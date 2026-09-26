@@ -107,6 +107,14 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
     })
 }
 
+/// Whether `actual` may feed a HostInvoke argument typed `expected`.
+/// Generic word edges (no precise [`host_spec`]) take any Value word, and a
+/// heap pointer is one; precise math / packed specs stay exact.
+pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
+    actual == expected
+        || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::HeapRef)
+}
+
 /// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).
 pub fn is_i4_bytes_host(id: u16) -> bool {
     matches!(

@@ -97,7 +97,7 @@ titles can oversell.
 | Area | What landed | Ceiling (do not overshoot in docs or code) |
 |------|-------------|--------------------------------------------|
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, escape, unroll, GVN). |
-| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
+| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. `Load; Dup` stays; fuse-select reads `Dup` as the second operand. |
 | **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
 | **`instcombine`** (`opt/instcombine.rs`, [#304](https://github.com/ardax-corp/coil-lang/pull/304)) | Local peeps: const-cond branches, known-tag EQ, pair-match payload identity (`POP` tag) | No new opcodes. Mid-body try-flatten peep **removed** (convoy risk). |
 | **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
@@ -109,8 +109,8 @@ titles can oversell.
 | **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13). Sidecar `index_facts` extend Unchecked/pin to helpers, for-in, and `i += k` when `0 <= i < len` is proven | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield (`YieldCoro` / `YieldFromCoro`), growing-array, alias-push, and **impure** helper-call loops stay checked. Pure user helpers on `b[i]` are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)). Pins are not saved across yield or on `ObjCoroutine`. |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
-| **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard` (cursor: Seek poisons latch operand-height). **`Aggressive` / `-O3` turns it on**. |
-| **`iterative_optimization`** | Fixpoint re-runs of the IL pipeline | **Default off** (COI-130). |
+| ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
+| ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 
@@ -201,10 +201,8 @@ What neither slice does yet (see
   `tell - arity`) and any store whose slot is still read.
 - **Cursor normalization at loop back edges (COI-97, won't-do on `Standard`).**
   Innermost mandelbrot has no tell-proven self-stores. A `Seek` on an *outer*
-  latch drops `cr`'s store and splits `FloatChainStore`. Prototype lives behind
-  `seek_back_edge` (**default off** on `Standard`; `Aggressive` / `-O3` turns it
-  on). Tests use a synthetic raising loop because mandelbrot does not hit the
-  profitable shape.
+  latch drops `cr`'s store and splits `FloatChainStore`. The `seek_back_edge`
+  prototype was removed after it measured as a large loss at `-O3`.
 - **Scheduling.** `mandelbrot`'s `tr → zr` copy cannot coalesce because `zr` is
   read between the def and the copy; **`tos_carry`** delays `STORE tr` across
   slot-addressed ops and stack `Bin` so the latch pops TOS (no `MoveSlot` opcode).
@@ -294,7 +292,7 @@ Residual alloc cost is **payload layout**, not identity hashing:
 - small `ObjEnum` payloads can inline ([#290](https://github.com/ardax-corp/coil-lang/pull/290));
 - typed instances with ≤2 fields inline those slots ([#299](https://github.com/ardax-corp/coil-lang/pull/299));
 - collection trigger is still `alloc_bytes` versus `gc_next_threshold` while idle;
-  S4 (COI-309) incremental mark + SATB + lazy sweep runs at alloc safepoints
+  S4 (COI-309) safepoint mark + lazy sweep runs at alloc safepoints
   ([gc-incremental.md](gc-incremental.md)).
 
 ### 4. Direct-call and closure specialization
@@ -352,7 +350,7 @@ existing opcode; fits append-only opcode ABI.
 | Family | Evidence (post Phases 1–4) | Est. dynamic weight | Recommendation | Rationale |
 |--------|----------------------------|---------------------|----------------|-----------|
 | `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** ([COI-87](https://linear.app/ardax/issue/COI-87)) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
-| Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **done** | Hoist `LOAD; Cast` to float temps (`il::cast_spill`, default on) + fuse stage0 `LOAD;CONST` / const-under (existing ext flags). |
+| Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **removed** | `il::cast_spill` only fed `FloatChainStore`; once that opcode was retired the pass was forced off at every level and has been deleted. |
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
@@ -369,13 +367,13 @@ Priority: landed; F0 drops fib-unit inversion (COI-367); F1 one parameterized
 fork worker per site (COI-366).
 
 IPA specialization used to invert guard-pruned fork-site nodes `W` into
-fib-equivalent units so `COIL_PAR_THRESHOLD` could stay **20**. F0 compares
+fib-equivalent units so the expression threshold could stay **20**. F0 compares
 `W` **directly** to a grain floor (default **10945** = `W(fib(20))` =
 `Fib(21)-1`). Verdicts on the calibrated loads stay the same: `fib(21)`
 forks, `fib(20)` refuses, `tak(24, 22, 20)` refuses, and the fair
 `tak(18, 12, 6)` bench load is 8398 grain (below the tight fib floor, above
 the loose `SelfCall` floor **8000**, so it forks). Loop IPA
-keeps trip-count grain via `COIL_LOOP_GRAIN` (default 20). Full formula and
+keeps trip-count grain via `DEFAULT_LOOP_GRAIN` (20). Full formula and
 verdict table in [auto-par](auto-par.md#expression-grain-w).
 
 The work cost is compile-time and bounded by construction: the walk is memoized

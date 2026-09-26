@@ -12,43 +12,21 @@ pub struct BlockGraph {
     pub succs: Vec<Vec<usize>>,
 }
 
-/// Split `ops` into basic blocks. Leaders: offset 0, every label, and the
-/// instruction after a jump or terminator.
+/// Basic blocks from [`crate::il::analysis::build_blocks`], with deduped successors.
 pub fn build_block_graph(ops: &[IlOp]) -> BlockGraph {
-    let n = ops.len();
-    if n == 0 {
-        return BlockGraph {
-            blocks: Vec::new(),
-            succs: Vec::new(),
-        };
-    }
-    let mut leaders = vec![false; n];
-    leaders[0] = true;
-    for (i, op) in ops.iter().enumerate() {
-        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
-            leaders[i] = true;
-        }
-        if ends_block(op) && i + 1 < n {
-            leaders[i + 1] = true;
-        }
-    }
-    let mut blocks = Vec::new();
-    let mut i = 0;
-    while i < n {
-        if !leaders[i] {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        i += 1;
-        while i < n && !leaders[i] {
-            i += 1;
-        }
-        blocks.push((start, i));
-    }
-    let label_block = label_to_block(ops, &blocks);
-    let succs: Vec<Vec<usize>> = (0..blocks.len())
-        .map(|bi| successors(ops, &blocks, bi, &label_block))
+    let raw = crate::il::analysis::build_blocks(ops);
+    let blocks = raw.iter().map(|b| (b.start, b.end)).collect();
+    let succs = raw
+        .into_iter()
+        .map(|b| {
+            let mut out: Vec<usize> = Vec::with_capacity(b.succs.len());
+            for s in b.succs {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            out
+        })
         .collect();
     BlockGraph { blocks, succs }
 }
@@ -130,7 +108,7 @@ fn is_cold_block(
     if s >= e {
         return false;
     }
-    if !is_terminator(&ops[e - 1]) {
+    if !ops[e - 1].is_terminator() {
         return false;
     }
     if graph.succs[idx].iter().any(|&t| t < idx) {
@@ -166,46 +144,8 @@ fn targeted_by_uncond(ops: &[IlOp], start: usize, end: usize) -> bool {
     false
 }
 
-fn label_to_block(ops: &[IlOp], blocks: &[(usize, usize)]) -> std::collections::HashMap<u32, usize> {
-    let mut map = std::collections::HashMap::new();
-    for (bi, &(s, e)) in blocks.iter().enumerate() {
-        for op in &ops[s..e] {
-            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-                map.insert(*id, bi);
-            }
-        }
-    }
-    map
-}
-
-fn successors(
-    ops: &[IlOp],
-    blocks: &[(usize, usize)],
-    bi: usize,
-    label_block: &std::collections::HashMap<u32, usize>,
-) -> Vec<usize> {
-    let (s, e) = blocks[bi];
-    let mut succs = Vec::new();
-    for op in &ops[s..e] {
-        if let IlOp::Jump { target, .. } = op
-            && let Some(&t) = label_block.get(&target.0)
-                && !succs.contains(&t) {
-                    succs.push(t);
-                }
-    }
-    if e > s && can_fall_through(&ops[e - 1]) && bi + 1 < blocks.len() && !succs.contains(&(bi + 1))
-    {
-        succs.push(bi + 1);
-    }
-    succs
-}
-
-fn ends_block(op: &IlOp) -> bool {
-    matches!(op, IlOp::Jump { .. }) || is_terminator(op)
-}
-
 fn can_fall_through(op: &IlOp) -> bool {
-    !is_terminator(op)
+    !op.is_terminator()
         && !matches!(
             op,
             IlOp::Jump {
@@ -215,16 +155,6 @@ fn can_fall_through(op: &IlOp) -> bool {
         )
 }
 
-fn is_terminator(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-    )
-}
 
 #[cfg(test)]
 mod tests {

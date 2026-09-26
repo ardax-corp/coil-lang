@@ -213,6 +213,7 @@ fn two_module_and_class_static_assignments_run() {
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =
@@ -775,7 +776,8 @@ fn repeated_field_keys_materialize_once_per_function() {
 fn for_in_array_hoists_array_len_out_of_loop() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn main() { for x in [1, 2, 3] { write(stdout(), to_bytes(format(\"%i\", x))); } }",
+        // A parameter, not a literal: MIR→LIR scalar-replaces a literal array.
+        "fn show([int] xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
     );
     let len_at = bc
         .iter()
@@ -2142,19 +2144,22 @@ return [sum]; \
 fn not_flag_break_emits_log_not_jmpt() {
     use common::Instruction;
     let (bc, _) = compile_src(
-        "fn main() { \
-let flag = false; \
+        // A parameter, not a literal: MIR→LIR would fold a constant flag away.
+        "fn spin(bool flag) -> int { \
 let i = 0; \
 while (i < 5) { \
 if !flag { break; } \
 i = i + 1; \
 } \
-}",
+return i; \
+} \
+fn main() { spin(false); }",
     );
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpt)),
-        "expected LogNotJmpt for inverted `if !flag {{ break }}`"
+        "expected LogNotJmpt for inverted `if !flag {{ break }}`; opcodes={:?}",
+        bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
     );
     assert!(
         bc.iter()
@@ -2224,7 +2229,8 @@ fn while_header_stays_fused_jmpf_not_jmpt() {
 fn for_in_array_emits_array_len_index_and_back_edge() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn main() { for x in [1, 2, 3] { write(stdout(), to_bytes(format(\"%i\", x))); } }",
+        // A parameter, not a literal: MIR→LIR scalar-replaces a literal array.
+        "fn show([int] xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
     );
     let has_len = bc
         .iter()
@@ -4513,7 +4519,7 @@ fn main() {
     let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert_eq!(makes, 1, "one box at call-arg; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -4654,7 +4660,7 @@ fn main() {
     );
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert_eq!(makes, 1, "one box at host; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);

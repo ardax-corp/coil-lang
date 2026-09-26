@@ -526,7 +526,7 @@ impl Compiler {
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
                     let niche_vec = Self::vec_option_host_native(&lookup_name).filter(|_| {
-                        self.host_enum_layout_for_expr(ast) == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                        self.expr_layout(ast).host_enum_layout() == common::HOST_ENUM_LAYOUT_OPTION_NICHE
                     });
                     if let Some(native) = niche_vec {
                         if !self.emit_host_invoke_from_call_args(
@@ -599,8 +599,16 @@ impl Compiler {
                             return bytecode;
                         }
                         if let Some(n) = self.static_len_of(&items[0]) {
-                            bytecode.append(&mut self.do_compile(&items[0]));
-                            bytecode.push_pop();
+                            // A bare local has no effects; emitting it would box a stack array.
+                            if matches!(
+                                unwrap_expr_output(&items[0]).1.as_ref(),
+                                Expression::Identifier(_)
+                            ) {
+                                self.discard_compile(&items[0]);
+                            } else {
+                                bytecode.append(&mut self.do_compile(&items[0]));
+                                bytecode.push_pop();
+                            }
                             self.emit_const_value(&ConstValue::Int(n as i64), &mut bytecode);
                             return bytecode;
                         }
@@ -969,7 +977,7 @@ impl Compiler {
                 let niche_vec = Self::vec_option_host_native(&lookup_name)
                     .or_else(|| Self::vec_option_host_native(&n))
                     .filter(|_| {
-                        self.host_enum_layout_for_expr(ast) == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                        self.expr_layout(ast).host_enum_layout() == common::HOST_ENUM_LAYOUT_OPTION_NICHE
                     });
                 if let Some(native) = niche_vec {
                     if !self.emit_host_invoke_from_call_args(
@@ -1018,7 +1026,7 @@ impl Compiler {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                     }
-                } else if is_generic && self.expr_is_niche_option(ast) {
+                } else if is_generic && self.expr_layout(ast).is_niche_option() {
                     Self::emit_boxed_option_to_niche(&mut bytecode);
                 }
             } else if self.fn_entry_labels.contains_key(&n) {
@@ -1111,11 +1119,7 @@ impl Compiler {
                                         break;
                                     }
                                 }
-                                found.or_else(|| {
-                                    self.checker
-                                        .codegen_var_type(&identifier)
-                                        .map(|ty| apply_ty_prune(self.checker.subst(), ty))
-                                })
+                                found.or_else(|| self.current_param_ty(&identifier))
                             };
                             binder.and_then(|vt| Self::instantiate_polyfn_app_result(&vt, &arg_tys))
                         }

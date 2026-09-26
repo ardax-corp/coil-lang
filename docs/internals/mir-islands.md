@@ -34,9 +34,9 @@ block islands on P5. Do not revive PGO.
 
 **I8 entry (post I1–I3 / A3 / B1).** After stack-IL opts, `IlModule` tries
 dense specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
-has **no LIR reconstruct wall**. Walls today: unmapped I5 alloc, I6 `CALL` /
-HostInvoke (LIR emit cannot reconstruct — Q7 densifies one-word self-`CALL`
-instead), I4 table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR
+has **no LIR reconstruct wall**. Walls today: unmapped I5 alloc, one-word I6
+`CALL` (Q7 densifies one-word self-`CALL` instead; HostInvoke word edges now
+reconstruct on LIR), I4 table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR
 (Q9 R1; dense infer still refuses —
 [q9-format-string.md](q9-format-string.md)). R2 densifies
 `from_bytes` / `to_bytes` HostInvoke. Escaping fields, box. I2 boxed unary `JumpIfMatch` may LIR; **D3** boxed

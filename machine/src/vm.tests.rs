@@ -1667,6 +1667,68 @@
         assert_eq!(vm.stack_at_for_test(0).heap_addr(), 0xBEE0);
     }
 
+    /// A frame with a trusted precise map roots only its heap slots; an
+    /// unmapped frame, the top frame without a known safepoint PC, and a frame
+    /// that re-entered the VM from native code are scanned word by word.
+    #[test]
+    fn precise_frame_maps_limit_stack_roots() {
+        use common::PreciseFrameMap;
+        use crate::ObjString;
+
+        let mut vm = Machine::<8>::default();
+        let code = [
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::CALL).with_call_packed(0, 5),
+            Byte::new(Instruction::RETURN),
+            Byte::new(Instruction::RETURN),
+        ];
+        vm.program_code = Arc::new(unsafe {
+            std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
+        });
+        let heap = vm.heap_mut();
+        let (main_obj, _) = heap.alloc(ObjString::from("main"), Object::String);
+        let (f_obj, _) = heap.alloc(ObjString::from("f"), Object::String);
+        let (g_obj, _) = heap.alloc(ObjString::from("g"), Object::String);
+        vm.frames.clear();
+        for (ip, sp) in [(1, 0), (4, 1), (0, 2)] {
+            vm.frames.setup_current_and_advance(|f| {
+                f.seek(ip);
+                f.set(sp);
+            });
+        }
+        for obj in [main_obj, f_obj, g_obj] {
+            vm.stack.push(Value::from(obj.addr()));
+        }
+        vm.precise_frames = vec![PreciseFrameMap {
+            entry_pc: 2,
+            end_pc: 5,
+            any_pc: Some(vec![]),
+            at_pc: vec![],
+        }];
+        let roots = |vm: &Machine<8>| {
+            let mut roots = Vec::new();
+            vm.collect_stack_roots(&mut roots);
+            roots
+        };
+
+        let r = roots(&vm);
+        assert!(r.contains(&main_obj.addr()), "unmapped caller is scanned");
+        assert!(!r.contains(&f_obj.addr()), "precise heap-free frame is skipped");
+        assert!(r.contains(&g_obj.addr()), "top frame without a safepoint PC is scanned");
+
+        vm.nested_frame_depths.push(3);
+        assert!(
+            roots(&vm).contains(&f_obj.addr()),
+            "a frame that entered native code has a stale PC"
+        );
+        vm.nested_frame_depths.clear();
+
+        vm.precise_frames.clear();
+        assert!(roots(&vm).contains(&f_obj.addr()), "no maps: every frame scanned");
+    }
+
     #[test]
     fn nested_enum_gc_traces_correctly() {
         use crate::{Heap, Member, ObjString, Object};
@@ -1918,6 +1980,31 @@
             !vm.panicked(),
             "MakeEnum Ok should survive GC at alloc; JumpIfMatch must see the enum"
         );
+    }
+
+    /// `BoxValue` must push before the GC safepoint (same rule as `MakeEnum`):
+    /// a swept box made `UnboxValue` pass its stale address through.
+    #[test]
+    fn box_value_survives_gc_triggered_at_alloc() {
+        let mut vm = Machine::<16>::default();
+        vm.heap_mut().set_gc_threshold_for_test(0);
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        // Immediate payload so `BoxValue` is the first alloc (GC fires there).
+        let bytecode = vec![
+            Byte::new(Instruction::CONST).with_const_inline(42),
+            Byte::new(Instruction::BoxValue).with_operand_u32(1),
+            Byte::new(Instruction::UnboxValue).with_operand_u32(1),
+            Byte::new(Instruction::STRINGIFY),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
+
+        vm.run_with_pool(&bytecode, &[], &[], 0);
+        assert!(!vm.panicked());
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "42");
     }
 
     #[test]
@@ -3055,6 +3142,30 @@
 
     fn make_coro(arity: u32, target: u32) -> Byte {
         Byte::new(Instruction::MakeCoro).with_call_packed(arity, target)
+    }
+
+    /// Coroutines nothing references are collected; only running ones and
+    /// those reachable through references are roots.
+    #[test]
+    fn unreachable_coroutines_are_collected() {
+        let mut vm = Machine::<8>::default();
+        let mut code = Vec::new();
+        for _ in 0..200 {
+            code.push(make_coro(0, 0));
+            code.push(Byte::new(Instruction::POP));
+        }
+        code.push(make_coro(0, 0));
+        code.push(Byte::new(Instruction::HALT));
+        vm.run(&code);
+        assert!(!vm.panicked());
+        vm.gc_collect();
+        let live = vm.heap().live_object_count();
+        assert!(live <= 4, "dropped coroutines stayed live: {live}");
+        let kept = vm.pop().raw() as u64;
+        assert!(
+            matches!(vm.heap().find_object_by_addr(kept), Some(Object::Coroutine(_))),
+            "the coroutine still on the stack must survive"
+        );
     }
 
     /// Create → resume → yield returns the yielded value to the resumer.
@@ -5217,7 +5328,7 @@
     }
 
     #[test]
-    fn coi_373_hot_dispatch_modes_agree_on_dense_move() {
+    fn coi_373_dispatch_runs_dense_move() {
         let ty = common::dense::TY_I64;
         let packed_const = ((ty as u32 & 0x7F) << 24) | 7;
         let packed_move = 1u32 << 8;
@@ -5228,47 +5339,30 @@
             Byte::new(Instruction::LOAD).with_load_store_slot(1),
             Byte::new(Instruction::HALT),
         ];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_int()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 7);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
-    fn run_pool_modes(code: &[Byte], pool: &[u64]) -> (i64, i64, i64) {
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(code, pool, &[], 0);
-            super::dispatch::override_mode(None);
-            vm.pop().as_int()
-        };
-        (
-            run(super::dispatch::Mode::Match),
-            run(super::dispatch::Mode::Table),
-            run(super::dispatch::Mode::HotMatch),
-        )
+    fn run_pool(code: &[Byte], pool: &[u64]) -> i64 {
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(code, pool, &[], 0);
+        vm.pop().as_int()
     }
 
     #[test]
-    fn coi_374_hot_dispatch_modes_agree_on_fused_fib() {
+    fn coi_374_dispatch_runs_fused_fib() {
         let (code, pool) = fused_fib_bytecode(13);
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 233);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_374_hot_dispatch_modes_agree_on_dense_index() {
+    fn coi_374_dispatch_runs_dense_index() {
         let code = [
             Byte::new(Instruction::Seek).with_operand_u32(4),
             const_int(5),
@@ -5281,10 +5375,8 @@
             load(2),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 6);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     fn dense_bin2_code() -> [Byte; 8] {
@@ -5343,45 +5435,17 @@
     }
 
     #[test]
-    fn coi_381_dense_bin2_sequential_ieee_all_modes() {
+    fn coi_381_dense_bin2_sequential_ieee() {
         let code = dense_bin2_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 20, "sequential (2+3)*4, not a fused FMA");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_389_dense_bin2_residue_peek_all_modes() {
+    fn coi_389_dense_bin2_residue_peek() {
         let code = dense_bin2_residue_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 22, "sequential (2+3)*4+2 residue");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
-    }
-
-    #[test]
-    fn coi_389_table_peek_saves_a_dispatch() {
-        let code = dense_bin2_residue_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover residue DenseBin (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover residue DenseBin (hot={hot_n}, match={match_n})"
-        );
     }
 
     fn dense_cast_bin_code() -> [Byte; 6] {
@@ -5414,25 +5478,19 @@
     }
 
     #[test]
-    fn coi_380_dense_cast_bin_peek_all_modes() {
+    fn coi_380_dense_cast_bin_peek() {
         let code = dense_cast_bin_code();
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_float()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 14.0, "i2f(7)+i2f(7)");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_380_dense_cast_bin2_peek_all_modes() {
+    fn coi_380_dense_cast_bin2_peek() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5460,47 +5518,17 @@
             load(3),
             Byte::new(Instruction::HALT),
         ];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_float()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 21.0, "7+7 then +7");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_380_table_peek_saves_a_dispatch() {
-        let code = dense_cast_bin_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover DenseBin (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover DenseBin (hot={hot_n}, match={match_n})"
-        );
-    }
-
-    #[test]
-    fn coi_377_dense_bin_jmpf_all_modes() {
+    fn coi_377_dense_bin_jmpf() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5531,14 +5559,12 @@
             const_int(0),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 5, "bin must run (2+3) before GT vs 4");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_379_dense_index_jmpf_all_modes() {
+    fn coi_379_dense_index_jmpf() {
         let abc = |op: Instruction, flags: u8, dest: u8, arr: u8, idx: u8| {
             Byte::new(op).with_operand_u32(
                 ((flags as u32) << 24)
@@ -5571,10 +5597,8 @@
             const_int(0),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 1, "index then EQ 1 must fall through");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     fn dense_store_bin_jmp_code() -> [Byte; 14] {
@@ -5610,40 +5634,14 @@
     }
 
     #[test]
-    fn coi_382_dense_store_bin_jmp_all_modes() {
+    fn coi_382_dense_store_bin_jmp() {
         let code = dense_store_bin_jmp_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 1, "store then k = k + p then JMP skips poison");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_382_table_peek_saves_dispatches() {
-        let code = dense_store_bin_jmp_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover DenseBin+JMP (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover DenseBin+JMP (hot={hot_n}, match={match_n})"
-        );
-    }
-
-    #[test]
-    fn coi_387_dense_bin_jmp_all_modes() {
+    fn coi_387_dense_bin_jmp() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5667,14 +5665,12 @@
             load(3),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 5, "bin then JMP must skip the poison CONST");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_387_dense_bin2_jmp_all_modes() {
+    fn coi_387_dense_bin2_jmp() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5700,10 +5696,8 @@
             load(4),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 20, "two bins then JMP, sequential (2+3)*4");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
@@ -5714,22 +5708,17 @@
             Byte::new(Instruction::ADD),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 42);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_375_table_tombstone_panics_like_match() {
+    fn coi_375_tombstone_panics() {
         let code = [Byte::new(Instruction::HostInvokeNiche)];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.panicked()
         };
-        assert!(run(super::dispatch::Mode::Match));
-        assert!(run(super::dispatch::Mode::Table));
+        assert!(run());
     }

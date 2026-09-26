@@ -149,7 +149,7 @@ G0–G3 execute peeks are **not** on this path.
 
 Default table: `unlikely(is_hot)` divert into `execute_dense` (compact
 `ALWAYS_HOT` match, no 256-entry table), then leftover `table_loop`.
-Table/hotmatch peek trailing `JMP` (X2), `DenseCast`+bin (S3), store+IV+JMP
+The dense streak (`execute_dense`) peeks trailing `JMP` (X2), `DenseCast`+bin (S3), store+IV+JMP
 (S5), `DenseBin2` residue (X4). Giant match does not peek.
 
 - **Fib IPA workers** stay on CALL/RETURN (kernel ops). They **do not** enter

@@ -56,6 +56,8 @@ fn is_index_read(op: &Instruction) -> bool {
             | Instruction::IndexUnchecked
             | Instruction::IndexPin
             | Instruction::IndexPinUnchecked
+            | Instruction::DenseIndex
+            | Instruction::DenseIndexJmpf
     )
 }
 
@@ -66,7 +68,54 @@ fn is_store_index_write(op: &Instruction) -> bool {
             | Instruction::StoreIndexUnchecked
             | Instruction::StoreIndexPin
             | Instruction::StoreIndexPinUnchecked
+            | Instruction::DenseStoreIndex
     )
+}
+
+/// MIR dense heap read / write proven in bounds (`HEAP_UNCHECKED`).
+fn is_dense_unchecked(b: &Byte, write: bool) -> bool {
+    let op = *b.bytecode();
+    let hit = if write {
+        op == Instruction::DenseStoreIndex
+    } else {
+        matches!(op, Instruction::DenseIndex | Instruction::DenseIndexJmpf)
+    };
+    hit && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED != 0
+}
+
+fn count_dense_unchecked_in(bytecode: &[Byte], start: usize, end: usize, write: bool) -> usize {
+    bytecode[start..end]
+        .iter()
+        .filter(|b| is_dense_unchecked(b, write))
+        .count()
+}
+
+/// Dense binary ops `(kind, dest, a, b)`: both halves of `DenseBin2` and the
+/// arithmetic half of `DenseBinJmpf` (its payload is a real fused jump word).
+fn dense_bin_ops(body: &[Byte]) -> Vec<(u8, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let b = &body[i];
+        match *b.bytecode() {
+            Instruction::DenseBin | Instruction::DenseBinJmpf => out.push(b.dense_abc_parts()),
+            Instruction::DenseBin2 => {
+                out.push(b.dense_abc_parts());
+                if let Some(tail) = body.get(i + 1) {
+                    out.push(tail.dense_abc_parts());
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+fn is_dense_float_kind(kind: u8) -> bool {
+    use common::dense::{FADD64, FDIV64, FMUL64, FSUB64};
+    matches!(kind, FADD64 | FSUB64 | FMUL64 | FDIV64)
 }
 
 fn count_index_reads_in(bytecode: &[Byte], start: usize, end: usize) -> usize {
@@ -440,7 +489,8 @@ fn perf_indexed_sum_hoists_array_len_once() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/indexed_sum.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "sum", bc.len());
-    let n = count_opcodes_in(&bc, start, end, Instruction::ArrayLen);
+    let is_len = |b: &Byte| matches!(*b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen);
+    let n = bc[start..end].iter().filter(|b| is_len(b)).count();
     assert_eq!(
         n, 1,
         "sum should hoist ArrayLen out of the while i < len(arr) loop (got {n})"
@@ -448,10 +498,7 @@ fn perf_indexed_sum_hoists_array_len_once() {
     // ArrayLen must not sit on the back-edge cycle: find the loop JMP and
     // ensure its target PC is at-or-after the sole ArrayLen (preheader).
     let sum = &bc[start..end];
-    let len_pc = sum
-        .iter()
-        .position(|b| *b.bytecode() == Instruction::ArrayLen)
-        .expect("ArrayLen in sum");
+    let len_pc = sum.iter().position(is_len).expect("ArrayLen in sum");
     let back_edge = sum.iter().rposition(|b| *b.bytecode() == Instruction::JMP);
     let Some(be) = back_edge else {
         panic!("sum should have a back-edge JMP");
@@ -462,15 +509,23 @@ fn perf_indexed_sum_hoists_array_len_once() {
         len_pc < target_rel,
         "ArrayLen at {len_pc} must be before back-edge target {target_rel} (hoisted preheader)"
     );
-    let stats = compiler::last_bounds_stats();
-    assert!(
-        stats.array_len_hoists >= 1,
-        "indexed_sum should hoist ArrayLen; stats={stats:?}"
-    );
-    assert!(
-        stats.proven_index >= 1,
-        "indexed_sum Index under i < len should be proven; stats={stats:?}"
-    );
+    // Fuse-IL records bounds stats; a MIR dense body proves via HEAP_UNCHECKED.
+    if sum.iter().any(|b| *b.bytecode() == Instruction::DenseArrayLen) {
+        assert!(
+            count_dense_unchecked_in(&bc, start, end, false) >= 1,
+            "indexed_sum dense Index under i < len should be unchecked"
+        );
+    } else {
+        let stats = compiler::last_bounds_stats();
+        assert!(
+            stats.array_len_hoists >= 1,
+            "indexed_sum should hoist ArrayLen; stats={stats:?}"
+        );
+        assert!(
+            stats.proven_index >= 1,
+            "indexed_sum Index under i < len should be proven; stats={stats:?}"
+        );
+    }
 }
 
 #[test]
@@ -490,8 +545,10 @@ fn perf_nsieve_proves_fill_bounded_index() {
         "nsieve p-loop Index should rewrite to IndexPinUnchecked"
     );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked) >= 1,
-        "nsieve should emit IndexPinUnchecked for proven p-loop read"
+        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)
+            + count_dense_unchecked_in(&bc, start, end, false)
+            >= 1,
+        "nsieve should emit an unchecked read for the proven p-loop index"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::StoreIndex),
@@ -504,11 +561,15 @@ fn perf_nsieve_proves_fill_bounded_index() {
         "nsieve stride StoreIndex should rewrite to StoreIndexPinUnchecked"
     );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked) >= 1,
-        "nsieve should emit StoreIndexPinUnchecked for proven stride write"
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked)
+            + count_dense_unchecked_in(&bc, start, end, true)
+            >= 1,
+        "nsieve should emit an unchecked write for the proven stride store"
     );
+    // Fuse-IL pins `flags`; dense heap ops read it without a pin.
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1,
+        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1
+            || count_dense_unchecked_in(&bc, start, end, false) >= 1,
         "nsieve should pin flags in loop preheaders"
     );
     let stats = compiler::last_bounds_stats();
@@ -536,18 +597,38 @@ fn perf_bool_guard_inverts_into_jmpt() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/bool_guard.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "count_until", bc.len());
-    // `if stop { break }` loads a bool: nothing to fuse into *Jmpf, so the
-    // JMPF-over-JMP pair collapses to a single JMPT.
-    assert_eq!(
-        count_opcodes_in(&bc, start, end, Instruction::JMPT),
-        1,
-        "bool guard should invert to JMPT"
+    // `if stop { break }` is one dispatch: fuse-IL collapses JMPF-over-JMP
+    // into `LOAD; JMPT`; MIR→LIR branches on `stop != 0`, which fuses into a
+    // single `BinSlotImmJmpf NEQ`.
+    let jmpt = count_opcodes_in(&bc, start, end, Instruction::JMPT);
+    let fused_ne = bc[start..end].iter().any(|b| {
+        *b.bytecode() == Instruction::BinSlotImmJmpf
+            && b.bin_slot_imm_jmpf_parts().0 == Instruction::NEQ as u8
+    });
+    assert!(
+        jmpt == 1 || fused_ne,
+        "bool guard should invert to JMPT or fuse into BinSlotImmJmpf NEQ"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::JMPF),
         0,
         "no bare JMPF should remain in the guard"
     );
+}
+
+/// Pre-order NodeId drift typed `j + 1` from a neighbouring float node, so
+/// `times_at`'s int counter compiled as `CONST 1; ADDF`.
+#[test]
+fn perf_nbody_int_counter_is_not_float_add() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/nbody.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "times_at", bc.len());
+    let int_const_addf = bc[start..end].windows(2).any(|w| {
+        *w[0].bytecode() == Instruction::CONST
+            && w[0].operand_u32() & Byte::POOL_FLAG == 0
+            && *w[1].bytecode() == Instruction::ADDF
+    });
+    assert!(!int_const_addf, "times_at int counter must not compile as ADDF");
 }
 
 #[test]
@@ -561,17 +642,19 @@ fn perf_mandelbrot_inverts_escape_into_const_jmpt() {
         0,
         "escape should fuse to *Jmpt, not bare JMPT"
     );
+    // MIR dense fuses the magnitude add, compare and branch into one DenseBinJmpf.
     assert!(
         count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotConstJmpt)
             + count_opcodes_in(&bc, start, end, Instruction::CmpJmpt)
+            + count_opcodes_in(&bc, start, end, Instruction::DenseBinJmpf)
             >= 1,
-        "escape should invert to *Jmpt (fused Const or Cmp)"
+        "escape should invert to *Jmpt (fused Const or Cmp) or fuse as DenseBinJmpf"
     );
 }
 
 #[test]
 fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
-    // `zr * zr` / `zi * zi`: GVN's Dup is re-expanded so both operands fuse.
+    // `zr * zr` / `zi * zi`: GVN's `Load; Dup` still fuses as a slot/slot binop.
     let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
@@ -595,7 +678,11 @@ fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
             }
             _ => false,
         })
-        .count();
+        .count()
+        + dense_bin_ops(&bc[start..end])
+            .iter()
+            .filter(|(k, _, a, b)| *k == common::dense::FMUL64 && a == b)
+            .count();
     assert!(
         self_mulf >= 2,
         "zr*zr and zi*zi should each fuse to one self-MULF op, got {self_mulf}"
@@ -608,10 +695,14 @@ fn perf_mandelbrot_uses_bin_slot_slot_float_arith() {
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
-        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore);
+        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore)
+        + dense_bin_ops(&bc[start..end])
+            .iter()
+            .filter(|op| is_dense_float_kind(op.0))
+            .count();
     assert!(
         bin_slot >= 1,
-        "mandelbrot should use BinSlotSlot float arith, got {bin_slot}"
+        "mandelbrot should use slot-addressed float arith, got {bin_slot}"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::FloatChainStore),
@@ -671,10 +762,14 @@ fn perf_mandelbrot_slot_promote_drops_ci_temp_copy() {
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
-        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore);
+        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore)
+        + dense_bin_ops(&bc[start..end])
+            .iter()
+            .filter(|op| is_dense_float_kind(op.0))
+            .count();
     assert!(
         bin_slot >= 1,
-        "mandelbrot should keep BinSlotSlot float arith after slot promote"
+        "mandelbrot should keep slot-addressed float arith after slot promote"
     );
     let index = count_index_reads_in(&bc, start, end);
     assert_eq!(index, 0, "mandelbrot has no array Index");
@@ -723,6 +818,10 @@ struct OpcodeHealth {
     array_pin: usize,
     packed_load_n2: usize,
     packed_load_n3: usize,
+    /// MIR dense binary ops (register-addressed, no stack round-trip).
+    dense_bin: usize,
+    dense_index_unchecked: usize,
+    dense_store_index_unchecked: usize,
 }
 
 impl OpcodeHealth {
@@ -787,16 +886,6 @@ struct OpcodeGaps {
     call_arg_peel_packing_holes: usize,
     index: usize,
     store_index: usize,
-}
-
-impl OpcodeGaps {
-    /// Combined `*Jmpt` demand signal for the Phase 5 ledger.
-    ///
-    /// Includes successful bare `JMPT` inverts, residual bare `JMPF`, and the
-    /// fused `*Jmpf; JMP` near-miss (`would_be_jmpt_after_invert`).
-    fn jmpt_counterpart_proxy(&self) -> usize {
-        self.bare_jmpf + self.jmpt + self.would_be_jmpt_after_invert
-    }
 }
 
 fn is_fused_jmpf(op: Instruction) -> bool {
@@ -893,7 +982,10 @@ fn inventory_health(body: &[Byte]) -> OpcodeHealth {
             op if is_float_arith(op) => h.float_arith += 1,
             _ => {}
         }
+        h.dense_index_unchecked += usize::from(is_dense_unchecked(b, false));
+        h.dense_store_index_unchecked += usize::from(is_dense_unchecked(b, true));
     }
+    h.dense_bin = dense_bin_ops(body).len();
     h
 }
 
@@ -1077,17 +1169,15 @@ fn perf_phase0_mandelbrot_shape_inventory() {
     //   loop_carried_phi_shuffle=0. MoveSlot still unproven.
 
     // Phase 4 fuse-feed / near-miss audit:
-    //   FCS≥2 / ConstJmpf≥1 / expand_dup squares intact; no promotion split.
+    //   FCS≥2 / ConstJmpf≥1 / Load;Dup squares intact; no promotion split.
     //   would_be_jmpt_after_invert=0 (escape inverted to BinSlotSlotConstJmpt).
-    // Phase cast_spill: cr/ci casts hoist to temps; FloatChainStore=4,
-    //   residual float_arith=0, float_chain_cast_blocked=0; STORE budget +1.
-    //   float_chain_stage_cap_leftover=0 (no 4-stage truncation).
+    // cast_spill / FloatChainStore are retired; cr/ci float chains stay unfused.
     //   unary / pool-imm / packing_holes / BinSlot→branch miss = 0.
     let (h, g) = compile_fn_inventory("examples/perf/mandelbrot.hy", "mandelbrot");
 
     assert!(
-        h.fused_bin_slot_total() >= 1,
-        "mandelbrot should use BinSlotSlot*: {h:?}"
+        h.fused_bin_slot_total() + h.dense_bin >= 1,
+        "mandelbrot should use BinSlotSlot* or dense binops: {h:?}"
     );
     assert_eq!(h.float_chain_store, 0, "FloatChainStore is not emitted: {h:?}");
     assert!(
@@ -1187,7 +1277,13 @@ fn perf_phase0_numeric_shape_inventory() {
     // loop shape is inventoried there. `2000` becomes a worker parameter, which
     // turns the loop compare from `BinSlotImmJmpf` into `BinSlotSlotJmpf`; the
     // span also carries `main`'s fork-join prologue, hence the wider budgets.
-    let (h, g) = compile_fn_inventory("examples/perf/numeric.hy", "main");
+    // The outlined symbol also spans `main`'s fork-join tail; inventory the loop.
+    let (bc, _, _, _, pipeline) = compile("examples/perf/numeric.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "__coil_par_loop_1", bc.len());
+    let (loop_start, back_edge) = innermost_loop_range(&bc, start, end);
+    let body = &bc[loop_start..=back_edge];
+    let (h, g) = (inventory_health(body), inventory_gaps(body, loop_start));
 
     assert!(h.load <= 10, "numeric LOAD budget: {h:?}");
     assert!(h.store <= 12, "numeric STORE budget: {h:?}");
@@ -1244,12 +1340,18 @@ fn perf_phase0_nsieve_shape_inventory() {
         h.fused_jmpf_total() + h.jmpf >= 3,
         "fill/p/k loop guards: {h:?}"
     );
-    assert!(h.index_pin_unchecked >= 1, "nsieve proven Index pin: {h:?}");
     assert!(
-        h.store_index_pin_unchecked >= 1,
-        "nsieve proven stride StoreIndex pin: {h:?}"
+        h.index_pin_unchecked + h.dense_index_unchecked >= 1,
+        "nsieve proven Index is unchecked: {h:?}"
     );
-    assert!(h.array_pin >= 1, "nsieve should hoist ArrayPin: {h:?}");
+    assert!(
+        h.store_index_pin_unchecked + h.dense_store_index_unchecked >= 1,
+        "nsieve proven stride StoreIndex is unchecked: {h:?}"
+    );
+    assert!(
+        h.array_pin >= 1 || h.dense_index_unchecked >= 1,
+        "nsieve should hoist ArrayPin (fuse-IL): {h:?}"
+    );
 
     // Proven p-loop read and stride write are both unchecked.
     assert_eq!(g.index, 0, "nsieve proven Index should not count as gap: {g:?}");
@@ -1311,8 +1413,8 @@ fn aot_p1_mandelbrot_residual_load_store_inventory() {
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let shape = load_store_shape(&bc, start, end);
-    let fused = count_bin_slot_family_in(&bc, start, end);
-    eprintln!("[P1] mandelbrot::mandelbrot {shape:?} bin_slot_family={fused}");
+    let fused = count_bin_slot_family_in(&bc, start, end) + dense_bin_ops(&bc[start..end]).len();
+    eprintln!("[P1] mandelbrot::mandelbrot {shape:?} bin_slot_family+dense={fused}");
 
     assert!(
         shape.load_ops <= 8,
@@ -1413,9 +1515,10 @@ fn aot_p2_nsieve_index_shape_inventory() {
         "nsieve IndexUnchecked count changed"
     );
     assert_eq!(
-        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked),
+        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)
+            + count_dense_unchecked_in(&bc, start, end, false),
         1,
-        "nsieve IndexPinUnchecked count changed"
+        "nsieve unchecked Index count changed"
     );
     assert_eq!(store_index, 0, "nsieve checked StoreIndex count changed");
     assert_eq!(
@@ -1424,13 +1527,15 @@ fn aot_p2_nsieve_index_shape_inventory() {
         "nsieve StoreIndexUnchecked count changed"
     );
     assert_eq!(
-        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked),
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked)
+            + count_dense_unchecked_in(&bc, start, end, true),
         1,
-        "nsieve StoreIndexPinUnchecked count changed"
+        "nsieve unchecked StoreIndex count changed"
     );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1,
-        "nsieve should hoist ArrayPin"
+        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1
+            || count_dense_unchecked_in(&bc, start, end, false) >= 1,
+        "nsieve should hoist ArrayPin (fuse-IL)"
     );
     assert!(
         shape.load_ops <= 7,
@@ -1441,7 +1546,7 @@ fn aot_p2_nsieve_index_shape_inventory() {
         "nsieve residual STORE regressed: {shape:?}"
     );
     assert_eq!(shape.packed_store_ops, 0, "{shape:?}");
-    // `flags.push(1)` is still an out-of-line Vec::push call.
+    // One out-of-line call (`Vec::with_capacity`; dense `push` is inline).
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::CALL),
         1,
@@ -1476,8 +1581,10 @@ fn aot_p2_len_loop_hoists_invariant_array_len() {
     for (name, index, store_index) in [("scan", 1usize, 0usize), ("fill", 0, 1)] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
         let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
-        let in_loop = count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen);
-        let total = count_opcodes_in(&bc, start, end, Instruction::ArrayLen);
+        let in_loop = count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
+            + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen);
+        let total = count_opcodes_in(&bc, start, end, Instruction::ArrayLen)
+            + count_opcodes_in(&bc, start, end, Instruction::DenseArrayLen);
         eprintln!("[P2] vec_scan::{name} array_len={total} in_loop={in_loop}");
         assert_eq!(
             in_loop, 0,
@@ -1536,7 +1643,8 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
         "scan Index should rewrite away"
     );
     let unchecked = count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked)
-        + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked);
+        + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)
+        + count_dense_unchecked_in(&bc, start, end, false);
     assert!(
         unchecked >= 1,
         "pure helper scan should emit Unchecked index"
@@ -1648,8 +1756,9 @@ fn aot_p3_binary_trees_make_enum_inventory() {
         "binary_trees user MakeTuple regressed: {total_tuples}"
     );
     assert_eq!(total_arrays, 0, "binary_trees should not build arrays");
+    // Auto-par keeps a sequential and a forked arm per `bottom_up` site.
     assert!(
-        total_calls <= 11,
+        total_calls <= 14,
         "binary_trees user CALL density regressed: {total_calls}"
     );
 }
@@ -1683,5 +1792,111 @@ fn perf_canon_stats_inventory() {
             s.const_load_swaps <= 32,
             "{path}: const/load swap volume: {s:?}"
         );
+    }
+}
+
+/// MIR keep-rate weighted by executed VM dispatches over `examples/perf`.
+///
+/// Manual census, not a gate:
+/// `COIL_AUTO_PAR=0 cargo test --release -p compiler --test perf_metrics -- --ignored mir_weighted_census --nocapture`
+#[test]
+#[ignore = "manual census; run with --release --ignored --nocapture"]
+fn mir_weighted_census() {
+    use std::collections::HashMap;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let mut files: Vec<_> = std::fs::read_dir(root.join("examples/perf"))
+        .expect("examples/perf")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "hy"))
+        .collect();
+    files.sort();
+
+    let mut by_tier: HashMap<String, u64> = HashMap::new();
+    let mut dense_reasons: HashMap<String, u64> = HashMap::new();
+    let mut lir_reasons: HashMap<String, u64> = HashMap::new();
+    let mut hot_fuse: Vec<(u64, String, String, String)> = Vec::new();
+    for path in files {
+        let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
+        pipeline.set_collect_opt_stats(true);
+        let Ok((bytecode, constants)) = pipeline.compile_src(&src) else {
+            eprintln!("skip (compile) {rel}");
+            continue;
+        };
+        let tiers = compiler::last_opt_stats().body_tiers;
+        let tier_of: HashMap<&str, &compiler::BodyTier> =
+            tiers.iter().map(|t| (t.name.as_str(), t)).collect();
+        let mut syms = pipeline.program_debug().fn_symbols;
+        syms.sort_by_key(|s| s.entry_pc);
+
+        machine::begin_pc_profile();
+        // A debug-assert at VM teardown (e.g. heap byte accounting) must not
+        // drop the whole census; the profile is already filled by then.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_dispatch(
+                bytecode.clone(),
+                constants,
+                pipeline.strings().to_vec(),
+                pipeline.static_slot_count(),
+                &pipeline,
+            )
+        }));
+        if ran.is_err() {
+            eprintln!("note: {rel} panicked at teardown; profile kept");
+        }
+        let counts = machine::take_pc_profile();
+
+        for (k, sym) in syms.iter().enumerate() {
+            let start = sym.entry_pc as usize;
+            let end = syms.get(k + 1).map(|s| s.entry_pc as usize).unwrap_or(bytecode.len());
+            let n: u64 = counts.get(start..end.min(counts.len())).map(|c| c.iter().sum()).unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
+            let (tier, dr, lr) = match tier_of.get(sym.name.as_str()) {
+                Some(t) => (
+                    t.tier.clone(),
+                    t.dense_reason.clone().unwrap_or_default(),
+                    t.lir_reason.clone().unwrap_or_default(),
+                ),
+                None => ("unmapped".to_string(), String::new(), String::new()),
+            };
+            *by_tier.entry(tier.clone()).or_default() += n;
+            if tier == "fuse" {
+                *dense_reasons.entry(dr.clone()).or_default() += n;
+                *lir_reasons.entry(lr.clone()).or_default() += n;
+                hot_fuse.push((n, format!("{rel}::{}", sym.name), dr, lr));
+            }
+        }
+    }
+
+    let total: u64 = by_tier.values().sum();
+    let pct = |n: u64| 100.0 * n as f64 / total.max(1) as f64;
+    let ranked = |m: &HashMap<String, u64>| {
+        let mut v: Vec<_> = m.iter().map(|(k, v)| (*v, k.clone())).collect();
+        v.sort_by(|a, b| b.cmp(a));
+        v
+    };
+    println!("\n== dispatches by tier ({total} total)");
+    for (n, t) in ranked(&by_tier) {
+        println!("{:6.2}%  {t}", pct(n));
+    }
+    println!("\n== fuse-IL dispatches by dense refusal");
+    for (n, r) in ranked(&dense_reasons).into_iter().take(12) {
+        println!("{:6.2}%  {r}", pct(n));
+    }
+    println!("\n== fuse-IL dispatches by LIR refusal");
+    for (n, r) in ranked(&lir_reasons).into_iter().take(12) {
+        println!("{:6.2}%  {r}", pct(n));
+    }
+    hot_fuse.sort_by(|a, b| b.0.cmp(&a.0));
+    println!("\n== hottest fuse-IL functions");
+    for (n, name, dr, lr) in hot_fuse.into_iter().take(25) {
+        println!("{:6.2}%  {name}  [dense: {dr}] [lir: {lr}]", pct(n));
     }
 }

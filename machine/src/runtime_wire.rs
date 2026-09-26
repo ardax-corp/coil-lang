@@ -71,6 +71,7 @@ pub fn wire_thread_program<const N: usize>(
         debug,
         operand_stack_slots,
         stack_maps: Vec::new(),
+        precise_frames: Vec::new(),
     })
 }
 
@@ -84,6 +85,7 @@ pub struct WireThreadProgramWithMapsArgs<'a, const N: usize> {
     pub debug: ProgramDebug,
     pub operand_stack_slots: u32,
     pub stack_maps: Vec<common::FrameStackMap>,
+    pub precise_frames: Vec<common::PreciseFrameMap>,
 }
 
 /// Like [`wire_thread_program`], attaching S2b maps for compile-and-run
@@ -98,6 +100,7 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
         debug,
         operand_stack_slots,
         stack_maps,
+        precise_frames,
     } = args;
     machine.set_thread_program(Arc::new(ThreadProgram {
         code: Arc::from(bytecode.to_vec()),
@@ -107,5 +110,6 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
         debug,
         operand_stack_slots,
         stack_maps,
+        precise_frames,
     }));
 }

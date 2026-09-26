@@ -33,20 +33,26 @@ test("nested array index") {
     let f0 = c.get_function("__zs_test_0").expect("__zs_test_0");
     let f1 = c.get_function("__zs_test_1").expect("__zs_test_1");
     let body = &bc[f0..f1];
-    // `len(a)` const-folds to CONST 4 (no LOAD/POP of `a` needed). A later
-    // test reuses name `a` with outer length 2 — that must not poison this fold.
-    let make_arr = body
-        .iter()
-        .position(|b| matches!(*b.bytecode(), Instruction::MakeArray))
-        .expect("array literal MakeArray");
+    // `a` lives in four stack slots and `len(a)` const-folds to CONST 4 without
+    // boxing `a`. A later test reuses name `a` with outer length 2 — that must
+    // not poison this fold.
     assert!(
-        matches!(*body[make_arr + 1].bytecode(), Instruction::POP),
-        "expected POP of unused array after len fold"
+        !body
+            .iter()
+            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray)),
+        "len(a) of a stack array must not box it"
     );
+    let elems_end = body
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(*b.bytecode(), Instruction::STORE))
+        .nth(3)
+        .map(|(i, _)| i)
+        .expect("four element stores");
+    let folded = &body[elems_end + 1];
     assert!(
-        matches!(*body[make_arr + 2].bytecode(), Instruction::CONST)
-            && body[make_arr + 2].operand_u32() == 4,
+        matches!(*folded.bytecode(), Instruction::CONST) && folded.operand_u32() == 4,
         "len(a) must const-fold to 4, not later nested outer len; got {:?}",
-        body[make_arr + 2].bytecode()
+        folded.bytecode()
     );
 }

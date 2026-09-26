@@ -5,8 +5,9 @@
 //! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when there is
 //!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
 //!
-//! Hard refuse is **LIR reconstruct** walls: unmapped alloc, `CALL` /
-//! HostInvoke (emit cannot rebuild those), escaping fields, box.
+//! Hard refuse is **LIR reconstruct** walls: unmapped alloc, one-word
+//! `CALL`, escaping fields, box. HostInvoke word edges lift (LIR emits
+//! `CONST id; args; HostInvoke`); untyped native ids refuse in the builder.
 //! Q6 counted `for`, Q7 one-word dense `CALL`, Q8 niche / two-slot `Br`,
 //! and D3 boxed multi-payload `Unpack` / `JumpIfMatch` are not walls —
 //! they lift; keep/refuse is the cost gate. LIR reconstructs multi-word `CALL`
@@ -28,8 +29,6 @@ pub enum LirRefuse {
     /// I6: user `CALL` / `TailCall` / other `Entry` (LIR reconstruct wall;
     /// Q7 one-word self-`CALL` is dense + cost, not this refuse).
     Call,
-    /// I6: HostInvoke (dense reconstructs; LIR emit does not).
-    Host,
     /// Escaping / heap-backed field ops (LIR reconstruct wall; D1 maps
     /// bind; D2 dense-native reconstruct is the keep path).
     HeapField,
@@ -40,14 +39,13 @@ pub enum LirRefuse {
 /// Production LIR entry after dense specialize misses.
 ///
 /// Eligible when there is no **LIR reconstruct** wall. Walls stay I5
-/// alloc without maps, HostInvoke/`CALL` (LIR emit cannot rebuild those
-/// — Q7 densifies one-word self-`CALL` instead), escaping fields, box.
+/// alloc without maps, one-word `CALL` (Q7 densifies one-word self-`CALL`
+/// instead), escaping fields, box. HostInvoke word edges lift.
 /// Counted `for` (Q6), niche / two-slot match (Q8), and boxed
 /// multi-payload `Unpack` / `JumpIfMatch` (D3) are not LIR walls. Q9 R1:
 /// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R3 maps
 /// `FORMAT` / `STRINGIFY` (unmapped format is an alloc wall). Q9 R2 densifies
-/// `from_bytes` / `to_bytes` HostInvoke (LIR still cannot reconstruct
-/// HostInvoke). Heap index /
+/// `from_bytes` / `to_bytes` HostInvoke. Heap index /
 /// `ArrayLen` / `StoreIndex` may lift (A2).
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 /// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
@@ -95,7 +93,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 ..
             } => return Some(LirRefuse::Alloc),
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
-            IlOp::HostInvoke { .. } => return Some(LirRefuse::Host),
             IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => {
                 return Some(LirRefuse::HeapField);
             }
@@ -222,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn i8_call_and_host_stay_fuse_il() {
+    fn i8_one_word_call_is_a_wall_but_host_lifts() {
         let loc = loc();
         let call = [IlOp::Entry {
             kind: crate::il::EntryKind::Call,
@@ -237,7 +234,8 @@ mod tests {
             layout: 0,
             loc,
         }];
-        assert_eq!(lir_refuse(&host, &[]), Some(LirRefuse::Host));
+        // HostInvoke lifts; the MIR builder refuses untyped native ids.
+        assert_eq!(lir_refuse(&host, &[]), None);
     }
 
     #[test]

@@ -50,6 +50,40 @@ impl FrameStackMap {
     }
 }
 
+/// Complete frame description (archive minor 21+) for the body in
+/// `[entry_pc, end_pc)`. Where it applies, the listed frame-relative slots
+/// are the only words of the frame that can hold heap references, so the GC
+/// roots those instead of scanning the frame.
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct PreciseFrameMap {
+    pub entry_pc: u32,
+    pub end_pc: u32,
+    /// Heap slots valid at every PC of the body (heap-free bodies: empty).
+    pub any_pc: Option<Vec<u16>>,
+    /// Heap slots at exact PCs, sorted by `pc`: the state after an
+    /// allocating / host op, or the caller's words below a `CALL`'s args.
+    pub at_pc: Vec<SlotMap>,
+}
+
+impl PreciseFrameMap {
+    /// Heap slots of a frame stopped at `pc`, when this map describes it.
+    pub fn slots_at_pc(&self, pc: u32) -> Option<&[u16]> {
+        if let Some(any) = &self.any_pc {
+            return Some(any);
+        }
+        let i = self.at_pc.binary_search_by_key(&pc, |s| s.pc).ok()?;
+        Some(&self.at_pc[i].slots)
+    }
+}
+
+/// The precise map covering `pc`, if any (`maps` sorted by `entry_pc`, disjoint).
+pub fn precise_map_for_pc(maps: &[PreciseFrameMap], pc: u32) -> Option<&PreciseFrameMap> {
+    let i = maps.partition_point(|m| m.entry_pc <= pc);
+    let m = maps.get(i.checked_sub(1)?)?;
+    (pc < m.end_pc).then_some(m)
+}
+
 /// Last map whose `entry_pc <= ip` and `contains_pc(ip)`.
 pub fn map_for_ip(maps: &[FrameStackMap], ip: u32) -> Option<&FrameStackMap> {
     let mut best = None;
@@ -89,5 +123,27 @@ mod tests {
         assert_eq!(m.slots_at(12), &[0]);
         assert_eq!(m.slots_at(25), &[0, 2]);
         assert!(m.contains_pc(10) && !m.contains_pc(40));
+    }
+
+    #[test]
+    fn precise_map_lookup_respects_bounds() {
+        let maps = vec![
+            PreciseFrameMap { entry_pc: 10, end_pc: 20, any_pc: Some(vec![]), at_pc: vec![] },
+            PreciseFrameMap {
+                entry_pc: 30,
+                end_pc: 40,
+                any_pc: None,
+                at_pc: vec![SlotMap { pc: 33, slots: vec![1] }],
+            },
+        ];
+        assert!(precise_map_for_pc(&maps, 9).is_none());
+        assert_eq!(precise_map_for_pc(&maps, 10).map(|m| m.entry_pc), Some(10));
+        assert!(precise_map_for_pc(&maps, 20).is_none());
+        assert!(precise_map_for_pc(&maps, 25).is_none());
+        assert_eq!(precise_map_for_pc(&maps, 39).map(|m| m.entry_pc), Some(30));
+        assert!(precise_map_for_pc(&maps, 40).is_none());
+        assert_eq!(maps[0].slots_at_pc(15), Some(&[][..]));
+        assert_eq!(maps[1].slots_at_pc(33), Some(&[1u16][..]));
+        assert_eq!(maps[1].slots_at_pc(34), None);
     }
 }

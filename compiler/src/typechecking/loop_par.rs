@@ -12,16 +12,15 @@
 //! sequential. Counted `for x in` / range (Q6 literal, B5 const range locals)
 //! share this shape; the latch is implicit.
 //!
-//! Wide shapes (`COIL_PAR_LOOP_WIDE`, default on) also admit a dynamic int
-//! bound, an int parameter or int local capture, a pure `if` whose arms share
-//! one reduction, and a positive constant stride. `COIL_PAR_LOOP_WIDE=0`
-//! keeps the original const unit-step shape.
+//! Wide shapes also admit a dynamic int bound, an int parameter or int local
+//! capture, a pure `if` whose arms share one reduction, and a positive
+//! constant stride.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{AdjustOp, AssignOp, Expression, Output};
 
-use super::par_profit::{par_loop_grain, par_loop_wide_enabled};
+use super::par_profit::DEFAULT_LOOP_GRAIN;
 
 /// Associative operator folding a loop's per-iteration contributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,7 +400,7 @@ impl Scan<'_> {
         }
         if !dynamic {
             let trips = iteration_count(begin, end, stride)?;
-            if trips <= par_loop_grain() {
+            if trips <= DEFAULT_LOOP_GRAIN {
                 return None;
             }
         }
@@ -442,11 +441,6 @@ impl Scan<'_> {
         }
         live.remove(&index);
         live.remove(acc);
-
-        let wide = dynamic || stride != 1 || !live.is_empty() || has_if;
-        if wide && !par_loop_wide_enabled() {
-            return None;
-        }
 
         Some(LoopParSite {
             index,
@@ -1264,7 +1258,7 @@ fn main() {{
 
     #[test]
     fn rejects_trip_count_at_threshold() {
-        let t = par_loop_grain();
+        let t = DEFAULT_LOOP_GRAIN;
         assert!(
             sites_of(&program(&format!(
                 r#"

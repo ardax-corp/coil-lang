@@ -113,10 +113,13 @@ impl NativeFn for HostClosureFn {
     }
 }
 
-#[derive(Default)]
+/// Registered host natives. Both tables sit behind `Arc` so a worker or
+/// re-entrant `execute` can share the registry without re-hashing every name;
+/// `register` copies on write only when a clone is still alive.
+#[derive(Default, Clone)]
 pub struct Natives {
-    by_name: std::collections::HashMap<String, Arc<dyn NativeFn>>,
-    by_id: Vec<Arc<dyn NativeFn>>,
+    by_name: Arc<std::collections::HashMap<String, Arc<dyn NativeFn>>>,
+    by_id: Arc<Vec<Arc<dyn NativeFn>>>,
 }
 
 impl Natives {
@@ -127,8 +130,13 @@ impl Natives {
     pub fn register(&mut self, native: Arc<dyn NativeFn>) -> usize {
         let id = self.by_id.len();
         let name = native.name().to_string();
-        self.by_name.insert(name, Arc::clone(&native));
-        self.by_id.push(native);
+        let by_name = Arc::make_mut(&mut self.by_name);
+        if by_name.is_empty() {
+            // The standard host table is ~140 natives; skip the rehash ladder.
+            by_name.reserve(192);
+        }
+        by_name.insert(name, Arc::clone(&native));
+        Arc::make_mut(&mut self.by_id).push(native);
         id
     }
 
@@ -148,13 +156,9 @@ impl Natives {
         self.by_id.is_empty()
     }
 
-    /// Clone the registered natives list (stable ids) for worker threads.
+    /// Share the registered natives (stable ids) with a worker thread.
     pub fn clone_registry(&self) -> Self {
-        let mut reg = Natives::new();
-        for native in &self.by_id {
-            reg.register(Arc::clone(native));
-        }
-        reg
+        self.clone()
     }
 }
 
@@ -180,6 +184,18 @@ mod tests {
         assert_eq!(id1, 1);
         assert!(reg.get("a").is_some());
         assert_eq!(reg.get_by_id(1).unwrap().name(), "b");
+    }
+
+    #[test]
+    fn cloned_registry_is_shared_and_copy_on_write() {
+        let mut reg = Natives::new();
+        reg.register(Arc::new(HostClosureFn::unary_i64("a", |x| x)));
+        let worker = reg.clone_registry();
+        assert!(Arc::ptr_eq(&reg.by_id, &worker.by_id), "clone shares tables");
+        reg.register(Arc::new(HostClosureFn::unary_i64("b", |x| x)));
+        assert_eq!(worker.len(), 1, "later registration does not leak into a clone");
+        assert!(worker.get("b").is_none());
+        assert_eq!(reg.len(), 2);
     }
 
     #[test]

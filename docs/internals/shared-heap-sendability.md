@@ -207,8 +207,7 @@ operand stack, statics, resume/coro stacks, and mapped slots.
 ### Incremental S4 vs steal
 
 Today mark finishes at the **alloc** safepoint so a single mutator never
-runs in `GcPhase::Marking`. Opcode `SetField` / `StoreIndex` skip SATB
-because of that.
+runs with gray objects, which is why no store needs a write barrier.
 
 C0 rule: **no mutator runs while the shared Heap is Marking or Sweeping.**
 
@@ -220,7 +219,6 @@ Before `begin_steal`:
    Heap to epoch-STW (below). Do not start a new incremental slice on a
    worker.
 
-SATB is unused during the epoch because mark does not overlap mutators.
 Host vec mutations in a stolen body are already a purity refuse.
 
 ### Two STW layers (C1 uses the first)

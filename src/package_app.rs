@@ -43,6 +43,7 @@ fn compile_program_archive_bytes(
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
@@ -361,6 +362,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -380,6 +382,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -402,6 +405,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

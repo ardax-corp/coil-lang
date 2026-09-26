@@ -60,7 +60,7 @@ type level). Runtime lowering:
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
 Counted const `for` / range with an associative int reduce may also
-**loop-IPA** (COI-362 E4) when trip count beats `COIL_LOOP_GRAIN` (default 20);
+**loop-IPA** (COI-362 E4) when trip count beats `DEFAULT_LOOP_GRAIN` (20);
 dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
 
 ## Prove

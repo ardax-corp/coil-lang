@@ -1,4 +1,4 @@
-//! Iterative optimization / convergence (COI-130).
+//! Pipeline round behaviour and opt stats.
 
 use super::*;
 use crate::il::op::{IlJumpKind, IlOp, Label};
@@ -49,7 +49,6 @@ fn jump_thread_opts() -> OptimizeOptions {
     let mut o = super::OptLevel::None.options();
     o.algebraic = false;
     o.jump_thread = true;
-    o.iterative_optimization = false;
     o
 }
 
@@ -66,67 +65,13 @@ fn jmp_chain() -> Vec<IlOp> {
     ]
 }
 
+/// Production runs the pipeline once; re-running it is not a supported mode
+/// (LICM is not idempotent), so a 3-edge chain threads exactly one hop.
 #[test]
-fn simple_code_converges_in_one_round() {
-    let mut ops = vec![c(1), ret()];
-    let stats = optimize_iteratively(&mut ops, &OptimizeOptions::default(), &mut Vec::new(), 10);
-    assert_eq!(stats.iterations, 1);
-    assert!(stats.converged);
-    assert!(!stats.hit_iteration_limit);
-    assert_eq!(stats.passes.len(), 1);
-    assert!(!stats.passes[0].changed);
-}
-
-#[test]
-fn jmp_chain_needs_two_rounds_to_thread_to_the_return() {
+fn one_round_threads_one_hop() {
     let mut ops = jmp_chain();
-    let stats = optimize_iteratively(&mut ops, &jump_thread_opts(), &mut Vec::new(), 10);
-    assert!(stats.converged);
-    assert!(!stats.hit_iteration_limit);
-    assert!(
-        stats.iterations >= 2,
-        "jump_thread follows one hop per round; a 3-edge chain needs a second pass"
-    );
-    assert!(stats.passes.iter().filter(|p| p.changed).count() >= 2);
-    assert_eq!(entry_target(&ops), Some(3));
-}
-
-#[test]
-fn max_iterations_stops_before_a_fixed_point() {
-    let mut ops = jmp_chain();
-    let stats = optimize_iteratively(&mut ops, &jump_thread_opts(), &mut Vec::new(), 1);
-    assert_eq!(stats.iterations, 1);
-    assert_eq!(stats.passes.len(), 1);
-    assert!(stats.passes[0].changed);
-    assert!(!stats.converged);
-    assert!(stats.hit_iteration_limit);
+    optimize(&mut ops, &jump_thread_opts(), &mut Vec::new());
     assert_eq!(entry_target(&ops), Some(2));
-}
-
-#[test]
-fn optimize_respects_iterative_flag() {
-    let mut once = jmp_chain();
-    let mut looped = jmp_chain();
-    let mut opts = jump_thread_opts();
-    opts.iterative_optimization = false;
-    optimize(&mut once, &opts, &mut Vec::new());
-    opts.iterative_optimization = true;
-    opts.max_optimization_iterations = 10;
-    optimize(&mut looped, &opts, &mut Vec::new());
-    assert_eq!(entry_target(&once), Some(2));
-    assert_eq!(entry_target(&looped), Some(3));
-}
-
-#[test]
-fn run_optimization_pass_matches_a_single_optimize() {
-    let mut a = jmp_chain();
-    let mut b = jmp_chain();
-    let opts = jump_thread_opts();
-    let stats = run_optimization_pass(&mut a, &opts, &mut Vec::new());
-    optimize(&mut b, &opts, &mut Vec::new());
-    assert!(stats.changed);
-    assert!(a == b, "single pass and optimize() should match");
-    assert_eq!(entry_target(&a), Some(2));
 }
 
 #[test]
@@ -158,30 +103,6 @@ fn stats_collect_stack_dce_and_format() {
     assert!(json.contains("stack_dce"));
 }
 
-#[test]
-fn stats_aggregate_across_iterative_rounds() {
-    begin_opt_stats();
-    let mut ops = jmp_chain();
-    let mut opts = jump_thread_opts();
-    opts.collect_stats = true;
-    opts.iterative_optimization = true;
-    opts.max_optimization_iterations = 10;
-    optimize(&mut ops, &opts, &mut Vec::new());
-    let stats = last_opt_stats();
-    assert!(stats.iterations >= 2);
-    let threaded = stats
-        .passes
-        .iter()
-        .find(|p| p.name == "jump_thread")
-        .expect("jump_thread recorded");
-    assert!(
-        threaded.applied >= 2,
-        "expected aggregated jump_thread hits, got {:?}",
-        stats.passes
-    );
-}
-
-/// `n * fact(n - 1)` must not become `n * n` when MIR parks the call result.
 #[test]
 fn fact_mul_keeps_call_result_across_opts() {
     use crate::il::{EntryKind, IlFunc, IlModule};

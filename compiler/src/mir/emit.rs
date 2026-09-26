@@ -1764,7 +1764,8 @@ fn emit_boxed_jump_if_match(args: EmitBoxedJumpIfMatchArgs<'_>) -> Result<(), Lo
 
 fn bin_kind(op: MirBinOp, ty: MirTy) -> Result<u8, LowerError> {
     let ty = match ty {
-        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => MirTy::I64,
+        // Bool words are 0/1, so `&` / `|` on i64 are exact.
+        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::Bool => MirTy::I64,
         other => other,
     };
     Ok(match (op, ty) {

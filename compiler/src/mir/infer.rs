@@ -217,9 +217,17 @@ fn infer_walk(
     // Map drafts always last-write recycled temps. Dense needs the same
     // when the body boxes (InitTyped / Make*) or has heap fields — ctor
     // temps become i64/bool after the object is stored (D1/D2).
+    // LIR does the same: fuse-IL recycles operand / local slots across
+    // disjoint live ranges (call args, then a FORMAT string). Lowering reads
+    // each slot's current SSA def, and SSA verify refuses a φ whose inputs
+    // disagree, so last-write typing cannot mistype a reconstruct.
     let reuse = mode == InferMode::Map
+        || mode == InferMode::Lir
         || (mode == InferMode::Dense
             && (allow_alloc || ops.iter().any(is_heap_field_op)));
+    // Operand painting stays strict for dense / map drafts (their lowering
+    // relies on it); LIR recycles like set_slot_reuse.
+    let _reuse_guard = WalkReuseGuard::enter(mode == InferMode::Lir);
 
     for op in ops {
         match op {
@@ -990,9 +998,13 @@ pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     })
 }
 
-/// Every Make* / InitTyped sits after the last back-edge (`return [sum]`).
-/// Those bodies stay fuse-IL so COI-87 invert+fuse remains observable.
-pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
+/// Every Make* / InitTyped sits after the last back-edge and that tail only
+/// shapes the result (`return [sum]`: no call / host / format work). Those
+/// bodies stay fuse-IL so COI-87 invert+fuse remains observable. A tail that
+/// does real work after the loop (formatted output, a discarded `Result`
+/// from a call) does not refuse the body: its hot loop may still take MIR.
+pub(crate) fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
+    use crate::il::effects::{Effects, effects};
     if has_alloc_inside_loop(ops) {
         return false;
     }
@@ -1010,7 +1022,10 @@ pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
             }
         }
     }
-    any
+    let tail_works = ops[last_back..]
+        .iter()
+        .any(|op| effects(op, None).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
+    any && !tail_works
 }
 
 /// Heap GetField / SetField / LoadField (fuse-IL or residual dense).
@@ -1402,6 +1417,19 @@ fn apply_bin(args: ApplyBinArgs<'_>) -> Result<(), LowerError> {
     let lhs = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("bin stack".into()))?;
+    // Strict `&&` / `||` (codegen emits them for pure compares) are bitwise
+    // on 0/1 words; only accept operands already known to be `Bool`.
+    if matches!(inst, Instruction::AND | Instruction::OR)
+        && lhs.ty == Some(MirTy::Bool)
+        && rhs.ty == Some(MirTy::Bool)
+    {
+        stack.push(Cell {
+            origin: Origin::Tmp,
+            ty: Some(MirTy::Bool),
+            imm: None,
+        });
+        return Ok(());
+    }
     if matches!(
         inst,
         Instruction::Pow | Instruction::PowF | Instruction::AND | Instruction::OR
@@ -1681,13 +1709,34 @@ fn apply_host(
     Ok(())
 }
 
+thread_local! {
+    /// Whether the current [`infer_walk`] recycles painted operand types (LIR).
+    static WALK_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Restores the enclosing walk's reuse mode (walks can nest via callees).
+struct WalkReuseGuard(bool);
+
+impl WalkReuseGuard {
+    fn enter(reuse: bool) -> Self {
+        Self(WALK_REUSE.with(|c| c.replace(reuse)))
+    }
+}
+
+impl Drop for WalkReuseGuard {
+    fn drop(&mut self) {
+        WALK_REUSE.with(|c| c.set(self.0));
+    }
+}
+
+/// Type the slot a consumed operand came from, under the walk's reuse mode.
 fn paint(
     slot_ty: &mut HashMap<u32, MirTy>,
     pool_ty: &mut [Option<MirTy>],
     cell: Cell,
     ty: MirTy,
 ) -> Result<(), LowerError> {
-    paint_slots(slot_ty, pool_ty, cell, ty, false)
+    paint_slots(slot_ty, pool_ty, cell, ty, WALK_REUSE.with(std::cell::Cell::get))
 }
 
 fn paint_slots(

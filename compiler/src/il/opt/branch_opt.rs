@@ -202,7 +202,7 @@ fn is_cold_region(ops: &[IlOp]) -> bool {
     if ops.iter().any(is_jump) {
         return false;
     }
-    matches!(ops.last(), Some(op) if is_terminator(op))
+    matches!(ops.last(), Some(op) if op.is_terminator())
 }
 
 fn region_defines_labels(ops: &[IlOp]) -> bool {
@@ -219,21 +219,11 @@ fn suffix_cannot_fall_into_moved_cold(suffix: &[IlOp]) -> bool {
         last_real = Some(op);
     }
     match last_real {
-        Some(op) => is_terminator(op) || is_uncond_jmp(op),
+        Some(op) => op.is_terminator() || is_uncond_jmp(op),
         None => false,
     }
 }
 
-fn is_terminator(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-    )
-}
 
 fn is_uncond_jmp(op: &IlOp) -> bool {
     matches!(

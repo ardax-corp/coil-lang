@@ -13,6 +13,7 @@ mod seekable_iter;
 mod source_pos;
 mod stack_map;
 mod value;
+mod verify;
 
 pub use archive::*;
 pub use array_vec::*;
@@ -28,6 +29,7 @@ pub use seekable_iter::*;
 pub use source_pos::*;
 pub use stack_map::*;
 pub use value::*;
+pub use verify::*;
 
 #[macro_export]
 macro_rules! promise {

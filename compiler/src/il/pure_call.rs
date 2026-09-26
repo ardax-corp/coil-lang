@@ -8,9 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use common::{Byte, Instruction};
-
-use super::op::{EntryKind, IlJumpKind, IlOp, Label};
+use super::effects::{Effects, effects};
+use super::op::{IlOp, Label};
 
 /// Maps entry labels and packed CALL offsets to callee names plus the AST purity set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -48,77 +47,33 @@ impl PureCallCtx {
     }
 }
 
-fn call_byte_is_pure(byte: &Byte, ctx: Option<&PureCallCtx>) -> bool {
-    if *byte.bytecode() != Instruction::CALL {
-        return false;
-    }
-    let (_, target) = byte.call_parts();
-    ctx.is_some_and(|c| c.call_offset_is_pure(target as u32))
-}
-
 /// True when `op` blocks length-invariance / ArrayLen hoist for an array loop.
+/// Array grow is handled per array by the callers; element stores are fine.
 pub fn op_blocks_length_proof(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
-    match op {
-        IlOp::HostInvoke { .. } | IlOp::Print { .. } => true,
-        IlOp::GetField { .. } | IlOp::SetField { .. } => true,
-        IlOp::Entry {
-            kind: EntryKind::Call,
-            target,
-            .. } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
-        IlOp::Entry { .. } => true,
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfMatch { .. },
-            ..
-        } => true,
-        IlOp::Byte { byte, .. } => match *byte.bytecode() {
-            Instruction::HostInvoke
-            | Instruction::PRINT
-            | Instruction::FORMAT
-            | Instruction::FfiInvoke
-            | Instruction::CallIndirect
-            | Instruction::GetField
-            | Instruction::SetField
-            | Instruction::TailCall
-            // Resume restores empty pin maps; pins are not saved on ObjCoroutine.
-            | Instruction::YieldCoro
-            | Instruction::YieldFromCoro => true,
-            Instruction::CALL => !call_byte_is_pure(byte, ctx),
-            _ => false,
-        },
-        _ => false,
-    }
+    // Resume restores empty pin maps; pins are not saved on ObjCoroutine.
+    effects(op, ctx).any(
+        Effects::CALL
+            | Effects::HOST
+            | Effects::FORMAT
+            | Effects::FIELD_READ
+            | Effects::FIELD_WRITE
+            | Effects::YIELD
+            | Effects::MATCH,
+    )
 }
 
 /// True when `op` blocks LICM / field-sensitive hoists.
 pub fn op_blocks_licm(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
-    match op {
-        IlOp::HostInvoke { .. } | IlOp::Print { .. } => true,
-        IlOp::SetField { .. } | IlOp::GetField { .. } => true,
-        IlOp::Entry {
-            kind: EntryKind::Call,
-            target,
-            .. } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
-        IlOp::Entry { .. } => true,
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfMatch { .. },
-            ..
-        } => true,
-        IlOp::Byte { byte, .. } => match *byte.bytecode() {
-            Instruction::HostInvoke
-            | Instruction::PRINT
-            | Instruction::FfiInvoke
-            | Instruction::SetField
-            | Instruction::GetField => true,
-            Instruction::CALL => !call_byte_is_pure(byte, ctx),
-            _ => false,
-        },
-        _ => false,
-    }
+    effects(op, ctx).any(
+        Effects::CALL | Effects::HOST | Effects::FIELD_READ | Effects::FIELD_WRITE | Effects::MATCH,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use common::DebugLoc;
+    use common::{Byte, DebugLoc, Instruction};
+
+    use crate::il::op::EntryKind;
 
     use super::*;
 

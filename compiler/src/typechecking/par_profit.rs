@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
 
-/// Expression IPA grain floor (`COIL_PAR_THRESHOLD`).
+/// Expression IPA grain floor.
 ///
 /// Unit is fork-tree nodes `W`, not fib(n). Default [`DEFAULT_EXPR_GRAIN`]
 /// is `W(fib(20))` for the `n <= 1` recurrence (`Fib(21) - 1`): the spawn
@@ -31,32 +31,21 @@ pub const DEFAULT_EXPR_GRAIN: i64 = 10_945;
 ///
 /// `SelfCall` combine re-entry and multi-parameter guards (tak `y >= x`)
 /// leave most recursive calls as sequential leaves that `W` does not count.
-/// Scaled with [`par_expr_grain`]: default **8000** admits `tak(18, 12, 6)`
+/// Default **8000** admits `tak(18, 12, 6)`
 /// (`W = 8398`) and keeps tight fib-shaped trees on [`DEFAULT_EXPR_GRAIN`].
 pub const DEFAULT_LOOSE_EXPR_GRAIN: i64 = 8_000;
 
-/// Loop IPA grain floor (`COIL_LOOP_GRAIN`). Unit is trip count of a
+/// Loop IPA grain floor. Unit is trip count of a
 /// counted `[begin, end)` range, not expression `W`. Isolate spawn still
 /// needs tens of trips, not thousands of fib-tree nodes.
 pub const DEFAULT_LOOP_GRAIN: i64 = 20;
 
-/// Compile-time expression grain floor (`COIL_PAR_THRESHOLD`).
-pub fn par_expr_grain() -> i64 {
-    static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *T.get_or_init(|| {
-        std::env::var("COIL_PAR_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_EXPR_GRAIN)
-    })
-}
-
 /// Per-site expression grain floor, same units as `W`.
 ///
-/// Tight recurrences keep [`par_expr_grain`]. Sites where `W` is a known
+/// Tight recurrences keep [`DEFAULT_EXPR_GRAIN`]. Sites where `W` is a known
 /// undercount use the scaled loose floor so spawn can still pay off.
 pub fn par_expr_grain_for(site: &ParForkSite) -> i64 {
-    let base = par_expr_grain();
+    let base = DEFAULT_EXPR_GRAIN;
     if grain_w_is_tight(site) {
         base
     } else {
@@ -99,38 +88,6 @@ fn arg_form_param(form: &ArgForm) -> Option<usize> {
         ArgForm::ParamMinus { param, .. } | ArgForm::ParamPlus { param, .. } => Some(*param),
         ArgForm::Const(_) => None,
     }
-}
-
-/// Compile-time counted-loop grain floor (`COIL_LOOP_GRAIN`, default 20).
-pub fn par_loop_grain() -> i64 {
-    static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *T.get_or_init(|| {
-        std::env::var("COIL_LOOP_GRAIN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_LOOP_GRAIN)
-    })
-}
-
-fn env_flag_default_on(key: &str) -> bool {
-    !matches!(
-        std::env::var(key),
-        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
-    )
-}
-
-/// Dynamic bounds, int parameters, branches, and non-unit strides (`COIL_PAR_LOOP_WIDE`).
-///
-/// Default on. `0` / `false` / `off` / `no` keeps the original const unit-step loop shape.
-pub fn par_loop_wide_enabled() -> bool {
-    env_flag_default_on("COIL_PAR_LOOP_WIDE")
-}
-
-/// Unary dynamic call entry into an existing fork worker (`COIL_PAR_EXPR_WIDE`).
-///
-/// Default on. Off leaves only constant call sites on the worker.
-pub fn par_expr_wide_enabled() -> bool {
-    env_flag_default_on("COIL_PAR_EXPR_WIDE")
 }
 
 /// Binary op used at a [`ParCombine::BinOp`] fork site.
@@ -289,7 +246,7 @@ impl<'a> WorkEstimate<'a> {
     fn new(sites: &'a HashMap<String, ParForkSite>) -> Self {
         Self {
             sites,
-            cap: par_expr_grain().saturating_add(1),
+            cap: DEFAULT_EXPR_GRAIN.saturating_add(1),
             memo: HashMap::new(),
         }
     }
@@ -305,7 +262,7 @@ impl<'a> WorkEstimate<'a> {
         self.sites
             .get(fn_name)
             .map(par_expr_grain_for)
-            .unwrap_or_else(par_expr_grain)
+            .unwrap_or(DEFAULT_EXPR_GRAIN)
     }
 
     fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
@@ -1288,8 +1245,7 @@ fn collect_const_calls(
                 if work.worth_parallel(fname, &consts) {
                     out.entry(fname.to_string()).or_default().insert(consts);
                 }
-            } else if par_expr_wide_enabled()
-                && !ENCLOSING_FORK.with(Cell::get)
+            } else if !ENCLOSING_FORK.with(Cell::get)
                 && args.len() == 1
                 && matches!(peel(&args[0]).1.as_ref(), Expression::Identifier(_))
                 && let Some(cut) = unary_dynamic_cutoff(sites, fname)
@@ -1682,7 +1638,7 @@ fn main() {
     /// `W(20) = DEFAULT_EXPR_GRAIN` so the floor still admits `fib(21)`.
     #[test]
     fn fib_shape_scores_fork_tree_grain() {
-        let floor = par_expr_grain();
+        let floor = DEFAULT_EXPR_GRAIN;
         let sites = sites_of(
             r#"
 fn fib(int n) -> int {
@@ -1753,7 +1709,7 @@ fn main() { return; }
     /// the tight fib floor **10945** and above the loose floor **8000**.
     #[test]
     fn fair_tak_load_uses_loose_grain() {
-        let tight = par_expr_grain();
+        let tight = DEFAULT_EXPR_GRAIN;
         let sites = sites_of(
             r#"
 fn tak(int x, int y, int z) -> int {

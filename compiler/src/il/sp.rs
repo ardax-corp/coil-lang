@@ -282,32 +282,6 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
     }
 }
 
-fn is_terminator(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-            | IlOp::Entry {
-                kind: EntryKind::TailCall,
-                .. }
-    ) || matches!(
-        op.as_encode_byte(),
-        Some(b) if matches!(
-            *b.bytecode(),
-            Instruction::RETURN
-                | Instruction::ReturnPair
-                | Instruction::HALT
-                | Instruction::LoadReturnSlot
-                | Instruction::ConstReturnImm
-                | Instruction::BinReturn
-                | Instruction::MakeEnumReturn
-                | Instruction::TailCall
-        )
-    )
-}
 
 /// When `op` is a nested direct call, the VM return resets tell to
 /// `frame_base + ret_words` (`1` boxed word, or `2` for a known ≤2-word
@@ -409,7 +383,7 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
                     IlJumpKind::Unconditional => None,
                     _ => Some(after),
                 };
-            } else if is_terminator(op) {
+            } else if op.is_terminator() {
                 fall_sp = None;
             } else if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 fall_sp = Some(before);

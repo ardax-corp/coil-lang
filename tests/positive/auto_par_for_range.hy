@@ -1,4 +1,4 @@
-// Counted for/range IPA (COI-362 E4). Trip count > COIL_LOOP_GRAIN.
+// Counted for/range IPA (COI-362 E4). Trip count > DEFAULT_LOOP_GRAIN.
 // Checksums must match sequential AUTO_PAR=0.
 
 fn sq(int i) -> int {

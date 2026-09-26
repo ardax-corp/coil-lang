@@ -1,4 +1,5 @@
 use super::*;
+use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInCounted, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
@@ -144,6 +145,8 @@ impl Compiler {
 
     pub fn set_source_file(&mut self, path: impl Into<std::path::PathBuf>) {
         self.current_source_file = Some(path.into());
+        // Record every compiled file, not only those that emit a located byte.
+        self.intern_source_file();
     }
 
     pub fn source_files_list(&self) -> Vec<String> {
@@ -157,6 +160,10 @@ impl Compiler {
     /// S2b slot / frame maps (empty when no allocating body lifted).
     pub fn stack_maps(&self) -> &[common::FrameStackMap] {
         &self.stack_maps
+    }
+
+    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
+        &self.precise_frames
     }
 
     pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
@@ -506,9 +513,7 @@ impl Compiler {
         // `Stream.fd()` sees the host string (InvalidInput).
         let niche_option = common::is_builtin_option_enum(enum_name)
             && !self.force_heap_option
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+            && (self.expr_layout(ast).is_niche_option()
                 || self.force_niche_option);
         let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
         let niche_result = self.should_niche_result_construct(enum_name, ast);
@@ -550,9 +555,7 @@ impl Compiler {
 
         if common::is_builtin_option_enum(enum_name)
             && !self.force_heap_option
-            && self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+            && self.expr_layout(ast).is_niche_option()
             || (common::is_builtin_option_enum(enum_name)
                 && !self.force_heap_option
                 && self.force_niche_option)
@@ -785,7 +788,9 @@ impl Compiler {
         let dbg_len = self.debug_locs.len();
         let boxes = self.context.stack_array_box.clone();
         let class_boxes = self.context.unboxed_class_box.clone();
+        let hoist = self.escape_hoist.take();
         let _ = self.do_compile(ast);
+        self.escape_hoist = hoist;
         self.bytecode.truncate(bc_len);
         self.debug_locs.truncate(dbg_len);
         self.context.stack_array_box = boxes;
@@ -991,8 +996,8 @@ impl Compiler {
         }
         let would_wrap = self.compiling_two_word_enum.is_none()
             && self.compiling_result_mode
-            && !self.return_is_niche_result()
-            && !self.return_is_unit_result_niche();
+            && !self.return_layout().is_niche_result()
+            && !self.return_layout().is_niche_unit_result();
         !would_wrap
     }
 
@@ -3496,11 +3501,77 @@ impl Compiler {
             bytecode.push_load(slot);
             return;
         }
+        if let Some(req) = &mut self.escape_hoist {
+            req.push(name.to_string());
+        }
         self.emit_box_stack_array(bytecode, base, n);
         let slot = self.alloc_temp_slot();
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push_store_pop(slot);
         self.context.stack_array_box.insert(name.to_string(), slot);
+    }
+
+    /// Box a stack array or unboxed class into its Q1/Q2 slot at a block
+    /// statement start (no live operands), so later escapes just `LOAD`.
+    fn emit_hoisted_escape_box(&mut self, name: &str) {
+        let mut bc = CodeBuf::new();
+        if let Some((base, n)) = self.stack_array_info(name) {
+            if self.context.stack_array_box.contains_key(name) {
+                return;
+            }
+            self.emit_box_stack_array(&mut bc, base, n);
+            let slot = self.alloc_temp_slot();
+            bc.push_store_pop(slot);
+            self.context.stack_array_box.insert(name.to_string(), slot);
+        } else if let Some((base, nfields)) = self.unboxed_class_info(name) {
+            if self.context.unboxed_class_box.contains_key(name) {
+                return;
+            }
+            let cname = self.unboxed_class_type_name(name).unwrap_or(name).to_string();
+            self.emit_box_unboxed_class(&mut bc, &cname, base, nfields);
+            let slot = self.alloc_temp_slot();
+            bc.push_store_pop(slot);
+            self.context.unboxed_class_box.insert(name.to_string(), slot);
+        }
+        self.bytecode.append(&mut bc);
+    }
+
+    /// Compile one block statement. A first escape inside it rolls the
+    /// statement back, boxes the escaping locals up front, and re-emits.
+    fn compile_block_stmt(&mut self, child: &Output<'_>) {
+        // Only locals already in scope can escape; skip the snapshot otherwise.
+        if self.context.stack_array_locals.is_empty()
+            && self.context.unboxed_class_locals.is_empty()
+        {
+            let outer = self.escape_hoist.take();
+            let mut bc = self.do_compile(child);
+            self.bytecode.append(&mut bc);
+            self.escape_hoist = outer;
+            return;
+        }
+        let outer = self.escape_hoist.replace(Vec::new());
+        let bc_len = self.bytecode.len();
+        let dbg_len = self.debug_locs.len();
+        let msg_len = self.messages.len();
+        let emit_idx = self.emit_idx;
+        let ctx = self.context.clone();
+        let pinned = self.pinned_array_slots.clone();
+        let mut bc = self.do_compile(child);
+        let req = self.escape_hoist.take().unwrap_or_default();
+        if !req.is_empty() {
+            self.emit_idx = emit_idx;
+            self.bytecode.truncate(bc_len);
+            self.debug_locs.truncate(dbg_len);
+            self.messages.truncate(msg_len);
+            self.context = ctx;
+            self.pinned_array_slots = pinned;
+            for name in &req {
+                self.emit_hoisted_escape_box(name);
+            }
+            bc = self.do_compile(child);
+        }
+        self.bytecode.append(&mut bc);
+        self.escape_hoist = outer;
     }
 
     /// Lift `arity` TOS args above every cached `[T; N]` / Q2 class box so a
@@ -3527,12 +3598,16 @@ impl Compiler {
         else {
             return;
         };
+        // The args are still live operands: spill temps must sit above them.
+        let depth_on_entry = self.expr_depth;
+        self.expr_depth += arity;
         let mut spilled = Vec::with_capacity(arity as usize);
         for _ in 0..arity {
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
             spilled.push(tmp);
         }
+        self.expr_depth = depth_on_entry;
         let spill_hi = spilled.iter().copied().max().unwrap_or(box_hi);
         bytecode.push_seek(box_hi.max(spill_hi) + 1);
         for tmp in spilled.into_iter().rev() {
@@ -4876,6 +4951,9 @@ impl Compiler {
             bytecode.push_load(slot);
             return;
         }
+        if let Some(req) = &mut self.escape_hoist {
+            req.push(name.to_string());
+        }
         self.emit_box_unboxed_class(bytecode, class_name, base, nfields);
         let slot = self.alloc_temp_slot();
         bytecode.push(Byte::new(Instruction::DUPLICATE));
@@ -5369,15 +5447,16 @@ impl Compiler {
         start: usize,
         end: usize,
     ) -> Option<(usize, bool, u32)> {
-        if let Some(id) = node {
-            if let Some(o) = self.typed_sidecar.overload(id) {
-                return Some((o.fixed_arity, o.is_rest, o.candidate_id));
-            }
-            if let Some(o) = self.checker.selected_overload_at_id(id) {
-                return Some(o);
-            }
+        // The call span is exact; the emit-order NodeId can drift onto a
+        // sibling call and pick its overload.
+        if let Some(o) = self.checker.selected_overload_span(start, end) {
+            return Some(o);
         }
-        self.checker.selected_overload_span(start, end)
+        let id = node?;
+        if let Some(o) = self.typed_sidecar.overload(id) {
+            return Some((o.fixed_arity, o.is_rest, o.candidate_id));
+        }
+        self.checker.selected_overload_at_id(id)
     }
 
     fn sidecar_for_in(
@@ -5536,12 +5615,7 @@ impl Compiler {
                 return Some(apply_ty_prune(self.checker.subst(), ty));
             }
         }
-        if let Some(ty) = self.sidecar_ty_of(node) {
-            return Some(ty);
-        }
-        self.checker
-            .codegen_var_type(name)
-            .map(|t| apply_ty_prune(self.checker.subst(), t))
+        self.sidecar_ty_of(node)
     }
 
     fn discard_statement_value(bytecode: &mut CodeBuf) {
@@ -5652,14 +5726,26 @@ impl Compiler {
             .iter()
             .map(Self::show_lookup_ty_for_instance)
             .collect();
-        let Some(instance) = self
+        // Constructed values carry `Sum` types; retry with their `App` head.
+        let instance = self
             .checker
             .generics()
             .find_instance_relaxed(&hint.class, &lookup)
             .cloned()
-        else {
+            .or_else(|| {
+                let heads: Option<Vec<Ty>> = arg_tys[..lookup_n]
+                    .iter()
+                    .map(|t| self.sum_instance_head(t).or_else(|| Some(t.clone())))
+                    .collect();
+                self.checker
+                    .generics()
+                    .find_instance_relaxed(&hint.class, &heads?)
+                    .cloned()
+            });
+        let Some(instance) = instance else {
             return false;
         };
+        let lookup: Vec<Ty> = instance.args.clone();
         let Some(fqn) = instance.method_fqns.get(method).cloned() else {
             return false;
         };
@@ -5677,7 +5763,19 @@ impl Compiler {
         for tmp in &temps {
             bytecode.push_load(*tmp);
         }
-        self.emit_direct_fn_call(bytecode, &fqn, temps.len() as u32)
+        let mut arity = temps.len() as u32;
+        if Self::is_default_method_fqn(&instance.class, method, &fqn)
+            && self.emit_instance_dict(bytecode, &instance.class, &lookup)
+        {
+            arity += 1;
+        }
+        self.emit_direct_fn_call(bytecode, &fqn, arity)
+    }
+
+    /// Default trait bodies reach siblings through their trailing dictionary;
+    /// concrete impl methods resolve siblings statically and skip the alloc.
+    fn is_default_method_fqn(class: &str, method: &str, fqn: &str) -> bool {
+        fqn == crate::typechecking::generics::Generics::default_method_fqn(class, method)
     }
 
     /// Emit element-wise / broadcast aggregate arithmetic when the typechecker
@@ -6500,7 +6598,13 @@ impl Compiler {
         bytecode.push_store_pop(rhs_slot);
         bytecode.push_load(lhs_slot);
         bytecode.push_load(rhs_slot);
-        self.emit_direct_fn_call(bytecode, &fqn, 2)
+        let mut arity = 2;
+        if Self::is_default_method_fqn(class, method, &fqn)
+            && self.emit_instance_dict(bytecode, class, std::slice::from_ref(&lookup_ty))
+        {
+            arity += 1;
+        }
+        self.emit_direct_fn_call(bytecode, &fqn, arity)
     }
 
     /// Emit a string literal as a table-indexed `STRING` byte into `self.bytecode`.
@@ -6764,10 +6868,14 @@ impl Compiler {
             }
         };
 
+        // Live operands raise `expr_depth` so escape-box temps land above them.
+        let depth_on_entry = self.expr_depth;
         let mut lib_bc = self.do_compile(lib);
         self.bytecode.append(&mut lib_bc);
+        self.expr_depth += 1;
         let mut fn_bc = self.do_compile(fn_id);
         self.bytecode.append(&mut fn_bc);
+        self.expr_depth += 1;
 
         for elem in &tuple_elements {
             if let Expression::Identifier(name) = elem.1.as_ref()
@@ -6775,11 +6883,13 @@ impl Compiler {
             {
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(offset as u32));
-                continue;
+            } else {
+                let mut bc = self.do_compile(elem);
+                self.bytecode.append(&mut bc);
             }
-            let mut bc = self.do_compile(elem);
-            self.bytecode.append(&mut bc);
+            self.expr_depth += 1;
         }
+        self.expr_depth = depth_on_entry;
         let arity = tuple_elements.len() as u32;
         self.bytecode.push_make_tuple(arity);
 
@@ -6797,6 +6907,48 @@ impl Compiler {
 
         self.bytecode
             .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(operand));
+
+        // The VM always boxes; `?` / match expect the niche shape for heap payloads.
+        let ty = self.typed_sidecar.ty_at_span(span.start, span.end).cloned();
+        match ty.map(|ty| self.value_layout(&ty)) {
+            Some(ValueLayout::NicheUnitResult) => {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, true);
+            }
+            Some(ValueLayout::NicheResult) => {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, false);
+            }
+            _ => {}
+        }
+    }
+
+    /// Boxed `ObjEnum` Result → pointer niche (`Err = ptr | 1`), or the
+    /// Option-shaped `Result<(), E>` (`Ok = 0`, `Err = ptr`) when `unit_ok`.
+    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
+        let mut bb = BlockBuilder::new();
+        let ok = bb.fresh_label(bytecode.il_mut());
+        let err = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        bb.emit_jump_to(
+            ok,
+            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.emit_jump_to(
+            err,
+            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.bind_label(err, bytecode.il_mut());
+        if !unit_ok {
+            Self::push_result_err_bit(bytecode);
+        }
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(ok, bytecode.il_mut());
+        if unit_ok {
+            bytecode.push_pop();
+            bytecode.push_const(0);
+        }
+        bb.bind_label(end, bytecode.il_mut());
     }
 
     /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
@@ -7260,13 +7412,13 @@ impl Compiler {
             {
                 let mut arg_bc = self.do_compile(arg);
                 self.bytecode.append(&mut arg_bc);
-                if self.expr_is_niche_option(arg) {
+                if self.expr_layout(arg).is_niche_option() {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
                 }
-                if self.expr_is_unit_result_niche(arg) {
+                if self.expr_layout(arg).is_niche_unit_result() {
                     Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
                 }
-                if self.expr_is_niche_result(arg) {
+                if self.expr_layout(arg).is_niche_result() {
                     Self::emit_niche_result_to_boxed(&mut self.bytecode);
                 }
                 // Box using the lookup head so enum Constructs get Enum tag.
@@ -7280,6 +7432,36 @@ impl Compiler {
         let mut arg_bc = self.do_compile(arg);
         self.bytecode.append(&mut arg_bc);
         self.bytecode.push(Byte::new(Instruction::STRINGIFY));
+    }
+
+    /// `Option<int>`-style instance head for a constructed value typed as a
+    /// `Sum`: binds the enum's declared type params from concrete payloads.
+    fn sum_instance_head(&self, ty: &Ty) -> Option<Ty> {
+        let (name, variants) = match ty {
+            Ty::Constructor { owner, .. } => return self.sum_instance_head(owner),
+            Ty::Sum { name, variants } => (name, variants),
+            _ => return None,
+        };
+        let params = self.checker.generics().generic_type_ctors.get(name)?.clone();
+        let decl = self.checker.enum_variants(name)?;
+        let mut bound: HashMap<String, Ty> = HashMap::new();
+        for (vname, payload) in variants {
+            let Some((_, _, decl_tys)) = decl.iter().find(|(n, _, _)| n == vname) else {
+                continue;
+            };
+            for (d, c) in decl_tys.iter().zip(payload.field_types()) {
+                if let Ty::Con(p) = d
+                    && params.contains(p)
+                {
+                    if bound.get(p).is_some_and(|b| b != c) {
+                        return None;
+                    }
+                    bound.insert(p.clone(), c.clone());
+                }
+            }
+        }
+        let args: Option<Vec<Ty>> = params.iter().map(|p| bound.get(p).cloned()).collect();
+        Some(Ty::App(Box::new(Ty::Con(name.clone())), args?))
     }
 
     fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
@@ -7317,14 +7499,17 @@ impl Compiler {
             Ty::Record { fields } => self.emit_record_show_for_stack_value(&fields),
             other => {
                 let lookup_ty = Self::show_lookup_ty_for_instance(&other);
-                if self.niche_option_inner_ty(&other).is_some() {
-                    Self::emit_niche_option_to_boxed(&mut self.bytecode);
-                }
-                if self.niche_unit_result_err_ty(&other).is_some() {
-                    Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
-                }
-                if self.niche_result_ok_err_ty(&other).is_some() {
-                    Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                match self.value_layout(&other) {
+                    ValueLayout::NicheOption => {
+                        Self::emit_niche_option_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::NicheUnitResult => {
+                        Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::NicheResult => {
+                        Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::Boxed => {}
                 }
                 if let Some(instance) = self
                     .checker
@@ -7868,9 +8053,6 @@ impl Compiler {
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
     ) -> bool {
-        if !crate::typechecking::par_expr_wide_enabled() {
-            return false;
-        }
         let Some(args) = args else {
             return false;
         };
@@ -8480,13 +8662,9 @@ impl Compiler {
                 done,
             });
         } else {
-            let grain = crate::typechecking::par_loop_grain();
-            let bounds = if crate::typechecking::par_loop_wide_enabled() {
-                site.chunk_bounds(grain)
-                    .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end])
-            } else {
-                vec![site.begin, site.midpoint(), site.end]
-            };
+            let bounds = site
+                .chunk_bounds(crate::typechecking::DEFAULT_LOOP_GRAIN)
+                .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
             self.emit_const_par_chunks(EmitConstParChunksArgs {
                 bounds: &bounds,
                 bb: &mut bb,
@@ -8662,7 +8840,7 @@ impl Compiler {
         let trip_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(trip_tmp);
 
-        let grain = crate::typechecking::par_loop_grain();
+        let grain = crate::typechecking::DEFAULT_LOOP_GRAIN;
         self.bytecode.push_load(trip_tmp);
         self.push_int_const(grain.max(1));
         self.bytecode.push(Byte::new(Instruction::GT));
@@ -8947,10 +9125,10 @@ impl Compiler {
             // fold any bytes returned in the local vec (non-host subexprs).
             let mut arg_bc = self.do_compile(arg);
             self.bytecode.append(&mut arg_bc);
-            if self.expr_is_unit_result_niche(arg) {
+            if self.expr_layout(arg).is_niche_unit_result() {
                 Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
             }
-            if self.expr_is_niche_result(arg) {
+            if self.expr_layout(arg).is_niche_result() {
                 Self::emit_niche_result_to_boxed(&mut self.bytecode);
             }
             let slot = self.alloc_temp_slot();
@@ -8968,7 +9146,7 @@ impl Compiler {
         }
         let arity = args.len();
         let layout = result
-            .map(|e| self.host_enum_layout_for_expr(e))
+            .map(|e| self.expr_layout(e).host_enum_layout())
             .unwrap_or(common::HOST_ENUM_LAYOUT_BOXED);
         if matches!(
             layout,
@@ -10136,9 +10314,9 @@ impl Compiler {
         if !common::is_poly_builtin_enum(enum_name) {
             return false;
         }
-        if self.expr_is_niche_option(inner)
-            || self.expr_is_unit_result_niche(inner)
-            || self.expr_is_niche_result(inner)
+        if self.expr_layout(inner).is_niche_option()
+            || self.expr_layout(inner).is_niche_unit_result()
+            || self.expr_layout(inner).is_niche_result()
         {
             return false;
         }
@@ -10207,13 +10385,13 @@ impl Compiler {
                 self.bytecode = boxed;
             }
             self.push_return_two_word();
-        } else if self.return_is_niche_result() {
+        } else if self.return_layout().is_niche_result() {
             // `[payload, Err tag]` → heap-heap `Result<T, E>` (`pointer | 1`).
             // Boxing as `ObjEnum` would look like `Ok` (aligned pointer).
             self.bytecode.push_pop();
             Self::push_result_err_bit(&mut self.bytecode);
             self.bytecode.push_return();
-        } else if self.return_is_unit_result_niche() {
+        } else if self.return_layout().is_niche_unit_result() {
             self.bytecode.push_pop();
             self.bytecode.push_return();
         } else {
@@ -10254,21 +10432,6 @@ impl Compiler {
             self.checker
                 .def_id_of(name)
                 .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
-        }
-    }
-
-    /// Host-edge Option/Result layout from this invoke's HM type only.
-    ///
-    /// Do not OR in `force_niche_option`: that flag is an outer match
-    /// scrutinee context and would stamp OptionNiche on a nested boxed
-    /// host Option (e.g. `Vec<int>::pop` inside a niche match).
-    fn host_enum_layout_for_expr(&self, expr: &Output) -> u32 {
-        if self.expr_is_niche_option(expr) || self.expr_is_unit_result_niche(expr) {
-            common::HOST_ENUM_LAYOUT_OPTION_NICHE
-        } else if self.expr_is_niche_result(expr) {
-            common::HOST_ENUM_LAYOUT_RESULT_NICHE
-        } else {
-            common::HOST_ENUM_LAYOUT_BOXED
         }
     }
 
@@ -10615,9 +10778,23 @@ impl Compiler {
                 return Some(apply_ty_prune(self.checker.subst(), ty));
             }
         }
-        self.checker
-            .codegen_var_type(local)
-            .map(|ty| apply_ty_prune(self.checker.subst(), ty))
+        self.current_param_ty(local)
+    }
+
+    /// Declared type of parameter `local` of the function being compiled.
+    /// Scoped to that function, unlike the checker's flat name map.
+    fn current_param_ty(&self, local: &str) -> Option<Ty> {
+        [
+            self.current_function_qualified.as_deref(),
+            self.current_function_table_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|name| {
+            let names = self.checker.fn_param_names(name)?;
+            let i = names.iter().position(|n| n == local)?;
+            self.checker.fn_param_tys(name)?.get(i).cloned()
+        })
     }
 
     fn local_polyfn_call_needs_unbox(&self, local: &str, span: Option<(usize, usize)>) -> bool {
@@ -10637,11 +10814,7 @@ impl Compiler {
                     break;
                 }
             }
-            found.or_else(|| {
-                self.checker
-                    .codegen_var_type(local)
-                    .map(|ty| apply_ty_prune(self.checker.subst(), ty))
-            })
+            found.or_else(|| self.current_param_ty(local))
         };
         let var_ty = binder_ty.or_else(|| self.local_polyfn_var_ty(local, span));
         let Some(var_ty) = var_ty else {
@@ -11005,7 +11178,8 @@ impl Compiler {
         // Capture lhs's ID before recursing, `do_compile(lhs)`
         // advances `emit_idx` past lhs's entire subtree.
         let lhs_ty = self.codegen_expr_ty(lhs);
-        let lhs_id = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let seq = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let lhs_id = self.checker.id_table().walk_id(lhs, seq);
         if self.expr_is_stackable_direct_call(lhs) && self.expr_is_stackable_direct_call(rhs) {
             // Raise `expr_depth` for pure CALL siblings so temps pad above lhs (enables BinReturn / fib).
             let depth_on_entry = self.expr_depth;
@@ -11676,7 +11850,7 @@ impl Compiler {
             .checker
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
             .unwrap_or(0);
-        let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
+        let niche_next = item_ty.is_some_and(|ty| crate::typechecking::value_layout::niche_heap_only(&self.checker, ty));
         // Trait FQNs miss `env` lookup; pin `Option<Item>` so CALL is two-slot
         // even if a prior one-word cache landed first.
         if let Some(item) = item_ty {
@@ -12015,7 +12189,8 @@ impl Compiler {
         ) {
             return true;
         }
-        let Some(id) = self.checker.id_table().ids().get(self.emit_idx).copied() else {
+        let seq = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let Some(id) = self.checker.id_table().walk_id(_node, seq) else {
             return false;
         };
         matches!(
@@ -12837,32 +13012,6 @@ impl Compiler {
         }
     }
 
-    /// Return the payload type when `Option<T>` can use `0` as `None`.
-    ///
-    /// Only ground heap values qualify: immediates and nested/generic Option
-    /// stay boxed `ObjEnum`.
-    fn niche_option_inner_ty(&self, ty: &Ty) -> Option<Ty> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{is_option_ty, option_inner, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        if !is_option_ty(ty) {
-            return None;
-        }
-        let inner = option_inner(ty)?;
-        if Self::niche_heap_only_ty(&inner, &self.checker) {
-            Some(inner)
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_niche_option(&self, expr: &Output) -> bool {
-        self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
-    }
-
     fn is_option_construct(expr: &Output) -> bool {
         match expr.1.as_ref() {
             Expression::Construct { enum_name, .. } => common::is_builtin_option_enum(enum_name),
@@ -12879,160 +13028,38 @@ impl Compiler {
         }
     }
 
-    /// `(T, E)` when both Result payloads are ground heap objects.
+    /// Layout of a value of type `ty` (the shared [`value_layout`] query).
     ///
-    /// `Ok` is the aligned pointer; `Err` is `pointer | 1`. Mixed immediates
-    /// (`Result<int, _>`, `Result<_, int>`, `Result<int, int>`) stay `ObjEnum`.
-    fn ty_is_unit(ty: &Ty) -> bool {
-        use crate::typechecking::ty::{UNIT, strip_readonly};
-        matches!(strip_readonly(ty), Ty::Con(name) if name == UNIT)
+    /// [`value_layout`]: crate::typechecking::value_layout::value_layout
+    fn value_layout(&self, ty: &Ty) -> ValueLayout {
+        crate::typechecking::value_layout::value_layout(&self.checker, ty)
     }
 
-    /// `E` when `Result<(), E>` can use Option-shaped `Ok = 0` / `Err = pointer`.
-    fn niche_unit_result_err_ty(&self, ty: &Ty) -> Option<Ty> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{result_ok_err, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        let (ok, err) = result_ok_err(ty)?;
-        if Self::ty_is_unit(&ok) && Self::niche_heap_only_ty(&err, &self.checker) {
-            Some(err)
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_unit_result_niche(&self, expr: &Output) -> bool {
+    /// Layout of `expr`'s value; untyped expressions are boxed.
+    fn expr_layout(&self, expr: &Output) -> ValueLayout {
         self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
+            .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
     }
 
-    fn return_is_unit_result_niche(&self) -> bool {
+    /// Layout of the function being compiled's return value.
+    fn return_layout(&self) -> ValueLayout {
         self.compiling_fn_return_ty()
-            .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
+            .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
     }
 
     fn should_niche_unit_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         common::is_builtin_result_enum(enum_name)
             && !self.force_heap_result
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
-                || (self.force_niche_result
-                    && self
-                        .compiling_fn_return_ty()
-                        .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())))
-    }
-
-    fn niche_result_ok_err_ty(&self, ty: &Ty) -> Option<(Ty, Ty)> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{result_ok_err, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        let (ok, err) = result_ok_err(ty)?;
-        if Self::niche_heap_only_ty(&ok, &self.checker)
-            && Self::niche_heap_only_ty(&err, &self.checker)
-        {
-            Some((ok, err))
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_niche_result(&self, expr: &Output) -> bool {
-        self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
-    }
-
-    fn return_is_niche_result(&self) -> bool {
-        self.compiling_fn_return_ty()
-            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
+            && (self.expr_layout(ast).is_niche_unit_result()
+                || (self.force_niche_result && self.return_layout().is_niche_unit_result()))
     }
 
     fn should_niche_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
+        let layout = self.expr_layout(ast);
         common::is_builtin_result_enum(enum_name)
             && !self.force_heap_result
-            && !self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
-                || self.force_niche_result)
-    }
-
-    /// True when `T` is a ground heap object, so `Option<T>` can use address `0` as `None`.
-    fn niche_heap_only_ty(ty: &Ty, checker: &Checker) -> bool {
-        use crate::typechecking::ty::strip_readonly;
-        let ty = strip_readonly(ty);
-        match ty {
-            Ty::Constructor { owner, .. } => Self::niche_heap_only_ty(owner, checker),
-            Ty::Con(name) => {
-                if name == "string" || checker.is_class(name) {
-                    true
-                } else if common::is_builtin_io_error_enum(name)
-                    || common::is_builtin_thread_error_enum(name)
-                    || common::is_builtin_env_error_enum(name)
-                {
-                    // Virtual unit-error enums stay heap even if this file
-                    // never imported the tags (per-file `check_program` reset).
-                    true
-                } else if common::is_builtin_option_enum(name)
-                    || common::is_builtin_result_enum(name)
-                    || checker.is_scalar_enum(name)
-                {
-                    false
-                } else {
-                    // Unit / closed user enums are heap `ObjEnum` (IoError, …).
-                    checker.enum_variants(name).is_some_and(|vars| {
-                        !vars.is_empty()
-                            && vars
-                                .iter()
-                                .all(|(_, _, payload)| payload.iter().all(Self::ty_is_closed))
-                    })
-                }
-            }
-            Ty::App(head, args) => {
-                let Ty::Con(name) = head.as_ref() else {
-                    return false;
-                };
-                if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
-                    return false;
-                }
-                checker.is_class(name) && args.iter().all(Self::ty_is_closed)
-            }
-            Ty::Sum { name, .. }
-                if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) =>
-            {
-                false
-            }
-            Ty::List(inner) => Self::ty_is_closed(inner),
-            Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
-            Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
-            Ty::Sum { variants, .. } => variants
-                .iter()
-                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
-            _ => false,
-        }
-    }
-
-    fn ty_is_closed(ty: &Ty) -> bool {
-        use crate::typechecking::ty::strip_readonly;
-        match strip_readonly(ty) {
-            Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-            Ty::List(inner) | Ty::Constructor { owner: inner, .. } => Self::ty_is_closed(inner),
-            Ty::App(_, args) => args.iter().all(Self::ty_is_closed),
-            Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
-            Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
-            Ty::Array { element, .. } => Self::ty_is_closed(element),
-            Ty::Sum { variants, .. } => variants
-                .iter()
-                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
-            Ty::Con(_) | Ty::Never => true,
-            Ty::Readonly(_) => unreachable!("stripped"),
-        }
+            && !layout.is_niche_unit_result()
+            && (layout.is_niche_result() || self.force_niche_result)
     }
 
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
@@ -13134,7 +13161,7 @@ impl Compiler {
     }
 
     fn wrap_result_ok_on_stack(&mut self) {
-        if self.return_is_niche_result() || self.return_is_unit_result_niche() {
+        if self.return_layout().is_niche_result() || self.return_layout().is_niche_unit_result() {
             return;
         }
         Self::emit_ok_or_some_wrap(&mut self.bytecode, false);
@@ -13146,10 +13173,10 @@ impl Compiler {
     }
 
     fn wrap_result_err_on_stack(&mut self) {
-        if self.return_is_unit_result_niche() {
+        if self.return_layout().is_niche_unit_result() {
             return;
         }
-        if self.return_is_niche_result() {
+        if self.return_layout().is_niche_result() {
             Self::push_result_err_bit(&mut self.bytecode);
         } else {
             Self::emit_result_err(&mut self.bytecode);
@@ -13951,12 +13978,756 @@ impl Compiler {
 
     // Successful `try_emit_*` calls write bytecode in the condition, so the
     // following arm is empty. Later arms still run only when earlier tries fail.
+    /// `lhs = value`: statics, fields, indices and locals.
+    #[inline(never)]
+    fn compile_assignment_into<'compiler>(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        span: &SimpleSpan,
+        lhs: &Output<'compiler>,
+        value: &Output<'compiler>,
+    ) {
+        match lhs.1.as_ref() {
+            Expression::QualifiedAccess { owner, member } => {
+                let fqn = self.class_member_fqn(owner, member);
+                if let Some(slot) = self.checker.static_slot_index(&fqn) {
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+                }
+            }
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields: parser::ast::EnumConstructPayload::Unit,
+            } => {
+                let fqn = self.class_member_fqn(enum_name, variant_name);
+                if let Some(slot) = self.checker.static_slot_index(&fqn) {
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+                }
+            }
+            Expression::Access(target_expr, field) => {
+                if let Some(slot) = self.unboxed_class_field_slot(target_expr, field) {
+                    self.append_binding_rhs(bytecode, value);
+                    self.skip_emit_ids_to_unwrapped(target_expr);
+                    bytecode.push_store_pop(slot);
+                    bytecode.push_load(slot);
+                } else {
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.append(&mut self.do_compile(target_expr));
+                    if let Some(idx) = self.class_field_slot(target_expr, field) {
+                        bytecode.push_set_field_slot(idx);
+                    } else {
+                        self.emit_field_name(bytecode, field);
+                        bytecode.push_set_field();
+                    }
+                }
+                // Value left on stack for expression result; ExprStatement POPs.
+            }
+            Expression::Index(arr, None) => {
+                let _ = arr;
+                self.messages.push({
+                    let mut m = Message::error(
+                        ErrorCode::InvalidAssignment,
+                        "append assignment `arr[] = value` is not supported".to_string(),
+                        lhs.0.into_range(),
+                    );
+                    m.push(DiagLabel::new(
+                        "use `vec.push(value)` on a `Vec<T>`".to_string(),
+                        lhs.0.into_range(),
+                    ));
+                    m
+                });
+            }
+            Expression::Index(arr, Some(idx)) => {
+                if let Expression::Identifier(name) = arr.1.as_ref()
+                    && let Some(box_slot) = self.stack_array_boxed_slot(name)
+                {
+                    self.append_binding_rhs(bytecode, value);
+                    self.emit_boxed_array_store(bytecode, box_slot, idx, true);
+                } else if let Expression::Identifier(name) = arr.1.as_ref()
+                    && let Some((base, n)) = self.stack_array_info(name)
+                    && let Expression::Integer(i) = idx.1.as_ref()
+                    && *i >= 0
+                    && (*i as usize) < n
+                {
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.push_store_pop(base + *i as u32);
+                    // Leave value on stack like StoreIndex.
+                    bytecode.push_load(base + *i as u32);
+                } else if let Expression::Identifier(name) = arr.1.as_ref()
+                    && let Some((base, n)) = self.stack_array_info(name)
+                    && (1..=32).contains(&n)
+                {
+                    self.append_binding_rhs(bytecode, value);
+                    let tmp_val = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp_val);
+                    self.compile_array_index_expr(bytecode, idx);
+                    let tmp_idx = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp_idx);
+                    let proven = self.stack_array_index_proven(lhs, idx, n);
+                    // Statement form: last-arm is StorePop; ExprStatement
+                    // skips the extra POP. Do not rematerialize TOS.
+                    self.emit_stack_array_select_store(EmitStackArraySelectStoreArgs {
+                        bytecode,
+                        base,
+                        n,
+                        idx_slot: tmp_idx,
+                        val_slot: tmp_val,
+                        leave_value: false,
+                        proven,
+                    });
+                } else {
+                    // RHS is evaluated first and spilled. Array may stay on
+                    // the operand stack only for push-only index exprs,                         // see `index_keeps_array_on_stack_safe`.
+                    let tmp_val = self.alloc_temp_slot();
+                    let depth_on_entry = self.expr_depth;
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.push_store_pop(tmp_val);
+                    if Self::index_keeps_array_on_stack_safe(idx.1.as_ref()) {
+                        bytecode.append(&mut self.do_compile(arr));
+                        self.expr_depth = depth_on_entry + 1;
+                        self.compile_array_index_expr(bytecode, idx);
+                        self.expr_depth = depth_on_entry;
+                        bytecode.push_load(tmp_val);
+                    } else {
+                        let tmp_arr = self.alloc_temp_slot();
+                        let tmp_idx = self.alloc_temp_slot();
+                        bytecode.append(&mut self.do_compile(arr));
+                        bytecode.push_store_pop(tmp_arr);
+                        self.compile_array_index_expr(bytecode, idx);
+                        bytecode.push_store_pop(tmp_idx);
+                        bytecode.push_load(tmp_arr);
+                        bytecode.push_load(tmp_idx);
+                        bytecode.push_load(tmp_val);
+                    }
+                    bytecode.push(Byte::new(Instruction::StoreIndex));
+                }
+            }
+            Expression::Identifier(name) => {
+                let resolved = self.resolve_free_fn(name);
+                if let Some(static_slot) = self
+                    .checker
+                    .static_slot_index(&resolved)
+                    .or_else(|| self.checker.static_slot_for_module_name(name))
+                {
+                    self.append_binding_rhs(bytecode, value);
+                    bytecode.push(
+                        Byte::new(Instruction::StoreStatic).with_operand_u32(static_slot),
+                    );
+                } else {
+                    self.context.assignments.insert(name.to_string(), true);
+                    let symbol_opt = if let Some(map) = &self.context.match_bindings {
+                        if let Some(&slot) = map.get(*name) {
+                            Some(slot as usize)
+                        } else {
+                            self.context.variables.key(&name.to_string())
+                        }
+                    } else {
+                        self.context.variables.key(&name.to_string())
+                    };
+
+                    if let Some(symbol) = symbol_opt {
+                        if unlikely(self.context.constants.contains_key(&symbol)) {
+                            let assigned =
+                                likely(*self.context.constants.get(&symbol).unwrap());
+                            if !assigned {
+                                self.context.constants.entry(symbol).and_modify(|state| {
+                                    *state = true;
+                                });
+                            } else {
+                                let mut message = Message::error(
+                                    ErrorCode::InvalidAssignment,
+                                    "Assignment error".to_string(),
+                                    span.into_range(),
+                                );
+                                message.push(DiagLabel::new(
+                                    format!(
+                                        "Unable to assign to an already assigned constant '{}'",
+                                        name
+                                    ),
+                                    span.into_range(),
+                                ));
+                                self.messages.push(message);
+                            }
+                        }
+                        // Multi-slot stack array: rewrite slots in place.
+                        if let Some((payload, tag_slot)) = self.unboxed_enum_info(name) {
+                            let _ = self.next_emit_id();
+                            self.unbox_enum_context += 1;
+                            self.append_binding_rhs(bytecode, value);
+                            self.unbox_enum_context -= 1;
+                            bytecode.push_store_pop(tag_slot);
+                            bytecode.push_store_pop(payload);
+                        } else if let Some((base, n)) = self.unboxed_class_info(name) {
+                            let _ = self.next_emit_id();
+                            let rhs_node = unwrap_expr_output(value);
+                            if let Expression::Instantiate(_, args) = rhs_node.1.as_ref() {
+                                self.skip_emit_ids_to_unwrapped(value);
+                                let _ = self.next_emit_id();
+                                if let Some(args) = args {
+                                    for (i, arg) in args.iter().enumerate().take(n) {
+                                        bytecode.append(&mut self.do_compile(arg));
+                                        bytecode.push_store_pop(base + i as u32);
+                                    }
+                                }
+                                self.context.unboxed_class_box.remove(*name);
+                            } else {
+                                self.append_binding_rhs(bytecode, value);
+                                if let Some(slot) = self.unboxed_class_boxed_slot(name) {
+                                    bytecode.push_store_pop(slot);
+                                } else {
+                                    let slot = self.alloc_temp_slot();
+                                    bytecode.push_store_pop(slot);
+                                    self.context
+                                        .unboxed_class_box
+                                        .insert((*name).to_string(), slot);
+                                }
+                            }
+                        } else if let Some((base, n)) = self.stack_array_info(name) {
+                            // Assignment: `name` Identifier is pre-walked
+                            // before `value`; consume it when we skip emit.
+                            let _ = self.next_emit_id();
+                            let ok =
+                                self.try_emit_stack_array_init(bytecode, value, base, n);
+                            if !ok {
+                                // Heap `[T; N]` (e.g. call return): box into slots.
+                                self.append_binding_rhs(bytecode, value);
+                                let tmp = self.alloc_temp_slot();
+                                bytecode.push_store_pop(tmp);
+                                for i in 0..n {
+                                    bytecode.push_load(tmp);
+                                    bytecode.push_const(i as i32);
+                                    bytecode.push_index();
+                                    bytecode.push_store_pop(base + i as u32);
+                                }
+                            }
+                        } else {
+                            self.append_binding_rhs(bytecode, value);
+                            bytecode.push_store_pop(symbol as u32);
+                        }
+                    } else {
+                        let mut message = Message::error(
+                            ErrorCode::UnknownValue,
+                            "Undefined variable".to_string(),
+                            span.into_range(),
+                        );
+                        message.push(DiagLabel::new(
+                            format!(
+                                "Unable to assign to a non-existing variable/constant '{}'",
+                                name
+                            ),
+                            span.into_range(),
+                        ));
+                        self.messages.push(message);
+                    }
+                }
+            }
+            _ => {
+                bytecode.append(&mut self.do_compile(value));
+                bytecode.push_pop();
+            }
+        }
+    }
+
+    /// Named `fn` declaration: emit the body, register the entry and debug info.
+    #[inline(never)]
+    /// True when no value of this function can be a heap word: every
+    /// parameter and every expression in `args` / `body` has a numeric,
+    /// `unit` or `never` checker type, and it declares no closures or nested
+    /// functions. Such frames get an empty precise map (see finalize).
+    fn fn_is_heap_free(&self, names: &[&str], args: &Output, body: &Output) -> bool {
+        use crate::typechecking::subst::apply_ty_prune;
+        use crate::typechecking::ty::strip_readonly;
+
+        let allowed = |ty: &Ty| {
+            let ty = apply_ty_prune(self.checker.subst(), ty);
+            match strip_readonly(&ty) {
+                Ty::Con(n) => matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "unit"),
+                Ty::Tuple(items) => items.is_empty(),
+                Ty::Never => true,
+                _ => false,
+            }
+        };
+        let Some(params) = names.iter().find_map(|n| self.checker.fn_param_tys(n)) else {
+            return false;
+        };
+        if !params.iter().all(allowed) {
+            return false;
+        }
+        let mut ok = true;
+        let mut stack = vec![args, body];
+        while let Some(node) = stack.pop() {
+            if !ok {
+                break;
+            }
+            match node.1.as_ref() {
+                Expression::Lambda { .. }
+                | Expression::Function { .. }
+                | Expression::Yield(..)
+                | Expression::YieldFrom(..)
+                | Expression::Resume { .. }
+                | Expression::Defer { .. } => ok = false,
+                Expression::Block(_)
+                | Expression::Statement(_)
+                | Expression::ExprStatement(_)
+                | Expression::Expr(_)
+                | Expression::Group(_)
+                | Expression::Fragment(_)
+                | Expression::Comment(_)
+                | Expression::Noop(_)
+                | Expression::Break
+                | Expression::Continue
+                | Expression::Type(_)
+                | Expression::TypeApp { .. }
+                | Expression::Argument { .. }
+                | Expression::Variable(..)
+                | Expression::Constant(..)
+                | Expression::Return(_)
+                | Expression::ImplicitReturn(_)
+                | Expression::If(..)
+                | Expression::Branch(..)
+                | Expression::Loop { .. } => {}
+                // A plain local target is untyped; the stored value is checked.
+                Expression::Assignment(target, value) | Expression::CompoundAssign(target, _, value) => {
+                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
+                        stack.push(target);
+                    }
+                    stack.push(value);
+                    continue;
+                }
+                Expression::Adjust { target, .. } => {
+                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
+                        stack.push(target);
+                    }
+                    continue;
+                }
+                // A direct call's callee is a code address, not a frame value;
+                // a local of the same name would be a closure.
+                Expression::Call { name, args } => {
+                    ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty));
+                    let direct = matches!(name.1.as_ref(), Expression::Identifier(n)
+                        if !self.context.variables.contains(&n.to_string()));
+                    if !direct {
+                        stack.push(name);
+                    }
+                    stack.extend(args.iter().flatten());
+                    continue;
+                }
+                _ => ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty)),
+            }
+            crate::typechecking::id::walk_children(node, &mut |child| stack.push(child));
+        }
+        ok
+    }
+
+    fn compile_function_decl_into<'compiler>(
+        &mut self,
+        span: &SimpleSpan,
+        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+    ) {
+        let Expression::Function {
+                docs: _,
+                attrs: _,
+                name,
+                is_coro,
+                is_static: _,
+                type_params,
+                args,
+                returns: _returns,
+                where_constraints: _,
+                body,
+            } = ast.1.borrow() else {
+            unreachable!("compile_function_decl_into on another expression");
+        };
+            let Some(body) = body else {
+                return;
+            };
+            let qualified = if self.namespace.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}::{}", self.namespace, name)
+            };
+            if *name == "main" {
+                self.user_main_defined = true;
+            }
+            self.module_items
+                .entry(self.namespace.clone())
+                .or_default()
+                .push(name.to_string());
+            let (fixed_arity, has_rest) = fn_arity_from_args(args);
+            let table_key =
+                if self.checker.is_overloaded(name) || self.checker.is_overloaded(&qualified) {
+                    if let Some((decl_id, fa, rest)) =
+                        self.checker.overload_decl_at(span.start, span.end)
+                    {
+                        overload_fn_key(&qualified, fa, rest, decl_id)
+                    } else {
+                        overload_fn_key(&qualified, fixed_arity, has_rest, 0)
+                    }
+                } else {
+                    qualified.clone()
+                };
+            let _ = self.bind_function_entry(table_key.clone());
+            self.fn_arities
+                .insert(table_key.clone(), (fixed_arity as u32, has_rest));
+            // Overloads share the unmangled FQN; do not mirror arity
+            // under `qualified` (last decl would win and poison
+            // fallbacks that lack `selected_overload_at`).
+            if *is_coro {
+                self.coroutine_fns.insert(qualified.clone());
+            }
+
+            // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
+            let prev_fn_vars = std::mem::take(&mut self.context.variables);
+            let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
+            let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
+            let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+            let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+            let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
+            let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
+            let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
+            let prev_pins = std::mem::take(&mut self.pinned_array_slots);
+            let prev_fn_qualified = self.current_function_qualified.take();
+            let prev_fn_table_key = self.current_function_table_key.take();
+            let prev_fn_table_key_was_none = prev_fn_table_key.is_none();
+            self.current_function_qualified = Some(qualified.clone());
+            self.current_function_table_key = Some(table_key.clone());
+            // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
+            // param call-site `declare` metadata for bare fn-id params.
+            let prev_checker_fn = if !self.compiling_method {
+                self.checker.set_current_function(Some(name.to_string()))
+            } else {
+                None
+            };
+            self.push_const_env();
+            self.context.variables = Interner::default();
+            self.context.stack_array_locals.clear();
+            self.context.stack_array_box.clear();
+            self.context.unboxed_enum_locals.clear();
+            self.context.unboxed_class_locals.clear();
+            self.context.unboxed_class_box.clear();
+            self.expr_depth = 0;
+            if self.compiling_method {
+                let slot = self.context.variables.intern("self".to_string()) as u32;
+                self.record_debug_local("self", slot);
+            }
+
+            let prev_result_mode = self.compiling_result_mode;
+            let prev_result_ok_is_result = self.compiling_result_ok_is_result;
+            self.compiling_result_mode = self.checker.fn_is_result_mode(name);
+            self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
+            let prev_two_word_enum = self.compiling_two_word_enum.clone();
+            let prev_try_fail = self.compiling_try_fail.take();
+            self.compiling_two_word_enum = if *is_coro {
+                self.pin_two_word_return_kind(&table_key, None);
+                None
+            } else {
+                self.two_word_return_kind(&table_key)
+            };
+
+            let mut a = self.do_compile(args);
+
+            // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
+            // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
+            let dict_arity = {
+                let via_fqn = self.checker.dict_arity_for(&qualified);
+                if via_fqn > 0 {
+                    via_fqn
+                } else {
+                    self.checker.dict_arity_for(name)
+                }
+            };
+            for dict_idx in 0..dict_arity {
+                self.context.variables.intern(format!("__dict{}", dict_idx));
+            }
+
+            // Args + self + dicts occupy the shared stack at body entry.
+            let entry_sp = self.context.variables.len() as u32;
+
+            self.bytecode.append(&mut a);
+
+            let body_start = self.bytecode.len();
+            self.emit_sidecar_array_pins(args);
+            // Provisional span so self-recursive peels can see the opening
+            // predicate while the body is still streaming into `self.bytecode`.
+            self.record_fn_span(table_key.clone(), body_start, body_start);
+            let body_op_start = self.bytecode.ops().len();
+            let prev_field_keys = std::mem::take(&mut self.field_key_slots);
+            self.emit_field_key_prologue(body);
+            let prev_active = self.active_fn_name.take();
+            let prev_fn_defers = std::mem::take(&mut self.fn_defers);
+            self.active_fn_name = Some(name.to_string());
+            let mut c = self.do_compile(body);
+            self.active_fn_name = prev_active;
+            self.bytecode.append(&mut c);
+
+            if !self.region_ends_with_return(body_op_start) {
+                self.emit_fallthrough_return(name, body.0);
+            }
+            self.emit_shared_try_fail_epilogue();
+
+            self.fn_defers = prev_fn_defers;
+            self.compiling_result_mode = prev_result_mode;
+            self.compiling_result_ok_is_result = prev_result_ok_is_result;
+            self.compiling_two_word_enum = prev_two_word_enum;
+            self.compiling_try_fail = prev_try_fail;
+            self.pop_const_env();
+            if !self.compiling_method {
+                self.checker.set_current_function(prev_checker_fn);
+            }
+            self.current_function_qualified = prev_fn_qualified;
+            self.current_function_table_key = prev_fn_table_key;
+            self.field_key_slots = prev_field_keys;
+            let body_end = self.bytecode.len();
+            self.record_fn_span(table_key.clone(), body_start, body_end);
+            if prev_fn_table_key_was_none
+                && !*is_coro
+                && type_params.is_empty()
+                && dict_arity == 0
+                && !self.compiling_method
+                && self.fn_is_heap_free(&[qualified.as_str(), table_key.as_str()], args, body)
+            {
+                self.precise_frame_fns.insert(table_key.clone());
+            }
+            let entry = self.fn_entry_labels.get(&table_key).copied();
+            self.bytecode.record_func_with_sp(
+                table_key.clone(),
+                entry,
+                body_start,
+                body_end,
+                entry_sp,
+            );
+            self.record_unboxed_class_fields();
+            self.context.variables = prev_fn_vars;
+            self.context.stack_array_locals = prev_stack_arrays;
+            self.context.stack_array_box = prev_stack_boxes;
+            self.context.unboxed_enum_locals = prev_unboxed_enum;
+            self.context.unboxed_class_locals = prev_unboxed_class;
+            self.context.unboxed_class_box = prev_unboxed_class_box;
+            self.polyfn_vars = prev_fn_polyfn_vars;
+            self.polyfn_sources = prev_fn_polyfn_sources;
+            self.pinned_array_slots = prev_pins;
+
+            self.emit_mono_specializations_for_function(
+                &qualified,
+                type_params,
+                args,
+                Some(body),
+                name,
+            );
+            self.emit_par_specializations_for(name, &table_key);
+    }
+
+    /// Identifier load: local slot, static, capture, or named `fn` value.
+    #[inline(never)]
+    fn compile_identifier_into<'compiler>(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        span: &SimpleSpan,
+        self_id: Option<crate::typechecking::id::NodeId>,
+        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+    ) {
+        let Expression::Identifier(n) = ast.1.borrow() else {
+            unreachable!("compile_identifier_into on another expression");
+        };
+            let resolved = self.resolve_free_fn(n);
+            if let Some(v) = self
+                .const_env()
+                .get(&resolved)
+                .or_else(|| self.const_env().get(*n))
+                .cloned()
+            {
+                self.emit_const_value(&v, bytecode);
+            } else if let Some(v) = self
+                .static_const_values
+                .get(&resolved)
+                .filter(|_| self.checker.is_static_const_fqn(&resolved))
+                .cloned()
+            {
+                self.emit_const_value(&v, bytecode);
+            } else if let Some(v) = self
+                .static_const_values
+                .get(&self.qualify_static_fqn(n))
+                .filter(|_| {
+                    self.checker
+                        .is_static_const_fqn(&self.qualify_static_fqn(n))
+                })
+                .cloned()
+            {
+                self.emit_const_value(&v, bytecode);
+            } else if let Some(static_slot) = self
+                .checker
+                .static_slot_index(&resolved)
+                .or_else(|| self.checker.static_slot_for_module_name(n))
+            {
+                bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
+            } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
+                if self.unbox_enum_context > 0 {
+                    bytecode.push_load(payload);
+                    bytecode.push_load(tag_slot);
+                } else if let Some(inc) = self
+                    .unboxed_enum_kind(n)
+                    .and_then(crate::typechecking::return_layout::range_kind_inclusive)
+                {
+                    self.emit_box_range_slots(bytecode, payload, tag_slot, inc);
+                } else if let Some(kind) = self.unboxed_enum_kind(n).map(str::to_string) {
+                    // Escape / unsure consumer: box the pair once here.
+                    Self::emit_box_slots_to_enum(
+                        &self.checker,
+                        bytecode,
+                        &kind,
+                        tag_slot,
+                        payload,
+                    );
+                } else {
+                    bytecode.push_load(payload);
+                    bytecode.push_load(tag_slot);
+                }
+            } else if let Some((base, nfields)) = self.unboxed_class_info(n) {
+                let cname = self.unboxed_class_type_name(n).unwrap_or(n).to_string();
+                self.emit_escape_unboxed_class(bytecode, n, &cname, base, nfields);
+            } else if let Some(slot) = self.lookup_slot(n) {
+                if let Some((base, len)) = self.stack_array_info(n) {
+                    // Escape multi-slot local to a heap ObjArray (Q1 box-once).
+                    self.emit_escape_stack_array(bytecode, n, base, len);
+                } else {
+                    bytecode.push_load(slot);
+                }
+            } else if let Some((en, vn)) = self.checker.bare_construct_at(span.start, span.end)
+            {
+                let en = en.clone();
+                let vn = vn.clone();
+                bytecode.append(&mut self.compile_construct_expr(
+                    &en,
+                    &vn,
+                    &parser::ast::EnumConstructPayload::Unit,
+                    ast,
+                ));
+            } else {
+                // Generic escaping to non-call (`let f = id`) → MakePolyFn for CallIndirect.
+                let resolved_n = self.resolve_free_fn(n);
+                if self.checker.is_generic_fn(&resolved_n) {
+                    if let Some(&entry_offset) = self.functions.get(&resolved_n) {
+                        // Constrained generics escape via MakePolyFnCapture; null only when dict evidence missing.
+                        let escape_ty = self.codegen_expr_ty(ast);
+                        let dict_arity = self.emit_polyfn_escape_dicts(
+                            bytecode,
+                            &resolved_n,
+                            escape_ty.as_ref(),
+                        );
+                        if dict_arity == 0 {
+                            bytecode.push(
+                                Byte::new(Instruction::MakePolyFn)
+                                    .with_operand_u32(entry_offset as u32),
+                            );
+                        } else {
+                            bytecode.push(
+                                Byte::new(Instruction::CodePtr)
+                                    .with_operand_u32(entry_offset as u32),
+                            );
+                            bytecode.push(
+                                Byte::new(Instruction::MakePolyFnCapture)
+                                    .with_operand_u32(dict_arity as u32),
+                            );
+                        }
+                    } else {
+                        // Function not yet compiled (forward reference), fall
+                        // through to the unknown-variable diagnostic.
+                        let mut message = Message::error(
+                            ErrorCode::UnknownValue,
+                            "Unknown generic function".to_string(),
+                            span.into_range(),
+                        );
+                        message.push(DiagLabel::new(
+                            format!("Generic function '{}' not found in bytecode", n),
+                            span.into_range(),
+                        ));
+                        self.messages.push(message);
+                    }
+                } else {
+                    // Monomorphic function in value position → MakeFn.
+                    let (fa, is_rest, entry_key) = if let Some((fa, is_rest, id)) =
+                        self.sidecar_overload(self_id, span.start, span.end)
+                    {
+                        let keyed = overload_fn_key(&resolved_n, fa, is_rest, id);
+                        (fa, is_rest, keyed)
+                    } else if self.checker.is_overloaded(&resolved_n) {
+                        // Ambiguous, typechecker should have diagnosed.
+                        let mut message = Message::error(
+                            ErrorCode::UnknownValue,
+                            "Ambiguous overload in value position".to_string(),
+                            span.into_range(),
+                        );
+                        message.push(DiagLabel::new(
+                            format!(
+                                "Cannot reify overloaded `{}` without a type annotation",
+                                n
+                            ),
+                            span.into_range(),
+                        ));
+                        self.messages.push(message);
+                        return;
+                    } else {
+                        let rest = self.checker.fn_has_rest(&resolved_n);
+                        let fa = self
+                            .checker
+                            .fn_param_names(&resolved_n)
+                            .map(|names| {
+                                if rest {
+                                    names.len().saturating_sub(1)
+                                } else {
+                                    names.len()
+                                }
+                            })
+                            .unwrap_or(0);
+                        (fa, rest, resolved_n.clone())
+                    };
+                    if let Some(&entry_offset) = self
+                        .functions
+                        .get(&entry_key)
+                        .or_else(|| self.functions.get(&resolved_n))
+                    {
+                        // Prefer codegen arity: multi-file clears `fn_param_names` (else MakeFn arity 0 breaks spawn).
+                        let (fa, is_rest) = self
+                            .fn_arities
+                            .get(&entry_key)
+                            .or_else(|| self.fn_arities.get(&resolved_n))
+                            .copied()
+                            .map(|(a, r)| (a as usize, r))
+                            .unwrap_or((fa, is_rest));
+                        bytecode.push_const(0);
+                        bytecode.push(
+                            Byte::new(Instruction::CodePtr)
+                                .with_operand_u32(entry_offset as u32),
+                        );
+                        bytecode.push(
+                            Byte::new(Instruction::MakeFn)
+                                .with_operand_u32(make_fn_operand(0, 0, fa as u32, is_rest)),
+                        );
+                    } else {
+                        let mut message = Message::error(
+                            ErrorCode::UnknownValue,
+                            "Unknown variable".to_string(),
+                            span.into_range(),
+                        );
+                        message.push(DiagLabel::new(
+                            format!("Unknown variable '{}'", n),
+                            span.into_range(),
+                        ));
+                        self.messages.push(message);
+                    }
+                }
+            }
+    }
+
     fn do_compile_inner<'compiler>(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
     ) -> CodeBuf {
         let mut bytecode = CodeBuf::new();
-        let self_id = self.next_emit_id();
+        let seq_id = self.next_emit_id();
+        let self_id = self.checker.id_table().walk_id(ast, seq_id);
         let (span, child) = ast;
 
         match child.borrow() {
@@ -14191,8 +14962,7 @@ impl Compiler {
                 self.context = ctx;
                 // Append each child to self.bytecode (Print/control-flow emit in-place).
                 for child in children {
-                    let mut bc = self.do_compile(child);
-                    self.bytecode.append(&mut bc);
+                    self.compile_block_stmt(child);
                 }
 
                 self.context = *self.context.get_prev().clone().unwrap();
@@ -14200,185 +14970,8 @@ impl Compiler {
                 self.polyfn_vars = saved_polyfn_vars;
                 self.polyfn_sources = saved_polyfn_sources;
             }
-            Expression::Function {
-                docs: _,
-                attrs: _,
-                name,
-                is_coro,
-                is_static: _,
-                type_params,
-                args,
-                returns: _returns,
-                where_constraints: _,
-                body,
-            } => {
-                let Some(body) = body else {
-                    return CodeBuf::new();
-                };
-                let qualified = if self.namespace.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{}::{}", self.namespace, name)
-                };
-                if *name == "main" {
-                    self.user_main_defined = true;
-                }
-                self.module_items
-                    .entry(self.namespace.clone())
-                    .or_default()
-                    .push(name.to_string());
-                let (fixed_arity, has_rest) = fn_arity_from_args(args);
-                let table_key =
-                    if self.checker.is_overloaded(name) || self.checker.is_overloaded(&qualified) {
-                        if let Some((decl_id, fa, rest)) =
-                            self.checker.overload_decl_at(span.start, span.end)
-                        {
-                            overload_fn_key(&qualified, fa, rest, decl_id)
-                        } else {
-                            overload_fn_key(&qualified, fixed_arity, has_rest, 0)
-                        }
-                    } else {
-                        qualified.clone()
-                    };
-                let _ = self.bind_function_entry(table_key.clone());
-                self.fn_arities
-                    .insert(table_key.clone(), (fixed_arity as u32, has_rest));
-                // Overloads share the unmangled FQN; do not mirror arity
-                // under `qualified` (last decl would win and poison
-                // fallbacks that lack `selected_overload_at`).
-                if *is_coro {
-                    self.coroutine_fns.insert(qualified.clone());
-                }
-
-                // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
-                let prev_fn_vars = std::mem::take(&mut self.context.variables);
-                let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
-                let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
-                let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-                let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
-                let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
-                let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-                let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
-                let prev_pins = std::mem::take(&mut self.pinned_array_slots);
-                let prev_fn_qualified = self.current_function_qualified.take();
-                let prev_fn_table_key = self.current_function_table_key.take();
-                self.current_function_qualified = Some(qualified.clone());
-                self.current_function_table_key = Some(table_key.clone());
-                // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
-                // param call-site `declare` metadata for bare fn-id params.
-                let prev_checker_fn = if !self.compiling_method {
-                    self.checker.set_current_function(Some(name.to_string()))
-                } else {
-                    None
-                };
-                self.push_const_env();
-                self.context.variables = Interner::default();
-                self.context.stack_array_locals.clear();
-                self.context.stack_array_box.clear();
-                self.context.unboxed_enum_locals.clear();
-                self.context.unboxed_class_locals.clear();
-                self.context.unboxed_class_box.clear();
-                self.expr_depth = 0;
-                if self.compiling_method {
-                    let slot = self.context.variables.intern("self".to_string()) as u32;
-                    self.record_debug_local("self", slot);
-                }
-
-                let prev_result_mode = self.compiling_result_mode;
-                let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-                self.compiling_result_mode = self.checker.fn_is_result_mode(name);
-                self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
-                let prev_two_word_enum = self.compiling_two_word_enum.clone();
-                let prev_try_fail = self.compiling_try_fail.take();
-                self.compiling_two_word_enum = if *is_coro {
-                    self.pin_two_word_return_kind(&table_key, None);
-                    None
-                } else {
-                    self.two_word_return_kind(&table_key)
-                };
-
-                let mut a = self.do_compile(args);
-
-                // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
-                // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
-                let dict_arity = {
-                    let via_fqn = self.checker.dict_arity_for(&qualified);
-                    if via_fqn > 0 {
-                        via_fqn
-                    } else {
-                        self.checker.dict_arity_for(name)
-                    }
-                };
-                for dict_idx in 0..dict_arity {
-                    self.context.variables.intern(format!("__dict{}", dict_idx));
-                }
-
-                // Args + self + dicts occupy the shared stack at body entry.
-                let entry_sp = self.context.variables.len() as u32;
-
-                self.bytecode.append(&mut a);
-
-                let body_start = self.bytecode.len();
-                self.emit_sidecar_array_pins(args);
-                // Provisional span so self-recursive peels can see the opening
-                // predicate while the body is still streaming into `self.bytecode`.
-                self.record_fn_span(table_key.clone(), body_start, body_start);
-                let body_op_start = self.bytecode.ops().len();
-                let prev_field_keys = std::mem::take(&mut self.field_key_slots);
-                self.emit_field_key_prologue(body);
-                let prev_active = self.active_fn_name.take();
-                let prev_fn_defers = std::mem::take(&mut self.fn_defers);
-                self.active_fn_name = Some(name.to_string());
-                let mut c = self.do_compile(body);
-                self.active_fn_name = prev_active;
-                self.bytecode.append(&mut c);
-
-                if !self.region_ends_with_return(body_op_start) {
-                    self.emit_fallthrough_return(name, body.0);
-                }
-                self.emit_shared_try_fail_epilogue();
-
-                self.fn_defers = prev_fn_defers;
-                self.compiling_result_mode = prev_result_mode;
-                self.compiling_result_ok_is_result = prev_result_ok_is_result;
-                self.compiling_two_word_enum = prev_two_word_enum;
-                self.compiling_try_fail = prev_try_fail;
-                self.pop_const_env();
-                if !self.compiling_method {
-                    self.checker.set_current_function(prev_checker_fn);
-                }
-                self.current_function_qualified = prev_fn_qualified;
-                self.current_function_table_key = prev_fn_table_key;
-                self.field_key_slots = prev_field_keys;
-                let body_end = self.bytecode.len();
-                self.record_fn_span(table_key.clone(), body_start, body_end);
-                let entry = self.fn_entry_labels.get(&table_key).copied();
-                self.bytecode.record_func_with_sp(
-                    table_key.clone(),
-                    entry,
-                    body_start,
-                    body_end,
-                    entry_sp,
-                );
-                self.record_unboxed_class_fields();
-                self.context.variables = prev_fn_vars;
-                self.context.stack_array_locals = prev_stack_arrays;
-                self.context.stack_array_box = prev_stack_boxes;
-                self.context.unboxed_enum_locals = prev_unboxed_enum;
-                self.context.unboxed_class_locals = prev_unboxed_class;
-                self.context.unboxed_class_box = prev_unboxed_class_box;
-                self.polyfn_vars = prev_fn_polyfn_vars;
-                self.polyfn_sources = prev_fn_polyfn_sources;
-                self.pinned_array_slots = prev_pins;
-
-                self.emit_mono_specializations_for_function(
-                    &qualified,
-                    type_params,
-                    args,
-                    Some(body),
-                    name,
-                );
-                self.emit_par_specializations_for(name, &table_key);
+            Expression::Function { .. } => {
+                self.compile_function_decl_into(span, ast);
             }
             Expression::Lambda {
                 args,
@@ -14604,7 +15197,7 @@ impl Compiler {
                     // enum, do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
                     if !self.skip_result_ok_wrap_for_return(expr)
-                        && !self.return_is_niche_result() && !self.return_is_unit_result_niche() {
+                        && !self.return_layout().is_niche_result() && !self.return_layout().is_niche_unit_result() {
                             Self::emit_ok_or_some_wrap(&mut bytecode, false);
                         }
                 }
@@ -15078,195 +15671,8 @@ impl Compiler {
             Expression::AssocTypeDef { ty, .. } => {
                 bytecode.append(&mut self.do_compile(ty));
             }
-            Expression::Identifier(n) => {
-                let resolved = self.resolve_free_fn(n);
-                if let Some(v) = self
-                    .const_env()
-                    .get(&resolved)
-                    .or_else(|| self.const_env().get(*n))
-                    .cloned()
-                {
-                    self.emit_const_value(&v, &mut bytecode);
-                } else if let Some(v) = self
-                    .static_const_values
-                    .get(&resolved)
-                    .filter(|_| self.checker.is_static_const_fqn(&resolved))
-                    .cloned()
-                {
-                    self.emit_const_value(&v, &mut bytecode);
-                } else if let Some(v) = self
-                    .static_const_values
-                    .get(&self.qualify_static_fqn(n))
-                    .filter(|_| {
-                        self.checker
-                            .is_static_const_fqn(&self.qualify_static_fqn(n))
-                    })
-                    .cloned()
-                {
-                    self.emit_const_value(&v, &mut bytecode);
-                } else if let Some(static_slot) = self
-                    .checker
-                    .static_slot_index(&resolved)
-                    .or_else(|| self.checker.static_slot_for_module_name(n))
-                {
-                    bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
-                } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
-                    if self.unbox_enum_context > 0 {
-                        bytecode.push_load(payload);
-                        bytecode.push_load(tag_slot);
-                    } else if let Some(inc) = self
-                        .unboxed_enum_kind(n)
-                        .and_then(crate::typechecking::return_layout::range_kind_inclusive)
-                    {
-                        self.emit_box_range_slots(&mut bytecode, payload, tag_slot, inc);
-                    } else if let Some(kind) = self.unboxed_enum_kind(n).map(str::to_string) {
-                        // Escape / unsure consumer: box the pair once here.
-                        Self::emit_box_slots_to_enum(
-                            &self.checker,
-                            &mut bytecode,
-                            &kind,
-                            tag_slot,
-                            payload,
-                        );
-                    } else {
-                        bytecode.push_load(payload);
-                        bytecode.push_load(tag_slot);
-                    }
-                } else if let Some((base, nfields)) = self.unboxed_class_info(n) {
-                    let cname = self.unboxed_class_type_name(n).unwrap_or(n).to_string();
-                    self.emit_escape_unboxed_class(&mut bytecode, n, &cname, base, nfields);
-                } else if let Some(slot) = self.lookup_slot(n) {
-                    if let Some((base, len)) = self.stack_array_info(n) {
-                        // Escape multi-slot local to a heap ObjArray (Q1 box-once).
-                        self.emit_escape_stack_array(&mut bytecode, n, base, len);
-                    } else {
-                        bytecode.push_load(slot);
-                    }
-                } else if let Some((en, vn)) = self.checker.bare_construct_at(span.start, span.end)
-                {
-                    let en = en.clone();
-                    let vn = vn.clone();
-                    bytecode.append(&mut self.compile_construct_expr(
-                        &en,
-                        &vn,
-                        &parser::ast::EnumConstructPayload::Unit,
-                        ast,
-                    ));
-                } else {
-                    // Generic escaping to non-call (`let f = id`) → MakePolyFn for CallIndirect.
-                    let resolved_n = self.resolve_free_fn(n);
-                    if self.checker.is_generic_fn(&resolved_n) {
-                        if let Some(&entry_offset) = self.functions.get(&resolved_n) {
-                            // Constrained generics escape via MakePolyFnCapture; null only when dict evidence missing.
-                            let escape_ty = self.codegen_expr_ty(ast);
-                            let dict_arity = self.emit_polyfn_escape_dicts(
-                                &mut bytecode,
-                                &resolved_n,
-                                escape_ty.as_ref(),
-                            );
-                            if dict_arity == 0 {
-                                bytecode.push(
-                                    Byte::new(Instruction::MakePolyFn)
-                                        .with_operand_u32(entry_offset as u32),
-                                );
-                            } else {
-                                bytecode.push(
-                                    Byte::new(Instruction::CodePtr)
-                                        .with_operand_u32(entry_offset as u32),
-                                );
-                                bytecode.push(
-                                    Byte::new(Instruction::MakePolyFnCapture)
-                                        .with_operand_u32(dict_arity as u32),
-                                );
-                            }
-                        } else {
-                            // Function not yet compiled (forward reference), fall
-                            // through to the unknown-variable diagnostic.
-                            let mut message = Message::error(
-                                ErrorCode::UnknownValue,
-                                "Unknown generic function".to_string(),
-                                span.into_range(),
-                            );
-                            message.push(DiagLabel::new(
-                                format!("Generic function '{}' not found in bytecode", n),
-                                span.into_range(),
-                            ));
-                            self.messages.push(message);
-                        }
-                    } else {
-                        // Monomorphic function in value position → MakeFn.
-                        let (fa, is_rest, entry_key) = if let Some((fa, is_rest, id)) =
-                            self.sidecar_overload(self_id, span.start, span.end)
-                        {
-                            let keyed = overload_fn_key(&resolved_n, fa, is_rest, id);
-                            (fa, is_rest, keyed)
-                        } else if self.checker.is_overloaded(&resolved_n) {
-                            // Ambiguous, typechecker should have diagnosed.
-                            let mut message = Message::error(
-                                ErrorCode::UnknownValue,
-                                "Ambiguous overload in value position".to_string(),
-                                span.into_range(),
-                            );
-                            message.push(DiagLabel::new(
-                                format!(
-                                    "Cannot reify overloaded `{}` without a type annotation",
-                                    n
-                                ),
-                                span.into_range(),
-                            ));
-                            self.messages.push(message);
-                            return bytecode;
-                        } else {
-                            let rest = self.checker.fn_has_rest(&resolved_n);
-                            let fa = self
-                                .checker
-                                .fn_param_names(&resolved_n)
-                                .map(|names| {
-                                    if rest {
-                                        names.len().saturating_sub(1)
-                                    } else {
-                                        names.len()
-                                    }
-                                })
-                                .unwrap_or(0);
-                            (fa, rest, resolved_n.clone())
-                        };
-                        if let Some(&entry_offset) = self
-                            .functions
-                            .get(&entry_key)
-                            .or_else(|| self.functions.get(&resolved_n))
-                        {
-                            // Prefer codegen arity: multi-file clears `fn_param_names` (else MakeFn arity 0 breaks spawn).
-                            let (fa, is_rest) = self
-                                .fn_arities
-                                .get(&entry_key)
-                                .or_else(|| self.fn_arities.get(&resolved_n))
-                                .copied()
-                                .map(|(a, r)| (a as usize, r))
-                                .unwrap_or((fa, is_rest));
-                            bytecode.push_const(0);
-                            bytecode.push(
-                                Byte::new(Instruction::CodePtr)
-                                    .with_operand_u32(entry_offset as u32),
-                            );
-                            bytecode.push(
-                                Byte::new(Instruction::MakeFn)
-                                    .with_operand_u32(make_fn_operand(0, 0, fa as u32, is_rest)),
-                            );
-                        } else {
-                            let mut message = Message::error(
-                                ErrorCode::UnknownValue,
-                                "Unknown variable".to_string(),
-                                span.into_range(),
-                            );
-                            message.push(DiagLabel::new(
-                                format!("Unknown variable '{}'", n),
-                                span.into_range(),
-                            ));
-                            self.messages.push(message);
-                        }
-                    }
-                }
+            Expression::Identifier(..) => {
+                self.compile_identifier_into(&mut bytecode, span, self_id, ast);
             }
             // Layout: c1, JMPF1, b1, JMP1, c2, JMPF2, b2, JMP2, b3, [end]
             Expression::If(branches) => {
@@ -15873,19 +16279,10 @@ impl Compiler {
                     }
                     _ => false,
                 };
-                // Prefer this node's sidecar (pointer / span) over `emit_idx`.
-                // If `self_id` drifted onto a parent `[byte; N]`, ignore a
-                // non-matching type so the string node's span/NodeId can still coerce.
-                let span_ty = self
-                    .node_id_of(ast)
+                let span_ty = self_id
                     .and_then(|id| self.sidecar_ty(id))
                     .filter(is_byte_or_bytes)
-                    .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_or_bytes))
-                    .or_else(|| {
-                        self_id
-                            .and_then(|id| self.sidecar_ty(id))
-                            .filter(is_byte_or_bytes)
-                    });
+                    .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_or_bytes));
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()
@@ -15958,247 +16355,9 @@ impl Compiler {
 
                 self.context.constants.insert(symbol, false);
             }
-            Expression::Assignment(lhs, value) => match lhs.1.as_ref() {
-                Expression::QualifiedAccess { owner, member } => {
-                    let fqn = self.class_member_fqn(owner, member);
-                    if let Some(slot) = self.checker.static_slot_index(&fqn) {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
-                    }
-                }
-                Expression::Construct {
-                    enum_name,
-                    variant_name,
-                    fields: parser::ast::EnumConstructPayload::Unit,
-                } => {
-                    let fqn = self.class_member_fqn(enum_name, variant_name);
-                    if let Some(slot) = self.checker.static_slot_index(&fqn) {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
-                    }
-                }
-                Expression::Access(target_expr, field) => {
-                    if let Some(slot) = self.unboxed_class_field_slot(target_expr, field) {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        self.skip_emit_ids_to_unwrapped(target_expr);
-                        bytecode.push_store_pop(slot);
-                        bytecode.push_load(slot);
-                    } else {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.append(&mut self.do_compile(target_expr));
-                        if let Some(idx) = self.class_field_slot(target_expr, field) {
-                            bytecode.push_set_field_slot(idx);
-                        } else {
-                            self.emit_field_name(&mut bytecode, field);
-                            bytecode.push_set_field();
-                        }
-                    }
-                    // Value left on stack for expression result; ExprStatement POPs.
-                }
-                Expression::Index(arr, None) => {
-                    let _ = arr;
-                    self.messages.push({
-                        let mut m = Message::error(
-                            ErrorCode::InvalidAssignment,
-                            "append assignment `arr[] = value` is not supported".to_string(),
-                            lhs.0.into_range(),
-                        );
-                        m.push(DiagLabel::new(
-                            "use `vec.push(value)` on a `Vec<T>`".to_string(),
-                            lhs.0.into_range(),
-                        ));
-                        m
-                    });
-                }
-                Expression::Index(arr, Some(idx)) => {
-                    if let Expression::Identifier(name) = arr.1.as_ref()
-                        && let Some(box_slot) = self.stack_array_boxed_slot(name)
-                    {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        self.emit_boxed_array_store(&mut bytecode, box_slot, idx, true);
-                    } else if let Expression::Identifier(name) = arr.1.as_ref()
-                        && let Some((base, n)) = self.stack_array_info(name)
-                        && let Expression::Integer(i) = idx.1.as_ref()
-                        && *i >= 0
-                        && (*i as usize) < n
-                    {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.push_store_pop(base + *i as u32);
-                        // Leave value on stack like StoreIndex.
-                        bytecode.push_load(base + *i as u32);
-                    } else if let Expression::Identifier(name) = arr.1.as_ref()
-                        && let Some((base, n)) = self.stack_array_info(name)
-                        && (1..=32).contains(&n)
-                    {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        let tmp_val = self.alloc_temp_slot();
-                        bytecode.push_store_pop(tmp_val);
-                        self.compile_array_index_expr(&mut bytecode, idx);
-                        let tmp_idx = self.alloc_temp_slot();
-                        bytecode.push_store_pop(tmp_idx);
-                        let proven = self.stack_array_index_proven(lhs, idx, n);
-                        // Statement form: last-arm is StorePop; ExprStatement
-                        // skips the extra POP. Do not rematerialize TOS.
-                        self.emit_stack_array_select_store(EmitStackArraySelectStoreArgs {
-                            bytecode: &mut bytecode,
-                            base,
-                            n,
-                            idx_slot: tmp_idx,
-                            val_slot: tmp_val,
-                            leave_value: false,
-                            proven,
-                        });
-                    } else {
-                        // RHS is evaluated first and spilled. Array may stay on
-                        // the operand stack only for push-only index exprs,                         // see `index_keeps_array_on_stack_safe`.
-                        let tmp_val = self.alloc_temp_slot();
-                        let depth_on_entry = self.expr_depth;
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.push_store_pop(tmp_val);
-                        if Self::index_keeps_array_on_stack_safe(idx.1.as_ref()) {
-                            bytecode.append(&mut self.do_compile(arr));
-                            self.expr_depth = depth_on_entry + 1;
-                            self.compile_array_index_expr(&mut bytecode, idx);
-                            self.expr_depth = depth_on_entry;
-                            bytecode.push_load(tmp_val);
-                        } else {
-                            let tmp_arr = self.alloc_temp_slot();
-                            let tmp_idx = self.alloc_temp_slot();
-                            bytecode.append(&mut self.do_compile(arr));
-                            bytecode.push_store_pop(tmp_arr);
-                            self.compile_array_index_expr(&mut bytecode, idx);
-                            bytecode.push_store_pop(tmp_idx);
-                            bytecode.push_load(tmp_arr);
-                            bytecode.push_load(tmp_idx);
-                            bytecode.push_load(tmp_val);
-                        }
-                        bytecode.push(Byte::new(Instruction::StoreIndex));
-                    }
-                }
-                Expression::Identifier(name) => {
-                    let resolved = self.resolve_free_fn(name);
-                    if let Some(static_slot) = self
-                        .checker
-                        .static_slot_index(&resolved)
-                        .or_else(|| self.checker.static_slot_for_module_name(name))
-                    {
-                        self.append_binding_rhs(&mut bytecode, value);
-                        bytecode.push(
-                            Byte::new(Instruction::StoreStatic).with_operand_u32(static_slot),
-                        );
-                    } else {
-                        self.context.assignments.insert(name.to_string(), true);
-                        let symbol_opt = if let Some(map) = &self.context.match_bindings {
-                            if let Some(&slot) = map.get(*name) {
-                                Some(slot as usize)
-                            } else {
-                                self.context.variables.key(&name.to_string())
-                            }
-                        } else {
-                            self.context.variables.key(&name.to_string())
-                        };
-
-                        if let Some(symbol) = symbol_opt {
-                            if unlikely(self.context.constants.contains_key(&symbol)) {
-                                let assigned =
-                                    likely(*self.context.constants.get(&symbol).unwrap());
-                                if !assigned {
-                                    self.context.constants.entry(symbol).and_modify(|state| {
-                                        *state = true;
-                                    });
-                                } else {
-                                    let mut message = Message::error(
-                                        ErrorCode::InvalidAssignment,
-                                        "Assignment error".to_string(),
-                                        span.into_range(),
-                                    );
-                                    message.push(DiagLabel::new(
-                                        format!(
-                                            "Unable to assign to an already assigned constant '{}'",
-                                            name
-                                        ),
-                                        span.into_range(),
-                                    ));
-                                    self.messages.push(message);
-                                }
-                            }
-                            // Multi-slot stack array: rewrite slots in place.
-                            if let Some((payload, tag_slot)) = self.unboxed_enum_info(name) {
-                                let _ = self.next_emit_id();
-                                self.unbox_enum_context += 1;
-                                self.append_binding_rhs(&mut bytecode, value);
-                                self.unbox_enum_context -= 1;
-                                bytecode.push_store_pop(tag_slot);
-                                bytecode.push_store_pop(payload);
-                            } else if let Some((base, n)) = self.unboxed_class_info(name) {
-                                let _ = self.next_emit_id();
-                                let rhs_node = unwrap_expr_output(value);
-                                if let Expression::Instantiate(_, args) = rhs_node.1.as_ref() {
-                                    self.skip_emit_ids_to_unwrapped(value);
-                                    let _ = self.next_emit_id();
-                                    if let Some(args) = args {
-                                        for (i, arg) in args.iter().enumerate().take(n) {
-                                            bytecode.append(&mut self.do_compile(arg));
-                                            bytecode.push_store_pop(base + i as u32);
-                                        }
-                                    }
-                                    self.context.unboxed_class_box.remove(*name);
-                                } else {
-                                    self.append_binding_rhs(&mut bytecode, value);
-                                    if let Some(slot) = self.unboxed_class_boxed_slot(name) {
-                                        bytecode.push_store_pop(slot);
-                                    } else {
-                                        let slot = self.alloc_temp_slot();
-                                        bytecode.push_store_pop(slot);
-                                        self.context
-                                            .unboxed_class_box
-                                            .insert((*name).to_string(), slot);
-                                    }
-                                }
-                            } else if let Some((base, n)) = self.stack_array_info(name) {
-                                // Assignment: `name` Identifier is pre-walked
-                                // before `value`; consume it when we skip emit.
-                                let _ = self.next_emit_id();
-                                let ok =
-                                    self.try_emit_stack_array_init(&mut bytecode, value, base, n);
-                                if !ok {
-                                    // Heap `[T; N]` (e.g. call return): box into slots.
-                                    self.append_binding_rhs(&mut bytecode, value);
-                                    let tmp = self.alloc_temp_slot();
-                                    bytecode.push_store_pop(tmp);
-                                    for i in 0..n {
-                                        bytecode.push_load(tmp);
-                                        bytecode.push_const(i as i32);
-                                        bytecode.push_index();
-                                        bytecode.push_store_pop(base + i as u32);
-                                    }
-                                }
-                            } else {
-                                self.append_binding_rhs(&mut bytecode, value);
-                                bytecode.push_store_pop(symbol as u32);
-                            }
-                        } else {
-                            let mut message = Message::error(
-                                ErrorCode::UnknownValue,
-                                "Undefined variable".to_string(),
-                                span.into_range(),
-                            );
-                            message.push(DiagLabel::new(
-                                format!(
-                                    "Unable to assign to a non-existing variable/constant '{}'",
-                                    name
-                                ),
-                                span.into_range(),
-                            ));
-                            self.messages.push(message);
-                        }
-                    }
-                }
-                _ => {
-                    bytecode.append(&mut self.do_compile(value));
-                    bytecode.push_pop();
-                }
-            },
+            Expression::Assignment(lhs, value) => {
+                self.compile_assignment_into(&mut bytecode, span, lhs, value);
+            }
 
             Expression::ExternBlock {
                 library,
@@ -16679,9 +16838,9 @@ impl Compiler {
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0
 
-                if !self.expr_is_niche_option(inner)
-                    && !self.expr_is_unit_result_niche(inner)
-                    && !self.expr_is_niche_result(inner)
+                if !self.expr_layout(inner).is_niche_option()
+                    && !self.expr_layout(inner).is_niche_unit_result()
+                    && !self.expr_layout(inner).is_niche_result()
                     && let Some(inner_kind) = self.expr_two_word_pair_kind(inner)
                 {
                     self.unbox_enum_context += 1;
@@ -16697,7 +16856,7 @@ impl Compiler {
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
-                if self.expr_is_niche_option(inner) {
+                if self.expr_layout(inner).is_niche_option() {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16716,7 +16875,7 @@ impl Compiler {
                         self.bytecode.push_return();
                     }
                     bb.bind_label(success, self.bytecode.il_mut());
-                } else if self.expr_is_unit_result_niche(inner) {
+                } else if self.expr_layout(inner).is_niche_unit_result() {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16728,8 +16887,8 @@ impl Compiler {
                         self.bytecode.push_const(1);
                         self.push_return_two_word();
                     } else {
-                        if !self.return_is_unit_result_niche() {
-                            if self.return_is_niche_result() {
+                        if !self.return_layout().is_niche_unit_result() {
+                            if self.return_layout().is_niche_result() {
                                 Self::push_result_err_bit(&mut self.bytecode);
                             } else {
                                 Self::emit_result_err(&mut self.bytecode);
@@ -16738,7 +16897,7 @@ impl Compiler {
                         self.bytecode.push_return();
                     }
                     bb.bind_label(success, self.bytecode.il_mut());
-                } else if self.expr_is_niche_result(inner) {
+                } else if self.expr_layout(inner).is_niche_result() {
                     Self::push_result_is_err(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16753,7 +16912,7 @@ impl Compiler {
                         self.bytecode.push_const(1);
                         self.push_return_two_word();
                     } else {
-                        if !self.return_is_niche_result() {
+                        if !self.return_layout().is_niche_result() {
                             Self::emit_niche_result_to_boxed(&mut self.bytecode);
                         }
                         self.bytecode.push_return();
@@ -16819,9 +16978,9 @@ impl Compiler {
                 // `a ?? b` → Ok/Some payload, else evaluate b.
                 let is_option = self.expr_is_option(lhs);
                 let success_tag: u32 = if is_option { 1 } else { 0 };
-                let niche_lhs = self.expr_is_niche_option(lhs);
-                let unit_result_lhs = self.expr_is_unit_result_niche(lhs);
-                let niche_result_lhs = self.expr_is_niche_result(lhs);
+                let niche_lhs = self.expr_layout(lhs).is_niche_option();
+                let unit_result_lhs = self.expr_layout(lhs).is_niche_unit_result();
+                let niche_result_lhs = self.expr_layout(lhs).is_niche_result();
 
                 // `lhs` always compiles to its ordinary (boxed / niche)
                 // representation, a two-word call auto-boxes unless
@@ -16898,10 +17057,8 @@ impl Compiler {
             }
             Expression::OptionalAccess(receiver, field) => {
                 // `opt?.field` → None if opt is None, else Some(opt.field).
-                if self.expr_is_niche_option(receiver)
-                    && self
-                        .codegen_expr_ty(ast)
-                        .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+                if self.expr_layout(receiver).is_niche_option()
+                    && self.expr_layout(ast).is_niche_option()
                 {
                     let mut recv_bc = self.do_compile(receiver);
                     self.bytecode.append(&mut recv_bc);
@@ -16953,7 +17110,7 @@ impl Compiler {
                     return bytecode;
                 }
 
-                let receiver_is_niche = self.expr_is_niche_option(receiver);
+                let receiver_is_niche = self.expr_layout(receiver).is_niche_option();
                 let previous_force = self.force_heap_option;
                 if receiver_is_niche {
                     self.force_heap_option = true;
@@ -17198,7 +17355,9 @@ impl Compiler {
     /// moved to the pre-`main` prologue.
     fn emit_finalizer_registry(&mut self, insert_at: usize) -> Option<usize> {
         let native_id = self.native_id("gc_register_finalizer")?;
-        let owners: Vec<String> = self.checker.classes_with_drop().cloned().collect();
+        let mut owners: Vec<String> = self.checker.classes_with_drop().cloned().collect();
+        // Registry order must not follow hash-set iteration: archives stay reproducible.
+        owners.sort_by_key(|o| self.checker.class_type_id(o));
         if owners.is_empty() {
             return None;
         }
@@ -17500,6 +17659,14 @@ impl Compiler {
             &lowered.stack_map_drafts,
             self.bytecode.as_slice(),
             &entries,
+        );
+        self.precise_frames = super::precise_frames::bind_precise_frames(
+            &self.precise_frame_fns,
+            self.bytecode.as_slice(),
+            &self.constants,
+            &lowered.match_arities,
+            &entries,
+            self.prologue_jmp_target(),
         );
 
         let dense_seek = self

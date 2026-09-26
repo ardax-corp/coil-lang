@@ -40,7 +40,17 @@ pub struct PassHit {
     pub ops_delta: i64,
 }
 
-/// Counters from IL opts (and tiny-inline when compiling). COI-176 `OptimizationStats`.
+/// Final tier of one function body, with why MIR tiers refused it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BodyTier {
+    pub name: String,
+    /// `dense`, `lir`, or `fuse`.
+    pub tier: String,
+    pub dense_reason: Option<String>,
+    pub lir_reason: Option<String>,
+}
+
+/// Counters from IL opts (and tiny-inline when compiling). COI-176.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
     pub ops_eliminated: usize,
@@ -52,6 +62,19 @@ pub struct OptStats {
     pub branches_optimized: usize,
     pub blocks_reordered: usize,
     pub iterations: usize,
+    /// Function bodies kept as dense MIR, MIR→LIR reconstruct, or fuse-IL.
+    #[serde(default)]
+    pub bodies_dense: usize,
+    #[serde(default)]
+    pub bodies_lir: usize,
+    #[serde(default)]
+    pub bodies_fuse: usize,
+    /// Why fuse-IL bodies were not taken by MIR→LIR (coarse keys, counted).
+    #[serde(default)]
+    pub fuse_reasons: Vec<PassHit>,
+    /// Per-body tier records (census input for dynamic weighting).
+    #[serde(default)]
+    pub body_tiers: Vec<BodyTier>,
     pub passes: Vec<PassHit>,
 }
 
@@ -84,6 +107,13 @@ impl OptStats {
         self.branches_optimized += other.branches_optimized;
         self.blocks_reordered += other.blocks_reordered;
         self.iterations += other.iterations;
+        self.bodies_dense += other.bodies_dense;
+        self.bodies_lir += other.bodies_lir;
+        self.bodies_fuse += other.bodies_fuse;
+        for hit in &other.fuse_reasons {
+            note_reason(&mut self.fuse_reasons, &hit.name, hit.applied);
+        }
+        self.body_tiers.extend(other.body_tiers.iter().cloned());
         for hit in &other.passes {
             self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
         }
@@ -106,6 +136,29 @@ impl OptStats {
         let _ = writeln!(out, "  stores eliminated: {}", self.stores_eliminated);
         let _ = writeln!(out, "  branches optimized: {}", self.branches_optimized);
         let _ = writeln!(out, "  blocks reordered: {}", self.blocks_reordered);
+        let _ = writeln!(
+            out,
+            "  bodies: {} dense, {} lir, {} fuse-il",
+            self.bodies_dense, self.bodies_lir, self.bodies_fuse
+        );
+        for b in &self.body_tiers {
+            let _ = writeln!(
+                out,
+                "    {}: {} (dense: {}; lir: {})",
+                b.name,
+                b.tier,
+                b.dense_reason.as_deref().unwrap_or("-"),
+                b.lir_reason.as_deref().unwrap_or("-")
+            );
+        }
+        if !self.fuse_reasons.is_empty() {
+            let _ = writeln!(out, "  fuse-il reasons:");
+            let mut ranked = self.fuse_reasons.clone();
+            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
+            for hit in ranked {
+                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+            }
+        }
         if self.passes.is_empty() {
             let _ = writeln!(out, "  passes: (none applied)");
         } else {
@@ -137,7 +190,7 @@ impl OptStats {
             );
         }
         format!(
-            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"passes\":[{}]}}",
+            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"passes\":[{}]}}",
             self.ops_eliminated,
             self.ops_added,
             self.functions_inlined,
@@ -147,6 +200,9 @@ impl OptStats {
             self.branches_optimized,
             self.blocks_reordered,
             self.iterations,
+            self.bodies_dense,
+            self.bodies_lir,
+            self.bodies_fuse,
             passes
         )
     }
@@ -170,6 +226,37 @@ pub fn last_opt_stats() -> OptStats {
 
 pub(crate) fn note_function_inlined() {
     with_stats(|s| s.functions_inlined += 1);
+}
+
+fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
+    if let Some(hit) = reasons.iter_mut().find(|h| h.name == name) {
+        hit.applied += n;
+    } else {
+        reasons.push(PassHit {
+            name: name.to_string(),
+            applied: n,
+            ops_delta: 0,
+        });
+    }
+}
+
+/// Count one body that stayed fuse-IL for `reason`.
+pub(crate) fn note_fuse_reason(reason: &str) {
+    with_stats(|s| note_reason(&mut s.fuse_reasons, reason, 1));
+}
+
+/// Record one body's final tier and refusal reasons.
+pub(crate) fn note_body_tier(record: BodyTier) {
+    with_stats(|s| s.body_tiers.push(record));
+}
+
+/// Record which tier each function body ended in (MIR keep-rate census).
+pub(crate) fn note_body_tiers(dense: usize, lir: usize, fuse: usize) {
+    with_stats(|s| {
+        s.bodies_dense += dense;
+        s.bodies_lir += lir;
+        s.bodies_fuse += fuse;
+    });
 }
 
 pub(crate) fn set_iterations(n: usize) {
@@ -202,8 +289,7 @@ fn count_stores(ops: &[IlOp]) -> usize {
 /// Run `f` and, when `collect`, fill a [`PassDelta`] from before/after ops.
 ///
 /// When `collect` is off the buffer is not cloned (same as the old
-/// `run_named_pass`); `changed` is then `false` and iterative opt still
-/// compares the whole round via [`super::PassStats`].
+/// `run_named_pass`); `changed` is then `false`.
 pub(crate) fn measure_pass(
     ops: &mut Vec<IlOp>,
     collect: bool,
