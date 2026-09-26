@@ -55,8 +55,6 @@ pipeline. No solo “pass” tests.
 
 | Knob | Default | Role |
 |------|---------|------|
-| `iterative_optimization` | off | Re-run `optimize_once_at` until a no-op round or the cap. |
-| `max_optimization_iterations` | 10 | Cap, clamped to `1..=10`. |
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
 | `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
 | `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |
@@ -69,20 +67,20 @@ pipeline. No solo “pass” tests.
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
 5. `copy_prop` → 6. `dest_prop` → 7. `dead_store` (same flag as `mem_fwd`) →
-8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `local_cse` → 12. `cast_spill`
+8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `local_cse`
 
 **Decision** (`decision_once_at`), in order:
 
-13. `licm` → 14. `loop_bounds` → 15. `strength_reduce` → 16. `loop_unroll`
-→ 17. `invariant_store_elim` → 18. `escape_analysis` → 19. `slot_promote`
-(+ `dead_store`) → 20. `tos_carry` → 21. `clone_shared_return` →
-22. `return_convoy` → 23. `bin_join_convoy` → 24. `multi_op_join_convoy` →
-25. `invert_guard_branch` → 26. `branch_optimization` → 27. `block_reordering`
-→ 28. `seek_back_edge` → 29. `slot_promote_tell` → 30. `ssa_gvn`
+12. `licm` → 13. `loop_bounds` → 14. `strength_reduce` → 15. `loop_unroll`
+→ 16. `invariant_store_elim` → 17. `escape_analysis` → 18. `slot_promote`
+(+ `dead_store`) → 19. `tos_carry` → 20. `clone_shared_return` →
+21. `return_convoy` → 22. `bin_join_convoy` → 23. `multi_op_join_convoy` →
+24. `invert_guard_branch` → 25. `branch_optimization` → 26. `block_reordering`
+→ 27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
-opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
-and `slot_promote_tell` **deferred**. Then per-body **`cfg_gvn`**, then seek +
+opts run with `multi_op_join_convoy`, `invert_guard_branch`,
+and `slot_promote_tell` **deferred**. Then per-body **`cfg_gvn`**, then
 slot_promote_tell, then concat, then whole-buffer multi_op + invert. Bare-buffer
 `optimize()` (empty `funcs` / unit tests) does **not** run `cfg_gvn`.
 
@@ -278,24 +276,6 @@ float identities / pool fold.
   `does_not_cross_basic_block`. Isolated flag:
   `isolated_optimize_flag_runs_pass`. Hit benches: `examples/perf/cse_index_recompute.hy`,
   `cse_cast_recompute.hy` ([#317](https://github.com/ardax-corp/coil-lang/pull/317)).
-
-## `cast_spill`
-
-**Flag:** `cast_spill` (default on). **Fn:**
-`il::cast_spill::spill_cast_before_float_chain`.
-
-- **Input:** `CastIntToFloat` inside a float-arith → `StorePop` window
-  (mandelbrot `CONST; LOAD; Cast; …; STORE`).
-- **Output:** Hoists `LOAD; Cast` into a prefix `LOAD; Cast; STORE t` and rewrites
-  the body to `LOAD t` so fuse-select can match `LOAD; CONST` / const-under
-  (FCS is a tombstone; not selected). New temps are fresh high slots. Labels unchanged; extra
-  stores raise `tell` on purpose.
-- **Refusals:** No float-chain-store after the cast; jump interrupting the
-  window; already-hoisted `Cast; STORE`. Residual `Byte` casts are recognized
-  via `as_encode_byte` (`CastIntToFloat`).
-- **Tests:** `il/cast_spill.rs` `spills_cast_inside_float_arith_store_window`,
-  `refuses_cast_without_float_chain_store_window`. Isolated off:
-  `optimize_with_cast_spill_disabled_keeps_inline_cast`.
 
 ## `licm`
 
@@ -584,23 +564,6 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
   `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
 
-## `seek_back_edge`
-
-**Flag:** `seek_back_edge` (default **off**; on at `-O3` Aggressive only).
-**Fn:** `slot_promote::seek_normalize_back_edges`. Uses **`tell`**.
-
-- **Input:** Innermost natural loop whose forward-edge cursor is Known and whose
-  body has self-stores the header join currently hides (COI-97).
-- **Output:** Inserts `Seek` (residual `Byte`) at the latch to the forward-edge
-  cursor so the header becomes Known; later `slot_promote_tell` can drop in-loop
-  self-stores. `Seek` is `tell::Set` and does not change eval-stack height.
-- **Refusals:** Outer (non-innermost) loops — outer Seek used to split
-  tombstoned `FloatChainStore` (mandelbrot `cr`); no profitable self-store; latch already
-  has `Seek`. Off on Standard because innermost mandelbrot has no such stores.
-- **Tests:** `opt/slot_promote.rs` `seek_on_back_edge_elides_loop_self_store`,
-  `optimize_at_default_does_not_seek_normalize`,
-  `optimize_at_seek_back_edge_elides_raising_loop_store`.
-
 ## `slot_promote_tell`
 
 **Flag:** `slot_promote_tell` (default on). **Fn:** `slot_promote::slot_promote_at`.
@@ -632,8 +595,8 @@ the `ssa_gvn` flag.
   (`Const`/`Load`/`Bin`/`BinSlot*`/`Index`/`LoadField`/`Dup`). Join sink
   requires agreeing pred tails and agreeing SP-in.
 - **Output:** Second identical producer → `Dup`; join-sunk redundant tail.
-  `Load; Dup` is re-expanded to `Load; Load` so fuse-select still sees both
-  binop operands (COI-82). No slot rename. Height preserved (`Dup` vs second
+  `Load; Dup` stays; fuse-select reads `Dup` as the second binop operand
+  (COI-82). No slot rename. Height preserved (`Dup` vs second
   `Const`/`Load` is the same +1).
 - **Refusals:** `StorePop`, calls, `HostInvoke`, `SetField`, `Make*`, box,
   residual effectful `Byte` — barriers. Does not replace convoy refuse rules.
@@ -671,8 +634,8 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
   `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
   `lower_refuses_const_return_across_value_join`,
-  `fuse_select_refuses_residual_byte_in_window`. Cast-spill → fuse:
-  `cast_spill_feeds_float_chain_store`. Invert-guard: `opt/convoy.tests.rs`
+  `fuse_select_refuses_residual_byte_in_window`. Retired float chain:
+  `cast_float_chain_is_not_fused`. Invert-guard: `opt/convoy.tests.rs`
   `invert_guard_refuses_value_under_jmp_hint`.
 
 ---
@@ -694,7 +657,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | algebraic | `algebraic.rs` | no |
 | instcombine | `instcombine.rs` | yes |
 | local_cse | `early_cse.rs` | yes |
-| cast_spill | `cast_spill.rs` | no |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
 | strength_reduce | `strength.rs` | yes |
@@ -710,7 +672,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | invert_guard_branch | `convoy.tests.rs` | no |
 | branch_optimization | `branch_opt.rs` | no |
 | block_reordering | `block_order.rs` | no |
-| seek_back_edge | `slot_promote.rs` | no |
 | slot_promote_tell | `slot_promote.rs` | no |
 | cfg_gvn | `gvn.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |

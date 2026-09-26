@@ -86,6 +86,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
@@ -193,6 +194,19 @@ mod archive_staleness {
             None => true,
         }
     }
+
+    /// True when a recorded source that still exists is newer than `archive`.
+    /// Missing sources are ignored: a shipped archive may outlive its tree.
+    pub(super) fn recorded_sources_newer(archive: &str, debug: &ProgramDebug) -> bool {
+        let Some(arch_mtime) = archive_mtime(archive) else {
+            return false;
+        };
+        debug
+            .source_files
+            .iter()
+            .filter_map(|src| archive_source_mtime(src))
+            .any(|m| m > arch_mtime)
+    }
 }
 
 /// Canonical entry path for FFI `base_dir` resolution (best-effort absolute).
@@ -206,21 +220,7 @@ fn maybe_warn_stale_archive(
     archive: &str,
     debug: &ProgramDebug,
 ) {
-    if debug.source_files.is_empty() {
-        return;
-    }
-    let entry = debug
-        .source_files
-        .iter()
-        .find(|p| {
-            Path::new(p)
-                .extension()
-                .is_some_and(|ext| ext == "hy")
-                && !p.contains("stdlib/")
-        })
-        .map(|s| s.as_str())
-        .unwrap_or(archive);
-    if archive_staleness::archive_is_stale(entry, archive, debug) {
+    if archive_staleness::recorded_sources_newer(archive, debug) {
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
@@ -363,6 +363,11 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
                 format_archive_version(v),
                 format_archive_version(ARCHIVE_VERSION)
             ),
+        ),
+        Err(LoadErr::Invalid(e)) => fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!("Bytecode archive `{archive}` is invalid ({e}). Please recompile from source."),
         ),
     };
 
@@ -893,6 +898,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -917,6 +923,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
@@ -927,6 +934,19 @@ mod tests {
         assert!(loaded.struct_layouts.is_empty());
         assert_eq!(loaded.operand_stack_slots, Some(256));
         let _ = std::fs::remove_file(&ok_path);
+
+        let bad_path = unique_tmp("bad_jump");
+        let bad_prog = ArchivedProgram {
+            bytecode: vec![Byte::new(common::Instruction::JMP).with_operand_u32(99)],
+            ..ok_prog
+        };
+        let bad_bytes = rkyv::to_bytes::<Error>(&bad_prog).unwrap();
+        std::fs::write(&bad_path, bad_bytes.as_slice()).unwrap();
+        assert!(matches!(
+            try_load_archive(bad_path.to_str().unwrap()),
+            Err(LoadErr::Invalid(e)) if e.pc == 0
+        ));
+        let _ = std::fs::remove_file(&bad_path);
     }
 
     #[test]
@@ -1038,6 +1058,35 @@ mod tests {
             archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
             "missing recorded dependency must invalidate the archive"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recorded_sources_newer_only_flags_edited_sources() {
+        use super::archive_staleness::recorded_sources_newer;
+        let dir = unique_tmp("run_archive_sources");
+        std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
+        let dep = dir.join("stdlib/io/sync.hy");
+        let entry = dir.join("main.hy");
+        let arch = dir.join("out.hyc");
+        std::fs::write(&dep, b"fn f() {}").unwrap();
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                dep.to_string_lossy().into_owned(),
+                entry.to_string_lossy().into_owned(),
+                dir.join("gone.hy").to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+        };
+        let a = arch.to_str().unwrap();
+        assert!(!recorded_sources_newer(a, &debug), "fresh archive");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(recorded_sources_newer(a, &debug), "edited entry");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

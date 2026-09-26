@@ -16,7 +16,7 @@ cargo test --workspace --lib --tests --bins
 Retry once on transient macOS/EAGAIN listing failures (same as CI).
 Reactor pool size defaults to `1` under cargo (`COIL_MAX_WORKER_THREADS` in `.cargo/config.toml`) and when `CI` is set (`WorkerCap`).
 
-Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` targets treat argv after `--` as their own CLI and abort the suite. Integration tests under `*/tests/` (e.g. `compiler/tests/diagnostics.rs`, `pipeline.rs`, `perf_metrics.rs`) are covered by `--tests`.
+Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` targets treat argv after `--` as their own CLI and abort the suite. Integration tests under `*/tests/` (e.g. `compiler/tests/diagnostics.rs`) are covered by `--tests`; `pipeline.rs`, `perf_metrics.rs`, `namespace.rs`, and `cursor_model.rs` need `vm-wire` (see below).
 
 ## Feature-gated suites
 
@@ -26,6 +26,7 @@ Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` target
 | `no-default` | `cargo test --workspace --lib --tests --bins --no-default-features` | real suite (default features are `[]`) |
 | `dissect` | `cargo test --workspace --lib --tests --bins --features dissect` | dissect integration |
 | `debugger` | `cargo test --workspace --lib --tests --bins --features debugger` | debugger paths |
+| `vm-wire` | `cargo test -p compiler --features vm-wire --tests` | pipeline / perf_metrics / namespace / cursor_model (CI: Linux default job) |
 
 ```bash
 cargo test --workspace --lib --tests --bins --no-default-features

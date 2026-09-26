@@ -6,7 +6,7 @@
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
 //! `IlModule::optimize_and_flatten` still defers `multi_op_join_convoy`,
-//! `invert_guard_branch`, `seek_back_edge`, `slot_promote_tell`, and `ssa_gvn`
+//! `invert_guard_branch`, `slot_promote_tell`, and `ssa_gvn`
 //! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
 //! in `lower_optimized`.
 
@@ -197,11 +197,6 @@ fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<
     super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
 }
 
-fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::cast_spill::spill_cast_before_float_chain(ops);
-    0
-}
-
 fn apply_licm(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::licm::licm_with(ops, opts.pure_call_ctx.as_ref());
     0
@@ -301,11 +296,6 @@ fn apply_branch_optimization(
 
 fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::block_order::reorder_basic_blocks(ops)
-}
-
-fn apply_seek_back_edge(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::slot_promote::seek_normalize_back_edges(ops, ctx.entry_tell);
-    0
 }
 
 fn apply_slot_promote_tell(
@@ -439,17 +429,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.local_cse,
         set_flag: |o| o.local_cse = true,
         apply: ApplyFn::Grow(apply_local_cse),
-    },
-    PassSpec {
-        name: "cast_spill",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.cast_spill,
-        set_flag: |o| o.cast_spill = true,
-        apply: ApplyFn::Grow(apply_cast_spill),
     },
     PassSpec {
         name: "licm",
@@ -617,17 +596,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_block_reordering),
     },
     PassSpec {
-        name: "seek_back_edge",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Aggressive,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.seek_back_edge,
-        set_flag: |o| o.seek_back_edge = true,
-        apply: ApplyFn::Grow(apply_seek_back_edge),
-    },
-    PassSpec {
         name: "slot_promote_tell",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -665,7 +633,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "algebraic",
     "instcombine",
     "local_cse",
-    "cast_spill",
     "licm",
     "loop_bounds",
     "strength_reduce",
@@ -681,7 +648,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "invert_guard_branch",
     "branch_optimization",
     "block_reordering",
-    "seek_back_edge",
     "slot_promote_tell",
     "ssa_gvn",
 ];
@@ -702,10 +668,6 @@ mod tests {
         let opts = OptimizeOptions::default();
         let enabled = enabled_pass_names(&opts);
         assert_eq!(enabled, OptLevel::Standard.pass_names());
-        assert!(
-            !enabled.contains(&"seek_back_edge"),
-            "Standard leaves seek_back_edge off"
-        );
         assert_eq!(enabled, subsequence(D1_PASS_ORDER, &enabled));
         assert_eq!(
             enabled,
@@ -743,13 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn iterative_opt_reuses_the_same_table() {
-        // optimize_iteratively_at re-runs run_once, which walks PRODUCTION_PASSES.
-        assert_eq!(
-            PRODUCTION_PASSES.len(),
-            D1_PASS_ORDER.len(),
-            "iterative rounds walk the same production table"
-        );
+    fn production_table_matches_documented_order() {
+        assert_eq!(PRODUCTION_PASSES.len(), D1_PASS_ORDER.len());
         let names: Vec<_> = PRODUCTION_PASSES.iter().map(|p| p.name).collect();
         assert_eq!(names, D1_PASS_ORDER);
     }

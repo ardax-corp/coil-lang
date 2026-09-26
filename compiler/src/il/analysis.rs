@@ -74,7 +74,8 @@ pub(crate) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
 }
 
 /// Straight-line region between leaders (labels / jump targets / fall-through
-/// after terminators). `JoinLabel` is not a leader — same as slot_promote.
+/// after terminators). `JoinLabel` is a label like any other: match arms jump
+/// to it, so it must lead a block and resolve as a jump target.
 #[derive(Clone, Debug)]
 pub(crate) struct Block {
     pub(crate) start: usize,
@@ -90,7 +91,7 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
     leaders.insert(0);
     let mut label_at: HashMap<u32, usize> = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             label_at.insert(*id, i);
             leaders.insert(i);
         }
@@ -103,15 +104,7 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
             if i + 1 < ops.len() {
                 leaders.insert(i + 1);
             }
-        } else if matches!(
-            op,
-            IlOp::Return { .. }
-                | IlOp::Halt { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-        ) && i + 1 < ops.len()
-        {
+        } else if op.is_terminator() && i + 1 < ops.len() {
             leaders.insert(i + 1);
         }
     }
@@ -162,11 +155,7 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
                     block.succs.push(fb);
                 }
             }
-            IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. } => {}
+            op if op.is_terminator() => {}
             _ => {
                 if end < ops.len()
                     && let Some(&fb) = block_at.get(&end)
@@ -383,5 +372,37 @@ mod tests {
     #[test]
     fn empty_ops_have_no_blocks() {
         assert!(build_blocks(&[]).is_empty());
+    }
+
+    /// `match` arms jump to a `JoinLabel`; the edge must exist so a slot
+    /// written in an arm and read after the join stays live.
+    #[test]
+    fn jump_to_join_label_keeps_arm_store_live() {
+        let jump = |kind, id| IlOp::Jump {
+            kind,
+            target: Label(id),
+            loc: loc(),
+            hint: Default::default(),
+        };
+        let ops = vec![
+            IlOp::Load { slot: 0, loc: loc() },
+            jump(IlJumpKind::JumpIfFalse, 1),
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            jump(IlJumpKind::Unconditional, 9),
+            IlOp::Label(Label(1)),
+            IlOp::Const { imm: 2, loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::JoinLabel(Label(9)),
+            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1 },
+        ];
+        let blocks = build_blocks(&ops);
+        let live = analyze_slot_liveness(&ops, &blocks);
+        let arm = blocks.iter().position(|b| b.start == 2).expect("arm block");
+        assert!(
+            live.live_out[arm].contains(&2),
+            "slot 2 must be live out of the arm that jumps to the join"
+        );
     }
 }

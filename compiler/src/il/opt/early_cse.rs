@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use common::Instruction;
 
+use crate::il::effects::{Effects, effects};
 use crate::il::gvn::gvn_cfg;
 use crate::il::op::{EntryKind, IlOp};
 use crate::il::pure_call::PureCallCtx;
@@ -187,46 +188,16 @@ fn is_pure_call_op(op: &IlOp, purity: Option<&PureCallCtx>) -> bool {
     }
 }
 
+/// Residual bytes are barriers unless this pass models them; typed ops use the
+/// shared effect table (element stores are tracked here, jumps end the block).
 fn is_full_barrier(op: &IlOp, purity: Option<&PureCallCtx>) -> bool {
-    if is_pure_call_op(op, purity) {
-        return false;
+    if matches!(op, IlOp::Byte { .. }) {
+        return !(is_cast_i2f(op)
+            || is_array_len(op)
+            || is_store_index(op)
+            || is_pure_call_op(op, purity));
     }
-    matches!(
-        op,
-        IlOp::HostInvoke { .. }
-            | IlOp::Print { .. }
-            | IlOp::Entry { .. }
-            | IlOp::MakeTuple { .. }
-            | IlOp::MakeArray { .. }
-            | IlOp::MakeEnum { .. }
-            | IlOp::BoxValue { .. }
-            | IlOp::SetField { .. }
-            | IlOp::GetField { .. }
-    ) || matches!(
-        op.as_encode_byte(),
-        Some(b) if matches!(
-            *b.bytecode(),
-            Instruction::HostInvoke
-                | Instruction::PRINT
-                | Instruction::CALL
-                | Instruction::TailCall
-                | Instruction::MakeCoro
-                | Instruction::MakeTuple
-                | Instruction::MakeArray
-                | Instruction::MakeEnum
-                | Instruction::BoxValue
-                | Instruction::FORMAT
-                | Instruction::FfiInvoke
-                | Instruction::SetField
-                | Instruction::GetField
-                | Instruction::YieldCoro
-                | Instruction::YieldFromCoro
-        )
-    ) || (matches!(op, IlOp::Byte { .. })
-        && !is_cast_i2f(op)
-        && !is_array_len(op)
-        && !is_store_index(op)
-        && !is_pure_call_op(op, purity))
+    effects(op, purity).any(!(Effects::ELEM_WRITE | Effects::MATCH))
 }
 
 fn depends_on(e: &Expr, slot: u32) -> bool {
@@ -626,7 +597,6 @@ mod tests {
             slot_promote: false,
             tos_carry: false,
             canon: false,
-            cast_spill: false,
             algebraic: false,
             instcombine: false,
             licm: false,
@@ -638,7 +608,6 @@ mod tests {
             multi_op_join_convoy: false,
             invert_guard_branch: false,
             slot_promote_tell: false,
-            seek_back_edge: false,
             loop_unroll: false,
             invariant_store_elim: false,
             ssa_gvn: false,

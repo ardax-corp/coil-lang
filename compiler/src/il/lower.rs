@@ -33,6 +33,8 @@ pub struct Lowered {
     pub pre_fuse_ops: Option<Vec<IlOp>>,
     /// S2b drafts (name + per-alloc slots) before PC bind.
     pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
+    /// Payload arity of each `JumpIfMatch`, by PC (bytecode encodes only the tag).
+    pub match_arities: HashMap<u32, u32>,
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
 }
@@ -213,7 +215,11 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
 
     let mut bytecode = Vec::with_capacity(slots.len());
     let mut debug_locs = Vec::with_capacity(slots.len());
+    let mut match_arities = HashMap::new();
     for slot in &slots {
+        if let Slot::Jump(IlJumpKind::JumpIfMatch { arity, .. }, ..) = slot {
+            match_arities.insert(bytecode.len() as u32, *arity);
+        }
         bytecode.push(encode_slot(slot, &label_pcs, pool)?);
         debug_locs.push(slot.loc());
     }
@@ -232,6 +238,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         func_label_maps: Vec::new(),
         pre_fuse_ops: None,
         stack_map_drafts: Vec::new(),
+        match_arities,
         deopt_map_drafts: Vec::new(),
         debug_slot_remaps: HashMap::new(),
     })
@@ -1650,7 +1657,7 @@ mod tests {
         );
     }
 
-    /// Stage0 `LOAD; CONST; op` (post-cast_spill shape) fuses with continuations.
+    /// Stage0 `LOAD; CONST; op` float chain stays unfused (FloatChainStore is retired).
     #[test]
     fn lower_fuses_load_const_stage0_float_chain_store() {
         let mut pool = vec![
@@ -1677,9 +1684,9 @@ mod tests {
         );
     }
 
-    /// `CastIntToFloat` spill + const-under stage0 → `FloatChainStore` (mandelbrot `cr`).
+    /// Mandelbrot `cr` cast + const-under chain stays unfused (FloatChainStore is retired).
     #[test]
-    fn cast_spill_feeds_float_chain_store() {
+    fn cast_float_chain_is_not_fused() {
         let loc = DebugLoc::unknown();
         let mut pool = vec![
             Value::from(2.0_f64).raw() as u64,

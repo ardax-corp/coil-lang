@@ -220,6 +220,7 @@ impl Pipeline {
             debug: self.program_debug(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: self.stack_maps().to_vec(),
+            precise_frames: self.precise_frames().to_vec(),
         });
     }
 
@@ -1257,6 +1258,7 @@ impl Pipeline {
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: self.stack_maps().to_vec(),
+            precise_frames: self.precise_frames().to_vec(),
             bytecode: self.bytecode,
         };
 
@@ -1356,7 +1358,23 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
+        self.debug_verify(&bytecode);
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
+    }
+
+    /// Debug builds verify every compiled program the way archive load does,
+    /// so the test suite catches codegen that emits out-of-range operands.
+    fn debug_verify(&self, bytecode: &[Byte]) {
+        if cfg!(debug_assertions) {
+            let c = self.compiler_lazy();
+            let limits = common::VerifyLimits {
+                strings: c.strings().len(),
+                static_slots: c.static_slot_count() as usize,
+            };
+            if let Err(e) = common::verify_bytecode(bytecode, c.constants(), limits) {
+                panic!("compiler emitted {e}");
+            }
+        }
     }
 
     /// Like [`Self::compile_src`], but keeps post-opt pre-fuse IL for the
@@ -1434,6 +1452,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
+        self.debug_verify(&self.bytecode);
         Ok((
             std::mem::take(&mut self.bytecode),
             self.compiler_lazy_mut().constants().to_vec(),
@@ -1606,6 +1625,10 @@ impl Pipeline {
     /// S2b maps from the last compile (in-memory; not required on `.hyc` load).
     pub fn stack_maps(&self) -> &[common::FrameStackMap] {
         self.compiler_lazy().stack_maps()
+    }
+
+    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
+        self.compiler_lazy().precise_frames()
     }
 
     pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
@@ -1843,6 +1866,7 @@ fn main() {
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
             stack_maps: pipeline.stack_maps().to_vec(),
+            precise_frames: pipeline.precise_frames().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1884,6 +1908,7 @@ fn main() {
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
             stack_maps: pipeline.stack_maps().to_vec(),
+            precise_frames: pipeline.precise_frames().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -2170,6 +2195,31 @@ fn main() { add(1, 2); }
         );
         let json = stats.format_json();
         assert!(json.contains("\"functions_inlined\""));
+    }
+
+    #[test]
+    fn opt_stats_census_counts_every_body_tier() {
+        let src = r#"
+fn sum(int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + i * 3;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() { sum(10); }
+"#;
+        let mut pipeline = Pipeline::new();
+        pipeline.set_collect_opt_stats(true);
+        pipeline.compile_src(src).expect("compile");
+        let stats = crate::last_opt_stats();
+        let bodies = stats.bodies_dense + stats.bodies_lir + stats.bodies_fuse;
+        assert!(bodies >= 2, "main and sum are both counted; stats={stats:?}");
+        let reasons: usize = stats.fuse_reasons.iter().map(|r| r.applied).sum();
+        assert_eq!(reasons, stats.bodies_fuse, "every fuse-IL body has a reason");
+        assert!(stats.format_text().contains("bodies:"));
     }
 
     #[test]
@@ -2881,13 +2931,19 @@ fn main() -> int {
             .expect("compile helper callee guard");
         let syms = pipeline.program_debug().fn_symbols;
         let at = fn_ops(&bytecode, &syms, "at");
+        // Dense keeps the proof as the `DenseIndex` unchecked flag (bit 0 of
+        // [31:24]) and caches the object instead of pinning.
+        let dense_unchecked = |b: &common::Byte| {
+            *b.bytecode() == Instruction::DenseIndex && (b.operand_u32() >> 24) & 1 == 1
+        };
+        let dense = at.iter().any(|b| *b.bytecode() == Instruction::DenseIndex);
         assert!(
-            at.iter().any(|b| is_unchecked_index(*b.bytecode())),
+            at.iter().any(|b| is_unchecked_index(*b.bytecode()) || dense_unchecked(b)),
             "i < a.len() in callee should uncheck a[i]; body={:?}",
             at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            at.iter().any(|b| is_pin_op(*b.bytecode())),
+            dense || at.iter().any(|b| is_pin_op(*b.bytecode())),
             "callee-proven helper should ArrayPin; body={:?}",
             at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );

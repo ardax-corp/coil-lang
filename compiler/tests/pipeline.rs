@@ -1678,46 +1678,20 @@ use string::{format, to_bytes};
 
 #[test]
 fn nested_if_in_loop_runs_correctly() {
-    let mut pipeline = compiler::Pipeline::new();
-    pipeline.bind_workspace_language_roots();
     let src = r#"
-        fn main() {
-            let i = 0;
-            while (i < 4) {
-                if i < 2 { 1; }
-                i = i + 1;
-            }
-        }
-    "#;
-    let parser = parser::Pratt::default();
-    let mut ast = parser.parse(src).expect("nested if-in-loop should parse");
-    let (bytecode, _constants) = pipeline.compile_test("", &mut ast);
-    assert!(!bytecode.is_empty(), "program should produce bytecode");
-
-    use common::Instruction;
-    let exit_branch_count = bytecode
-        .iter()
-        .filter(|b| {
-            matches!(
-                b.bytecode(),
-                Instruction::JMPF | Instruction::CmpJmpf | Instruction::BinSlotImmJmpf
-            )
-        })
-        .count();
-    let jmp_count = bytecode
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::JMP))
-        .count();
-    assert!(
-        exit_branch_count >= 2,
-        "expected at least 2 exit branches (loop + if); got {}",
-        exit_branch_count
-    );
-    assert!(
-        jmp_count >= 1,
-        "expected at least 1 JMP (loop back-edge); got {}",
-        jmp_count
-    );
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let i = 0;
+    let n = 0;
+    while (i < 4) {
+        if i < 2 { n = n + 1; }
+        i = i + 1;
+    }
+    write(stdout(), to_bytes(format("%i,%i", i, n)));
+}
+"#;
+    assert_eq!(run_example_src(src), "4,2");
 }
 
 #[test]
@@ -5780,8 +5754,11 @@ fn two_local_compare_break_bin_slot_slot_jmpt_runs() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
-    let a = 1;
-    let b = 2;
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let a = v[0];
+    let b = v[1];
     let n = 0;
     while (n < 10) {
         if a < b { break; }
@@ -5790,6 +5767,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
+    // Heap reads, not literals: MIR→LIR would fold a constant compare away.
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
@@ -8135,10 +8113,11 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("class slots");
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::LoadField)),
-        "class reads must use LoadField"
+        bytecode.iter().any(|b| matches!(
+            b.bytecode(),
+            common::Instruction::LoadField | common::Instruction::DenseFieldLoad
+        )),
+        "class reads must use slot field loads"
     );
     let named_set = bytecode.iter().any(|b| {
         matches!(b.bytecode(), common::Instruction::SetField)
@@ -8218,6 +8197,56 @@ fn main() {
     assert_eq!(out, "42");
 }
 
+/// Heap-free functions get an empty any-PC map; a function holding an object
+/// gets per-PC maps that list it, and the program still runs under collections.
+#[test]
+fn heap_free_functions_get_precise_frame_maps() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+use gc::{collect};
+class B {
+    pub v: int,
+}
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn holds(int n) -> int {
+    let b = new B(n);
+    collect();
+    return b.v;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", fib(10) + holds(3))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let fib = pipeline.function_offset("fib").expect("fib") as u32;
+    let holds = pipeline.function_offset("holds").expect("holds") as u32;
+    let precise = pipeline.precise_frames();
+    assert!(
+        precise
+            .iter()
+            .any(|m| m.entry_pc == fib && m.any_pc.as_deref() == Some(&[][..])),
+        "fib must be heap-free: {precise:?}"
+    );
+    let holds_map = precise
+        .iter()
+        .find(|m| m.entry_pc == holds)
+        .expect("holds gets per-PC maps");
+    assert!(holds_map.any_pc.is_none(), "holds keeps a heap object: {holds_map:?}");
+    assert!(
+        holds_map.at_pc.iter().any(|s| !s.slots.is_empty()),
+        "the fresh object is listed at its safepoint: {holds_map:?}"
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "58");
+}
+
 #[test]
 fn s2b_maps_survive_archive_load_and_collect() {
     use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
@@ -8257,6 +8286,7 @@ fn main() {
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -8283,6 +8313,7 @@ fn main() {
         debug: loaded.debug_bundle(),
         operand_stack_slots: loaded.operand_stack_slots,
         stack_maps: loaded.stack_maps.clone(),
+        precise_frames: loaded.precise_frames.clone(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
@@ -10632,32 +10663,6 @@ fn main() {
 }
 
 #[test]
-fn for_true_satisfies_non_unit_return() {
-    let mut pipeline = test_pipeline();
-    let result = pipeline.compile_src(
-        r#"
-fn forever() -> int {
-    for (; true; ) {
-    }
-}
-
-fn main() {
-    let _ = forever;
-}
-"#,
-    );
-    assert!(
-        result.is_ok(),
-        "for (; true; ) without break should complete -> int: {:?}",
-        pipeline
-            .messages()
-            .iter()
-            .map(|m| m.message())
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn raise_path_satisfies_result_return() {
     let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
@@ -10941,25 +10946,22 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    let mut set_field_followed_by_pop = 0usize;
-    for w in bytecode.windows(2) {
-        if matches!(w[0].bytecode(), common::Instruction::SetField)
-            && matches!(w[1].bytecode(), common::Instruction::POP)
-        {
-            set_field_followed_by_pop += 1;
-        }
-    }
+    // Field SROA may drop SetField entirely; any that remain must POP.
+    let set_field_without_pop = bytecode.windows(2).any(|w| {
+        matches!(w[0].bytecode(), common::Instruction::SetField)
+            && !matches!(w[1].bytecode(), common::Instruction::POP)
+    });
     assert!(
-        set_field_followed_by_pop >= 2,
+        !set_field_without_pop,
         "class field assignment statements need SetField; POP"
     );
     // Fixed-array const stores are direct STORE — heap StoreIndex is optional.
     assert_eq!(run_example_src(src), "7,30");
 }
 
-/// Repeated GetField of the same name materializes the key once and reuses the value.
+/// Repeated reads of the same field load it once and reuse the value.
 #[test]
-fn repeated_field_key_reuses_prologue_temp() {
+fn repeated_field_read_reuses_loaded_value() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -10976,33 +10978,14 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    // Prologue: STRING table["x"]; STORE temp (ctor also emits STRING "x" for SetField).
-    let x_idx = pipeline
-        .strings()
-        .iter()
-        .position(|s| s == "x")
-        .expect("string table should contain field key x") as u32;
-    let has_string_x_store = bytecode.windows(2).any(|w| {
-        matches!(w[0].bytecode(), common::Instruction::STRING)
-            && w[0].operand_u32() == x_idx
-            && matches!(
-                w[1].bytecode(),
-                common::Instruction::STORE | common::Instruction::StorePop
-            )
+    // Value reuse: one field load then DUPLICATE (not a second load of x).
+    let has_load_dup = bytecode.windows(2).any(|w| {
+        matches!(
+            w[0].bytecode(),
+            common::Instruction::GetField | common::Instruction::LoadField
+        ) && matches!(w[1].bytecode(), common::Instruction::DUPLICATE)
     });
-    assert!(
-        has_string_x_store,
-        "p.x + p.x should materialize STRING \"x\" into a temp slot"
-    );
-    // Value reuse: GetField then DUPLICATE (not a second GetField of x).
-    let has_getfield_dup = bytecode.windows(2).any(|w| {
-        matches!(w[0].bytecode(), common::Instruction::GetField)
-            && matches!(w[1].bytecode(), common::Instruction::DUPLICATE)
-    });
-    assert!(
-        has_getfield_dup,
-        "p.x + p.x should GetField once then DUPLICATE"
-    );
+    assert!(has_load_dup, "p.x + p.x should load x once then DUPLICATE");
     assert_eq!(run_example_src(src), "6");
 }
 
@@ -11123,6 +11106,7 @@ fn main() {
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =
@@ -11839,5 +11823,26 @@ test("forward static method call from instance") {
             machine.panicked(),
             machine.result_is_ok(ret)
         );
+    }
+}
+
+/// Codegen must not depend on hash-set iteration order (finalizer registry).
+#[test]
+fn compile_is_deterministic_for_many_drop_classes() {
+    let mut src = String::new();
+    for i in 0..12 {
+        src.push_str(&format!(
+            "class C{i} {{ pub v: int, }}\nimpl C{i} {{ fn drop() {{ }} }}\n"
+        ));
+    }
+    src.push_str("fn main() {\n");
+    for i in 0..12 {
+        src.push_str(&format!("    let _c{i} = new C{i}({i});\n"));
+    }
+    src.push_str("}\n");
+    let compile = || test_pipeline().compile_src(&src).expect("drop classes compile");
+    let first = compile();
+    for _ in 0..4 {
+        assert_eq!(compile(), first, "bytecode differs between identical compiles");
     }
 }

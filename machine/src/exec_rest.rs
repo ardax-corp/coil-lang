@@ -496,7 +496,9 @@ impl<const S: usize> Machine<S> {
                             if unlikely(!self.stack_maps.is_empty()) {
                                 self.gc_ip = ip;
                             }
+                            self.gc_top_ip = Some(ip);
                             self.gc_collect();
+                            self.gc_top_ip = None;
                             let freed = before.saturating_sub(self.heap.size());
                             self.stack.push(Value::from(freed as i64));
                         }
@@ -1217,6 +1219,7 @@ impl<const S: usize> Machine<S> {
                         saved_frames: vec![(target, 0)],
                         pending_send: Value::from(0_i64),
                         yield_from: None,
+                        delegator: None,
                         yield_from_resume_ip: 0,
                         io_wait: None,
                     };
@@ -1243,7 +1246,7 @@ impl<const S: usize> Machine<S> {
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
                         } else if let Some(sub) = gc.as_ref().yield_from {
-                            self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
+                            Self::with_coroutine_mut(gc, |c| {
                                 c.pending_send = send_val;
                             });
                             self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);
@@ -1571,8 +1574,9 @@ impl<const S: usize> Machine<S> {
                     };
                     let boxed = ObjBoxed { tag, payload };
                     let (object, _) = self.heap.alloc(boxed, Object::Boxed);
-                    self.maybe_gc_after_alloc(ip);
+                    // Root before GC: an unpushed fresh box would be swept.
                     self.stack.push(Value::from(object.addr()));
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::UnboxValue => {
                     let expected_tag = (opcode.operand_u32() & 0xFFFF) as u16;

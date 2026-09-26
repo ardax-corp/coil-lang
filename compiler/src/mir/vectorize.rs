@@ -1598,8 +1598,19 @@ fn emit_vop(args: EmitVopArgs<'_>) -> Option<u8> {
             out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
                 iota_k, iota, 0, 0,
             )));
+            // `SPLAT_F64` reads raw f64 bits: convert the int IV first.
+            let splat_src = if store_ty == dense::TY_F64 {
+                out.push(IlOp::byte(Byte::new(Instruction::DenseCast).with_dense_unary(
+                    dense::CAST_I2F,
+                    idx_tmp,
+                    i_slot,
+                )));
+                idx_tmp
+            } else {
+                i_slot
+            };
             out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                splat_k, splat, i_slot, 0,
+                splat_k, splat, splat_src, 0,
             )));
             out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
                 add_k, dest, splat, iota,
@@ -1698,7 +1709,7 @@ fn emit_vop(args: EmitVopArgs<'_>) -> Option<u8> {
             Some(vc)
         }
         VOp::CastI2F(src) => {
-            // V0: `i as float` on the IV becomes f64 iota + splat(i as i64 bits).
+            // V0: `i as float` on the IV becomes f64 iota + splat(float(i)).
             // Exact for |i| < 2^53 (index loops).
             match src.as_ref() {
                 VOp::Iota => {
@@ -1716,10 +1727,15 @@ fn emit_vop(args: EmitVopArgs<'_>) -> Option<u8> {
                 }
                 VOp::Splat { v, .. } => {
                     let dest = alloc_v(next_v)?;
+                    out.push(IlOp::byte(Byte::new(Instruction::DenseCast).with_dense_unary(
+                        dense::CAST_I2F,
+                        idx_tmp,
+                        regs[v.index()],
+                    )));
                     out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
                         simd::SPLAT_F64,
                         dest,
-                        regs[v.index()],
+                        idx_tmp,
                         0,
                     )));
                     Some(dest)

@@ -1,6 +1,14 @@
 # VM opcodes (builtins-related)
 
-User code does not name these directly; the compiler emits them:
+User code does not name these directly; the compiler emits them.
+
+**Load-time verification.** `decode_archived_program` runs
+`common::verify_bytecode` on every archive (`coil run`, `coil-embed`,
+pipeline reload); debug builds also verify freshly compiled programs. It
+rejects retired opcodes (tombstones below) and out-of-range jump / call
+targets (including pool-held fused-jump descriptors), constant-pool,
+string-table and static-slot indices. Frame-slot operands and stack height
+remain compiler invariants.
 
 | Opcode | Role |
 |--------|------|
@@ -25,17 +33,17 @@ User code does not name these directly; the compiler emits them:
 | `CALL` (bit 31) | Two-slot return width. Bit 31 set (`Byte::CALL_RET2_BIT`) means the callee leaves two words instead of one boxed word; arity moves to `[30:24]` (0..=127) to make room. Enums use `[payload, tag]`; arity-2 immediate products use `[a, b]` (second on top). Clear (old archives, or any `with_call_packed` caller) means one word — no archive bump. See [limitations.md](limitations.md) two-slot direct CALL/RETURN. |
 | `RETURN` (operand) | `0` (default; old archives) is one word. `2` pops/pushes two words (second on top) instead of one value. |
 | `DenseBin` / `DenseCmp` | MIR 3-address numeric op / compare. Operand `[31:24] kind`, `[23:16] dest`, `[15:8] lhs`, `[7:0] rhs`. Stack-neutral; writes a typed frame slot. Archive **minor 6**. |
-| `DenseBin2` | Two-word pack of consecutive `DenseBin` (COI-381 S2). First `dense_abc` is the opcode operand; the following word is a payload `DenseBin` (second op). One dispatch; sequential IEEE (no FMA / reassoc). Not `FloatChainStore`. Archive **minor 16**. Table/hotmatch peek a leftover `DenseBin` (COI-389 X4 odd-length residue) then a trailing `JMP` (COI-387 X2 latch) without a new discriminant; giant match does not. |
+| `DenseBin2` | Two-word pack of consecutive `DenseBin` (COI-381 S2). First `dense_abc` is the opcode operand; the following word is a payload `DenseBin` (second op). One dispatch; sequential IEEE (no FMA / reassoc). Not `FloatChainStore`. Archive **minor 16**. The dense streak (`execute_dense`) peeks a leftover `DenseBin` (COI-389 X4 odd-length residue) then a trailing `JMP` (COI-387 X2 latch) without a new discriminant; giant match does not. |
 | `DenseBinJmpf` | Two-word pack of `DenseBin` then a fused `*Jmpf`/`*Jmpt` (COI-377 S1). Operand is the bin `dense_abc`; the following word is the jump (`BinSlotSlotJmpf` / `BinSlotImmJmpf` / twins). One dispatch; sequential IEEE then the compare-branch. Not `DenseCmp`+jmp. Archive **minor 17**. |
 | `DenseIndexJmpf` | Two-word pack of `DenseIndex` then a fused `*Jmpf`/`*Jmpt` (COI-379 S4). Operand is the index `dense_abc`; the following word is the jump (`BinSlotImmJmpf` / twins, or `BinSlotSlotJmpf` / twins). One dispatch; heap load then compare-branch. Stacks with last-addr `Object` cache (COI-372). Archive **minor 18**. |
 | `MakeEnumReturn` | `MakeEnum; RETURN` for a one-word heap enum (COI-388 X3). Same operand as `MakeEnum` (`[31:16]` tag, `[15:0]` arity). Fuse-select only; two-word `RETURN` is not fused. Not ALWAYS_HOT. Archive **minor 19**. |
 | `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
 | `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for residual φ edge copies; COI-383 S6 sinks + coalesces so many latch/header copies never emit. |
-| `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). Table/hotmatch peek a trailing `DenseBin` / `DenseBin2` after `DenseCast` (COI-380 S3) without a new discriminant; giant match does not. After a peeked `DenseBin2`, X4 also takes a leftover `DenseBin`. |
+| `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). The dense streak (`execute_dense`) peeks a trailing `DenseBin` / `DenseBin2` after `DenseCast` (COI-380 S3) without a new discriminant; giant match does not. After a peeked `DenseBin2`, X4 also takes a leftover `DenseBin`. |
 | `VLoad` / `VStore` | Compiler-only 8-lane numeric heap access (COI-310). `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` vreg, `[15:8]` array slot, `[7:0]` index slot. No heap refs in vregs. Archive **minor 8**. |
 | `VBin` / `VMove` | 8-lane zip / splat / iota / neg via `coil-simd` (`VBin` packing matches `DenseBin`; splat `a` is a frame slot). `VMove` copies vregs. HostInvoke packs (P12) stay. |
 | `VReduce` / `VFma` | S5b V1 (archive **minor 9**). `VReduce`: `[31:24]` ty, `[23:16]` dest slot, `[15:8]` vsrc — `dest = fold_left_add(dest, lanes)` (float sequential). `VFma`: dest/a/b vregs — `v[dest] = v[a]*v[b] + v[dest]` mul-then-add (no hardware contract). |
-| `DenseIndex` / `DenseStoreIndex` | A2 (archive **minor 10**). Stack-neutral heap index / store. `[31:24]` flags (bit 0 = unchecked), `[23:16]` dest, `[15:8]` array, `[7:0]` index. `DenseStoreIndex` dest is the stored value. Last-addr `Object` cache + `frame_pins` (COI-372); slab probe only on identity miss. Table/hotmatch peek a trailing `DenseBin`/`DenseBin2` then `JMP` after `DenseStoreIndex` (COI-382 S5 nsieve k-loop) without a new discriminant; giant match does not. |
+| `DenseIndex` / `DenseStoreIndex` | A2 (archive **minor 10**). Stack-neutral heap index / store. `[31:24]` flags (bit 0 = unchecked), `[23:16]` dest, `[15:8]` array, `[7:0]` index. `DenseStoreIndex` dest is the stored value. Last-addr `Object` cache + `frame_pins` (COI-372); slab probe only on identity miss. The dense streak (`execute_dense`) peeks a trailing `DenseBin`/`DenseBin2` then `JMP` after `DenseStoreIndex` (COI-382 S5 nsieve k-loop) without a new discriminant; giant match does not. |
 | `DenseArrayLen` | `[15:8]` dest, `[7:0]` array. |
 | `DenseMake` | `MakeArray` / `MakeTuple` / `MakeEnum`. `[31:24]` kind (`0` array, `1` tuple, `2+tag` enum), `[23:16]` dest, `[15:8]` arity, `[7:0]` first element slot (consecutive). |
 | `DensePush` | CALL / HostInvoke ABI edge: push consecutive slots. `[15:8]` arity, `[7:0]` base. |

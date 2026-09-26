@@ -47,6 +47,9 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
+    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// map-lift shortcuts `allow_effects` enables in lowering.
+    pub allow_host_edges: bool,
     /// S2b: fill roots without SSA verify.
     pub skip_verify: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -67,6 +70,7 @@ impl MirBuilder {
             subst: HashMap::new(),
             finished: false,
             allow_effects: false,
+            allow_host_edges: false,
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
             match_seek: None,
@@ -105,6 +109,27 @@ impl MirBuilder {
     pub fn use_local(&mut self, local: LocalId, ty: MirTy) -> Result<ValueId, MirError> {
         let b = self.cur()?;
         Ok(self.read_variable(local, ty, b))
+    }
+
+    /// `local`'s definition in the current block, without reading through
+    /// predecessors (no φ is inserted).
+    pub fn local_def_here(&self, local: LocalId) -> Option<ValueId> {
+        let b = self.current?;
+        self.current_def[b.index()].get(&local).copied()
+    }
+
+    /// Field ops need a heapref object. Map lifts (`skip_verify`) only encode
+    /// liveness, so a niche word already tested on this path is accepted.
+    fn field_object_ok(&self, object: ValueId) -> bool {
+        let ty = self.resolve_ty(object);
+        ty == MirTy::HeapRef || (self.skip_verify && ty.is_heap_word())
+    }
+
+    fn is_const_one(&self, v: ValueId) -> bool {
+        let v = self.resolve(v);
+        self.func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
+            matches!(i, MirInst::Const { dest, c: MirConst::I64(1) | MirConst::I32(1) } if *dest == v)
+        })
     }
 
     pub fn create_block(&mut self) -> BlockId {
@@ -178,6 +203,10 @@ impl MirBuilder {
         let dest_ty = if heap_bit {
             match op {
                 MirBinOp::BitOr => MirTy::NicheRes,
+                // `word & 1` reads the niche Result tag; other masks untag.
+                MirBinOp::BitAnd if self.is_const_one(lhs) || self.is_const_one(rhs) => {
+                    MirTy::I64
+                }
                 MirBinOp::BitAnd => MirTy::HeapRef,
                 _ => {
                     if lt.is_heap_word() {
@@ -233,6 +262,28 @@ impl MirBuilder {
             dest,
             op,
             ty: cmp_ty,
+            lhs: self.resolve(lhs),
+            rhs: self.resolve(rhs),
+        })?;
+        Ok(dest)
+    }
+
+    /// Strict bool `&&` / `||` as `BitAnd` / `BitOr` on `Bool` (0/1) values.
+    pub fn ins_bool_logic(
+        &mut self,
+        op: MirBinOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let (lt, rt) = (self.resolve_ty(lhs), self.resolve_ty(rhs));
+        if lt != MirTy::Bool || rt != MirTy::Bool || !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr) {
+            return Err(MirError::msg(format!("bool logic {op:?} on {lt}, {rt}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Bin {
+            dest,
+            op,
+            ty: MirTy::Bool,
             lhs: self.resolve(lhs),
             rhs: self.resolve(rhs),
         })?;
@@ -309,7 +360,7 @@ impl MirBuilder {
         if !super::host_allow::dense_host_layout_ok(layout) {
             return Err(MirError::msg(format!("host {native_id} layout {layout}")));
         }
-        let spec = if self.allow_effects {
+        let spec = if self.allow_effects || self.allow_host_edges {
             super::host_allow::host_edge_spec(native_id)
         } else {
             super::host_allow::host_spec(native_id)
@@ -325,7 +376,8 @@ impl MirBuilder {
         }
         let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
         for (i, (&a, &ty)) in args.iter().zip(spec.args).enumerate() {
-            if self.resolve_ty(a) != ty {
+            let actual = self.resolve_ty(a);
+            if !super::host_allow::host_arg_ok(native_id, ty, actual) {
                 return Err(MirError::msg(format!(
                     "host {} arg {i} is {} vs {ty}",
                     spec.name,
@@ -511,7 +563,7 @@ impl MirBuilder {
         index: u32,
         dest_ty: MirTy,
     ) -> Result<ValueId, MirError> {
-        if self.resolve_ty(object) != MirTy::HeapRef {
+        if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldLoad object {}",
                 self.resolve_ty(object)
@@ -542,7 +594,7 @@ impl MirBuilder {
         name: Option<ValueId>,
         index: Option<u32>,
     ) -> Result<ValueId, MirError> {
-        if self.resolve_ty(object) != MirTy::HeapRef {
+        if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldStore object {}",
                 self.resolve_ty(object)
@@ -1107,6 +1159,11 @@ impl MirBuilder {
             v = n;
         }
         v
+    }
+
+    /// SSA type of `v` after φ / copy substitution.
+    pub fn value_ty(&self, v: ValueId) -> MirTy {
+        self.resolve_ty(v)
     }
 
     fn resolve_ty(&self, v: ValueId) -> MirTy {

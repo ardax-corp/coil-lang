@@ -54,6 +54,34 @@ and relocate mapped slots on collect.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
+- **Precise frames** (archive **minor 21**). A
+  [`PreciseFrameMap`](../../common/src/stack_map.rs) describes a body's
+  frame completely where it applies: `any_pc` (valid at every PC) or
+  `at_pc` (exact PCs). The GC roots only the listed slots of such a frame
+  and scans every other frame word by word, so a stack whose frames all
+  have maps is not scanned at all.
+  [`bind_precise_frames`](../../compiler/src/codegen/precise_frames.rs) runs
+  on the final bytecode of every body (any tier):
+  - heap-free functions (`fn_is_heap_free`: every parameter and expression
+    has a numeric / `unit` / `never` checker type, no closures) whose
+    bytecode has no heap-producing op get an empty `any_pc` map;
+  - every other body gets a forward dataflow over the physical words of its
+    frame (one "may hold a heap word" bit per word, a cursor range after
+    joins of differing heights, callee clobber above a `CALL` base). It
+    records the complete heap slots after each allocating / host op and the
+    caller's words below each `CALL`'s arguments. Words above the cursor
+    count only when last written as a slot (store, dense register, match
+    payload). `JumpIfMatch` payload arity comes from lowering
+    (`Lowered::match_arities`).
+  A body is refused (no map, conservative) on any opcode the dataflow does
+  not model (SIMD, closures, coroutines, FFI), on control flow that enters
+  it anywhere but its entry, or when its arity is not fixed by direct
+  `CALL`s / plain `CodePtr`s (`main` is seeded from the prologue).
+  The VM trusts a map only at a known PC: the top frame's safepoint PC, or a
+  return PC that follows a `CALL`. A frame that entered native code which
+  re-entered the VM (`call_function`) or holds a coroutine resume base stays
+  conservative. On `gc_churn`, `result_heap_churn` and `dict_count` every
+  frame at every collection is precise.
 
 ## Later (not this island)
 
@@ -80,9 +108,9 @@ and relocate mapped slots on collect.
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
-Write barriers (`GcBarrier` kind `write`) stay named only. S4 SATB
-already shades at VM field / vec stores; a compiler opcode would not
-pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
+Write barriers (`GcBarrier` kind `write`) stay named only. S4 marks
+to completion before the mutator runs, so no store needs a barrier; a
+compiler opcode would not pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
 of growing GC maps.
 
 See [mir-islands.md](mir-islands.md) (I5),

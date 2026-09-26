@@ -607,6 +607,36 @@ impl IlOp {
     /// this to find a real `RETURN` sink, not a fused return producer. A
     /// two-word `RETURN` (`ret_words == 2`) is excluded too: it pops/pushes
     /// `[payload, tag]`, not the single value these passes assume.
+    /// Ends a block with no successor: returns, halt, tail calls, and their
+    /// residual `Byte` encodings.
+    pub fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            IlOp::Return { .. }
+                | IlOp::Halt { .. }
+                | IlOp::LoadReturnSlot { .. }
+                | IlOp::ConstReturnImm { .. }
+                | IlOp::BinReturn { .. }
+                | IlOp::Entry {
+                    kind: EntryKind::TailCall,
+                    ..
+                }
+        ) || matches!(
+            self.as_encode_byte(),
+            Some(b) if matches!(
+                *b.bytecode(),
+                Instruction::RETURN
+                    | Instruction::ReturnPair
+                    | Instruction::HALT
+                    | Instruction::LoadReturnSlot
+                    | Instruction::ConstReturnImm
+                    | Instruction::BinReturn
+                    | Instruction::MakeEnumReturn
+                    | Instruction::TailCall
+            )
+        )
+    }
+
     pub fn is_plain_return(&self) -> bool {
         matches!(self, IlOp::Return { ret_words: 1, .. })
             || matches!(

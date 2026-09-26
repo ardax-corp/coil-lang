@@ -1,13 +1,14 @@
 //! Pre-walk [`NodeId`] minting for span-indexed type lookup.
 //!
-//! The pre-walk and [`Checker::infer`](super::infer::Checker::infer) both
-//! visit the AST in pre-order, so the n-th infer call consumes the n-th ID.
+//! The pre-walk records each node's id by address (checked against its span).
+//! [`Checker::infer`](super::infer::Checker::infer) and codegen key facts by
+//! that exact id; the pre-order counter they also advance only stands in for
+//! clones of a recorded node ([`IdTable::walk_id`]), since rules that skip or
+//! revisit children make it drift.
 
 use std::collections::HashMap;
 
-use parser::ast::{
-    EnumConstructPayload, EnumVariantPayload, Expression, Output, Pattern, PatternPayload,
-};
+use parser::ast::{EnumConstructPayload, EnumVariantPayload, Output};
 
 /// Stable identifier for an AST node (minted in pre-walk visit order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -23,9 +24,15 @@ impl NodeId {
 #[derive(Debug, Default, Clone)]
 pub struct IdTable {
     ids: Vec<NodeId>,
-    /// Heap pointer of each node's `Expression` → minted id (stable for the
-    /// AST lifetime). Lets emit look up sidecar facts without source spans.
-    by_expr_ptr: HashMap<usize, NodeId>,
+    /// Address of each node's `Output` → (minted id, span). Parents that
+    /// rebuild child vectors free and reuse addresses, so a lookup whose span
+    /// differs is a stale hit on another node and yields `None`.
+    by_expr_ptr: HashMap<usize, (NodeId, usize, usize)>,
+    /// Span of each minted id (index = id), to vet pre-order fallbacks.
+    spans: Vec<(usize, usize)>,
+    /// Next id for nodes the pre-walk never saw; outside the minted range so
+    /// it neither grows [`Self::len`] nor aliases a real node.
+    next_synthetic: u32,
 }
 
 impl IdTable {
@@ -40,20 +47,43 @@ impl IdTable {
     }
 
     pub fn record_output(&mut self, node: &Output<'_>, id: NodeId) {
-        self.by_expr_ptr
-            .insert(std::ptr::from_ref(node) as *const Output<'_> as usize, id);
+        let idx = id.0 as usize;
+        if self.spans.len() <= idx {
+            self.spans.resize(idx + 1, (usize::MAX, usize::MAX));
+        }
+        self.spans[idx] = (node.0.start, node.0.end);
+        self.by_expr_ptr.insert(
+            std::ptr::from_ref(node) as *const Output<'_> as usize,
+            (id, node.0.start, node.0.end),
+        );
     }
 
-    pub fn id_of_ptr(&self, ptr: usize) -> Option<NodeId> {
-        self.by_expr_ptr.get(&ptr).copied()
+    /// Id for `node` in a pre-order walk: its recorded id, else the pre-order
+    /// `seq` id when that id was minted for the same span (a clone of that
+    /// node). `None` means `seq` belongs to a different node.
+    pub fn walk_id(&self, node: &Output<'_>, seq: Option<NodeId>) -> Option<NodeId> {
+        self.id_of_output(node).or_else(|| {
+            seq.filter(|s| self.spans.get(s.0 as usize) == Some(&(node.0.start, node.0.end)))
+        })
     }
 
-    pub fn id_of_expr(&self, expr: &Expression<'_>) -> Option<NodeId> {
-        self.id_of_ptr(std::ptr::from_ref(expr) as usize)
+    /// [`Self::walk_id`], minting a synthetic id instead of `None` so facts
+    /// about an unrecorded node never overwrite another node's.
+    pub fn resolve_walk_id(&mut self, node: &Output<'_>, seq: NodeId) -> NodeId {
+        if let Some(id) = self.walk_id(node, Some(seq)) {
+            return id;
+        }
+        let id = NodeId((1 << 31) + self.next_synthetic);
+        self.next_synthetic += 1;
+        id
     }
 
     pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {
-        self.id_of_ptr(std::ptr::from_ref(node) as *const Output<'_> as usize)
+        let ptr = std::ptr::from_ref(node) as *const Output<'_> as usize;
+        match self.by_expr_ptr.get(&ptr) {
+            Some(&(id, start, end)) if start == node.0.start && end == node.0.end => Some(id),
+            _ => None,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -73,10 +103,11 @@ impl IdTable {
 pub fn pre_walk(node: &Output, table: &mut IdTable) {
     let id = table.push();
     table.record_output(node, id);
-    pre_walk_children(node, table);
+    walk_children(node, &mut |child| pre_walk(child, table));
 }
 
-fn pre_walk_children(node: &Output, table: &mut IdTable) {
+/// Call `visit` on each direct child expression of `node`, in pre-order.
+pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Output<'s>)) {
     use parser::ast::Expression;
     match node.1.as_ref() {
         Expression::Noop(_)
@@ -99,15 +130,15 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
 
         Expression::Argument { ty, .. } => {
             if let Some(t) = ty {
-                pre_walk(t, table);
+                visit(t);
             }
         }
 
-        Expression::Spread(inner) => pre_walk(inner, table),
+        Expression::Spread(inner) => visit(inner),
 
         Expression::TypeFnSig { params, ret } => {
-            pre_walk(params, table);
-            pre_walk(ret, table);
+            visit(params);
+            visit(ret);
         }
 
         Expression::AttrDecl {
@@ -117,26 +148,26 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             body,
             ..
         } => {
-            pre_walk(args, table);
+            visit(args);
             if let Some(ret) = returns {
-                pre_walk(ret, table);
+                visit(ret);
             }
-            pre_walk(body, table);
+            visit(body);
         }
 
-        Expression::LetDestructure { rhs, .. } => pre_walk(rhs, table),
+        Expression::LetDestructure { rhs, .. } => visit(rhs),
 
-        Expression::NamedArg(_, value) => pre_walk(value, table),
+        Expression::NamedArg(_, value) => visit(value),
 
         Expression::TypeApp { args, .. } => {
             for a in args {
-                pre_walk(a, table);
+                visit(a);
             }
         }
 
         Expression::TypeFun(arg, ret) => {
-            pre_walk(arg, table);
-            pre_walk(ret, table);
+            visit(arg);
+            visit(ret);
         }
 
         Expression::Expr(e)
@@ -156,17 +187,17 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
         | Expression::LogicalNot(e)
         | Expression::Positive(e)
         | Expression::Adjust { target: e, .. }
-        | Expression::Member(e) => pre_walk(e, table),
-        Expression::Defer { body, .. } => pre_walk(body, table),
+        | Expression::Member(e) => visit(e),
+        Expression::Defer { body, .. } => visit(body),
 
         Expression::CompoundAssign(name, _, value) => {
-            pre_walk(name, table);
-            pre_walk(value, table);
+            visit(name);
+            visit(value);
         }
 
         Expression::Assignment(name, value) => {
-            pre_walk(name, table);
-            pre_walk(value, table);
+            visit(name);
+            visit(value);
         }
 
         Expression::Add(l, r)
@@ -189,22 +220,22 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
         | Expression::Leq(l, r)
         | Expression::Geq(l, r)
         | Expression::Coalesce(l, r) => {
-            pre_walk(l, table);
-            pre_walk(r, table);
+            visit(l);
+            visit(r);
         }
         Expression::Cast(expr, ty) => {
-            pre_walk(expr, table);
-            pre_walk(ty, table);
+            visit(expr);
+            visit(ty);
         }
         Expression::Range { start, end, .. } => {
-            pre_walk(start, table);
-            pre_walk(end, table);
+            visit(start);
+            visit(end);
         }
 
         Expression::Resume(target, arg) => {
-            pre_walk(target, table);
+            visit(target);
             if let Some(a) = arg {
-                pre_walk(a, table);
+                visit(a);
             }
         }
 
@@ -215,82 +246,82 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
         | Expression::Declare(cs)
         | Expression::Invoke(cs) => {
             for c in cs {
-                pre_walk(c, table);
+                visit(c);
             }
         }
-        Expression::Dload(path) => pre_walk(path, table),
-        Expression::Done(handle) => pre_walk(handle, table),
+        Expression::Dload(path) => visit(path),
+        Expression::Done(handle) => visit(handle),
         Expression::Tuple(items) => {
             for c in items {
-                pre_walk(c, table);
+                visit(c);
             }
         }
         Expression::Array(items) => {
             for c in items {
-                pre_walk(c, table);
+                visit(c);
             }
         }
         Expression::Index(target, index) => {
-            pre_walk(target, table);
+            visit(target);
             if let Some(index) = index {
-                pre_walk(index, table);
+                visit(index);
             }
         }
-        Expression::Readonly(inner) => pre_walk(inner, table),
+        Expression::Readonly(inner) => visit(inner),
         Expression::StaticDecl { ty, init, .. } => {
             if let Some(ty) = ty {
-                pre_walk(ty, table);
+                visit(ty);
             }
-            pre_walk(init, table);
+            visit(init);
         }
         Expression::Dict(fields) => {
             for f in fields {
-                pre_walk(&f.value, table);
+                visit(&f.value);
             }
         }
         Expression::If(branches) => {
             for b in branches {
-                pre_walk(b, table);
+                visit(b);
             }
         }
         Expression::Implementation { methods, .. } => {
             for m in methods {
-                pre_walk(m, table);
+                visit(m);
             }
         }
         Expression::Class { fields, .. } => {
             for f in fields {
-                pre_walk(f, table);
+                visit(f);
             }
         }
 
         Expression::Function { args, body, .. } => {
-            pre_walk(args, table);
+            visit(args);
             if let Some(body) = body {
-                pre_walk(body, table);
+                visit(body);
             }
         }
         Expression::Lambda { args, body, .. } => {
-            pre_walk(args, table);
-            pre_walk(body, table);
+            visit(args);
+            visit(body);
         }
         Expression::TestCase { name, body } => {
-            pre_walk(name, table);
-            pre_walk(body, table);
+            visit(name);
+            visit(body);
         }
 
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {
-                pre_walk(c, table);
+                visit(c);
             }
-            pre_walk(body, table);
+            visit(body);
         }
 
         Expression::Call { name, args } => {
-            pre_walk(name, table);
+            visit(name);
             if let Some(a) = args {
                 for arg in a {
-                    pre_walk(arg, table);
+                    visit(arg);
                 }
             }
         }
@@ -304,19 +335,18 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             // For-in binds `identifier` before the body; visit order must
             // match infer (iterable → binding → body). Pattern for-in has
             // no Identifier node.
-            pre_walk(iterable, table);
+            visit(iterable);
             if let Some(i) = identifier {
-                pre_walk(i, table);
+                visit(i);
             }
-            pre_walk(body, table);
+            visit(body);
         }
 
         // Patterns have no NodeId; walk bodies only (lockstep with infer).
         Expression::Match { scrutinee, arms } => {
-            pre_walk(scrutinee, table);
+            visit(scrutinee);
             for arm in arms {
-                pre_walk_pattern(&arm.pattern.1, table);
-                pre_walk(&arm.body, table);
+                visit(&arm.body);
             }
         }
 
@@ -325,11 +355,9 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             then_arm,
             else_arm,
         } => {
-            pre_walk(scrutinee, table);
-            pre_walk_pattern(&then_arm.pattern.1, table);
-            pre_walk(&then_arm.body, table);
-            pre_walk_pattern(&else_arm.pattern.1, table);
-            pre_walk(&else_arm.body, table);
+            visit(scrutinee);
+            visit(&then_arm.body);
+            visit(&else_arm.body);
         }
 
         Expression::WhileLet {
@@ -337,44 +365,42 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             then_arm,
             on_miss,
         } => {
-            pre_walk(scrutinee, table);
-            pre_walk_pattern(&then_arm.pattern.1, table);
-            pre_walk(&then_arm.body, table);
-            pre_walk_pattern(&on_miss.pattern.1, table);
-            pre_walk(&on_miss.body, table);
+            visit(scrutinee);
+            visit(&then_arm.body);
+            visit(&on_miss.body);
         }
 
         Expression::EnumDecl { variants, .. } => {
             for v in variants {
-                pre_walk(v, table);
+                visit(v);
             }
         }
         Expression::TypeAlias { ty, .. } => {
-            pre_walk(ty, table);
+            visit(ty);
         }
         Expression::ExternBlock { declarations, .. } => {
             for decl in declarations {
-                pre_walk(&decl.args, table);
+                visit(&decl.args);
                 if let Some(ret) = &decl.returns {
-                    pre_walk(ret, table);
+                    visit(ret);
                 }
             }
         }
         Expression::ExternStruct(decl) => {
             for (_, ty) in &decl.fields {
-                pre_walk(ty, table);
+                visit(ty);
             }
         }
         Expression::EnumVariant { payload, .. } => match payload {
             EnumVariantPayload::Unit => {}
             EnumVariantPayload::Tuple(parts) => {
                 for p in parts {
-                    pre_walk(p, table);
+                    visit(p);
                 }
             }
             EnumVariantPayload::Record(fields) => {
                 for f in fields {
-                    pre_walk(&f.value, table);
+                    visit(&f.value);
                 }
             }
         },
@@ -382,77 +408,57 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             EnumConstructPayload::Unit => {}
             EnumConstructPayload::Tuple(args) => {
                 for arg in args {
-                    pre_walk(arg, table);
+                    visit(arg);
                 }
             }
             EnumConstructPayload::Record(parts) => {
                 for p in parts {
-                    pre_walk(&p.value, table);
+                    visit(&p.value);
                 }
             }
         },
 
-        Expression::Method(_, body) => pre_walk(body, table),
+        Expression::Method(_, body) => visit(body),
 
         Expression::Access(receiver, _) | Expression::OptionalAccess(receiver, _) => {
-            pre_walk(receiver, table)
+            visit(receiver)
         }
 
         Expression::Instantiate(class, args) => {
-            pre_walk(class, table);
+            visit(class);
             if let Some(a) = args {
                 for arg in a {
-                    pre_walk(arg, table);
+                    visit(arg);
                 }
             }
         }
 
         // New generic-system nodes — no ID-table children needed yet.
-        Expression::Forall { ty, .. } => pre_walk(ty, table),
+        Expression::Forall { ty, .. } => visit(ty),
         Expression::TypeClass { methods, .. } => {
             for m in methods {
-                pre_walk(m, table);
+                visit(m);
             }
         }
         Expression::TypeClassImpl { args, methods, .. } => {
             // Walk type-annotation args so NodeId counters match infer.rs's
             // `self.infer(a)` calls for each arg.
             for a in args {
-                pre_walk(a, table);
+                visit(a);
             }
             for m in methods {
-                pre_walk(m, table);
+                visit(m);
             }
         }
         Expression::AssocTypeDecl { .. } => {}
         Expression::AssocTypeDef { ty, .. } => {
-            pre_walk(ty, table);
+            visit(ty);
         }
         Expression::TypeProjection { args, .. } => {
             for arg in args {
-                pre_walk(arg, table);
+                visit(arg);
             }
         }
-    }
-}
-
-/// Structural walk over patterns (no NodeIds).
-pub fn pre_walk_pattern(pattern: &Pattern, _table: &mut IdTable) {
-    match pattern {
-        Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } | Pattern::Integer(_) => {}
-        Pattern::Constructor { payload, .. } => match payload {
-            PatternPayload::Unit => {}
-            PatternPayload::Tuple(parts) => {
-                for p in parts {
-                    pre_walk_pattern(&p.1, _table);
-                }
-            }
-            PatternPayload::Record(fields) => {
-                for pf in fields {
-                    pre_walk_pattern(&pf.pattern.1, _table);
-                }
-            }
-        },
     }
 }
 

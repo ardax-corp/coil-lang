@@ -54,6 +54,26 @@ pub fn dispatch_count() -> u64 {
 #[cfg(not(any(test, feature = "vm_profile")))]
 pub fn reset_dispatch_count() {}
 
+// Per-PC dispatch histogram (tests / `vm_profile` only). Off until
+// [`begin_pc_profile`] so ordinary test runs do not pay for it.
+#[cfg(any(test, feature = "vm_profile"))]
+thread_local! {
+    static VM_PC_PROFILE: std::cell::RefCell<Option<Vec<u64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start counting dispatches per PC on this thread.
+#[cfg(any(test, feature = "vm_profile"))]
+pub fn begin_pc_profile() {
+    VM_PC_PROFILE.with(|p| *p.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop profiling and return dispatch counts indexed by PC.
+#[cfg(any(test, feature = "vm_profile"))]
+pub fn take_pc_profile() -> Vec<u64> {
+    VM_PC_PROFILE.with(|p| p.borrow_mut().take().unwrap_or_default())
+}
+
 // Frame-relative cursor (`stack.tell() - sp`) observed before each dispatch,
 // paired with the PC. Feeds the differential test for the static cursor model
 // in `compiler::il::tell`, which cannot be trusted from code reading alone.
@@ -270,6 +290,14 @@ fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
     #[cfg(any(test, feature = "vm_profile"))]
     {
         VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
+        VM_PC_PROFILE.with(|p| {
+            if let Some(counts) = p.borrow_mut().as_mut() {
+                if counts.len() <= ip {
+                    counts.resize(ip + 1, 0);
+                }
+                counts[ip] += 1;
+            }
+        });
         VM_CURSOR_TRACE.with(|t| {
             let mut t = t.borrow_mut();
             if t.len() < CURSOR_TRACE_CAP {
@@ -483,6 +511,11 @@ pub struct Machine<const S: usize> {
     io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     /// S2b maps: live heap IL slots at alloc safepoints.
     stack_maps: Vec<common::FrameStackMap>,
+    /// Complete frame maps (sorted by entry); see [`common::PreciseFrameMap`].
+    precise_frames: Vec<common::PreciseFrameMap>,
+    /// PC past the op that entered the current GC safepoint, while one runs.
+    /// `None` keeps the top frame on the conservative scan.
+    gc_top_ip: Option<usize>,
     /// Bytecode PC of the current GC safepoint (alloc / `gc::collect`).
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
@@ -557,6 +590,8 @@ impl<const S: usize> Machine<S> {
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            gc_top_ip: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
             finalizer_by_type: std::collections::HashMap::default(),
@@ -1221,7 +1256,6 @@ impl<const S: usize> Machine<S> {
             }
 
             self.mark_from_vm_roots();
-            self.relocate_mapped_slots();
             let queue = self.queue_unmarked_finalizers();
             if !queue.is_empty() {
                 let mut gray = Vec::new();
@@ -1244,7 +1278,6 @@ impl<const S: usize> Machine<S> {
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
-            self.relocate_mapped_slots();
             // Cache is not a GC root; unmarked interned literals are gone.
             self.invalidate_program_string_cache();
             if !self.gc_deferred {
@@ -1266,7 +1299,7 @@ impl<const S: usize> Machine<S> {
         self.heap.restore_gc_roots(roots);
     }
 
-    /// Incremental mark / SATB remark / lazy sweep at an alloc safepoint.
+    /// Mark to completion / lazy sweep at an alloc safepoint.
     #[inline(never)]
     fn gc_safepoint(&mut self) {
         if self.gc_in_progress {
@@ -1301,19 +1334,17 @@ impl<const S: usize> Machine<S> {
 
     #[inline(never)]
     fn gc_mark_slice(&mut self) {
-        // Drain mark at this safepoint so the mutator never runs while
-        // `GcPhase::Marking` (SATB is then only needed on host stores).
-        let n = self.heap.gc_work_quantum();
-        while !self.heap.mark_quantum(n) {}
+        // Drain mark at this safepoint: the mutator never runs with gray
+        // objects (finalizers below run after the drain), so stores need no
+        // write barrier. See `Heap::resurrect_during_mark`.
+        while !self.heap.mark_quantum(usize::MAX) {}
         self.gc_remark_vm_roots();
         while !self.heap.mark_quantum(usize::MAX) {}
-        self.relocate_mapped_slots();
         let queue = self.queue_unmarked_finalizers();
         if !queue.is_empty() {
             for (val, _) in &queue {
                 if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
-                    self.heap
-                        .satb_shade_member(crate::memory::Member::Object(obj));
+                    self.heap.shade_for_finalizer(obj);
                 }
             }
             while !self.heap.mark_quantum(usize::MAX) {}
@@ -1339,21 +1370,15 @@ impl<const S: usize> Machine<S> {
     }
 
     fn gc_sweep_slice(&mut self) {
-        let n = self.heap.gc_work_quantum();
+        let n = self.heap.gc_sweep_quantum();
         if self.heap.sweep_quantum(n) {
-            self.relocate_mapped_slots();
             self.invalidate_program_string_cache();
         }
     }
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
         let mut roots = self.heap.take_gc_roots();
-        for v in self.stack.as_slice() {
-            let addr = v.heap_addr();
-            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        }
+        self.collect_stack_roots(&mut roots);
         {
             let addr = self.steal_join_root.heap_addr();
             if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
@@ -1369,12 +1394,6 @@ impl<const S: usize> Machine<S> {
         for ctx in &self.resume_stack {
             roots.push(ctx.coro.as_ptr() as u64);
         }
-        for obj in self.heap.into_iter() {
-            if let Object::Coroutine(gc) = obj {
-                roots.push(gc.as_ptr() as u64);
-                Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
-            }
-        }
         for pins in &self.frame_pins {
             for obj in pins.by_slot.iter().flatten() {
                 roots.push(obj.addr());
@@ -1389,6 +1408,86 @@ impl<const S: usize> Machine<S> {
         roots.extend(self.userland_libraries.keys().copied());
         self.collect_mapped_slot_addrs(&mut roots);
         roots
+    }
+
+    /// Operand-stack roots, frame by frame: a frame with a trusted precise map
+    /// roots only its heap slots; every other stack word is scanned.
+    fn collect_stack_roots(&self, roots: &mut Vec<u64>) {
+        let heap = &self.heap;
+        let mut root = |v: Value| {
+            let addr = v.heap_addr();
+            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                roots.push(addr);
+            }
+        };
+        let stack = self.stack.as_slice();
+        let n = self.frames.len();
+        if self.precise_frames.is_empty() || n == 0 {
+            stack.iter().copied().for_each(&mut root);
+            return;
+        }
+        let top = stack.len();
+        stack[..self.frames[0].get().min(top)].iter().copied().for_each(&mut root);
+        for i in 0..n {
+            let lo = self.frames[i].get();
+            let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
+            if lo > hi || hi > top {
+                // Unexpected frame layout: everything from here up is scanned.
+                stack[lo.min(top)..].iter().copied().for_each(&mut root);
+                return;
+            }
+            match self.trusted_precise_slots(i, lo, hi) {
+                Some(slots) => {
+                    // The top frame's stored locals may sit above the cursor.
+                    let limit = if i + 1 == n { self.stack.capacity() } else { hi };
+                    for &s in slots {
+                        let idx = lo + usize::from(s);
+                        if idx < limit {
+                            root(self.stack[idx]);
+                        }
+                    }
+                }
+                None => stack[lo..hi].iter().copied().for_each(&mut root),
+            }
+        }
+    }
+
+    /// Heap slots of frame `i` (stack region `[lo, hi)`) from its precise
+    /// map, when its PC is known: the top frame's safepoint PC, or a return
+    /// address that follows a `CALL`. Frames holding a coroutine segment or
+    /// that re-entered the VM through native code (stale return PC) stay
+    /// conservative.
+    fn trusted_precise_slots(&self, i: usize, lo: usize, hi: usize) -> Option<&[u16]> {
+        if !self.resume_stack.is_empty()
+            && self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi)
+        {
+            return None;
+        }
+        if !self.nested_frame_depths.is_empty()
+            && self.nested_frame_depths.iter().any(|&d| d >= 2 && d - 2 == i)
+        {
+            return None;
+        }
+        // PCs are one past the op; look up the op itself so a body's last op
+        // never resolves to the next body.
+        let pc = if i + 1 == self.frames.len() {
+            self.gc_top_ip?.checked_sub(1)?
+        } else {
+            let call_pc = self.frames[i].tell().checked_sub(1)?;
+            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL) {
+                return None;
+            }
+            call_pc
+        };
+        let pc = u32::try_from(pc).ok()?;
+        common::precise_map_for_pc(&self.precise_frames, pc)?.slots_at_pc(pc)
+    }
+
+    fn instruction_at(&self, pc: usize) -> Option<Instruction> {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        code.get(pc).map(|b| *b.bytecode())
     }
 
     fn collect_mapped_slot_addrs(&self, roots: &mut Vec<u64>) {
@@ -1420,30 +1519,6 @@ impl<const S: usize> Machine<S> {
             };
             for &slot in map.slots_at(ip) {
                 visit(sp.saturating_add(slot as usize));
-            }
-        }
-    }
-
-    /// Rewrite mapped frame slots when a live object moved (identity today).
-    fn relocate_mapped_slots(&mut self) {
-        if self.stack_maps.is_empty() {
-            return;
-        }
-        let mut idxs = Vec::new();
-        self.for_each_mapped_slot_index(|i| idxs.push(i));
-        for idx in idxs {
-            if idx >= self.stack.capacity() {
-                continue;
-            }
-            let addr = self.stack[idx].heap_addr();
-            if addr == 0 {
-                continue;
-            }
-            if let Some(obj) = self.heap.find_object_by_addr(addr) {
-                let live = obj.addr();
-                if live != addr {
-                    self.stack[idx] = Value::from(live);
-                }
             }
         }
     }
@@ -1600,7 +1675,9 @@ impl<const S: usize> Machine<S> {
         if unlikely(!self.stack_maps.is_empty()) {
             self.gc_ip = ip;
         }
+        self.gc_top_ip = Some(ip);
         self.gc_safepoint();
+        self.gc_top_ip = None;
     }
 
     /// Classify a stack value as an enum member; heap pointers become `Object`.
@@ -1725,22 +1802,6 @@ impl<const S: usize> Machine<S> {
         mask
     }
 
-    fn root_coroutine_saved_stack(heap: &Heap, coro: &ObjCoroutine, roots: &mut Vec<u64>) {
-        let mask = coro.saved_live_mask;
-        for (i, v) in coro.saved_stack.iter().enumerate() {
-            if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
-                continue;
-            }
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        }
-        if let Some(delegate) = &coro.yield_from {
-            roots.push(delegate.as_ptr() as u64);
-        }
-    }
-
     /// Intern `data`, push the GC pointer, then maybe collect.
     ///
     /// The intern table is a cache, not a GC root, unmarked interned strings
@@ -1844,6 +1905,7 @@ impl<const S: usize> Machine<S> {
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
+        self.precise_frames = program.precise_frames.clone();
         self.thread_program = Some(program);
     }
 
@@ -1854,6 +1916,11 @@ impl<const S: usize> Machine<S> {
 
     pub fn stack_maps(&self) -> &[common::FrameStackMap] {
         &self.stack_maps
+    }
+
+    /// Attach complete frame maps. Empty keeps every frame conservative.
+    pub fn set_precise_frames(&mut self, maps: Vec<common::PreciseFrameMap>) {
+        self.precise_frames = maps;
     }
 
     pub fn thread_program(&self) -> Option<&crate::thread::ThreadProgram> {
@@ -1947,6 +2014,7 @@ impl<const S: usize> Machine<S> {
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
+            precise_frames: self.precise_frames.clone(),
         }));
     }
 
@@ -2016,35 +2084,18 @@ impl<const S: usize> Machine<S> {
         self.dense_obj_addr
     }
 
-    fn with_coroutine_mut(&self, addr: u64, f: impl FnOnce(&mut ObjCoroutine)) {
-        let mut current = self.heap.head_for_lookup();
-        while let Some(reference) = current {
-            if reference.addr() == addr {
-                if let Object::Coroutine(gc) = reference {
-                    f(gc.payload_mut());
-                }
-                return;
-            }
-            current = reference.get_next();
-        }
+    fn with_coroutine_mut(coro: RefCoroutine, f: impl FnOnce(&mut ObjCoroutine)) {
+        f(coro.payload_mut());
     }
 
+    /// Parent delegating to `sub` via `yield from`, if it still is.
     fn find_delegator(&self, sub: RefCoroutine) -> Option<RefCoroutine> {
-        let sub_addr = sub.as_ptr() as u64;
-        let mut current = self.heap.head_for_lookup();
-        while let Some(reference) = current {
-            if let Object::Coroutine(gc) = reference
-                && gc
-                    .as_ref()
-                    .yield_from
-                    .as_ref()
-                    .is_some_and(|d| d.as_ptr() as u64 == sub_addr)
-                {
-                    return Some(gc);
-                }
-            current = reference.get_next();
-        }
-        None
+        sub.as_ref().delegator.filter(|parent| {
+            parent
+                .as_ref()
+                .yield_from
+                .is_some_and(|d| d.as_ptr() == sub.as_ptr())
+        })
     }
 
     fn save_coroutine_state(
@@ -2076,7 +2127,7 @@ impl<const S: usize> Machine<S> {
         }
 
         let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
-        self.with_coroutine_mut(coro_gc.as_ptr() as u64, |coro| {
+        Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
             coro.saved_frames = saved_frames;
@@ -2095,10 +2146,10 @@ impl<const S: usize> Machine<S> {
             && let Some(ctx) = self.resume_stack.last()
             && self.frames.len() <= ctx.frame_depth
         {
-            let coro_ptr = ctx.coro.as_ptr() as u64;
+            let coro_ref = ctx.coro;
             let old_wait = {
                 let mut taken = None;
-                self.with_coroutine_mut(coro_ptr, |coro| {
+                Self::with_coroutine_mut(coro_ref, |coro| {
                     // Outer coroutines suspended via `yield from` stay on
                     // `resume_stack` while main runs; host RETURN must not
                     // treat that as coroutine completion.
@@ -2138,15 +2189,14 @@ impl<const S: usize> Machine<S> {
         layout: crate::host_enum::HostEnumLayout,
     ) {
         let token = self.io_reactor.register_wait(req.handle, req.interest);
-        let coro_ptr = self
+        let coro_ref = self
             .resume_stack
             .last()
             .expect("cooperative await requires an active coroutine")
-            .coro
-            .as_ptr() as u64;
+            .coro;
         let old = {
             let mut taken = None;
-            self.with_coroutine_mut(coro_ptr, |c| {
+            Self::with_coroutine_mut(coro_ref, |c| {
                 taken = c.io_wait.replace(token);
             });
             taken
@@ -2179,7 +2229,7 @@ impl<const S: usize> Machine<S> {
 
         let old_wait = {
             let mut taken = None;
-            self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
+            Self::with_coroutine_mut(gc, |c| {
                 taken = c.io_wait.take();
                 c.pending_send = send_val;
             });
@@ -2311,7 +2361,7 @@ impl<const S: usize> Machine<S> {
         }
 
         let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
-        self.with_coroutine_mut(coro_gc.as_ptr() as u64, |coro| {
+        Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
             coro.saved_frames = saved_frames;
@@ -2344,10 +2394,11 @@ impl<const S: usize> Machine<S> {
         };
         let outer = outer_ctx.coro;
         self.save_coroutine_state(outer, *ip, *sp, outer_ctx.base_sp, outer_ctx.frame_depth);
-        self.with_coroutine_mut(outer.as_ptr() as u64, |outer_coro| {
+        Self::with_coroutine_mut(outer, |outer_coro| {
             outer_coro.yield_from = Some(sub);
             outer_coro.yield_from_resume_ip = *ip;
         });
+        Self::with_coroutine_mut(sub, |sub_coro| sub_coro.delegator = Some(outer));
         self.resume_coroutine(ip, sp, sub, Value::from(0_i64), code, false);
     }
 
@@ -2814,35 +2865,10 @@ impl<const S: usize> Machine<S> {
     /// Fused jump tables live *inside* this outlined copy. Bytecode prefetch
     /// was removed: the next word is already in L1 on the flagship loops, and
     /// the guard compare retired on every dispatch.
-    /// Hot dense/jmp ops may divert into `dispatch` when
-    /// `COIL_THREADED_DISPATCH` selects table or hotmatch. The default is
-    /// this match. An always-hot arm then continues the streak in
-    /// `execute_dense`, so a dense loop does not return here per opcode.
-    /// CALL/RETURN stay on this match.
-    ///
-    /// `PEEK` is false for the default match. The table/hotmatch test is
-    /// then absent from the loop; fib, tak, and other non-dense code do
-    /// not compare the dispatch mode on every opcode.
+    /// An always-hot arm continues the streak in `execute_dense`, so a dense
+    /// loop does not return here per opcode. CALL/RETURN stay on this match.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
-        #[cfg(any(test, feature = "debugger"))]
-        let debug_attached = self.debug.is_some();
-        #[cfg(not(any(test, feature = "debugger")))]
-        let debug_attached = false;
-        if !debug_attached && dispatch::mode() != dispatch::Mode::Match {
-            self.execute_loop::<true>(code, constants, start_ip)
-        } else {
-            self.execute_loop::<false>(code, constants, start_ip)
-        }
-    }
-
-    #[inline(never)]
-    fn execute_loop<const PEEK: bool>(
-        &mut self,
-        code: &[Byte],
-        constants: &[u64],
-        start_ip: usize,
-    ) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
 
         let mut ip: usize = start_ip;
@@ -2852,7 +2878,14 @@ impl<const S: usize> Machine<S> {
 
         macro_rules! then_hot_streak {
             () => {
-                if let Some(stop) = dispatch::consume_always_hot_streak(
+                // Inline peek: non-dense code (tak, fib) must not pay the
+                // outlined streak call after every jump.
+                if ip < code_len
+                    && dispatch::is_always_hot_disc(
+                        // SAFETY: `ip < code_len` checked above.
+                        *unsafe { code.get_unchecked(ip) }.bytecode() as u8,
+                    )
+                    && let Some(msg) = dispatch::consume_always_hot_streak(
                     dispatch::ConsumeAlwaysHotStreakArgs {
                         stack: &mut self.stack,
                         sp: &mut sp,
@@ -2867,13 +2900,7 @@ impl<const S: usize> Machine<S> {
                         stack_cap,
                     },
                 ) {
-                    match stop {
-                        dispatch::HotStop::Panic(msg) => {
-                            return self.runtime_panic(msg, ip.saturating_sub(1));
-                        }
-                        dispatch::HotStop::Done(paused) => return paused,
-                        dispatch::HotStop::Rest(_) => {}
-                    }
+                    return self.runtime_panic(msg, ip.saturating_sub(1));
                 }
                 if unlikely(!self.frame_pins.is_empty()) {
                     self.return_bookkeeping = true;
@@ -2896,51 +2923,6 @@ impl<const S: usize> Machine<S> {
             let debug_attached = self.debug.is_some();
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
-
-            if PEEK {
-                promise!(ip < code_len);
-                let peek = unsafe { code.get_unchecked(ip) };
-                let peek_bc = *peek.bytecode();
-                // Fib never takes this; keep the giant match as fall-through.
-                // Remaining (non-hot) ops use `_ => exec_rest` in this match —
-                // do not divert `!is_kernel` or fib bounces on stack ADD.
-                if unlikely(dispatch::is_hot(peek_bc)) {
-                    let dispatch_mode = dispatch::mode();
-                    // If the streak does not consume this word, fall through
-                    // into the match. `continue` here used to spin: table
-                    // mode can report `CALL` as hot while leaving `ip` and
-                    // the operand stack untouched.
-                    let ip_at_peek = ip;
-                    match dispatch::run_hot_streak(dispatch::RunHotStreakArgs {
-                        stack: &mut self.stack,
-                        sp: &mut sp,
-                        ip: &mut ip,
-                        code,
-                        constants,
-                        heap: &mut self.heap,
-                        frames: &mut self.frames,
-                        frame_pins: &mut self.frame_pins,
-                        dense_obj_addr: &mut self.dense_obj_addr,
-                        dense_obj: &mut self.dense_obj,
-                        stack_cap,
-                        mode: dispatch_mode,
-                    }) {
-                        Some(dispatch::HotStop::Panic(msg)) => {
-                            return self.runtime_panic(msg, ip.saturating_sub(1));
-                        }
-                        Some(dispatch::HotStop::Done(paused)) => return paused,
-                        Some(dispatch::HotStop::Rest(op)) => {
-                            match self.exec_rest(&op, &mut ip, &mut sp, code, constants, stack_cap)
-                            {
-                                dispatch::RestFlow::Continue => continue,
-                                dispatch::RestFlow::Done(paused) => return paused,
-                            }
-                        }
-                        None if ip != ip_at_peek => continue,
-                        None => {}
-                    }
-                }
-            }
 
             note_dispatch_at(ip, &self.stack, sp);
 

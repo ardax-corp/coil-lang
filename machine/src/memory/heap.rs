@@ -1,8 +1,9 @@
 //! Mark-and-sweep heap: intrusive object list, string interning, and GC.
 //!
-//! Interpreter collections use incremental tricolor mark + Yuasa SATB and a
-//! lazy sweep cursor. Explicit `Heap::collect` / `gc::collect` still drain a
-//! cycle to completion. Objects do not move.
+//! Interpreter collections mark to completion at an alloc safepoint, then
+//! sweep lazily from a cursor. The mutator never runs with gray objects, so
+//! stores need no write barrier (see [`Heap::resurrect_during_mark`]).
+//! Explicit `Heap::collect` / `gc::collect` drain a cycle. Objects do not move.
 
 use std::alloc::Layout;
 use std::collections::HashMap;
@@ -16,12 +17,10 @@ use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
-/// Gray objects scanned at one alloc safepoint (work-based pacing adds more).
-pub const GC_MARK_QUANTUM: usize = 128;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
-/// Incremental collector phase. `Idle` means the last cycle finished.
+/// Collector phase. `Idle` means the last cycle finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcPhase {
     Idle,
@@ -205,13 +204,22 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        let epoch_lock = self.alloc_lock;
-        let _epoch_guard = if epoch_lock.is_null() {
-            None
-        } else {
-            let lock = unsafe { &*epoch_lock };
-            Some(lock.lock().unwrap_or_else(|e| e.into_inner()))
-        };
+        let _epoch_guard = self.epoch_guard();
+        self.alloc_unlocked(data, map)
+    }
+
+    /// Serializes heap-structure mutation while a shared-heap steal epoch is
+    /// open (workers share this `Heap`). `None` outside an epoch.
+    fn epoch_guard(&self) -> Option<std::sync::MutexGuard<'static, ()>> {
+        let lock = self.alloc_lock;
+        // The epoch's Mutex outlives every job bound to it.
+        (!lock.is_null()).then(|| unsafe { &*lock }.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn alloc_unlocked<T: GcSized, F>(&mut self, data: T, map: F) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
         unsafe {
@@ -224,9 +232,13 @@ impl Heap {
         self.head = Some(object);
         self.alloc_bytes += size;
         self.live_count += 1;
-        // SATB: mutator-allocated objects during mark are black (not gray).
+        // Objects allocated while a cycle is open (finalizers) are black.
         if self.gc_phase == GcPhase::Marking {
             let _ = content.mark();
+        } else if self.gc_phase == GcPhase::Sweeping && self.gc_sweep_prev.is_none() {
+            // `head == cursor` here; unlinking the cursor must patch this
+            // object's `next`, not overwrite `head` (which would drop it).
+            self.gc_sweep_prev = Some(object);
         }
         crate::vm::note_heap_alloc();
         debug_assert!(
@@ -241,6 +253,7 @@ impl Heap {
     /// Interns a string and returns its handle. The same reference is returned
     /// for two equal strings.
     pub fn intern(&mut self, data: String) -> RefString {
+        let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(&data);
         if let Some(s) = self.strings.find(&data, hash) {
             return s;
@@ -251,6 +264,7 @@ impl Heap {
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
         crate::vm::note_intern_str();
+        let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(data);
         if let Some(s) = self.strings.find(data, hash) {
             return s;
@@ -260,6 +274,7 @@ impl Heap {
 
     /// Register an existing string object in the intern table when needed.
     pub fn intern_ref(&mut self, string: RefString) -> RefString {
+        let _epoch_guard = self.epoch_guard();
         let data = string.as_ref();
         if let Some(s) = self.strings.find(&data.data, data.hash) {
             return s;
@@ -270,7 +285,7 @@ impl Heap {
 
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
         let obj_string = ObjString { data, hash };
-        let (_, s) = self.alloc(obj_string, Object::String);
+        let (_, s) = self.alloc_unlocked(obj_string, Object::String);
         self.strings.insert(s, ());
         s
     }
@@ -340,34 +355,24 @@ impl Heap {
         self.gc_phase == GcPhase::Sweeping
     }
 
-    /// Shade `v` if a mark cycle is running (Yuasa SATB: log the overwritten pointer).
-    #[inline]
-    pub fn satb_shade_value(&mut self, v: Value) {
+    /// Mark `v` and everything it reaches when a cycle is open.
+    ///
+    /// Marking always drains before the mutator runs again (finalizers run
+    /// with an empty gray list), so the only way user code can reach an
+    /// unmarked object is a `Weak` upgrade before dead weaks are cleared.
+    /// Draining here restores the "no gray objects while the mutator runs"
+    /// invariant, which is why stores need no write barrier.
+    pub fn resurrect_during_mark(&mut self, v: Value) {
         if unlikely(self.gc_phase == GcPhase::Marking) {
             self.shade_value(v);
+            while !self.mark_quantum(usize::MAX) {}
         }
     }
 
-    /// Shade a replaced instance/enum member during mark.
-    #[inline]
-    pub fn satb_shade_member(&mut self, member: Member) {
-        if unlikely(self.gc_phase != GcPhase::Marking) {
-            return;
-        }
-        match member {
-            Member::Object(o) => self.shade_object(o),
-            Member::Value(v) => self.shade_value(v),
-        }
-    }
-
-    /// Shade overwritten / dropped slot values (clear, bulk IO fill).
-    #[inline]
-    pub fn satb_shade_values(&mut self, vals: &[Value]) {
-        if unlikely(self.gc_phase != GcPhase::Marking) {
-            return;
-        }
-        for &v in vals {
-            self.shade_value(v);
+    /// Mark a finalizable object (and later its graph) before its `drop` runs.
+    pub fn shade_for_finalizer(&mut self, obj: Object) {
+        if self.gc_phase == GcPhase::Marking {
+            self.shade_object(obj);
         }
     }
 
@@ -485,7 +490,12 @@ impl Heap {
     }
 
     fn finish_sweep_cycle(&mut self) {
-        self.gc_next_threshold = self.alloc_bytes.saturating_mul(self.gc_growth_factor);
+        // Floor at the initial budget: a tiny live set would otherwise
+        // schedule a collection every few allocations.
+        self.gc_next_threshold = self
+            .alloc_bytes
+            .saturating_mul(self.gc_growth_factor)
+            .max(GC_NEXT_THRESHOLD);
         self.gc_phase = GcPhase::Idle;
         self.gc_sweep_cursor = None;
         self.gc_sweep_prev = None;
@@ -533,17 +543,13 @@ impl Heap {
         self.gc_phase == GcPhase::Idle && self.alloc_bytes > self.gc_next_threshold
     }
 
-    /// Gray / sweep objects to process at one safepoint (doubles under pressure).
+    /// Objects to sweep at one safepoint (doubles under pressure).
     #[inline]
-    pub fn gc_work_quantum(&self) -> usize {
-        let base = match self.gc_phase {
-            GcPhase::Sweeping => GC_SWEEP_QUANTUM,
-            GcPhase::Marking | GcPhase::Idle => GC_MARK_QUANTUM,
-        };
+    pub fn gc_sweep_quantum(&self) -> usize {
         if self.alloc_bytes > self.gc_next_threshold {
-            base.saturating_mul(2)
+            GC_SWEEP_QUANTUM.saturating_mul(2)
         } else {
-            base
+            GC_SWEEP_QUANTUM
         }
     }
 
@@ -557,6 +563,7 @@ impl Heap {
     /// Adjust tracked heap bytes after an in-place grow/shrink of a managed
     /// object's internal Rust allocation (for example `ObjArray.elements`).
     pub fn account_resize(&mut self, old_size: usize, new_size: usize) {
+        let _epoch_guard = self.epoch_guard();
         if new_size >= old_size {
             self.alloc_bytes += new_size - old_size;
         } else {
@@ -696,6 +703,7 @@ impl Heap {
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
     pub fn immortal_unit_enum(&mut self, tag: u32) -> Object {
+        let _epoch_guard = self.epoch_guard();
         if let Some((cached, obj)) = self.unit_enum
             && cached == tag
         {
@@ -709,7 +717,7 @@ impl Heap {
             tag,
             payload: EnumPayload::empty(),
         };
-        let (object, _) = self.alloc(obj_enum, Object::Enum);
+        let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
         self.immortal_enums.insert(tag, object);
         self.unit_enum = Some((tag, object));
         object
@@ -751,16 +759,9 @@ impl Heap {
             return;
         };
         let n = gc.as_ref().elements.len().min(values.len());
-        let mut olds = Vec::with_capacity(n);
-        {
-            let arr = gc.as_mut();
-            for (i, &v) in values.iter().take(n).enumerate() {
-                olds.push(arr.elements[i]);
-                arr.elements[i] = Value::from(v);
-            }
-        }
-        for old in olds {
-            self.satb_shade_value(old);
+        let arr = gc.as_mut();
+        for (i, &v) in values.iter().take(n).enumerate() {
+            arr.elements[i] = Value::from(v);
         }
     }
 
@@ -1025,8 +1026,8 @@ impl Object {
                     heap.mark_value(*v, grey_objects);
                 }
                 heap.mark_value(coro.pending_send, grey_objects);
-                if let Some(delegate) = &coro.yield_from {
-                    Object::Coroutine(*delegate).mark(grey_objects);
+                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
+                    Object::Coroutine(link).mark(grey_objects);
                 }
             }
             Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
@@ -1678,6 +1679,9 @@ pub struct ObjCoroutine {
     pub pending_send: Value,
     /// Active `yield from` delegate, if any.
     pub yield_from: Option<RefCoroutine>,
+    /// Coroutine delegating to this one via `yield from` (back edge of
+    /// `yield_from`). Traced: a running delegate keeps its parent alive.
+    pub delegator: Option<RefCoroutine>,
     /// Outer continuation IP when the delegate completes.
     pub yield_from_resume_ip: usize,
     /// Registered IO reactor waiter while this coro cooperatively awaits readiness.
@@ -2906,18 +2910,22 @@ mod tests {
 
         assert!(
             !heap.should_collect(),
-            "after sweep, threshold must be live*growth so one survivor is quiet"
+            "after sweep, threshold must be max(live*growth, budget) so one survivor is quiet"
         );
         let quiet_size = heap.size();
-        // Grow past the rescaled threshold without roots, should_collect again.
+        // Grow past the rescaled (floored) threshold without roots, should_collect again.
         while !heap.should_collect() {
             let _ = heap.alloc(ObjString::from("pressure"), Object::String);
             // Guard against runaway if rescale broke (would never trip).
             assert!(
-                heap.size() < quiet_size.saturating_mul(8).max(4096),
+                heap.size() <= quiet_size.saturating_mul(8).max(GC_NEXT_THRESHOLD * 2),
                 "alloc_bytes grew without tripping should_collect"
             );
         }
+        assert!(
+            heap.size() > GC_NEXT_THRESHOLD,
+            "a tiny live set must not collect below the initial budget"
+        );
     }
 
     /// Immortal arity-0 enums are seeded as GC roots and must not be swept,
@@ -3135,37 +3143,6 @@ mod tests {
     }
 
     #[test]
-    fn satb_keeps_overwritten_pointer_this_cycle() {
-        let mut heap = Heap::default();
-        let (old, _) = heap.alloc(ObjString::from("old"), Object::String);
-        let (fresh, _) = heap.alloc(ObjString::from("fresh"), Object::String);
-        let inst = ObjInstance::with_slots(1, vec![Member::Object(old)]);
-        let (obj, mut gc) = heap.alloc(inst, Object::Instance);
-
-        heap.begin_mark(&[obj.addr()]);
-        // Overwrite before `obj` is scanned so only SATB keeps `old` gray.
-        heap.satb_shade_member(Member::Object(old));
-        gc.as_mut().set_slot(0, Member::Object(fresh));
-        while !heap.mark_quantum(64) {}
-        heap.clear_dead_weaks();
-        heap.begin_sweep();
-        heap.finish_sweep();
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&old.addr()), "SATB floating garbage this cycle");
-        assert!(live.contains(&fresh.addr()));
-        assert!(live.contains(&obj.addr()));
-
-        heap.collect(&[obj.addr()]);
-        let live = live_object_addrs(&heap);
-        assert!(
-            !live.contains(&old.addr()),
-            "overwritten pointer dies on the next cycle"
-        );
-        assert!(live.contains(&fresh.addr()));
-    }
-
-    #[test]
     fn alloc_during_mark_is_black() {
         let mut heap = Heap::default();
         let (root, _) = heap.alloc(ObjString::from("root"), Object::String);
@@ -3203,5 +3180,56 @@ mod tests {
         for addr in dead {
             assert!(heap.find_object_by_addr(addr).is_none());
         }
+    }
+
+    /// Shared-heap workers intern and allocate concurrently inside a steal
+    /// epoch; the intern table and slab must stay consistent.
+    #[test]
+    fn epoch_workers_intern_and_alloc_concurrently() {
+        struct HeapPtr(*mut Heap);
+        unsafe impl Send for HeapPtr {}
+        unsafe impl Sync for HeapPtr {}
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        heap.enter_epoch_stw(&lock);
+        let shared = HeapPtr(&mut heap);
+        std::thread::scope(|scope| {
+            for t in 0..4 {
+                let shared = &shared;
+                scope.spawn(move || {
+                    let heap = unsafe { &mut *shared.0 };
+                    for i in 0..2000 {
+                        let s = heap.intern_str(&format!("k{}", (i * 7 + t) % 500));
+                        assert!(heap.find_object_by_addr(s.as_ptr() as u64).is_some());
+                        let (o, _) = heap.alloc(ObjString::from("x"), Object::String);
+                        assert!(heap.find_object_by_addr(o.addr()).is_some());
+                    }
+                });
+            }
+        });
+        heap.exit_epoch_stw();
+        for i in 0..500 {
+            let key = format!("k{i}");
+            let a = heap.intern_str(&key);
+            let b = heap.intern_str(&key);
+            assert!(Gc::ptr_eq(a, b), "{key} interned twice");
+        }
+    }
+
+    /// Allocs between sweep quanta prepend to `head`; freeing the old dead
+    /// head must not unlink them (leaked bytes tripped the Drop assert).
+    #[test]
+    fn alloc_during_sweep_stays_linked() {
+        let mut heap = Heap::default();
+        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
+        let (_dead, _) = heap.alloc(ObjString::from("dead"), Object::String);
+        heap.mark_from_roots(&[keep.addr()]);
+        heap.begin_sweep();
+        let (baby, _) = heap.alloc(ObjString::from("baby"), Object::String);
+        while !heap.sweep_quantum(1) {}
+        assert!(heap.find_object_by_addr(baby.addr()).is_some());
+        assert!((&heap).into_iter().any(|o| o.addr() == baby.addr()));
+        assert!((&heap).into_iter().any(|o| o.addr() == keep.addr()));
+        assert_eq!((&heap).into_iter().count(), 2);
     }
 }

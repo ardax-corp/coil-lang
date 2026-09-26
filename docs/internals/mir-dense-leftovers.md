@@ -11,6 +11,77 @@ D1 [COI-355](https://linear.app/ardax/issue/COI-355) (`e046af78`).
 D2 [COI-356](https://linear.app/ardax/issue/COI-356) (`0cbc2dce`, #409).
 D3 [COI-357](https://linear.app/ardax/issue/COI-357) boxed multi-payload match (this PR).
 
+## Keep-rate census
+
+`coil compile --opt-stats` (or `--opt-stats-json`) now reports how many
+function bodies end in each tier and why fuse-IL bodies were not taken by
+MIR→LIR (`bodies_dense` / `bodies_lir` / `bodies_fuse`, `fuse_reasons`).
+Snapshot at this tip over `examples/perf`, `examples`, and `tests/positive`
+(with coil-stdlib on the search path):
+
+| Corpus | Bodies | Dense | LIR | Fuse-IL |
+|--------|--------|-------|-----|---------|
+| `examples/perf` | 290 | 28% | 2% | 70% |
+| `examples` | 349 | 3% | 3% | 94% |
+| `tests/positive` | 484 | 13% | 10% | 77% |
+
+Fuse-IL reasons (907 bodies): LIR walls `Host` 38%, `Box` 20%, `Call` 11%,
+`HeapField` 8%, `Alloc` 7%; LIR cost gate 4%; alloc only after loops 3%;
+everything else (bool-cond lowering, residual `CallIndirect` / yield bytes,
+`Pow` / `AND` / `OR`) is under 2% each. The next coverage lever is LIR
+reconstruct across HostInvoke / box / CALL edges, not operator refuses or
+cost-gate tuning. Fuse-IL stays the majority path, so the stack-IL pipeline
+cannot be trimmed ahead of MIR yet.
+
+### Weighted by executed dispatches
+
+Count-based keep-rate overstates the gap: cold `main` wrappers count the
+same as hot loops. `mir_weighted_census` in `compiler/tests/perf_metrics.rs`
+runs every `examples/perf` program with the `vm_profile` per-PC counter and
+attributes dispatches to each body's tier and refusal reasons:
+
+```bash
+COIL_AUTO_PAR=0 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+  cargo test --release -p compiler --features vm-wire --test perf_metrics \
+  -- --ignored mir_weighted_census --nocapture
+```
+
+Snapshot before the coverage pass (3.53G dispatches): dense 32.7%, LIR
+8.1%, fuse-IL 59.1%. The top refusal was the whole-body `alloc only after
+loops` rule (32%); with it out of the way the real blockers were the LIR
+`Host` wall and flow-insensitive slot typing.
+
+After the pass (3.30G dispatches, −6.7% executed work): **dense 35.1%, LIR
+30.5%, fuse-IL 34.4%**. What changed:
+
+- the post-loop alloc refuse only applies to result-shaping tails (no call /
+  host / format after the loop);
+- LIR infer recycles slot types across disjoint live ranges (fuse-IL reuses a
+  slot for call args and later a `FORMAT` string);
+- MIR→LIR reconstructs HostInvoke word edges (generic Value-word args accept
+  a `HeapRef`; precise math / packed specs stay exact);
+- the MIR→LIR cost gate weights loop bodies ×8 per level (flat counts kept
+  fuse-IL on churn `main`s whose LIR loop was 8–14% faster); a weighted tie
+  goes to the flat count;
+- strict bool `AND` / `OR` over `Bool` operands lower to `BitAnd` / `BitOr`;
+- `JMPT` / `JMPF` on an int word lower as `x != 0`, and LIR branches on `x`;
+- lowering refuses when the IL opcode domain (`NEGF` / `ADDF` …) disagrees
+  with operand types (was a miscompile: `-(1.5, 2.0)` printed `-3.0`).
+
+Remaining fuse-IL dispatches by reason:
+
+| Reason | Share of all dispatches |
+|---|---|
+| dense: alloc without stack maps (LIR: `Alloc` / `Call` walls) | 14.0% |
+| LIR cost gate on small loop-free helpers (`lookup`, `chain`) | 13.1% |
+| dense: non-empty operand stack at CFG edge (`?` payload) | 6.0% |
+| dense: niche Result vs heapref return (LIR `HeapField`) | 3.5% |
+
+Carrying operand-stack values across edges in dense (`allow_stack_edges`)
+was tried and reverted: `option_match_call` got 5% slower because `main`
+lost its LIR form. Loop-free `lookup` / `chain` are already minimal on
+fuse-IL; the gate is right to keep them.
+
 ## Cross-check (open Linear / landed PRs)
 
 | Ticket | Status | What actually landed | Leftover |

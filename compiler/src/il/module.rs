@@ -218,13 +218,10 @@ impl IlModule {
         let run_invert = per.invert_guard_branch;
         per.invert_guard_branch = false;
         // GVN reasons about slot defs; promotion removes the store that makes one
-        // visible, so it runs after GVN has seen the body. Seek-normalize poisons
-        // operand-height at the latch, so it also waits until after GVN.
+        // visible, so it runs after GVN has seen the body.
         let run_slot_promote_tell = per.slot_promote_tell;
-        let run_seek_back_edge = per.seek_back_edge;
         let run_ssa_gvn = per.ssa_gvn;
         per.slot_promote_tell = false;
-        per.seek_back_edge = false;
         per.ssa_gvn = false;
 
         if self.funcs.is_empty() {
@@ -253,9 +250,6 @@ impl IlModule {
                 &mut next_label,
             );
             super::gvn::cfg_gvn_with(&mut body.ops, false);
-            if run_seek_back_edge {
-                opt::seek_normalize_back_edges(&mut body.ops, body.meta.entry_sp);
-            }
             if run_slot_promote_tell {
                 opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
             }
@@ -288,6 +282,9 @@ impl IlModule {
         }
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
+        let mut dense_why: Vec<Option<String>> = vec![None; self.funcs.len()];
+        let mut lir_why: Vec<Option<String>> = vec![None; self.funcs.len()];
+        let mut tier: Vec<&'static str> = vec!["fuse"; self.funcs.len()];
         let mut side_remaps = HashMap::<String, HashMap<u32, u32>>::new();
         let mut side_deopts = Vec::new();
         while !pending.is_empty() && opts.mir_specialize {
@@ -318,8 +315,10 @@ impl IlModule {
                         dense_calls.insert(id, abi);
                     }
                     body.ops = dense;
+                    tier[i] = "dense";
                     progressed = true;
                 } else {
+                    dense_why[i] = crate::mir::take_dense_refusal();
                     next.push(i);
                 }
             }
@@ -328,7 +327,9 @@ impl IlModule {
             }
             pending = next;
         }
-        for i in pending {
+        let dense_kept = self.funcs.len() - pending.len();
+        let mut lir_kept = 0usize;
+        for i in pending.iter().copied() {
             if !opts.mir_specialize {
                 break;
             }
@@ -344,8 +345,7 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                let fuse = lir_emit_cost(&body.ops);
-                if lir_emit_cost(&lir) <= fuse.saturating_add(lir_cost_slack(&body.ops)) {
+                if lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -353,7 +353,34 @@ impl IlModule {
                         side_deopts.push(deopt);
                     }
                     body.ops = lir;
+                    tier[i] = "lir";
+                    lir_kept += 1;
+                } else {
+                    lir_why[i] = Some("lir cost gate".to_string());
                 }
+            } else {
+                lir_why[i] = Some(
+                    crate::mir::take_lir_refusal().unwrap_or_else(|| "lir refused".to_string()),
+                );
+            }
+            if opts.collect_stats && let Some(why) = &lir_why[i] {
+                super::opt::note_fuse_reason(why);
+            }
+        }
+        if opts.collect_stats {
+            let (dense, fuse) = if opts.mir_specialize {
+                (dense_kept, pending.len() - lir_kept)
+            } else {
+                (0, self.funcs.len())
+            };
+            super::opt::note_body_tiers(dense, lir_kept, fuse);
+            for (i, body) in self.funcs.iter().enumerate() {
+                super::opt::note_body_tier(super::opt::BodyTier {
+                    name: body.meta.name.clone(),
+                    tier: tier[i].to_string(),
+                    dense_reason: dense_why[i].take(),
+                    lir_reason: lir_why[i].take(),
+                });
             }
         }
         self.debug_slot_remaps.extend(side_remaps);
@@ -469,17 +496,48 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
 /// the body (naive slot spill). Labels are free. `Seek` / `StorePop` are
 /// expensive so leftover lets keep fuse-IL (ConstReturnImm).
-fn lir_emit_cost(ops: &[IlOp]) -> usize {
+/// Keep a MIR→LIR reconstruct when it is no costlier than the opted fuse-IL
+/// (+ match slack). Costs weight loop bodies (×8 per nesting level) so a
+/// smaller hot loop can win against a larger cold tail — a flat count kept
+/// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
+/// sides to expose the same loops; otherwise compare flat counts.
+/// A weighted tie is settled by the flat count.
+fn lir_keeps(fuse_ops: &[IlOp], lir: &[IlOp]) -> bool {
+    let fuse_loops = super::analysis::find_natural_loops(fuse_ops);
+    let lir_loops = super::analysis::find_natural_loops(lir);
+    let slack = lir_cost_slack(fuse_ops);
+    let flat_ok = lir_emit_cost(lir, &[]) <= lir_emit_cost(fuse_ops, &[]).saturating_add(slack);
+    if fuse_loops.is_empty() || fuse_loops.len() != lir_loops.len() {
+        return flat_ok;
+    }
+    let f = lir_emit_cost(fuse_ops, &fuse_loops);
+    let l = lir_emit_cost(lir, &lir_loops);
+    // IL-level cost cannot see fuse-select packing; a weighted tie goes to
+    // the flat count, which still favours the tighter fuse-IL loop.
+    l < f || (l <= f.saturating_add(slack) && flat_ok)
+}
+
+/// Static reconstruct cost; ops inside `loops` weigh ×8 per level (max 2).
+fn lir_emit_cost(ops: &[IlOp], loops: &[super::analysis::NaturalLoop]) -> usize {
     ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-        .map(|op| match op {
-            IlOp::StorePop { .. } => 2,
-            IlOp::Byte { byte, .. }
-                if matches!(*byte.bytecode(), common::Instruction::Seek) =>
-            {
-                2 + (byte.operand_u32() as usize) / 16
-            }
-            _ => 1,
+        .enumerate()
+        .filter(|(_, op)| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .map(|(i, op)| {
+            let base = match op {
+                IlOp::StorePop { .. } => 2,
+                IlOp::Byte { byte, .. }
+                    if matches!(*byte.bytecode(), common::Instruction::Seek) =>
+                {
+                    2 + (byte.operand_u32() as usize) / 16
+                }
+                _ => 1,
+            };
+            let depth = loops
+                .iter()
+                .filter(|lp| lp.header <= i && i <= lp.latch)
+                .count()
+                .min(2) as u32;
+            base * 8usize.pow(depth)
         })
         .sum()
 }
@@ -1329,7 +1387,6 @@ mod tests {
                 slot_promote: false,
                 tos_carry: false,
                 canon: false,
-                cast_spill: false,
                 algebraic: false,
                 instcombine: false,
                 local_cse: false,
@@ -1342,7 +1399,6 @@ mod tests {
                 multi_op_join_convoy: true,
                 invert_guard_branch: false,
                 slot_promote_tell: false,
-                seek_back_edge: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
                 invariant_store_elim: false,
@@ -1350,8 +1406,6 @@ mod tests {
                 escape_analysis: false,
                 branch_optimization: false,
                 block_reordering: false,
-                iterative_optimization: false,
-                max_optimization_iterations: 10,
                 collect_stats: false,
                 pure_call_ctx: None,
                 mir_specialize: true,
@@ -1398,7 +1452,7 @@ mod tests {
         ]
     }
 
-    fn seek_promote_opts(on: bool) -> OptimizeOptions {
+    fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
             jump_thread: false,
             dead_block: false,
@@ -1409,7 +1463,6 @@ mod tests {
             slot_promote: false,
             tos_carry: false,
             canon: false,
-            cast_spill: false,
             algebraic: false,
             instcombine: false,
             local_cse: false,
@@ -1422,7 +1475,6 @@ mod tests {
             multi_op_join_convoy: false,
             invert_guard_branch: false,
             slot_promote_tell: true,
-            seek_back_edge: on,
             loop_unroll: false,
             loop_unroll_factor: 8,
             invariant_store_elim: false,
@@ -1430,20 +1482,14 @@ mod tests {
             escape_analysis: false,
             branch_optimization: false,
             block_reordering: false,
-            iterative_optimization: false,
-            max_optimization_iterations: 10,
             collect_stats: false,
             pure_call_ctx: None,
             mir_specialize: true,
         }
     }
 
-    fn is_seek(op: &IlOp) -> bool {
-        matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
-    }
-
-    /// Production `optimize_and_flatten` with default `seek_back_edge` off
-    /// must not apply the flag-on Seek-normalize (Seek-to-tell + drop store).
+    /// Production `optimize_and_flatten` must not Seek-normalize a raising
+    /// loop (Seek-to-tell + drop store); that pass was removed.
     /// LIR reconstruct may rewrite the loop; that is not Seek-normalize.
     #[test]
     fn optimize_and_flatten_default_does_not_seek_normalize() {
@@ -1451,7 +1497,7 @@ mod tests {
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(false), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(), &mut Vec::new());
         let seek_to = flat.iter().find_map(|op| match op {
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
                 Some(byte.operand_u32())
@@ -1478,43 +1524,4 @@ mod tests {
         );
     }
 
-    /// Flag on: Seek sits on the latch after GVN, then promotion drops the
-    /// self-store. Mandelbrot never takes this path (`seek_back_edge` stays off).
-    #[test]
-    fn optimize_and_flatten_seek_back_edge_elides_raising_loop_store() {
-        let ops = raising_loop();
-        let emit_end = ops.iter().filter(|op| op.emits_code()).count();
-        let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(true), &mut Vec::new());
-        assert!(
-            flat.windows(2).any(|w| {
-                is_seek(&w[0])
-                    && matches!(
-                        w[1],
-                        IlOp::Jump {
-                            kind: IlJumpKind::Unconditional,
-                            ..
-                        }
-                    )
-            }),
-            "Seek must sit on the latch after GVN"
-        );
-        let seek_to = flat.iter().find_map(|op| match op {
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
-                Some(byte.operand_u32())
-            }
-            _ => None,
-        });
-        assert_eq!(
-            seek_to,
-            Some(2),
-            "Seek must re-anchor to the forward-edge tell"
-        );
-        let stores = flat
-            .iter()
-            .filter(|op| matches!(op, IlOp::StorePop { .. }))
-            .count();
-        assert_eq!(stores, 0);
-    }
 }

@@ -78,6 +78,8 @@ pub struct LowerHints {
     pub allow_index: bool,
     /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
+    /// MIR→LIR: generic host word edges only (see `MirBuilder::allow_host_edges`).
+    pub allow_host_edges: bool,
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit skips the markers.
     pub allow_deopt: bool,
@@ -105,6 +107,7 @@ impl Default for LowerHints {
             allow_alloc: false,
             allow_index: false,
             allow_effects: false,
+            allow_host_edges: false,
             allow_deopt: false,
             allow_string: false,
             skip_verify: false,
@@ -172,6 +175,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
     b.allow_effects = hints.allow_effects;
+    b.allow_host_edges = hints.allow_host_edges;
     b.skip_verify = hints.skip_verify;
     for i in 0..hints.param_count {
         let ty = hints.slot(i);
@@ -564,6 +568,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpf fallthrough".into()))?;
             record_edge(incoming, pred, taken, tos.clone());
             record_edge(incoming, pred, not_taken, tos.clone());
+            let cond = branch_cond(b, cond)?;
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Jump {
@@ -581,6 +586,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpt fallthrough".into()))?;
             record_edge(incoming, pred, taken, tos.clone());
             record_edge(incoming, pred, not_taken, tos.clone());
+            let cond = branch_cond(b, cond)?;
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Return { ret_words, .. }) if *ret_words >= 2 => {
@@ -839,7 +845,7 @@ fn lower_op(
             let (dest_ty, dest_hi_ty) = if super::abi::is_multi_word_ret(*ret_words) {
                 two_slot_call_tys(hints, rest)
             } else {
-                (use_result_ty(hints, next, MirTy::I64), None)
+                (call_result_ty(hints, next, rest), None)
             };
             let abi = if let Some(abi) = hints.calls.get(&target.0) {
                 if abi.params.len() != n {
@@ -1020,6 +1026,7 @@ fn lower_byte(
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("neg stack".into()))?;
+            opcode_matches_operands(*byte.bytecode(), &[b.value_ty(v)])?;
             tos.push(b.ins_neg(v)?);
             Ok(())
         }
@@ -1098,10 +1105,14 @@ fn lower_byte(
             }
             if hints.allow_heap_fields {
                 let n = byte.operand_u32();
+                // `Seek tmp+1` after boxing a class re-exposes the instance
+                // stored to `tmp` in this block; a staging `Seek` does not.
                 if tos.is_empty() && n > 0 {
-                    let slot = n - 1;
-                    if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
-                        tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+                    let slot = LocalId(n - 1);
+                    if let Some(v) = b.local_def_here(slot)
+                        && b.func().ty(v) == MirTy::HeapRef
+                    {
+                        tos.push(v);
                     }
                 }
             }
@@ -1271,12 +1282,53 @@ fn is_float_inst(inst: Instruction) -> bool {
     )
 }
 
+/// `JMPF` / `JMPT` test a word for non-zero. MIR branches on `Bool`, so an
+/// integer condition (e.g. a two-slot `Result` tag after `CALL`) becomes
+/// `cond != 0`; other word kinds still refuse.
+fn branch_cond(b: &mut MirBuilder, cond: ValueId) -> Result<ValueId, LowerError> {
+    let zero = match b.value_ty(cond) {
+        MirTy::Bool => return Ok(cond),
+        MirTy::I64 => MirConst::I64(0),
+        MirTy::I32 => MirConst::I32(0),
+        other => {
+            return Err(LowerError::Refused(format!("branch cond on {other}")));
+        }
+    };
+    let zero = b.ins_const(zero)?;
+    Ok(b.ins_cmp(MirCmpOp::Ne, cond, zero)?)
+}
+
+/// The IL opcode fixes the domain; MIR ops are untyped (`Add`, `Neg`). A
+/// float opcode on words typed `i64` (e.g. a heap tuple element read) would
+/// otherwise lower to integer arithmetic on float bits. Refuse the lift.
+fn opcode_matches_operands(inst: Instruction, tys: &[MirTy]) -> Result<(), LowerError> {
+    let float_op = is_float_inst(inst) || inst == Instruction::NEGF;
+    let int_op = !float_op && !matches!(inst, Instruction::EQ | Instruction::NEQ);
+    let bad = tys
+        .iter()
+        .any(|t| (float_op && !t.is_float()) || (int_op && t.is_float()));
+    if bad {
+        return Err(LowerError::Refused(format!(
+            "{} on {}",
+            inst.mnemonic(),
+            tys.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn apply_bin(
     b: &mut MirBuilder,
     inst: Instruction,
     lhs: ValueId,
     rhs: ValueId,
 ) -> Result<ValueId, LowerError> {
+    opcode_matches_operands(inst, &[b.value_ty(lhs), b.value_ty(rhs)])?;
+    match inst {
+        Instruction::AND => return Ok(b.ins_bool_logic(MirBinOp::BitAnd, lhs, rhs)?),
+        Instruction::OR => return Ok(b.ins_bool_logic(MirBinOp::BitOr, lhs, rhs)?),
+        _ => {}
+    }
     if let Some(op) = map_bin(inst) {
         return Ok(b.ins_binop(op, lhs, rhs)?);
     }
@@ -1306,12 +1358,14 @@ fn map_bin(inst: Instruction) -> Option<MirBinOp> {
 /// `StorePop` is the tag; the second is the payload.
 fn two_slot_call_tys(hints: &LowerHints, rest: &[IlOp]) -> (MirTy, Option<MirTy>) {
     let mut stores = Vec::new();
-    for op in rest {
+    let mut after = 0;
+    for (i, op) in rest.iter().enumerate() {
         match op {
             IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
             IlOp::StorePop { slot, .. } => {
                 stores.push(*slot);
                 if stores.len() == 2 {
+                    after = i + 1;
                     break;
                 }
             }
@@ -1319,9 +1373,77 @@ fn two_slot_call_tys(hints: &LowerHints, rest: &[IlOp]) -> (MirTy, Option<MirTy>
         }
     }
     if stores.len() == 2 {
-        (hints.slot(stores[1]), Some(hints.slot(stores[0])))
+        // A slot's static type is its last write; fuse-IL recycles slots, so
+        // prefer what this live range's uses demand.
+        let ty = |slot| slot_use_ty(slot, &rest[after..]).unwrap_or_else(|| hints.slot(slot));
+        (ty(stores[1]), Some(ty(stores[0])))
     } else {
         (MirTy::I64, Some(MirTy::I64))
+    }
+}
+
+/// Operand type of the first binop reading `slot` before it is overwritten.
+/// `None` when the slot is only copied, overwritten, or never read.
+fn slot_use_ty(slot: u32, ops: &[IlOp]) -> Option<MirTy> {
+    let binop_ty = |op: &IlOp| match op {
+        IlOp::Bin { op, .. } | IlOp::BinReturn { op, .. } => Some(if is_float_op(*op) {
+            MirTy::F64
+        } else {
+            MirTy::I64
+        }),
+        _ => None,
+    };
+    let is_push = |op: &IlOp| {
+        matches!(
+            op,
+            IlOp::Load { .. } | IlOp::Const { .. } | IlOp::ConstPool { .. }
+        )
+    };
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            IlOp::StorePop { slot: s, .. } if *s == slot => return None,
+            IlOp::Load { slot: s, .. } if *s == slot => {
+                // The value is a binop operand when at most one push follows it.
+                let next = ops.get(i + 1);
+                if let Some(ty) = next.and_then(binop_ty) {
+                    return Some(ty);
+                }
+                if matches!(next, Some(IlOp::LoadField { .. })) {
+                    return Some(MirTy::HeapRef);
+                }
+                if next.is_some_and(is_push)
+                    && let Some(ty) = ops.get(i + 2).and_then(binop_ty)
+                {
+                    return Some(ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One-word CALL result type: the niche test idiom that follows it, else
+/// what the stored slot's live range demands, else [`use_result_ty`].
+fn call_result_ty(hints: &LowerHints, next: Option<&IlOp>, rest: &[IlOp]) -> MirTy {
+    let mut ops = rest
+        .iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)));
+    match (ops.next(), ops.next(), ops.next()) {
+        (Some(IlOp::Dup { .. }), Some(IlOp::Const { imm: 1, .. }), Some(IlOp::Bin { op, .. }))
+            if *op == Instruction::BITAND =>
+        {
+            MirTy::NicheRes
+        }
+        (Some(IlOp::Dup { .. }), Some(IlOp::LogNot { .. }), _) => MirTy::NicheOpt,
+        (Some(IlOp::StorePop { slot, .. }), _, _) => {
+            let after = rest
+                .iter()
+                .position(|op| matches!(op, IlOp::StorePop { .. }))
+                .map_or(rest.len(), |i| i + 1);
+            slot_use_ty(*slot, &rest[after..]).unwrap_or_else(|| hints.slot(*slot))
+        }
+        _ => use_result_ty(hints, next, MirTy::I64),
     }
 }
 

@@ -61,11 +61,7 @@ pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Root(gc)) => match gc.payload_mut().payload.take() {
-            Some(m) => {
-                let v = member_to_value(&m);
-                heap.satb_shade_member(m);
-                pack_gc_option(heap, Some(v))
-            }
+            Some(m) => pack_gc_option(heap, Some(member_to_value(&m))),
             None => pack_gc_option(heap, None),
         },
         _ => pack_gc_option(heap, None),
@@ -100,7 +96,10 @@ pub fn host_gc_upgrade(heap: &mut Heap, args: &[Value]) -> Value {
         _ => None,
     };
     match target {
-        Some(v) => pack_gc_option(heap, Some(v)),
+        Some(v) => {
+            heap.resurrect_during_mark(v);
+            pack_gc_option(heap, Some(v))
+        }
         None => pack_gc_option(heap, None),
     }
 }
@@ -157,6 +156,40 @@ mod tests {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => None,
             _ => panic!("expected Option"),
         }
+    }
+
+    /// A finalizer runs while mark is still open (weaks not yet cleared). An
+    /// upgrade there may hand back an unmarked object; storing it into an
+    /// already-black holder must keep it alive.
+    #[test]
+    fn upgrade_during_mark_shades_target() {
+        use crate::memory::{GcPhase, ObjInstance, ObjString};
+        let mut heap = Heap::default();
+        let (leaf, _) = heap.alloc(ObjString::from("leaf"), Object::String);
+        let w = host_gc_weak(&mut heap, &[Value::from(leaf.addr())]);
+        let (holder, mut holder_gc) = heap.alloc(
+            ObjInstance::with_slots(1, vec![Member::Value(Value::from(0i64))]),
+            Object::Instance,
+        );
+        let roots = [holder.addr(), w.raw() as u64];
+        heap.begin_mark(&roots);
+        while !heap.mark_quantum(usize::MAX) {}
+        assert_eq!(heap.gc_phase(), GcPhase::Marking);
+
+        let opt = host_gc_upgrade(&mut heap, &[w]);
+        let got = option_payload(&heap, opt).expect("weak not cleared yet");
+        assert_eq!(got.raw() as u64, leaf.addr());
+        holder_gc.as_mut().set_slot(0, Member::Object(leaf));
+
+        heap.remark_roots(&roots);
+        while !heap.mark_quantum(usize::MAX) {}
+        heap.clear_dead_weaks();
+        heap.begin_sweep();
+        heap.finish_sweep();
+        assert!(
+            heap.find_object_by_addr(leaf.addr()).is_some(),
+            "object resurrected through upgrade was swept while still referenced"
+        );
     }
 
     #[test]
