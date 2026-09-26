@@ -55,22 +55,33 @@ and relocate mapped slots on collect.
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
 - **Precise frames** (archive **minor 21**). A
-  [`PreciseFrameMap`](../../common/src/stack_map.rs) says that anywhere in
-  a body only `heap_slots` of its frame can hold heap words; the GC roots
-  those and skips the rest of that frame. Frames without one keep the
-  conservative scan, so a stack whose frames are all precise is not scanned
-  at all. Codegen marks a top-level, non-generic, non-coroutine function
-  heap-free when every parameter and body expression has a numeric / `unit`
-  / `never` checker type and it has no closures (`fn_is_heap_free`);
-  [`bind_heap_free_frames`](../../compiler/src/mir/stackmap.rs) keeps it
-  only if its final bytecode (any tier) has no op that can leave a heap word
-  in the frame (allocs, `BoxValue`, `STRING`, closures, FFI, heap reads).
-  The VM trusts a map only at a known PC: the top frame's safepoint PC, or
-  a return PC that follows `CALL` / `CallIndirect`. A frame that entered
-  native code which re-entered the VM (`call_function`), or holds a
-  coroutine resume base, stays conservative. Heap-holding frames are not
-  precise yet: S2b maps cover IL slots at alloc sites, not operand
-  temporaries or call sites.
+  [`PreciseFrameMap`](../../common/src/stack_map.rs) describes a body's
+  frame completely where it applies: `any_pc` (valid at every PC) or
+  `at_pc` (exact PCs). The GC roots only the listed slots of such a frame
+  and scans every other frame word by word, so a stack whose frames all
+  have maps is not scanned at all.
+  [`bind_precise_frames`](../../compiler/src/codegen/precise_frames.rs) runs
+  on the final bytecode of every body (any tier):
+  - heap-free functions (`fn_is_heap_free`: every parameter and expression
+    has a numeric / `unit` / `never` checker type, no closures) whose
+    bytecode has no heap-producing op get an empty `any_pc` map;
+  - every other body gets a forward dataflow over the physical words of its
+    frame (one "may hold a heap word" bit per word, a cursor range after
+    joins of differing heights, callee clobber above a `CALL` base). It
+    records the complete heap slots after each allocating / host op and the
+    caller's words below each `CALL`'s arguments. Words above the cursor
+    count only when last written as a slot (store, dense register, match
+    payload). `JumpIfMatch` payload arity comes from lowering
+    (`Lowered::match_arities`).
+  A body is refused (no map, conservative) on any opcode the dataflow does
+  not model (SIMD, closures, coroutines, FFI), on control flow that enters
+  it anywhere but its entry, or when its arity is not fixed by direct
+  `CALL`s / plain `CodePtr`s (`main` is seeded from the prologue).
+  The VM trusts a map only at a known PC: the top frame's safepoint PC, or a
+  return PC that follows a `CALL`. A frame that entered native code which
+  re-entered the VM (`call_function`) or holds a coroutine resume base stays
+  conservative. On `gc_churn`, `result_heap_churn` and `dict_count` every
+  frame at every collection is precise.
 
 ## Later (not this island)
 
