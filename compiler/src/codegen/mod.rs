@@ -851,6 +851,11 @@ pub struct Compiler {
     /// boxes hoisted to its start so box slots never land on live operands.
     escape_hoist: Option<Vec<String>>,
 
+    /// Top-level functions whose frames can never hold a heap word
+    /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
+    precise_frame_fns: HashSet<String>,
+    precise_frames: Vec<common::PreciseFrameMap>,
+
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
@@ -1062,6 +1067,8 @@ impl Default for Compiler {
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             escape_hoist: None,
+            precise_frame_fns: HashSet::new(),
+            precise_frames: Vec::new(),
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),

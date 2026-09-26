@@ -162,6 +162,10 @@ impl Compiler {
         &self.stack_maps
     }
 
+    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
+        &self.precise_frames
+    }
+
     pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
         &self.stack_map_drafts
     }
@@ -14228,6 +14232,95 @@ impl Compiler {
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
     #[inline(never)]
+    /// True when no value of this function can be a heap word: every
+    /// parameter and every expression in `args` / `body` has a numeric,
+    /// `unit` or `never` checker type, and it declares no closures or nested
+    /// functions. Such frames get an empty precise map (see finalize).
+    fn fn_is_heap_free(&self, names: &[&str], args: &Output, body: &Output) -> bool {
+        use crate::typechecking::subst::apply_ty_prune;
+        use crate::typechecking::ty::strip_readonly;
+
+        let allowed = |ty: &Ty| {
+            let ty = apply_ty_prune(self.checker.subst(), ty);
+            match strip_readonly(&ty) {
+                Ty::Con(n) => matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "unit"),
+                Ty::Tuple(items) => items.is_empty(),
+                Ty::Never => true,
+                _ => false,
+            }
+        };
+        let Some(params) = names.iter().find_map(|n| self.checker.fn_param_tys(n)) else {
+            return false;
+        };
+        if !params.iter().all(allowed) {
+            return false;
+        }
+        let mut ok = true;
+        let mut stack = vec![args, body];
+        while let Some(node) = stack.pop() {
+            if !ok {
+                break;
+            }
+            match node.1.as_ref() {
+                Expression::Lambda { .. }
+                | Expression::Function { .. }
+                | Expression::Yield(..)
+                | Expression::YieldFrom(..)
+                | Expression::Resume { .. }
+                | Expression::Defer { .. } => ok = false,
+                Expression::Block(_)
+                | Expression::Statement(_)
+                | Expression::ExprStatement(_)
+                | Expression::Expr(_)
+                | Expression::Group(_)
+                | Expression::Fragment(_)
+                | Expression::Comment(_)
+                | Expression::Noop(_)
+                | Expression::Break
+                | Expression::Continue
+                | Expression::Type(_)
+                | Expression::TypeApp { .. }
+                | Expression::Argument { .. }
+                | Expression::Variable(..)
+                | Expression::Constant(..)
+                | Expression::Return(_)
+                | Expression::ImplicitReturn(_)
+                | Expression::If(..)
+                | Expression::Branch(..)
+                | Expression::Loop { .. } => {}
+                // A plain local target is untyped; the stored value is checked.
+                Expression::Assignment(target, value) | Expression::CompoundAssign(target, _, value) => {
+                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
+                        stack.push(target);
+                    }
+                    stack.push(value);
+                    continue;
+                }
+                Expression::Adjust { target, .. } => {
+                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
+                        stack.push(target);
+                    }
+                    continue;
+                }
+                // A direct call's callee is a code address, not a frame value;
+                // a local of the same name would be a closure.
+                Expression::Call { name, args } => {
+                    ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty));
+                    let direct = matches!(name.1.as_ref(), Expression::Identifier(n)
+                        if !self.context.variables.contains(&n.to_string()));
+                    if !direct {
+                        stack.push(name);
+                    }
+                    stack.extend(args.iter().flatten());
+                    continue;
+                }
+                _ => ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty)),
+            }
+            crate::typechecking::id::walk_children(node, &mut |child| stack.push(child));
+        }
+        ok
+    }
+
     fn compile_function_decl_into<'compiler>(
         &mut self,
         span: &SimpleSpan,
@@ -14297,6 +14390,7 @@ impl Compiler {
             let prev_pins = std::mem::take(&mut self.pinned_array_slots);
             let prev_fn_qualified = self.current_function_qualified.take();
             let prev_fn_table_key = self.current_function_table_key.take();
+            let prev_fn_table_key_was_none = prev_fn_table_key.is_none();
             self.current_function_qualified = Some(qualified.clone());
             self.current_function_table_key = Some(table_key.clone());
             // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
@@ -14387,6 +14481,15 @@ impl Compiler {
             self.field_key_slots = prev_field_keys;
             let body_end = self.bytecode.len();
             self.record_fn_span(table_key.clone(), body_start, body_end);
+            if prev_fn_table_key_was_none
+                && !*is_coro
+                && type_params.is_empty()
+                && dict_arity == 0
+                && !self.compiling_method
+                && self.fn_is_heap_free(&[qualified.as_str(), table_key.as_str()], args, body)
+            {
+                self.precise_frame_fns.insert(table_key.clone());
+            }
             let entry = self.fn_entry_labels.get(&table_key).copied();
             self.bytecode.record_func_with_sp(
                 table_key.clone(),
@@ -17554,6 +17657,11 @@ impl Compiler {
         apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
         self.stack_maps = crate::mir::bind_drafts(
             &lowered.stack_map_drafts,
+            self.bytecode.as_slice(),
+            &entries,
+        );
+        self.precise_frames = crate::mir::bind_heap_free_frames(
+            &self.precise_frame_fns,
             self.bytecode.as_slice(),
             &entries,
         );

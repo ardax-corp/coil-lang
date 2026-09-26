@@ -496,7 +496,9 @@ impl<const S: usize> Machine<S> {
                             if unlikely(!self.stack_maps.is_empty()) {
                                 self.gc_ip = ip;
                             }
+                            self.gc_top_ip = Some(ip);
                             self.gc_collect();
+                            self.gc_top_ip = None;
                             let freed = before.saturating_sub(self.heap.size());
                             self.stack.push(Value::from(freed as i64));
                         }

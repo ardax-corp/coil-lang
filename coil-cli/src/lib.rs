@@ -37,6 +37,8 @@ pub struct LoadedArchive {
     pub operand_stack_slots: Option<u32>,
     /// S2b maps when the envelope stored them (minor 14+). Empty = conservative GC.
     pub stack_maps: Vec<common::FrameStackMap>,
+    /// Complete frame maps (minor 21+). Empty = every frame conservative.
+    pub precise_frames: Vec<common::PreciseFrameMap>,
 }
 
 /// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
@@ -77,6 +79,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         } else {
             Vec::new()
         },
+        precise_frames: program.precise_frames,
     })
 }
 
@@ -135,6 +138,7 @@ pub fn execute_archived_program(
         debug: loaded.debug.clone(),
         operand_stack_slots: slots as u32,
         stack_maps: loaded.stack_maps.clone(),
+        precise_frames: loaded.precise_frames.clone(),
     });
     machine.set_program_debug(loaded.debug.clone());
     machine.run_raw(
@@ -373,6 +377,7 @@ mod tests {
             struct_layouts: vec![],
             operand_stack_slots: Some(512),
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         assert_eq!(
             resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode),
@@ -410,6 +415,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: maps.clone(),
+            precise_frames: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let loaded = load_archive_bytes(bytes.as_slice()).expect("load");

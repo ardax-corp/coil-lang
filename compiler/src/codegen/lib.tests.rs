@@ -213,6 +213,7 @@ fn two_module_and_class_static_assignments_run() {
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use common::{Byte, FrameStackMap, Instruction, SlotMap};
+use common::{Byte, FrameStackMap, Instruction, PreciseFrameMap, SlotMap};
 
 use crate::il::IlOp;
 
@@ -150,6 +150,74 @@ fn try_build_draft_err(
         }
     }
     Ok(draft)
+}
+
+/// Empty precise maps for heap-free functions (`names`): each body runs from
+/// its entry to the next entry PC and must end in a return / jump and contain
+/// no op that can put a heap word in its frame. Anything else stays scanned.
+pub fn bind_heap_free_frames(
+    names: &std::collections::HashSet<String>,
+    bytecode: &[Byte],
+    entries: &[(String, u32)],
+) -> Vec<PreciseFrameMap> {
+    let mut pcs: Vec<u32> = entries.iter().map(|(_, pc)| *pc).collect();
+    pcs.sort_unstable();
+    pcs.dedup();
+    let mut out: Vec<PreciseFrameMap> = entries
+        .iter()
+        .filter(|(name, _)| names.contains(name))
+        .filter_map(|(_, entry)| {
+            let next = pcs.partition_point(|&pc| pc <= *entry);
+            let end = pcs.get(next).copied().unwrap_or(bytecode.len() as u32);
+            let body = bytecode.get(*entry as usize..end as usize)?;
+            let ends_in_exit = body.last().is_some_and(|b| {
+                matches!(
+                    *b.bytecode(),
+                    Instruction::RETURN
+                        | Instruction::ConstReturnImm
+                        | Instruction::LoadReturnSlot
+                        | Instruction::BinReturn
+                        | Instruction::TailCall
+                        | Instruction::JMP
+                )
+            });
+            let heap_free = body.iter().all(|b| !puts_heap_word(*b.bytecode()));
+            (ends_in_exit && heap_free).then(|| PreciseFrameMap {
+                entry_pc: *entry,
+                end_pc: end,
+                heap_slots: Vec::new(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|m| m.entry_pc);
+    out.dedup_by_key(|m| m.entry_pc);
+    out
+}
+
+/// Ops that can leave a heap word on the executing frame.
+fn puts_heap_word(inst: Instruction) -> bool {
+    is_alloc_opcode(inst)
+        || matches!(
+            inst,
+            Instruction::BoxValue
+                | Instruction::STRING
+                | Instruction::MakeFn
+                | Instruction::MakePolyFn
+                | Instruction::MakePolyFnCapture
+                | Instruction::CodePtr
+                | Instruction::MakeCoro
+                | Instruction::MakeDict
+                | Instruction::DictEntries
+                | Instruction::FfiLoad
+                | Instruction::DeclareFFI
+                | Instruction::FfiInvoke
+                | Instruction::GetField
+                | Instruction::LoadField
+                | Instruction::Index
+                | Instruction::DenseIndex
+                | Instruction::DenseIndexJmpf
+                | Instruction::DenseFieldLoad
+        )
 }
 
 /// Bytecode opcodes that are interpreter GC safepoints (alloc).

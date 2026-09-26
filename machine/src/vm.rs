@@ -511,6 +511,11 @@ pub struct Machine<const S: usize> {
     io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     /// S2b maps: live heap IL slots at alloc safepoints.
     stack_maps: Vec<common::FrameStackMap>,
+    /// Complete frame maps (sorted by entry); see [`common::PreciseFrameMap`].
+    precise_frames: Vec<common::PreciseFrameMap>,
+    /// PC past the op that entered the current GC safepoint, while one runs.
+    /// `None` keeps the top frame on the conservative scan.
+    gc_top_ip: Option<usize>,
     /// Bytecode PC of the current GC safepoint (alloc / `gc::collect`).
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
@@ -585,6 +590,8 @@ impl<const S: usize> Machine<S> {
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            gc_top_ip: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
             finalizer_by_type: std::collections::HashMap::default(),
@@ -1371,12 +1378,7 @@ impl<const S: usize> Machine<S> {
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
         let mut roots = self.heap.take_gc_roots();
-        for v in self.stack.as_slice() {
-            let addr = v.heap_addr();
-            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        }
+        self.collect_stack_roots(&mut roots);
         {
             let addr = self.steal_join_root.heap_addr();
             if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
@@ -1406,6 +1408,81 @@ impl<const S: usize> Machine<S> {
         roots.extend(self.userland_libraries.keys().copied());
         self.collect_mapped_slot_addrs(&mut roots);
         roots
+    }
+
+    /// Operand-stack roots, frame by frame: a frame with a trusted precise map
+    /// roots only its heap slots; every other stack word is scanned.
+    fn collect_stack_roots(&self, roots: &mut Vec<u64>) {
+        let stack = self.stack.as_slice();
+        let mut scan = |words: &[Value]| {
+            for v in words {
+                let addr = v.heap_addr();
+                if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                    roots.push(addr);
+                }
+            }
+        };
+        let n = self.frames.len();
+        if self.precise_frames.is_empty() || n == 0 {
+            scan(stack);
+            return;
+        }
+        let top = stack.len();
+        scan(&stack[..self.frames[0].get().min(top)]);
+        for i in 0..n {
+            let lo = self.frames[i].get();
+            let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
+            if lo > hi || hi > top {
+                // Unexpected frame layout: everything from here up is scanned.
+                scan(&stack[lo.min(top)..]);
+                return;
+            }
+            match self.trusted_precise_map(i, lo, hi) {
+                Some(map) => {
+                    let heap_words: Vec<Value> = map
+                        .heap_slots
+                        .iter()
+                        .map(|&s| lo + usize::from(s))
+                        .filter(|&idx| idx < hi)
+                        .map(|idx| stack[idx])
+                        .collect();
+                    scan(&heap_words);
+                }
+                None => scan(&stack[lo..hi]),
+            }
+        }
+    }
+
+    /// Precise map for frame `i` (stack region `[lo, hi)`) when its PC is
+    /// known: the top frame's safepoint PC, or a return address that follows
+    /// a `CALL`. Frames holding a coroutine segment or that re-entered the VM
+    /// through native code (stale return PC) stay conservative.
+    fn trusted_precise_map(&self, i: usize, lo: usize, hi: usize) -> Option<&common::PreciseFrameMap> {
+        if self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi) {
+            return None;
+        }
+        if self.nested_frame_depths.iter().any(|&d| d >= 2 && d - 2 == i) {
+            return None;
+        }
+        // PCs are one past the op; look up the op itself so a body's last op
+        // never resolves to the next body.
+        let pc = if i + 1 == self.frames.len() {
+            self.gc_top_ip?.checked_sub(1)?
+        } else {
+            let call_pc = self.frames[i].tell().checked_sub(1)?;
+            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL | Instruction::CallIndirect) {
+                return None;
+            }
+            call_pc
+        };
+        common::precise_map_for_pc(&self.precise_frames, u32::try_from(pc).ok()?)
+    }
+
+    fn instruction_at(&self, pc: usize) -> Option<Instruction> {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        code.get(pc).map(|b| *b.bytecode())
     }
 
     fn collect_mapped_slot_addrs(&self, roots: &mut Vec<u64>) {
@@ -1593,7 +1670,9 @@ impl<const S: usize> Machine<S> {
         if unlikely(!self.stack_maps.is_empty()) {
             self.gc_ip = ip;
         }
+        self.gc_top_ip = Some(ip);
         self.gc_safepoint();
+        self.gc_top_ip = None;
     }
 
     /// Classify a stack value as an enum member; heap pointers become `Object`.
@@ -1821,6 +1900,7 @@ impl<const S: usize> Machine<S> {
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
+        self.precise_frames = program.precise_frames.clone();
         self.thread_program = Some(program);
     }
 
@@ -1831,6 +1911,11 @@ impl<const S: usize> Machine<S> {
 
     pub fn stack_maps(&self) -> &[common::FrameStackMap] {
         &self.stack_maps
+    }
+
+    /// Attach complete frame maps. Empty keeps every frame conservative.
+    pub fn set_precise_frames(&mut self, maps: Vec<common::PreciseFrameMap>) {
+        self.precise_frames = maps;
     }
 
     pub fn thread_program(&self) -> Option<&crate::thread::ThreadProgram> {
@@ -1924,6 +2009,7 @@ impl<const S: usize> Machine<S> {
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
+            precise_frames: self.precise_frames.clone(),
         }));
     }
 

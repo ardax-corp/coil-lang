@@ -86,6 +86,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
@@ -897,6 +898,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -921,6 +923,7 @@ mod tests {
             struct_layouts: Vec::new(),
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();

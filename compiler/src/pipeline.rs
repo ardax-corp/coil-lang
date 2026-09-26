@@ -220,6 +220,7 @@ impl Pipeline {
             debug: self.program_debug(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: self.stack_maps().to_vec(),
+            precise_frames: self.precise_frames().to_vec(),
         });
     }
 
@@ -1257,6 +1258,7 @@ impl Pipeline {
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: self.stack_maps().to_vec(),
+            precise_frames: self.precise_frames().to_vec(),
             bytecode: self.bytecode,
         };
 
@@ -1625,6 +1627,10 @@ impl Pipeline {
         self.compiler_lazy().stack_maps()
     }
 
+    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
+        self.compiler_lazy().precise_frames()
+    }
+
     pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
         self.compiler_lazy().deopt_map_drafts()
     }
@@ -1860,6 +1866,7 @@ fn main() {
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
             stack_maps: pipeline.stack_maps().to_vec(),
+            precise_frames: pipeline.precise_frames().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1901,6 +1908,7 @@ fn main() {
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
             stack_maps: pipeline.stack_maps().to_vec(),
+            precise_frames: pipeline.precise_frames().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");

@@ -50,6 +50,24 @@ impl FrameStackMap {
     }
 }
 
+/// Complete frame description (archive minor 21+): anywhere in
+/// `[entry_pc, end_pc)`, only `heap_slots` (frame-relative) of this frame can
+/// hold heap words, so the GC roots those instead of scanning the frame.
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct PreciseFrameMap {
+    pub entry_pc: u32,
+    pub end_pc: u32,
+    pub heap_slots: Vec<u16>,
+}
+
+/// The precise map covering `pc`, if any (`maps` sorted by `entry_pc`, disjoint).
+pub fn precise_map_for_pc(maps: &[PreciseFrameMap], pc: u32) -> Option<&PreciseFrameMap> {
+    let i = maps.partition_point(|m| m.entry_pc <= pc);
+    let m = maps.get(i.checked_sub(1)?)?;
+    (pc < m.end_pc).then_some(m)
+}
+
 /// Last map whose `entry_pc <= ip` and `contains_pc(ip)`.
 pub fn map_for_ip(maps: &[FrameStackMap], ip: u32) -> Option<&FrameStackMap> {
     let mut best = None;
@@ -89,5 +107,19 @@ mod tests {
         assert_eq!(m.slots_at(12), &[0]);
         assert_eq!(m.slots_at(25), &[0, 2]);
         assert!(m.contains_pc(10) && !m.contains_pc(40));
+    }
+
+    #[test]
+    fn precise_map_lookup_respects_bounds() {
+        let maps = vec![
+            PreciseFrameMap { entry_pc: 10, end_pc: 20, heap_slots: vec![] },
+            PreciseFrameMap { entry_pc: 30, end_pc: 40, heap_slots: vec![1] },
+        ];
+        assert!(precise_map_for_pc(&maps, 9).is_none());
+        assert_eq!(precise_map_for_pc(&maps, 10).map(|m| m.entry_pc), Some(10));
+        assert!(precise_map_for_pc(&maps, 20).is_none());
+        assert!(precise_map_for_pc(&maps, 25).is_none());
+        assert_eq!(precise_map_for_pc(&maps, 39).map(|m| m.entry_pc), Some(30));
+        assert!(precise_map_for_pc(&maps, 40).is_none());
     }
 }
