@@ -490,7 +490,12 @@ impl Heap {
     }
 
     fn finish_sweep_cycle(&mut self) {
-        self.gc_next_threshold = self.alloc_bytes.saturating_mul(self.gc_growth_factor);
+        // Floor at the initial budget: a tiny live set would otherwise
+        // schedule a collection every few allocations.
+        self.gc_next_threshold = self
+            .alloc_bytes
+            .saturating_mul(self.gc_growth_factor)
+            .max(GC_NEXT_THRESHOLD);
         self.gc_phase = GcPhase::Idle;
         self.gc_sweep_cursor = None;
         self.gc_sweep_prev = None;
@@ -2905,18 +2910,22 @@ mod tests {
 
         assert!(
             !heap.should_collect(),
-            "after sweep, threshold must be live*growth so one survivor is quiet"
+            "after sweep, threshold must be max(live*growth, budget) so one survivor is quiet"
         );
         let quiet_size = heap.size();
-        // Grow past the rescaled threshold without roots, should_collect again.
+        // Grow past the rescaled (floored) threshold without roots, should_collect again.
         while !heap.should_collect() {
             let _ = heap.alloc(ObjString::from("pressure"), Object::String);
             // Guard against runaway if rescale broke (would never trip).
             assert!(
-                heap.size() < quiet_size.saturating_mul(8).max(4096),
+                heap.size() <= quiet_size.saturating_mul(8).max(GC_NEXT_THRESHOLD * 2),
                 "alloc_bytes grew without tripping should_collect"
             );
         }
+        assert!(
+            heap.size() > GC_NEXT_THRESHOLD,
+            "a tiny live set must not collect below the initial budget"
+        );
     }
 
     /// Immortal arity-0 enums are seeded as GC roots and must not be swept,
