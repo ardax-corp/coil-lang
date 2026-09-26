@@ -22,6 +22,7 @@ pub fn bind_precise_frames(
     constants: &[u64],
     match_arities: &HashMap<u32, u32>,
     entries: &[(String, u32)],
+    entry_sps: &HashMap<String, u32>,
     prologue_entry: u32,
 ) -> Vec<PreciseFrameMap> {
     let mut starts: Vec<u32> = entries.iter().map(|(_, pc)| *pc).collect();
@@ -52,7 +53,17 @@ pub fn bind_precise_frames(
         if enters_mid_body {
             continue;
         }
-        if let Some(at_pc) = analyze_body(bytecode, constants, match_arities, entry, end, prologue_entry)
+        // Words the host pushes when it calls a body no bytecode references.
+        let declared = entries
+            .iter()
+            .filter(|(_, pc)| *pc == entry)
+            .filter_map(|(n, _)| entry_sps.get(n).map(|&sp| sp as usize))
+            .max();
+        let seed = EntrySeed {
+            prologue_entry: prologue_entry as usize,
+            declared,
+        };
+        if let Some(at_pc) = analyze_body(bytecode, constants, match_arities, entry, end, &seed)
             && !at_pc.is_empty()
         {
             out.push(PreciseFrameMap {
@@ -306,13 +317,13 @@ fn analyze_body(
     match_arities: &HashMap<u32, u32>,
     entry: u32,
     end: u32,
-    prologue_entry: u32,
+    seed: &EntrySeed,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
     let mut states: HashMap<usize, FrameState> = HashMap::new();
     let mut work = vec![entry];
     // Parameters are live words of unknown kind.
-    let arity = entry_arity(bytecode, constants, entry, prologue_entry as usize)?;
+    let arity = entry_arity(bytecode, constants, entry, seed)?;
     states.insert(
         entry,
         FrameState {
@@ -373,18 +384,30 @@ fn analyze_body(
     Some(out)
 }
 
-/// Parameter count of the body at `entry`, read from its callers' `CALL` /
-/// `TailCall`s. Bodies entered any other way (jump, code pointer, coroutine,
-/// host-only) or with differing arities are refused.
+/// How a body's entry state is known besides its callers' `CALL`s.
+struct EntrySeed {
+    /// The prologue `JMP` target (`main` or setup).
+    prologue_entry: usize,
+    /// Codegen's entry height (params, `self`, dictionaries) for this body.
+    declared: Option<usize>,
+}
+
+/// Words on the frame when the body at `entry` starts: its callers' `CALL`
+/// / `TailCall` arity, `0` for `main` entered from the prologue, or the
+/// declared entry height when no bytecode references the body (only the host
+/// calls it: tests, finalizers, callbacks). Bodies entered any other way
+/// (jump, closure code pointer, coroutine) or with differing arities are
+/// refused.
 fn entry_arity(
     bytecode: &[Byte],
     constants: &[u64],
     entry: usize,
-    prologue_entry: usize,
+    seed: &EntrySeed,
 ) -> Option<usize> {
-    if entry == prologue_entry && entered_by_prologue_only(bytecode, constants, entry) {
+    if entry == seed.prologue_entry && entered_by_prologue_only(bytecode, constants, entry) {
         return Some(0);
     }
+    let mut referenced = false;
     let mut arity = None;
     for b in bytecode {
         let inst = *b.bytecode();
@@ -401,6 +424,7 @@ fn entry_arity(
         if target != Some(entry) {
             continue;
         }
+        referenced = true;
         // A plain code pointer is called with the declared arity; closures
         // (`MakePolyFn*`) append captures, jumps and coroutines do not match.
         if matches!(inst, Instruction::CodePtr) {
@@ -416,7 +440,7 @@ fn entry_arity(
             Some(_) => return None,
         }
     }
-    arity
+    if referenced { arity } else { seed.declared }
 }
 
 /// `main` shape: `CALL 0 target=0` at PC 0 opens a fresh frame at base 0,
@@ -700,7 +724,7 @@ mod tests {
         let mut code = vec![call(1, 2), op(Instruction::HALT)];
         code.extend_from_slice(body);
         let entries = vec![("f".to_string(), 2)];
-        bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, u32::MAX)
+        bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
     }
 
     fn slots_at(maps: &[PreciseFrameMap], pc: u32) -> Option<Vec<u16>> {
@@ -769,6 +793,43 @@ mod tests {
     }
 
     #[test]
+    fn host_called_body_uses_declared_entry_height() {
+        // `[0] HALT; [1..] body` with no bytecode reference to PC 1.
+        let mut code = vec![op(Instruction::HALT)];
+        code.extend_from_slice(&[
+            load(0),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ]);
+        let entries = vec![("t".to_string(), 1)];
+        let declared = HashMap::from([("t".to_string(), 1)]);
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &declared,
+            u32::MAX,
+        );
+        assert_eq!(slots_at(&maps, 2), Some(vec![0, 1]));
+
+        // A closure code pointer to the body keeps it unmapped.
+        code[0] = op(Instruction::CodePtr).with_operand_u32(1);
+        code.push(op(Instruction::HALT));
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &declared,
+            u32::MAX,
+        );
+        assert!(maps.is_empty());
+    }
+
+    #[test]
     fn entry_mid_body_refuses_the_body() {
         let mut code = vec![call(1, 2), call(1, 4)];
         code.extend_from_slice(&[
@@ -778,7 +839,7 @@ mod tests {
         ]);
         let entries = vec![("f".to_string(), 2)];
         let maps =
-            bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, u32::MAX);
+            bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX);
         assert!(maps.is_empty());
     }
 }

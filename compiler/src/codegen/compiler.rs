@@ -17565,6 +17565,12 @@ impl Compiler {
             offset_callees,
         });
         self.bytecode.set_opt_options(self.opt_options.clone());
+        let entry_sps: HashMap<String, u32> = self
+            .bytecode
+            .funcs()
+            .iter()
+            .map(|f| (f.name.clone(), f.entry_sp))
+            .collect();
         let mut lowered = if self.retain_cursor_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
         } else {
@@ -17666,6 +17672,7 @@ impl Compiler {
             &self.constants,
             &lowered.match_arities,
             &entries,
+            &entry_sps,
             self.prologue_jmp_target(),
         );
 
