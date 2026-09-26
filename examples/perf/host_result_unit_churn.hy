@@ -11,7 +11,10 @@ fn main() {
     let i = 0;
     while i < iters {
         let n = i % 10;
-        let code = if n == 9 { -1 } else { n };
+        let code = n;
+        if n == 9 {
+            code = -1;
+        }
         acc = acc + match result_unit_probe(code) {
             Result::Ok(_) => 1,
             Result::Err(_) => 0,
