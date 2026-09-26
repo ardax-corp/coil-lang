@@ -204,13 +204,22 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        let epoch_lock = self.alloc_lock;
-        let _epoch_guard = if epoch_lock.is_null() {
-            None
-        } else {
-            let lock = unsafe { &*epoch_lock };
-            Some(lock.lock().unwrap_or_else(|e| e.into_inner()))
-        };
+        let _epoch_guard = self.epoch_guard();
+        self.alloc_unlocked(data, map)
+    }
+
+    /// Serializes heap-structure mutation while a shared-heap steal epoch is
+    /// open (workers share this `Heap`). `None` outside an epoch.
+    fn epoch_guard(&self) -> Option<std::sync::MutexGuard<'static, ()>> {
+        let lock = self.alloc_lock;
+        // The epoch's Mutex outlives every job bound to it.
+        (!lock.is_null()).then(|| unsafe { &*lock }.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn alloc_unlocked<T: GcSized, F>(&mut self, data: T, map: F) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
         unsafe {
@@ -244,6 +253,7 @@ impl Heap {
     /// Interns a string and returns its handle. The same reference is returned
     /// for two equal strings.
     pub fn intern(&mut self, data: String) -> RefString {
+        let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(&data);
         if let Some(s) = self.strings.find(&data, hash) {
             return s;
@@ -254,6 +264,7 @@ impl Heap {
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
         crate::vm::note_intern_str();
+        let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(data);
         if let Some(s) = self.strings.find(data, hash) {
             return s;
@@ -263,6 +274,7 @@ impl Heap {
 
     /// Register an existing string object in the intern table when needed.
     pub fn intern_ref(&mut self, string: RefString) -> RefString {
+        let _epoch_guard = self.epoch_guard();
         let data = string.as_ref();
         if let Some(s) = self.strings.find(&data.data, data.hash) {
             return s;
@@ -273,7 +285,7 @@ impl Heap {
 
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
         let obj_string = ObjString { data, hash };
-        let (_, s) = self.alloc(obj_string, Object::String);
+        let (_, s) = self.alloc_unlocked(obj_string, Object::String);
         self.strings.insert(s, ());
         s
     }
@@ -546,6 +558,7 @@ impl Heap {
     /// Adjust tracked heap bytes after an in-place grow/shrink of a managed
     /// object's internal Rust allocation (for example `ObjArray.elements`).
     pub fn account_resize(&mut self, old_size: usize, new_size: usize) {
+        let _epoch_guard = self.epoch_guard();
         if new_size >= old_size {
             self.alloc_bytes += new_size - old_size;
         } else {
@@ -685,6 +698,7 @@ impl Heap {
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
     pub fn immortal_unit_enum(&mut self, tag: u32) -> Object {
+        let _epoch_guard = self.epoch_guard();
         if let Some((cached, obj)) = self.unit_enum
             && cached == tag
         {
@@ -698,7 +712,7 @@ impl Heap {
             tag,
             payload: EnumPayload::empty(),
         };
-        let (object, _) = self.alloc(obj_enum, Object::Enum);
+        let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
         self.immortal_enums.insert(tag, object);
         self.unit_enum = Some((tag, object));
         object
@@ -3153,6 +3167,40 @@ mod tests {
         assert!(heap.find_object_by_addr(keep.addr()).is_some());
         for addr in dead {
             assert!(heap.find_object_by_addr(addr).is_none());
+        }
+    }
+
+    /// Shared-heap workers intern and allocate concurrently inside a steal
+    /// epoch; the intern table and slab must stay consistent.
+    #[test]
+    fn epoch_workers_intern_and_alloc_concurrently() {
+        struct HeapPtr(*mut Heap);
+        unsafe impl Send for HeapPtr {}
+        unsafe impl Sync for HeapPtr {}
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        heap.enter_epoch_stw(&lock);
+        let shared = HeapPtr(&mut heap);
+        std::thread::scope(|scope| {
+            for t in 0..4 {
+                let shared = &shared;
+                scope.spawn(move || {
+                    let heap = unsafe { &mut *shared.0 };
+                    for i in 0..2000 {
+                        let s = heap.intern_str(&format!("k{}", (i * 7 + t) % 500));
+                        assert!(heap.find_object_by_addr(s.as_ptr() as u64).is_some());
+                        let (o, _) = heap.alloc(ObjString::from("x"), Object::String);
+                        assert!(heap.find_object_by_addr(o.addr()).is_some());
+                    }
+                });
+            }
+        });
+        heap.exit_epoch_stw();
+        for i in 0..500 {
+            let key = format!("k{i}");
+            let a = heap.intern_str(&key);
+            let b = heap.intern_str(&key);
+            assert!(Gc::ptr_eq(a, b), "{key} interned twice");
         }
     }
 
