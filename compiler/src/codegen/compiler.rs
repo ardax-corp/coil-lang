@@ -5754,7 +5754,12 @@ impl Compiler {
         for tmp in &temps {
             bytecode.push_load(*tmp);
         }
-        self.emit_direct_fn_call(bytecode, &fqn, temps.len() as u32)
+        // Instance methods take a trailing dictionary (defaults call siblings through it).
+        let mut arity = temps.len() as u32;
+        if self.emit_instance_dict(bytecode, &instance.class, &lookup) {
+            arity += 1;
+        }
+        self.emit_direct_fn_call(bytecode, &fqn, arity)
     }
 
     /// Emit element-wise / broadcast aggregate arithmetic when the typechecker
@@ -6577,7 +6582,11 @@ impl Compiler {
         bytecode.push_store_pop(rhs_slot);
         bytecode.push_load(lhs_slot);
         bytecode.push_load(rhs_slot);
-        self.emit_direct_fn_call(bytecode, &fqn, 2)
+        let mut arity = 2;
+        if self.emit_instance_dict(bytecode, class, std::slice::from_ref(&lookup_ty)) {
+            arity += 1;
+        }
+        self.emit_direct_fn_call(bytecode, &fqn, arity)
     }
 
     /// Emit a string literal as a table-indexed `STRING` byte into `self.bytecode`.
