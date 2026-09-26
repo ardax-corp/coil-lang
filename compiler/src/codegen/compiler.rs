@@ -5767,12 +5767,19 @@ impl Compiler {
         for tmp in &temps {
             bytecode.push_load(*tmp);
         }
-        // Instance methods take a trailing dictionary (defaults call siblings through it).
         let mut arity = temps.len() as u32;
-        if self.emit_instance_dict(bytecode, &instance.class, &lookup) {
+        if Self::is_default_method_fqn(&instance.class, method, &fqn)
+            && self.emit_instance_dict(bytecode, &instance.class, &lookup)
+        {
             arity += 1;
         }
         self.emit_direct_fn_call(bytecode, &fqn, arity)
+    }
+
+    /// Default trait bodies reach siblings through their trailing dictionary;
+    /// concrete impl methods resolve siblings statically and skip the alloc.
+    fn is_default_method_fqn(class: &str, method: &str, fqn: &str) -> bool {
+        fqn == crate::typechecking::generics::Generics::default_method_fqn(class, method)
     }
 
     /// Emit element-wise / broadcast aggregate arithmetic when the typechecker
@@ -6596,7 +6603,9 @@ impl Compiler {
         bytecode.push_load(lhs_slot);
         bytecode.push_load(rhs_slot);
         let mut arity = 2;
-        if self.emit_instance_dict(bytecode, class, std::slice::from_ref(&lookup_ty)) {
+        if Self::is_default_method_fqn(class, method, &fqn)
+            && self.emit_instance_dict(bytecode, class, std::slice::from_ref(&lookup_ty))
+        {
             arity += 1;
         }
         self.emit_direct_fn_call(bytecode, &fqn, arity)
