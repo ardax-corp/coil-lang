@@ -8197,6 +8197,49 @@ fn main() {
     assert_eq!(out, "42");
 }
 
+/// Heap-free functions get an empty precise frame map; a function holding
+/// an object does not, and the program still runs under collections.
+#[test]
+fn heap_free_functions_get_precise_frame_maps() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+use gc::{collect};
+class B {
+    pub v: int,
+}
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn holds(int n) -> int {
+    let b = new B(n);
+    collect();
+    return b.v;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", fib(10) + holds(3))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let fib = pipeline.function_offset("fib").expect("fib") as u32;
+    let holds = pipeline.function_offset("holds").expect("holds") as u32;
+    let precise = pipeline.precise_frames();
+    assert!(
+        precise.iter().any(|m| m.entry_pc == fib && m.heap_slots.is_empty()),
+        "fib must be precise: {precise:?}"
+    );
+    assert!(
+        !precise.iter().any(|m| m.entry_pc == holds),
+        "holds keeps a heap object: {precise:?}"
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "58");
+}
+
 #[test]
 fn s2b_maps_survive_archive_load_and_collect() {
     use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
@@ -8236,6 +8279,7 @@ fn main() {
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -8262,6 +8306,7 @@ fn main() {
         debug: loaded.debug_bundle(),
         operand_stack_slots: loaded.operand_stack_slots,
         stack_maps: loaded.stack_maps.clone(),
+        precise_frames: loaded.precise_frames.clone(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
@@ -11054,6 +11099,7 @@ fn main() {
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
+        precise_frames: pipeline.precise_frames().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

@@ -1667,6 +1667,67 @@
         assert_eq!(vm.stack_at_for_test(0).heap_addr(), 0xBEE0);
     }
 
+    /// A frame with a trusted precise map roots only its heap slots; an
+    /// unmapped frame, the top frame without a known safepoint PC, and a frame
+    /// that re-entered the VM from native code are scanned word by word.
+    #[test]
+    fn precise_frame_maps_limit_stack_roots() {
+        use common::PreciseFrameMap;
+        use crate::ObjString;
+
+        let mut vm = Machine::<8>::default();
+        let code = [
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::CALL).with_call_packed(0, 5),
+            Byte::new(Instruction::RETURN),
+            Byte::new(Instruction::RETURN),
+        ];
+        vm.program_code = Arc::new(unsafe {
+            std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
+        });
+        let heap = vm.heap_mut();
+        let (main_obj, _) = heap.alloc(ObjString::from("main"), Object::String);
+        let (f_obj, _) = heap.alloc(ObjString::from("f"), Object::String);
+        let (g_obj, _) = heap.alloc(ObjString::from("g"), Object::String);
+        vm.frames.clear();
+        for (ip, sp) in [(1, 0), (4, 1), (0, 2)] {
+            vm.frames.setup_current_and_advance(|f| {
+                f.seek(ip);
+                f.set(sp);
+            });
+        }
+        for obj in [main_obj, f_obj, g_obj] {
+            vm.stack.push(Value::from(obj.addr()));
+        }
+        vm.precise_frames = vec![PreciseFrameMap {
+            entry_pc: 2,
+            end_pc: 5,
+            heap_slots: vec![],
+        }];
+        let roots = |vm: &Machine<8>| {
+            let mut roots = Vec::new();
+            vm.collect_stack_roots(&mut roots);
+            roots
+        };
+
+        let r = roots(&vm);
+        assert!(r.contains(&main_obj.addr()), "unmapped caller is scanned");
+        assert!(!r.contains(&f_obj.addr()), "precise heap-free frame is skipped");
+        assert!(r.contains(&g_obj.addr()), "top frame without a safepoint PC is scanned");
+
+        vm.nested_frame_depths.push(3);
+        assert!(
+            roots(&vm).contains(&f_obj.addr()),
+            "a frame that entered native code has a stale PC"
+        );
+        vm.nested_frame_depths.clear();
+
+        vm.precise_frames.clear();
+        assert!(roots(&vm).contains(&f_obj.addr()), "no maps: every frame scanned");
+    }
+
     #[test]
     fn nested_enum_gc_traces_correctly() {
         use crate::{Heap, Member, ObjString, Object};
