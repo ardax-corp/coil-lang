@@ -178,6 +178,12 @@ jobs:
         run: |
           ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
+      - name: GC stress (`coil test`, collect at every allocation)
+        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        run: |
+          cargo build --bin coil --features gc-stress --target-dir target/gc-stress
+          ./target/gc-stress/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+
       - name: Leak smoke (`coil test` under ulimit -v)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
