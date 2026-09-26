@@ -409,7 +409,6 @@ impl Body<'_> {
         arity: usize,
         coroutine: bool,
     ) -> Option<Vec<(usize, Vec<u16>)>> {
-        let (bytecode, constants, match_arities) = (self.bytecode, self.constants, self.match_arities);
         let (entry, end) = (self.entry, self.end);
         let mut states: HashMap<usize, FrameState> = HashMap::new();
         let mut work = vec![start];
@@ -423,19 +422,7 @@ impl Body<'_> {
                 slot: vec![true; arity],
             },
         );
-        let step_at = |pc: usize, st: &mut FrameState| {
-            transfer(
-                bytecode.get(pc)?,
-                bytecode.get(pc + 1),
-                receives_send(bytecode, pc + 1),
-                coroutine,
-                constants,
-                match_arities,
-                st,
-                pc,
-                end,
-            )
-        };
+        let step_at = |pc: usize, st: &mut FrameState| transfer(self, pc, coroutine, st);
         let mut recorded: HashSet<usize> = HashSet::new();
         let mut steps = 0usize;
         while let Some(pc) = work.pop() {
@@ -606,17 +593,11 @@ struct Step {
 }
 
 /// Apply one op to `st`. `None` refuses the body (unmodeled op).
-fn transfer(
-    b: &Byte,
-    tail_word: Option<&Byte>,
-    next_receives: bool,
-    coroutine: bool,
-    constants: &[u64],
-    match_arities: &HashMap<u32, u32>,
-    st: &mut FrameState,
-    pc: usize,
-    end: usize,
-) -> Option<Step> {
+fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Option<Step> {
+    let b = body.bytecode.get(pc)?;
+    let tail_word = body.bytecode.get(pc + 1);
+    let next_receives = receives_send(body.bytecode, pc + 1);
+    let (constants, match_arities, end) = (body.constants, body.match_arities, body.end);
     use Instruction::*;
     let mut step = Step {
         width: 1,
