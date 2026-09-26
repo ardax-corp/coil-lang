@@ -5729,14 +5729,26 @@ impl Compiler {
             .iter()
             .map(Self::show_lookup_ty_for_instance)
             .collect();
-        let Some(instance) = self
+        // Constructed values carry `Sum` types; retry with their `App` head.
+        let instance = self
             .checker
             .generics()
             .find_instance_relaxed(&hint.class, &lookup)
             .cloned()
-        else {
+            .or_else(|| {
+                let heads: Option<Vec<Ty>> = arg_tys[..lookup_n]
+                    .iter()
+                    .map(|t| self.sum_instance_head(t).or_else(|| Some(t.clone())))
+                    .collect();
+                self.checker
+                    .generics()
+                    .find_instance_relaxed(&hint.class, &heads?)
+                    .cloned()
+            });
+        let Some(instance) = instance else {
             return false;
         };
+        let lookup: Vec<Ty> = instance.args.clone();
         let Some(fqn) = instance.method_fqns.get(method).cloned() else {
             return false;
         };
@@ -7412,6 +7424,36 @@ impl Compiler {
         let mut arg_bc = self.do_compile(arg);
         self.bytecode.append(&mut arg_bc);
         self.bytecode.push(Byte::new(Instruction::STRINGIFY));
+    }
+
+    /// `Option<int>`-style instance head for a constructed value typed as a
+    /// `Sum`: binds the enum's declared type params from concrete payloads.
+    fn sum_instance_head(&self, ty: &Ty) -> Option<Ty> {
+        let (name, variants) = match ty {
+            Ty::Constructor { owner, .. } => return self.sum_instance_head(owner),
+            Ty::Sum { name, variants } => (name, variants),
+            _ => return None,
+        };
+        let params = self.checker.generics().generic_type_ctors.get(name)?.clone();
+        let decl = self.checker.enum_variants(name)?;
+        let mut bound: HashMap<String, Ty> = HashMap::new();
+        for (vname, payload) in variants {
+            let Some((_, _, decl_tys)) = decl.iter().find(|(n, _, _)| n == vname) else {
+                continue;
+            };
+            for (d, c) in decl_tys.iter().zip(payload.field_types()) {
+                if let Ty::Con(p) = d
+                    && params.contains(p)
+                {
+                    if bound.get(p).is_some_and(|b| b != c) {
+                        return None;
+                    }
+                    bound.insert(p.clone(), c.clone());
+                }
+            }
+        }
+        let args: Option<Vec<Ty>> = params.iter().map(|p| bound.get(p).cloned()).collect();
+        Some(Ty::App(Box::new(Ty::Con(name.clone())), args?))
     }
 
     fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
