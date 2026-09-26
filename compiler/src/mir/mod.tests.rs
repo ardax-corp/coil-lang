@@ -6098,3 +6098,42 @@ fn strict_bool_or_of_compares_lowers() {
     int_or.push(IlOp::Return { loc, ret_words: 1 });
     assert!(super::infer::infer_lir(&int_or, 0, 1).is_err(), "OR on int words refuses");
 }
+
+/// `JMPT` on an int word (two-slot tag, `i & 1`) lowers as `x != 0` and LIR
+/// branches on `x` directly again (no extra compare in the reconstruct).
+#[test]
+fn int_branch_cond_lowers_and_lir_branches_on_word() {
+    let loc = loc();
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Const { imm: 1, loc },
+        IlOp::Bin {
+            op: Instruction::BITAND,
+            loc,
+        },
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfTrue,
+            target: Label(1),
+            loc,
+            hint: Default::default(),
+        },
+        IlOp::Const { imm: 10, loc },
+        IlOp::Return { loc, ret_words: 1 },
+        IlOp::Label(Label(1)),
+        IlOp::Const { imm: 20, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let mut hints = LowerHints::new("odd");
+    hints.param_count = 1;
+    hints.slot_ty.insert(0, super::ty::MirTy::I64);
+    let f = try_lower_numeric(&ops, &hints).expect("int cond lowers");
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits");
+    let has_ne = lir.iter().any(|op| {
+        matches!(op, IlOp::Bin { op: Instruction::NEQ, .. })
+            || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::NEQ)
+    });
+    assert!(!has_ne, "LIR must branch on the word, not `!= 0`");
+}

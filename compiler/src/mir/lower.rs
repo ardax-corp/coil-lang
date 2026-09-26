@@ -568,6 +568,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpf fallthrough".into()))?;
             record_edge(incoming, pred, taken, tos.clone());
             record_edge(incoming, pred, not_taken, tos.clone());
+            let cond = branch_cond(b, cond)?;
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Jump {
@@ -585,6 +586,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpt fallthrough".into()))?;
             record_edge(incoming, pred, taken, tos.clone());
             record_edge(incoming, pred, not_taken, tos.clone());
+            let cond = branch_cond(b, cond)?;
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Return { ret_words, .. }) if *ret_words >= 2 => {
@@ -1274,6 +1276,22 @@ fn is_float_inst(inst: Instruction) -> bool {
             | Instruction::GEQF
             | Instruction::PowF
     )
+}
+
+/// `JMPF` / `JMPT` test a word for non-zero. MIR branches on `Bool`, so an
+/// integer condition (e.g. a two-slot `Result` tag after `CALL`) becomes
+/// `cond != 0`; other word kinds still refuse.
+fn branch_cond(b: &mut MirBuilder, cond: ValueId) -> Result<ValueId, LowerError> {
+    let zero = match b.value_ty(cond) {
+        MirTy::Bool => return Ok(cond),
+        MirTy::I64 => MirConst::I64(0),
+        MirTy::I32 => MirConst::I32(0),
+        other => {
+            return Err(LowerError::Refused(format!("branch cond on {other}")));
+        }
+    };
+    let zero = b.ins_const(zero)?;
+    Ok(b.ins_cmp(MirCmpOp::Ne, cond, zero)?)
 }
 
 /// The IL opcode fixes the domain; MIR ops are untyped (`Add`, `Neg`). A

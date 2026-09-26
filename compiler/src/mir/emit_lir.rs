@@ -1626,6 +1626,11 @@ fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
+        // `x != 0` on an int word: the jump already tests for non-zero, so
+        // branch on `x` itself (keeps `BinSlotImmJmp*` fusion on `i & 1`).
+        if *op == MirCmpOp::Ne && ty.is_int() && tree_i16(func, plan, *rhs) == Some(0) {
+            return emit_stack(out, *lhs, func, plan, regs, pool, loc);
+        }
         return emit_bin(EmitBinArgs {
             out,
             op: stack_cmp(*op, *ty)?,
