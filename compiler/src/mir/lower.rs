@@ -1358,12 +1358,14 @@ fn map_bin(inst: Instruction) -> Option<MirBinOp> {
 /// `StorePop` is the tag; the second is the payload.
 fn two_slot_call_tys(hints: &LowerHints, rest: &[IlOp]) -> (MirTy, Option<MirTy>) {
     let mut stores = Vec::new();
-    for op in rest {
+    let mut after = 0;
+    for (i, op) in rest.iter().enumerate() {
         match op {
             IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
             IlOp::StorePop { slot, .. } => {
                 stores.push(*slot);
                 if stores.len() == 2 {
+                    after = i + 1;
                     break;
                 }
             }
@@ -1371,10 +1373,51 @@ fn two_slot_call_tys(hints: &LowerHints, rest: &[IlOp]) -> (MirTy, Option<MirTy>
         }
     }
     if stores.len() == 2 {
-        (hints.slot(stores[1]), Some(hints.slot(stores[0])))
+        // A slot's static type is its last write; fuse-IL recycles slots, so
+        // prefer what this live range's uses demand.
+        let ty = |slot| slot_use_ty(slot, &rest[after..]).unwrap_or_else(|| hints.slot(slot));
+        (ty(stores[1]), Some(ty(stores[0])))
     } else {
         (MirTy::I64, Some(MirTy::I64))
     }
+}
+
+/// Operand type of the first binop reading `slot` before it is overwritten.
+/// `None` when the slot is only copied, overwritten, or never read.
+fn slot_use_ty(slot: u32, ops: &[IlOp]) -> Option<MirTy> {
+    let binop_ty = |op: &IlOp| match op {
+        IlOp::Bin { op, .. } | IlOp::BinReturn { op, .. } => Some(if is_float_op(*op) {
+            MirTy::F64
+        } else {
+            MirTy::I64
+        }),
+        _ => None,
+    };
+    let is_push = |op: &IlOp| {
+        matches!(
+            op,
+            IlOp::Load { .. } | IlOp::Const { .. } | IlOp::ConstPool { .. }
+        )
+    };
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            IlOp::StorePop { slot: s, .. } if *s == slot => return None,
+            IlOp::Load { slot: s, .. } if *s == slot => {
+                // The value is a binop operand when at most one push follows it.
+                let next = ops.get(i + 1);
+                if let Some(ty) = next.and_then(binop_ty) {
+                    return Some(ty);
+                }
+                if next.is_some_and(is_push)
+                    && let Some(ty) = ops.get(i + 2).and_then(binop_ty)
+                {
+                    return Some(ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn use_result_ty(hints: &LowerHints, next: Option<&IlOp>, default: MirTy) -> MirTy {

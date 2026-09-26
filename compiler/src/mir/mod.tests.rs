@@ -6138,6 +6138,40 @@ fn int_branch_cond_lowers_and_lir_branches_on_word() {
     assert!(!has_ne, "LIR must branch on the word, not `!= 0`");
 }
 
+/// Fuse-IL recycles a slot: a two-slot CALL word first, a heap array later.
+/// The CALL words are typed by their own live range, so the map lift binds.
+#[test]
+fn two_slot_call_words_follow_their_live_range_type() {
+    let loc = loc();
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            arity: 1,
+            target: Label(1),
+            loc,
+            ret_words: 2,
+        },
+        IlOp::StorePop { slot: 2, loc },
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Load { slot: 1, loc },
+        IlOp::Load { slot: 2, loc },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc,
+        },
+        IlOp::StorePop { slot: 3, loc },
+        IlOp::Load { slot: 3, loc },
+        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Load { slot: 1, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let draft = super::stackmap::try_build_draft(&ops, "pairs", 1, &[], &[]);
+    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "recycled slot must still map");
+}
+
 /// A staging `Seek` must not push a slot whose heap type comes from a later
 /// live range (only `Seek tmp+1` after an in-block store re-exposes it).
 #[test]
