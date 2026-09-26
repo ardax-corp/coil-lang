@@ -5446,15 +5446,16 @@ impl Compiler {
         start: usize,
         end: usize,
     ) -> Option<(usize, bool, u32)> {
-        if let Some(id) = node {
-            if let Some(o) = self.typed_sidecar.overload(id) {
-                return Some((o.fixed_arity, o.is_rest, o.candidate_id));
-            }
-            if let Some(o) = self.checker.selected_overload_at_id(id) {
-                return Some(o);
-            }
+        // The call span is exact; the emit-order NodeId can drift onto a
+        // sibling call and pick its overload.
+        if let Some(o) = self.checker.selected_overload_span(start, end) {
+            return Some(o);
         }
-        self.checker.selected_overload_span(start, end)
+        let id = node?;
+        if let Some(o) = self.typed_sidecar.overload(id) {
+            return Some((o.fixed_arity, o.is_rest, o.candidate_id));
+        }
+        self.checker.selected_overload_at_id(id)
     }
 
     fn sidecar_for_in(
