@@ -536,12 +536,17 @@ fn perf_bool_guard_inverts_into_jmpt() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/bool_guard.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "count_until", bc.len());
-    // `if stop { break }` loads a bool: nothing to fuse into *Jmpf, so the
-    // JMPF-over-JMP pair collapses to a single JMPT.
-    assert_eq!(
-        count_opcodes_in(&bc, start, end, Instruction::JMPT),
-        1,
-        "bool guard should invert to JMPT"
+    // `if stop { break }` is one dispatch: fuse-IL collapses JMPF-over-JMP
+    // into `LOAD; JMPT`; MIR→LIR branches on `stop != 0`, which fuses into a
+    // single `BinSlotImmJmpf NEQ`.
+    let jmpt = count_opcodes_in(&bc, start, end, Instruction::JMPT);
+    let fused_ne = bc[start..end].iter().any(|b| {
+        *b.bytecode() == Instruction::BinSlotImmJmpf
+            && b.bin_slot_imm_jmpf_parts().0 == Instruction::NEQ as u8
+    });
+    assert!(
+        jmpt == 1 || fused_ne,
+        "bool guard should invert to JMPT or fuse into BinSlotImmJmpf NEQ"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::JMPF),
