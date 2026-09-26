@@ -11,7 +11,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 
 ## User preferences
 
-- Tests: `cargo test --workspace --lib --tests --bins` (required gate; covers integration tests, skips Criterion benches). Bare optional stack: `cargo test --workspace --lib --tests --bins --no-default-features`. Tooling: `--features <dissect|debugger>` with full test. Leak smoke: `cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)`. Soft CPU: `./scripts/poop_baseline.sh`.
+- Tests: `cargo test --workspace --lib --tests --bins` (required gate; covers integration tests, skips Criterion benches). Bare optional stack: `cargo test --workspace --lib --tests --bins --no-default-features`. Tooling: `--features <dissect|debugger>` with full test. VM-wire suites (pipeline, perf_metrics, …): `cargo test -p compiler --features vm-wire --tests`. Leak smoke: `cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)`. Soft CPU: `./scripts/poop_baseline.sh`.
 - Large tasks: scoped sub-agents on disjoint modules.
 - VM perf: alloc reduction, hot-loop tuning, bounds-check elimination, `promise!` — not benchmark-shaped opcodes unless universal.
 - **Hit-bench prove:** if an opt is sound but flagship `.hyc` (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`) are identical, add focused `examples/perf` hit benches and prove those. Do not skip merge solely because flagships did not change; skip only on hit-bench wash/regress. Flagships remain controls. Landed: InstCombine (#304), try flatten (#307), LICM+integer SR (#315), TailCall (#316), Local CSE (#317), DestProp (#318), MIR InstCombine (#329), MIR DestProp (#330), MIR IV SR (#331), MIR cross-block GVN/PRE (`mir_gvn_divf`).
