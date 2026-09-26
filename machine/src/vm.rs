@@ -2015,35 +2015,18 @@ impl<const S: usize> Machine<S> {
         self.dense_obj_addr
     }
 
-    fn with_coroutine_mut(&self, addr: u64, f: impl FnOnce(&mut ObjCoroutine)) {
-        let mut current = self.heap.head_for_lookup();
-        while let Some(reference) = current {
-            if reference.addr() == addr {
-                if let Object::Coroutine(gc) = reference {
-                    f(gc.payload_mut());
-                }
-                return;
-            }
-            current = reference.get_next();
-        }
+    fn with_coroutine_mut(coro: RefCoroutine, f: impl FnOnce(&mut ObjCoroutine)) {
+        f(coro.payload_mut());
     }
 
+    /// Parent delegating to `sub` via `yield from`, if it still is.
     fn find_delegator(&self, sub: RefCoroutine) -> Option<RefCoroutine> {
-        let sub_addr = sub.as_ptr() as u64;
-        let mut current = self.heap.head_for_lookup();
-        while let Some(reference) = current {
-            if let Object::Coroutine(gc) = reference
-                && gc
-                    .as_ref()
-                    .yield_from
-                    .as_ref()
-                    .is_some_and(|d| d.as_ptr() as u64 == sub_addr)
-                {
-                    return Some(gc);
-                }
-            current = reference.get_next();
-        }
-        None
+        sub.as_ref().delegator.filter(|parent| {
+            parent
+                .as_ref()
+                .yield_from
+                .is_some_and(|d| d.as_ptr() == sub.as_ptr())
+        })
     }
 
     fn save_coroutine_state(
@@ -2075,7 +2058,7 @@ impl<const S: usize> Machine<S> {
         }
 
         let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
-        self.with_coroutine_mut(coro_gc.as_ptr() as u64, |coro| {
+        Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
             coro.saved_frames = saved_frames;
@@ -2094,10 +2077,10 @@ impl<const S: usize> Machine<S> {
             && let Some(ctx) = self.resume_stack.last()
             && self.frames.len() <= ctx.frame_depth
         {
-            let coro_ptr = ctx.coro.as_ptr() as u64;
+            let coro_ref = ctx.coro;
             let old_wait = {
                 let mut taken = None;
-                self.with_coroutine_mut(coro_ptr, |coro| {
+                Self::with_coroutine_mut(coro_ref, |coro| {
                     // Outer coroutines suspended via `yield from` stay on
                     // `resume_stack` while main runs; host RETURN must not
                     // treat that as coroutine completion.
@@ -2137,15 +2120,14 @@ impl<const S: usize> Machine<S> {
         layout: crate::host_enum::HostEnumLayout,
     ) {
         let token = self.io_reactor.register_wait(req.handle, req.interest);
-        let coro_ptr = self
+        let coro_ref = self
             .resume_stack
             .last()
             .expect("cooperative await requires an active coroutine")
-            .coro
-            .as_ptr() as u64;
+            .coro;
         let old = {
             let mut taken = None;
-            self.with_coroutine_mut(coro_ptr, |c| {
+            Self::with_coroutine_mut(coro_ref, |c| {
                 taken = c.io_wait.replace(token);
             });
             taken
@@ -2178,7 +2160,7 @@ impl<const S: usize> Machine<S> {
 
         let old_wait = {
             let mut taken = None;
-            self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
+            Self::with_coroutine_mut(gc, |c| {
                 taken = c.io_wait.take();
                 c.pending_send = send_val;
             });
@@ -2310,7 +2292,7 @@ impl<const S: usize> Machine<S> {
         }
 
         let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
-        self.with_coroutine_mut(coro_gc.as_ptr() as u64, |coro| {
+        Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
             coro.saved_frames = saved_frames;
@@ -2343,10 +2325,11 @@ impl<const S: usize> Machine<S> {
         };
         let outer = outer_ctx.coro;
         self.save_coroutine_state(outer, *ip, *sp, outer_ctx.base_sp, outer_ctx.frame_depth);
-        self.with_coroutine_mut(outer.as_ptr() as u64, |outer_coro| {
+        Self::with_coroutine_mut(outer, |outer_coro| {
             outer_coro.yield_from = Some(sub);
             outer_coro.yield_from_resume_ip = *ip;
         });
+        Self::with_coroutine_mut(sub, |sub_coro| sub_coro.delegator = Some(outer));
         self.resume_coroutine(ip, sp, sub, Value::from(0_i64), code, false);
     }
 

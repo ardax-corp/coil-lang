@@ -1217,6 +1217,7 @@ impl<const S: usize> Machine<S> {
                         saved_frames: vec![(target, 0)],
                         pending_send: Value::from(0_i64),
                         yield_from: None,
+                        delegator: None,
                         yield_from_resume_ip: 0,
                         io_wait: None,
                     };
@@ -1243,7 +1244,7 @@ impl<const S: usize> Machine<S> {
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
                         } else if let Some(sub) = gc.as_ref().yield_from {
-                            self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
+                            Self::with_coroutine_mut(gc, |c| {
                                 c.pending_send = send_val;
                             });
                             self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);

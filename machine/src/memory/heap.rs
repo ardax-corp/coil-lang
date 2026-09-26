@@ -1021,8 +1021,8 @@ impl Object {
                     heap.mark_value(*v, grey_objects);
                 }
                 heap.mark_value(coro.pending_send, grey_objects);
-                if let Some(delegate) = &coro.yield_from {
-                    Object::Coroutine(*delegate).mark(grey_objects);
+                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
+                    Object::Coroutine(link).mark(grey_objects);
                 }
             }
             Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
@@ -1674,6 +1674,9 @@ pub struct ObjCoroutine {
     pub pending_send: Value,
     /// Active `yield from` delegate, if any.
     pub yield_from: Option<RefCoroutine>,
+    /// Coroutine delegating to this one via `yield from` (back edge of
+    /// `yield_from`). Traced: a running delegate keeps its parent alive.
+    pub delegator: Option<RefCoroutine>,
     /// Outer continuation IP when the delegate completes.
     pub yield_from_resume_ip: usize,
     /// Registered IO reactor waiter while this coro cooperatively awaits readiness.
