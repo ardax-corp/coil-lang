@@ -35,22 +35,27 @@ pub fn bind_precise_frames(
         let Some(body) = bytecode.get(entry as usize..end as usize) else {
             continue;
         };
+        let enters_mid_body = foreign
+            .iter()
+            .any(|&(from, to)| to > entry && to < end && !(from >= entry && from < end));
+        if enters_mid_body {
+            continue;
+        }
         let named_heap_free = entries
             .iter()
             .any(|(n, pc)| *pc == entry && heap_free.contains(n));
-        if named_heap_free && ends_in_exit(body) && body.iter().all(|b| !puts_heap_word(*b.bytecode())) {
+        if named_heap_free
+            && ends_in_exit(body)
+            && body.iter().all(|b| !puts_heap_word(*b.bytecode()))
+            && closure_entries(bytecode, constants, entry as usize, end as usize)
+                .is_some_and(|c| c.is_empty())
+        {
             out.push(PreciseFrameMap {
                 entry_pc: entry,
                 end_pc: end,
                 any_pc: Some(Vec::new()),
                 at_pc: Vec::new(),
             });
-            continue;
-        }
-        let enters_mid_body = foreign
-            .iter()
-            .any(|&(from, to)| to > entry && to < end && !(from >= entry && from < end));
-        if enters_mid_body {
             continue;
         }
         // Words the host pushes when it calls a body no bytecode references.
@@ -310,7 +315,9 @@ impl FrameState {
 }
 
 /// Complete heap slots at each recorded PC of the body `[entry, end)`, or
-/// `None` when the body uses an op the dataflow does not model.
+/// `None` when the body cannot be described. Closure bodies compiled inside
+/// it (code pointers fed to `MakeFn`) are analysed from their own entry and
+/// merged; any other entry into the middle of the body refuses it.
 fn analyze_body(
     bytecode: &[Byte],
     constants: &[u64],
@@ -320,68 +327,158 @@ fn analyze_body(
     seed: &EntrySeed,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
-    let mut states: HashMap<usize, FrameState> = HashMap::new();
-    let mut work = vec![entry];
-    // Parameters are live words of unknown kind.
     let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
-    states.insert(
+    let body = Body {
+        bytecode,
+        constants,
+        match_arities,
         entry,
-        FrameState {
-            lo: arity,
-            hi: arity,
-            bits: vec![true; arity],
-            slot: vec![true; arity],
-        },
-    );
-    let mut recorded: HashMap<usize, Vec<u16>> = HashMap::new();
-    let mut steps = 0usize;
-    while let Some(pc) = work.pop() {
-        steps += 1;
-        if steps > 200_000 {
+        end,
+    };
+    let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
+        std::collections::BTreeMap::new();
+    let starts = std::iter::once((entry, arity, coroutine))
+        .chain(closure_entries(bytecode, constants, entry, end)?.into_iter().map(|(pc, a)| (pc, a, false)));
+    for (start, arity, coroutine) in starts {
+        for (pc, slots) in body.analyze_from(start, arity, coroutine)? {
+            merged.entry(pc).or_default().extend(slots);
+        }
+    }
+    Some(
+        merged
+            .into_iter()
+            .map(|(pc, slots)| SlotMap {
+                pc: pc as u32,
+                slots: slots.into_iter().collect(),
+            })
+            .collect(),
+    )
+}
+
+/// Closure bodies inside `(entry, end)`: `CodePtr` targets immediately fed to
+/// `MakeFn`, entered with `[captures..., params...]`. `None` when anything
+/// else (a plain code pointer, call or coroutine) targets the middle of the
+/// body, or closure sites disagree on the frame size.
+fn closure_entries(
+    bytecode: &[Byte],
+    constants: &[u64],
+    entry: usize,
+    end: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut found: HashMap<usize, usize> = HashMap::new();
+    for (from, to) in inbound_targets(bytecode, constants) {
+        let (from, to) = (from as usize, to as usize);
+        if to <= entry || to >= end {
+            continue;
+        }
+        let b = bytecode.get(from)?;
+        if jump_target(b, constants).is_some() {
+            continue;
+        }
+        let make_fn = bytecode.get(from + 1)?;
+        if !matches!(*b.bytecode(), Instruction::CodePtr)
+            || !matches!(*make_fn.bytecode(), Instruction::MakeFn)
+        {
             return None;
         }
-        let mut st = states.get(&pc)?.clone();
-        let b = bytecode.get(pc)?;
-        let step = transfer(b, bytecode.get(pc + 1), receives_send(bytecode, pc + 1), coroutine, constants, match_arities, &mut st, pc, end)?;
-        if let Some(slots) = step.record.clone() {
-            recorded.insert(pc, slots);
+        let op = make_fn.operand_u32();
+        let words = (op & 0xFF) as usize + ((op >> 16) & 0xFF) as usize + ((op >> 24) & 1) as usize;
+        if *found.entry(to).or_insert(words) != words {
+            return None;
         }
-        let jump_state = step.jump_state.clone().unwrap_or_else(|| st.clone());
-        let edges = step
-            .fallthrough
-            .then(|| (pc + step.width, st.clone()))
-            .into_iter()
-            .chain(step.jump.map(|t| (t, jump_state)));
-        for (succ, out) in edges {
-            if succ < entry || succ >= end {
+    }
+    let mut out: Vec<(usize, usize)> = found.into_iter().collect();
+    out.sort_unstable();
+    Some(out)
+}
+
+/// One body's bytecode range and the side tables the dataflow reads.
+struct Body<'a> {
+    bytecode: &'a [Byte],
+    constants: &'a [u64],
+    match_arities: &'a HashMap<u32, u32>,
+    entry: usize,
+    end: usize,
+}
+
+impl Body<'_> {
+    /// Fixpoint from `start` (with `arity` live words) to the recorded slots.
+    fn analyze_from(
+        &self,
+        start: usize,
+        arity: usize,
+        coroutine: bool,
+    ) -> Option<Vec<(usize, Vec<u16>)>> {
+        let (bytecode, constants, match_arities) = (self.bytecode, self.constants, self.match_arities);
+        let (entry, end) = (self.entry, self.end);
+        let mut states: HashMap<usize, FrameState> = HashMap::new();
+        let mut work = vec![start];
+        // Parameters are live words of unknown kind.
+        states.insert(
+            start,
+            FrameState {
+                lo: arity,
+                hi: arity,
+                bits: vec![true; arity],
+                slot: vec![true; arity],
+            },
+        );
+        let step_at = |pc: usize, st: &mut FrameState| {
+            transfer(
+                bytecode.get(pc)?,
+                bytecode.get(pc + 1),
+                receives_send(bytecode, pc + 1),
+                coroutine,
+                constants,
+                match_arities,
+                st,
+                pc,
+                end,
+            )
+        };
+        let mut recorded: HashSet<usize> = HashSet::new();
+        let mut steps = 0usize;
+        while let Some(pc) = work.pop() {
+            steps += 1;
+            if steps > 200_000 {
                 return None;
             }
-            match states.get_mut(&succ) {
-                Some(existing) => {
-                    if existing.merge(&out)? {
+            let mut st = states.get(&pc)?.clone();
+            let step = step_at(pc, &mut st)?;
+            if step.record.is_some() {
+                recorded.insert(pc);
+            }
+            let jump_state = step.jump_state.clone().unwrap_or_else(|| st.clone());
+            let edges = step
+                .fallthrough
+                .then(|| (pc + step.width, st.clone()))
+                .into_iter()
+                .chain(step.jump.map(|t| (t, jump_state)));
+            for (succ, out) in edges {
+                if succ < entry || succ >= end {
+                    return None;
+                }
+                match states.get_mut(&succ) {
+                    Some(existing) => {
+                        if existing.merge(&out)? {
+                            work.push(succ);
+                        }
+                    }
+                    None => {
+                        states.insert(succ, out);
                         work.push(succ);
                     }
                 }
-                None => {
-                    states.insert(succ, out);
-                    work.push(succ);
-                }
             }
         }
+        // Recorded sets must reflect the fixpoint: recompute from final states.
+        let mut out = Vec::with_capacity(recorded.len());
+        for pc in recorded {
+            let mut st = states.get(&pc)?.clone();
+            out.push((pc, step_at(pc, &mut st)?.record?));
+        }
+        Some(out)
     }
-    // Recorded sets must reflect the fixpoint: recompute from final states.
-    let mut out = Vec::with_capacity(recorded.len());
-    let mut pcs: Vec<usize> = recorded.keys().copied().collect();
-    pcs.sort_unstable();
-    for pc in pcs {
-        let mut st = states.get(&pc)?.clone();
-        let step = transfer(&bytecode[pc], bytecode.get(pc + 1), receives_send(bytecode, pc + 1), coroutine, constants, match_arities, &mut st, pc, end)?;
-        out.push(SlotMap {
-            pc: pc as u32,
-            slots: step.record?,
-        });
-    }
-    Some(out)
 }
 
 /// How a body's entry state is known besides its callers' `CALL`s.
@@ -623,6 +720,13 @@ fn transfer(
         DoneCoro => {
             st.pop()?;
             st.push(false)?;
+        }
+        // Pops `[captures..., filled..., mask, entry]`, pushes the closure.
+        MakeFn => {
+            let op = b.operand_u32();
+            st.pop_n((op & 0xFF) as usize + ((op >> 8) & 0xFF) as usize + 2)?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
         }
         MakeCoro => {
             st.pop_n(b.call_parts().0)?;
@@ -921,6 +1025,41 @@ mod tests {
         );
         // After resume: saved local 0, the sent value in slot 1, a new object.
         assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn closure_body_is_analysed_from_its_own_entry() {
+        // Body at 2 builds a one-capture closure whose code sits at 10.
+        let maps = bind(&[
+            load(0),
+            konst(0),
+            op(Instruction::CodePtr).with_operand_u32(10),
+            op(Instruction::MakeFn).with_operand_u32(1 | (1 << 16)),
+            store(1),
+            konst(0),
+            op(Instruction::RETURN),
+            op(Instruction::HALT),
+            // closure frame: [capture, param]
+            load(0),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ]);
+        // Enclosing MakeFn at 5: param 0 and the new closure at 1.
+        assert_eq!(slots_at(&maps, 5), Some(vec![0, 1]));
+        // Closure MakeArray at 11: capture, param, array.
+        assert_eq!(slots_at(&maps, 11), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn plain_code_pointer_into_the_body_refuses_it() {
+        let maps = bind(&[
+            op(Instruction::CodePtr).with_operand_u32(5),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+            load(0),
+            op(Instruction::RETURN),
+        ]);
+        assert!(maps.is_empty());
     }
 
     #[test]
