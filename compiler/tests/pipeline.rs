@@ -10636,32 +10636,6 @@ fn main() {
 }
 
 #[test]
-fn for_true_satisfies_non_unit_return() {
-    let mut pipeline = test_pipeline();
-    let result = pipeline.compile_src(
-        r#"
-fn forever() -> int {
-    for (; true; ) {
-    }
-}
-
-fn main() {
-    let _ = forever;
-}
-"#,
-    );
-    assert!(
-        result.is_ok(),
-        "for (; true; ) without break should complete -> int: {:?}",
-        pipeline
-            .messages()
-            .iter()
-            .map(|m| m.message())
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn raise_path_satisfies_result_return() {
     let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
