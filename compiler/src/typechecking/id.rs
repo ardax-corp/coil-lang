@@ -1,7 +1,10 @@
 //! Pre-walk [`NodeId`] minting for span-indexed type lookup.
 //!
-//! The pre-walk and [`Checker::infer`](super::infer::Checker::infer) both
-//! visit the AST in pre-order, so the n-th infer call consumes the n-th ID.
+//! The pre-walk records each node's id by address (checked against its span).
+//! [`Checker::infer`](super::infer::Checker::infer) and codegen key facts by
+//! that exact id; the pre-order counter they also advance only stands in for
+//! clones of a recorded node ([`IdTable::walk_id`]), since rules that skip or
+//! revisit children make it drift.
 
 use std::collections::HashMap;
 

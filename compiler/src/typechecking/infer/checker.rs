@@ -2097,9 +2097,8 @@ impl Checker {
             std::panic::panic_any(RecursionLimitExceeded);
         }
 
-        // Pull the next ID from the pre-walk's minting order. Both
-        // `infer` and the pre-walk visit in pre-order, so the `n`-th
-        // call here consumes the `n`-th ID.
+        // Key facts by the node's own id; the pre-order counter drifts when a
+        // rule skips or revisits children (see `IdTable::walk_id`).
         let seq_id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
         let id = self.ids.resolve_walk_id(expr, seq_id);
