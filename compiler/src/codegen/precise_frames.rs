@@ -506,9 +506,12 @@ fn entry_arity(
         return Some((0, false));
     }
     let mut referenced = false;
+    let mut code_ref = false;
+    // Frame words of closures built on this entry (`[captures..., params]`).
+    let mut closure_words = 0usize;
     let mut coro_arity = None;
     let mut arity = None;
-    for b in bytecode {
+    for (from, b) in bytecode.iter().enumerate() {
         let inst = *b.bytecode();
         let target = match inst {
             Instruction::CALL if b.call_parts().1 == 0 => None,
@@ -524,9 +527,22 @@ fn entry_arity(
             continue;
         }
         referenced = true;
-        // A plain code pointer is called with the declared arity; closures
-        // (`MakePolyFn*`) append captures, jumps and coroutines do not match.
-        if matches!(inst, Instruction::CodePtr) {
+        // Code pointers and poly-fn values are called through `CallIndirect`
+        // with the declared params and dictionaries; a pointer fed to `MakeFn`
+        // also prepends its captures.
+        if matches!(
+            inst,
+            Instruction::CodePtr | Instruction::MakePolyFn | Instruction::MakePolyFnCapture
+        ) {
+            code_ref = true;
+            if let Some(make_fn) = bytecode.get(from + 1)
+                && matches!(*make_fn.bytecode(), Instruction::MakeFn)
+            {
+                let op = make_fn.operand_u32();
+                let words =
+                    (op & 0xFF) as usize + ((op >> 16) & 0xFF) as usize + ((op >> 24) & 1) as usize;
+                closure_words = closure_words.max(words);
+            }
             continue;
         }
         let slot = match inst {
@@ -543,9 +559,15 @@ fn entry_arity(
     }
     match (arity, coro_arity) {
         (Some(_), Some(_)) => None,
-        (None, Some(a)) => Some((a + usize::from(receives_send(bytecode, entry)), true)),
-        (a, None) if referenced => a.map(|a| (a, false)),
-        _ => seed.declared.map(|a| (a, false)),
+        (None, Some(a)) if !code_ref => {
+            Some((a + usize::from(receives_send(bytecode, entry)), true))
+        }
+        (None, Some(_)) => None,
+        // Overestimating the entry height only roots a few stale words.
+        (Some(a), None) if code_ref => Some((a.max(seed.declared?).max(closure_words), false)),
+        (Some(a), None) => Some((a, false)),
+        (None, None) if referenced && !code_ref => None,
+        (None, None) => seed.declared.map(|a| (a.max(closure_words), false)),
     }
 }
 
@@ -720,6 +742,31 @@ fn transfer(
         DoneCoro => {
             st.pop()?;
             st.push(false)?;
+        }
+        INC | DEC => {
+            st.set(b.inc_dec_parts().0, false)?;
+            st.push(false)?;
+        }
+        // In-place payload unpack when the enum matches (cursor floor too).
+        UnpackAt => {
+            let op = b.operand_u32();
+            let (slot, arity) = ((op & 0xFFFF) as usize, (op >> 16) as usize);
+            for p in slot..slot + arity {
+                st.set(p, true)?;
+            }
+            st.hi = st.hi.max(slot + arity);
+        }
+        DictEntries => {
+            st.pop()?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
+        MakePolyFn | MakePolyFnCapture => {
+            if matches!(inst, MakePolyFnCapture) {
+                st.pop_n((b.operand_u32() & 0xFF) as usize + 1)?;
+            }
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
         }
         // Pops `[captures..., filled..., mask, entry]`, pushes the closure.
         MakeFn => {
@@ -982,16 +1029,15 @@ mod tests {
         );
         assert_eq!(slots_at(&maps, 2), Some(vec![0, 1]));
 
-        // A closure code pointer to the body keeps it unmapped.
+        // Without a declared height, a code-pointer-only body stays unmapped.
         code[0] = op(Instruction::CodePtr).with_operand_u32(1);
-        code.push(op(Instruction::HALT));
         let maps = bind_precise_frames(
             &HashSet::new(),
             &code,
             &[],
             &HashMap::new(),
             &entries,
-            &declared,
+            &HashMap::new(),
             u32::MAX,
         );
         assert!(maps.is_empty());
