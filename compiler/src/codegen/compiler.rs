@@ -6806,6 +6806,45 @@ impl Compiler {
         self.bytecode
             .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(operand));
 
+        // The VM always boxes; `?` / match expect the niche shape for heap payloads.
+        let ty = self.typed_sidecar.ty_at_span(span.start, span.end).cloned();
+        if let Some(ty) = ty {
+            if self.niche_unit_result_err_ty(&ty).is_some() {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, true);
+            } else if self.niche_result_ok_err_ty(&ty).is_some() {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, false);
+            }
+        }
+    }
+
+    /// Boxed `ObjEnum` Result → pointer niche (`Err = ptr | 1`), or the
+    /// Option-shaped `Result<(), E>` (`Ok = 0`, `Err = ptr`) when `unit_ok`.
+    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
+        let mut bb = BlockBuilder::new();
+        let ok = bb.fresh_label(bytecode.il_mut());
+        let err = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        bb.emit_jump_to(
+            ok,
+            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.emit_jump_to(
+            err,
+            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.bind_label(err, bytecode.il_mut());
+        if !unit_ok {
+            Self::push_result_err_bit(bytecode);
+        }
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(ok, bytecode.il_mut());
+        if unit_ok {
+            bytecode.push_pop();
+            bytecode.push_const(0);
+        }
+        bb.bind_label(end, bytecode.il_mut());
     }
 
     /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
