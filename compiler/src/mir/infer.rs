@@ -1720,7 +1720,12 @@ fn apply_host(
     }
     args.reverse();
     let _fn = stack.pop().expect("fn id checked");
+    let generic = super::host_allow::host_spec(id).is_none();
     for (cell, ty) in args.iter().zip(spec.args.iter()) {
+        // A generic word edge takes a heap pointer as is (`host_arg_ok`).
+        if generic && cell.ty.is_some_and(MirTy::is_heap_word) {
+            continue;
+        }
         paint(slot_ty, pool_ty, *cell, *ty)?;
     }
     stack.push(Cell {
