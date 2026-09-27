@@ -96,7 +96,7 @@ pub fn infer_numeric_with(
     )
 }
 
-/// Dense infer that accepts `Make*` / `InitTyped` when S2b maps exist (S2c).
+/// Dense infer that accepts `Make*` / `InitTyped` / format ops (S2c).
 pub fn infer_numeric_across_alloc(
     ops: &[IlOp],
     pool_len: usize,
@@ -226,7 +226,8 @@ fn infer_walk(
         || (mode == InferMode::Dense
             && (allow_alloc || ops.iter().any(is_heap_field_op)));
     // Operand painting stays strict for dense / map drafts (their lowering
-    // relies on it); LIR recycles like set_slot_reuse.
+    // relies on it: recycled operand types miscompile range loops); LIR recycles
+    // like set_slot_reuse.
     let _reuse_guard = WalkReuseGuard::enter(mode == InferMode::Lir);
 
     for op in ops {
@@ -484,19 +485,27 @@ fn infer_walk(
                     }
                     set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
-                Instruction::STRING if mode.allows_string() || mode.allows_heap_fields() => {
+                Instruction::STRING
+                    if mode.allows_string()
+                        || mode.allows_heap_fields()
+                        || mode.allows_alloc(allow_alloc) =>
+                {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
                         imm: None,
                     });
                 }
-                Instruction::PRINT if mode.allows_string() => {
+                Instruction::PRINT if mode.allows_string() || mode.allows_alloc(allow_alloc) => {
                     stack
                         .pop()
                         .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
                 }
-                other if is_format_inst(other) && mode.allows_string() => {
+                // Dense takes table format ops only across alloc (they are
+                // safepoints: S2b maps or a frame extent root the registers).
+                other if is_format_inst(other)
+                    && (mode.allows_string() || mode.allows_alloc(allow_alloc)) =>
+                {
                     apply_format(&mut stack, byte.operand_u32(), other)?;
                 }
                 other if is_format_inst(other) => {

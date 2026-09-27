@@ -4253,8 +4253,10 @@ fn i4_string_format_enter_lir_not_dense() {
     assert!(p.iter().any(|op| matches!(op, IlOp::String { .. })));
 }
 
+/// A format loop may take dense (the cost gate decides); either way it runs
+/// the shipped `FORMAT` opcode and keeps a safepoint map at it.
 #[test]
-fn pipeline_format_loop_stays_fuse_il() {
+fn pipeline_format_loop_keeps_format_opcode() {
     let src = r#"
 use string::{format};
 fn hot(int n) -> int {
@@ -4291,10 +4293,6 @@ fn main() {
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
-    );
-    assert!(
-        hot_bc.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
-        "R3 must not dense-specialize a FORMAT loop"
     );
     assert!(
         p.stack_maps().iter().any(|m| m.safepoints.iter().any(|s| {

@@ -135,41 +135,9 @@ pub fn try_specialize_body_side(
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
         side.needs_frame_extent = true;
     }
-    let inferred = if has_alloc {
-        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls)
-    } else {
-        infer_numeric_with(ops, pool.len(), entry_sp, calls)
-    };
-    let inferred = match inferred {
+    let (hints, mut func) = match lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc) {
         Ok(v) => v,
-        Err(e) => return refuse_dense(format!("infer: {e}")),
-    };
-    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
-        return refuse_dense("no numeric arith");
-    }
-    let mut hints = LowerHints::new(name);
-    hints.allow_match = match_shaped_il(ops)
-        || inferred
-            .slot_ty
-            .values()
-            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
-    hints.slot_ty = inferred.slot_ty;
-    hints.pool = pool.clone();
-    hints.pool_ty = inferred.pool_ty;
-    hints.calls = calls.clone();
-    hints.allow_alloc = has_alloc;
-    hints.allow_index = true;
-    hints.allow_effects = true;
-    hints.allow_heap_fields = true;
-    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
-    hints.param_count = live_params
-        .as_ref()
-        .map(|p| p.len() as u32)
-        .unwrap_or(entry_sp)
-        .max(entry_sp);
-    let mut func = match try_lower_numeric(ops, &hints) {
-        Ok(f) => f,
-        Err(e) => return refuse_dense(format!("lower: {e}")),
+        Err(e) => return refuse_dense(e),
     };
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
@@ -257,6 +225,49 @@ pub fn try_specialize_body_side(
 /// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
 /// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
 /// as match — that densifies `if !flag` and drops LogNotJmpt.
+/// Infer + lower a dense body; `Err` is the refusal key.
+fn lower_dense_attempt(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &[u64],
+    calls: &DenseCallMap,
+    has_alloc: bool,
+) -> Result<(LowerHints, crate::mir::MirFunc), String> {
+    let inferred = if has_alloc {
+        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls)
+    } else {
+        infer_numeric_with(ops, pool.len(), entry_sp, calls)
+    };
+    let inferred = inferred.map_err(|e| format!("infer: {e}"))?;
+    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
+        return Err("no numeric arith".into());
+    }
+    let mut hints = LowerHints::new(name);
+    hints.allow_match = match_shaped_il(ops)
+        || inferred
+            .slot_ty
+            .values()
+            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
+    hints.slot_ty = inferred.slot_ty;
+    hints.pool = pool.to_vec();
+    hints.pool_ty = inferred.pool_ty;
+    hints.calls = calls.clone();
+    hints.allow_alloc = has_alloc;
+    hints.allow_string = has_alloc;
+    hints.allow_index = true;
+    hints.allow_effects = true;
+    hints.allow_heap_fields = true;
+    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
+    hints.param_count = live_params
+        .as_ref()
+        .map(|p| p.len() as u32)
+        .unwrap_or(entry_sp)
+        .max(entry_sp);
+    let func = try_lower_numeric(ops, &hints).map_err(|e| format!("lower: {e}"))?;
+    Ok((hints, func))
+}
+
 fn match_shaped_il(ops: &[IlOp]) -> bool {
     let mut i = 0;
     while i < ops.len() {

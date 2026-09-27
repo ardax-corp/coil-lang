@@ -1081,10 +1081,31 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::Print { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses I4 print/format (Q9 R1 is MIR→LIR)".into(),
+        // Table ops at the stack edge, like HostInvoke: push operands, run
+        // the shipped opcode, store the result.
+        MirInst::Format { dest, fmt, args } => {
+            let words: Vec<ValueId> = std::iter::once(*fmt).chain(args.iter().copied()).collect();
+            emit_dense_push(out, &words, regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+                loc,
             ));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Stringify { dest, src } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Print { src, .. } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::Print { loc });
         }
     }
     Ok(())
@@ -1829,6 +1850,9 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
                 MirInst::Alloc { elems, .. } => elems.len(),
+                // Format string plus args, pushed like call args.
+                MirInst::Format { args, .. } => args.len() + 1,
+                MirInst::Stringify { .. } | MirInst::Print { .. } => 1,
                 _ => 0,
             };
             n = n.max(u8::try_from(w).unwrap_or(u8::MAX));
