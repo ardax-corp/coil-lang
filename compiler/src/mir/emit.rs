@@ -485,26 +485,27 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
             });
             return Ok(());
         }
-        out.push(IlOp::Load {
-            slot: u32::from(regs[lhs.index()]),
-            loc,
-        });
-        if plan.needs_slot(*rhs) {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[rhs.index()]),
-                loc,
-            });
-        } else {
-            emit_stack_value(EmitStackValueArgs {
-                out,
-                stacked: &mut Vec::new(),
-                v: *rhs,
-                func,
-                plan,
-                regs,
-                pool,
-                loc,
-            })?;
+        // Either operand may be slotless (a constant `destprop` moved in
+        // from a folded phi): rebuild it on the stack instead of loading a
+        // register it never got.
+        for v in [*lhs, *rhs] {
+            if plan.needs_slot(v) {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[v.index()]),
+                    loc,
+                });
+            } else {
+                emit_stack_value(EmitStackValueArgs {
+                    out,
+                    stacked: &mut Vec::new(),
+                    v,
+                    func,
+                    plan,
+                    regs,
+                    pool,
+                    loc,
+                })?;
+            }
         }
         out.push(IlOp::Bin {
             op: stack_cmp_op(*op, *ty)?,
@@ -512,11 +513,23 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         });
         return Ok(());
     }
-    out.push(IlOp::Load {
-        slot: u32::from(regs[cond.index()]),
+    if plan.needs_slot(cond) {
+        out.push(IlOp::Load {
+            slot: u32::from(regs[cond.index()]),
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack_value(EmitStackValueArgs {
+        out,
+        stacked: &mut Vec::new(),
+        v: cond,
+        func,
+        plan,
+        regs,
+        pool,
         loc,
-    });
-    Ok(())
+    })
 }
 
 fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
