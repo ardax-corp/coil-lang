@@ -28,7 +28,7 @@ cost gate. No env toggle. No PGO.
 | **R1** | Table `STRING`, `PRINT`, `FORMAT`, `STRINGIFY` as SSA (`HeapRef` / IO token) | MIR→LIR reconstruct of the same IL. Dense infer still refuses so numeric specialize is unchanged | unicode / regex; format-in-loop dense |
 | **R2** | `string::{from_bytes,to_bytes}` as I6 HostInvoke on dense when maps/effects allow | Dense box at the host edge (same as other I6) | unicode / regex |
 | **R3 (this PR)** | Live-heap maps across `FORMAT` / `STRINGIFY` (I5-style roots) so a format in a mapped loop can stay SSA | LIR when maps bind and cost ≤ fuse. Dense infer still refuses table ops | unicode / regex |
-| **R5** | Table ops in allocating dense bodies | Stack-edge push + shipped opcode | slot reused across types |
+| **R5** | Table ops in allocating dense bodies | Stack-edge push + shipped opcode | stack value at CFG edge |
 | **R4** | Unicode / regex — only if a later island says they belong in SSA | TBD | — |
 
 Post-quirks rank: R2 is **B4**. **R3** is **B9**
@@ -94,14 +94,16 @@ Allocating dense bodies (S2b maps or a frame extent, archive minor 22)
 may carry `FORMAT` / `STRINGIFY` / `STRING` / `PRINT`. Dense emit pushes
 the operands at the stack edge (`DensePush`), runs the shipped opcode and
 stores the result, like I6 HostInvoke; the gather window counts the format
-string plus args. The cost gate still decides. Most `main` bodies that
-format a result now stop at the next wall: a slot reused for an int and
-then a heap string (`slot N joins heapref and i64`). Dense operand typing
-stays strict there; recycling it like LIR miscompiles range loops.
+string plus args. A body whose slots are reused across types (format args,
+then the string) retries dense infer with LIR-style recycled slot types;
+SSA verify still refuses a φ whose inputs disagree. Generic host edges take
+a heap word as is. The cost gate still decides.
+`host_result_unit_churn::main` takes dense (−8% instructions).
 
 ## Leftover after R5
 
-- Dense slot recycling across types (the `main`-with-`format` wall)
+- `main` bodies whose next wall is a stack value at a CFG edge (two-slot
+  `?`) or a float op on a recycled slot
 - Unicode / regex in SSA (**R4**) — no island has asked for that yet
 - LIR reconstruct of HostInvoke
 - Score-chasing string microbenches
