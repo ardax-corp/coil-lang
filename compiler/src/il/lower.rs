@@ -36,6 +36,7 @@ pub struct Lowered {
     /// Payload arity of each `JumpIfMatch`, by PC (bytecode encodes only the tag).
     pub match_arities: HashMap<u32, u32>,
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
+    pub needs_frame_extent: std::collections::HashSet<String>,
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
 }
 
@@ -176,6 +177,7 @@ pub(crate) fn lower_module_inner(
     lowered.func_label_maps = func_label_maps;
     lowered.stack_map_drafts = std::mem::take(&mut module.stack_map_drafts);
     lowered.deopt_map_drafts = std::mem::take(&mut module.deopt_map_drafts);
+    lowered.needs_frame_extent = std::mem::take(&mut module.needs_frame_extent);
     lowered.debug_slot_remaps = std::mem::take(&mut module.debug_slot_remaps);
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
@@ -240,6 +242,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         stack_map_drafts: Vec::new(),
         match_arities,
         deopt_map_drafts: Vec::new(),
+        needs_frame_extent: Default::default(),
         debug_slot_remaps: HashMap::new(),
     })
 }

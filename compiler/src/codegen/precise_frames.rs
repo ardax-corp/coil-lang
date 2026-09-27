@@ -15,9 +15,14 @@ use std::collections::{HashMap, HashSet};
 
 use common::{Byte, Instruction, PreciseFrameMap, SlotMap};
 
-/// Precise maps for every body in `entries` that can be described.
+/// Frame rows for the bodies in `entries`: precise heap slots when a body can
+/// be described, and a frame extent for `needs_extent` bodies (allocating
+/// dense code without S2b maps, whose registers may sit past the cursor).
+/// Without a decodable extent such a frame is scanned to the end of the stack.
+#[allow(clippy::too_many_arguments)]
 pub fn bind_precise_frames(
     heap_free: &HashSet<String>,
+    needs_extent: &HashSet<String>,
     bytecode: &[Byte],
     constants: &[u64],
     match_arities: &HashMap<u32, u32>,
@@ -35,51 +40,156 @@ pub fn bind_precise_frames(
         let Some(body) = bytecode.get(entry as usize..end as usize) else {
             continue;
         };
+        let names = || entries.iter().filter(|(_, pc)| *pc == entry).map(|(n, _)| n);
+        // Only bodies whose registers may sit past the cursor get an extent:
+        // widening every conservative frame also roots stale dead words.
+        let frame_words = if names().any(|n| needs_extent.contains(n)) {
+            frame_extent(body, constants).unwrap_or_else(|| {
+                debug_assert!(false, "dense body without a decodable frame extent");
+                u32::MAX
+            })
+        } else {
+            0
+        };
+        let mut row = PreciseFrameMap {
+            entry_pc: entry,
+            end_pc: end,
+            any_pc: None,
+            at_pc: Vec::new(),
+            frame_words,
+        };
         let enters_mid_body = foreign
             .iter()
             .any(|&(from, to)| to > entry && to < end && !(from >= entry && from < end));
-        if enters_mid_body {
-            continue;
+        if !enters_mid_body {
+            let heap_free_fn = names().any(|n| heap_free.contains(n));
+            if heap_free_fn
+                && ends_in_exit(body)
+                && body.iter().all(|b| !puts_heap_word(*b.bytecode()))
+                && closure_entries(bytecode, constants, entry as usize, end as usize)
+                    .is_some_and(|c| c.is_empty())
+            {
+                row.any_pc = Some(Vec::new());
+            } else {
+                // Words the host pushes when it calls a body no bytecode references.
+                let declared = names()
+                    .filter_map(|n| entry_sps.get(n).map(|&sp| sp as usize))
+                    .max();
+                let seed = EntrySeed {
+                    prologue_entry: prologue_entry as usize,
+                    declared,
+                };
+                if let Some(at_pc) =
+                    analyze_body(bytecode, constants, match_arities, entry, end, &seed)
+                {
+                    row.at_pc = at_pc;
+                }
+            }
         }
-        let named_heap_free = entries
-            .iter()
-            .any(|(n, pc)| *pc == entry && heap_free.contains(n));
-        if named_heap_free
-            && ends_in_exit(body)
-            && body.iter().all(|b| !puts_heap_word(*b.bytecode()))
-            && closure_entries(bytecode, constants, entry as usize, end as usize)
-                .is_some_and(|c| c.is_empty())
-        {
-            out.push(PreciseFrameMap {
-                entry_pc: entry,
-                end_pc: end,
-                any_pc: Some(Vec::new()),
-                at_pc: Vec::new(),
-            });
-            continue;
-        }
-        // Words the host pushes when it calls a body no bytecode references.
-        let declared = entries
-            .iter()
-            .filter(|(_, pc)| *pc == entry)
-            .filter_map(|(n, _)| entry_sps.get(n).map(|&sp| sp as usize))
-            .max();
-        let seed = EntrySeed {
-            prologue_entry: prologue_entry as usize,
-            declared,
-        };
-        if let Some(at_pc) = analyze_body(bytecode, constants, match_arities, entry, end, &seed)
-            && !at_pc.is_empty()
-        {
-            out.push(PreciseFrameMap {
-                entry_pc: entry,
-                end_pc: end,
-                any_pc: None,
-                at_pc,
-            });
+        if row.any_pc.is_some() || !row.at_pc.is_empty() || row.frame_words != 0 {
+            out.push(row);
         }
     }
     out
+}
+
+/// Highest frame word the body can touch, plus one: `None` when an op is not
+/// known to be slot-free and its slot operands are not decoded here.
+fn frame_extent(body: &[Byte], constants: &[u64]) -> Option<u32> {
+    let mut words = 0usize;
+    for b in body {
+        words = words.max(slot_extent(b, constants)?);
+    }
+    u32::try_from(words).ok()
+}
+
+/// Frame words op `b` names (highest slot + 1); `Some(0)` for slot-free ops.
+/// The two-word dense packs are covered word by word (their tails decode as
+/// `DenseBin` / `BinSlot*Jmp*`).
+fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
+    use Instruction::*;
+    let pool = |i: usize| constants.get(i).copied();
+    let one = |s: usize| Some(s + 1);
+    let max = |xs: &[usize]| xs.iter().max().map(|m| m + 1);
+    match *b.bytecode() {
+        LOAD | STORE | StorePop => {
+            max(&(0..b.load_store_count()).map(|i| b.load_store_slot_at(i) as usize).collect::<Vec<_>>())
+        }
+        Seek | LoadReturnSlot => Some(b.operand_u32() as usize),
+        BinSlotImm => one(b.bin_slot_imm_parts().1),
+        BinSlotSlot => {
+            let (_, a, c) = b.bin_slot_slot_parts();
+            max(&[a, c])
+        }
+        BinSlotImmJmpf | BinSlotImmJmpt => one(b.bin_slot_imm_jmpf_parts().1),
+        BinSlotSlotJmpf | BinSlotSlotJmpt => {
+            let (_, a, pool_idx) = b.bin_slot_slot_jmpf_parts();
+            max(&[a, (pool(pool_idx)? as u32 & 0xFF) as usize])
+        }
+        BinSlotImmStore => {
+            let (_, src, pool_idx) = b.bin_slot_imm_store_parts();
+            max(&[src, (pool(pool_idx)? >> 32) as usize])
+        }
+        BinSlotSlotStore => {
+            let (_, a, c, dest) = b.bin_slot_slot_store_parts();
+            max(&[a, c, dest])
+        }
+        INC | DEC => one(b.inc_dec_parts().0),
+        UnpackAt => {
+            let op = b.operand_u32();
+            Some((op & 0xFFFF) as usize + (op >> 16) as usize)
+        }
+        TailCall => Some(b.call_parts().0),
+        DenseBin | DenseBin2 | DenseBinJmpf | DenseCmp | DenseIndex | DenseIndexJmpf
+        | DenseStoreIndex | DenseFieldLoad | DenseFieldStore | DenseArrayPush => {
+            let (_, d, x, y) = b.dense_abc_parts();
+            max(&[d, x, y])
+        }
+        DenseMake => {
+            let (_, dest, arity, base) = b.dense_abc_parts();
+            max(&[dest, base + arity.max(1) - 1])
+        }
+        DenseMakeObject => one(common::dense::unpack_make_object(b.operand_u32()).0 as usize),
+        DenseConst => one(b.dense_const_parts().1),
+        DenseMove => {
+            let (d, s) = b.dense_move_parts();
+            max(&[d, s])
+        }
+        DenseArrayLen => {
+            let (d, a) = b.dense_move_parts();
+            max(&[d, a])
+        }
+        DenseUnary | DenseCast => {
+            let (_, d, s) = b.dense_unary_parts();
+            max(&[d, s])
+        }
+        DensePush => {
+            let (arity, base) = b.dense_move_parts();
+            Some(base + arity)
+        }
+        VLoad | VStore => {
+            let (_, _, arr, idx) = b.dense_abc_parts();
+            max(&[arr, idx])
+        }
+        // Splat reads a scalar slot; other operands are vector registers.
+        VBin => one(b.dense_abc_parts().2),
+        VReduce => one(b.dense_abc_parts().1),
+        VMove | VFma => Some(0),
+        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT
+        | ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
+        | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | XOR
+        | AND | OR | NOT | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt
+        | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt | JMP | JMPF | JMPT
+        | CmpJmpf | CmpJmpt | LogNotJmpf | LogNotJmpt | JumpIfMatch | Unpack | RETURN
+        | ConstReturnImm | BinReturn | ReturnPair | MakeEnumReturn | CALL | CallIndirect
+        | HostInvoke | MakeArray | MakeTuple | MakeEnum | MakeDict | DictEntries | InitTyped
+        | INIT | BoxValue | UnboxValue | FORMAT | STRINGIFY | Index | IndexUnchecked
+        | StoreIndex | StoreIndexUnchecked | ArrayLen | ArrayPush | GetField | SetField
+        | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
+        | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
+        | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic => Some(0),
+        _ => None,
+    }
 }
 
 fn ends_in_exit(body: &[Byte]) -> bool {
@@ -920,7 +1030,7 @@ mod tests {
         let mut code = vec![call(1, 2), op(Instruction::HALT)];
         code.extend_from_slice(body);
         let entries = vec![("f".to_string(), 2)];
-        bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
+        bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
     }
 
     fn slots_at(maps: &[PreciseFrameMap], pc: u32) -> Option<Vec<u16>> {
@@ -928,6 +1038,11 @@ mod tests {
     }
 
     use common::precise_map_for_pc;
+
+    /// Rows may still carry a frame extent; none describes heap slots.
+    fn no_precise(maps: &[PreciseFrameMap]) -> bool {
+        maps.iter().all(|m| m.any_pc.is_none() && m.at_pc.is_empty())
+    }
 
     #[test]
     fn alloc_safepoint_keeps_heap_words_and_drops_numbers() {
@@ -985,7 +1100,7 @@ mod tests {
             op(Instruction::FfiInvoke),
             op(Instruction::RETURN),
         ]);
-        assert!(maps.is_empty());
+        assert!(no_precise(&maps));
     }
 
     #[test]
@@ -1001,6 +1116,7 @@ mod tests {
         let declared = HashMap::from([("t".to_string(), 1)]);
         let maps = bind_precise_frames(
             &HashSet::new(),
+            &HashSet::new(),
             &code,
             &[],
             &HashMap::new(),
@@ -1014,6 +1130,7 @@ mod tests {
         code[0] = op(Instruction::CodePtr).with_operand_u32(1);
         let maps = bind_precise_frames(
             &HashSet::new(),
+            &HashSet::new(),
             &code,
             &[],
             &HashMap::new(),
@@ -1021,7 +1138,7 @@ mod tests {
             &HashMap::new(),
             u32::MAX,
         );
-        assert!(maps.is_empty());
+        assert!(no_precise(&maps));
     }
 
     #[test]
@@ -1042,6 +1159,7 @@ mod tests {
         ]);
         let entries = vec![("co".to_string(), 2)];
         let maps = bind_precise_frames(
+            &HashSet::new(),
             &HashSet::new(),
             &code,
             &[],
@@ -1086,7 +1204,50 @@ mod tests {
             load(0),
             op(Instruction::RETURN),
         ]);
-        assert!(maps.is_empty());
+        assert!(no_precise(&maps));
+    }
+
+    #[test]
+    fn only_marked_bodies_carry_a_frame_extent() {
+        let code = vec![
+            call(1, 2),
+            op(Instruction::HALT),
+            load(0),
+            store(6),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ];
+        let entries = vec![("f".to_string(), 2)];
+        let bind_with = |needs: HashSet<String>| {
+            bind_precise_frames(
+                &HashSet::new(),
+                &needs,
+                &code,
+                &[],
+                &HashMap::new(),
+                &entries,
+                &HashMap::new(),
+                u32::MAX,
+            )
+        };
+        let plain = bind_with(HashSet::new());
+        assert!(plain.iter().all(|m| m.frame_words == 0));
+        let marked = bind_with(HashSet::from(["f".to_string()]));
+        assert_eq!(marked[0].frame_words, 7);
+    }
+
+    #[test]
+    fn frame_extent_is_the_highest_slot_touched() {
+        let body = [
+            load(0),
+            store(7),
+            op(Instruction::DenseMove).with_operand_u32((9 << 8) | 1),
+            op(Instruction::RETURN),
+        ];
+        let dest = body[2].dense_move_parts().0;
+        assert_eq!(frame_extent(&body, &[]), Some(dest.max(7) as u32 + 1));
+        let unknown = [load(0), op(Instruction::FfiInvoke), op(Instruction::RETURN)];
+        assert_eq!(frame_extent(&unknown, &[]), None);
     }
 
     #[test]
@@ -1099,7 +1260,7 @@ mod tests {
         ]);
         let entries = vec![("f".to_string(), 2)];
         let maps =
-            bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX);
-        assert!(maps.is_empty());
+            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX);
+        assert!(no_precise(&maps));
     }
 }

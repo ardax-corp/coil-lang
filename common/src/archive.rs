@@ -84,10 +84,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 21 — persist [`crate::PreciseFrameMap`]s: frames whose heap words are
 ///      fully described skip the conservative stack scan. Older envelopes
 ///      load with none (every frame conservative). Not an opcode change.
+/// 22 — `PreciseFrameMap::frame_words`: conservative frames scan at least the
+///      body's frame extent. Minor-21 rows load with `0` (unknown). Also
+///      `DenseCast` kind `CAST_F2I` (`f64` → `i64`).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 21;
+pub const ARCHIVE_MINOR: u16 = 22;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -243,6 +246,24 @@ pub struct ArchivedProgram {
     pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
 }
 
+/// Minor-21 envelope (precise frame maps without `frame_words`).
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV21 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
+    pub precise_frames: Vec<crate::stack_map::PreciseFrameMapV21>,
+}
+
 /// Minor 14–20 envelope (S2b maps, no precise frame maps).
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(compare(PartialEq))]
@@ -322,6 +343,9 @@ pub const STACK_MAPS_MINOR: u16 = 14;
 /// First minor that stores [`ArchivedProgram::precise_frames`].
 pub const PRECISE_FRAMES_MINOR: u16 = 21;
 
+/// First minor whose precise frame rows carry `frame_words`.
+pub const FRAME_WORDS_MINOR: u16 = 22;
+
 pub use crate::opcode::Byte;
 
 impl ArchivedProgram {
@@ -349,6 +373,25 @@ impl ArchivedProgramV12 {
             operand_stack_slots: 0,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+        }
+    }
+}
+
+impl ArchivedProgramV21 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: self.operand_stack_slots,
+            stack_maps: self.stack_maps,
+            precise_frames: self.precise_frames.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -437,6 +480,9 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let v21 = rkyv::access::<ArchivedArchivedProgramV21, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV21, Error>(archived).ok());
     let v20 = rkyv::access::<ArchivedArchivedProgramV20, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV20, Error>(archived).ok());
@@ -449,7 +495,7 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
 
     if let Some(program) = current {
         if archive_version_compatible(program.version, ARCHIVE_VERSION)
-            && archive_minor(program.version) >= PRECISE_FRAMES_MINOR
+            && archive_minor(program.version) >= FRAME_WORDS_MINOR
         {
             return Ok(DecodedArchive {
                 program,
@@ -459,6 +505,20 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         }
         if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
             return Err(ArchiveDecodeError::Version(program.version));
+        }
+    }
+    if let Some(old) = v21 {
+        if archive_version_compatible(old.version, ARCHIVE_VERSION)
+            && archive_minor(old.version) >= PRECISE_FRAMES_MINOR
+        {
+            return Ok(DecodedArchive {
+                program: old.into_program(),
+                operand_stack_slots_persisted: true,
+                stack_maps_persisted: true,
+            });
+        }
+        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
+            return Err(ArchiveDecodeError::Version(old.version));
         }
     }
     if let Some(old) = v20 {
@@ -637,9 +697,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 21);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 21));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.21");
+        assert_eq!(ARCHIVE_MINOR, 22);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 22));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.22");
     }
 
     #[test]
@@ -847,6 +907,7 @@ mod tests {
             end_pc: 20,
             any_pc: None,
             at_pc: vec![crate::stack_map::SlotMap { pc: 8, slots: vec![1] }],
+            frame_words: 6,
         }];
         let program = ArchivedProgram {
             version: ARCHIVE_VERSION,
@@ -865,6 +926,36 @@ mod tests {
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
         assert_eq!(decoded.program.precise_frames, precise);
+    }
+
+    #[test]
+    fn decode_minor21_envelope_leaves_frame_words_unknown() {
+        use crate::stack_map::{PreciseFrameMapV21, SlotMap};
+
+        let old = ArchivedProgramV21 {
+            version: pack_archive_version(4, 21),
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown()],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
+            stack_maps: Vec::new(),
+            precise_frames: vec![PreciseFrameMapV21 {
+                entry_pc: 0,
+                end_pc: 1,
+                any_pc: None,
+                at_pc: vec![SlotMap { pc: 0, slots: vec![2] }],
+            }],
+        };
+        let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v21");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v21");
+        let row = &decoded.program.precise_frames[0];
+        assert_eq!(row.at_pc[0].slots, vec![2]);
+        assert_eq!(row.frame_words, 0);
     }
 
     #[test]

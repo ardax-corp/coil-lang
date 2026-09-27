@@ -22,6 +22,9 @@ use super::stackmap::has_real_maps;
 pub struct BodySidecar {
     pub debug_slot_remap: HashMap<u32, u32>,
     pub deopt: Option<DraftDeoptMap>,
+    /// Allocating dense body without S2b maps: its registers may sit past the
+    /// cursor, so its frame needs a decoded extent (see `precise_frames`).
+    pub needs_frame_extent: bool,
 }
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
@@ -130,7 +133,7 @@ pub fn try_specialize_body_side(
         return refuse_dense("post-loop alloc return");
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
-        return refuse_dense("alloc without stack maps");
+        side.needs_frame_extent = true;
     }
     let inferred = if has_alloc {
         infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls)

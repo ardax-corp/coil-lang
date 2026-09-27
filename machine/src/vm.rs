@@ -1447,7 +1447,14 @@ impl<const S: usize> Machine<S> {
                         }
                     }
                 }
-                None => stack[lo..hi].iter().copied().for_each(&mut root),
+                None => {
+                    // Slots stored past the cursor: cover the body's extent.
+                    let reach = self
+                        .frame_extent(i)
+                        .map_or(hi, |words| lo.saturating_add(words).max(hi))
+                        .min(self.stack.capacity());
+                    (lo..reach).for_each(|idx| root(self.stack[idx]));
+                }
             }
         }
     }
@@ -1486,6 +1493,19 @@ impl<const S: usize> Machine<S> {
         };
         let pc = u32::try_from(pc).ok()?;
         common::precise_map_for_pc(&self.precise_frames, pc)?.slots_at_pc(pc)
+    }
+
+    /// Frame words of the body frame `i` runs (its PC need not be trusted:
+    /// the extent only widens a conservative scan). `u32::MAX` is unbounded.
+    fn frame_extent(&self, i: usize) -> Option<usize> {
+        let ip = if i + 1 == self.frames.len() {
+            self.gc_top_ip?
+        } else {
+            self.frames[i].tell()
+        };
+        let pc = u32::try_from(ip.checked_sub(1)?).ok()?;
+        let words = common::precise_map_for_pc(&self.precise_frames, pc)?.frame_words;
+        (words != 0).then_some(words as usize)
     }
 
     fn instruction_at(&self, pc: usize) -> Option<Instruction> {

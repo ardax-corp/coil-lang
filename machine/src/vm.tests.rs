@@ -1706,6 +1706,7 @@
             end_pc: 5,
             any_pc: Some(vec![]),
             at_pc: vec![],
+            frame_words: 0,
         }]);
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();
@@ -1727,6 +1728,41 @@
 
         vm.precise_frames = Arc::default();
         assert!(roots(&vm).contains(&f_obj.addr()), "no maps: every frame scanned");
+    }
+
+    /// A conservatively scanned frame covers its body's extent, so a slot
+    /// stored past the cursor is still a root.
+    #[test]
+    fn frame_extent_widens_the_conservative_scan() {
+        use common::PreciseFrameMap;
+        use crate::ObjString;
+
+        let mut vm = Machine::<8>::default();
+        let (obj, _) = vm.heap_mut().alloc(ObjString::from("past"), Object::String);
+        vm.frames.clear();
+        vm.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(0);
+        });
+        vm.stack.push(Value::from(0i64));
+        vm.stack[5] = Value::from(obj.addr());
+        vm.gc_top_ip = Some(3);
+        let roots = |vm: &Machine<8>| {
+            let mut roots = Vec::new();
+            vm.collect_stack_roots(&mut roots);
+            roots
+        };
+        let row = |frame_words| PreciseFrameMap {
+            entry_pc: 0,
+            end_pc: 10,
+            any_pc: None,
+            at_pc: vec![],
+            frame_words,
+        };
+        vm.precise_frames = Arc::new(vec![row(2)]);
+        assert!(!roots(&vm).contains(&obj.addr()), "slot 5 is past a 2-word extent");
+        vm.precise_frames = Arc::new(vec![row(6)]);
+        assert!(roots(&vm).contains(&obj.addr()), "the extent covers slot 5");
     }
 
     #[test]

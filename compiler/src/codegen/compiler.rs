@@ -17668,6 +17668,7 @@ impl Compiler {
         );
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,
+            &lowered.needs_frame_extent,
             self.bytecode.as_slice(),
             &self.constants,
             &lowered.match_arities,
