@@ -22,8 +22,8 @@ use super::stackmap::has_real_maps;
 pub struct BodySidecar {
     pub debug_slot_remap: HashMap<u32, u32>,
     pub deopt: Option<DraftDeoptMap>,
-    /// Allocating dense body without S2b maps: its registers may sit past the
-    /// cursor, so its frame needs a decoded extent (see `precise_frames`).
+    /// Allocating dense body: its registers may sit past the cursor, so its
+    /// frame needs a decoded extent (see `precise_frames`).
     pub needs_frame_extent: bool,
 }
 
@@ -132,9 +132,9 @@ pub fn try_specialize_body_side(
     if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
         return refuse_dense("post-loop alloc return");
     }
-    if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
-        side.needs_frame_extent = true;
-    }
+    // Registers may sit past the cursor at a safepoint, and generic host
+    // results are heap words typed `i64` that S2b maps miss: cover the frame.
+    side.needs_frame_extent = has_alloc;
     let (hints, mut func) = match lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc) {
         Ok(v) => v,
         Err(e) => return refuse_dense(e),
