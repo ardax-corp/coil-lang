@@ -89,6 +89,14 @@ and relocate mapped slots on collect.
   segment starts above, stays conservative. Worker VMs share the maps by
   `Arc`. The `gc-stress` feature collects at every allocation safepoint;
   CI runs `coil test` with it.
+- **Frame extents** (archive **minor 22**). Allocating dense bodies no
+  longer need S2b maps: their registers can sit past the cursor, so
+  `bind_precise_frames` records the body's frame extent (highest slot + 1,
+  decoded from the final bytecode) in `PreciseFrameMap::frame_words`, and a
+  conservatively scanned frame covers at least that many words. Only those
+  bodies get an extent; widening every conservative frame would also root
+  stale dead words (finalizers stopped running). A body whose ops do not all
+  decode is scanned to the end of the stack.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

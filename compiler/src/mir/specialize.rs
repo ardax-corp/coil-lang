@@ -112,8 +112,8 @@ pub fn try_specialize_body_side(
     // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
     // fuse-IL. D3: boxed JumpIfMatch / multi-payload Unpack may dense
-    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped take
-    // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
+    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped without
+    // S2b maps take dense with a frame extent (minor 22). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. D2: heap LoadField / GetField /
     // SetField emit DenseField*; Object Alloc is DenseMakeObject.
