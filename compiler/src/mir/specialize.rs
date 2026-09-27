@@ -135,8 +135,15 @@ pub fn try_specialize_body_side(
     // Registers may sit past the cursor at a safepoint, and generic host
     // results are heap words typed `i64` that S2b maps miss: cover the frame.
     side.needs_frame_extent = has_alloc;
-    let (hints, mut func) = match lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc) {
+    // Strict slot typing first; an allocating body whose slots are recycled
+    // across types (format args, then a string) retries with LIR-style typing.
+    let attempt = |recycle| lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc, recycle);
+    let (hints, mut func) = match attempt(false) {
         Ok(v) => v,
+        Err(e) if has_alloc => match attempt(true) {
+            Ok(v) => v,
+            Err(_) => return refuse_dense(e),
+        },
         Err(e) => return refuse_dense(e),
     };
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
@@ -233,9 +240,10 @@ fn lower_dense_attempt(
     pool: &[u64],
     calls: &DenseCallMap,
     has_alloc: bool,
+    recycle: bool,
 ) -> Result<(LowerHints, crate::mir::MirFunc), String> {
     let inferred = if has_alloc {
-        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls)
+        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls, recycle)
     } else {
         infer_numeric_with(ops, pool.len(), entry_sp, calls)
     };

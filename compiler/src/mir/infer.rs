@@ -97,12 +97,16 @@ pub fn infer_numeric_with(
 }
 
 /// Dense infer that accepts `Make*` / `InitTyped` / format ops (S2c).
+/// `recycle_operands` types consumed operand slots by their last use (like
+/// LIR) instead of refusing a slot reused for another type.
 pub fn infer_numeric_across_alloc(
     ops: &[IlOp],
     pool_len: usize,
     param_count: u32,
     calls: &DenseCallMap,
+    recycle_operands: bool,
 ) -> Result<Inferred, LowerError> {
+    let _recycle = WalkRecycle::enter(recycle_operands);
     infer_walk(
         ops,
         pool_len,
@@ -225,10 +229,12 @@ fn infer_walk(
         || mode == InferMode::Lir
         || (mode == InferMode::Dense
             && (allow_alloc || ops.iter().any(is_heap_field_op)));
-    // Operand painting stays strict for dense / map drafts (their lowering
-    // relies on it: recycled operand types miscompile range loops); LIR recycles
-    // like set_slot_reuse.
-    let _reuse_guard = WalkReuseGuard::enter(mode == InferMode::Lir);
+    // Operand painting stays strict for map drafts and a first dense try;
+    // LIR recycles like set_slot_reuse, and so does a dense retry that asked
+    // for it. SSA verify still refuses a φ whose inputs disagree.
+    let recycle = mode == InferMode::Lir
+        || (mode == InferMode::Dense && allow_alloc && DENSE_RECYCLE.with(std::cell::Cell::get));
+    let _reuse_guard = WalkReuseGuard::enter(recycle);
 
     for op in ops {
         match op {
@@ -1739,6 +1745,26 @@ fn apply_host(
 thread_local! {
     /// Whether the current [`infer_walk`] recycles painted operand types (LIR).
     static WALK_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// Set by [`infer_numeric_across_alloc`] for one dense walk.
+    static DENSE_RECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Scopes [`DENSE_RECYCLE`] to one [`infer_numeric_across_alloc`] call.
+struct WalkRecycle(bool);
+
+impl WalkRecycle {
+    fn enter(on: bool) -> Self {
+        Self(DENSE_RECYCLE.with(|c| c.replace(on)))
+    }
+}
+
+impl Drop for WalkRecycle {
+    fn drop(&mut self) {
+        DENSE_RECYCLE.with(|c| c.set(self.0));
+    }
 }
 
 /// Restores the enclosing walk's reuse mode (walks can nest via callees).
