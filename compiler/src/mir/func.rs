@@ -372,6 +372,9 @@ impl MirFunc {
                 let ok = match kind {
                     super::inst::MirCastKind::IntToFloat => from.is_int() && to.is_float(),
                     super::inst::MirCastKind::Sext => from == MirTy::I32 && *to == MirTy::I64,
+                    super::inst::MirCastKind::FloatToInt => {
+                        from == MirTy::F64 && *to == MirTy::I64
+                    }
                 };
                 if !ok || self.ty(*dest) != *to {
                     return Err(format!("{dest} illegal cast {from} -> {to}"));

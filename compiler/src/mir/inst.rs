@@ -217,6 +217,8 @@ pub enum MirCastKind {
     IntToFloat,
     /// `i32` → `i64`.
     Sext,
+    /// `CastFloatToInt` — `f64` → `i64`, truncating toward zero.
+    FloatToInt,
 }
 
 /// Value-producing instruction. Phis occupy the prefix of a block.

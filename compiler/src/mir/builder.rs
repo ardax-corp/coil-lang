@@ -329,6 +329,7 @@ impl MirBuilder {
         let ok = match kind {
             MirCastKind::IntToFloat => from.is_int() && to.is_float(),
             MirCastKind::Sext => from == MirTy::I32 && to == MirTy::I64,
+            MirCastKind::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
         };
         if !ok {
             return Err(MirError::msg(format!("illegal cast {from} -> {to}")));

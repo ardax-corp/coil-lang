@@ -815,6 +815,9 @@ fn eval_cast(kind: MirCastKind, to: MirTy, c: MirConst) -> Option<MirConst> {
             Some(MirConst::f32(v as f32))
         }
         (MirCastKind::Sext, MirTy::I64, MirConst::I32(v)) => Some(MirConst::I64(i64::from(v))),
+        (MirCastKind::FloatToInt, MirTy::I64, MirConst::F64(b)) => {
+            Some(MirConst::I64(f64::from_bits(b) as i64))
+        }
         _ => None,
     }
 }

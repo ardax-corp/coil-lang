@@ -37,7 +37,7 @@ use super::gc::refuse_reason as alloc_refuse_reason;
 use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
-/// Bin / slot-bin plus residual INC/DEC/NEG/NEGF/`CastIntToFloat`.
+/// Bin / slot-bin plus residual INC/DEC/NEG/NEGF/`CastIntToFloat`/`CastFloatToInt`.
 /// Load / Store / Const / control do not count. Size metric only;
 /// keep/refuse for straight-line dense is [`super::specialize`] cost vs fuse.
 pub fn numeric_work_ops(ops: &[IlOp]) -> usize {
@@ -367,6 +367,17 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::F64),
+                        imm: None,
+                    });
+                }
+                Instruction::CastFloatToInt => {
+                    let c = stack
+                        .pop()
+                        .ok_or_else(|| LowerError::Refused("cast stack".into()))?;
+                    paint(&mut slot_ty, &mut pool_ty, c, MirTy::F64)?;
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: Some(MirTy::I64),
                         imm: None,
                     });
                 }
@@ -932,6 +943,7 @@ fn infer_walk(
                 if matches!(
                     *byte.bytecode(),
                     Instruction::CastIntToFloat
+                        | Instruction::CastFloatToInt
                         | Instruction::NEGF
                         | Instruction::NEG
                         | Instruction::NOT
@@ -971,6 +983,7 @@ fn is_numeric_work_op(op: &IlOp) -> bool {
         IlOp::Byte { byte, .. } => matches!(
             *byte.bytecode(),
             Instruction::CastIntToFloat
+                | Instruction::CastFloatToInt
                 | Instruction::NEGF
                 | Instruction::NEG
                 | Instruction::INC

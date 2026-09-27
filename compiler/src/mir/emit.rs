@@ -799,6 +799,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             let k = match kind {
                 MirCastKind::IntToFloat => dense::CAST_I2F,
                 MirCastKind::Sext => dense::CAST_SEXT,
+                MirCastKind::FloatToInt => dense::CAST_F2I,
             };
             out.push(byte(
                 Byte::new(Instruction::DenseCast).with_dense_unary(
