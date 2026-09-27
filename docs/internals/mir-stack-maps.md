@@ -90,8 +90,9 @@ and relocate mapped slots on collect.
   `Arc`. The `gc-stress` feature collects at every allocation safepoint;
   CI runs `coil test` with it.
 - **Frame extents** (archive **minor 22**). Allocating dense bodies no
-  longer need S2b maps: their registers can sit past the cursor, so
-  `bind_precise_frames` records the body's frame extent (highest slot + 1,
+  longer need S2b maps: their registers can sit past the cursor, and
+  generic host results are heap words typed `i64` that S2b maps miss. So
+  every allocating dense body gets its frame extent (highest slot + 1,
   decoded from the final bytecode) in `PreciseFrameMap::frame_words`, and a
   conservatively scanned frame covers at least that many words. Only those
   bodies get an extent; widening every conservative frame would also root
