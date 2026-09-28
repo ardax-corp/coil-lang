@@ -929,15 +929,29 @@ impl<const S: usize> Machine<S> {
         if let Some(loc) = self.format_panic_location(panic_insn_ip) {
             lines.push(format!("  at {loc}"));
         }
+        // Deep recursion repeats one frame line; print each run once.
+        let mut repeats = 0usize;
+        let flush = |lines: &mut Vec<String>, repeats: &mut usize| {
+            if *repeats > 0 {
+                lines.push(format!("  ... repeated {repeats} more times"));
+                *repeats = 0;
+            }
+        };
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
             let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
-            if let Some(loc) = self.format_panic_location(ip) {
-                lines.push(format!("  in {name} at {loc}"));
-            } else {
-                lines.push(format!("  in {name}"));
+            let line = match self.format_panic_location(ip) {
+                Some(loc) => format!("  in {name} at {loc}"),
+                None => format!("  in {name}"),
+            };
+            if lines.last() == Some(&line) {
+                repeats += 1;
+                continue;
             }
+            flush(&mut lines, &mut repeats);
+            lines.push(line);
         }
+        flush(&mut lines, &mut repeats);
         lines.join("\n")
     }
 
@@ -957,7 +971,7 @@ impl<const S: usize> Machine<S> {
         } else {
             eprint!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
-                eprintln!("{backtrace}");
+                eprintln!("\n{backtrace}");
             }
             let _ = io::stderr().flush();
         }
