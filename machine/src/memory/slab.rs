@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 
+/// Chunk size in bytes (evacuation sizing).
+#[cfg(feature = "gc-compact")]
+pub const CHUNK_BYTES: usize = CHUNK;
+
 /// Sweep cycles a free slot must stay unused before its empty chunk's pages
 /// go back to the OS. Longer than the phase of typical periodic churn, so
 /// released chunks are not refaulted a cycle later.
@@ -152,6 +156,22 @@ struct FreeClass {
 }
 
 type FreeLists = Vec<FreeClass>;
+
+/// Sorted `(chunk start, index)` pairs (see [`Slab::chunk_index`]).
+#[cfg(feature = "gc-compact")]
+pub struct ChunkIndex {
+    starts: Vec<(u64, usize)>,
+}
+
+#[cfg(feature = "gc-compact")]
+impl ChunkIndex {
+    /// Index of the chunk containing `addr`.
+    pub fn chunk_of(&self, addr: u64) -> Option<usize> {
+        let at = self.starts.partition_point(|&(s, _)| s <= addr).checked_sub(1)?;
+        let (s, i) = self.starts[at];
+        (addr < s + CHUNK as u64).then_some(i)
+    }
+}
 
 pub struct Slab {
     chunks: ChunkTable,
@@ -343,6 +363,97 @@ impl Slab {
             }
         }
         released_bytes
+    }
+
+    /// Sorted chunk starts for `addr → chunk index` lookups in bulk passes.
+    #[cfg(feature = "gc-compact")]
+    pub fn chunk_index(&self) -> ChunkIndex {
+        let n = self.chunks.len();
+        let mut starts: Vec<(u64, usize)> = Vec::with_capacity(n);
+        for i in 0..n {
+            if let Some(c) = self.chunks.get(i) {
+                starts.push((c.ptr as u64, i));
+            }
+        }
+        starts.sort_unstable();
+        ChunkIndex { starts }
+    }
+
+    /// Slots in chunk `i` (0 when out of range).
+    #[cfg(feature = "gc-compact")]
+    pub fn chunk_slots(&self, i: usize) -> usize {
+        self.chunks.get(i).map_or(0, |c| {
+            (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize
+        })
+    }
+
+    /// Bytes sitting on the free lists (cheap fragmentation estimate).
+    #[cfg(feature = "gc-compact")]
+    pub fn free_slot_bytes(&self) -> usize {
+        self.free
+            .iter()
+            .map(|c| c.key.0 as usize * c.slots.len())
+            .sum()
+    }
+
+    /// `(slot_size, align)` of chunk `i`.
+    #[cfg(feature = "gc-compact")]
+    pub fn chunk_class(&self, i: usize) -> Option<(u32, u32)> {
+        self.chunks.get(i).map(|c| (c.meta.slot_size, c.meta.slot_align))
+    }
+
+    /// Give back the pages of `chunks`, which must hold no live object, and
+    /// take their slots off the free lists (re-carved before any new map).
+    /// Returns bytes released.
+    #[cfg(feature = "gc-compact")]
+    pub fn release_chunks(
+        &mut self,
+        chunks: &[bool],
+        index: &ChunkIndex,
+    ) -> usize {
+        if !cfg!(unix) || !chunks.contains(&true) {
+            return 0;
+        }
+        let _ = self.take_free_in(chunks, index);
+        let mut n = 0;
+        for (i, _) in chunks.iter().enumerate().filter(|(_, c)| **c) {
+            let Some(c) = self.chunks.get(i) else {
+                continue;
+            };
+            n += 1;
+            release_pages(c.ptr, CHUNK);
+            let key = (c.meta.slot_size, c.meta.slot_align);
+            match self.released.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, list)) => list.push(i),
+                None => self.released.push((key, vec![i])),
+            }
+        }
+        n * CHUNK
+    }
+
+    /// Remove and return the free slots that lie in `chunks`, so new
+    /// allocations land elsewhere while those chunks are emptied. Hand them
+    /// back with [`Self::free`].
+    #[cfg(feature = "gc-compact")]
+    pub fn take_free_in(
+        &mut self,
+        chunks: &[bool],
+        index: &ChunkIndex,
+    ) -> Vec<NonNull<u8>> {
+        let mut taken = Vec::new();
+        for class in &mut self.free {
+            class.slots.retain(|p| {
+                let inside = index
+                    .chunk_of(p.as_ptr() as u64)
+                    .is_some_and(|i| chunks.get(i).copied().unwrap_or(false));
+                if inside {
+                    taken.push(*p);
+                }
+                !inside
+            });
+            class.low_water = class.low_water.min(class.slots.len());
+        }
+        taken
     }
 
     /// Bytes of chunks whose pages were given back and not yet reused.
