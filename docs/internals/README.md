@@ -25,7 +25,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |
 | [Shared-heap sendability](shared-heap-sendability.md) | COI-363 C0 whitelist; C1 loop steal (E6); C2 expression IPA without PortableValue copy (E7) |
 | [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
-| [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
+| [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
 | [Superinstruction candidates](superinstructions-candidates.md) | [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |

@@ -110,9 +110,9 @@ pub enum ErrorCode {
 
     UnknownExpression,
     CodegenError,
-    /// Recursive function depth cannot be proven; `#[max_depth(N)]` required.
+    /// Retired: recursion depth no longer needs a proof (the VM grows its stack).
     UnboundedRecursion,
-    /// Proven / attributed recursion depth exceeds the VM operand-stack capacity.
+    /// Retired: stack need is checked at run time, not estimated at compile time.
     StackDepthExceeded,
     /// Monomorphization per-fn or total cap was hit; extra specs were not emitted.
     MonomorphizeCap,
