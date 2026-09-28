@@ -53,6 +53,32 @@ values from generic shared bodies are safe. Cost: the flag test on every
 element store (+2.6% instructions on the tight `stride_store_iv` loop,
 `nsieve` neutral). For a moving collector a clear array pins nothing.
 
+## Evacuation (`gc-compact`, experimental, off by default)
+
+`--features gc-compact` adds mostly-copying evacuation of sparse chunks
+(`machine/src/memory/compact.rs`), run after a finished sweep:
+
+- **Every VM root pins** (stack — precise-map slots only say a word *may*
+  be a reference — statics, pins, caches), as do targets of ambiguous
+  interior words (arrays that may hold references, tuples, captures,
+  `Member::Value`), `Root` / `Weak` targets, immortal unit enums and every
+  kind other than instances, enums with payload, boxes, tuples and arrays.
+  So the VM never needs pointer rewriting; only precise heap-interior
+  references (`Member::Object`, masked coroutine slots) are rewritten.
+- Chunks are chosen per size class, sparsest first, while their objects fit
+  in the free slots of the chunks that stay; emptied chunks are released at
+  once. At most 64 chunks per step; a capped step continues next cycle.
+- Skipped while a re-entrant `call_function` is active (a host frame below
+  may hold raw handles), in a shared-heap epoch, or under the debugger.
+  Attempts back off from every 8 to every 256 collections while
+  unproductive.
+- `gc-stress` + `gc-compact` moves every movable object at every
+  collection; CI runs `coil test` that way.
+
+Default builds do not compile any of it. It is not default-on: on the
+probes so far, allocation refills holes before evacuation pays, and a
+copying step raises peak RSS. See [moving-gc.md](moving-gc.md) for the plan.
+
 ## Deferred
 
 - Incremental mark interleaved with the mutator (would need a real write
