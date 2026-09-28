@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output};
 
+use super::id::walk_children;
+
 /// Names of user functions that are pure and self-recursive.
 pub type RecursivePureSet = HashSet<String>;
 
@@ -569,8 +571,10 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         Expression::Declare(_) | Expression::Invoke(_) => {
             facts.local.insert(EffectFlags::FFI);
         }
-        Expression::Panic(_) | Expression::Defer { .. } => {
+        // Still walked: calls inside the message / deferred body count.
+        Expression::Panic(inner) | Expression::Defer { body: inner, .. } => {
             facts.local.insert(EffectFlags::UNKNOWN);
+            walk_body(inner, facts);
         }
         Expression::Add(a, b)
         | Expression::Sub(a, b)
@@ -697,7 +701,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         }
         Expression::Index(base, None) | Expression::Access(base, _) => walk_body(base, facts),
         Expression::NamedArg(_, v) => walk_body(v, facts),
-        _ => {}
+        // `if let`, `while let`, `new`, and anything added later: effects in
+        // any child count. Skipping them used to hide calls from purity.
+        _ => walk_children(ast, &mut |c| walk_body(c, facts)),
     }
 }
 
@@ -1101,5 +1107,24 @@ fn main() { return; }
         assert!(side.name_is_pure("sq$mono$1$0"));
         assert!(side.name_is_pure("util::sq"));
         assert!(!side.name_is_pure("mod::Type::sq"));
+    }
+
+    /// `if let` bodies used to be skipped, hiding IO from purity.
+    #[test]
+    fn if_let_body_effects_count() {
+        let set = analyze_pure_fns(&parse_ast(
+            r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn speak(Option<int> o) -> int {
+    if let Option::Some(n) = o {
+        write(stdout(), to_bytes(format("%i", n)));
+    }
+    return 0;
+}
+fn main() { return; }
+"#,
+        ));
+        assert!(!set.contains("speak"), "speak writes under if let: {set:?}");
     }
 }
