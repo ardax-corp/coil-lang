@@ -1774,10 +1774,7 @@
 
         // Allocate an inner enum (no payload).
         let (inner_obj, _) = heap.alloc(
-            ObjEnum {
-                tag: 99,
-                payload: crate::EnumPayload::empty(),
-            },
+            ObjEnum::new(99, crate::EnumPayload::empty()),
             Object::Enum,
         );
         // Allocate a string.
@@ -1785,13 +1782,10 @@
         // Allocate an outer enum whose payload contains
         // references to both the inner enum and the string.
         let (outer_obj, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: crate::EnumPayload::two(
-                    Member::Object(inner_obj),
-                    Member::Object(string_obj),
-                ),
-            },
+            ObjEnum::new(
+                0,
+                crate::EnumPayload::two(Member::Object(inner_obj), Member::Object(string_obj)),
+            ),
             Object::Enum,
         );
 

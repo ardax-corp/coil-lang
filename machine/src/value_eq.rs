@@ -310,17 +310,11 @@ mod tests {
         let mut heap = Heap::default();
         let (payload, _) = heap.alloc(ObjString::from("n"), Object::String);
         let (ok_a, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: EnumPayload::one(Member::Value(Value::from(payload.addr()))),
-            },
+            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(payload.addr())))),
             Object::Enum,
         );
         let (ok_b, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: EnumPayload::one(Member::Value(Value::from(payload.addr()))),
-            },
+            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(payload.addr())))),
             Object::Enum,
         );
         assert_ne!(ok_a.addr(), ok_b.addr());
@@ -337,17 +331,11 @@ mod tests {
         let (payload, _) = heap.alloc(ObjString::from("n"), Object::String);
         let member = Member::Value(Value::from(payload.addr()));
         let (ok, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: EnumPayload::one(member),
-            },
+            ObjEnum::new(0, EnumPayload::one(member)),
             Object::Enum,
         );
         let (err, _) = heap.alloc(
-            ObjEnum {
-                tag: 1,
-                payload: EnumPayload::one(member),
-            },
+            ObjEnum::new(1, EnumPayload::one(member)),
             Object::Enum,
         );
         assert!(!values_eq(

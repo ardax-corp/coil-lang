@@ -187,6 +187,8 @@ pub enum PortableValue {
     Enum {
         tag: u32,
         payload: Vec<PortableValue>,
+        /// `fn drop()` key, kept like [`Self::Instance`]'s `type_id`.
+        type_id: u32,
     },
     Instance {
         type_id: u32,
@@ -206,10 +208,15 @@ impl std::fmt::Debug for PortableValue {
             Self::String(s) => write!(f, "String({s:?})"),
             Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
             Self::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
-            Self::Enum { tag, payload } => f
+            Self::Enum {
+                tag,
+                payload,
+                type_id,
+            } => f
                 .debug_struct("Enum")
                 .field("tag", tag)
                 .field("payload", payload)
+                .field("type_id", type_id)
                 .finish(),
             Self::Instance { type_id, fields } => f
                 .debug_struct("Instance")
@@ -236,12 +243,14 @@ impl PartialEq for PortableValue {
                 Self::Enum {
                     tag: t1,
                     payload: p1,
+                    type_id: y1,
                 },
                 Self::Enum {
                     tag: t2,
                     payload: p2,
+                    type_id: y2,
                 },
-            ) => t1 == t2 && p1 == p2,
+            ) => t1 == t2 && p1 == p2 && y1 == y2,
             (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
                 t1 == t2 && f1 == f2
             }
@@ -801,6 +810,7 @@ fn encode_value(
         return Ok(PortableValue::Enum {
             tag: gc.as_ref().tag,
             payload: vec![],
+            type_id: 0,
         });
     }
     if !visited.insert(addr) {
@@ -833,6 +843,7 @@ fn encode_value(
             Ok(PortableValue::Enum {
                 tag: gc.as_ref().tag,
                 payload,
+                type_id: gc.as_ref().type_id,
             })
         }
         Object::Instance(gc) => {
@@ -918,19 +929,19 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(ObjTuple { elements }, Object::Tuple);
             Ok(Value::from(obj.addr()))
         }
-        PortableValue::Enum { tag, payload } => {
+        PortableValue::Enum {
+            tag,
+            payload,
+            type_id,
+        } => {
             let mut members = Vec::with_capacity(payload.len());
             for pv in payload {
                 let v = decode_portable(heap, pv)?;
                 members.push(member_from_value(heap, v));
             }
-            let (obj, _) = heap.alloc(
-                ObjEnum {
-                    tag,
-                    payload: EnumPayload::from_vec(members),
-                },
-                Object::Enum,
-            );
+            let mut obj_enum = ObjEnum::new(tag, EnumPayload::from_vec(members));
+            obj_enum.type_id = type_id;
+            let (obj, _) = heap.alloc(obj_enum, Object::Enum);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Instance { type_id, fields } => {
@@ -1760,14 +1771,11 @@ mod tests {
         assert_eq!(gc.as_ref().elements[1].as_int(), 8);
 
         let (en, _) = heap.alloc(
-            ObjEnum {
-                tag: 3,
-                payload: EnumPayload::one(Member::Value(Value::from(11_i64))),
-            },
+            ObjEnum::new(3, EnumPayload::one(Member::Value(Value::from(11_i64)))),
             Object::Enum,
         );
         let pv = value_to_portable(&heap, Value::from(en.addr())).unwrap();
-        let PortableValue::Enum { tag, payload } = pv else {
+        let PortableValue::Enum { tag, payload, .. } = pv else {
             panic!("expected enum portable");
         };
         assert_eq!(tag, 3);
@@ -1781,25 +1789,22 @@ mod tests {
         let mut heap = Heap::default();
         let leaf = heap.immortal_unit_enum(0);
         let (node, _) = heap.alloc(
-            ObjEnum {
-                tag: 1,
-                payload: EnumPayload::two(Member::Object(leaf), Member::Object(leaf)),
-            },
+            ObjEnum::new(1, EnumPayload::two(Member::Object(leaf), Member::Object(leaf))),
             Object::Enum,
         );
         let pv = value_to_portable(&heap, Value::from(node.addr())).expect("shared Leaf DAG");
-        let PortableValue::Enum { tag, payload } = pv else {
+        let PortableValue::Enum { tag, payload, .. } = pv else {
             panic!("expected enum portable");
         };
         assert_eq!(tag, 1);
         assert_eq!(payload.len(), 2);
         assert!(matches!(
             &payload[0],
-            PortableValue::Enum { tag: 0, payload: p } if p.is_empty()
+            PortableValue::Enum { tag: 0, payload: p, .. } if p.is_empty()
         ));
         assert!(matches!(
             &payload[1],
-            PortableValue::Enum { tag: 0, payload: p } if p.is_empty()
+            PortableValue::Enum { tag: 0, payload: p, .. } if p.is_empty()
         ));
     }
 
@@ -1810,17 +1815,11 @@ mod tests {
     fn portable_rejects_shared_payload_enum_dag() {
         let mut heap = Heap::default();
         let (shared, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: EnumPayload::one(Member::Value(Value::from(7_i64))),
-            },
+            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(7_i64)))),
             Object::Enum,
         );
         let (node, _) = heap.alloc(
-            ObjEnum {
-                tag: 1,
-                payload: EnumPayload::two(Member::Object(shared), Member::Object(shared)),
-            },
+            ObjEnum::new(1, EnumPayload::two(Member::Object(shared), Member::Object(shared))),
             Object::Enum,
         );
         assert_eq!(

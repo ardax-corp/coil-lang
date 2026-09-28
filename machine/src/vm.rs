@@ -1777,7 +1777,7 @@ impl<const S: usize> Machine<S> {
             note_make_fast();
         }
         let payload = Self::stack_copy_enum_payload(&self.heap, &self.stack, sp, arity);
-        let obj_enum = ObjEnum { tag, payload };
+        let obj_enum = ObjEnum::new(tag, payload);
         let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
         self.stack.seek(sp - arity);
         self.stack.push(Value::from(object.addr()));

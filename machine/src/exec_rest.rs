@@ -963,7 +963,7 @@ impl<const S: usize> Machine<S> {
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload =
                             Self::dense_enum_payload(&self.heap, &self.stack[lo..lo + arity]);
-                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
