@@ -1,4 +1,11 @@
-//! Fail-closed escape analysis for `MakeArray` → frame-slot scalarization.
+//! Fail-closed escape analysis for `MakeArray` / `MakeTuple` → frame-slot
+//! scalarization.
+//!
+//! Tuples are immutable, so a non-escaping tuple read only with constant
+//! indices becomes plain slots whatever its elements are (the
+//! immediate-element and mutated-slot-snapshot refusals below exist for
+//! mutable `[T; N]` arrays). An escaping tuple is rebuilt once with
+//! `MakeTuple` at its first escape.
 //!
 //! Shared verdict is [`crate::escape::ArrayEscape`] (Q1): non-escaping →
 //! slots; escaping → **box once** and reuse that identity. Immediate elems
@@ -21,10 +28,15 @@ use super::super::op::{EntryKind, IlOp};
 pub struct AllocSite {
     pub make_idx: usize,
     pub arity: u32,
+    /// `MakeTuple` (immutable) rather than `MakeArray`.
+    pub tuple: bool,
     pub store_slot: u32,
     pub escaped: bool,
     /// Scalarize anyway; rewrite whole-array `LOAD`s to a slot `MakeArray`.
     pub box_at_escape: bool,
+    /// `LOAD`s of `store_slot` reached only by this site's store (the slot
+    /// may be reused for other values elsewhere in the body).
+    pub owned: Vec<usize>,
 }
 
 impl AllocSite {
@@ -60,17 +72,23 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
     let mut allocs = Vec::new();
     let mut i = 0;
     while i + 1 < ops.len() {
-        if let IlOp::MakeArray { arity, .. } = &ops[i]
-            && *arity >= 1
-            && *arity <= MAX_STACK_ARITY
+        let made = match &ops[i] {
+            IlOp::MakeArray { arity, .. } => Some((*arity, false)),
+            IlOp::MakeTuple { arity, .. } => Some((*arity, true)),
+            _ => None,
+        };
+        if let Some((arity, tuple)) = made
+            && (1..=MAX_STACK_ARITY).contains(&arity)
             && let IlOp::StorePop { slot, .. } = &ops[i + 1]
         {
             allocs.push(AllocSite {
                 make_idx: i,
-                arity: *arity,
+                arity,
+                tuple,
                 store_slot: *slot,
                 escaped: false,
                 box_at_escape: false,
+                owned: Vec::new(),
             });
             i += 2;
             continue;
@@ -79,28 +97,26 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
     }
 
     let slots: Vec<u32> = allocs.iter().map(|a| a.store_slot).collect();
+    let blocks = super::super::analysis::build_blocks(ops);
     for a in &mut allocs {
-        if slot_stored_elsewhere(ops, a.make_idx, a.store_slot) {
-            a.escaped = true;
-            continue;
-        }
         if slots.iter().filter(|s| **s == a.store_slot).count() > 1 {
             a.escaped = true;
             continue;
         }
-        if a.escaped {
-            continue;
-        }
-        if slot_has_opaque_use(ops, a.store_slot, a.make_idx) {
-            a.escaped = true;
-            continue;
+        match owned_loads(ops, &blocks, a.make_idx + 1, a.store_slot) {
+            Some(owned) => a.owned = owned,
+            None => {
+                a.escaped = true;
+                continue;
+            }
         }
         match classify_site_uses(ops, a) {
             SiteUses::Private => {
                 // Computed elems stay heap unless they are immediates.
                 // Slot-SROA of zip/ADD results aliases sibling zips and
                 // named locals across assert joins (dest-prop / slot reuse).
-                if !makearray_elems_are_immediate(ops, a.make_idx, a.arity) {
+                // Tuples are never written after creation: no aliasing.
+                if !a.tuple && !makearray_elems_are_immediate(ops, a.make_idx, a.arity) {
                     a.escaped = true;
                 }
             }
@@ -113,7 +129,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
         // Q1 box snapshot: MakeArray of LOADs from slots that are also stored
         // (codegen `[T; N]` locals). Exploding that copy lets dest-prop mix
         // the snapshot with the mutable slots.
-        if makearray_is_mutated_slot_snapshot(ops, a.make_idx, a.arity) {
+        if !a.tuple && makearray_is_mutated_slot_snapshot(ops, a.make_idx, a.arity) {
             a.escaped = true;
             a.box_at_escape = false;
         }
@@ -134,11 +150,17 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
     }
     let mut base = max_slot_used(ops).saturating_add(1);
     let mut map: Vec<(u32, u32, u32, usize)> = Vec::new(); // slot, base, arity, make_idx
+    let mut tuples: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut owned: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for s in sites {
         if base.saturating_add(s.arity) > 256 {
             continue;
         }
         map.push((s.store_slot, base, s.arity, s.make_idx));
+        owned.extend(s.owned.iter().copied());
+        if s.tuple {
+            tuples.insert(s.store_slot);
+        }
         base = base.saturating_add(s.arity);
     }
     if map.is_empty() {
@@ -150,7 +172,7 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
     let mut i = 0;
     while i < ops.len() {
         if let Some((_, b, arity, _)) = map.iter().copied().find(|(_, _, _, m)| *m == i)
-            && matches!(ops[i], IlOp::MakeArray { .. })
+            && matches!(ops[i], IlOp::MakeArray { .. } | IlOp::MakeTuple { .. })
             && i + 1 < ops.len()
             && matches!(ops[i + 1], IlOp::StorePop { .. })
         {
@@ -162,6 +184,7 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
             continue;
         }
         if let Some(slot) = load_of_single_slot(&ops[i])
+            && owned.contains(&i)
             && let Some((_, b, arity, _)) = map.iter().copied().find(|(s, _, _, _)| *s == slot)
         {
             let loc = ops[i].loc();
@@ -205,7 +228,11 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
                                 loc,
                             });
                         }
-                        out.push(IlOp::MakeArray { arity, loc });
+                        if tuples.contains(&slot) {
+                            out.push(IlOp::MakeTuple { arity, loc });
+                        } else {
+                            out.push(IlOp::MakeArray { arity, loc });
+                        }
                         out.push(IlOp::Dup { loc });
                         out.push(IlOp::StorePop { slot, loc });
                     } else {
@@ -258,35 +285,18 @@ enum SiteUses {
 }
 
 fn classify_site_uses(ops: &[IlOp], site: &AllocSite) -> SiteUses {
-    let mut i = 0;
     let mut saw_private = false;
     let mut saw_escape = false;
-    while i < ops.len() {
-        if i == site.make_idx || i == site.make_idx + 1 {
-            i += 1;
-            continue;
-        }
-        if load_of_single_slot(&ops[i]) != Some(site.store_slot) {
-            i += 1;
-            continue;
-        }
-        if let Some(u) = classify_local_use(ops, i, site.arity) {
+    for &i in &site.owned {
+        if classify_local_use(ops, i, site.arity).is_some() {
             if saw_escape {
                 return SiteUses::Refuse;
             }
             saw_private = true;
-            i += match u {
-                LocalUse::Index { consumed, .. }
-                | LocalUse::Len { consumed }
-                | LocalUse::StoreIndex { consumed, .. } => consumed,
-            };
             continue;
         }
         match named_escape_kind(ops, i) {
-            Some(EscapeKind::Box) => {
-                saw_escape = true;
-                i += 1;
-            }
+            Some(EscapeKind::Box) => saw_escape = true,
             Some(EscapeKind::Grow) | None => return SiteUses::Refuse,
         }
     }
@@ -297,6 +307,158 @@ fn classify_site_uses(ops: &[IlOp], site: &AllocSite) -> SiteUses {
     } else {
         SiteUses::Refuse
     }
+}
+
+/// Loads of `slot` that only `store_idx` reaches (forward reaching
+/// definitions over the body's blocks). `None` refuses the site: some read
+/// of the slot is reached by this store *and* another definition, or reads
+/// it in a form the rewrite cannot replace (packed / fused / opaque). An op
+/// whose slot footprint is unknown may or may not have overwritten the slot,
+/// so it adds "other" without clearing "mine".
+fn owned_loads(
+    ops: &[IlOp],
+    blocks: &[super::super::analysis::Block],
+    store_idx: usize,
+    slot: u32,
+) -> Option<Vec<usize>> {
+    const MINE: u8 = 1;
+    const OTHER: u8 = 2;
+    let step = |i: usize, op: &IlOp, st: u8| -> u8 {
+        if i == store_idx {
+            return MINE;
+        }
+        match slot_touch(op, slot) {
+            SlotTouch::Write => OTHER,
+            SlotTouch::Unknown => st | OTHER,
+            _ => st,
+        }
+    };
+    let n = blocks.len();
+    if n == 0 {
+        return None;
+    }
+    let preds = super::super::analysis::preds_of(blocks);
+    let mut out_state = vec![0u8; n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..n {
+            // The body's entry (params, uninitialized frame words) is "other".
+            let mut st = if b == 0 { OTHER } else { 0 };
+            for &p in &preds[b] {
+                st |= out_state[p];
+            }
+            let block = &blocks[b];
+            for (i, op) in ops.iter().enumerate().take(block.end).skip(block.start) {
+                st = step(i, op, st);
+            }
+            if st != out_state[b] {
+                out_state[b] = st;
+                changed = true;
+            }
+        }
+    }
+    let mut owned = Vec::new();
+    for b in 0..n {
+        let mut st = if b == 0 { OTHER } else { 0 };
+        for &p in &preds[b] {
+            st |= out_state[p];
+        }
+        let block = &blocks[b];
+        for (i, op) in ops.iter().enumerate().take(block.end).skip(block.start) {
+            if i != store_idx && st & MINE != 0 {
+                match slot_touch(op, slot) {
+                    SlotTouch::Load if st & OTHER == 0 => owned.push(i),
+                    // Mixed reach, or a read / footprint the rewrite cannot
+                    // replace while this store may still be live.
+                    SlotTouch::Load | SlotTouch::Read | SlotTouch::Unknown => return None,
+                    SlotTouch::Write | SlotTouch::None => {}
+                }
+            }
+            st = step(i, op, st);
+        }
+    }
+    owned.sort_unstable();
+    Some(owned)
+}
+
+/// How one op touches a local slot, for [`owned_loads`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotTouch {
+    None,
+    /// Single-slot `LOAD` the rewrite can replace.
+    Load,
+    /// Any other read (fused, packed, pinned, return slot).
+    Read,
+    Write,
+    /// Addresses slots with a footprint we do not model (`Seek` at or below
+    /// the slot, `UnpackAt`, fused stores through the pool, …).
+    Unknown,
+}
+
+fn slot_touch(op: &IlOp, slot: u32) -> SlotTouch {
+    let hit = |s: u32, t: SlotTouch| if s == slot { t } else { SlotTouch::None };
+    match op {
+        IlOp::Load { slot: s, .. } => hit(*s, SlotTouch::Load),
+        IlOp::StorePop { slot: s, .. } => hit(*s, SlotTouch::Write),
+        IlOp::ArrayPin { slot: s, .. }
+        | IlOp::IndexPin { slot: s, .. }
+        | IlOp::IndexPinUnchecked { slot: s, .. }
+        | IlOp::StoreIndexPin { slot: s, .. }
+        | IlOp::StoreIndexPinUnchecked { slot: s, .. }
+        | IlOp::LoadReturnSlot { slot: s, .. } => hit(*s, SlotTouch::Read),
+        IlOp::BinSlotImm { slot: s, .. } => hit(u32::from(*s), SlotTouch::Read),
+        IlOp::BinSlotSlot { a, b, .. } => {
+            if u32::from(*a) == slot || u32::from(*b) == slot {
+                SlotTouch::Read
+            } else {
+                SlotTouch::None
+            }
+        }
+        IlOp::Byte { byte, .. } => {
+            let insn = *byte.bytecode();
+            if insn == Instruction::Seek {
+                return if byte.operand_u32() <= slot {
+                    SlotTouch::Unknown
+                } else {
+                    SlotTouch::None
+                };
+            }
+            let (uses, defs, opaque) = super::super::analysis::op_slot_use_def(op);
+            if defs.contains(&slot) {
+                SlotTouch::Write
+            } else if uses.contains(&slot) {
+                if load_of_single_slot(op) == Some(slot) {
+                    SlotTouch::Load
+                } else {
+                    SlotTouch::Read
+                }
+            } else if opaque && byte_addresses_slots(insn) {
+                SlotTouch::Unknown
+            } else {
+                SlotTouch::None
+            }
+        }
+        _ => SlotTouch::None,
+    }
+}
+
+/// Residual bytes whose slot operands [`super::super::analysis::op_slot_use_def`]
+/// cannot fully name.
+fn byte_addresses_slots(insn: Instruction) -> bool {
+    matches!(
+        insn,
+        Instruction::UnpackAt
+            | Instruction::FloatChainStore
+            | Instruction::BinSlotImmStore
+            | Instruction::BinSlotSlotConstJmpf
+            | Instruction::BinSlotSlotConstJmpt
+            | Instruction::ArrayPin
+            | Instruction::IndexPin
+            | Instruction::IndexPinUnchecked
+            | Instruction::StoreIndexPin
+            | Instruction::StoreIndexPinUnchecked
+    )
 }
 
 fn load_of_single_slot(op: &IlOp) -> Option<u32> {
@@ -465,55 +627,6 @@ fn makearray_is_mutated_slot_snapshot(ops: &[IlOp], make_idx: usize, arity: u32)
     }
     ops[make_idx - n..make_idx].iter().any(|op| {
         load_of_single_slot(op).is_some_and(|s| slot_has_store(ops, s))
-    })
-}
-
-fn slot_has_opaque_use(ops: &[IlOp], slot: u32, make_idx: usize) -> bool {
-    for (i, op) in ops.iter().enumerate() {
-        if i == make_idx || i == make_idx + 1 {
-            continue;
-        }
-        match op {
-            IlOp::Load { slot: s, .. } if *s == slot => {}
-            IlOp::BinSlotImm { slot: s, .. } if *s as u32 == slot => return true,
-            IlOp::BinSlotSlot { a, b, .. } if *a as u32 == slot || *b as u32 == slot => {
-                return true;
-            }
-            IlOp::LoadReturnSlot { slot: s, .. } if *s == slot => return true,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::LOAD | Instruction::STORE | Instruction::StorePop
-                ) =>
-            {
-                // Single-slot LOAD is a use walker site (private or box-at-edge).
-                if *byte.bytecode() == Instruction::LOAD && byte.load_store_count() == 1 {
-                    continue;
-                }
-                if (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn slot_stored_elsewhere(ops: &[IlOp], make_idx: usize, slot: u32) -> bool {
-    ops.iter().enumerate().any(|(i, op)| {
-        if i == make_idx + 1 {
-            return false;
-        }
-        match op {
-            IlOp::StorePop { slot: s, .. } if *s == slot => true,
-            IlOp::Byte { byte, .. }
-                if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop) =>
-            {
-                (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot)
-            }
-            _ => false,
-        }
     })
 }
 

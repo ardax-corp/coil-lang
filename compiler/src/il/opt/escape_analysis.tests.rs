@@ -589,3 +589,59 @@ fn boxes_once_across_two_escape_edges() {
         .count();
     assert_eq!(makes, 1, "Q1 box-once");
 }
+
+/// `LOAD a; LOAD a; CONST 1; ADD; MakeTuple 2; STORE t` — computed elements
+/// built from a slot the loop rewrites.
+fn computed_tuple(slot: u32) -> Vec<IlOp> {
+    vec![
+        IlOp::Load { slot: 0, loc: loc() },
+        IlOp::Load { slot: 0, loc: loc() },
+        IlOp::Const { imm: 1, loc: loc() },
+        IlOp::byte(Byte::new(Instruction::ADD)),
+        IlOp::MakeTuple { arity: 2, loc: loc() },
+        IlOp::StorePop { slot, loc: loc() },
+        IlOp::Const { imm: 9, loc: loc() },
+        IlOp::StorePop { slot: 0, loc: loc() },
+    ]
+}
+
+/// Tuples are immutable: computed elements from a mutated slot still become
+/// slots (arrays refuse both cases).
+#[test]
+fn scalarizes_private_tuple_with_computed_elements() {
+    let mut ops = computed_tuple(1);
+    ops.extend([
+        IlOp::Load { slot: 1, loc: loc() },
+        IlOp::Const { imm: 1, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1 },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(info.allocs[0].tuple);
+    assert!(is_stack_allocatable(&info.allocs[0]), "{:?}", info.allocs);
+    allocate_on_stack(&mut ops, &info);
+    assert!(
+        !ops.iter().any(|op| matches!(op, IlOp::MakeTuple { .. })),
+        "private tuple becomes slots"
+    );
+}
+
+/// An escaping tuple is rebuilt once with `MakeTuple`, not `MakeArray`.
+#[test]
+fn escaping_tuple_boxes_as_a_tuple() {
+    let mut ops = computed_tuple(1);
+    ops.extend([
+        IlOp::Load { slot: 1, loc: loc() },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Pop { loc: loc() },
+        IlOp::Load { slot: 1, loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1 },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(info.allocs[0].box_at_escape);
+    allocate_on_stack(&mut ops, &info);
+    let tuples = ops.iter().filter(|op| matches!(op, IlOp::MakeTuple { .. })).count();
+    assert_eq!(tuples, 1, "one tuple rebuilt at the return edge");
+    assert!(!has_make_array(&ops));
+}
