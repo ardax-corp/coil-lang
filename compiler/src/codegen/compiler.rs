@@ -3543,7 +3543,21 @@ impl Compiler {
 
     /// Compile one block statement. A first escape inside it rolls the
     /// statement back, boxes the escaping locals up front, and re-emits.
+    ///
+    /// The box must run exactly as often as the local's `let`, so an escape
+    /// of a local bound at a shallower statement depth (inside a loop body or
+    /// `if` arm) is handed to the enclosing statement frame instead.
     fn compile_block_stmt(&mut self, child: &Output<'_>) {
+        let depth = self.stmt_depth + 1;
+        for name in let_bound_names(child) {
+            self.escape_decl_depth.insert(name.to_string(), depth);
+        }
+        self.stmt_depth = depth;
+        self.compile_block_stmt_at(child, depth);
+        self.stmt_depth = depth - 1;
+    }
+
+    fn compile_block_stmt_at(&mut self, child: &Output<'_>, depth: u32) {
         // Only locals already in scope can escape; skip the snapshot otherwise.
         if self.context.stack_array_locals.is_empty()
             && self.context.unboxed_class_locals.is_empty()
@@ -3554,7 +3568,7 @@ impl Compiler {
             self.escape_hoist = outer;
             return;
         }
-        let outer = self.escape_hoist.replace(Vec::new());
+        let mut outer = self.escape_hoist.replace(Vec::new());
         let bc_len = self.bytecode.len();
         let dbg_len = self.debug_locs.len();
         let msg_len = self.messages.len();
@@ -3563,6 +3577,21 @@ impl Compiler {
         let pinned = self.pinned_array_slots.clone();
         let mut bc = self.do_compile(child);
         let req = self.escape_hoist.take().unwrap_or_default();
+        // Bound by a shallower statement: the enclosing frame rolls this
+        // whole statement back and boxes before it.
+        if let Some(up) = outer.as_mut() {
+            let shallower: Vec<String> = req
+                .iter()
+                .filter(|n| self.escape_decl_depth.get(*n).is_some_and(|&d| d < depth))
+                .cloned()
+                .collect();
+            if !shallower.is_empty() {
+                up.extend(shallower);
+                self.bytecode.append(&mut bc);
+                self.escape_hoist = outer;
+                return;
+            }
+        }
         if !req.is_empty() {
             self.emit_idx = emit_idx;
             self.bytecode.truncate(bc_len);
@@ -14965,10 +14994,12 @@ impl Compiler {
                 self.push_const_env();
                 let ctx = self.context.child();
                 self.context = ctx;
+                let saved_decl_depth = self.escape_decl_depth.clone();
                 // Append each child to self.bytecode (Print/control-flow emit in-place).
                 for child in children {
                     self.compile_block_stmt(child);
                 }
+                self.escape_decl_depth = saved_decl_depth;
 
                 self.context = *self.context.get_prev().clone().unwrap();
                 self.pop_const_env();
@@ -17810,3 +17841,19 @@ impl Compiler {
 #[cfg(test)]
 #[path = "lib.tests.rs"]
 mod tests;
+
+/// Names a `let` statement binds: `let x;` is a bare `Variable`, and
+/// `let x = e;` parses as a `Fragment` of the `Variable` plus its init.
+fn let_bound_names<'a>(stmt: &'a Output<'a>) -> Vec<&'a str> {
+    match unwrap_expr_output(stmt).1.as_ref() {
+        Expression::Variable(name, _) => vec![*name],
+        Expression::Fragment(items) => items
+            .iter()
+            .filter_map(|item| match unwrap_expr_output(item).1.as_ref() {
+                Expression::Variable(name, _) => Some(*name),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
