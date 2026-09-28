@@ -179,6 +179,43 @@ pub fn emit_dense(
             if !plan.needs_slot(inst.dest()) {
                 continue;
             }
+            // Register form needs every operand in a register. A convoyed
+            // operand (a self-call result on the stack) feeding a stored
+            // value goes through the stack instead.
+            if inst.operands().iter().any(|v| !plan.needs_slot(*v)) {
+                let MirInst::Bin {
+                    dest,
+                    op,
+                    ty,
+                    lhs,
+                    rhs,
+                } = inst
+                else {
+                    return Err(LowerError::Refused(
+                        "dense operand without a register".into(),
+                    ));
+                };
+                emit_stack_bin(EmitStackBinArgs {
+                    out: &mut out,
+                    stacked: &mut stacked,
+                    op: *op,
+                    ty: *ty,
+                    lhs: *lhs,
+                    rhs: *rhs,
+                    dest: *dest,
+                    func,
+                    plan: &plan,
+                    regs: &regs,
+                    pool,
+                    loc,
+                })?;
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+                stacked.clear();
+                continue;
+            }
             emit_inst(EmitInstArgs {
                 out: &mut out,
                 inst,
