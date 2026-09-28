@@ -69,6 +69,43 @@ S4 safepoint mark (no write barrier).
 **C. Handle table (`Value` = index).** Refused in heap-identity.md: an extra
 indirection on every heap access and an archive-major change.
 
+## Stage 0 results (2026-09, `--features gc-stats`)
+
+Census after each mark (release build, `COIL_AUTO_PAR=0`):
+
+| Workload | Mapped | Live | Reclaim by unmapping empty chunks | Extra by compaction | Pinned (ambiguous) |
+|----------|-------:|-----:|----------------------------------:|--------------------:|-------------------:|
+| Flagships (`mandelbrot`, `tak`, `nsieve`, `binary_trees`, `fib`) | — | — | never collect (under the 1 MB budget) | — | — |
+| `gc_churn` steady state | 8.8 MB | 0 | **8.8 MB** | 0 | 0 |
+| `result_heap_churn` | 1.1 MB | ~0 | 0.96 MB | 64 KB | 0 |
+| Probe: 60k-node list, half copied to a new list, 20k nodes in a `Vec<Node>` | 7.6 MB | 3.8 MB | **3.7 MB** (65 empty chunks) | ~35 KB | 20k nodes (36–40% of live) |
+| Probe: same list thinned **in place** (every other node unlinked) | 5.6 MB | 3.8 MB | 64 KB | **1.7 MB** (30%) | 20k nodes (36%) |
+
+Findings:
+
+1. **Most reclaimable memory is whole empty chunks, not fragmentation.**
+   Allocation fills a size class sequentially, so a generation that dies
+   together frees whole chunks. That needs no moving: idle-chunk release
+   (`madvise(MADV_DONTNEED)`, chunk stays mapped and reads as poisoned) now
+   ships separately — `gc_shrink.hy` RSS ~96 MB → ~40 MB after its peak,
+   no regression on churn benches.
+2. **Compaction only pays for survivors scattered in place** (~30% in the
+   in-place-thinning probe), which is exactly the long-lived mutable
+   structure case.
+3. **Interior ambiguity dominates pinning.** Every object held only by a
+   `Vec` / tuple / capture word is ambiguous today — 36–40% of the live set
+   in the probe. Conservative *stack* roots were 0 in every run (precise
+   frame maps cover these programs). Stage 2 (precise element kinds) is
+   therefore the real prerequisite, not stack precision.
+4. **Precise maps are type-precise, not liveness-precise.** A dead temp in a
+   mapped slot kept a 60k-node list alive in the first probe; liveness in
+   precise maps would reclaim more than compaction on such code.
+
+Recommendation after Stage 0: keep idle-chunk release; do Stage 1 (landed
+with it: `for_each_vm_root` / `Object::for_each_reference` tag every root
+and interior reference precise / ambiguous / pinned) and Stage 2 before any
+evacuation work; evaluate slot liveness in precise maps as a cheaper win.
+
 ## Plan (option B)
 
 0. **Measure.** Fragmentation (live bytes vs mapped chunk bytes after each
