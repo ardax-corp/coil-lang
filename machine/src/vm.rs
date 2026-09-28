@@ -544,6 +544,9 @@ pub struct Machine<const S: usize> {
     frame_reserve: usize,
     match_payload_bound: usize,
     frame_reserve_key: (usize, usize),
+    /// Constant base cases of unary callees, for the same code as
+    /// `frame_reserve_key`.
+    unary_bases: dispatch::UnaryBaseTable,
     /// `CALL` may open a frame without a stack check while fewer frames than
     /// this are live (see [`Self::rearm_call_window`]).
     call_hot_depth: usize,
@@ -620,6 +623,7 @@ impl<const S: usize> Machine<S> {
             frame_reserve: 0,
             match_payload_bound: 0,
             frame_reserve_key: (0, 0),
+            unary_bases: dispatch::UnaryBaseTable::default(),
             call_hot_depth: 0,
             call_window_end: 0,
         }
@@ -2880,6 +2884,7 @@ impl<const S: usize> Machine<S> {
             let reserve = common::frame_reserve(raw, constants);
             self.frame_reserve = reserve.words;
             self.match_payload_bound = reserve.match_payload;
+            self.unary_bases = dispatch::UnaryBaseTable::build(code, constants);
             self.frame_reserve_key = key;
         }
     }
@@ -3187,9 +3192,7 @@ impl<const S: usize> Machine<S> {
                     if !debug_attached
                         && arity == 1
                         && target != 0
-                        && let Some(ret) = dispatch::unary_const_base_return(
-                            code,
-                            constants,
+                        && let Some(ret) = self.unary_bases.fast_return(
                             target,
                             self.stack[self.stack.tell() - 1],
                             &self.heap,

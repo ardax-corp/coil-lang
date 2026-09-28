@@ -636,47 +636,126 @@ pub(super) fn dense_field_store(
     Ok(())
 }
 
-/// Direct unary call whose callee starts with `slot0 ? imm; jump ConstReturnImm`.
-///
-/// Same compare the callee would run. When the branch is taken, the call
-/// returns that constant and does not push a frame. Any other shape returns
-/// `None` and the caller performs a normal `CALL`.
-#[inline(always)]
-pub(super) fn unary_const_base_return<H: crate::fused::HeapView>(
-    code: &[Byte],
-    constants: &[u64],
-    target: usize,
-    arg: Value,
-    heap: &H,
-) -> Option<Value> {
-    if target >= code.len() {
-        return None;
+/// A callee prologue `slot0 ? imm; jump ConstReturnImm k`, decoded once per
+/// program (see [`UnaryBaseTable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnaryBase {
+    imm: i64,
+    ret: i64,
+    guard: Guard,
+}
+
+/// When the base case is taken. Integer orderings are resolved at decode
+/// (compare op and jump sense folded) so the hit path is one compare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Guard {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Other { cmp: u8, want_true: bool },
+}
+
+impl UnaryBase {
+    /// Decode the guard at `target`, if it is one.
+    fn decode(code: &[Byte], constants: &[u64], target: usize) -> Option<Self> {
+        let entry = code.get(target)?;
+        let want_true = match *entry.bytecode() {
+            Instruction::BinSlotImmJmpt => true,
+            Instruction::BinSlotImmJmpf => false,
+            _ => return None,
+        };
+        let (cmp, slot, pool_idx) = entry.bin_slot_imm_jmpf_parts();
+        if slot != 0 {
+            return None;
+        }
+        let packed = *constants.get(pool_idx)?;
+        let ret_op = code.get((packed >> 32) as usize)?;
+        if !matches!(*ret_op.bytecode(), Instruction::ConstReturnImm) {
+            return None;
+        }
+        // `Jmpf` takes the branch when the compare is false: negate it.
+        let guard = match (Instruction::from(cmp), want_true) {
+            (Instruction::LE, true) | (Instruction::GEQ, false) => Guard::Lt,
+            (Instruction::LEQ, true) | (Instruction::GT, false) => Guard::Le,
+            (Instruction::GT, true) | (Instruction::LEQ, false) => Guard::Gt,
+            (Instruction::GEQ, true) | (Instruction::LE, false) => Guard::Ge,
+            _ => Guard::Other { cmp, want_true },
+        };
+        Some(Self {
+            imm: packed as u32 as i32 as i64,
+            ret: ret_op.operand_u32() as i32 as i64,
+            guard,
+        })
     }
-    let entry = unsafe { code.get_unchecked(target) };
-    let want_true = match *entry.bytecode() {
-        Instruction::BinSlotImmJmpt => true,
-        Instruction::BinSlotImmJmpf => false,
-        _ => return None,
-    };
-    let (cmp_op, slot, pool_idx) = entry.bin_slot_imm_jmpf_parts();
-    if slot != 0 || pool_idx >= constants.len() {
-        return None;
+
+    #[inline(always)]
+    fn taken<H: crate::fused::HeapView>(&self, arg: Value, heap: &H) -> bool {
+        let a = arg.as_int();
+        match self.guard {
+            Guard::Lt => a < self.imm,
+            Guard::Le => a <= self.imm,
+            Guard::Gt => a > self.imm,
+            Guard::Ge => a >= self.imm,
+            Guard::Other { cmp, want_true } => {
+                crate::fused::eval_cmp(cmp, arg, Value::from(self.imm), heap) == want_true
+            }
+        }
     }
-    let packed = unsafe { *constants.get_unchecked(pool_idx) };
-    let imm = packed as u32 as i32 as i64;
-    let dest = (packed >> 32) as usize;
-    if dest >= code.len() {
-        return None;
+}
+
+/// Unary `CALL` targets whose callee opens with a constant base case, so the
+/// call can return that constant without a frame when the guard is taken.
+/// Decoded once per program instead of on every call.
+#[derive(Default)]
+pub(crate) struct UnaryBaseTable {
+    /// Per code word: `0` = no guard, else `1 +` index into `bases`.
+    by_target: Vec<u32>,
+    bases: Vec<UnaryBase>,
+}
+
+impl UnaryBaseTable {
+    pub(crate) fn build(code: &[Byte], constants: &[u64]) -> Self {
+        let mut table = Self::default();
+        for b in code {
+            if !matches!(*b.bytecode(), Instruction::CALL) {
+                continue;
+            }
+            let (arity, target) = b.call_parts();
+            if arity != 1 || target == 0 || target >= code.len() {
+                continue;
+            }
+            if table.by_target.is_empty() {
+                table.by_target = vec![0; code.len()];
+            }
+            if table.by_target[target] != 0 {
+                continue;
+            }
+            if let Some(base) = UnaryBase::decode(code, constants, target) {
+                table.bases.push(base);
+                table.by_target[target] = table.bases.len() as u32;
+            }
+        }
+        table
     }
-    let ret_op = unsafe { code.get_unchecked(dest) };
-    if !matches!(*ret_op.bytecode(), Instruction::ConstReturnImm) {
-        return None;
+
+    /// The constant a unary call to `target` returns without a frame, when
+    /// the callee's base-case guard holds for `arg`.
+    #[inline(always)]
+    pub(crate) fn fast_return<H: crate::fused::HeapView>(
+        &self,
+        target: usize,
+        arg: Value,
+        heap: &H,
+    ) -> Option<Value> {
+        let idx = *self.by_target.get(target)?;
+        if idx == 0 {
+            return None;
+        }
+        // SAFETY: `build` only stores `1 + index` of a pushed base.
+        let base = unsafe { self.bases.get_unchecked(idx as usize - 1) };
+        base.taken(arg, heap).then(|| Value::from(base.ret as u64))
     }
-    let taken = crate::fused::eval_cmp(cmp_op, arg, Value::from(imm), heap);
-    if taken != want_true {
-        return None;
-    }
-    Some(Value::from(ret_op.operand_u32() as i32 as i64 as u64))
 }
 
 fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
@@ -1055,6 +1134,55 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CALL 1 -> 3`; at 3 a guard on slot 0 against `imm`, jumping to a
+    /// `ConstReturnImm ret` at 5.
+    fn unary_guard_program(jump: Instruction, cmp: Instruction, imm: i32, ret: u32) -> (Vec<Byte>, Vec<u64>) {
+        let pool = vec![(5u64 << 32) | (imm as u32 as u64)];
+        let code = vec![
+            Byte::new(Instruction::CALL).with_call_packed(1, 3),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(jump).with_bin_slot_imm_jmpf(cmp as u8, 0, 0),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::ConstReturnImm).with_operand_u32(ret),
+        ];
+        (code, pool)
+    }
+
+    #[test]
+    fn unary_base_jmpt_returns_when_the_compare_holds() {
+        let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpt, Instruction::LEQ, 2, 1);
+        let table = UnaryBaseTable::build(&code, &pool);
+        let heap = crate::memory::Heap::default();
+        assert_eq!(table.fast_return(3, Value::from(2i64), &heap), Some(Value::from(1i64)));
+        assert_eq!(table.fast_return(3, Value::from(3i64), &heap), None);
+    }
+
+    /// `Jmpf` jumps to the base case when the compare is false.
+    #[test]
+    fn unary_base_jmpf_returns_when_the_compare_fails() {
+        let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpf, Instruction::LEQ, 2, 9);
+        let table = UnaryBaseTable::build(&code, &pool);
+        let heap = crate::memory::Heap::default();
+        assert_eq!(table.fast_return(3, Value::from(5i64), &heap), Some(Value::from(9i64)));
+        assert_eq!(table.fast_return(3, Value::from(2i64), &heap), None);
+        let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpf, Instruction::LE, 0, 4);
+        let table = UnaryBaseTable::build(&code, &pool);
+        assert_eq!(table.fast_return(3, Value::from(0i64), &heap), Some(Value::from(4i64)));
+        assert_eq!(table.fast_return(3, Value::from(-1i64), &heap), None);
+    }
+
+    /// A target that is not a guarded constant return stays a normal call.
+    #[test]
+    fn unary_base_ignores_other_callees() {
+        let (mut code, pool) = unary_guard_program(Instruction::BinSlotImmJmpt, Instruction::EQ, 0, 1);
+        code[5] = Byte::new(Instruction::RETURN);
+        let table = UnaryBaseTable::build(&code, &pool);
+        let heap = crate::memory::Heap::default();
+        assert_eq!(table.fast_return(3, Value::from(0i64), &heap), None);
+        assert_eq!(table.fast_return(0, Value::from(0i64), &heap), None);
+    }
 
     #[test]
     fn always_hot_subset() {
