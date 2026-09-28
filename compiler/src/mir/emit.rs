@@ -1070,7 +1070,12 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             if let Some(make_kind) = dense_make_kind(*kind)? {
                 let arity = u8::try_from(elems.len())
                     .map_err(|_| LowerError::Refused("DenseMake arity".into()))?;
-                let slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
+                let mut slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
+                // `elems` is push order; `MakeEnum` pops, so payload[0] is the
+                // last push. DenseMake reads declaration order.
+                if matches!(kind, MirAllocKind::Enum { .. }) {
+                    slots.reverse();
+                }
                 let base = gather_base(out, &slots, scratch, loc)?;
                 out.push(byte(
                     Byte::new(Instruction::DenseMake).with_dense_abc(
