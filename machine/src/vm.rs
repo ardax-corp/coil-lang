@@ -276,6 +276,13 @@ macro_rules! unary {
 #[inline(always)]
 fn prefetch_code(_code: &[Byte], _ip: usize) {}
 
+/// Collections between evacuation attempts outside stress mode
+/// (`gc-compact`), and the ceiling unproductive attempts back off to.
+#[cfg(feature = "gc-compact")]
+const COMPACT_WINDOW: u32 = 8;
+#[cfg(feature = "gc-compact")]
+const COMPACT_WINDOW_MAX: u32 = 256;
+
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     // Lowering may target `code.len()` as “fall out of the loop” (next `while`
@@ -484,6 +491,19 @@ pub struct Machine<const S: usize> {
     /// required so nested `call_function` reentrancy (FFI callbacks) does not
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
+    /// Active `execute` invocations (nested ones come from `call_function`).
+    #[cfg(feature = "gc-compact")]
+    in_execute: u32,
+    /// Active `call_function`s entered while `execute` was running: a host
+    /// frame below may hold raw heap handles (`gc-compact` skips evacuation).
+    #[cfg(feature = "gc-compact")]
+    reentrant_calls: u32,
+    /// Collections since the last evacuation attempt (`gc-compact`).
+    #[cfg(feature = "gc-compact")]
+    compact_cycles: u32,
+    /// Collections to wait before the next attempt (backs off when idle).
+    #[cfg(feature = "gc-compact")]
+    compact_window: u32,
     nested_return: Option<Value>,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
@@ -592,6 +612,14 @@ impl<const S: usize> Machine<S> {
             nested_depth: 0,
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
+            #[cfg(feature = "gc-compact")]
+            in_execute: 0,
+            #[cfg(feature = "gc-compact")]
+            reentrant_calls: 0,
+            #[cfg(feature = "gc-compact")]
+            compact_cycles: 0,
+            #[cfg(feature = "gc-compact")]
+            compact_window: COMPACT_WINDOW,
             nested_return: None,
             pending_ffi: None,
             pending_io: None,
@@ -803,6 +831,10 @@ impl<const S: usize> Machine<S> {
         self.pending_debug_stop = None;
         self.nested_depth = 0;
         self.nested_frame_depths.clear();
+        #[cfg(feature = "gc-compact")]
+        {
+            self.reentrant_calls = 0;
+        }
         self.nested_return = None;
         self.resume_stack.clear();
         self.return_bookkeeping = !self.frame_pins.is_empty();
@@ -847,7 +879,7 @@ impl<const S: usize> Machine<S> {
         let mut ip = start_ip;
         loop {
             self.pending_debug_stop = None;
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -1306,7 +1338,52 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
+        #[cfg(feature = "gc-compact")]
+        self.gc_compact();
         self.gc_in_progress = false;
+    }
+
+    /// Evacuate sparse chunks after a finished cycle (`gc-compact`). Every VM
+    /// root pins its target, so nothing the VM holds moves. Skipped while a
+    /// re-entrant `call_function` is active (the host frame that re-entered
+    /// may hold a raw handle), in a shared-heap epoch, or under the debugger.
+    /// A top-level `call_function` (test runner, reactor job) is fine.
+    /// `gc-stress` moves everything movable each cycle.
+    #[cfg(feature = "gc-compact")]
+    fn gc_compact(&mut self) {
+        if self.reentrant_calls != 0
+            || self.shared_epoch.is_some()
+            || self.heap.epoch_stw()
+            || !self.heap.gc_is_idle()
+        {
+            return;
+        }
+        #[cfg(any(test, feature = "debugger"))]
+        if self.debug.is_some() {
+            return;
+        }
+        // Outside stress mode, wait `compact_window` collections between
+        // attempts; unproductive attempts double it (the analysis walks the
+        // whole heap), a productive one resets it.
+        let stress = cfg!(feature = "gc-stress");
+        self.compact_cycles += 1;
+        if !stress && self.compact_cycles < self.compact_window {
+            return;
+        }
+        let mut pins = Vec::new();
+        self.for_each_vm_root(&mut |addr, _| pins.push(addr));
+        let _evacuation = self.heap.evacuate(&pins, stress);
+        self.compact_cycles = 0;
+        if _evacuation.capped {
+            // More sparse chunks remain: continue next cycle.
+            self.compact_window = 1;
+        } else if _evacuation.chunks != 0 {
+            self.compact_window = COMPACT_WINDOW;
+        } else {
+            self.compact_window = (self.compact_window * 2).min(COMPACT_WINDOW_MAX);
+        }
+        #[cfg(feature = "gc-stats")]
+        eprintln!("gc-stats evacuate: {_evacuation:?}");
     }
 
     /// `gc-stats`: census of the live set just marked, before weaks clear.
@@ -1405,6 +1482,8 @@ impl<const S: usize> Machine<S> {
         let n = self.heap.gc_sweep_quantum();
         if self.heap.sweep_quantum(n) {
             self.invalidate_program_string_cache();
+            #[cfg(feature = "gc-compact")]
+            self.gc_compact();
         }
     }
 
@@ -2525,6 +2604,10 @@ impl<const S: usize> Machine<S> {
         self.nested_depth = 0;
         self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
+        #[cfg(feature = "gc-compact")]
+        {
+            self.reentrant_calls = 0;
+        }
         self.nested_return = None;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -2563,6 +2646,10 @@ impl<const S: usize> Machine<S> {
         self.nested_depth = 0;
         self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
+        #[cfg(feature = "gc-compact")]
+        {
+            self.reentrant_calls = 0;
+        }
         self.nested_return = None;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -2661,7 +2748,7 @@ impl<const S: usize> Machine<S> {
         };
         let mut ip = start_ip;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -2712,7 +2799,7 @@ impl<const S: usize> Machine<S> {
         self.sync_thread_program_from_current();
         let mut ip = 0usize;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -2966,6 +3053,12 @@ impl<const S: usize> Machine<S> {
         }
         self.nested_return = None;
         self.nested_depth += 1;
+        #[cfg(feature = "gc-compact")]
+        let reentrant = self.in_execute != 0;
+        #[cfg(feature = "gc-compact")]
+        {
+            self.reentrant_calls += u32::from(reentrant);
+        }
         self.return_bookkeeping = true;
         let callee_sp = self.stack.tell().saturating_sub(args.len());
         self.frames.setup_current_and_advance(|f| {
@@ -2978,7 +3071,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -2998,6 +3091,10 @@ impl<const S: usize> Machine<S> {
         let _ = self.pop_call_frame();
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
+        #[cfg(feature = "gc-compact")]
+        {
+            self.reentrant_calls -= u32::from(reentrant);
+        }
         let _ = self.nested_frame_depths.pop();
         self.return_bookkeeping =
             self.nested_depth > 0 || !self.resume_stack.is_empty() || !self.frame_pins.is_empty();
@@ -3056,6 +3153,22 @@ impl<const S: usize> Machine<S> {
     /// the guard compare retired on every dispatch.
     /// An always-hot arm continues the streak in `execute_dense`, so a dense
     /// loop does not return here per opcode. CALL/RETURN stay on this match.
+    /// [`Self::execute`], counting it as active for the `gc-compact`
+    /// re-entrancy check (outside the loop, so it costs nothing per op).
+    #[inline(always)]
+    fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
+        #[cfg(feature = "gc-compact")]
+        {
+            self.in_execute += 1;
+        }
+        let paused = self.execute(code, constants, start_ip);
+        #[cfg(feature = "gc-compact")]
+        {
+            self.in_execute -= 1;
+        }
+        paused
+    }
+
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
