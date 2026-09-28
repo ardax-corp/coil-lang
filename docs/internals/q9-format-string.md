@@ -102,8 +102,8 @@ a heap word as is. The cost gate still decides.
 
 ## Leftover after R5
 
-- `main` bodies whose next wall is a stack value at a CFG edge (two-slot
-  `?`) or a float op on a recycled slot
+- `main` bodies whose next wall is a float op on a recycled slot, or a
+  stack-φ dense reconstruct that loses the fused-dispatch gate
 - Unicode / regex in SSA (**R4**) — no island has asked for that yet
 - LIR reconstruct of HostInvoke
 - Score-chasing string microbenches
