@@ -198,6 +198,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         end_labels,
         pre_len,
         pre_to_post,
+        ..
     } = fuse_select(ops, pool);
 
     // Assign in pre-slot order so a rebound label keeps the *last* bind
@@ -317,6 +318,7 @@ pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
     }
     let end_labels = pending;
     let pre_len = pre_slots.len();
+    let pre_loops = back_edge_ranges(&pre_slots, &binds_at);
     let (slots, pre_to_post) = fuse_slots_with_origins(pre_slots, pool, &binds_at);
     FuseOut {
         slots,
@@ -324,7 +326,69 @@ pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
         end_labels,
         pre_len,
         pre_to_post,
+        pre_loops,
     }
+}
+
+/// `(header, latch)` pre-slot ranges of back edges (jump to an earlier label).
+fn back_edge_ranges(pre_slots: &[Slot], binds_at: &HashMap<usize, Vec<u32>>) -> Vec<(usize, usize)> {
+    let mut label_at: HashMap<u32, usize> = HashMap::new();
+    for (&idx, ids) in binds_at {
+        for id in ids {
+            label_at.insert(*id, idx);
+        }
+    }
+    pre_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, slot)| {
+            let target = match slot {
+                Slot::Jump(_, l, ..) | Slot::CmpJmpf(_, l, ..) | Slot::LogNotJmpf(l, ..) => *l,
+                Slot::BinSlotImmJmpf { target, .. } | Slot::BinSlotSlotJmpf { target, .. } => *target,
+                _ => return None,
+            };
+            let head = *label_at.get(&target.0)?;
+            (head <= pc).then_some((head, pc))
+        })
+        .collect()
+}
+
+/// Dispatch estimate for one body on the bytecode it would run: fuse-select
+/// `ops`, then count slots, weighting each ×64 per enclosing back-edge loop
+/// (at most two levels): straight-line code in a `main` runs once, a loop
+/// runs many times. Lets a reconstruct be compared with the fuse-IL it
+/// replaces after both are packed, not op for op before fusion.
+pub(crate) fn fused_dispatch_cost(ops: &[IlOp], pool: &[u64]) -> usize {
+    let mut pool = pool.to_vec();
+    let FuseOut {
+        slots,
+        pre_to_post,
+        pre_loops,
+        ..
+    } = fuse_select(ops, &mut pool);
+    let post = |pre: usize| pre_to_post.get(&pre).copied();
+    let loops: Vec<(usize, usize)> = pre_loops
+        .iter()
+        .filter_map(|&(h, l)| Some((post(h)?, post(l)?)))
+        .collect();
+    (0..slots.len())
+        .map(|pc| {
+            let depth = loops.iter().filter(|&&(h, l)| h <= pc && pc <= l).count().min(2);
+            // A packed LOAD / STORE moves one word per slot it names.
+            let words = match &slots[pc] {
+                Slot::Byte(b, _)
+                    if matches!(
+                        *b.bytecode(),
+                        Instruction::LOAD | Instruction::STORE | Instruction::StorePop
+                    ) =>
+                {
+                    b.load_store_count().max(1)
+                }
+                _ => 1,
+            };
+            words * 64usize.pow(depth as u32)
+        })
+        .sum()
 }
 
 pub(crate) struct FuseOut {
@@ -333,6 +397,8 @@ pub(crate) struct FuseOut {
     end_labels: Vec<u32>,
     pre_len: usize,
     pre_to_post: HashMap<usize, usize>,
+    /// Back-edge loops over pre-fusion slots (jump targets still symbolic).
+    pre_loops: Vec<(usize, usize)>,
 }
 
 fn fuse_slots_with_origins(
