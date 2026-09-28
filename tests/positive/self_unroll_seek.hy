@@ -1,6 +1,5 @@
 // A one-level self-unroll must not copy the callee's frame `Seek`: in the
 // caller it would move the cursor over the peeled argument's temp slot.
-#[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 {
         return n;
