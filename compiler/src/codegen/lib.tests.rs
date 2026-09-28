@@ -7283,9 +7283,10 @@ fn main() {
     assert_eq!(make_array.operand_u32(), 0);
 }
 
-/// `let (a, b) = (1, 2)` desugars to Index + StorePop per binding.
+/// `let (a, b) = (1, 2)` desugars to Index + StorePop per binding; the
+/// literal tuple never escapes, so escape analysis turns it into slots.
 #[test]
-fn let_tuple_destructure_emits_index_and_store_pop() {
+fn let_tuple_destructure_scalarizes() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         r#"
@@ -7299,26 +7300,13 @@ fn main() {
 }
 "#,
     );
-    let index_count = bc
+    let heap_ops = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::Index))
+        .filter(|b| matches!(b.bytecode(), Instruction::Index | Instruction::MakeTuple))
         .count();
-    assert!(
-        index_count >= 2,
-        "expected ≥2 Index for tuple let destructure; got {index_count}"
-    );
-    let store_pop_count = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::STORE))
-        .count();
-    // RHS temp + a + b (at least 3).
-    assert!(
-        store_pop_count >= 3,
-        "expected ≥3 StorePop (tmp + a + b); got {store_pop_count}"
-    );
+    assert_eq!(heap_ops, 0, "literal destructure should need no tuple or Index");
 }
 
-/// Value-position mono fn → MakeFn; calling through the local → CallIndirect.
 #[test]
 fn fn_value_emits_make_fn_then_call_indirect() {
     use common::Instruction;
@@ -7460,7 +7448,7 @@ fn main() {
 }
 
 #[test]
-fn tuple_zip_add_emits_index_and_make_tuple() {
+fn tuple_zip_add_emits_elementwise_add() {
     use common::Instruction;
     let (bc, _) = compile_src(
         r#"
@@ -7473,12 +7461,7 @@ fn main() {
 }
 "#,
     );
-    let has_index = bc
-        .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::Index));
-    let has_make = bc
-        .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::MakeTuple));
+    // `a` is only read with a constant index, so its elements stay in slots.
     let has_add = bc.iter().any(|b| {
         matches!(
             b.bytecode(),
@@ -7486,8 +7469,8 @@ fn main() {
         )
     });
     assert!(
-        has_index && has_make && has_add,
-        "expected Index + ADD + MakeTuple zip lowering; opcodes: {:?}",
+        has_add,
+        "expected element-wise ADD zip lowering; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -7699,9 +7682,12 @@ fn cross_does_not_emit_packed_opcodes() {
     use common::Instruction;
     let (bc, _) = compile_src(
         r#"
+fn go(int x) -> int {
+    let c = cross((x, 0, 0), (0, x, 0));
+    return c[2];
+}
 fn main() {
-    let c = cross((1, 0, 0), (0, 1, 0));
-    return c[0];
+    return go(3);
 }
 "#,
     );
@@ -9508,7 +9494,9 @@ fn pair(int i) -> (int, int) {
     return (i, i + 1);
 }
 fn take((int, int) p) -> int {
-    return p[0] + p[1];
+    let v: Vec<(int, int)> = Vec::new();
+    v.push(p);
+    return v[0][0] + v[0][1];
 }
 fn main() {
     let _ = take(pair(1));
