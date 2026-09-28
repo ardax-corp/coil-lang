@@ -18,7 +18,14 @@ kind tags (1..=18) are unchanged.
 
 Allocate `GcData<T>` headers from a **mapped slab** (size-class free lists;
 64KiB anonymous chunks). Sweep **poisons** `GcHeader.kind = 0` and returns
-the slot to the free list; chunks stay mapped. Payload `Vec`s (array
+the slot to the free list; chunks stay mapped. **Idle-chunk release:** a
+chunk whose slots sat unused for a whole `RELEASE_WINDOW` (8 sweep cycles,
+tracked as each size class's free-list low-water mark) gets its pages back
+to the OS with `madvise(MADV_DONTNEED)` and is re-carved before any new chunk
+is mapped. It stays mapped — a released page reads as zeros, so every header
+in it is poisoned and stale / conservative lookups stay defined. Steady
+churn drains its free list each cycle and never releases (no refaults).
+Payload `Vec`s (array
 elements, interned string bytes) stay ordinary Rust allocs in this cut.
 Typed class instances use dense slots
 ([#287](https://github.com/ardax-corp/coil-lang/pull/287)); small `ObjEnum`

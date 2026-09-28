@@ -1315,6 +1315,8 @@ impl<const S: usize> Machine<S> {
                 self.mark_from_vm_roots();
             }
 
+            #[cfg(feature = "gc-stats")]
+            self.note_gc_census();
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
@@ -1325,6 +1327,14 @@ impl<const S: usize> Machine<S> {
             }
         }
         self.gc_in_progress = false;
+    }
+
+    /// `gc-stats`: census of the live set just marked, before weaks clear.
+    #[cfg(feature = "gc-stats")]
+    fn note_gc_census(&self) {
+        let mut roots = Vec::new();
+        self.for_each_vm_root(&mut |addr, kind| roots.push((addr, kind)));
+        eprintln!("{}", self.heap.census(&roots));
     }
 
     fn gc_start_mark(&mut self) {
@@ -1396,6 +1406,8 @@ impl<const S: usize> Machine<S> {
             self.gc_remark_vm_roots();
             while !self.heap.mark_quantum(usize::MAX) {}
         }
+        #[cfg(feature = "gc-stats")]
+        self.note_gc_census();
         self.heap.clear_dead_weaks();
         self.heap.begin_sweep();
         // Intern table is unlinked; unmarked literals will be freed across
@@ -1418,62 +1430,80 @@ impl<const S: usize> Machine<S> {
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
         let mut roots = self.heap.take_gc_roots();
-        self.collect_stack_roots(&mut roots);
-        {
-            let addr = self.steal_join_root.heap_addr();
-            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        }
-        for v in &self.statics {
+        self.for_each_vm_root(&mut |addr, _| roots.push(addr));
+        roots
+    }
+
+    /// Every VM root that resolves to a live heap object, tagged with how a
+    /// moving collector could treat it (see `docs/internals/moving-gc.md`).
+    /// Heap-owned roots (immortal unit enums, handle roots) are seeded by
+    /// [`crate::memory::Heap::take_gc_roots`], not here.
+    pub(crate) fn for_each_vm_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+        let heap = &self.heap;
+        let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
-            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
+            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                visit(addr, kind);
             }
+        };
+        self.for_each_stack_root(visit);
+        // Untyped words: the join result and statics may be immediates.
+        word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
+        for v in &self.statics {
+            word(*v, crate::memory::RootKind::Ambiguous, visit);
         }
         for ctx in &self.resume_stack {
-            roots.push(ctx.coro.as_ptr() as u64);
+            visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
         for pins in &self.frame_pins {
             for obj in pins.by_slot.iter().flatten() {
-                roots.push(obj.addr());
+                visit(obj.addr(), crate::memory::RootKind::Precise);
             }
         }
         if let Some(obj) = self.dense_obj {
-            roots.push(obj.addr());
+            visit(obj.addr(), crate::memory::RootKind::Precise);
         }
         // `FfiLoad` keeps `ObjLibrary` in `userland_libraries` for the VM
         // lifetime; the Coil handle is only an addr. Root those keys so GC
         // cannot sweep a live dload and `FfiInvoke` hit `invalid library handle`.
-        roots.extend(self.userland_libraries.keys().copied());
-        self.collect_mapped_slot_addrs(&mut roots);
-        roots
+        // Keyed by address, so they must not move.
+        for &addr in self.userland_libraries.keys() {
+            visit(addr, crate::memory::RootKind::Pinned);
+        }
+        self.for_each_mapped_slot_index(|idx| {
+            if idx < self.stack.capacity() {
+                word(self.stack[idx], crate::memory::RootKind::Precise, visit);
+            }
+        });
     }
 
     /// Operand-stack roots, frame by frame: a frame with a trusted precise map
     /// roots only its heap slots; every other stack word is scanned.
-    fn collect_stack_roots(&self, roots: &mut Vec<u64>) {
+    fn for_each_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
-        let mut root = |v: Value| {
+        let mut root = |v: Value, kind: crate::memory::RootKind| {
             let addr = v.heap_addr();
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
+                visit(addr, kind);
             }
         };
+        let scanned = crate::memory::RootKind::Ambiguous;
         let stack = self.stack.as_slice();
         let n = self.frames.len();
         if self.precise_frames.is_empty() || n == 0 {
-            stack.iter().copied().for_each(&mut root);
+            stack.iter().for_each(|&v| root(v, scanned));
             return;
         }
         let top = stack.len();
-        stack[..self.frames[0].get().min(top)].iter().copied().for_each(&mut root);
+        stack[..self.frames[0].get().min(top)]
+            .iter()
+            .for_each(|&v| root(v, scanned));
         for i in 0..n {
             let lo = self.frames[i].get();
             let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
             if lo > hi || hi > top {
                 // Unexpected frame layout: everything from here up is scanned.
-                stack[lo.min(top)..].iter().copied().for_each(&mut root);
+                stack[lo.min(top)..].iter().for_each(|&v| root(v, scanned));
                 return;
             }
             match self.trusted_precise_slots(i, lo, hi) {
@@ -1483,7 +1513,7 @@ impl<const S: usize> Machine<S> {
                     for &s in slots {
                         let idx = lo + usize::from(s);
                         if idx < limit {
-                            root(self.stack[idx]);
+                            root(self.stack[idx], crate::memory::RootKind::Precise);
                         }
                     }
                 }
@@ -1493,7 +1523,7 @@ impl<const S: usize> Machine<S> {
                         .frame_extent(i)
                         .map_or(hi, |words| lo.saturating_add(words).max(hi))
                         .min(self.stack.capacity());
-                    (lo..reach).for_each(|idx| root(self.stack[idx]));
+                    (lo..reach).for_each(|idx| root(self.stack[idx], scanned));
                 }
             }
         }
@@ -1553,18 +1583,6 @@ impl<const S: usize> Machine<S> {
             std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
         };
         code.get(pc).map(|b| *b.bytecode())
-    }
-
-    fn collect_mapped_slot_addrs(&self, roots: &mut Vec<u64>) {
-        self.for_each_mapped_slot_index(|idx| {
-            if idx >= self.stack.capacity() {
-                return;
-            }
-            let addr = self.stack[idx].heap_addr();
-            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        });
     }
 
     fn for_each_mapped_slot_index(&self, mut visit: impl FnMut(usize)) {
