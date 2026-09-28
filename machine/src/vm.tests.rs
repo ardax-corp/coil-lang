@@ -5262,6 +5262,21 @@
         assert_eq!(sized.operand_stack_capacity(), 512);
     }
 
+    /// Zero-argument self calls never raise the cursor, so only the frame
+    /// limit stops them.
+    #[test]
+    fn recursion_without_stack_growth_stops_at_the_frame_limit() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::RETURN),
+        ]);
+        assert!(vm.panicked());
+        assert_eq!(vm.operand_stack_capacity(), crate::DEFAULT_OPERAND_STACK_SLOTS);
+    }
+
     #[test]
     fn init_typed_stamps_type_id() {
         let mut vm = Machine::<8>::default();

@@ -1100,6 +1100,13 @@ impl<const S: usize> Machine<S> {
                             promise!(pool_idx < constants.len());
                             let target_offset = opcode.jump_if_match_target(constants);
                             let _ = self.stack.pop();
+                            if !self.reserve_operand_words(enum_ref.payload.len()) {
+                                *ip_out = ip;
+                                *sp_out = sp;
+                                return dispatch::RestFlow::Done(
+                                    self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                                );
+                            }
                             for member in &enum_ref.payload {
                                 let value = match member {
                                     Member::Value(v) => *v,
@@ -1249,13 +1256,22 @@ impl<const S: usize> Machine<S> {
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
-                        } else if let Some(sub) = gc.as_ref().yield_from {
-                            Self::with_coroutine_mut(gc, |c| {
-                                c.pending_send = send_val;
-                            });
-                            self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);
-                        } else {
-                            self.resume_coroutine(&mut ip, &mut sp, gc, send_val, code, true);
+                        }
+                        let target = match gc.as_ref().yield_from {
+                            Some(sub) => {
+                                Self::with_coroutine_mut(gc, |c| {
+                                    c.pending_send = send_val;
+                                });
+                                sub
+                            }
+                            None => gc,
+                        };
+                        if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
                         }
                     } else {
                         *ip_out = ip;
@@ -1279,7 +1295,13 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Coroutine(sub)) =
                         Self::find_object_by_addr(&self.heap, addr)
                     {
-                        self.start_yield_from(&mut ip, &mut sp, sub, code);
+                        if !self.start_yield_from(&mut ip, &mut sp, sub, code) {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
+                        }
                     } else {
                         *ip_out = ip;
                     *sp_out = sp;
@@ -1427,6 +1449,15 @@ impl<const S: usize> Machine<S> {
                             // Too many args for a fixed fn, drop extras defensively.
                         }
 
+                        if self.frames.len() >= crate::MAX_CALL_FRAMES
+                            || !self.reserve_operand_words(captures.len() + call_args.len())
+                        {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
+                        }
                         // Frame: [captures..., params...]
                         for c in &captures {
                             self.stack.push(*c);
@@ -1501,6 +1532,13 @@ impl<const S: usize> Machine<S> {
                     };
 
                     let dict_arity = merged_dicts.len();
+                    if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(dict_arity) {
+                        *ip_out = ip;
+                        *sp_out = sp;
+                        return dispatch::RestFlow::Done(
+                            self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                        );
+                    }
                     for dict in merged_dicts {
                         self.stack.push(dict);
                     }

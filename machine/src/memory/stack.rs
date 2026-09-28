@@ -35,6 +35,14 @@ impl<T: Default + Copy> Stack<T> {
         self.stack.len()
     }
 
+    /// Extend the backing storage to `cap` slots; the cursor and every slot
+    /// keep their values. Never shrinks.
+    pub fn grow_to(&mut self, cap: usize) {
+        if cap > self.stack.len() {
+            self.stack.resize_with(cap, T::default);
+        }
+    }
+
     #[inline]
     pub fn pop(&mut self) -> T {
         promise!(self.cursor > 0);
