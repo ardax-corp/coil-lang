@@ -1,7 +1,9 @@
 //! Length / in-bounds sidecar facts for `IndexUnchecked` / `ArrayPin`.
 //!
 //! Fail-closed: facts are `0 <= i < len(arr)` plus length stability. Yield,
-//! `ArrayPush`, host, and length-mutating calls refuse. Callers may transfer
+//! `ArrayPush`, and calls that may change a length refuse (see
+//! [`crate::typechecking::purity::LengthStability`]; impure calls that only
+//! write fields, elements or output keep the facts). Callers may transfer
 //! a proven `(arr, i)` pair into a helper when every site agrees.
 
 use std::collections::HashSet;
@@ -89,7 +91,8 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     checker.for_in_pin.clear();
     checker.for_in_pin_spans.clear();
 
-    let pure = checker.pure_fn_names.clone();
+    // A call only poisons lengths when it can change one; pure is too strict.
+    let pure = checker.length_stability.fns.clone();
     let mut calls: Vec<CallSite> = Vec::new();
     let mut used_as_value: HashSet<String> = HashSet::new();
     collect_value_uses(ast, &mut used_as_value);
