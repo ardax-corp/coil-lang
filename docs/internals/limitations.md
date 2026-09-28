@@ -72,6 +72,15 @@ GVN has two layers under the COI-82 ceiling — neither is real SSA slot rename.
 
 **Operand-order canon.** `il::canon` rewrites `Const; Load; op` (any SP) and Known-SP high-then-low `Load; Load; op` windows into preferred forms before algebraic/fuse. Int `ConstPool; Load; int-op` demotes the pool entry to inline `Const` when the value is a non-negative `i32` without `POOL_FLAG` bit 31 (float pool operands and non-commutative ops refused). Ordered cmps flip polarity on swap (`LE`↔`GT`, `LEQ`↔`GEQ`). No float reassociation. Fuse-select also packs const-left commute `CONST; LOAD; int-bin` into `BinSlotImm` (COI-384) when slot-promote creates that shape after canon. Loop bounds' `i < bound` header match accepts `Load i; Load b; LE` and the post-canon `Load b; Load i; GT` (and matching `BinSlotSlot` forms); **`LEQ`/`GEQ` headers are not treated as length proofs** (`i <= len` would allow an OOB index; COI-85 / COI-98). See `CanonStats` / `last_canon_stats()`.
 
+**Tuples** use the same pass: a `MakeTuple` stored to a local and read only
+with constant indices becomes slots whatever its elements are (tuples are
+never written after creation, so the immediate-element and mutated-slot
+refusals below are array-only); an escaping tuple is rebuilt once with
+`MakeTuple`. The pass owns only the `LOAD`s its store reaches (forward
+reaching definitions), so a slot reused for another value later in the body
+no longer refuses the site. `let t = (i, i + 1); … t[1] - t[0]` in a loop
+allocates nothing.
+
 **MakeArray frame scalarization (Q1 / COI-334).** One escape answer
 (`compiler/src/escape.rs` + IL `escape_analysis`): non-escaping `[T; N]` /
 `MakeArray` → consecutive frame slots (arity ≤ 32); named escape → **box

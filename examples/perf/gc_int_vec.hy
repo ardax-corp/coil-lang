@@ -1,4 +1,4 @@
-// GC: a large live Vec<int> through heavy tuple churn. Marking scans the
+// GC: a large live Vec<int> through heavy allocation churn. Marking scans the
 // vector once, finds no references, and skips it until it is written again
 // (ObjArray::may_hold_refs).
 use io::{stdout};
@@ -15,13 +15,28 @@ fn fill(int n) -> Vec<int> {
     return v;
 }
 
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+// Real short-lived garbage (escape analysis cannot remove it): a list that
+// grows for 64 iterations, then is dropped.
+fn churn(Option<Node> junk, int round) -> Option<Node> {
+    if round % 64 == 0 {
+        return Option::None;
+    }
+    return Option::Some(new Node(round, junk));
+}
+
 fn main() {
     let big = fill(2000000);
     let total = 0;
+    let junk: Option<Node> = Option::None;
     let round = 0;
     while round < 2000000 {
-        let t = (round, round + 1);
-        total = total + t[1] - t[0];
+        junk = churn(junk, round);
+        total = total + 1;
         round = round + 1;
     }
     write_all(stdout(), to_bytes(format("%i %i", total, len(big))));
