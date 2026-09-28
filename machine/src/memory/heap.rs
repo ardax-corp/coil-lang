@@ -3234,6 +3234,8 @@ mod tests {
     /// Many strings, all swept: after the release window their chunks' pages
     /// go back, stale lookups still read a poisoned header, and new
     /// allocations reuse the released chunks instead of mapping more.
+    // Release is `madvise`; elsewhere it is a no-op and nothing is released.
+    #[cfg(unix)]
     #[test]
     fn idle_chunks_release_and_are_reused() {
         let mut heap = Heap::default();
