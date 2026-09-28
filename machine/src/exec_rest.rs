@@ -1628,6 +1628,15 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
+                Instruction::TagEnumType => {
+                    // Payload variants only: unit variants are shared immortals.
+                    let v = *self.stack.top();
+                    if let Some(Object::Enum(gc)) = Self::find_object_by_addr(&self.heap, v.raw() as u64)
+                        && !gc.as_ref().payload.is_empty()
+                    {
+                        gc.payload_mut().type_id = opcode.operand_u32();
+                    }
+                }
                 Instruction::UnboxValue => {
                     let expected_tag = (opcode.operand_u32() & 0xFFFF) as u16;
                     let v = self.stack.pop();

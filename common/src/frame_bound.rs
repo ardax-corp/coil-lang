@@ -295,7 +295,7 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         | GetField | SetField | YieldCoro | DoneCoro | ArrayPush | ArrayLen | BoxValue
         | UnboxValue | DynAdd | DynSub | DynMul | DynDiv | DynMod | DynCmp | DynEq | DynNe
         | DynPrint | DictEntries | StoreStatic | CastIntToFloat | CastFloatToInt
-        | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt => {}
+        | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt | TagEnumType => {}
     }
     s
 }
