@@ -15,6 +15,15 @@ use common::{promise, unlikely};
 use super::slab::Slab;
 use super::AddrHashBuilder;
 
+/// Moving-GC evacuation of sparse chunks (`gc-compact`,
+/// `docs/internals/moving-gc.md`). A child of this module so it can use the
+/// heap's private list, slab and object storage.
+#[cfg(feature = "gc-compact")]
+#[path = "compact.rs"]
+mod compact;
+#[cfg(feature = "gc-compact")]
+pub use compact::Evacuation;
+
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
 /// Growth when most of the heap survived its last collection: the live set is
@@ -1782,6 +1791,14 @@ impl EnumPayload {
         match &self.inner {
             EnumPayloadInner::Inline { len, slots } => &slots[..*len as usize],
             EnumPayloadInner::Spill(v) => v.as_slice(),
+        }
+    }
+
+    #[cfg(feature = "gc-compact")]
+    fn as_mut_slice(&mut self) -> &mut [Member] {
+        match &mut self.inner {
+            EnumPayloadInner::Inline { len, slots } => &mut slots[..*len as usize],
+            EnumPayloadInner::Spill(v) => v.as_mut_slice(),
         }
     }
 
