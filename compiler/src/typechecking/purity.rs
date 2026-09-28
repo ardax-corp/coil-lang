@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use parser::ast::{EnumConstructPayload, Expression, Output};
+use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, Pattern, PatternPayload};
 
 use super::id::walk_children;
 
@@ -28,6 +28,10 @@ impl EffectFlags {
     pub const IO: u16 = 1 << 6;
     pub const ATTACH_PARK: u16 = 1 << 7;
     pub const UNKNOWN: u16 = 1 << 8;
+    /// May change the length (or buffer) of an array it can reach: `Vec`
+    /// grow/shrink methods, unknown or indirect code, yield, FFI. Always set
+    /// alongside another impure bit, so purity is unchanged.
+    pub const RESIZE: u16 = 1 << 9;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -74,6 +78,118 @@ struct FnFacts {
     local: EffectFlags,
     /// Callee names (unqualified Identifier call targets).
     callees: HashSet<String>,
+    /// Names bound in the body (params, `let`, patterns). A call through one
+    /// of these is a function value, not the host or user `fn` it shadows.
+    bound: HashSet<String>,
+}
+
+/// Record `f` under `name`. Methods are keyed by bare name, so two impls with
+/// the same method name share one entry: union them rather than letting the
+/// last body win.
+fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
+    let entry = facts.entry(name.to_string()).or_default();
+    entry.local = entry.local.union(f.local);
+    entry.callees.extend(f.callees);
+    entry.bound.extend(f.bound);
+}
+
+/// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
+/// match / `if let` pattern bindings.
+fn collect_binders(ast: &Output<'_>, out: &mut HashSet<String>) {
+    match ast.1.as_ref() {
+        Expression::Variable(n, _) | Expression::Argument { name: n, .. } => {
+            out.insert((*n).to_string());
+        }
+        Expression::Constant(name, _) => {
+            if let Expression::Identifier(n) = peel(name).1.as_ref() {
+                out.insert((*n).to_string());
+            }
+        }
+        Expression::LetDestructure { pattern, .. } => let_pattern_binders(pattern, out),
+        Expression::Loop {
+            identifier,
+            pattern,
+            ..
+        } => {
+            if let Some(id) = identifier
+                && let Expression::Identifier(n) = peel(id).1.as_ref()
+            {
+                out.insert((*n).to_string());
+            }
+            if let Some(p) = pattern {
+                let_pattern_binders(p, out);
+            }
+        }
+        Expression::Match { arms, .. } => {
+            for arm in arms {
+                pattern_binders(&arm.pattern.1, out);
+            }
+        }
+        Expression::IfLet {
+            then_arm, else_arm, ..
+        } => {
+            pattern_binders(&then_arm.pattern.1, out);
+            pattern_binders(&else_arm.pattern.1, out);
+        }
+        Expression::WhileLet {
+            then_arm, on_miss, ..
+        } => {
+            pattern_binders(&then_arm.pattern.1, out);
+            pattern_binders(&on_miss.pattern.1, out);
+        }
+        _ => {}
+    }
+    walk_children(ast, &mut |c| collect_binders(c, out));
+}
+
+fn let_pattern_binders(p: &LetPattern<'_>, out: &mut HashSet<String>) {
+    match p {
+        LetPattern::Wildcard => {}
+        LetPattern::Binding { name } => {
+            out.insert((*name).to_string());
+        }
+        LetPattern::Tuple(items) => {
+            for item in items {
+                let_pattern_binders(item, out);
+            }
+        }
+        LetPattern::Record(fields) => {
+            for f in fields {
+                let_pattern_binders(&f.pattern, out);
+            }
+        }
+    }
+}
+
+fn pattern_binders(p: &Pattern<'_>, out: &mut HashSet<String>) {
+    match p {
+        Pattern::Binding { name } => {
+            out.insert((*name).to_string());
+        }
+        Pattern::Constructor { payload, .. } => match payload {
+            PatternPayload::Unit => {}
+            PatternPayload::Tuple(items) => {
+                for (_, item) in items {
+                    pattern_binders(item, out);
+                }
+            }
+            PatternPayload::Record(fields) => {
+                for f in fields {
+                    pattern_binders(&f.pattern.1, out);
+                }
+            }
+        },
+        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
+    }
+}
+
+/// Facts for one `fn` declaration: its body effects plus every bound name.
+fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
+    let mut f = FnFacts::default();
+    walk_body(body, &mut f);
+    collect_binders(args, &mut f.bound);
+    collect_binders(body, &mut f.bound);
+    f
 }
 
 /// Collect per-function callee sets (and local impurity) for call-graph analyses.
@@ -171,12 +287,11 @@ fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) 
         | Expression::Group(inner) => collect_toplevel_fns(inner, facts),
         Expression::Function {
             name,
+            args,
             body: Some(body),
             ..
         } => {
-            let mut f = FnFacts::default();
-            walk_body(body, &mut f);
-            facts.insert((*name).to_string(), f);
+            insert_facts(facts, name, fn_facts(args, body));
             // Nested fns inside this body still count as top-level for recursion.
             collect_toplevel_fns(body, facts);
         }
@@ -202,6 +317,52 @@ pub fn analyze_pure_fns(ast: &Output<'_>) -> HashSet<String> {
         .filter(|(_, flags)| flags.is_pure())
         .map(|(name, _)| name)
         .collect()
+}
+
+/// What the loop length proofs may assume about calls (see
+/// `docs/internals/limitations.md`, impure calls in counted loops).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LengthStability {
+    /// User functions that cannot change the length of any array, even one
+    /// they can reach. Always a superset of the pure set.
+    pub fns: HashSet<String>,
+    /// No `fn drop()` can change an array length. Finalizers run at
+    /// allocation safepoints, so when this is false only pure calls are
+    /// length-stable and allocating ops stay barriers.
+    pub alloc_stable: bool,
+}
+
+/// True when some `fn drop()` in `ast` may change an array's length.
+pub fn finalizers_may_resize(ast: &Output<'_>) -> bool {
+    finalizers_resize(&analyze_fn_effects(ast))
+}
+
+fn finalizers_resize(effects: &HashMap<String, EffectFlags>) -> bool {
+    effects
+        .get("drop")
+        .is_some_and(|f| f.contains(EffectFlags::RESIZE))
+}
+
+/// Length-stable user functions for this file. `program_finalizers_resize`
+/// is the whole-compile answer from the pipeline when it has one; a drop in
+/// this file counts either way.
+pub fn length_stability(
+    effects: &HashMap<String, EffectFlags>,
+    program_finalizers_resize: bool,
+) -> LengthStability {
+    let alloc_stable = !program_finalizers_resize && !finalizers_resize(effects);
+    let fns = effects
+        .iter()
+        .filter(|(_, f)| {
+            if alloc_stable {
+                !f.contains(EffectFlags::RESIZE)
+            } else {
+                f.is_pure()
+            }
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    LengthStability { fns, alloc_stable }
 }
 
 /// Analyze top-level / nested `fn` declarations and return self-recursive pure names.
@@ -231,7 +392,12 @@ fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFla
     for (name, f) in facts {
         let mut flags = f.local;
         for c in &f.callees {
-            if !user_fns.contains(c) {
+            if f.bound.contains(c) {
+                // A local function value: anything could be behind it.
+                flags = flags.union(EffectFlags::from_bits(
+                    EffectFlags::UNKNOWN | EffectFlags::HOST | EffectFlags::RESIZE,
+                ));
+            } else if !user_fns.contains(c) {
                 flags = flags.union(classify_unknown_callee(c));
             }
         }
@@ -242,7 +408,7 @@ fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFla
         changed = false;
         for (name, f) in facts {
             let mut flags = out[name];
-            for c in &f.callees {
+            for c in f.callees.iter().filter(|c| !f.bound.contains(*c)) {
                 if let Some(&callee) = out.get(c) {
                     flags = flags.union(callee);
                 }
@@ -258,7 +424,37 @@ fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFla
 
 /// Host / virtual-module names that are not user `fn`s.
 fn classify_unknown_callee(name: &str) -> EffectFlags {
-    classify_host_name(name)
+    let flags = classify_host_name(name);
+    if host_is_length_stable(name) {
+        flags
+    } else {
+        flags.union(EffectFlags::from_bits(EffectFlags::RESIZE))
+    }
+}
+
+/// Host / prelude callees that never change the length of an array they are
+/// handed: pure math, clocks, formatting, and output writes (which only read
+/// their buffer). Anything else — `read` into a buffer, `vec_*`, threads,
+/// FFI, unknown names — may.
+fn host_is_length_stable(name: &str) -> bool {
+    let short = name.rsplit("::").next().unwrap_or(name);
+    is_pure_host_name(short)
+        || short.starts_with("clock_")
+        || matches!(
+            short,
+            "len"
+                | "wall_nanos"
+                | "mono_nanos"
+                | "sleep_ms"
+                | "assert"
+                | "format"
+                | "to_bytes"
+                | "from_bytes"
+                | "stdout"
+                | "stderr"
+                | "write"
+                | "write_all"
+        )
 }
 
 /// Effect bits for a host / virtual-module callee (I6).
@@ -368,12 +564,11 @@ fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         | Expression::Group(inner) => collect_fns(inner, facts),
         Expression::Function {
             name,
+            args,
             body: Some(body),
             ..
         } => {
-            let mut f = FnFacts::default();
-            walk_body(body, &mut f);
-            facts.insert((*name).to_string(), f);
+            insert_facts(facts, name, fn_facts(args, body));
             collect_nested_fns(body, facts);
         }
         Expression::Implementation { methods, .. } => {
@@ -400,12 +595,11 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         }
         Expression::Function {
             name,
+            args,
             body: Some(body),
             ..
         } => {
-            let mut f = FnFacts::default();
-            walk_body(body, &mut f);
-            facts.insert((*name).to_string(), f);
+            insert_facts(facts, name, fn_facts(args, body));
             collect_nested_fns(body, facts);
         }
         Expression::Statement(inner)
@@ -565,11 +759,12 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::TypeOf(inner)
         | Expression::Readonly(inner)
         | Expression::OptionalAccess(inner, _) => walk_body(inner, facts),
+        // The resumer (or the resumed body) runs arbitrary code.
         Expression::Yield(_) | Expression::YieldFrom(_) | Expression::Resume(_, _) => {
-            facts.local.insert(EffectFlags::YIELD);
+            facts.local.insert(EffectFlags::YIELD | EffectFlags::RESIZE);
         }
         Expression::Declare(_) | Expression::Invoke(_) => {
-            facts.local.insert(EffectFlags::FFI);
+            facts.local.insert(EffectFlags::FFI | EffectFlags::RESIZE);
         }
         // Still walked: calls inside the message / deferred body count.
         Expression::Panic(inner) | Expression::Defer { body: inner, .. } => {
@@ -629,8 +824,13 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 Expression::QualifiedAccess { owner, member } => {
                     facts.callees.insert(format!("{owner}::{member}"));
                 }
-                _ => {
+                // Method calls are keyed by name only here, so the receiver
+                // type is unknown: only `len` / `capacity` cannot resize.
+                Expression::Access(_, member) if matches!(*member, "len" | "capacity") => {
                     facts.local.insert(EffectFlags::UNKNOWN);
+                }
+                _ => {
+                    facts.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
                 }
             }
             walk_body(name, facts);
@@ -723,6 +923,10 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
     checker.fn_effects.clear();
     checker.pure_fn_names.clear();
     let effects = analyze_fn_effects(ast);
+    checker.length_stability = length_stability(
+        &effects,
+        checker.program_finalizers_resize.unwrap_or(false),
+    );
     for (name, flags) in &effects {
         if flags.is_pure() {
             checker.pure_fn_names.insert(name.clone());
@@ -1126,5 +1330,127 @@ fn main() { return; }
 "#,
         ));
         assert!(!set.contains("speak"), "speak writes under if let: {set:?}");
+    }
+
+    fn stability(src: &str) -> LengthStability {
+        let ast = parse_ast(src);
+        length_stability(&analyze_fn_effects(&ast), false)
+    }
+
+    /// Field and element writes are impure but cannot change an array length.
+    #[test]
+    fn field_writer_is_length_stable_but_impure() {
+        let src = r#"
+class Tally {
+    pub hits: int,
+}
+fn absorb(Tally t, int x) -> int {
+    t.hits = t.hits + 1;
+    return x;
+}
+fn poke(Vec<int> v) -> int {
+    v[0] = 1;
+    return 0;
+}
+fn main() { return; }
+"#;
+        let st = stability(src);
+        assert!(st.alloc_stable);
+        assert!(st.fns.contains("absorb"), "{:?}", st.fns);
+        assert!(st.fns.contains("poke"), "{:?}", st.fns);
+        assert!(!analyze_pure_fns(&parse_ast(src)).contains("absorb"));
+    }
+
+    #[test]
+    fn push_or_unknown_method_is_not_length_stable() {
+        let st = stability(
+            r#"
+fn grow(Vec<int> v) -> int {
+    v.push(1);
+    return 0;
+}
+fn via(Vec<int> v) -> int {
+    return grow(v);
+}
+fn size(Vec<int> v) -> int {
+    return len(v);
+}
+fn main() { return; }
+"#,
+        );
+        assert!(!st.fns.contains("grow"), "{:?}", st.fns);
+        assert!(!st.fns.contains("via"), "callee resizes: {:?}", st.fns);
+        assert!(st.fns.contains("size"), "{:?}", st.fns);
+    }
+
+    /// A parameter that shadows a length-stable host name is a function value.
+    #[test]
+    fn shadowed_host_name_is_not_length_stable() {
+        let st = stability(
+            r#"
+fn apply(Handler write, int x) -> int {
+    return write(x);
+}
+fn main() { return; }
+"#,
+        );
+        assert!(!st.fns.contains("apply"), "{:?}", st.fns);
+    }
+
+    /// Same-named methods in two impls share one entry; the resizing body
+    /// must not be overwritten by the stable one.
+    #[test]
+    fn same_named_methods_union_their_effects() {
+        let st = stability(
+            r#"
+class A {
+    pub xs: Vec<int>,
+}
+class B {
+    pub n: int,
+}
+impl A {
+    fn step() -> int {
+        self.xs.push(1);
+        return 0;
+    }
+}
+impl B {
+    fn step() -> int {
+        return self.n;
+    }
+}
+fn main() { return; }
+"#,
+        );
+        assert!(!st.fns.contains("step"), "{:?}", st.fns);
+    }
+
+    /// A finalizer that can resize makes allocation a barrier, so only pure
+    /// functions stay length-stable.
+    #[test]
+    fn resizing_finalizer_falls_back_to_pure() {
+        let st = stability(
+            r#"
+class Log {
+    pub xs: Vec<int>,
+}
+class Tally {
+    pub hits: int,
+}
+impl Log {
+    fn drop() {
+        self.xs.push(1);
+    }
+}
+fn absorb(Tally t, int x) -> int {
+    t.hits = t.hits + 1;
+    return x;
+}
+fn main() { return; }
+"#,
+        );
+        assert!(!st.alloc_stable);
+        assert!(!st.fns.contains("absorb"), "{:?}", st.fns);
     }
 }

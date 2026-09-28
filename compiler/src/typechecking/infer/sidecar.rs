@@ -49,6 +49,7 @@ pub struct TypedSidecar {
     /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
     fn_effects: HashMap<DefId, EffectFlags>,
     pure_fn_names: HashSet<String>,
+    length_stability: crate::typechecking::purity::LengthStability,
     /// Names that appear as a function *value* in this module — see
     /// [`crate::typechecking::fn_value_escape`]. Package-wide proof is the
     /// pipeline seed; this set is the per-file snapshot.
@@ -157,6 +158,12 @@ impl TypedSidecar {
         &self.pure_fn_names
     }
 
+    /// Functions that cannot change any array's length, for the loop length
+    /// proofs (superset of [`Self::pure_fn_names`]).
+    pub fn length_stability(&self) -> &crate::typechecking::purity::LengthStability {
+        &self.length_stability
+    }
+
     /// True when `name` (bare or qualified) is used as a function value
     /// in this compile unit — not just as a direct `Call` target.
     /// A two-word function must stay boxed once this is true (`CallIndirect`
@@ -230,6 +237,7 @@ impl Checker {
             for_in_pin_spans: self.for_in_pin_spans.clone(),
             fn_effects: self.fn_effects.clone(),
             pure_fn_names: self.pure_fn_names.clone(),
+            length_stability: self.length_stability.clone(),
             fn_value_escaped: self.fn_value_escaped.clone(),
         }
     }
