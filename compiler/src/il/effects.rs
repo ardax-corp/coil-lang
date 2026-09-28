@@ -124,7 +124,8 @@ fn byte_effects(byte: &common::Byte, purity: Option<&PureCallCtx>) -> Effects {
             Effects::ELEM_WRITE
         }
         ArrayPush => Effects::GROW,
-        MakeTuple | MakeArray | MakeEnum | BoxValue | MakeDict => Effects::ALLOC,
+        // Tagging makes the fresh enum finalizable: never drop it as dead.
+        MakeTuple | MakeArray | MakeEnum | BoxValue | MakeDict | TagEnumType => Effects::ALLOC,
         YieldCoro | YieldFromCoro => Effects::YIELD,
         CONST | STRING | LOAD | DUPLICATE | POP | ADD | SUB | MUL | DIV | MOD | ADDF | SUBF
         | MULF | DIVF | MODF | BITAND | BITOR | XOR | SHL | SHR | EQ | NEQ | LE | LEQ | GT

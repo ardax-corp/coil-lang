@@ -1634,31 +1634,39 @@ impl<const S: usize> Machine<S> {
         let mut current = self.heap.head_for_lookup();
         while let Some(obj) = current {
             if !obj.is_marked()
-                && let Object::Instance(gc) = obj
+                && let Some(pc) = self.pending_finalizer(obj)
             {
-                let inst = gc.as_ref();
-                if inst.type_id != 0
-                    && !inst.finalized
-                    && let Some(&pc) = self.finalizer_by_type.get(&inst.type_id)
-                {
-                    out.push((Value::from(obj.addr()), pc));
-                }
+                out.push((Value::from(obj.addr()), pc));
             }
             current = obj.get_next();
         }
         out
     }
 
+    /// Drop PC for a tagged instance or enum whose finalizer has not run.
+    fn pending_finalizer(&self, obj: Object) -> Option<u32> {
+        let (type_id, finalized) = match obj {
+            Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+            Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+            _ => return None,
+        };
+        if type_id == 0 || finalized {
+            return None;
+        }
+        self.finalizer_by_type.get(&type_id).copied()
+    }
+
     fn claim_finalizer(&self, v: Value) -> bool {
         match Self::find_object_by_addr(&self.heap, v.raw() as u64) {
             Some(Object::Instance(gc)) => {
                 let inst = gc.payload_mut();
-                if inst.finalized {
-                    false
-                } else {
-                    inst.finalized = true;
-                    true
-                }
+                !std::mem::replace(&mut inst.finalized, true)
+            }
+            // Untagged enums (unit variants: shared immortals) are never
+            // finalized, so an explicit `drop()` on one just runs the body.
+            Some(Object::Enum(gc)) => {
+                let e = gc.payload_mut();
+                e.type_id == 0 || !std::mem::replace(&mut e.finalized, true)
             }
             _ => false,
         }
@@ -1689,14 +1697,8 @@ impl<const S: usize> Machine<S> {
         let mut queue = Vec::new();
         let mut current = self.heap.head_for_lookup();
         while let Some(obj) = current {
-            if let Object::Instance(gc) = obj {
-                let inst = gc.as_ref();
-                if inst.type_id != 0
-                    && !inst.finalized
-                    && let Some(&pc) = self.finalizer_by_type.get(&inst.type_id)
-                {
-                    queue.push((Value::from(obj.addr()), pc));
-                }
+            if let Some(pc) = self.pending_finalizer(obj) {
+                queue.push((Value::from(obj.addr()), pc));
             }
             current = obj.get_next();
         }
@@ -1777,7 +1779,7 @@ impl<const S: usize> Machine<S> {
             note_make_fast();
         }
         let payload = Self::stack_copy_enum_payload(&self.heap, &self.stack, sp, arity);
-        let obj_enum = ObjEnum { tag, payload };
+        let obj_enum = ObjEnum::new(tag, payload);
         let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
         self.stack.seek(sp - arity);
         self.stack.push(Value::from(object.addr()));
@@ -3127,7 +3129,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::MakeEnumReturn as u8);
+            promise!(*bc as u8 <= Instruction::TagEnumType as u8);
 
             match bc {
                 Instruction::STORE => {

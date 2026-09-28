@@ -410,10 +410,7 @@ mod tests {
     fn unpack_boxed_option_refuses_tag_payload_disagreement() {
         let mut heap = Heap::default();
         let (none_with_payload, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: EnumPayload::one(Member::Value(Value::from(1i64))),
-            },
+            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(1i64)))),
             Object::Enum,
         );
         assert!(unpack_option(
@@ -423,10 +420,7 @@ mod tests {
         )
         .is_err());
         let (bad_tag, _) = heap.alloc(
-            ObjEnum {
-                tag: 2,
-                payload: EnumPayload::empty(),
-            },
+            ObjEnum::new(2, EnumPayload::empty()),
             Object::Enum,
         );
         assert!(unpack_option(&heap, HostEnumLayout::Boxed, Value::from(bad_tag.addr())).is_err());

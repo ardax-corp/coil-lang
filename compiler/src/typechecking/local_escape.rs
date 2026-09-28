@@ -615,7 +615,8 @@ fn is_unbox_ty(checker: &Checker, ty: &Ty) -> bool {
     let Some(name) = enum_name(ty) else {
         return false;
     };
-    if common::is_builtin_ffi_enum(name) {
+    // `fn drop()` enums must stay heap so the finalizer has an object.
+    if common::is_builtin_ffi_enum(name) || checker.enum_has_drop(name) {
         return false;
     }
     if checker.is_scalar_enum(name) {

@@ -439,6 +439,10 @@ pub enum Instruction {
     /// (`[31:16]` tag, `[15:0]` arity). Fuse-select only; two-word `RETURN`
     /// must not fuse (would drop the hi word). Archive **minor 19** (COI-388 X3).
     MakeEnumReturn,
+    /// Stamp the enum type id (operand) on the payload-variant enum at TOS so
+    /// the GC runs its `fn drop()`. Stack-neutral; never allocates. A unit
+    /// variant (shared immortal) passes through untagged. Archive **minor 23**.
+    TagEnumType,
 }
 
 impl From<u8> for Instruction {
@@ -878,6 +882,7 @@ impl Instruction {
             Self::DenseBinJmpf => "DenseBinJmpf",
             Self::DenseIndexJmpf => "DenseIndexJmpf",
             Self::MakeEnumReturn => "MakeEnumReturn",
+            Self::TagEnumType => "TagEnumType",
         }
     }
 }
@@ -1909,7 +1914,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::MakeEnumReturn as u8;
+        let last = Instruction::TagEnumType as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

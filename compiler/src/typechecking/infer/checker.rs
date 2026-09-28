@@ -59,6 +59,15 @@ enum BareCtor {
     None,
 }
 
+
+/// What an `impl` block's owner is, for `fn drop()` checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropOwner {
+    Class,
+    Enum,
+    Other,
+}
+
 impl Checker {
     pub fn new() -> Self {
         let mut env = Env::new();
@@ -103,6 +112,7 @@ impl Checker {
             class_type_ids: std::collections::HashMap::new(),
             next_class_type_id: 1,
             classes_with_drop: std::collections::HashSet::new(),
+            enums_with_drop: std::collections::HashSet::new(),
             methods: std::collections::HashMap::new(),
             static_methods: std::collections::HashMap::new(),
             ids: IdTable::new(),
@@ -11085,11 +11095,12 @@ impl Checker {
         &mut self,
         what: &str,
         owner_key: &str,
-        owner_is_class: bool,
+        owner: DropOwner,
         is_static: bool,
         args: &Output,
         range: &Range<usize>,
     ) {
+        let owner_is_enum = owner == DropOwner::Enum;
         let arity = match args.1.as_ref() {
             Expression::Fragment(items) => items
                 .iter()
@@ -11099,8 +11110,10 @@ impl Checker {
         };
         let msg = if !what.is_empty() {
             Some("fn drop(self) is only allowed on inherent class impls, not trait instances")
-        } else if !owner_is_class {
-            Some("fn drop(self) is only allowed on nominal classes")
+        } else if owner == DropOwner::Other {
+            Some("fn drop(self) is only allowed on nominal classes and enums")
+        } else if owner_is_enum && self.enum_scalar.contains_key(owner_key) {
+            Some("fn drop(self) is not allowed on scalar-backed enums (they are not heap values)")
         } else if is_static {
             Some("fn drop must take self by value; static drop is not allowed")
         } else if arity != 0 {
@@ -11108,6 +11121,16 @@ impl Checker {
         } else if !self.classes_with_drop.insert(owner_key.to_string()) {
             Some("duplicate fn drop(self) for this class")
         } else {
+            if owner_is_enum {
+                // Enums share the class type-id space so one finalizer
+                // registry serves both.
+                self.enums_with_drop.insert(owner_key.to_string());
+                if !self.class_type_ids.contains_key(owner_key) {
+                    let id = self.next_class_type_id;
+                    self.next_class_type_id = self.next_class_type_id.saturating_add(1).max(1);
+                    self.class_type_ids.insert(owner_key.to_string(), id);
+                }
+            }
             None
         };
         if let Some(msg) = msg {
@@ -15600,6 +15623,15 @@ impl Checker {
             .resolve_class_key(name)
             .unwrap_or_else(|| name.to_string());
         self.classes_with_drop.contains(&key)
+    }
+
+    /// True for an enum with an inherent `fn drop()`: always boxed, and its
+    /// payload-variant constructions carry a finalizer type id.
+    pub fn enum_has_drop(&self, name: &str) -> bool {
+        self.enums_with_drop.contains(name)
+            || self
+                .resolve_class_key(name)
+                .is_some_and(|k| self.enums_with_drop.contains(&k))
     }
 
     pub fn classes_with_drop(&self) -> impl Iterator<Item = &String> {

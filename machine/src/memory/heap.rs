@@ -316,7 +316,7 @@ impl Heap {
         let object = if payload.is_empty() {
             self.immortal_unit_enum(tag)
         } else {
-            self.alloc(ObjEnum { tag, payload }, Object::Enum).0
+            self.alloc(ObjEnum::new(tag, payload), Object::Enum).0
         };
         common::Value::from(object.addr())
     }
@@ -727,10 +727,7 @@ impl Heap {
             self.unit_enum = Some((tag, *obj));
             return *obj;
         }
-        let obj_enum = crate::memory::ObjEnum {
-            tag,
-            payload: EnumPayload::empty(),
-        };
+        let obj_enum = crate::memory::ObjEnum::new(tag, EnumPayload::empty());
         let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
         self.immortal_enums.insert(tag, object);
         self.unit_enum = Some((tag, object));
@@ -1630,6 +1627,22 @@ impl<'a> IntoIterator for &'a EnumPayload {
 pub struct ObjEnum {
     pub tag: u32,
     pub payload: EnumPayload,
+    /// Finalizer key for an enum with `fn drop()` (`TagEnumType`); `0` = none.
+    /// Unit variants are shared immortals and are never tagged.
+    pub type_id: u32,
+    /// Set once the finalizer has been claimed, like [`ObjInstance::finalized`].
+    pub finalized: bool,
+}
+
+impl ObjEnum {
+    pub fn new(tag: u32, payload: EnumPayload) -> Self {
+        Self {
+            tag,
+            payload,
+            type_id: 0,
+            finalized: false,
+        }
+    }
 }
 
 impl GcSized for ObjEnum {
@@ -2620,10 +2633,7 @@ mod tests {
         let string_member = Member::Object(string_obj);
 
         // 2. Allocate the enum with the string in its payload.
-        let enum_value = ObjEnum {
-            tag: 0,
-            payload: EnumPayload::one(string_member),
-        };
+        let enum_value = ObjEnum::new(0, EnumPayload::one(string_member));
         let (enum_obj, _enum_ref) = heap.alloc(enum_value, Object::Enum);
         let enum_addr = enum_obj.addr();
 
@@ -2658,20 +2668,14 @@ mod tests {
 
         // Inner enum: empty payload.
         let (inner_obj, _inner_ref) = heap.alloc(
-            ObjEnum {
-                tag: 1,
-                payload: EnumPayload::empty(),
-            },
+            ObjEnum::new(1, EnumPayload::empty()),
             Object::Enum,
         );
         let inner_addr = inner_obj.addr();
 
         // Outer enum: payload contains the inner enum as a
         // `Member::Object`.
-        let outer = ObjEnum {
-            tag: 0,
-            payload: EnumPayload::one(Member::Object(inner_obj)),
-        };
+        let outer = ObjEnum::new(0, EnumPayload::one(Member::Object(inner_obj)));
         let (outer_obj, _outer_ref) = heap.alloc(outer, Object::Enum);
         let outer_addr = outer_obj.addr();
 
@@ -2817,7 +2821,7 @@ mod tests {
             Member::Object(c),
         ]);
         assert!(!payload.is_inline());
-        let (enum_obj, enum_ref) = heap.alloc(ObjEnum { tag: 0, payload }, Object::Enum);
+        let (enum_obj, enum_ref) = heap.alloc(ObjEnum::new(0, payload), Object::Enum);
         assert_eq!(enum_ref.as_ref().payload.len(), 3);
 
         let mut gray = Vec::new();

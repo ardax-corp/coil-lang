@@ -963,7 +963,7 @@ impl<const S: usize> Machine<S> {
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload =
                             Self::dense_enum_payload(&self.heap, &self.stack[lo..lo + arity]);
-                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
@@ -1627,6 +1627,15 @@ impl<const S: usize> Machine<S> {
                     // Root before GC: an unpushed fresh box would be swept.
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
+                }
+                Instruction::TagEnumType => {
+                    // Payload variants only: unit variants are shared immortals.
+                    let v = *self.stack.top();
+                    if let Some(Object::Enum(gc)) = Self::find_object_by_addr(&self.heap, v.raw() as u64)
+                        && !gc.as_ref().payload.is_empty()
+                    {
+                        gc.payload_mut().type_id = opcode.operand_u32();
+                    }
                 }
                 Instruction::UnboxValue => {
                     let expected_tag = (opcode.operand_u32() & 0xFFFF) as u16;

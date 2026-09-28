@@ -661,6 +661,12 @@ impl Compiler {
         // Emit MAKE_ENUM with the tag (upper 16) and
         // arity (lower 16) packed in the operand.
         bytecode.push_make_enum(tag as u16, arity as u16);
+        // `fn drop()` enums: tag payload variants so the GC finalizes them.
+        // Unit variants are shared immortals and never drop.
+        if arity > 0 && self.checker.enum_has_drop(enum_name) {
+            let type_id = self.checker.class_type_id(enum_name);
+            bytecode.push(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id));
+        }
         bytecode
     }
 
@@ -8520,6 +8526,10 @@ impl Compiler {
                 enum_name,
                 variant_name,
             } => {
+                // The combine builds the value without the finalizer tag.
+                if self.checker.enum_has_drop(enum_name) {
+                    return None;
+                }
                 let tag = self.checker.tag_for(enum_name, variant_name)?;
                 if self.checker.arity_for(enum_name, variant_name) != Some(arms) {
                     return None;

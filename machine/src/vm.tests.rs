@@ -1774,10 +1774,7 @@
 
         // Allocate an inner enum (no payload).
         let (inner_obj, _) = heap.alloc(
-            ObjEnum {
-                tag: 99,
-                payload: crate::EnumPayload::empty(),
-            },
+            ObjEnum::new(99, crate::EnumPayload::empty()),
             Object::Enum,
         );
         // Allocate a string.
@@ -1785,13 +1782,10 @@
         // Allocate an outer enum whose payload contains
         // references to both the inner enum and the string.
         let (outer_obj, _) = heap.alloc(
-            ObjEnum {
-                tag: 0,
-                payload: crate::EnumPayload::two(
-                    Member::Object(inner_obj),
-                    Member::Object(string_obj),
-                ),
-            },
+            ObjEnum::new(
+                0,
+                crate::EnumPayload::two(Member::Object(inner_obj), Member::Object(string_obj)),
+            ),
             Object::Enum,
         );
 
@@ -5376,6 +5370,56 @@
         let _ = vm.restore_output();
         let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
         assert_eq!(s, "closed");
+    }
+
+    /// A payload enum stamped by `TagEnumType` is finalized at teardown.
+    #[test]
+    fn teardown_runs_tagged_enum_finalizer() {
+        let strings = vec!["closed".to_string()];
+        let bytecode = vec![
+            Byte::new(Instruction::JMP).with_operand_u32(5),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::PRINT),
+            const_int(0),
+            Byte::new(Instruction::RETURN),
+            const_int(42),
+            Byte::new(Instruction::MakeEnum).with_operands_u16([0, 1]),
+            Byte::new(Instruction::TagEnumType).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.register_finalizer_for_test(7, 1);
+        vm.run_with_pool(&bytecode, &[], &strings, 0);
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "closed");
+    }
+
+    /// Unit variants are shared immortals: `TagEnumType` leaves them untagged,
+    /// so no finalizer runs for them.
+    #[test]
+    fn tag_enum_type_skips_unit_variants() {
+        let strings = vec!["closed".to_string()];
+        let bytecode = vec![
+            Byte::new(Instruction::JMP).with_operand_u32(5),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::PRINT),
+            const_int(0),
+            Byte::new(Instruction::RETURN),
+            Byte::new(Instruction::MakeEnum).with_operands_u16([1, 0]),
+            Byte::new(Instruction::TagEnumType).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.register_finalizer_for_test(7, 1);
+        vm.run_with_pool(&bytecode, &[], &strings, 0);
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "");
     }
 
     #[test]
