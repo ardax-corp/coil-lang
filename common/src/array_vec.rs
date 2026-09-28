@@ -114,6 +114,22 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
         }
     }
 
+    /// [`Self::rewrite_top_and_push`] for a caller that already knows
+    /// `0 < len < N` (the new element stays inline).
+    #[inline]
+    pub fn rewrite_top_and_push_inline<F, G>(&mut self, rewrite_top: F, setup_new: G)
+    where
+        F: FnOnce(&mut T),
+        G: FnOnce(&mut T),
+    {
+        let current = self.current;
+        promise!(current > 0);
+        promise!(current < N);
+        rewrite_top(&mut self.storage[current - 1]);
+        setup_new(&mut self.storage[current]);
+        self.current = current + 1;
+    }
+
     #[cold]
     #[inline(never)]
     fn rewrite_top_and_push_cold<F, G>(&mut self, max_len: usize, rewrite_top: F, setup_new: G) -> bool

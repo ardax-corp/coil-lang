@@ -22,7 +22,7 @@ pub use builtins::*;
 pub use debug::*;
 pub use ffi::tag;
 pub use ffi::*;
-pub use frame_bound::frame_reserve;
+pub use frame_bound::{FrameReserve, frame_reserve};
 pub use host::*;
 pub use interner::*;
 pub use opcode::*;

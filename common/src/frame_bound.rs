@@ -1,8 +1,7 @@
 //! Static bound on how far one frame can raise the operand-stack cursor.
 //!
-//! The VM checks `cursor + frame_reserve(..)` against the stack capacity
-//! whenever it opens a frame (and at the few ops that push a runtime-sized
-//! payload), and grows the stack when it does not fit. Recursion depth then
+//! The VM keeps [`FrameReserve::words`] free above the cursor for every frame
+//! it opens, and grows the stack when it does not fit. Recursion depth then
 //! only costs memory; it can never write past the buffer.
 //!
 //! Code is split into components linked by fall-through and jumps (calls and
@@ -13,16 +12,60 @@
 
 use crate::{Byte, Instruction};
 
-/// Words the frame opened at the current cursor may add above it, for every
-/// frame `code` can run. Never less than one.
+/// What the VM keeps free for the frames of one program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameReserve {
+    /// Words a frame can occupy above the base its caller gives it,
+    /// including its arguments (the widest `CALL` / `TailCall` arity). Never
+    /// less than one.
+    pub words: usize,
+    /// Widest enum payload the program builds. A `JumpIfMatch` hit is
+    /// counted as pushing this many words; a wider (host-built) payload
+    /// must re-check the stack.
+    pub match_payload: usize,
+}
+
+/// [`FrameReserve`] for every frame `code` can run.
 #[must_use]
-pub fn frame_reserve(code: &[Byte], pool: &[u64]) -> usize {
+pub fn frame_reserve(code: &[Byte], pool: &[u64]) -> FrameReserve {
+    let match_payload = widest_payload(code);
+    let args = code
+        .iter()
+        .filter(|b| matches!(*b.bytecode(), Instruction::CALL | Instruction::TailCall))
+        .map(|b| b.call_parts().0)
+        .max()
+        .unwrap_or(0);
+    let words = frame_words(code, pool, match_payload)
+        .saturating_add(args)
+        .max(1);
+    FrameReserve {
+        words,
+        match_payload,
+    }
+}
+
+/// Host natives build `Option` / `Result` payloads of one word.
+const HOST_PAYLOAD: usize = 2;
+
+fn widest_payload(code: &[Byte]) -> usize {
+    code.iter()
+        .filter_map(|b| match *b.bytecode() {
+            Instruction::MakeEnum | Instruction::MakeEnumReturn => Some(b.operand_u16(1) as usize),
+            Instruction::DenseMake if b.dense_abc_parts().0 >= crate::dense::MAKE_ENUM => {
+                Some(b.dense_abc_parts().2)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .max(HOST_PAYLOAD)
+}
+
+fn frame_words(code: &[Byte], pool: &[u64], match_payload: usize) -> usize {
     let n = code.len();
-    let steps: Vec<Step> = code.iter().map(|b| step(b, pool)).collect();
+    let steps: Vec<Step> = code.iter().map(|b| step(b, pool, match_payload)).collect();
     let mut parent: Vec<usize> = (0..n).collect();
-    let mut whole = Bound::default();
     for (pc, s) in steps.iter().enumerate() {
-        whole.add(s);
         if s.falls && pc + 1 < n {
             union(&mut parent, pc, pc + 1);
         }
@@ -37,13 +80,13 @@ pub fn frame_reserve(code: &[Byte], pool: &[u64]) -> usize {
         let root = find(&mut parent, pc);
         per_root[root].add(s);
     }
-    per_root.iter().map(Bound::words).max().unwrap_or(0).max(1)
+    per_root.iter().map(Bound::words).max().unwrap_or(0)
 }
 
 fn whole_program(steps: &[Step]) -> usize {
     let mut all = Bound::default();
     steps.iter().for_each(|s| all.add(s));
-    all.words().max(1)
+    all.words()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -94,7 +137,7 @@ struct Step {
     falls: bool,
 }
 
-fn step(b: &Byte, pool: &[u64]) -> Step {
+fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
     use Instruction::*;
     let at = |i: usize| pool.get(i).copied();
     let hi = |xs: &[usize]| xs.iter().max().map_or(0, |m| *m as u64 + 1);
@@ -154,8 +197,9 @@ fn step(b: &Byte, pool: &[u64]) -> Step {
             s.slots = hi(&[a, other]);
             s.jump = pool_target(at(idx));
         }
-        // The hit edge pushes the runtime payload; the VM reserves it there.
+        // The hit edge pops the scrutinee and pushes its payload.
         JumpIfMatch => {
+            s.push = match_payload as u64;
             s.jump = at((b.operand_u32() & 0xFFFF) as usize)
                 .map_or(Jump::Unknown, |t| Jump::To(t as usize));
         }
@@ -264,6 +308,10 @@ mod tests {
         Byte::new(i)
     }
 
+    fn words(code: &[Byte]) -> usize {
+        frame_reserve(code, &[]).words
+    }
+
     fn konst(v: i32) -> Byte {
         Byte::new(Instruction::CONST).with_const_inline(v)
     }
@@ -277,7 +325,7 @@ mod tests {
             op(Instruction::MakeArray).with_operand_u32(3),
             op(Instruction::RETURN),
         ];
-        assert_eq!(frame_reserve(&code, &[]), 4);
+        assert_eq!(words(&code), 4);
     }
 
     #[test]
@@ -293,8 +341,8 @@ mod tests {
             konst(3),
             op(Instruction::RETURN),
         ];
-        // Caller: 1 + 2 (call result); callee: 3 pushes.
-        assert_eq!(frame_reserve(&code, &[]), 3);
+        // Caller: 1 + 2 (call result); callee: 3 pushes; plus one argument.
+        assert_eq!(words(&code), 4);
     }
 
     #[test]
@@ -307,7 +355,7 @@ mod tests {
             konst(3),
             op(Instruction::RETURN),
         ];
-        assert_eq!(frame_reserve(&code, &[]), 3);
+        assert_eq!(words(&code), 3);
     }
 
     #[test]
@@ -318,7 +366,7 @@ mod tests {
             op(Instruction::Seek).with_operand_u32(12),
             op(Instruction::RETURN),
         ];
-        assert_eq!(frame_reserve(&code, &[]), 41 + 1);
+        assert_eq!(words(&code), 41 + 1);
     }
 
     #[test]
@@ -334,11 +382,26 @@ mod tests {
             ),
             op(Instruction::RETURN),
         ];
-        assert_eq!(frame_reserve(&code, &[]), 3);
+        assert_eq!(words(&code), 3);
     }
 
     #[test]
     fn empty_code_still_reserves_a_word() {
-        assert_eq!(frame_reserve(&[], &[]), 1);
+        assert_eq!(words(&[]), 1);
+    }
+
+    #[test]
+    fn a_match_hit_counts_the_widest_payload() {
+        let code = [
+            konst(1),
+            konst(2),
+            konst(3),
+            op(Instruction::MakeEnum).with_operands_u16([0, 3]),
+            op(Instruction::JumpIfMatch).with_operand_u32(0),
+            op(Instruction::RETURN),
+        ];
+        let reserve = frame_reserve(&code, &[5]);
+        assert_eq!(reserve.match_payload, 3);
+        assert_eq!(reserve.words, 3 + 1 + 3);
     }
 }

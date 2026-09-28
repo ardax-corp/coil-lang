@@ -1100,19 +1100,25 @@ impl<const S: usize> Machine<S> {
                             promise!(pool_idx < constants.len());
                             let target_offset = opcode.jump_if_match_target(constants);
                             let _ = self.stack.pop();
-                            if !self.reserve_operand_words(enum_ref.payload.len()) {
+                            let payload: &[Member] = &enum_ref.payload;
+                            // The frame reserve counts the widest payload the program builds.
+                            let wide = payload.len() > self.match_payload_bound;
+                            if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
                                 *ip_out = ip;
                                 *sp_out = sp;
                                 return dispatch::RestFlow::Done(
                                     self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                                 );
                             }
-                            for member in &enum_ref.payload {
+                            for member in payload {
                                 let value = match member {
                                     Member::Value(v) => *v,
                                     Member::Object(o) => Value::from(o.addr()),
                                 };
                                 self.stack.push(value);
+                            }
+                            if unlikely(wide) {
+                                self.rearm_call_window();
                             }
                             set_jump_target(&mut ip, target_offset, code);
                         }
@@ -1471,6 +1477,7 @@ impl<const S: usize> Machine<S> {
                         self.frames.get_mut().seek(return_ip);
                         self.frames
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
+                        self.keep_call_window(self.frames.len() - 1);
                         sp = callee_sp;
                         set_jump_target(&mut ip, entry as usize, code);
                         *ip_out = ip;
@@ -1550,6 +1557,7 @@ impl<const S: usize> Machine<S> {
                     self.frames.get_mut().seek(return_ip);
                     self.frames
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
+                    self.keep_call_window(self.frames.len() - 1);
                     sp = callee_sp;
                     set_jump_target(&mut ip, target, code);
                 }
