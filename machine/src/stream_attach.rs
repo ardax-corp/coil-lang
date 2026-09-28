@@ -357,7 +357,7 @@ mod tests {
 
     fn make_byte_array(heap: &mut Heap, bytes: &[u8]) -> Value {
         let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
-        let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+        let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
         Value::from(obj.addr())
     }
 
@@ -404,8 +404,8 @@ mod tests {
         assert_eq!(got, Some(2));
         match heap.find_object_by_addr(buf.raw() as u64) {
             Some(Object::Array(arr)) => {
-                assert_eq!(arr.as_ref().elements[0].as_int(), b'h' as i64);
-                assert_eq!(arr.as_ref().elements[1].as_int(), b'i' as i64);
+                assert_eq!(arr.as_ref().elements()[0].as_int(), b'h' as i64);
+                assert_eq!(arr.as_ref().elements()[1].as_int(), b'i' as i64);
             }
             _ => panic!("buf"),
         }

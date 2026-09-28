@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
-use common::unlikely;
+use common::{promise, unlikely};
 
 use super::slab::Slab;
 use super::AddrHashBuilder;
@@ -858,7 +858,7 @@ impl Heap {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
             return;
         };
-        let n = gc.as_ref().elements.len().min(values.len());
+        let n = gc.as_ref().elements().len().min(values.len());
         let arr = gc.as_mut();
         for (i, &v) in values.iter().take(n).enumerate() {
             arr.elements[i] = Value::from(v);
@@ -866,6 +866,14 @@ impl Heap {
     }
 
     /// True if `addr` is a live heap object.
+    /// True when `v` could be a heap reference: its address lies in the
+    /// slab's mapped range. False proves it is not one.
+    #[inline]
+    pub fn may_be_ref(&self, v: Value) -> bool {
+        let addr = v.heap_addr();
+        addr != 0 && self.slab.may_contain(addr)
+    }
+
     pub fn contains_addr(&self, addr: *mut u8) -> bool {
         self.find_object_by_addr(addr as u64).is_some()
     }
@@ -1107,13 +1115,23 @@ impl Object {
             }
             Self::Library(_) => {}
             Self::Tuple(t) => {
-                for v in &t.as_ref().elements {
+                for v in t.as_ref().elements() {
                     heap.mark_value(*v, grey_objects);
                 }
             }
             Self::Array(a) => {
-                for v in &a.as_ref().elements {
-                    heap.mark_value(*v, grey_objects);
+                // Clear flag: scanned clean at a previous mark, unwritten since.
+                if a.as_ref().may_hold_refs() {
+                    let mut any = false;
+                    for v in a.as_ref().elements() {
+                        if heap.may_be_ref(*v) {
+                            any = true;
+                            heap.mark_value(*v, grey_objects);
+                        }
+                    }
+                    if !any {
+                        a.payload_mut().may_hold_refs = false;
+                    }
                 }
             }
             Self::Coroutine(c) => {
@@ -1191,8 +1209,13 @@ impl Object {
                 }
             }
             Self::Enum(e) => e.as_ref().payload.iter().for_each(|m| member(m, visit)),
-            Self::Tuple(t) => t.as_ref().elements.iter().for_each(|v| word(*v, false, visit)),
-            Self::Array(a) => a.as_ref().elements.iter().for_each(|v| word(*v, false, visit)),
+            Self::Tuple(t) => t.as_ref().elements().iter().for_each(|v| word(*v, false, visit)),
+            Self::Array(a) => {
+                let a = a.as_ref();
+                if a.may_hold_refs() {
+                    a.elements().iter().for_each(|v| word(*v, false, visit));
+                }
+            }
             Self::Coroutine(c) => {
                 let coro = c.as_ref();
                 let mask = coro.saved_live_mask;
@@ -1864,8 +1887,155 @@ pub struct ObjTuple {
     pub elements: Vec<Value>,
 }
 
+impl ObjTuple {
+    #[inline]
+    pub fn elements(&self) -> &Vec<Value> {
+        &self.elements
+    }
+}
+
+/// A `Vec` / array object.
+///
+/// `may_hold_refs` is false only when the last mark scanned every element,
+/// found none that could be a heap reference, and nothing was written since.
+/// Marking skips such an array (a live `Vec<int>` of millions of words is
+/// scanned once, then costs nothing per collection). Every write goes
+/// through [`Self::push`] / [`Self::set`] / [`Self::store_indexed`] /
+/// [`Self::elements_mut`], which set the flag with one byte store — no
+/// compare on the hot path. Not type-based, so boxed values from a generic
+/// shared body are covered too.
 pub struct ObjArray {
-    pub elements: Vec<Value>,
+    elements: Vec<Value>,
+    may_hold_refs: bool,
+}
+
+impl ObjArray {
+    /// Conservative: any element may be a reference.
+    pub fn new(elements: Vec<Value>) -> Self {
+        let may_hold_refs = !elements.is_empty();
+        Self {
+            elements,
+            may_hold_refs,
+        }
+    }
+
+    /// Classify `elements` against `heap` up front.
+    pub fn from_values(elements: Vec<Value>, heap: &Heap) -> Self {
+        let may_hold_refs = elements.iter().any(|v| heap.may_be_ref(*v));
+        Self {
+            elements,
+            may_hold_refs,
+        }
+    }
+
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            elements: Vec::with_capacity(n),
+            may_hold_refs: false,
+        }
+    }
+
+    #[inline]
+    pub fn elements(&self) -> &Vec<Value> {
+        &self.elements
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    /// False when no element can be a heap reference (marking skips them).
+    #[inline]
+    pub fn may_hold_refs(&self) -> bool {
+        self.may_hold_refs
+    }
+
+    /// A write may add a reference: the next mark rescans.
+    #[inline(always)]
+    fn note(&mut self) {
+        // Test first: rewriting the byte on every store costs more than the
+        // (predictable) branch in hot store loops.
+        if !self.may_hold_refs {
+            self.may_hold_refs = true;
+        }
+    }
+
+    /// Store a numeric SIMD lane (never a reference) without classifying.
+    ///
+    /// # Safety
+    /// `i` must be in bounds and `v` must not be a heap reference.
+    #[inline(always)]
+    pub unsafe fn set_numeric_unchecked(&mut self, i: usize, v: Value) {
+        unsafe { *self.elements.get_unchecked_mut(i) = v };
+    }
+
+    #[inline]
+    pub fn push(&mut self, v: Value) {
+        self.note();
+        self.elements.push(v);
+    }
+
+    /// Overwrite element `i` (caller checks bounds).
+    #[inline]
+    pub fn set(&mut self, i: usize, v: Value) {
+        self.note();
+        self.elements[i] = v;
+    }
+
+    /// Unchecked [`Self::set`]; `i < len` is the caller's proof.
+    ///
+    /// # Safety
+    /// `i` must be in bounds.
+    #[inline]
+    pub unsafe fn set_unchecked(&mut self, i: usize, v: Value) {
+        self.note();
+        unsafe { *self.elements.get_unchecked_mut(i) = v };
+    }
+
+    /// `elements[index] = value` with the VM's bounds rules: `unchecked` is a
+    /// proven index; otherwise out of range returns `false`.
+    #[inline(always)]
+    pub fn store_indexed(&mut self, index: i64, value: Value, unchecked: bool) -> bool {
+        let elements: &mut [Value] = &mut self.elements;
+        let len = elements.len();
+        if unchecked {
+            let idx = index as usize;
+            promise!(index >= 0);
+            promise!(idx < len);
+            unsafe {
+                *elements.get_unchecked_mut(idx) = value;
+            }
+        } else if index >= 0 && (index as usize) < len {
+            unsafe {
+                *elements.get_unchecked_mut(index as usize) = value;
+            }
+        } else {
+            return false;
+        }
+        self.note();
+        true
+    }
+
+    /// Raw element access for writes the classifier does not see. Marks the
+    /// array as possibly holding references (always safe).
+    #[inline]
+    pub fn elements_mut(&mut self) -> &mut Vec<Value> {
+        self.may_hold_refs = true;
+        &mut self.elements
+    }
+
+    /// Element access for writes that add no new values (pop, remove,
+    /// truncate, clear, reorder): the flag stays as is.
+    #[inline]
+    pub fn elements_mut_no_new_values(&mut self) -> &mut Vec<Value> {
+        &mut self.elements
+    }
 }
 
 /// Suspended async function state: saved stack segment + call frames.
@@ -3276,15 +3446,39 @@ mod tests {
         assert_eq!(heap.slab.released_bytes(), 0);
     }
 
+    /// An int-only array is scanned once, then skipped; a reference stored
+    /// after that must still keep its target alive.
+    #[test]
+    fn clean_array_is_skipped_until_written() {
+        let mut heap = Heap::default();
+        let (arr, gc) = heap.alloc(
+            ObjArray::new((0..1000).map(Value::from).collect()),
+            Object::Array,
+        );
+        heap.gc_roots.push(arr.addr());
+        let root = |heap: &mut Heap| {
+            heap.begin_mark(&[arr.addr()]);
+            while !heap.mark_quantum(usize::MAX) {}
+            unsafe { heap.sweep() };
+        };
+        root(&mut heap);
+        assert!(!gc.as_ref().may_hold_refs(), "no element looked like a reference");
+        let (s, _) = heap.alloc(ObjString::from("kept"), Object::String);
+        let mut gc = gc;
+        gc.as_mut().set(3, Value::from(s.addr()));
+        assert!(gc.as_ref().may_hold_refs(), "a write reopens the scan");
+        root(&mut heap);
+        assert!(heap.find_object_by_addr(s.addr()).is_some(), "stored reference survives");
+        assert!(gc.as_ref().may_hold_refs());
+    }
+
     /// Array elements are raw words (ambiguous); typed members are precise.
     #[test]
     fn for_each_reference_marks_array_words_ambiguous() {
         let mut heap = Heap::default();
         let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
         let (arr, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(s.addr()), Value::from(7i64)],
-            },
+            ObjArray::new(vec![Value::from(s.addr()), Value::from(7i64)]),
             Object::Array,
         );
         let (en, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Member::Object(s))), Object::Enum);
@@ -3301,9 +3495,7 @@ mod tests {
         let mut heap = Heap::default();
         let (s_obj, _) = heap.alloc(ObjString::from("coil"), Object::String);
         let (arr_obj, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(1i64)],
-            },
+            ObjArray::new(vec![Value::from(1i64)]),
             Object::Array,
         );
 
@@ -3343,16 +3535,14 @@ mod tests {
     fn update_array_elements_writes_and_truncates_excess() {
         let mut heap = Heap::default();
         let (obj, gc) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0i64), Value::from(0i64)],
-            },
+            ObjArray::new(vec![Value::from(0i64), Value::from(0i64)]),
             Object::Array,
         );
         let addr = obj.addr();
         heap.update_array_elements(addr, &[10, 20, 30]);
-        assert_eq!(gc.as_ref().elements[0].as_int(), 10);
-        assert_eq!(gc.as_ref().elements[1].as_int(), 20);
-        assert_eq!(gc.as_ref().elements.len(), 2);
+        assert_eq!(gc.as_ref().elements()[0].as_int(), 10);
+        assert_eq!(gc.as_ref().elements()[1].as_int(), 20);
+        assert_eq!(gc.as_ref().elements().len(), 2);
     }
 
     #[test]

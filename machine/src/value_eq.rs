@@ -60,8 +60,8 @@ fn values_eq_rec(
     };
     match (oa, ob) {
         (Object::Array(ga), Object::Array(gb)) => {
-            let ea = &ga.as_ref().elements;
-            let eb = &gb.as_ref().elements;
+            let ea = &ga.as_ref().elements();
+            let eb = &gb.as_ref().elements();
             if ea.len() != eb.len() {
                 return false;
             }
@@ -70,8 +70,8 @@ fn values_eq_rec(
                 .all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev))
         }
         (Object::Tuple(ga), Object::Tuple(gb)) => {
-            let ea = &ga.as_ref().elements;
-            let eb = &gb.as_ref().elements;
+            let ea = &ga.as_ref().elements();
+            let eb = &gb.as_ref().elements();
             if ea.len() != eb.len() {
                 return false;
             }
@@ -128,22 +128,18 @@ mod tests {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
             panic!("expected array at {addr:#x}");
         };
-        gc.payload_mut().elements[index] = value;
+        gc.payload_mut().elements_mut()[index] = value;
     }
 
     #[test]
     fn array_deep_eq_same_contents() {
         let mut heap = Heap::default();
         let (oa, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(1_i64), Value::from(2_i64)],
-            },
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64)]),
             Object::Array,
         );
         let (ob, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(1_i64), Value::from(2_i64)],
-            },
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64)]),
             Object::Array,
         );
         assert!(values_eq(
@@ -157,15 +153,11 @@ mod tests {
     fn array_deep_ne_different_len() {
         let mut heap = Heap::default();
         let (oa, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(1_i64)],
-            },
+            ObjArray::new(vec![Value::from(1_i64)]),
             Object::Array,
         );
         let (ob, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(1_i64), Value::from(2_i64)],
-            },
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64)]),
             Object::Array,
         );
         assert!(!values_eq(
@@ -214,15 +206,11 @@ mod tests {
     fn self_loop_arrays_are_equal() {
         let mut heap = Heap::default();
         let (oa, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (ob, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         set_array_elem(&heap, oa.addr(), 0, Value::from(oa.addr()));
@@ -239,21 +227,15 @@ mod tests {
         // a = [a]  vs  b = [c], c = [b]
         let mut heap = Heap::default();
         let (oa, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (ob, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (oc, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         set_array_elem(&heap, oa.addr(), 0, Value::from(oa.addr()));
@@ -271,27 +253,19 @@ mod tests {
         // a=[b], b=[a]  vs  c=[d], d=[c]
         let mut heap = Heap::default();
         let (oa, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (ob, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (oc, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         let (od, _) = heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(0_i64)],
-            },
+            ObjArray::new(vec![Value::from(0_i64)]),
             Object::Array,
         );
         set_array_elem(&heap, oa.addr(), 0, Value::from(ob.addr()));

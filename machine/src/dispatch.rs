@@ -459,10 +459,10 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
         addr,
     ) {
         Some(Object::Array(gc)) => {
-            super::Machine::<8>::read_indexed(&gc.as_ref().elements, index, unchecked)
+            super::Machine::<8>::read_indexed(gc.as_ref().elements(), index, unchecked)
         }
         Some(Object::Tuple(gc)) => {
-            super::Machine::<8>::read_indexed(&gc.as_ref().elements, index, unchecked)
+            super::Machine::<8>::read_indexed(gc.as_ref().elements(), index, unchecked)
         }
         _ => None,
     };
@@ -515,8 +515,7 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
         arr as u32,
         addr,
     ) {
-        let elems = &mut gc.as_mut().elements;
-        if !super::Machine::<8>::write_indexed(elems, index, value, unchecked) {
+        if !gc.as_mut().store_indexed(index, value, unchecked) {
             return Err(DenseFail::IndexOob);
         }
     } else {
@@ -538,8 +537,8 @@ pub(super) fn dense_array_len(
     promise!(sp + arr < stack_cap);
     let addr = stack[sp + arr].raw() as u64;
     let len = match heap.find_object_by_addr(addr) {
-        Some(Object::Array(gc)) => gc.as_ref().elements.len(),
-        Some(Object::Tuple(gc)) => gc.as_ref().elements.len(),
+        Some(Object::Array(gc)) => gc.as_ref().elements().len(),
+        Some(Object::Tuple(gc)) => gc.as_ref().elements().len(),
         Some(Object::String(gc)) => gc.as_ref().data.len(),
         Some(Object::Instance(gc)) => gc
             .as_ref()

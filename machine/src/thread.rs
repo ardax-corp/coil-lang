@@ -819,15 +819,15 @@ fn encode_value(
     match obj {
         Object::String(gc) => Ok(PortableValue::String(gc.as_ref().data.clone())),
         Object::Array(gc) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements.len());
-            for e in &gc.as_ref().elements {
+            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
+            for e in gc.as_ref().elements() {
                 out.push(encode_value(heap, *e, visited)?);
             }
             Ok(PortableValue::Array(out))
         }
         Object::Tuple(gc) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements.len());
-            for e in &gc.as_ref().elements {
+            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
+            for e in gc.as_ref().elements() {
                 out.push(encode_value(heap, *e, visited)?);
             }
             Ok(PortableValue::Tuple(out))
@@ -918,7 +918,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             for e in elems {
                 elements.push(decode_portable(heap, e)?);
             }
-            let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+            let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Tuple(elems) => {
@@ -1391,7 +1391,7 @@ fn parse_lock_callback_result(heap: &Heap, ret: Value) -> Result<(Value, Value),
     let Some(Object::Tuple(gc)) = heap.find_object_by_addr(ret.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
-    let elems = &gc.as_ref().elements;
+    let elems = &gc.as_ref().elements();
     if elems.len() != 2 {
         return Err(ThreadErrorTag::Other);
     }
@@ -1710,7 +1710,7 @@ mod tests {
         let Member::Object(Object::Tuple(tup)) = &gc.as_ref().payload[0] else {
             panic!("expected (Sender, Receiver) tuple");
         };
-        let elems = &tup.as_ref().elements;
+        let elems = &tup.as_ref().elements();
         (elems[0], elems[1])
     }
 
@@ -1741,15 +1741,15 @@ mod tests {
     fn portable_roundtrip_nested_array() {
         let mut heap = Heap::default();
         let elems = vec![Value::from(1_i64), Value::from(2_i64)];
-        let (arr, _) = heap.alloc(ObjArray { elements: elems }, Object::Array);
+        let (arr, _) = heap.alloc(ObjArray::new(elems), Object::Array);
         let v = Value::from(arr.addr());
         let pv = value_to_portable(&heap, v).unwrap();
         let back = portable_to_value(&mut heap, pv).unwrap();
         let Object::Array(gc) = heap.find_object_by_addr(back.raw() as u64).unwrap() else {
             panic!("expected array");
         };
-        assert_eq!(gc.as_ref().elements[0].as_int(), 1);
-        assert_eq!(gc.as_ref().elements[1].as_int(), 2);
+        assert_eq!(gc.as_ref().elements()[0].as_int(), 1);
+        assert_eq!(gc.as_ref().elements()[1].as_int(), 2);
     }
 
     #[test]
@@ -1767,8 +1767,8 @@ mod tests {
         let Object::Tuple(gc) = heap.find_object_by_addr(back.raw() as u64).unwrap() else {
             panic!("expected tuple");
         };
-        assert_eq!(gc.as_ref().elements[0].as_int(), 7);
-        assert_eq!(gc.as_ref().elements[1].as_int(), 8);
+        assert_eq!(gc.as_ref().elements()[0].as_int(), 7);
+        assert_eq!(gc.as_ref().elements()[1].as_int(), 8);
 
         let (en, _) = heap.alloc(
             ObjEnum::new(3, EnumPayload::one(Member::Value(Value::from(11_i64)))),

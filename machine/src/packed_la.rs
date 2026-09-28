@@ -24,8 +24,8 @@ fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
 
 fn elements_of(obj: &Object) -> Option<&[Value]> {
     match obj {
-        Object::Array(gc) => Some(gc.as_ref().elements.as_slice()),
-        Object::Tuple(gc) => Some(gc.as_ref().elements.as_slice()),
+        Object::Array(gc) => Some(gc.as_ref().elements().as_slice()),
+        Object::Tuple(gc) => Some(gc.as_ref().elements().as_slice()),
         _ => None,
     }
 }
@@ -115,7 +115,8 @@ fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value
         let (object, _) = heap.alloc(ObjTuple { elements: values }, Object::Tuple);
         object.addr()
     } else {
-        let (object, _) = heap.alloc(ObjArray { elements: values }, Object::Array);
+        let arr = ObjArray::from_values(values, heap);
+        let (object, _) = heap.alloc(arr, Object::Array);
         object.addr()
     };
     Value::from(addr)

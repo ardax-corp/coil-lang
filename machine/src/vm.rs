@@ -1081,7 +1081,7 @@ impl<const S: usize> Machine<S> {
         let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) else {
             return false;
         };
-        let elems = &gc.as_ref().elements;
+        let elems = &gc.as_ref().elements();
         if index < 0 || (index as usize).saturating_add(n) > elems.len() {
             return false;
         }
@@ -1097,37 +1097,17 @@ impl<const S: usize> Machine<S> {
         let Some(Object::Array(mut gc)) = Self::find_object_by_addr(&self.heap, addr) else {
             return false;
         };
-        let elems = &mut gc.as_mut().elements;
-        if index < 0 || (index as usize).saturating_add(n) > elems.len() {
+        let arr = gc.as_mut();
+        if index < 0 || (index as usize).saturating_add(n) > arr.len() {
             return false;
         }
         let base = index as usize;
         for i in 0..n {
-            unsafe {
-                *elems.get_unchecked_mut(base + i) = Value::from(self.vregs[vsrc][i]);
-            }
+            // SAFETY: `base + n <= len` checked above; SIMD lanes are
+            // numeric (stride-1 numeric loops only), never references.
+            unsafe { arr.set_numeric_unchecked(base + i, Value::from(self.vregs[vsrc][i])) };
         }
         true
-    }
-
-    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) -> bool {
-        let len = elements.len();
-        if unchecked {
-            let idx = index as usize;
-            promise!(index >= 0);
-            promise!(idx < len);
-            unsafe {
-                *elements.get_unchecked_mut(idx) = value;
-            }
-            true
-        } else if index >= 0 && (index as usize) < len {
-            unsafe {
-                *elements.get_unchecked_mut(index as usize) = value;
-            }
-            true
-        } else {
-            false
-        }
     }
 
     fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
@@ -1737,9 +1717,9 @@ impl<const S: usize> Machine<S> {
         else {
             return false;
         };
-        let old_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
-        gc.as_mut().elements.push(value);
-        let new_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
+        let old_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
+        gc.as_mut().push(value);
+        let new_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
         if old_bytes != new_bytes {
             self.heap.account_resize(old_bytes, new_bytes);
         }
