@@ -957,18 +957,22 @@ impl<const S: usize> Machine<S> {
                     if arity <= 3 {
                         note_make_fast();
                     }
-                    let values = Self::stack_copy_decl(&self.stack, sp + base, arity);
-                    let addr = if kind == common::dense::MAKE_TUPLE {
+                    let lo = sp + base;
+                    let addr = if kind >= common::dense::MAKE_ENUM {
+                        // Inline payloads read the registers directly (no Vec).
+                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
+                        let payload =
+                            Self::dense_enum_payload(&self.heap, &self.stack[lo..lo + arity]);
+                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        object.addr()
+                    } else if kind == common::dense::MAKE_TUPLE {
+                        let values = Self::stack_copy_decl(&self.stack, lo, arity);
                         let (object, _) = self
                             .heap
                             .alloc(ObjTuple { elements: values }, Object::Tuple);
                         object.addr()
-                    } else if kind >= common::dense::MAKE_ENUM {
-                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
-                        let payload = Self::dense_enum_payload(&self.heap, &values);
-                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
-                        object.addr()
                     } else {
+                        let values = Self::stack_copy_decl(&self.stack, lo, arity);
                         let (object, _) = self
                             .heap
                             .alloc(ObjArray { elements: values }, Object::Array);
