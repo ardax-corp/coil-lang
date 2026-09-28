@@ -90,8 +90,11 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
     /// One `current < N` check covers both slots. `get_mut` tests `current < N + 1`
     /// and `current_mut` tests `current < N`, so calling both compares twice on
     /// every call while the frame is still inline.
+    ///
+    /// Returns `false` (and pushes nothing) when `max_len` elements are already
+    /// live; only the spilled path, past `N`, can reach that.
     #[inline]
-    pub fn rewrite_top_and_push<F, G>(&mut self, rewrite_top: F, setup_new: G)
+    pub fn rewrite_top_and_push<F, G>(&mut self, max_len: usize, rewrite_top: F, setup_new: G) -> bool
     where
         F: FnOnce(&mut T),
         G: FnOnce(&mut T),
@@ -105,21 +108,42 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
             rewrite_top(&mut self.storage[current - 1]);
             setup_new(&mut self.storage[current]);
             self.current = current + 1;
+            true
         } else {
-            self.rewrite_top_and_push_cold(rewrite_top, setup_new);
+            self.rewrite_top_and_push_cold(max_len, rewrite_top, setup_new)
         }
     }
 
-    #[cold]
-    #[inline(never)]
-    fn rewrite_top_and_push_cold<F, G>(&mut self, rewrite_top: F, setup_new: G)
+    /// [`Self::rewrite_top_and_push`] for a caller that already knows
+    /// `0 < len < N` (the new element stays inline).
+    #[inline]
+    pub fn rewrite_top_and_push_inline<F, G>(&mut self, rewrite_top: F, setup_new: G)
     where
         F: FnOnce(&mut T),
         G: FnOnce(&mut T),
     {
+        let current = self.current;
+        promise!(current > 0);
+        promise!(current < N);
+        rewrite_top(&mut self.storage[current - 1]);
+        setup_new(&mut self.storage[current]);
+        self.current = current + 1;
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn rewrite_top_and_push_cold<F, G>(&mut self, max_len: usize, rewrite_top: F, setup_new: G) -> bool
+    where
+        F: FnOnce(&mut T),
+        G: FnOnce(&mut T),
+    {
+        if self.current >= max_len {
+            return false;
+        }
         rewrite_top(self.get_mut());
         setup_new(self.current_mut());
         self.consume();
+        true
     }
 
     #[inline]
@@ -357,14 +381,25 @@ mod tests {
     fn rewrite_top_and_push_inline_then_spill() {
         let mut v = ArrayVec::<i32, 2>::default();
         v.push(1);
-        v.rewrite_top_and_push(|top| *top = 7, |frame| *frame = 8);
+        assert!(v.rewrite_top_and_push(8, |top| *top = 7, |frame| *frame = 8));
         assert_eq!(v.len(), 2);
         assert_eq!(v[0], 7);
         assert_eq!(v[1], 8);
         // `current == N`: top stays inline, the new slot spills.
-        v.rewrite_top_and_push(|top| *top = 9, |frame| *frame = 3);
+        assert!(v.rewrite_top_and_push(8, |top| *top = 9, |frame| *frame = 3));
         assert_eq!(v.len(), 3);
         assert_eq!(v[1], 9);
+        assert_eq!(v[2], 3);
+    }
+
+    #[test]
+    fn rewrite_top_and_push_refuses_past_max_len() {
+        let mut v = ArrayVec::<i32, 2>::default();
+        v.push(1);
+        assert!(v.rewrite_top_and_push(3, |_| {}, |frame| *frame = 2));
+        assert!(v.rewrite_top_and_push(3, |_| {}, |frame| *frame = 3));
+        assert!(!v.rewrite_top_and_push(3, |top| *top = 9, |_| {}));
+        assert_eq!(v.len(), 3);
         assert_eq!(v[2], 3);
     }
 

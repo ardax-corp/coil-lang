@@ -957,18 +957,22 @@ impl<const S: usize> Machine<S> {
                     if arity <= 3 {
                         note_make_fast();
                     }
-                    let values = Self::stack_copy_decl(&self.stack, sp + base, arity);
-                    let addr = if kind == common::dense::MAKE_TUPLE {
+                    let lo = sp + base;
+                    let addr = if kind >= common::dense::MAKE_ENUM {
+                        // Inline payloads read the registers directly (no Vec).
+                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
+                        let payload =
+                            Self::dense_enum_payload(&self.heap, &self.stack[lo..lo + arity]);
+                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        object.addr()
+                    } else if kind == common::dense::MAKE_TUPLE {
+                        let values = Self::stack_copy_decl(&self.stack, lo, arity);
                         let (object, _) = self
                             .heap
                             .alloc(ObjTuple { elements: values }, Object::Tuple);
                         object.addr()
-                    } else if kind >= common::dense::MAKE_ENUM {
-                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
-                        let payload = Self::dense_enum_payload(&self.heap, &values);
-                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
-                        object.addr()
                     } else {
+                        let values = Self::stack_copy_decl(&self.stack, lo, arity);
                         let (object, _) = self
                             .heap
                             .alloc(ObjArray { elements: values }, Object::Array);
@@ -1096,12 +1100,25 @@ impl<const S: usize> Machine<S> {
                             promise!(pool_idx < constants.len());
                             let target_offset = opcode.jump_if_match_target(constants);
                             let _ = self.stack.pop();
-                            for member in &enum_ref.payload {
+                            let payload: &[Member] = &enum_ref.payload;
+                            // The frame reserve counts the widest payload the program builds.
+                            let wide = payload.len() > self.match_payload_bound;
+                            if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
+                                *ip_out = ip;
+                                *sp_out = sp;
+                                return dispatch::RestFlow::Done(
+                                    self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                                );
+                            }
+                            for member in payload {
                                 let value = match member {
                                     Member::Value(v) => *v,
                                     Member::Object(o) => Value::from(o.addr()),
                                 };
                                 self.stack.push(value);
+                            }
+                            if unlikely(wide) {
+                                self.rearm_call_window();
                             }
                             set_jump_target(&mut ip, target_offset, code);
                         }
@@ -1245,13 +1262,22 @@ impl<const S: usize> Machine<S> {
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
-                        } else if let Some(sub) = gc.as_ref().yield_from {
-                            Self::with_coroutine_mut(gc, |c| {
-                                c.pending_send = send_val;
-                            });
-                            self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);
-                        } else {
-                            self.resume_coroutine(&mut ip, &mut sp, gc, send_val, code, true);
+                        }
+                        let target = match gc.as_ref().yield_from {
+                            Some(sub) => {
+                                Self::with_coroutine_mut(gc, |c| {
+                                    c.pending_send = send_val;
+                                });
+                                sub
+                            }
+                            None => gc,
+                        };
+                        if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
                         }
                     } else {
                         *ip_out = ip;
@@ -1275,7 +1301,13 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Coroutine(sub)) =
                         Self::find_object_by_addr(&self.heap, addr)
                     {
-                        self.start_yield_from(&mut ip, &mut sp, sub, code);
+                        if !self.start_yield_from(&mut ip, &mut sp, sub, code) {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
+                        }
                     } else {
                         *ip_out = ip;
                     *sp_out = sp;
@@ -1423,6 +1455,15 @@ impl<const S: usize> Machine<S> {
                             // Too many args for a fixed fn, drop extras defensively.
                         }
 
+                        if self.frames.len() >= crate::MAX_CALL_FRAMES
+                            || !self.reserve_operand_words(captures.len() + call_args.len())
+                        {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
+                        }
                         // Frame: [captures..., params...]
                         for c in &captures {
                             self.stack.push(*c);
@@ -1436,6 +1477,7 @@ impl<const S: usize> Machine<S> {
                         self.frames.get_mut().seek(return_ip);
                         self.frames
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
+                        self.keep_call_window(self.frames.len() - 1);
                         sp = callee_sp;
                         set_jump_target(&mut ip, entry as usize, code);
                         *ip_out = ip;
@@ -1497,6 +1539,13 @@ impl<const S: usize> Machine<S> {
                     };
 
                     let dict_arity = merged_dicts.len();
+                    if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(dict_arity) {
+                        *ip_out = ip;
+                        *sp_out = sp;
+                        return dispatch::RestFlow::Done(
+                            self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                        );
+                    }
                     for dict in merged_dicts {
                         self.stack.push(dict);
                     }
@@ -1508,6 +1557,7 @@ impl<const S: usize> Machine<S> {
                     self.frames.get_mut().seek(return_ip);
                     self.frames
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
+                    self.keep_call_window(self.frames.len() - 1);
                     sp = callee_sp;
                     set_jump_target(&mut ip, target, code);
                 }

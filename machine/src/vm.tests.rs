@@ -1701,12 +1701,13 @@
         for obj in [main_obj, f_obj, g_obj] {
             vm.stack.push(Value::from(obj.addr()));
         }
-        vm.precise_frames = vec![PreciseFrameMap {
+        vm.precise_frames = Arc::new(vec![PreciseFrameMap {
             entry_pc: 2,
             end_pc: 5,
             any_pc: Some(vec![]),
             at_pc: vec![],
-        }];
+            frame_words: 0,
+        }]);
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();
             vm.collect_stack_roots(&mut roots);
@@ -1725,8 +1726,43 @@
         );
         vm.nested_frame_depths.clear();
 
-        vm.precise_frames.clear();
+        vm.precise_frames = Arc::default();
         assert!(roots(&vm).contains(&f_obj.addr()), "no maps: every frame scanned");
+    }
+
+    /// A conservatively scanned frame covers its body's extent, so a slot
+    /// stored past the cursor is still a root.
+    #[test]
+    fn frame_extent_widens_the_conservative_scan() {
+        use common::PreciseFrameMap;
+        use crate::ObjString;
+
+        let mut vm = Machine::<8>::default();
+        let (obj, _) = vm.heap_mut().alloc(ObjString::from("past"), Object::String);
+        vm.frames.clear();
+        vm.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(0);
+        });
+        vm.stack.push(Value::from(0i64));
+        vm.stack[5] = Value::from(obj.addr());
+        vm.gc_top_ip = Some(3);
+        let roots = |vm: &Machine<8>| {
+            let mut roots = Vec::new();
+            vm.collect_stack_roots(&mut roots);
+            roots
+        };
+        let row = |frame_words| PreciseFrameMap {
+            entry_pc: 0,
+            end_pc: 10,
+            any_pc: None,
+            at_pc: vec![],
+            frame_words,
+        };
+        vm.precise_frames = Arc::new(vec![row(2)]);
+        assert!(!roots(&vm).contains(&obj.addr()), "slot 5 is past a 2-word extent");
+        vm.precise_frames = Arc::new(vec![row(6)]);
+        assert!(roots(&vm).contains(&obj.addr()), "the extent covers slot 5");
     }
 
     #[test]
@@ -5224,6 +5260,21 @@
 
         let sized = Machine::<16>::with_operand_capacity(512);
         assert_eq!(sized.operand_stack_capacity(), 512);
+    }
+
+    /// Zero-argument self calls never raise the cursor, so only the frame
+    /// limit stops them.
+    #[test]
+    fn recursion_without_stack_growth_stops_at_the_frame_limit() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::RETURN),
+        ]);
+        assert!(vm.panicked());
+        assert_eq!(vm.operand_stack_capacity(), crate::DEFAULT_OPERAND_STACK_SLOTS);
     }
 
     #[test]

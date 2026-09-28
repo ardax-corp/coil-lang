@@ -7,6 +7,8 @@ edition = "2024"
 default = []
 debugger = []
 vm_profile = []
+# Collect at every allocation safepoint (GC soundness testing only).
+gc-stress = []
 
 [dependencies]
 common = { path = "../common" }

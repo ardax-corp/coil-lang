@@ -15,13 +15,19 @@ use std::collections::{HashMap, HashSet};
 
 use common::{Byte, Instruction, PreciseFrameMap, SlotMap};
 
-/// Precise maps for every body in `entries` that can be described.
+/// Frame rows for the bodies in `entries`: precise heap slots when a body can
+/// be described, and a frame extent for `needs_extent` bodies (allocating
+/// dense code without S2b maps, whose registers may sit past the cursor).
+/// Without a decodable extent such a frame is scanned to the end of the stack.
+#[allow(clippy::too_many_arguments)]
 pub fn bind_precise_frames(
     heap_free: &HashSet<String>,
+    needs_extent: &HashSet<String>,
     bytecode: &[Byte],
     constants: &[u64],
     match_arities: &HashMap<u32, u32>,
     entries: &[(String, u32)],
+    entry_sps: &HashMap<String, u32>,
     prologue_entry: u32,
 ) -> Vec<PreciseFrameMap> {
     let mut starts: Vec<u32> = entries.iter().map(|(_, pc)| *pc).collect();
@@ -34,36 +40,156 @@ pub fn bind_precise_frames(
         let Some(body) = bytecode.get(entry as usize..end as usize) else {
             continue;
         };
-        let named_heap_free = entries
-            .iter()
-            .any(|(n, pc)| *pc == entry && heap_free.contains(n));
-        if named_heap_free && ends_in_exit(body) && body.iter().all(|b| !puts_heap_word(*b.bytecode())) {
-            out.push(PreciseFrameMap {
-                entry_pc: entry,
-                end_pc: end,
-                any_pc: Some(Vec::new()),
-                at_pc: Vec::new(),
-            });
-            continue;
-        }
+        let names = || entries.iter().filter(|(_, pc)| *pc == entry).map(|(n, _)| n);
+        // Only bodies whose registers may sit past the cursor get an extent:
+        // widening every conservative frame also roots stale dead words.
+        let frame_words = if names().any(|n| needs_extent.contains(n)) {
+            frame_extent(body, constants).unwrap_or_else(|| {
+                debug_assert!(false, "dense body without a decodable frame extent");
+                u32::MAX
+            })
+        } else {
+            0
+        };
+        let mut row = PreciseFrameMap {
+            entry_pc: entry,
+            end_pc: end,
+            any_pc: None,
+            at_pc: Vec::new(),
+            frame_words,
+        };
         let enters_mid_body = foreign
             .iter()
             .any(|&(from, to)| to > entry && to < end && !(from >= entry && from < end));
-        if enters_mid_body {
-            continue;
+        if !enters_mid_body {
+            let heap_free_fn = names().any(|n| heap_free.contains(n));
+            if heap_free_fn
+                && ends_in_exit(body)
+                && body.iter().all(|b| !puts_heap_word(*b.bytecode()))
+                && closure_entries(bytecode, constants, entry as usize, end as usize)
+                    .is_some_and(|c| c.is_empty())
+            {
+                row.any_pc = Some(Vec::new());
+            } else {
+                // Words the host pushes when it calls a body no bytecode references.
+                let declared = names()
+                    .filter_map(|n| entry_sps.get(n).map(|&sp| sp as usize))
+                    .max();
+                let seed = EntrySeed {
+                    prologue_entry: prologue_entry as usize,
+                    declared,
+                };
+                if let Some(at_pc) =
+                    analyze_body(bytecode, constants, match_arities, entry, end, &seed)
+                {
+                    row.at_pc = at_pc;
+                }
+            }
         }
-        if let Some(at_pc) = analyze_body(bytecode, constants, match_arities, entry, end, prologue_entry)
-            && !at_pc.is_empty()
-        {
-            out.push(PreciseFrameMap {
-                entry_pc: entry,
-                end_pc: end,
-                any_pc: None,
-                at_pc,
-            });
+        if row.any_pc.is_some() || !row.at_pc.is_empty() || row.frame_words != 0 {
+            out.push(row);
         }
     }
     out
+}
+
+/// Highest frame word the body can touch, plus one: `None` when an op is not
+/// known to be slot-free and its slot operands are not decoded here.
+fn frame_extent(body: &[Byte], constants: &[u64]) -> Option<u32> {
+    let mut words = 0usize;
+    for b in body {
+        words = words.max(slot_extent(b, constants)?);
+    }
+    u32::try_from(words).ok()
+}
+
+/// Frame words op `b` names (highest slot + 1); `Some(0)` for slot-free ops.
+/// The two-word dense packs are covered word by word (their tails decode as
+/// `DenseBin` / `BinSlot*Jmp*`).
+fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
+    use Instruction::*;
+    let pool = |i: usize| constants.get(i).copied();
+    let one = |s: usize| Some(s + 1);
+    let max = |xs: &[usize]| xs.iter().max().map(|m| m + 1);
+    match *b.bytecode() {
+        LOAD | STORE | StorePop => {
+            max(&(0..b.load_store_count()).map(|i| b.load_store_slot_at(i) as usize).collect::<Vec<_>>())
+        }
+        Seek | LoadReturnSlot => Some(b.operand_u32() as usize),
+        BinSlotImm => one(b.bin_slot_imm_parts().1),
+        BinSlotSlot => {
+            let (_, a, c) = b.bin_slot_slot_parts();
+            max(&[a, c])
+        }
+        BinSlotImmJmpf | BinSlotImmJmpt => one(b.bin_slot_imm_jmpf_parts().1),
+        BinSlotSlotJmpf | BinSlotSlotJmpt => {
+            let (_, a, pool_idx) = b.bin_slot_slot_jmpf_parts();
+            max(&[a, (pool(pool_idx)? as u32 & 0xFF) as usize])
+        }
+        BinSlotImmStore => {
+            let (_, src, pool_idx) = b.bin_slot_imm_store_parts();
+            max(&[src, (pool(pool_idx)? >> 32) as usize])
+        }
+        BinSlotSlotStore => {
+            let (_, a, c, dest) = b.bin_slot_slot_store_parts();
+            max(&[a, c, dest])
+        }
+        INC | DEC => one(b.inc_dec_parts().0),
+        UnpackAt => {
+            let op = b.operand_u32();
+            Some((op & 0xFFFF) as usize + (op >> 16) as usize)
+        }
+        TailCall => Some(b.call_parts().0),
+        DenseBin | DenseBin2 | DenseBinJmpf | DenseCmp | DenseIndex | DenseIndexJmpf
+        | DenseStoreIndex | DenseFieldLoad | DenseFieldStore | DenseArrayPush => {
+            let (_, d, x, y) = b.dense_abc_parts();
+            max(&[d, x, y])
+        }
+        DenseMake => {
+            let (_, dest, arity, base) = b.dense_abc_parts();
+            max(&[dest, base + arity.max(1) - 1])
+        }
+        DenseMakeObject => one(common::dense::unpack_make_object(b.operand_u32()).0 as usize),
+        DenseConst => one(b.dense_const_parts().1),
+        DenseMove => {
+            let (d, s) = b.dense_move_parts();
+            max(&[d, s])
+        }
+        DenseArrayLen => {
+            let (d, a) = b.dense_move_parts();
+            max(&[d, a])
+        }
+        DenseUnary | DenseCast => {
+            let (_, d, s) = b.dense_unary_parts();
+            max(&[d, s])
+        }
+        DensePush => {
+            let (arity, base) = b.dense_move_parts();
+            Some(base + arity)
+        }
+        VLoad | VStore => {
+            let (_, _, arr, idx) = b.dense_abc_parts();
+            max(&[arr, idx])
+        }
+        // Splat reads a scalar slot; other operands are vector registers.
+        VBin => one(b.dense_abc_parts().2),
+        VReduce => one(b.dense_abc_parts().1),
+        VMove | VFma => Some(0),
+        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT
+        | ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
+        | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | XOR
+        | AND | OR | NOT | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt
+        | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt | JMP | JMPF | JMPT
+        | CmpJmpf | CmpJmpt | LogNotJmpf | LogNotJmpt | JumpIfMatch | Unpack | RETURN
+        | ConstReturnImm | BinReturn | ReturnPair | MakeEnumReturn | CALL | CallIndirect
+        | HostInvoke | MakeArray | MakeTuple | MakeEnum | MakeDict | DictEntries | InitTyped
+        | INIT | BoxValue | UnboxValue | FORMAT | STRINGIFY | Index | IndexUnchecked
+        | StoreIndex | StoreIndexUnchecked | ArrayLen | ArrayPush | GetField | SetField
+        | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
+        | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
+        | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic => Some(0),
+        _ => None,
+    }
 }
 
 fn ends_in_exit(body: &[Byte]) -> bool {
@@ -299,94 +425,190 @@ impl FrameState {
 }
 
 /// Complete heap slots at each recorded PC of the body `[entry, end)`, or
-/// `None` when the body uses an op the dataflow does not model.
+/// `None` when the body cannot be described. Closure bodies compiled inside
+/// it (code pointers fed to `MakeFn`) are analysed from their own entry and
+/// merged; any other entry into the middle of the body refuses it.
 fn analyze_body(
     bytecode: &[Byte],
     constants: &[u64],
     match_arities: &HashMap<u32, u32>,
     entry: u32,
     end: u32,
-    prologue_entry: u32,
+    seed: &EntrySeed,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
-    let mut states: HashMap<usize, FrameState> = HashMap::new();
-    let mut work = vec![entry];
-    // Parameters are live words of unknown kind.
-    let arity = entry_arity(bytecode, constants, entry, prologue_entry as usize)?;
-    states.insert(
+    let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
+    let body = Body {
+        bytecode,
+        constants,
+        match_arities,
         entry,
-        FrameState {
-            lo: arity,
-            hi: arity,
-            bits: vec![true; arity],
-            slot: vec![true; arity],
-        },
-    );
-    let mut recorded: HashMap<usize, Vec<u16>> = HashMap::new();
-    let mut steps = 0usize;
-    while let Some(pc) = work.pop() {
-        steps += 1;
-        if steps > 200_000 {
+        end,
+    };
+    let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
+        std::collections::BTreeMap::new();
+    let starts = std::iter::once((entry, arity, coroutine))
+        .chain(closure_entries(bytecode, constants, entry, end)?.into_iter().map(|(pc, a)| (pc, a, false)));
+    for (start, arity, coroutine) in starts {
+        for (pc, slots) in body.analyze_from(start, arity, coroutine)? {
+            merged.entry(pc).or_default().extend(slots);
+        }
+    }
+    Some(
+        merged
+            .into_iter()
+            .map(|(pc, slots)| SlotMap {
+                pc: pc as u32,
+                slots: slots.into_iter().collect(),
+            })
+            .collect(),
+    )
+}
+
+/// Closure bodies inside `(entry, end)`: `CodePtr` targets immediately fed to
+/// `MakeFn`, entered with `[captures..., params...]`. `None` when anything
+/// else (a plain code pointer, call or coroutine) targets the middle of the
+/// body, or closure sites disagree on the frame size.
+fn closure_entries(
+    bytecode: &[Byte],
+    constants: &[u64],
+    entry: usize,
+    end: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut found: HashMap<usize, usize> = HashMap::new();
+    for (from, to) in inbound_targets(bytecode, constants) {
+        let (from, to) = (from as usize, to as usize);
+        if to <= entry || to >= end {
+            continue;
+        }
+        let b = bytecode.get(from)?;
+        if jump_target(b, constants).is_some() {
+            continue;
+        }
+        let make_fn = bytecode.get(from + 1)?;
+        if !matches!(*b.bytecode(), Instruction::CodePtr)
+            || !matches!(*make_fn.bytecode(), Instruction::MakeFn)
+        {
             return None;
         }
-        let mut st = states.get(&pc)?.clone();
-        let b = bytecode.get(pc)?;
-        let step = transfer(b, bytecode.get(pc + 1), constants, match_arities, &mut st, pc, end)?;
-        if let Some(slots) = step.record.clone() {
-            recorded.insert(pc, slots);
-        }
-        let jump_state = step.jump_state.clone().unwrap_or_else(|| st.clone());
-        let edges = step
-            .fallthrough
-            .then(|| (pc + step.width, st.clone()))
-            .into_iter()
-            .chain(step.jump.map(|t| (t, jump_state)));
-        for (succ, out) in edges {
-            if succ < entry || succ >= end {
-                return None;
-            }
-            match states.get_mut(&succ) {
-                Some(existing) => {
-                    if existing.merge(&out)? {
-                        work.push(succ);
-                    }
-                }
-                None => {
-                    states.insert(succ, out);
-                    work.push(succ);
-                }
-            }
+        let op = make_fn.operand_u32();
+        let words = (op & 0xFF) as usize + ((op >> 16) & 0xFF) as usize + ((op >> 24) & 1) as usize;
+        if *found.entry(to).or_insert(words) != words {
+            return None;
         }
     }
-    // Recorded sets must reflect the fixpoint: recompute from final states.
-    let mut out = Vec::with_capacity(recorded.len());
-    let mut pcs: Vec<usize> = recorded.keys().copied().collect();
-    pcs.sort_unstable();
-    for pc in pcs {
-        let mut st = states.get(&pc)?.clone();
-        let step = transfer(&bytecode[pc], bytecode.get(pc + 1), constants, match_arities, &mut st, pc, end)?;
-        out.push(SlotMap {
-            pc: pc as u32,
-            slots: step.record?,
-        });
-    }
+    let mut out: Vec<(usize, usize)> = found.into_iter().collect();
+    out.sort_unstable();
     Some(out)
 }
 
-/// Parameter count of the body at `entry`, read from its callers' `CALL` /
-/// `TailCall`s. Bodies entered any other way (jump, code pointer, coroutine,
-/// host-only) or with differing arities are refused.
+/// One body's bytecode range and the side tables the dataflow reads.
+struct Body<'a> {
+    bytecode: &'a [Byte],
+    constants: &'a [u64],
+    match_arities: &'a HashMap<u32, u32>,
+    entry: usize,
+    end: usize,
+}
+
+impl Body<'_> {
+    /// Fixpoint from `start` (with `arity` live words) to the recorded slots.
+    fn analyze_from(
+        &self,
+        start: usize,
+        arity: usize,
+        coroutine: bool,
+    ) -> Option<Vec<(usize, Vec<u16>)>> {
+        let (entry, end) = (self.entry, self.end);
+        let mut states: HashMap<usize, FrameState> = HashMap::new();
+        let mut work = vec![start];
+        // Parameters are live words of unknown kind.
+        states.insert(
+            start,
+            FrameState {
+                lo: arity,
+                hi: arity,
+                bits: vec![true; arity],
+                slot: vec![true; arity],
+            },
+        );
+        let step_at = |pc: usize, st: &mut FrameState| transfer(self, pc, coroutine, st);
+        let mut recorded: HashSet<usize> = HashSet::new();
+        let mut steps = 0usize;
+        while let Some(pc) = work.pop() {
+            steps += 1;
+            if steps > 200_000 {
+                return None;
+            }
+            let mut st = states.get(&pc)?.clone();
+            let step = step_at(pc, &mut st)?;
+            if step.record.is_some() {
+                recorded.insert(pc);
+            }
+            let jump_state = step.jump_state.clone().unwrap_or_else(|| st.clone());
+            let edges = step
+                .fallthrough
+                .then(|| (pc + step.width, st.clone()))
+                .into_iter()
+                .chain(step.jump.map(|t| (t, jump_state)));
+            for (succ, out) in edges {
+                if succ < entry || succ >= end {
+                    return None;
+                }
+                match states.get_mut(&succ) {
+                    Some(existing) => {
+                        if existing.merge(&out)? {
+                            work.push(succ);
+                        }
+                    }
+                    None => {
+                        states.insert(succ, out);
+                        work.push(succ);
+                    }
+                }
+            }
+        }
+        // Recorded sets must reflect the fixpoint: recompute from final states.
+        let mut out = Vec::with_capacity(recorded.len());
+        for pc in recorded {
+            let mut st = states.get(&pc)?.clone();
+            out.push((pc, step_at(pc, &mut st)?.record?));
+        }
+        Some(out)
+    }
+}
+
+/// How a body's entry state is known besides its callers' `CALL`s.
+struct EntrySeed {
+    /// The prologue `JMP` target (`main` or setup).
+    prologue_entry: usize,
+    /// Codegen's entry height (params, `self`, dictionaries) for this body.
+    declared: Option<usize>,
+}
+
+/// Words on the frame when the body at `entry` starts, and whether it runs
+/// as a coroutine: its callers' `CALL` / `TailCall` arity, the `MakeCoro`
+/// arity (plus the send word the first resume pushes before a store), `0` for
+/// `main` entered from the prologue, or the declared entry height when no
+/// bytecode references the body (only the host calls it: tests, finalizers,
+/// callbacks). Bodies entered any other way (jump, closure code pointer) or
+/// with differing arities are refused.
 fn entry_arity(
     bytecode: &[Byte],
     constants: &[u64],
     entry: usize,
-    prologue_entry: usize,
-) -> Option<usize> {
-    if entry == prologue_entry && entered_by_prologue_only(bytecode, constants, entry) {
-        return Some(0);
+    seed: &EntrySeed,
+) -> Option<(usize, bool)> {
+    if entry == seed.prologue_entry && entered_by_prologue_only(bytecode, constants, entry) {
+        return Some((0, false));
     }
+    let mut referenced = false;
+    let mut code_ref = false;
+    // Frame words of closures built on this entry (`[captures..., params]`).
+    let mut closure_words = 0usize;
+    let mut coro_arity = None;
     let mut arity = None;
-    for b in bytecode {
+    for (from, b) in bytecode.iter().enumerate() {
         let inst = *b.bytecode();
         let target = match inst {
             Instruction::CALL if b.call_parts().1 == 0 => None,
@@ -401,22 +623,56 @@ fn entry_arity(
         if target != Some(entry) {
             continue;
         }
-        // A plain code pointer is called with the declared arity; closures
-        // (`MakePolyFn*`) append captures, jumps and coroutines do not match.
-        if matches!(inst, Instruction::CodePtr) {
+        referenced = true;
+        // Code pointers and poly-fn values are called through `CallIndirect`
+        // with the declared params and dictionaries; a pointer fed to `MakeFn`
+        // also prepends its captures.
+        if matches!(
+            inst,
+            Instruction::CodePtr | Instruction::MakePolyFn | Instruction::MakePolyFnCapture
+        ) {
+            code_ref = true;
+            if let Some(make_fn) = bytecode.get(from + 1)
+                && matches!(*make_fn.bytecode(), Instruction::MakeFn)
+            {
+                let op = make_fn.operand_u32();
+                let words =
+                    (op & 0xFF) as usize + ((op >> 16) & 0xFF) as usize + ((op >> 24) & 1) as usize;
+                closure_words = closure_words.max(words);
+            }
             continue;
         }
-        if !matches!(inst, Instruction::CALL | Instruction::TailCall) {
-            return None;
-        }
+        let slot = match inst {
+            Instruction::CALL | Instruction::TailCall => &mut arity,
+            Instruction::MakeCoro => &mut coro_arity,
+            _ => return None,
+        };
         let a = b.call_parts().0;
-        match arity {
-            None => arity = Some(a),
+        match *slot {
+            None => *slot = Some(a),
             Some(prev) if prev == a => {}
             Some(_) => return None,
         }
     }
-    arity
+    match (arity, coro_arity) {
+        (Some(_), Some(_)) => None,
+        (None, Some(a)) if !code_ref => {
+            Some((a + usize::from(receives_send(bytecode, entry)), true))
+        }
+        (None, Some(_)) => None,
+        // Overestimating the entry height only roots a few stale words.
+        (Some(a), None) if code_ref => Some((a.max(seed.declared?).max(closure_words), false)),
+        (Some(a), None) => Some((a, false)),
+        (None, None) if referenced && !code_ref => None,
+        (None, None) => seed.declared.map(|a| (a.max(closure_words), false)),
+    }
+}
+
+/// A resume pushes the sent value when the op it resumes at stores it.
+fn receives_send(bytecode: &[Byte], pc: usize) -> bool {
+    bytecode
+        .get(pc)
+        .is_some_and(|b| matches!(*b.bytecode(), Instruction::STORE | Instruction::StorePop))
 }
 
 /// `main` shape: `CALL 0 target=0` at PC 0 opens a fresh frame at base 0,
@@ -447,15 +703,11 @@ struct Step {
 }
 
 /// Apply one op to `st`. `None` refuses the body (unmodeled op).
-fn transfer(
-    b: &Byte,
-    tail_word: Option<&Byte>,
-    constants: &[u64],
-    match_arities: &HashMap<u32, u32>,
-    st: &mut FrameState,
-    pc: usize,
-    end: usize,
-) -> Option<Step> {
+fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Option<Step> {
+    let b = body.bytecode.get(pc)?;
+    let tail_word = body.bytecode.get(pc + 1);
+    let next_receives = receives_send(body.bytecode, pc + 1);
+    let (constants, match_arities, end) = (body.constants, body.match_arities, body.end);
     use Instruction::*;
     let mut step = Step {
         width: 1,
@@ -544,6 +796,81 @@ fn transfer(
                 st.push(true)?;
             }
         }
+        // Pops the target, dictionaries and args; the callee frame starts at
+        // their base. A partial application instead pushes a new function
+        // there and hits a safepoint, so the record covers the base word too.
+        CallIndirect => {
+            let packed = b.operand_u32();
+            let words = 1 + (packed & 0xFFFF) as usize + ((packed >> 16) & 0xFFFF) as usize;
+            st.pop_n(words)?;
+            step.record = Some(st.heap_slots(st.hi + 1, true));
+            st.clobber_from(st.lo);
+            st.push(true)?;
+            // The callee's return width is not encoded: one or two words.
+            st.write(st.hi, true, false)?;
+            st.hi += 1;
+        }
+        // Suspends: the frame's words below the cursor are saved and restored
+        // on resume; anything above is gone. Outside a coroutine the value
+        // would stay on the stack, so only `MakeCoro` bodies model it.
+        YieldCoro => {
+            if !coroutine || st.lo != st.hi {
+                return None;
+            }
+            st.pop()?;
+            st.clobber_from(st.lo);
+            if next_receives {
+                st.push(true)?;
+            }
+        }
+        // Runs another coroutine above the cursor; its yield / return value
+        // lands at the base.
+        ResumeCoro => {
+            st.pop_n(1 + (b.operand_u32() & 1) as usize)?;
+            st.clobber_from(st.lo);
+            st.push(true)?;
+        }
+        DoneCoro => {
+            st.pop()?;
+            st.push(false)?;
+        }
+        INC | DEC => {
+            st.set(b.inc_dec_parts().0, false)?;
+            st.push(false)?;
+        }
+        // In-place payload unpack when the enum matches (cursor floor too).
+        UnpackAt => {
+            let op = b.operand_u32();
+            let (slot, arity) = ((op & 0xFFFF) as usize, (op >> 16) as usize);
+            for p in slot..slot + arity {
+                st.set(p, true)?;
+            }
+            st.hi = st.hi.max(slot + arity);
+        }
+        DictEntries => {
+            st.pop()?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
+        MakePolyFn | MakePolyFnCapture => {
+            if matches!(inst, MakePolyFnCapture) {
+                st.pop_n((b.operand_u32() & 0xFF) as usize + 1)?;
+            }
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
+        // Pops `[captures..., filled..., mask, entry]`, pushes the closure.
+        MakeFn => {
+            let op = b.operand_u32();
+            st.pop_n((op & 0xFF) as usize + ((op >> 8) & 0xFF) as usize + 2)?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
+        MakeCoro => {
+            st.pop_n(b.call_parts().0)?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
         HostInvoke => {
             let arity = (b.operand_u32() & 0xFFFF) as usize;
             st.pop_n(arity + 1)?;
@@ -624,6 +951,9 @@ fn transfer(
         }
         DenseIndex | DenseFieldLoad => st.set(b.dense_abc_parts().1, true)?,
         DenseStoreIndex | DenseFieldStore => {}
+        // SIMD lanes live in VM vector registers; only a reduce writes a slot.
+        VLoad | VStore | VBin | VMove | VFma => {}
+        VReduce => st.set(b.dense_abc_parts().1, false)?,
         DensePush => {
             let (arity, base) = b.dense_move_parts();
             for i in 0..arity {
@@ -700,7 +1030,7 @@ mod tests {
         let mut code = vec![call(1, 2), op(Instruction::HALT)];
         code.extend_from_slice(body);
         let entries = vec![("f".to_string(), 2)];
-        bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, u32::MAX)
+        bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
     }
 
     fn slots_at(maps: &[PreciseFrameMap], pc: u32) -> Option<Vec<u16>> {
@@ -708,6 +1038,11 @@ mod tests {
     }
 
     use common::precise_map_for_pc;
+
+    /// Rows may still carry a frame extent; none describes heap slots.
+    fn no_precise(maps: &[PreciseFrameMap]) -> bool {
+        maps.iter().all(|m| m.any_pc.is_none() && m.at_pc.is_empty())
+    }
 
     #[test]
     fn alloc_safepoint_keeps_heap_words_and_drops_numbers() {
@@ -762,10 +1097,157 @@ mod tests {
         let maps = bind(&[
             load(0),
             op(Instruction::MakeArray).with_operand_u32(1),
-            op(Instruction::VLoad),
+            op(Instruction::FfiInvoke),
             op(Instruction::RETURN),
         ]);
-        assert!(maps.is_empty());
+        assert!(no_precise(&maps));
+    }
+
+    #[test]
+    fn host_called_body_uses_declared_entry_height() {
+        // `[0] HALT; [1..] body` with no bytecode reference to PC 1.
+        let mut code = vec![op(Instruction::HALT)];
+        code.extend_from_slice(&[
+            load(0),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ]);
+        let entries = vec![("t".to_string(), 1)];
+        let declared = HashMap::from([("t".to_string(), 1)]);
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &declared,
+            u32::MAX,
+        );
+        assert_eq!(slots_at(&maps, 2), Some(vec![0, 1]));
+
+        // Without a declared height, a code-pointer-only body stays unmapped.
+        code[0] = op(Instruction::CodePtr).with_operand_u32(1);
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &HashMap::new(),
+            u32::MAX,
+        );
+        assert!(no_precise(&maps));
+    }
+
+    #[test]
+    fn coroutine_body_keeps_words_across_a_yield() {
+        // `[0] MakeCoro 0 → 2; [1] HALT; [2..] body`.
+        let mut code = vec![
+            op(Instruction::MakeCoro).with_call_packed(0, 2),
+            op(Instruction::HALT),
+        ];
+        code.extend_from_slice(&[
+            op(Instruction::InitTyped),
+            store(0),
+            konst(1),
+            op(Instruction::YieldCoro),
+            store(1),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        let entries = vec![("co".to_string(), 2)];
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &HashMap::new(),
+            u32::MAX,
+        );
+        // After resume: saved local 0, the sent value in slot 1, a new object.
+        assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn closure_body_is_analysed_from_its_own_entry() {
+        // Body at 2 builds a one-capture closure whose code sits at 10.
+        let maps = bind(&[
+            load(0),
+            konst(0),
+            op(Instruction::CodePtr).with_operand_u32(10),
+            op(Instruction::MakeFn).with_operand_u32(1 | (1 << 16)),
+            store(1),
+            konst(0),
+            op(Instruction::RETURN),
+            op(Instruction::HALT),
+            // closure frame: [capture, param]
+            load(0),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ]);
+        // Enclosing MakeFn at 5: param 0 and the new closure at 1.
+        assert_eq!(slots_at(&maps, 5), Some(vec![0, 1]));
+        // Closure MakeArray at 11: capture, param, array.
+        assert_eq!(slots_at(&maps, 11), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn plain_code_pointer_into_the_body_refuses_it() {
+        let maps = bind(&[
+            op(Instruction::CodePtr).with_operand_u32(5),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+            load(0),
+            op(Instruction::RETURN),
+        ]);
+        assert!(no_precise(&maps));
+    }
+
+    #[test]
+    fn only_marked_bodies_carry_a_frame_extent() {
+        let code = vec![
+            call(1, 2),
+            op(Instruction::HALT),
+            load(0),
+            store(6),
+            op(Instruction::MakeArray).with_operand_u32(1),
+            op(Instruction::RETURN),
+        ];
+        let entries = vec![("f".to_string(), 2)];
+        let bind_with = |needs: HashSet<String>| {
+            bind_precise_frames(
+                &HashSet::new(),
+                &needs,
+                &code,
+                &[],
+                &HashMap::new(),
+                &entries,
+                &HashMap::new(),
+                u32::MAX,
+            )
+        };
+        let plain = bind_with(HashSet::new());
+        assert!(plain.iter().all(|m| m.frame_words == 0));
+        let marked = bind_with(HashSet::from(["f".to_string()]));
+        assert_eq!(marked[0].frame_words, 7);
+    }
+
+    #[test]
+    fn frame_extent_is_the_highest_slot_touched() {
+        let body = [
+            load(0),
+            store(7),
+            op(Instruction::DenseMove).with_operand_u32((9 << 8) | 1),
+            op(Instruction::RETURN),
+        ];
+        let dest = body[2].dense_move_parts().0;
+        assert_eq!(frame_extent(&body, &[]), Some(dest.max(7) as u32 + 1));
+        let unknown = [load(0), op(Instruction::FfiInvoke), op(Instruction::RETURN)];
+        assert_eq!(frame_extent(&unknown, &[]), None);
     }
 
     #[test]
@@ -778,7 +1260,7 @@ mod tests {
         ]);
         let entries = vec![("f".to_string(), 2)];
         let maps =
-            bind_precise_frames(&HashSet::new(), &code, &[], &HashMap::new(), &entries, u32::MAX);
-        assert!(maps.is_empty());
+            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX);
+        assert!(no_precise(&maps));
     }
 }

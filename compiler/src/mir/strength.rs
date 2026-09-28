@@ -425,7 +425,7 @@ fn values_defined_in(func: &MirFunc, blocks: &HashSet<BlockId>) -> HashSet<Value
             continue;
         }
         for inst in &b.insts {
-            out.insert(inst.dest());
+            out.extend(inst.dests());
         }
     }
     out

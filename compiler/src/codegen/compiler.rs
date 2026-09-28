@@ -1432,6 +1432,11 @@ impl Compiler {
                     // Frame-slot operands the copy paths do not remap.
                     | Instruction::INC
                     | Instruction::DEC
+                    | Instruction::ArrayPin
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
                     | Instruction::HostInvoke
                     | Instruction::FfiInvoke
                     | Instruction::PRINT
@@ -2975,7 +2980,7 @@ impl Compiler {
                                 saw_value = true;
                             }
                             _ => {
-                                if Self::inline_forbidden_op(other) && !allow_calls {
+                                if Self::inline_forbidden_op(other) {
                                     return false;
                                 }
                                 self.bytecode.push_op(other.clone());
@@ -17565,6 +17570,12 @@ impl Compiler {
             offset_callees,
         });
         self.bytecode.set_opt_options(self.opt_options.clone());
+        let entry_sps: HashMap<String, u32> = self
+            .bytecode
+            .funcs()
+            .iter()
+            .map(|f| (f.name.clone(), f.entry_sp))
+            .collect();
         let mut lowered = if self.retain_cursor_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
         } else {
@@ -17662,10 +17673,12 @@ impl Compiler {
         );
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,
+            &lowered.needs_frame_extent,
             self.bytecode.as_slice(),
             &self.constants,
             &lowered.match_arities,
             &entries,
+            &entry_sps,
             self.prologue_jmp_target(),
         );
 

@@ -1940,9 +1940,9 @@ fn main() {
     }
 
     #[test]
-    fn dynamic_recursion_without_max_depth_fails_compile() {
+    fn dynamic_recursion_without_max_depth_compiles() {
         let mut pipeline = Pipeline::new();
-        let err = pipeline.compile_src(
+        let compiled = pipeline.compile_src(
             r#"
 fn noise() -> int { return 10; }
 fn fib(int n) -> int {
@@ -1955,8 +1955,8 @@ fn main() {
 }
 "#,
         );
-        assert!(err.is_err());
-        assert!(pipeline.had_errors());
+        assert!(compiled.is_ok());
+        assert!(!pipeline.had_errors());
     }
 
     /// `Pipeline::with_reporter` must not pay for `Compiler::default`, that is

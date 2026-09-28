@@ -1420,6 +1420,10 @@ fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<()
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::CastIntToFloat), loc));
             Ok(())
         }
+        MirCastKind::FloatToInt => {
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CastFloatToInt), loc));
+            Ok(())
+        }
         MirCastKind::Sext => Err(LowerError::Refused("lir sext".into())),
     }
 }

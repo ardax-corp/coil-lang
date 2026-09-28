@@ -17,6 +17,9 @@ use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
+/// Growth when most of the heap survived its last collection: the live set is
+/// still growing, so re-marking it every doubling is mostly wasted work.
+const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
@@ -34,6 +37,8 @@ pub struct Heap {
     alloc_bytes: usize,
     gc_next_threshold: usize,
     gc_growth_factor: usize,
+    /// Heap bytes when the current sweep started (survival for the next budget).
+    gc_sweep_start_bytes: usize,
     strings: Table<()>,
     head: Option<Object>,
     slab: Slab,
@@ -76,6 +81,7 @@ impl Default for Heap {
             alloc_bytes: 0,
             gc_next_threshold: GC_NEXT_THRESHOLD,
             gc_growth_factor: GC_GROWTH_FACTOR,
+            gc_sweep_start_bytes: 0,
             strings: Table::default(),
             head: None,
             slab: Slab::new(),
@@ -330,6 +336,7 @@ impl Heap {
         }
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
+        self.gc_sweep_start_bytes = self.alloc_bytes;
         self.gc_sweep_prev = None;
         self.gc_sweep_cursor = self.head;
         self.finish_sweep();
@@ -434,6 +441,7 @@ impl Heap {
         }
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
+        self.gc_sweep_start_bytes = self.alloc_bytes;
         self.gc_sweep_prev = None;
         self.gc_sweep_cursor = self.head;
     }
@@ -492,9 +500,14 @@ impl Heap {
     fn finish_sweep_cycle(&mut self) {
         // Floor at the initial budget: a tiny live set would otherwise
         // schedule a collection every few allocations.
+        let growth = if self.alloc_bytes.saturating_mul(2) > self.gc_sweep_start_bytes {
+            self.gc_growth_factor.max(GC_GROWTH_FACTOR_SURVIVING)
+        } else {
+            self.gc_growth_factor
+        };
         self.gc_next_threshold = self
             .alloc_bytes
-            .saturating_mul(self.gc_growth_factor)
+            .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD);
         self.gc_phase = GcPhase::Idle;
         self.gc_sweep_cursor = None;
@@ -540,7 +553,8 @@ impl Heap {
     /// Mid-cycle work is paced from the alloc safepoint, not a second start.
     #[inline]
     pub fn should_collect(&self) -> bool {
-        self.gc_phase == GcPhase::Idle && self.alloc_bytes > self.gc_next_threshold
+        self.gc_phase == GcPhase::Idle
+            && (cfg!(feature = "gc-stress") || self.alloc_bytes > self.gc_next_threshold)
     }
 
     /// Objects to sweep at one safepoint (doubles under pressure).
@@ -2926,6 +2940,28 @@ mod tests {
             heap.size() > GC_NEXT_THRESHOLD,
             "a tiny live set must not collect below the initial budget"
         );
+    }
+
+    /// The next budget grows 4× when most of the heap survived (a growing live
+    /// set) and 2× when most of it was garbage, never below the initial budget.
+    #[test]
+    fn gc_budget_grows_faster_when_most_of_the_heap_survives() {
+        let mut heap = Heap::default();
+        let mut keep = Vec::new();
+        while heap.size() < GC_NEXT_THRESHOLD / 2 {
+            keep.push(heap.alloc(ObjString::from("live"), Object::String).0.addr());
+        }
+        heap.trace(&keep);
+        unsafe { heap.sweep() };
+        assert_eq!(heap.gc_next_threshold, heap.size() * GC_GROWTH_FACTOR_SURVIVING);
+
+        let live = heap.size();
+        while heap.size() < live * 4 {
+            let _ = heap.alloc(ObjString::from("garbage"), Object::String);
+        }
+        heap.trace(&keep);
+        unsafe { heap.sweep() };
+        assert_eq!(heap.gc_next_threshold, (heap.size() * GC_GROWTH_FACTOR).max(GC_NEXT_THRESHOLD));
     }
 
     /// Immortal arity-0 enums are seeded as GC roots and must not be swept,

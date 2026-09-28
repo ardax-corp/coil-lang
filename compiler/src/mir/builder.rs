@@ -329,6 +329,7 @@ impl MirBuilder {
         let ok = match kind {
             MirCastKind::IntToFloat => from.is_int() && to.is_float(),
             MirCastKind::Sext => from == MirTy::I32 && to == MirTy::I64,
+            MirCastKind::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
         };
         if !ok {
             return Err(MirError::msg(format!("illegal cast {from} -> {to}")));
@@ -902,7 +903,11 @@ impl MirBuilder {
     pub fn ret(&mut self, value: Option<ValueId>) -> Result<(), MirError> {
         let lo = value.map(|v| self.resolve(v));
         if let Some(v) = lo {
-            let ty = self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v));
+            let v_ty = self.resolve_ty(v);
+            let ty = self.func.ret_ty.map_or(v_ty, |rt| {
+                // `Ok(p)` / `Err(p | 1)` returns join into the niche word.
+                if rt.is_heap_word() && v_ty.is_heap_word() { rt.join(v_ty) } else { rt }
+            });
             self.func.ret_ty = Some(ty);
             if ty.is_heap_word() {
                 self.func.ret_layout = ty.layout();

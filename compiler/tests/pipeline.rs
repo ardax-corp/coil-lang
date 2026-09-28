@@ -5747,7 +5747,9 @@ fn main() {
     assert_eq!(run_example_src(src), "0");
 }
 
-/// Two-local `if a < b { break }` fuses to BinSlotSlotJmpt and takes the break.
+/// Two-local `if a < b { break }` fuses to a two-slot compare jump (fuse-IL
+/// `BinSlotSlotJmpt`, or `BinSlotSlotJmpf` when `main` runs dense) and takes
+/// the break.
 #[test]
 fn two_local_compare_break_bin_slot_slot_jmpt_runs() {
     let src = r#"
@@ -5771,10 +5773,11 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::BinSlotSlotJmpt)),
-        "expected BinSlotSlotJmpt in bytecode"
+        bytecode.iter().any(|b| matches!(
+            b.bytecode(),
+            common::Instruction::BinSlotSlotJmpt | common::Instruction::BinSlotSlotJmpf
+        )),
+        "expected a two-slot compare jump in bytecode"
     );
     assert_eq!(run_example_src(src), "0");
 }
@@ -11013,7 +11016,12 @@ fn main() {
         .unwrap_or(bytecode.len());
     let lens = bytecode[start..end]
         .iter()
-        .filter(|b| matches!(b.bytecode(), common::Instruction::ArrayLen))
+        .filter(|b| {
+            matches!(
+                b.bytecode(),
+                common::Instruction::ArrayLen | common::Instruction::DenseArrayLen
+            )
+        })
         .count();
     assert_eq!(
         lens, 1,

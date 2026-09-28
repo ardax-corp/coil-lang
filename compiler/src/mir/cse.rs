@@ -224,7 +224,9 @@ fn def_blocks(func: &MirFunc) -> Vec<Option<BlockId>> {
     }
     for block in &func.blocks {
         for inst in &block.insts {
-            at[inst.dest().index()] = Some(block.id);
+            for d in inst.dests() {
+                at[d.index()] = Some(block.id);
+            }
         }
     }
     at

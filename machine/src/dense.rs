@@ -104,6 +104,7 @@ pub fn eval_cast(kind: u8, src: Value) -> Value {
     match kind {
         dense::CAST_I2F => Value::from(src.as_int() as f64),
         dense::CAST_SEXT => Value::from(i64::from(src.as_int() as i32)),
+        dense::CAST_F2I => Value::from(src.as_float() as i64),
         _ => src,
     }
 }

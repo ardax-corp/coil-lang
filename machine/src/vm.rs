@@ -433,6 +433,12 @@ fn resolve_dense_index_object_in(
     Some(obj)
 }
 
+/// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
+const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+
+/// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
+const CALL_WINDOW: usize = 32;
+
 pub struct Machine<const S: usize> {
     heap: crate::memory::HeapSlot,
     stack: Stack<Value>,
@@ -512,7 +518,7 @@ pub struct Machine<const S: usize> {
     /// S2b maps: live heap IL slots at alloc safepoints.
     stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps (sorted by entry); see [`common::PreciseFrameMap`].
-    precise_frames: Vec<common::PreciseFrameMap>,
+    precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// PC past the op that entered the current GC safepoint, while one runs.
     /// `None` keeps the top frame on the conservative scan.
     gc_top_ip: Option<usize>,
@@ -532,6 +538,17 @@ pub struct Machine<const S: usize> {
     shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Join result bits not yet stored on the operand stack (Layer A collect).
     steal_join_root: Value,
+    /// [`common::FrameReserve`] of the code `execute` last ran, keyed by that
+    /// code's address and length. Every frame open keeps `frame_reserve`
+    /// words free.
+    frame_reserve: usize,
+    match_payload_bound: usize,
+    frame_reserve_key: (usize, usize),
+    /// `CALL` may open a frame without a stack check while fewer frames than
+    /// this are live (see [`Self::rearm_call_window`]).
+    call_hot_depth: usize,
+    /// Stack end the current window was reserved up to (`<= capacity`).
+    call_window_end: usize,
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -590,7 +607,7 @@ impl<const S: usize> Machine<S> {
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
+            precise_frames: Arc::default(),
             gc_top_ip: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
@@ -600,6 +617,11 @@ impl<const S: usize> Machine<S> {
             gc_deferred: false,
             shared_epoch: None,
             steal_join_root: Value::default(),
+            frame_reserve: 0,
+            match_payload_bound: 0,
+            frame_reserve_key: (0, 0),
+            call_hot_depth: 0,
+            call_window_end: 0,
         }
     }
 
@@ -920,15 +942,29 @@ impl<const S: usize> Machine<S> {
         if let Some(loc) = self.format_panic_location(panic_insn_ip) {
             lines.push(format!("  at {loc}"));
         }
+        // Deep recursion repeats one frame line; print each run once.
+        let mut repeats = 0usize;
+        let flush = |lines: &mut Vec<String>, repeats: &mut usize| {
+            if *repeats > 0 {
+                lines.push(format!("  ... repeated {repeats} more times"));
+                *repeats = 0;
+            }
+        };
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
             let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
-            if let Some(loc) = self.format_panic_location(ip) {
-                lines.push(format!("  in {name} at {loc}"));
-            } else {
-                lines.push(format!("  in {name}"));
+            let line = match self.format_panic_location(ip) {
+                Some(loc) => format!("  in {name} at {loc}"),
+                None => format!("  in {name}"),
+            };
+            if lines.last() == Some(&line) {
+                repeats += 1;
+                continue;
             }
+            flush(&mut lines, &mut repeats);
+            lines.push(line);
         }
+        flush(&mut lines, &mut repeats);
         lines.join("\n")
     }
 
@@ -948,7 +984,7 @@ impl<const S: usize> Machine<S> {
         } else {
             eprint!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
-                eprintln!("{backtrace}");
+                eprintln!("\n{backtrace}");
             }
             let _ = io::stderr().flush();
         }
@@ -1447,19 +1483,28 @@ impl<const S: usize> Machine<S> {
                         }
                     }
                 }
-                None => stack[lo..hi].iter().copied().for_each(&mut root),
+                None => {
+                    // Slots stored past the cursor: cover the body's extent.
+                    let reach = self
+                        .frame_extent(i)
+                        .map_or(hi, |words| lo.saturating_add(words).max(hi))
+                        .min(self.stack.capacity());
+                    (lo..reach).for_each(|idx| root(self.stack[idx]));
+                }
             }
         }
     }
 
     /// Heap slots of frame `i` (stack region `[lo, hi)`) from its precise
     /// map, when its PC is known: the top frame's safepoint PC, or a return
-    /// address that follows a `CALL`. Frames holding a coroutine segment or
+    /// address that follows a `CALL` / `CallIndirect`. Frames holding a coroutine segment or
     /// that re-entered the VM through native code (stale return PC) stay
     /// conservative.
     fn trusted_precise_slots(&self, i: usize, lo: usize, hi: usize) -> Option<&[u16]> {
+        // A coroutine segment starting above this frame's base belongs to
+        // frames this map does not describe.
         if !self.resume_stack.is_empty()
-            && self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi)
+            && self.resume_stack.iter().any(|c| c.base_sp > lo && c.base_sp <= hi)
         {
             return None;
         }
@@ -1474,13 +1519,29 @@ impl<const S: usize> Machine<S> {
             self.gc_top_ip?.checked_sub(1)?
         } else {
             let call_pc = self.frames[i].tell().checked_sub(1)?;
-            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL) {
+            if !matches!(
+                self.instruction_at(call_pc)?,
+                Instruction::CALL | Instruction::CallIndirect
+            ) {
                 return None;
             }
             call_pc
         };
         let pc = u32::try_from(pc).ok()?;
         common::precise_map_for_pc(&self.precise_frames, pc)?.slots_at_pc(pc)
+    }
+
+    /// Frame words of the body frame `i` runs (its PC need not be trusted:
+    /// the extent only widens a conservative scan). `u32::MAX` is unbounded.
+    fn frame_extent(&self, i: usize) -> Option<usize> {
+        let ip = if i + 1 == self.frames.len() {
+            self.gc_top_ip?
+        } else {
+            self.frames[i].tell()
+        };
+        let pc = u32::try_from(ip.checked_sub(1)?).ok()?;
+        let words = common::precise_map_for_pc(&self.precise_frames, pc)?.frame_words;
+        (words != 0).then_some(words as usize)
     }
 
     fn instruction_at(&self, pc: usize) -> Option<Instruction> {
@@ -1905,7 +1966,7 @@ impl<const S: usize> Machine<S> {
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
-        self.precise_frames = program.precise_frames.clone();
+        self.precise_frames = Arc::clone(&program.precise_frames);
         self.thread_program = Some(program);
     }
 
@@ -1919,7 +1980,7 @@ impl<const S: usize> Machine<S> {
     }
 
     /// Attach complete frame maps. Empty keeps every frame conservative.
-    pub fn set_precise_frames(&mut self, maps: Vec<common::PreciseFrameMap>) {
+    pub fn set_precise_frames(&mut self, maps: Arc<Vec<common::PreciseFrameMap>>) {
         self.precise_frames = maps;
     }
 
@@ -2014,7 +2075,7 @@ impl<const S: usize> Machine<S> {
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
-            precise_frames: self.precise_frames.clone(),
+            precise_frames: Arc::clone(&self.precise_frames),
         }));
     }
 
@@ -2220,10 +2281,15 @@ impl<const S: usize> Machine<S> {
         send_val: Value,
         code: &[Byte],
         push_send_for_receive: bool,
-    ) {
+    ) -> bool {
+        // The saved segment (and a sent value) land above the cursor.
+        if !self.reserve_operand_words(gc.as_ref().saved_stack.len() + 1) {
+            return false;
+        }
         let return_ip = *ip;
         let coro = gc.as_ref();
         let base_sp = self.stack.tell();
+        let base_depth = self.frames.len();
 
         self.frames.get_mut().seek(return_ip);
 
@@ -2270,6 +2336,7 @@ impl<const S: usize> Machine<S> {
         {
             self.stack.push(send_val);
         }
+        self.keep_call_window(base_depth)
     }
 
     fn delegate_yield_to_parent(
@@ -2388,9 +2455,9 @@ impl<const S: usize> Machine<S> {
         sp: &mut usize,
         sub: RefCoroutine,
         code: &[Byte],
-    ) {
+    ) -> bool {
         let Some(outer_ctx) = self.resume_stack.last().copied() else {
-            return;
+            return true;
         };
         let outer = outer_ctx.coro;
         self.save_coroutine_state(outer, *ip, *sp, outer_ctx.base_sp, outer_ctx.frame_depth);
@@ -2399,7 +2466,7 @@ impl<const S: usize> Machine<S> {
             outer_coro.yield_from_resume_ip = *ip;
         });
         Self::with_coroutine_mut(sub, |sub_coro| sub_coro.delegator = Some(outer));
-        self.resume_coroutine(ip, sp, sub, Value::from(0_i64), code, false);
+        self.resume_coroutine(ip, sp, sub, Value::from(0_i64), code, false)
     }
 
     /// Read-only access to the heap. Used by the GC integration
@@ -2760,8 +2827,134 @@ impl<const S: usize> Machine<S> {
         self.push_result_err(kind, err.to_string());
     }
 
+    /// Make room for `words` more operand words plus [`Self::frame_reserve`]
+    /// above the cursor. `false` when that passes the VM limit.
+    #[inline]
+    fn reserve_operand_words(&mut self, words: usize) -> bool {
+        self.reserve_operand_from(self.stack.tell().saturating_add(words))
+    }
+
+    /// Like [`Self::reserve_operand_words`], for a frame whose words end at `top`.
+    #[inline]
+    fn reserve_operand_from(&mut self, top: usize) -> bool {
+        let end = top.saturating_add(self.frame_reserve);
+        end <= self.stack.capacity() || self.grow_operand_stack(end)
+    }
+
+    fn grow_operand_stack_to(&mut self, end: usize) -> bool {
+        end <= self.stack.capacity() || self.grow_operand_stack(end)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow_operand_stack(&mut self, end: usize) -> bool {
+        if end > crate::MAX_OPERAND_STACK_SLOTS {
+            return false;
+        }
+        let cap = self
+            .stack
+            .capacity()
+            .saturating_mul(2)
+            .clamp(end, crate::MAX_OPERAND_STACK_SLOTS);
+        self.stack.grow_to(cap);
+        true
+    }
+
+    /// Room for a `JumpIfMatch` payload wider than the frame reserve counts,
+    /// then a fresh window above it.
+    #[cold]
+    #[inline(never)]
+    fn reserve_wide_payload(&mut self, words: usize) -> bool {
+        self.reserve_operand_words(words)
+    }
+
+    /// Recompute [`Self::frame_reserve`] when `execute` runs different code.
+    fn bind_frame_reserve(&mut self, code: &[Byte], constants: &[u64]) {
+        let key = (code.as_ptr().addr(), code.len());
+        if self.frame_reserve_key != key {
+            // SAFETY: same layout as `program_code`'s copy in `run_with_pool`.
+            let raw: &[RawByte] =
+                unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len()) };
+            let reserve = common::frame_reserve(raw, constants);
+            self.frame_reserve = reserve.words;
+            self.match_payload_bound = reserve.match_payload;
+            self.frame_reserve_key = key;
+        }
+    }
+
+    /// Reserve room for the running frame, then for every frame `CALL` can
+    /// open up to [`Self::call_hot_depth`] live frames. A `CALL` frame starts at
+    /// most `frame_reserve` words above its caller's base (which is at or
+    /// below the cursor now), so `cursor + (hot + 1) * frame_reserve` covers
+    /// them all. Deeper calls, and frames opened any other way, come back
+    /// here. `false` when even the running frame does not fit.
+    #[inline(never)]
+    fn rearm_call_window(&mut self) -> bool {
+        // Without room for a window, every `CALL` takes the checked path.
+        self.call_hot_depth = 0;
+        let tell = self.stack.tell();
+        if !self.reserve_operand_from(tell) {
+            return false;
+        }
+        let words = self.frame_reserve.max(1);
+        self.call_window_end = tell + words;
+        let fit = (crate::MAX_OPERAND_STACK_SLOTS - tell) / words;
+        let hot = S
+            .min(self.frames.len() + CALL_WINDOW)
+            .min(fit.saturating_sub(1));
+        let end = tell + (hot + 1) * words;
+        if hot > 0 && self.grow_operand_stack_to(end) {
+            self.call_hot_depth = hot;
+            self.call_window_end = end;
+        }
+        true
+    }
+
+    /// After frames were opened above the cursor without `CALL` (host call,
+    /// closure, coroutine resume) on top of `base_depth` live frames: keep the
+    /// window when it still covers them and every `CALL` it admits from them,
+    /// else re-arm.
+    #[inline]
+    fn keep_call_window(&mut self, base_depth: usize) -> bool {
+        let reach = self.call_hot_depth.saturating_sub(base_depth) + 1;
+        let need = self.stack.tell() + reach * self.frame_reserve;
+        need <= self.call_window_end || self.rearm_call_window()
+    }
+
+    /// `CALL` past the window: check this frame, open it, re-arm. On
+    /// overflow, panics at `call_ip` and returns `false`.
+    #[cold]
+    #[inline(never)]
+    fn open_call_frame_cold(&mut self, return_ip: usize, callee_sp: usize, call_ip: usize) -> bool {
+        let opened = self.reserve_operand_words(0)
+            && self.frames.rewrite_top_and_push(
+                crate::MAX_CALL_FRAMES,
+                |caller| caller.seek(return_ip),
+                |frame| frame.set(callee_sp),
+            );
+        if !opened || !self.rearm_call_window() {
+            return self.runtime_panic(STACK_OVERFLOW, call_ip);
+        }
+        true
+    }
+
     /// Call a coil function at `offset` reentrantly (for FFI callbacks).
     pub fn call_function(&mut self, offset: u32, args: &[Value]) -> Value {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        // Borrow constants without cloning; stable while `program_constants` is not resized.
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(
+                self.program_constants.as_ptr(),
+                self.program_constants.len(),
+            )
+        };
+        self.bind_frame_reserve(code, constants);
+        if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(args.len()) {
+            self.runtime_panic(STACK_OVERFLOW, offset as usize);
+            return Value::default();
+        }
         let saved_sp = self.stack.tell();
         for a in args {
             self.stack.push(*a);
@@ -2774,19 +2967,10 @@ impl<const S: usize> Machine<S> {
             f.seek(0);
             f.set(callee_sp);
         });
+        self.keep_call_window(self.frames.len() - 1);
         // Capture only when RETURN reaches this frame depth (the
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
-        let code: &[Byte] = unsafe {
-            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
-        };
-        // Borrow constants without cloning; stable while `program_constants` is not resized.
-        let constants: &[u64] = unsafe {
-            std::slice::from_raw_parts(
-                self.program_constants.as_ptr(),
-                self.program_constants.len(),
-            )
-        };
         let mut ip = offset as usize;
         loop {
             let paused = self.execute(code, constants, ip);
@@ -2873,7 +3057,13 @@ impl<const S: usize> Machine<S> {
 
         let mut ip: usize = start_ip;
         let mut sp = self.frames.get_mut().get();
-        let stack_cap = self.stack.capacity();
+        self.bind_frame_reserve(code, constants);
+        if !self.rearm_call_window() {
+            return self.runtime_panic(STACK_OVERFLOW, ip);
+        }
+        // Bound for `promise!` index hints only. The buffer grows during the
+        // run but never past this, so the hints stay true without a refresh.
+        let stack_cap = crate::MAX_OPERAND_STACK_SLOTS;
         let code_len = code.len();
 
         macro_rules! then_hot_streak {
@@ -3007,18 +3197,26 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(ret);
                         continue;
                     }
+                    // Inside the window the stack already has room: one compare,
+                    // the same as the inline-frame check it replaces.
+                    macro_rules! open_frame {
+                        ($return_ip:expr) => {
+                            if likely(self.frames.len() < self.call_hot_depth) {
+                                self.frames.rewrite_top_and_push_inline(
+                                    |caller| caller.seek($return_ip),
+                                    |frame| frame.set(callee_sp),
+                                );
+                            } else if !self.open_call_frame_cold($return_ip, callee_sp, ip - 1) {
+                                return false;
+                            }
+                        };
+                    }
                     if likely(target != 0) {
-                        self.frames.rewrite_top_and_push(
-                            |caller| caller.seek(ip),
-                            |frame| frame.set(callee_sp),
-                        );
+                        open_frame!(ip);
                         sp = callee_sp;
                         set_jump_target(&mut ip, target, code);
                     } else {
-                        self.frames.rewrite_top_and_push(
-                            |caller| caller.seek(ip + 1),
-                            |frame| frame.set(callee_sp),
-                        );
+                        open_frame!(ip + 1);
                         sp = callee_sp;
                     }
                 }

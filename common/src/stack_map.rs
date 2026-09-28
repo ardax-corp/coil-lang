@@ -64,6 +64,32 @@ pub struct PreciseFrameMap {
     /// Heap slots at exact PCs, sorted by `pc`: the state after an
     /// allocating / host op, or the caller's words below a `CALL`'s args.
     pub at_pc: Vec<SlotMap>,
+    /// Frame words the body can touch (highest slot + 1), `0` when not
+    /// needed. A frame scanned conservatively covers at least this many
+    /// words, so registers stored past the cursor are still seen (minor 22+).
+    pub frame_words: u32,
+}
+
+/// Minor-21 row (no `frame_words`).
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct PreciseFrameMapV21 {
+    pub entry_pc: u32,
+    pub end_pc: u32,
+    pub any_pc: Option<Vec<u16>>,
+    pub at_pc: Vec<SlotMap>,
+}
+
+impl From<PreciseFrameMapV21> for PreciseFrameMap {
+    fn from(m: PreciseFrameMapV21) -> Self {
+        Self {
+            entry_pc: m.entry_pc,
+            end_pc: m.end_pc,
+            any_pc: m.any_pc,
+            at_pc: m.at_pc,
+            frame_words: 0,
+        }
+    }
 }
 
 impl PreciseFrameMap {
@@ -128,12 +154,19 @@ mod tests {
     #[test]
     fn precise_map_lookup_respects_bounds() {
         let maps = vec![
-            PreciseFrameMap { entry_pc: 10, end_pc: 20, any_pc: Some(vec![]), at_pc: vec![] },
+            PreciseFrameMap {
+                entry_pc: 10,
+                end_pc: 20,
+                any_pc: Some(vec![]),
+                at_pc: vec![],
+                frame_words: 0,
+            },
             PreciseFrameMap {
                 entry_pc: 30,
                 end_pc: 40,
                 any_pc: None,
                 at_pc: vec![SlotMap { pc: 33, slots: vec![1] }],
+                frame_words: 4,
             },
         ];
         assert!(precise_map_for_pc(&maps, 9).is_none());

@@ -22,6 +22,9 @@ use super::stackmap::has_real_maps;
 pub struct BodySidecar {
     pub debug_slot_remap: HashMap<u32, u32>,
     pub deopt: Option<DraftDeoptMap>,
+    /// Allocating dense body: its registers may sit past the cursor, so its
+    /// frame needs a decoded extent (see `precise_frames`).
+    pub needs_frame_extent: bool,
 }
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
@@ -109,8 +112,8 @@ pub fn try_specialize_body_side(
     // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
     // fuse-IL. D3: boxed JumpIfMatch / multi-payload Unpack may dense
-    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped take
-    // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
+    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped without
+    // S2b maps take dense with a frame extent (minor 22). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. D2: heap LoadField / GetField /
     // SetField emit DenseField*; Object Alloc is DenseMakeObject.
@@ -129,44 +132,41 @@ pub fn try_specialize_body_side(
     if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
         return refuse_dense("post-loop alloc return");
     }
-    if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
-        return refuse_dense("alloc without stack maps");
-    }
-    let inferred = if has_alloc {
-        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls)
-    } else {
-        infer_numeric_with(ops, pool.len(), entry_sp, calls)
+    // Registers may sit past the cursor at a safepoint, and generic host
+    // results are heap words typed `i64` that S2b maps miss: cover the frame.
+    side.needs_frame_extent = has_alloc;
+    // Strict first. An allocating body whose slots are recycled across types
+    // (format args, then a string) retries with LIR-style typing; a body that
+    // leaves values on the stack across an edge (two-slot `?`, match arms)
+    // retries with stack φs and must then win a loop-weighted cost compare.
+    let attempt = |recycle, edge_stack| {
+        let relax = DenseRelax {
+            recycle,
+            edge_stack,
+        };
+        lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc, relax)
     };
-    let inferred = match inferred {
+    let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
+    let mut edge_stack = false;
+    let mut first = attempt(false, false);
+    if first.as_ref().is_err_and(edge_refusal) {
+        edge_stack = true;
+        first = attempt(false, true);
+    }
+    let (hints, mut func) = match first {
         Ok(v) => v,
-        Err(e) => return refuse_dense(format!("infer: {e}")),
-    };
-    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
-        return refuse_dense("no numeric arith");
-    }
-    let mut hints = LowerHints::new(name);
-    hints.allow_match = match_shaped_il(ops)
-        || inferred
-            .slot_ty
-            .values()
-            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
-    hints.slot_ty = inferred.slot_ty;
-    hints.pool = pool.clone();
-    hints.pool_ty = inferred.pool_ty;
-    hints.calls = calls.clone();
-    hints.allow_alloc = has_alloc;
-    hints.allow_index = true;
-    hints.allow_effects = true;
-    hints.allow_heap_fields = true;
-    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
-    hints.param_count = live_params
-        .as_ref()
-        .map(|p| p.len() as u32)
-        .unwrap_or(entry_sp)
-        .max(entry_sp);
-    let mut func = match try_lower_numeric(ops, &hints) {
-        Ok(f) => f,
-        Err(e) => return refuse_dense(format!("lower: {e}")),
+        Err(e) if has_alloc => {
+            let mut retry = attempt(true, edge_stack);
+            if !edge_stack && retry.as_ref().is_err_and(edge_refusal) {
+                edge_stack = true;
+                retry = attempt(true, true);
+            }
+            match retry {
+                Ok(v) => v,
+                Err(_) => return refuse_dense(e),
+            }
+        }
+        Err(e) => return refuse_dense(e),
     };
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
@@ -244,6 +244,23 @@ pub fn try_specialize_body_side(
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return refuse_dense("dense cost gate");
     }
+    // Stack φs cost moves on every edge and loops skip the gate above:
+    // compare dispatches after fuse-select, where fuse-IL packs its loop
+    // tests and slot arithmetic.
+    if edge_stack {
+        let dense_cost = crate::il::fused_dispatch_cost(&out, pool);
+        if dense_cost > crate::il::fused_dispatch_cost(ops, pool) {
+            return refuse_dense("dense edge-stack cost gate");
+        }
+        // Dense is tried first; a stack-φ body must not pre-empt the MIR→LIR
+        // reconstruct the next tier would pick.
+        let mut lir_pool = pool.clone();
+        if let Some(lir) = try_lower_abi_body(ops, name, entry_sp, &mut lir_pool)
+            && dense_cost > crate::il::fused_dispatch_cost(&lir, &lir_pool)
+        {
+            return refuse_dense("dense edge-stack loses to LIR");
+        }
+    }
     // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
     if count_make_enum(&out) > count_make_enum(ops) {
         return refuse_dense("MakeEnum growth");
@@ -254,6 +271,64 @@ pub fn try_specialize_body_side(
 /// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
 /// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
 /// as match — that densifies `if !flag` and drops LogNotJmpt.
+/// Relaxations a dense retry may ask for.
+#[derive(Clone, Copy)]
+struct DenseRelax {
+    /// Type recycled slots by last use (LIR-style).
+    recycle: bool,
+    /// Carry operand-stack values across CFG edges as stack φs.
+    edge_stack: bool,
+}
+
+/// Infer + lower a dense body; `Err` is the refusal key.
+fn lower_dense_attempt(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &[u64],
+    calls: &DenseCallMap,
+    has_alloc: bool,
+    relax: DenseRelax,
+) -> Result<(LowerHints, crate::mir::MirFunc), String> {
+    let DenseRelax {
+        recycle,
+        edge_stack,
+    } = relax;
+    let inferred = if has_alloc {
+        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls, recycle)
+    } else {
+        infer_numeric_with(ops, pool.len(), entry_sp, calls)
+    };
+    let inferred = inferred.map_err(|e| format!("infer: {e}"))?;
+    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
+        return Err("no numeric arith".into());
+    }
+    let mut hints = LowerHints::new(name);
+    hints.allow_match = edge_stack
+        || match_shaped_il(ops)
+        || inferred
+            .slot_ty
+            .values()
+            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
+    hints.slot_ty = inferred.slot_ty;
+    hints.pool = pool.to_vec();
+    hints.pool_ty = inferred.pool_ty;
+    hints.calls = calls.clone();
+    hints.allow_alloc = has_alloc;
+    hints.allow_string = has_alloc;
+    hints.allow_index = true;
+    hints.allow_effects = true;
+    hints.allow_heap_fields = true;
+    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
+    hints.param_count = live_params
+        .as_ref()
+        .map(|p| p.len() as u32)
+        .unwrap_or(entry_sp)
+        .max(entry_sp);
+    let func = try_lower_numeric(ops, &hints).map_err(|e| format!("lower: {e}"))?;
+    Ok((hints, func))
+}
+
 fn match_shaped_il(ops: &[IlOp]) -> bool {
     let mut i = 0;
     while i < ops.len() {

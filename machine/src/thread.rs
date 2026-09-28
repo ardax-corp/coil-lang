@@ -158,7 +158,7 @@ pub struct ThreadProgram {
     /// S2b slot / frame maps (empty when the archive had none).
     pub stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps; frames without one keep the conservative scan.
-    pub precise_frames: Vec<common::PreciseFrameMap>,
+    pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
 }
 
 /// Tag indices for [`ThreadError`](common::BUILTIN_THREAD_ERROR_ENUM).

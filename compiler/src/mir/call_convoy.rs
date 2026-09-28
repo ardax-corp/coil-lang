@@ -122,6 +122,31 @@ impl ConvoyPlan {
                 need_slot[i] = true;
             }
         }
+        // A constant compared by a fused branch gets a register (set once
+        // where it is defined, before the loop) unless it is the right operand
+        // and fits `BinSlotImm`: rebuilding it on the stack costs dispatches
+        // on every trip and blocks the two-slot compare-jump fuse.
+        for block in &func.blocks {
+            let Some(Terminator::Br { cond, .. }) = &block.term else {
+                continue;
+            };
+            if !fused[cond.index()] {
+                continue;
+            }
+            let Some((lhs, rhs)) = block.insts.iter().find_map(|inst| match inst {
+                MirInst::Cmp { dest, lhs, rhs, .. } if dest == cond => Some((*lhs, *rhs)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            for (v, is_rhs) in [(lhs, false), (rhs, true)] {
+                if rematerialize_const(func, &def[v.index()])
+                    && !(is_rhs && const_fits_i16(func, &def[v.index()]))
+                {
+                    need_slot[v.index()] = true;
+                }
+            }
+        }
         // TailCall dests never live in the caller frame.
         for block in &func.blocks {
             for inst in &block.insts {
@@ -490,6 +515,19 @@ fn rematerialize_const(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
             ..
         })
     )
+}
+
+fn const_fits_i16(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
+    let Some((bid, idx)) = *def else {
+        return false;
+    };
+    let n = match func.block(bid).insts.get(idx) {
+        Some(MirInst::Const { c: MirConst::I64(x), .. }) => *x,
+        Some(MirInst::Const { c: MirConst::I32(x), .. }) => i64::from(*x),
+        Some(MirInst::Const { c: MirConst::Bool(x), .. }) => i64::from(*x),
+        _ => return false,
+    };
+    i16::try_from(n).is_ok()
 }
 
 fn consumer_keeps_tos(

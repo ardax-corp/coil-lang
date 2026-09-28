@@ -1022,6 +1022,13 @@ fn lower_byte(
             tos.push(b.ins_cast(MirCastKind::IntToFloat, to, v)?);
             Ok(())
         }
+        Instruction::CastFloatToInt => {
+            let v = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("cast stack".into()))?;
+            tos.push(b.ins_cast(MirCastKind::FloatToInt, MirTy::I64, v)?);
+            Ok(())
+        }
         Instruction::NEGF | Instruction::NEG => {
             let v = tos
                 .pop()

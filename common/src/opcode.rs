@@ -527,6 +527,8 @@ pub mod dense {
     pub const UNARY_FNEG: u8 = 2;
     pub const CAST_I2F: u8 = 0;
     pub const CAST_SEXT: u8 = 1;
+    /// `f64` → `i64`, truncating toward zero like `CastFloatToInt` (minor 22+).
+    pub const CAST_F2I: u8 = 2;
 
     /// [`super::Instruction::DenseIndex`] / [`super::Instruction::DenseStoreIndex`] flag.
     pub const HEAP_UNCHECKED: u8 = 1;

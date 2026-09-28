@@ -110,6 +110,6 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
         debug,
         operand_stack_slots,
         stack_maps,
-        precise_frames,
+        precise_frames: Arc::new(precise_frames),
     }));
 }

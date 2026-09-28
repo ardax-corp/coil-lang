@@ -12,7 +12,7 @@ Plan for `HashMap`, `HashSet`, `List`, and `TreeMap` in the standard library.
 | Recursive enums | Persistent trees / functional lists |
 | Bit ops (`&`, `<<`) and `%` | Bucket index from hash |
 | `HostInvoke` (not opcodes) | Prefer this over new opcodes if a native ever lands |
-| `#[max_depth(N)]` | Bound recursive tree / list walks |
+| Growable operand stack | Recursive tree / list walks of any depth (up to the VM limit) |
 
 **Do not add** map/set/list opcodes or a heap `Object::HashMap`. That would be benchmark-shaped surface area; AGENTS prefers alloc reduction and `HostInvoke` over new opcodes unless the pattern is universal.
 
@@ -42,7 +42,7 @@ shape (COI-92) — not a single boxed ABI.
 |-----|--------|-------------------|
 | `[Option<T>]` / `[Foo<K,V>]` | Nested generics in array element types parse | Done — write `[Option<int>]` directly |
 | Free `fn f<T>(T) -> Option<T>` | Still `E0127` (shared body boxes `T`); put that return on an inherent method. Ground `Option`/`Result` elsewhere is niche / two-slot / boxed by shape | — |
-| Functional `List` recursion can panic on stack | Prefer mutable class list for now | VM stack / `max_depth` interaction audit |
+| Functional `List` recursion past the VM limit panics with `stack overflow` | Prefer mutable class list for very long lists | — |
 
 ## Future (only if measured)
 

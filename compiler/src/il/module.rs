@@ -6,7 +6,7 @@
 //! CFG GVN run per body, then the stream is concatenated for whole-buffer
 //! `multi_op_join_convoy` and a single fuse/PC lower.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::func::IlFunc;
 use super::op::{IlJumpKind, IlOp, Label};
@@ -42,6 +42,8 @@ pub struct IlModule {
     pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     /// I7 / C3 deopt resume drafts (compiler-internal; not archived).
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
+    /// Dense bodies whose frames need a decoded extent (no S2b maps).
+    pub needs_frame_extent: HashSet<String>,
     /// Original IL slot → reconstruct slot after dense / LIR (named lets).
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
 }
@@ -61,6 +63,7 @@ impl IlModule {
                 entry_at_offset: HashMap::new(),
                 stack_map_drafts: Vec::new(),
                 deopt_map_drafts: Vec::new(),
+                needs_frame_extent: HashSet::new(),
                 debug_slot_remaps: HashMap::new(),
             };
         }
@@ -266,6 +269,7 @@ impl IlModule {
         // S2d: snapshot maps from stack-IL before dense replace (dense residuals
         // cannot re-infer). Re-lift after LIR / fuse-IL when that succeeds.
         self.stack_map_drafts.clear();
+        self.needs_frame_extent.clear();
         let mut pre_maps = std::collections::HashMap::<String, crate::mir::DraftFrameMap>::new();
         if opts.mir_specialize {
             for body in &self.funcs {
@@ -307,6 +311,9 @@ impl IlModule {
                     }
                     if let Some(deopt) = side.deopt {
                         side_deopts.push(deopt);
+                    }
+                    if side.needs_frame_extent {
+                        self.needs_frame_extent.insert(body.meta.name.clone());
                     }
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());

@@ -179,6 +179,43 @@ pub fn emit_dense(
             if !plan.needs_slot(inst.dest()) {
                 continue;
             }
+            // Register form needs every operand in a register. A convoyed
+            // operand (a self-call result on the stack) feeding a stored
+            // value goes through the stack instead.
+            if inst.operands().iter().any(|v| !plan.needs_slot(*v)) {
+                let MirInst::Bin {
+                    dest,
+                    op,
+                    ty,
+                    lhs,
+                    rhs,
+                } = inst
+                else {
+                    return Err(LowerError::Refused(
+                        "dense operand without a register".into(),
+                    ));
+                };
+                emit_stack_bin(EmitStackBinArgs {
+                    out: &mut out,
+                    stacked: &mut stacked,
+                    op: *op,
+                    ty: *ty,
+                    lhs: *lhs,
+                    rhs: *rhs,
+                    dest: *dest,
+                    func,
+                    plan: &plan,
+                    regs: &regs,
+                    pool,
+                    loc,
+                })?;
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+                stacked.clear();
+                continue;
+            }
             emit_inst(EmitInstArgs {
                 out: &mut out,
                 inst,
@@ -485,26 +522,27 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
             });
             return Ok(());
         }
-        out.push(IlOp::Load {
-            slot: u32::from(regs[lhs.index()]),
-            loc,
-        });
-        if plan.needs_slot(*rhs) {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[rhs.index()]),
-                loc,
-            });
-        } else {
-            emit_stack_value(EmitStackValueArgs {
-                out,
-                stacked: &mut Vec::new(),
-                v: *rhs,
-                func,
-                plan,
-                regs,
-                pool,
-                loc,
-            })?;
+        // Either operand may be slotless (a constant `destprop` moved in
+        // from a folded phi): rebuild it on the stack instead of loading a
+        // register it never got.
+        for v in [*lhs, *rhs] {
+            if plan.needs_slot(v) {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[v.index()]),
+                    loc,
+                });
+            } else {
+                emit_stack_value(EmitStackValueArgs {
+                    out,
+                    stacked: &mut Vec::new(),
+                    v,
+                    func,
+                    plan,
+                    regs,
+                    pool,
+                    loc,
+                })?;
+            }
         }
         out.push(IlOp::Bin {
             op: stack_cmp_op(*op, *ty)?,
@@ -512,11 +550,23 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         });
         return Ok(());
     }
-    out.push(IlOp::Load {
-        slot: u32::from(regs[cond.index()]),
+    if plan.needs_slot(cond) {
+        out.push(IlOp::Load {
+            slot: u32::from(regs[cond.index()]),
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack_value(EmitStackValueArgs {
+        out,
+        stacked: &mut Vec::new(),
+        v: cond,
+        func,
+        plan,
+        regs,
+        pool,
         loc,
-    });
-    Ok(())
+    })
 }
 
 fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
@@ -799,6 +849,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             let k = match kind {
                 MirCastKind::IntToFloat => dense::CAST_I2F,
                 MirCastKind::Sext => dense::CAST_SEXT,
+                MirCastKind::FloatToInt => dense::CAST_F2I,
             };
             out.push(byte(
                 Byte::new(Instruction::DenseCast).with_dense_unary(
@@ -1080,10 +1131,31 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::Print { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses I4 print/format (Q9 R1 is MIR→LIR)".into(),
+        // Table ops at the stack edge, like HostInvoke: push operands, run
+        // the shipped opcode, store the result.
+        MirInst::Format { dest, fmt, args } => {
+            let words: Vec<ValueId> = std::iter::once(*fmt).chain(args.iter().copied()).collect();
+            emit_dense_push(out, &words, regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+                loc,
             ));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Stringify { dest, src } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Print { src, .. } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::Print { loc });
         }
     }
     Ok(())
@@ -1828,6 +1900,9 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
                 MirInst::Alloc { elems, .. } => elems.len(),
+                // Format string plus args, pushed like call args.
+                MirInst::Format { args, .. } => args.len() + 1,
+                MirInst::Stringify { .. } | MirInst::Print { .. } => 1,
                 _ => 0,
             };
             n = n.max(u8::try_from(w).unwrap_or(u8::MAX));

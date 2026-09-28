@@ -1,10 +1,11 @@
-//! Static recursion-depth / operand-stack bound analysis.
+//! Static recursion-depth analysis that presizes the VM operand stack.
 //!
 //! Proves call-frame depth when a recursive function has a decreasing int/byte
 //! **measure** parameter (possibly among multiple args), a recognizable base
 //! case, and **known** entry measure values (literals, intra-proc const bindings,
-//! or shallow interprocedural wrappers). When unprovable, `#[max_depth(N)]` is
-//! required.
+//! or shallow interprocedural wrappers). `#[max_depth(N)]` is an optional hint
+//! for other recursion. Neither is needed for safety: the VM grows the stack
+//! whenever a frame opens without room (`common::frame_reserve`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -137,7 +138,6 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
     let mut max_frames_any: u32 = 1;
 
     for name in &recursive {
-        let span = fn_meta.get(name).map(|m| m.span.clone()).unwrap_or(0..0);
         let attr_depth = fn_meta.get(name).and_then(|m| m.max_depth);
         let attr_err = fn_meta.get(name).and_then(|m| m.attr_error.clone());
         if let Some(msg) = attr_err {
@@ -162,23 +162,13 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
         }
 
         if !is_self {
-            match attr_depth {
-                Some(d) => {
-                    max_frames_any = max_frames_any.max(d);
-                    report.bounds.push(FnStackBound {
-                        fn_name: name.clone(),
-                        max_frames: d,
-                        source: BoundSource::Attribute,
-                    });
-                }
-                None => report.messages.push(Message::error(
-                    ErrorCode::UnboundedRecursion,
-                    format!(
-                        "recursive function `{name}` participates in mutual recursion; \
-                         add `#[max_depth(N)]` with a safe upper bound on call-frame depth"
-                    ),
-                    span.clone(),
-                )),
+            if let Some(d) = attr_depth {
+                max_frames_any = max_frames_any.max(d);
+                report.bounds.push(FnStackBound {
+                    fn_name: name.clone(),
+                    max_frames: d,
+                    source: BoundSource::Attribute,
+                });
             }
             continue;
         }
@@ -218,46 +208,11 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
                     source: BoundSource::Attribute,
                 });
             }
-            (DepthProof::Unprovable, None) => {
-                let reason = if has_dynamic {
-                    "is called with a non-constant measure argument"
-                } else if measure_shapes
-                    .get(name)
-                    .is_some_and(|s| s.base_bound.is_none())
-                {
-                    "needs a recognizable base case (`if n <= K` / `n < K` / `n == K`)"
-                } else if measure_shapes.contains_key(name) {
-                    "has no constant entry call site to bound its measure"
-                } else {
-                    "has no analyzable decreasing measure / base-case shape"
-                };
-                report.messages.push(Message::error(
-                    ErrorCode::UnboundedRecursion,
-                    format!(
-                        "recursive function `{name}` {reason}; \
-                         add `#[max_depth(N)]` with a safe upper bound on call-frame depth"
-                    ),
-                    span,
-                ));
-            }
+            (DepthProof::Unprovable, None) => {}
         }
     }
 
     report.operand_slots_needed = operand_slots_for_frames(max_frames_any);
-    if max_frames_any
-        .saturating_mul(DEFAULT_FRAME_SLOTS)
-        .saturating_add(DEFAULT_FRAME_SLOTS)
-        > MAX_OPERAND_STACK_SLOTS
-    {
-        report.messages.push(Message::error(
-            ErrorCode::StackDepthExceeded,
-            format!(
-                "estimated operand stack need exceeds the VM limit of {MAX_OPERAND_STACK_SLOTS} slots"
-            ),
-            0..0,
-        ));
-    }
-
     report
 }
 
@@ -268,7 +223,6 @@ enum DepthProof {
 }
 
 struct FnMeta {
-    span: std::ops::Range<usize>,
     max_depth: Option<u32>,
     attr_error: Option<Message>,
     self_recursive: bool,
@@ -392,13 +346,11 @@ fn collect_fn_meta<'a>(
             body: Some(body),
             ..
         } if recursive.contains(*name) => {
-            let span = ast.0.into_range();
-            let (max_depth, attr_error) = parse_max_depth_attr(attrs, span.clone());
+            let (max_depth, attr_error) = parse_max_depth_attr(attrs, ast.0.into_range());
             let self_recursive = body_calls_self(body, name);
             out.insert(
                 (*name).to_string(),
                 FnMeta {
-                    span,
                     max_depth,
                     attr_error,
                     self_recursive,
@@ -1587,6 +1539,16 @@ mod tests {
         );
     }
 
+    /// Unprovable recursion compiles; it just gets no frame bound.
+    fn assert_unbounded(report: &StackBoundReport, name: &str) {
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert!(
+            !report.bounds.iter().any(|b| b.fn_name == name),
+            "{:?}",
+            report.bounds
+        );
+    }
+
     fn parse(src: &str) -> Output<'static> {
         let owned = Box::leak(src.to_string().into_boxed_str());
         Pratt::default().parse(owned).expect("parse")
@@ -1664,7 +1626,7 @@ fn main() {
     }
 
     #[test]
-    fn dynamic_rec_requires_max_depth() {
+    fn dynamic_rec_compiles_without_a_bound() {
         let ast = parse(
             r#"
 fn noise() -> int { return 10; }
@@ -1679,14 +1641,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("max_depth")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "fib");
     }
 
     #[test]
@@ -1801,14 +1756,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("max_depth")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "fib");
     }
 
     #[test]
@@ -1828,14 +1776,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("max_depth")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "fib");
     }
 
     #[test]
@@ -1855,14 +1796,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("max_depth")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "fib");
 
         let ast = parse(
             r#"
@@ -1879,14 +1813,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("max_depth")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "fib");
     }
 
     #[test]
@@ -2087,7 +2014,7 @@ fn main() {
     }
 
     #[test]
-    fn mutual_non_tail_sibling_still_needs_attr() {
+    fn mutual_non_tail_sibling_compiles_without_a_bound() {
         let ast = parse(
             r#"
 fn even(int n) -> int {
@@ -2105,14 +2032,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.message().contains("mutual recursion")),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "even");
     }
 
     #[test]
@@ -2209,7 +2129,7 @@ fn main() { let x = g(4); return; }
     }
 
     #[test]
-    fn missing_base_case_requires_max_depth() {
+    fn missing_base_case_compiles_without_a_bound() {
         let ast = parse(
             r#"
 fn f(int n) -> int {
@@ -2222,17 +2142,11 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report.messages.iter().any(|m| {
-                m.code() == Some(ErrorCode::UnboundedRecursion) && m.message().contains("base case")
-            }),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "f");
     }
 
     #[test]
-    fn unrecognized_shape_requires_max_depth() {
+    fn unrecognized_shape_compiles_without_a_bound() {
         let ast = parse(
             r#"
 fn boom(int n) -> int {
@@ -2245,14 +2159,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report.messages.iter().any(|m| {
-                m.code() == Some(ErrorCode::UnboundedRecursion)
-                    && m.message().contains("analyzable decreasing measure")
-            }),
-            "{:?}",
-            report.messages
-        );
+        assert_unbounded(&report, "boom");
     }
 
     #[test]
@@ -2283,7 +2190,7 @@ fn main() {
     }
 
     #[test]
-    fn absurd_max_depth_emits_stack_depth_exceeded() {
+    fn absurd_max_depth_clamps_to_the_vm_limit() {
         let ast = parse(
             r#"
 #[max_depth(65536)]
@@ -2299,14 +2206,7 @@ fn main() {
 "#,
         );
         let report = analyze_stack_bounds(&ast);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.code() == Some(ErrorCode::StackDepthExceeded)),
-            "{:?}",
-            report.messages
-        );
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
         assert_eq!(report.operand_slots_needed, MAX_OPERAND_STACK_SLOTS);
     }
 

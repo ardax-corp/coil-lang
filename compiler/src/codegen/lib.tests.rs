@@ -4563,7 +4563,7 @@ fn main() {
     let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert!(
         makes >= 1,
