@@ -9,8 +9,8 @@ Its size is decided in two places:
   dense specialize, a recursive body that `Seek`s more than 16 slots
   reapplies `max_frames × seek + seek`
   ([`rescale_operand_slots_for_dense_seek`](../../compiler/src/typechecking/stack_bound.rs), Q7 `tak`).
-- **Run time, growth.** The VM never relies on that size. Whenever it opens
-  a frame without room, it grows the buffer (doubling) up to
+- **Run time, growth.** The VM never relies on that size. Before a frame
+  could run out of room, it grows the buffer (doubling) up to
   [`MAX_OPERAND_STACK_SLOTS`](../../machine/src/lib.rs), then panics with
   `stack overflow`. The limit on live frames,
   [`MAX_CALL_FRAMES`](../../machine/src/lib.rs), stops recursion that never
@@ -19,25 +19,35 @@ Its size is decided in two places:
 ## Frame reserve
 
 [`common::frame_reserve`](../../common/src/frame_bound.rs) bounds how far any
-one frame can raise the cursor above where it was opened. It splits the code
-into components joined by fall-through and jumps (calls and code pointers
-open new frames, so they do not join), and takes the largest
-`highest slot touched + sum of each op's pushes`. Loops have no net push, and
-`STORE` / `Seek` / dense registers only raise the cursor to a slot counted in
-the first term. The per-op table is an exhaustive `match`, so a new opcode
-does not build until it is classified.
+one frame can rise above the base its caller gives it (`W`). It splits the
+code into components joined by fall-through and jumps (calls and code
+pointers open new frames, so they do not join), takes the largest
+`highest slot touched + sum of each op's pushes`, and adds the widest
+`CALL` / `TailCall` arity. Loops have no net push, and `STORE` / `Seek` /
+dense registers only raise the cursor to a slot counted in the first term. A
+`JumpIfMatch` hit counts as pushing the widest enum payload the program
+builds (host enums carry at most two words). The per-op table is an
+exhaustive `match`, so a new opcode does not build until it is classified.
 
 The VM computes the reserve once per program (keyed by the code slice
-`execute` runs, so old archives are covered too) and keeps
-`cursor + reserve ≤ capacity` at:
+`execute` runs, so old archives are covered too).
 
-- `CALL`, `TailCall`, `CallIndirect` (after its captures / dictionaries), and
-  host `call_function`;
+## Call window
+
+Checking every `CALL` would cost the hot path. Instead the VM reserves a
+window: with the cursor at `T` and depth `d`, it grows the stack to
+`T + (hot + 1) × W` for `hot = min(frames kept inline, d + 32)`. A `CALL`
+frame starts at most `W` above its caller's base, so every frame `CALL` opens
+while fewer than `hot` frames are live fits. `CALL` then only compares the
+frame count against `hot`, the same compare as the inline-frame check it
+replaces; `TailCall` needs none (`W` covers its arguments). Past the window,
+`CALL` checks its own frame and re-arms.
+
+Frames opened any other way keep the window only when it still covers them:
+
+- `CallIndirect` (after its captures / dictionaries) and host `call_function`;
 - coroutine resume and `yield from` (the saved segment lands above the cursor);
-- a `JumpIfMatch` hit (the payload width is only known at run time).
-
-`CALL` pays one compare against the cached capacity; the rest are off the hot
-path.
+- a `JumpIfMatch` payload wider than the reserve counts.
 
 Archive **minor 13** (COI-358 E0) stores `operand_stack_slots` on
 [`ArchivedProgram`](../../common/src/archive.rs). `coil run foo.hyc` and
