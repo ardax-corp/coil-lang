@@ -325,6 +325,7 @@ fn lower_dense_attempt(
         .map(|p| p.len() as u32)
         .unwrap_or(entry_sp)
         .max(entry_sp);
+    hints.entry_tell = Some(entry_sp);
     let func = try_lower_numeric(ops, &hints).map_err(|e| format!("lower: {e}"))?;
     Ok((hints, func))
 }
@@ -570,6 +571,7 @@ pub fn try_lower_abi_body_side(
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
+    hints.entry_tell = Some(entry_sp);
     hints.allow_match = true;
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
