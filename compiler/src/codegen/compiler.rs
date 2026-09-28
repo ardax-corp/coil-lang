@@ -1432,6 +1432,11 @@ impl Compiler {
                     // Frame-slot operands the copy paths do not remap.
                     | Instruction::INC
                     | Instruction::DEC
+                    | Instruction::ArrayPin
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
                     | Instruction::HostInvoke
                     | Instruction::FfiInvoke
                     | Instruction::PRINT
@@ -2975,7 +2980,7 @@ impl Compiler {
                                 saw_value = true;
                             }
                             _ => {
-                                if Self::inline_forbidden_op(other) && !allow_calls {
+                                if Self::inline_forbidden_op(other) {
                                     return false;
                                 }
                                 self.bytecode.push_op(other.clone());
