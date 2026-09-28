@@ -92,6 +92,8 @@ impl Checker {
             for_in_pin_spans: HashSet::new(),
             fn_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
+            length_stability: Default::default(),
+            program_finalizers_resize: None,
             current_module_id,
             host_grants: crate::HostGrants::deny_all(),
             dload_host_stems: Vec::new(),
@@ -1544,6 +1546,7 @@ impl Checker {
         self.for_in_pin_spans.clear();
         self.fn_effects.clear();
         self.pure_fn_names.clear();
+        self.length_stability = Default::default();
         self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
         // Mint NodeIds for every AST node (pre-walk). The visit order

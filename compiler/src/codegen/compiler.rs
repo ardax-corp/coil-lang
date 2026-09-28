@@ -9769,6 +9769,12 @@ impl Compiler {
         self.pair_return_kinds.borrow_mut().clear();
     }
 
+    /// Whole-compile answer to "can some `fn drop()` resize an array?"
+    /// (`None` = the file being checked is the whole program).
+    pub fn set_program_finalizers_resize(&mut self, resize: Option<bool>) {
+        self.checker.program_finalizers_resize = resize;
+    }
+
     pub fn clear_fn_value_escaped_program(&mut self) {
         self.fn_value_escaped_program = None;
         self.pair_return_kinds.borrow_mut().clear();
@@ -17595,10 +17601,13 @@ impl Compiler {
             .iter()
             .map(|(name, off)| (*off as u32, name.clone()))
             .collect();
+        let stability = self.typed_sidecar.length_stability();
         self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
             pure_fns: self.pure_fns.clone(),
             label_callees,
             offset_callees,
+            length_stable_fns: stability.fns.clone(),
+            alloc_length_stable: stability.alloc_stable,
         });
         self.bytecode.set_opt_options(self.opt_options.clone());
         let entry_sps: HashMap<String, u32> = self

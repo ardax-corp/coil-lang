@@ -220,6 +220,12 @@ pub struct Checker {
     pub(crate) fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
     /// Bind names proven pure (LICM / index facts / auto-par).
     pub(crate) pure_fn_names: HashSet<String>,
+    /// Functions that cannot change an array length, and whether allocation
+    /// (which can run finalizers) is length-stable. Recomputed per file.
+    pub(crate) length_stability: crate::typechecking::purity::LengthStability,
+    /// Whole-compile "some `fn drop()` may resize an array" from the pipeline
+    /// (every file in the use graph). `None` = this file is the program.
+    pub(crate) program_finalizers_resize: Option<bool>,
     /// [`ModuleId`] for [`Self::current_module`].
     current_module_id: ModuleId,
 

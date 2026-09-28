@@ -46,6 +46,10 @@ impl Effects {
         Effects(self.0 | other.0)
     }
 
+    pub(crate) const fn without(self, mask: Effects) -> Effects {
+        Effects(self.0 & !mask.0)
+    }
+
     pub(crate) const fn any(self, mask: Effects) -> bool {
         self.0 & mask.0 != 0
     }

@@ -1665,6 +1665,37 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     );
 }
 
+/// Impure helper that only writes a field: `len(v)` still hoists and `v[i]`
+/// still unchecks, like the pure helper above (length-stable calls).
+#[test]
+fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_impure.hy");
+    let stats = compiler::last_bounds_stats();
+    assert!(
+        stats.proven_index >= 1,
+        "v[i] under i < len(v) should prove across absorb; stats={stats:?}"
+    );
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "scan", bc.len());
+    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    assert_eq!(
+        count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
+            + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen),
+        0,
+        "scan must not recompute len(v) every iteration"
+    );
+    let unchecked = count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked)
+        + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)
+        + count_dense_unchecked_in(&bc, start, end, false);
+    assert!(unchecked >= 1, "field-writing helper scan should emit Unchecked index");
+    assert!(
+        count_opcodes_in(&bc, start, end, Instruction::CALL) >= 1,
+        "absorb must remain a CALL (not tiny-inlined)"
+    );
+    let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
+    println!("vec_scan_impure dispatches={dispatches}");
+}
+
 #[test]
 fn aot_p2_nsieve_dispatch_regression() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.hy");

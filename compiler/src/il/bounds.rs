@@ -1066,7 +1066,7 @@ mod hoist {
     use common::Instruction;
 
     use crate::il::licm::{
-        NaturalLoop, find_natural_loops, insert_preheader_ops, loop_has_barrier, slots_stored_in_loop,
+        NaturalLoop, find_natural_loops, insert_preheader_ops, slots_stored_in_loop,
         store_count_in_loop,
     };
     use crate::il::op::IlOp;
@@ -1150,7 +1150,7 @@ mod hoist {
                     facts.refusal = Some(Refusal::HeaderSpUnknown);
                     return facts;
                 }
-                if loop_has_barrier(ops, lp, purity) || !loop_is_modelled(ops, lp) {
+                if loop_blocks_length_proof(ops, lp, purity) || !loop_is_modelled(ops, lp) {
                     facts.refusal = Some(Refusal::OpaqueOp);
                     return facts;
                 }
@@ -1448,6 +1448,18 @@ mod hoist {
             return None;
         }
         None
+    }
+
+    /// True when an op in the loop could change an array's length behind our
+    /// back (impure-for-length call, host, yield, …). Same question as the
+    /// unchecked-index proof, so the same barrier.
+    fn loop_blocks_length_proof(
+        ops: &[IlOp],
+        lp: &NaturalLoop,
+        purity: Option<&crate::il::pure_call::PureCallCtx>,
+    ) -> bool {
+        (lp.header..=lp.latch)
+            .any(|i| crate::il::pure_call::op_blocks_length_proof(&ops[i], purity))
     }
 
     /// True when no op in the loop can change the length of an existing array.

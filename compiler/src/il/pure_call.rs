@@ -8,8 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use common::Instruction;
+
 use super::effects::{Effects, effects};
-use super::op::{IlOp, Label};
+use super::op::{EntryKind, IlOp, Label};
 
 /// Maps entry labels and packed CALL offsets to callee names plus the AST purity set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,6 +20,12 @@ pub struct PureCallCtx {
     pub label_callees: HashMap<u32, String>,
     /// Emit-time `CALL` targets (`self.functions` offsets) → bind names.
     pub offset_callees: HashMap<u32, String>,
+    /// Callees that cannot change any array's length (superset of
+    /// `pure_fns`); see [`crate::typechecking::purity::LengthStability`].
+    pub length_stable_fns: HashSet<String>,
+    /// No finalizer can change a length, so allocating ops (`FORMAT`, field
+    /// key interning) are not length barriers.
+    pub alloc_length_stable: bool,
 }
 
 impl PureCallCtx {
@@ -33,25 +41,59 @@ impl PureCallCtx {
             .is_some_and(|n| self.name_is_pure(n))
     }
 
-    /// Exact bind name, `$mono$` clone of a pure bind, or a single `::` suffix
-    /// against the AST short name.
     fn name_is_pure(&self, name: &str) -> bool {
-        let stem = name.split("$mono$").next().unwrap_or(name);
-        if self.pure_fns.contains(stem) {
-            return true;
-        }
-        match stem.rsplit_once("::") {
-            Some((prefix, short)) if !prefix.contains("::") => self.pure_fns.contains(short),
-            _ => false,
-        }
+        name_in(&self.pure_fns, name)
+    }
+
+    /// True when `op` calls a user function that cannot change any array's
+    /// length (whatever its return width).
+    fn call_is_length_stable(&self, op: &IlOp) -> bool {
+        let name = match op {
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                target,
+                ..
+            } => self.label_callees.get(&target.0),
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CALL => {
+                self.offset_callees.get(&(byte.call_parts().1 as u32))
+            }
+            _ => None,
+        };
+        name.is_some_and(|n| name_in(&self.length_stable_fns, n))
+    }
+}
+
+/// Exact bind name, `$mono$` clone of a listed bind, or a single `::` suffix
+/// against the AST short name.
+fn name_in(set: &HashSet<String>, name: &str) -> bool {
+    let stem = name.split("$mono$").next().unwrap_or(name);
+    if set.contains(stem) {
+        return true;
+    }
+    match stem.rsplit_once("::") {
+        Some((prefix, short)) if !prefix.contains("::") => set.contains(short),
+        _ => false,
     }
 }
 
 /// True when `op` blocks length-invariance / ArrayLen hoist for an array loop.
 /// Array grow is handled per array by the callers; element stores are fine.
+///
+/// The question is only "can this change an array's length?", not "is this
+/// pure?": a call to a length-stable user function passes even when it does
+/// IO or writes fields. Field ops and `FORMAT` run no user code and never
+/// resize, but they allocate, and allocation can run a finalizer — so they
+/// pass only when no finalizer can resize.
 pub fn op_blocks_length_proof(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
+    let mut e = effects(op, ctx);
+    if e.any(Effects::CALL) && ctx.is_some_and(|c| c.call_is_length_stable(op)) {
+        e = e.without(Effects::CALL);
+    }
+    if ctx.is_some_and(|c| c.alloc_length_stable) {
+        e = e.without(Effects::FORMAT | Effects::FIELD_READ | Effects::FIELD_WRITE);
+    }
     // Resume restores empty pin maps; pins are not saved on ObjCoroutine.
-    effects(op, ctx).any(
+    e.any(
         Effects::CALL
             | Effects::HOST
             | Effects::FORMAT
@@ -72,8 +114,6 @@ pub fn op_blocks_licm(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
 #[cfg(test)]
 mod tests {
     use common::{Byte, DebugLoc, Instruction};
-
-    use crate::il::op::EntryKind;
 
     use super::*;
 
@@ -198,5 +238,56 @@ mod tests {
         assert!(!ctx.call_is_pure(Label(4)));
         ctx.label_callees.insert(5, "sq$mono$3$0".into());
         assert!(ctx.call_is_pure(Label(5)));
+    }
+
+    /// Impure but length-stable: passes the length proof, still blocks LICM.
+    #[test]
+    fn length_stable_call_passes_length_proof_only() {
+        let mut ctx = PureCallCtx::default();
+        ctx.length_stable_fns.insert("absorb".into());
+        ctx.label_callees.insert(9, "absorb".into());
+        ctx.offset_callees.insert(40, "absorb".into());
+        let entry = IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 2,
+            target: Label(9),
+            loc: loc(),
+            ret_words: 1,
+        };
+        let byte = IlOp::Byte {
+            byte: Byte::new(Instruction::CALL).with_call_packed(2, 40),
+            loc: loc(),
+        };
+        for op in [&entry, &byte] {
+            assert!(!op_blocks_length_proof(op, Some(&ctx)));
+            assert!(op_blocks_licm(op, Some(&ctx)));
+        }
+        // A tail call to the same name is still a barrier.
+        let tail = IlOp::Entry {
+            kind: EntryKind::TailCall,
+            arity: 2,
+            target: Label(9),
+            loc: loc(),
+            ret_words: 1,
+        };
+        assert!(op_blocks_length_proof(&tail, Some(&ctx)));
+    }
+
+    /// Field ops and FORMAT allocate; a resizing finalizer keeps them barriers.
+    #[test]
+    fn field_and_format_pass_only_when_alloc_is_length_stable() {
+        let get = IlOp::GetField { loc: loc() };
+        let format = IlOp::Byte {
+            byte: Byte::new(Instruction::FORMAT),
+            loc: loc(),
+        };
+        let mut ctx = PureCallCtx::default();
+        assert!(op_blocks_length_proof(&get, Some(&ctx)));
+        assert!(op_blocks_length_proof(&format, Some(&ctx)));
+        ctx.alloc_length_stable = true;
+        assert!(!op_blocks_length_proof(&get, Some(&ctx)));
+        assert!(!op_blocks_length_proof(&format, Some(&ctx)));
+        let host = IlOp::HostInvoke { arity: 1, layout: 0, loc: loc() };
+        assert!(op_blocks_length_proof(&host, Some(&ctx)));
     }
 }
