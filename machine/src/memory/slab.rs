@@ -32,12 +32,122 @@ struct PageMeta {
 const SEGS: usize = 32;
 const SEG0: usize = 64;
 
+/// Bits of a 64 KiB bucket key (`addr >> 16`) resolved by each directory level.
+const DIR_BITS: u32 = 16;
+const DIR_LEN: usize = 1 << DIR_BITS;
+type DirLeaf = [AtomicU64; DIR_LEN];
+
+/// `addr >> 16` → up to two chunk indices (+1; 0 = empty), in two lazily
+/// allocated levels. A 64 KiB chunk straddles at most two buckets, so one
+/// `u64` per bucket holds every candidate. Zeroed allocations keep untouched
+/// pages non-resident. Lookups are two loads instead of a scan of every
+/// chunk. Published after the chunk table entry, so concurrent readers
+/// (shared-heap workers) only see indices that `ChunkTable::get` resolves.
+struct ChunkDir {
+    root: AtomicPtr<[AtomicPtr<DirLeaf>; DIR_LEN]>,
+    /// Allocated leaves, for `Drop` (writer-only; readers never touch it).
+    leaves: std::cell::UnsafeCell<Vec<*mut DirLeaf>>,
+}
+
+impl ChunkDir {
+    const fn new() -> Self {
+        Self {
+            root: AtomicPtr::new(std::ptr::null_mut()),
+            leaves: std::cell::UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    fn split(addr: u64) -> Option<(usize, usize)> {
+        let key = addr >> 16;
+        let hi = (key >> DIR_BITS) as usize;
+        (hi < DIR_LEN).then_some((hi, (key as usize) & (DIR_LEN - 1)))
+    }
+
+    fn zeroed<T>() -> *mut T {
+        let layout = Layout::new::<T>();
+        let p = unsafe { std::alloc::alloc_zeroed(layout) };
+        if p.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        p.cast()
+    }
+
+    /// Single writer, like [`ChunkTable::push`].
+    fn insert(&self, start: u64, index: usize) {
+        let mut root = self.root.load(Ordering::Acquire);
+        if root.is_null() {
+            root = Self::zeroed();
+            self.root.store(root, Ordering::Release);
+        }
+        let tag = index as u64 + 1;
+        let mut key_addr = start & !0xffff;
+        while key_addr < start + CHUNK as u64 {
+            let Some((hi, lo)) = Self::split(key_addr) else {
+                return;
+            };
+            let slot = unsafe { &(*root)[hi] };
+            let mut leaf = slot.load(Ordering::Acquire);
+            if leaf.is_null() {
+                leaf = Self::zeroed();
+                // SAFETY: single writer; `leaves` is only read by `Drop`.
+                unsafe { (*self.leaves.get()).push(leaf) };
+                slot.store(leaf, Ordering::Release);
+            }
+            let entry = unsafe { &(*leaf)[lo] };
+            let cur = entry.load(Ordering::Relaxed);
+            let packed = if cur & 0xffff_ffff == 0 {
+                cur | tag
+            } else {
+                debug_assert!(cur >> 32 == 0, "more than two chunks in one 64 KiB bucket");
+                cur | (tag << 32)
+            };
+            entry.store(packed, Ordering::Release);
+            key_addr += 1 << 16;
+        }
+    }
+
+    /// Candidate chunk indices for `addr` (at most two).
+    fn candidates(&self, addr: u64) -> [usize; 2] {
+        let none = [usize::MAX; 2];
+        let root = self.root.load(Ordering::Acquire);
+        let Some((hi, lo)) = Self::split(addr) else {
+            return none;
+        };
+        if root.is_null() {
+            return none;
+        }
+        let leaf = unsafe { &(*root)[hi] }.load(Ordering::Acquire);
+        if leaf.is_null() {
+            return none;
+        }
+        let e = unsafe { &(*leaf)[lo] }.load(Ordering::Acquire);
+        let at = |t: u64| if t == 0 { usize::MAX } else { t as usize - 1 };
+        [at(e & 0xffff_ffff), at(e >> 32)]
+    }
+}
+
+impl Drop for ChunkDir {
+    fn drop(&mut self) {
+        let root = *self.root.get_mut();
+        if root.is_null() {
+            return;
+        }
+        unsafe {
+            for &leaf in (*self.leaves.get()).iter() {
+                std::alloc::dealloc(leaf.cast(), Layout::new::<DirLeaf>());
+            }
+            std::alloc::dealloc(root.cast(), Layout::new::<[AtomicPtr<DirLeaf>; DIR_LEN]>());
+        }
+    }
+}
+
 /// Append-only chunk list that never moves published entries: segment `k`
 /// holds `SEG0 << k` chunks. Shared-heap workers look up addresses while the
 /// lock-holding allocator appends, so a reallocating `Vec` would race.
 struct ChunkTable {
     segs: [AtomicPtr<Chunk>; SEGS],
     len: AtomicUsize,
+    dir: ChunkDir,
     /// `[lo, hi)` spans every chunk: immediates probed as addresses miss fast.
     lo: AtomicU64,
     hi: AtomicU64,
@@ -48,6 +158,7 @@ impl ChunkTable {
         Self {
             segs: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             len: AtomicUsize::new(0),
+            dir: ChunkDir::new(),
             lo: AtomicU64::new(u64::MAX),
             hi: AtomicU64::new(0),
         }
@@ -98,6 +209,7 @@ impl ChunkTable {
         self.lo.fetch_min(start, Ordering::Release);
         self.hi.fetch_max(start + CHUNK as u64, Ordering::Release);
         self.len.store(i + 1, Ordering::Release);
+        self.dir.insert(start, i);
     }
 
     /// Published entries as per-segment slices (one `len` load).
@@ -114,20 +226,15 @@ impl ChunkTable {
         })
     }
 
-    /// Index of the chunk containing `addr` (tight per-segment scan: this is
-    /// the miss path of every heap-pointer probe).
+    /// Index of the chunk containing `addr` (the miss path of every
+    /// heap-pointer probe): two directory loads, then a range check.
     fn position(&self, addr: u64) -> Option<usize> {
-        let mut base = 0;
-        for seg in self.segments() {
-            for (j, c) in seg.iter().enumerate() {
+        self.dir.candidates(addr).into_iter().find(|&i| {
+            self.get(i).is_some_and(|c| {
                 let start = c.ptr as u64;
-                if addr >= start && addr < start + CHUNK as u64 {
-                    return Some(base + j);
-                }
-            }
-            base += seg.len();
-        }
-        None
+                addr >= start && addr < start + CHUNK as u64
+            })
+        })
     }
 }
 
@@ -509,7 +616,9 @@ mod tests {
     fn chunk_table_keeps_entries_across_segment_growth() {
         let mut t = ChunkTable::new();
         let n = SEG0 * 7 + 5;
-        let first = |i: usize| (i + 1) as *mut u8;
+        // Fake, non-overlapping chunk ranges (never dereferenced), offset so
+        // they straddle 64 KiB buckets like real `mmap` results do.
+        let first = |i: usize| ((i + 1) * CHUNK + 0x1234) as *mut u8;
         for i in 0..n {
             t.push(Chunk {
                 ptr: first(i),
@@ -525,5 +634,15 @@ mod tests {
             assert_eq!(t.get(i).unwrap().ptr, first(i), "entry {i}");
         }
         assert!(t.get(n).is_none());
+        // The directory resolves every address inside a chunk, and nothing
+        // just past the last one.
+        for i in [0, 1, SEG0, n - 1] {
+            let start = first(i) as u64;
+            for addr in [start, start + 1, start + CHUNK as u64 - 1] {
+                assert_eq!(t.position(addr), Some(i), "chunk {i} addr {addr:#x}");
+            }
+        }
+        assert_eq!(t.position(first(n - 1) as u64 + CHUNK as u64), None);
+        assert_eq!(t.position(0x10), None);
     }
 }
