@@ -43,13 +43,23 @@ fn peak() -> int {
     return sum(build(400000));
 }
 
+// Real short-lived garbage (escape analysis cannot remove it): a list that
+// grows for 64 iterations, then is dropped.
+fn churn(Option<Node> junk, int round) -> Option<Node> {
+    if round % 64 == 0 {
+        return Option::None;
+    }
+    return Option::Some(new Node(round, junk));
+}
+
 fn main() {
     let total = peak();
-    // Phase 2: small tuples churn through many collections.
+    // Phase 2: short lists churn through many collections.
+    let junk: Option<Node> = Option::None;
     let round = 0;
     while round < 3000000 {
-        let t = (round, round + 1);
-        total = total + t[1] - t[0];
+        junk = churn(junk, round);
+        total = total + 1;
         round = round + 1;
     }
     write_all(stdout(), to_bytes(format("%i", total)));
