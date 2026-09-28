@@ -214,6 +214,12 @@ impl Slab {
         self.chunks.len() * CHUNK
     }
 
+    /// Address lies in the span of mapped chunks (cheap reject for values).
+    #[inline]
+    pub fn may_contain(&self, addr: u64) -> bool {
+        self.chunks.may_contain(addr)
+    }
+
     /// `(chunk index, slot size, slots in that chunk)` for a slot address.
     #[cfg(feature = "gc-stats")]
     pub fn slot_meta(&self, addr: u64) -> Option<(usize, usize, usize)> {

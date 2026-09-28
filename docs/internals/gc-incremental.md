@@ -41,6 +41,18 @@ for a per-mark census (RSS, mapped / released slab, live bytes, reclaim by
 unmap vs compaction, precise vs ambiguous roots and interior references) —
 the Stage 0 numbers in [moving-gc.md](moving-gc.md).
 
+## Clean arrays
+
+`ObjArray::may_hold_refs` lets marking skip an array proven reference-free:
+the flag clears when a mark scans every element and none lies in the slab
+range, and any element write sets it again (one byte, no compare — every
+write goes through the `ObjArray` API; `elements` is private). A live
+`Vec<int>` is therefore scanned once, not every collection
+(`examples/perf/gc_int_vec.hy`: −7% instructions). Not type-based, so boxed
+values from generic shared bodies are safe. Cost: the flag test on every
+element store (+2.6% instructions on the tight `stride_store_iv` loop,
+`nsieve` neutral). For a moving collector a clear array pins nothing.
+
 ## Deferred
 
 - Incremental mark interleaved with the mutator (would need a real write

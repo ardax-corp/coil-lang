@@ -378,9 +378,7 @@ mod tests {
         let mut heap = Heap::default();
         let s = intern(&mut heap, "kid");
         let (arr, _) = heap.alloc(
-            crate::memory::ObjArray {
-                elements: vec![s],
-            },
+            crate::memory::ObjArray::new(vec![s]),
             Object::Array,
         );
         heap.collect(&[arr.addr()]);

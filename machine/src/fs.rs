@@ -34,7 +34,7 @@ fn alloc_path_string(heap: &mut Heap, s: &str) -> Value {
 
 fn alloc_string_array(heap: &mut Heap, names: Vec<String>) -> Value {
     let elements: Vec<Value> = names.iter().map(|s| alloc_path_string(heap, s)).collect();
-    let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
     Value::from(obj.addr())
 }
 
@@ -430,7 +430,7 @@ mod tests {
             panic!("expected array");
         };
         arr.as_ref()
-            .elements
+            .elements()
             .iter()
             .map(|e| value_as_string(heap, *e).unwrap())
             .collect()

@@ -355,7 +355,7 @@ pub fn stream_read(
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
     let capacity = match heap.find_object_by_addr(buf.raw() as u64) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements.len(),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     stream_read_into(heap, stream, buf, capacity)
@@ -370,7 +370,7 @@ fn stream_read_into(
 ) -> Result<Option<usize>, IoErrorTag> {
     let buf_addr = buf.raw() as u64;
     let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements.len().min(cap),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len().min(cap),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -401,7 +401,7 @@ fn stream_read_into(
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
+        for (dst, src) in arr.elements_mut()[..n].iter_mut().zip(tmp[..n].iter()) {
             *dst = Value::from(*src as i64);
         }
         Ok(Some(n))
@@ -428,7 +428,7 @@ pub fn stream_write_from(
     let buf_addr = buf.raw() as u64;
     let bytes: Vec<u8> = match heap.find_object_by_addr(buf_addr) {
         Some(Object::Array(arr_gc)) => {
-            let elems = &arr_gc.as_ref().elements;
+            let elems = &arr_gc.as_ref().elements();
             let start = offset as usize;
             if start > elems.len() {
                 return Err(IoErrorTag::InvalidInput);
@@ -480,16 +480,14 @@ pub fn stream_read_exact(
     let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
-    let need = arr_gc.as_ref().elements.len();
+    let need = arr_gc.as_ref().elements().len();
     if need == 0 {
         return Ok(Some(0));
     }
     // One reusable scratch for the whole call (no per-iteration Coil alloc).
     let scratch_vals: Vec<Value> = (0..need).map(|_| Value::from(0_i64)).collect();
     let (scratch_obj, _) = heap.alloc(
-        ObjArray {
-            elements: scratch_vals,
-        },
+        ObjArray::new(scratch_vals),
         Object::Array,
     );
     let scratch = Value::from(scratch_obj.addr());
@@ -512,11 +510,11 @@ pub fn stream_read_exact(
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                let chunk: Vec<Value> = src.as_ref().elements[..n].to_vec();
+                let chunk: Vec<Value> = src.as_ref().elements()[..n].to_vec();
                 let Some(Object::Array(mut dst)) = heap.find_object_by_addr(buf_addr) else {
                     return Err(IoErrorTag::Other);
                 };
-                let elems = &mut dst.as_mut().elements;
+                let elems = dst.as_mut().elements_mut();
                 for (i, v) in chunk.into_iter().enumerate() {
                     elems[filled + i] = v;
                 }
@@ -537,9 +535,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
     let chunk_size = 4096usize;
     let scratch_vals: Vec<Value> = (0..chunk_size).map(|_| Value::from(0_i64)).collect();
     let (scratch_obj, _) = heap.alloc(
-        ObjArray {
-            elements: scratch_vals,
-        },
+        ObjArray::new(scratch_vals),
         Object::Array,
     );
     let scratch = Value::from(scratch_obj.addr());
@@ -552,7 +548,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                for v in &src.as_ref().elements[..n] {
+                for v in &src.as_ref().elements()[..n] {
                     acc.push(v.as_int() as u8);
                 }
             }
@@ -564,7 +560,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
         }
     }
     let elements: Vec<Value> = acc.iter().map(|&b| Value::from(b as i64)).collect();
-    let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
     Ok(Value::from(obj.addr()))
 }
 
@@ -576,7 +572,7 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
     };
     let bytes: Vec<u8> = arr_gc
         .as_ref()
-        .elements
+        .elements()
         .iter()
         .map(|v| v.as_int() as u8)
         .collect();
@@ -1093,7 +1089,7 @@ pub fn udp_send_to(
 pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value, IoErrorTag> {
     let buf_addr = buf.raw() as u64;
     let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements.len(),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -1136,7 +1132,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
+        for (dst, src) in arr.elements_mut()[..n].iter_mut().zip(tmp[..n].iter()) {
             *dst = Value::from(*src as i64);
         }
     }
@@ -1205,7 +1201,7 @@ pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
     match heap.find_object_by_addr(v.raw() as u64) {
         Some(Object::Array(arr_gc)) => Ok(arr_gc
             .as_ref()
-            .elements
+            .elements()
             .iter()
             .map(|e| {
                 let n = e.as_int();
@@ -1242,7 +1238,7 @@ pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
         Err(_) => Vec::new(),
     };
     let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
-    let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
     Value::from(obj.addr())
 }
 
@@ -1305,7 +1301,7 @@ mod tests {
 
     fn make_byte_array(heap: &mut Heap, bytes: &[u8]) -> Value {
         let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
-        let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+        let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
         Value::from(obj.addr())
     }
 
@@ -1313,7 +1309,7 @@ mod tests {
         match heap.find_object_by_addr(v.raw() as u64) {
             Some(Object::Array(gc)) => gc
                 .as_ref()
-                .elements
+                .elements()
                 .iter()
                 .map(|e| e.as_int() as u8)
                 .collect(),
@@ -1526,7 +1522,7 @@ mod tests {
 
     fn tuple_elems(heap: &Heap, v: Value) -> Vec<Value> {
         match heap.find_object_by_addr(v.raw() as u64) {
-            Some(Object::Tuple(gc)) => gc.as_ref().elements.clone(),
+            Some(Object::Tuple(gc)) => gc.as_ref().elements().clone(),
             _ => panic!("expected tuple"),
         }
     }

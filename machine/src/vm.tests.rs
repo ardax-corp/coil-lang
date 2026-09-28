@@ -222,10 +222,10 @@
             let addr = vm.pop().raw() as u64;
             let elements: Vec<i64> = match vm.heap().find_object_by_addr(addr) {
                 Some(Object::Tuple(gc)) => {
-                    gc.as_ref().elements.iter().map(Value::as_int).collect()
+                    gc.as_ref().elements().iter().map(Value::as_int).collect()
                 }
                 Some(Object::Array(gc)) => {
-                    gc.as_ref().elements.iter().map(Value::as_int).collect()
+                    gc.as_ref().elements().iter().map(Value::as_int).collect()
                 }
                 _ => panic!("{name} did not allocate an aggregate"),
             };
@@ -250,7 +250,7 @@
 
         let addr = vm.pop().raw() as u64;
         match vm.heap().find_object_by_addr(addr) {
-            Some(Object::Tuple(gc)) => assert!(gc.as_ref().elements.is_empty()),
+            Some(Object::Tuple(gc)) => assert!(gc.as_ref().elements().is_empty()),
             _ => panic!("arity-0 MakeTuple must still allocate a tuple"),
         }
         assert_eq!(
@@ -622,7 +622,7 @@
         let addr = vm.pop().raw() as u64;
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Tuple(gc)) => {
-                let e = &gc.as_ref().elements;
+                let e = &gc.as_ref().elements();
                 assert_eq!(e.len(), 2);
                 assert_eq!(e[0].as_int(), 10);
                 assert_eq!(e[1].as_int(), 20);
@@ -2183,7 +2183,7 @@
             .iter()
             .map(|&b| Value::from(b as i64))
             .collect();
-        let (arr, _) = heap.alloc(ObjArray { elements }, Object::Array);
+        let (arr, _) = heap.alloc(ObjArray::new(elements), Object::Array);
         let data = Value::from(arr.addr());
         crate::io::stream_write_all(heap, stdout, data).expect("write_all stdout");
 
@@ -2781,7 +2781,7 @@
 
         fn byte_array(heap: &mut Heap, bytes: &[u8]) -> Value {
             let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
-            let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+            let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
             Value::from(obj.addr())
         }
 
@@ -2814,7 +2814,7 @@
                         if let Some(Object::Array(arr)) =
                             vm.heap().find_object_by_addr(buf.raw() as u64)
                         {
-                            for v in arr.as_ref().elements.iter().take(n) {
+                            for v in arr.as_ref().elements().iter().take(n) {
                                 got.push(v.as_int() as u8);
                             }
                         }
@@ -3539,9 +3539,7 @@
     fn vec_pop_allocates_a_boxed_option() {
         let mut vm = Machine::<16>::default();
         let (object, _) = vm.heap.alloc(
-            ObjArray {
-                elements: vec![Value::from(7_i64)],
-            },
+            ObjArray::new(vec![Value::from(7_i64)]),
             Object::Array,
         );
         let before = vm.heap.live_object_count();

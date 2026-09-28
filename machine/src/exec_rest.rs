@@ -370,7 +370,7 @@ impl<const S: usize> Machine<S> {
                             match Self::find_object_by_addr(&self.heap, tags_addr) {
                                 Some(crate::memory::Object::Tuple(gc)) => gc
                                     .as_ref()
-                                    .elements
+                                    .elements()
                                     .iter()
                                     .map(|v| Self::ffi_type_from_value(v, &self.heap))
                                     .collect(),
@@ -391,7 +391,7 @@ impl<const S: usize> Machine<S> {
                     let lib_addr = lib_val.raw() as u64;
 
                     let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
-                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements.clone(),
+                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().clone(),
                         _ => Vec::new(),
                     };
 
@@ -425,7 +425,7 @@ impl<const S: usize> Machine<S> {
                         match Self::find_object_by_addr(&self.heap, args_tuple_addr) {
                             Some(crate::memory::Object::Tuple(gc)) => gc
                                 .as_ref()
-                                .elements
+                                .elements()
                                 .iter()
                                 .map(|v| Self::ffi_type_from_value(v, &self.heap))
                                 .collect(),
@@ -668,9 +668,8 @@ impl<const S: usize> Machine<S> {
                             .alloc(ObjTuple { elements: values }, Object::Tuple);
                         object.addr()
                     } else {
-                        let (object, _) = self
-                            .heap
-                            .alloc(ObjArray { elements: values }, Object::Array);
+                        let arr = ObjArray::from_values(values, &self.heap);
+                        let (object, _) = self.heap.alloc(arr, Object::Array);
                         object.addr()
                     };
                     self.stack.seek(base);
@@ -694,10 +693,10 @@ impl<const S: usize> Machine<S> {
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
                         }
                         Some(crate::memory::Object::Tuple(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
                         }
                         _ => None,
                     };
@@ -714,10 +713,10 @@ impl<const S: usize> Machine<S> {
                     let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
                     let result = match self.pinned_object(slot) {
                         Some(Object::Array(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
                         }
                         Some(Object::Tuple(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
                         }
                         _ => None,
                     };
@@ -827,8 +826,7 @@ impl<const S: usize> Machine<S> {
                     if let Some(crate::memory::Object::Array(mut gc)) =
                         Self::find_object_by_addr(&self.heap, target_addr)
                     {
-                        let arr = gc.as_mut();
-                        if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
+                        if !gc.as_mut().store_indexed(index, value, unchecked) {
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
@@ -846,8 +844,7 @@ impl<const S: usize> Machine<S> {
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
                     if let Some(Object::Array(mut gc)) = self.pinned_object(slot) {
-                        let arr = gc.as_mut();
-                        if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
+                        if !gc.as_mut().store_indexed(index, value, unchecked) {
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
@@ -973,9 +970,8 @@ impl<const S: usize> Machine<S> {
                         object.addr()
                     } else {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
-                        let (object, _) = self
-                            .heap
-                            .alloc(ObjArray { elements: values }, Object::Array);
+                        let arr = ObjArray::from_values(values, &self.heap);
+                        let (object, _) = self.heap.alloc(arr, Object::Array);
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
@@ -1037,8 +1033,8 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack.pop();
                     let target_addr = target_val.raw() as u64;
                     let len = match Self::find_object_by_addr(&self.heap, target_addr) {
-                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements.len(),
-                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements.len(),
+                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements().len(),
+                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
                         Some(crate::memory::Object::Instance(gc)) => gc
                             .as_ref()
@@ -1074,9 +1070,7 @@ impl<const S: usize> Machine<S> {
                         }
                     }
                     let (array_obj, _) = self.heap.alloc(
-                        ObjArray {
-                            elements: pair_addrs,
-                        },
+                        ObjArray::new(pair_addrs),
                         Object::Array,
                     );
                     self.stack.push(Value::from(array_obj.addr()));
@@ -1437,16 +1431,12 @@ impl<const S: usize> Machine<S> {
                                 {
                                     v
                                 } else {
-                                    let arr = crate::memory::ObjArray {
-                                        elements: remaining_new.to_vec(),
-                                    };
+                                    let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
                                     let (object, _) = self.heap.alloc(arr, Object::Array);
                                     Value::from(object.addr())
                                 }
                             } else {
-                                let arr = crate::memory::ObjArray {
-                                    elements: remaining_new.to_vec(),
-                                };
+                                let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
                                 let (object, _) = self.heap.alloc(arr, Object::Array);
                                 Value::from(object.addr())
                             };

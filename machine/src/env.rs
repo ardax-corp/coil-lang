@@ -78,8 +78,8 @@ fn heap_string(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
 fn value_as_string_array(heap: &Heap, v: Value) -> Result<Vec<String>, EnvErrorTag> {
     match heap.find_object_by_addr(v.raw() as u64) {
         Some(Object::Array(gc)) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements.len());
-            for e in &gc.as_ref().elements {
+            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
+            for e in gc.as_ref().elements() {
                 let s = heap_string(heap, *e)?;
                 if contains_nul(&s) {
                     return Err(EnvErrorTag::InvalidInput);
@@ -100,7 +100,7 @@ fn alloc_string_array(heap: &mut Heap, strings: &[String]) -> Value {
             Value::from(gc.as_ptr() as *mut u8 as u64)
         })
         .collect();
-    let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
     Value::from(obj.addr())
 }
 
@@ -317,7 +317,7 @@ mod tests {
                 Value::from(gc.as_ptr() as *mut u8 as u64)
             })
             .collect();
-        let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+        let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
         Value::from(obj.addr())
     }
 
