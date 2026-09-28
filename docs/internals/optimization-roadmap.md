@@ -177,10 +177,26 @@ Copy propagation in `opt/dce.rs` stays straight-line and tell-safe only.
 - `tak`: LOAD 11→7, STORE 7→3, `slot_move` 4→0 (coalesce + peel raise);
 - fuse windows intact across mandelbrot / tak / numeric / nsieve.
 
-Still deferred for a later SSA-like slice: overlapping live-range φ shuffles
-(mandelbrot `tr`→`zr`), **real** rename across disagreeing joins, and operand-stack
-retention across calls. `ssa_gvn` does not deliver that slice — see landed table
-above. Measure residual candidates against the ledger before appending opcodes.
+**Overlapping live-range φ shuffles — closed (not building a stack-IL SSA
+rename).** The motivating case, mandelbrot `tr`→`zr`, is gone twice over:
+TOS-carry reclaims it on fuse-IL (`perf_phase0_mandelbrot_shape_inventory`
+pins `loop_carried_phi_shuffle == 0`), and the body now lowers to dense MIR,
+where `zr`/`zi` are registers and the update writes `zr` in place. A census of
+every `examples/perf` function (2026-09) found no hot overlapping carry left.
+Residual slot copies near a back-edge are:
+
+- `acc = acc + f(…)` spill before a `CALL` (`LOAD acc; STORE tmp`) in auto-par
+  chunk workers (`mandelbrot_ipa`, `for_in_range`, `for_in_dict`, …) — two
+  dispatches next to a `CALL` / `RETURN` into a much larger callee;
+- copies into never-read slots (`tail_sibling`, `gc_churn::build_list`) that
+  `dead_store` keeps because the loop header cursor is `Unknown`;
+- genuine branch assignments (`s2g_escape_edges::pack_field`).
+
+None clears the hit-bench bar. Revisit only if a fuse-IL body with a hot
+overlapping carry shows up; a narrow call-spill fold (forward `LOAD a; STORE t`
+across a `CALL` when `a` is below the callee frame and slot liveness proves `t`
+dead) is the smallest candidate. **Real** rename across disagreeing joins and
+operand-stack retention across calls stay deferred for the same reason.
 
 A second, narrower slice sits at the end of the pipeline: `slot_promote_at`
 uses `tell` as the whole safety proof — a `STORE t` reached with the cursor at
