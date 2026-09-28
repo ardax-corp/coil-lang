@@ -271,9 +271,18 @@ do not add a second opcode.
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
 
-- **Impure calls in counted loops.** Host natives, FFI, `FORMAT`, field get/set,
-  `CallIndirect`, `ArrayPush` / `MakeArray`, and any callee purity cannot prove
-  still refuse the region. `LEQ` / `GEQ` headers are still not proofs.
+- **Impure calls in counted loops — length-stable calls landed.** The proof
+  asks "can this change an array's length?", not "is this pure?". A user
+  callee is *length-stable* when its call-graph closure has no `RESIZE`
+  effect (`Vec` grow/shrink methods, unknown or indirect calls, yield, FFI,
+  hosts outside a small allowlist). Field / element writes, output writes and
+  clocks keep the proof; `FORMAT` and field get/set pass too when no
+  `fn drop()` in the compile can resize (finalizers run at allocation
+  safepoints). Hit: `examples/perf/vec_scan_impure.hy` (−11.2% instructions).
+  Still refused: method calls other than `len` / `capacity` (the purity walk
+  keys methods by bare name, so the receiver type is unknown), direct
+  `HostInvoke` at IL, `CallIndirect`, `ArrayPush` / `MakeArray`. `LEQ` /
+  `GEQ` headers are still not proofs.
 
 ### 3. Allocation and GC fast paths
 
