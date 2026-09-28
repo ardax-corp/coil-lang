@@ -10,6 +10,14 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 
+/// Sweep cycles a free slot must stay unused before its empty chunk's pages
+/// go back to the OS. Longer than the phase of typical periodic churn, so
+/// released chunks are not refaulted a cycle later.
+const RELEASE_WINDOW: u32 = 8;
+
+#[cfg(test)]
+pub(crate) const RELEASE_WINDOW_FOR_TEST: u32 = RELEASE_WINDOW;
+
 struct Chunk {
     ptr: *mut u8,
     meta: PageMeta,
@@ -134,13 +142,28 @@ impl Drop for ChunkTable {
     }
 }
 
-type FreeLists = Vec<((u32, u32), Vec<NonNull<u8>>)>;
+/// Free slots of one `(slot_size, align)` class.
+struct FreeClass {
+    key: (u32, u32),
+    slots: Vec<NonNull<u8>>,
+    /// Shortest `slots` got since the last release scan: that many slots
+    /// sat unused for the whole cycle.
+    low_water: usize,
+}
+
+type FreeLists = Vec<FreeClass>;
 
 pub struct Slab {
     chunks: ChunkTable,
     /// Free lists keyed by `(slot_size, align)`. A handful of classes; a
     /// linear scan is cheaper than hashing the pair on every alloc.
     free: FreeLists,
+    /// Empty chunks whose pages went back to the OS, by `(slot_size, align)`.
+    /// They stay mapped (zero pages read as poisoned headers) and are
+    /// re-carved before a new chunk is mapped. Chunk indices.
+    released: Vec<((u32, u32), Vec<usize>)>,
+    /// Sweep cycles since the last idle scan (see [`RELEASE_WINDOW`]).
+    cycles_since_scan: u32,
     /// Entry of the last chunk that contained a lookup. Entries never move,
     /// so one word stays valid and a racing update cannot tear it.
     last: AtomicPtr<Chunk>,
@@ -151,6 +174,8 @@ impl Slab {
         Self {
             chunks: ChunkTable::new(),
             free: Vec::new(),
+            released: Vec::new(),
+            cycles_since_scan: 0,
             last: AtomicPtr::new(std::ptr::null_mut()),
         }
     }
@@ -158,10 +183,12 @@ impl Slab {
     pub fn alloc(&mut self, layout: Layout) -> NonNull<u8> {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
-        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key)
-            && let Some(p) = slots.pop() {
-                return p;
-            }
+        if let Some(class) = self.free.iter_mut().find(|c| c.key == key)
+            && let Some(p) = class.slots.pop()
+        {
+            class.low_water = class.low_water.min(class.slots.len());
+            return p;
+        }
         self.carve_page(slot_size, align)
     }
 
@@ -171,11 +198,15 @@ impl Slab {
             return;
         };
         let key = (meta.slot_size, meta.slot_align);
-        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
-            slots.push(ptr);
+        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+            class.slots.push(ptr);
             return;
         }
-        self.free.push((key, vec![ptr]));
+        self.free.push(FreeClass {
+            key,
+            slots: vec![ptr],
+            low_water: 0,
+        });
     }
 
     /// Mapped anonymous bytes (chunks stay mapped after sweep).
@@ -210,8 +241,125 @@ impl Slab {
         })
     }
 
+    /// Give back the pages of chunks the program did not need for the last
+    /// [`RELEASE_WINDOW`] sweep cycles. Call once per completed sweep.
+    ///
+    /// Per size class, `low_water` free slots were never handed out since the
+    /// previous scan; only that many slots' worth of *empty* chunks is
+    /// released, so steady churn (which drains its free list) keeps
+    /// everything and never refaults. Chunks stay mapped: a released page
+    /// reads as zeros, so every header in it is poisoned (`kind == 0`) and a
+    /// stale or conservative lookup stays defined
+    /// (`docs/internals/heap-identity.md`). Returns bytes released.
+    pub fn release_idle_chunks(&mut self) -> usize {
+        self.cycles_since_scan += 1;
+        if self.cycles_since_scan < RELEASE_WINDOW {
+            return 0;
+        }
+        self.cycles_since_scan = 0;
+        let idle: Vec<((u32, u32), usize)> = self
+            .free
+            .iter_mut()
+            .map(|c| {
+                let idle = c.low_water;
+                c.low_water = c.slots.len();
+                (c.key, idle)
+            })
+            .collect();
+        if !cfg!(unix) {
+            return 0;
+        }
+        // Skip the scan unless some class idled at least two chunks' worth.
+        let chunk_slots = |(size, _): (u32, u32)| CHUNK / size as usize;
+        let mut budget: Vec<((u32, u32), usize)> = idle
+            .into_iter()
+            .map(|(k, n)| (k, n / chunk_slots(k)))
+            .filter(|&(_, chunks)| chunks >= 2)
+            .collect();
+        if budget.is_empty() {
+            return 0;
+        }
+        #[cfg(feature = "gc-stats")]
+        eprintln!("gc-stats idle chunks by class: {budget:?}");
+        let n = self.chunks.len();
+        let mut starts: Vec<(u64, usize)> = Vec::with_capacity(n);
+        for i in 0..n {
+            if let Some(c) = self.chunks.get(i) {
+                starts.push((c.ptr as u64, i));
+            }
+        }
+        starts.sort_unstable();
+        let chunk_of = |addr: u64| -> Option<usize> {
+            let at = starts.partition_point(|&(s, _)| s <= addr).checked_sub(1)?;
+            let (s, i) = starts[at];
+            (addr < s + CHUNK as u64).then_some(i)
+        };
+        let mut free_slots = vec![0usize; n];
+        for class in self.free.iter().filter(|c| budget.iter().any(|(k, _)| *k == c.key)) {
+            for p in &class.slots {
+                if let Some(i) = chunk_of(p.as_ptr() as u64) {
+                    free_slots[i] += 1;
+                }
+            }
+        }
+        let mut release = vec![false; n];
+        let mut released_bytes = 0;
+        for (i, &free) in free_slots.iter().enumerate() {
+            let Some(c) = self.chunks.get(i) else {
+                continue;
+            };
+            let key = (c.meta.slot_size, c.meta.slot_align);
+            let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
+            if free == 0 || free != slots {
+                continue;
+            }
+            let Some((_, left)) = budget.iter_mut().find(|(k, _)| *k == key) else {
+                continue;
+            };
+            if *left == 0 {
+                continue;
+            }
+            *left -= 1;
+            release_pages(c.ptr, CHUNK);
+            release[i] = true;
+            released_bytes += CHUNK;
+            match self.released.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, list)) => list.push(i),
+                None => self.released.push((key, vec![i])),
+            }
+        }
+        if released_bytes != 0 {
+            for class in &mut self.free {
+                class
+                    .slots
+                    .retain(|p| chunk_of(p.as_ptr() as u64).is_none_or(|i| !release[i]));
+                class.low_water = class.slots.len();
+            }
+        }
+        released_bytes
+    }
+
+    /// Bytes of chunks whose pages were given back and not yet reused.
+    #[cfg(any(test, feature = "gc-stats"))]
+    pub fn released_bytes(&self) -> usize {
+        self.released.iter().map(|(_, l)| l.len()).sum::<usize>() * CHUNK
+    }
+
     fn carve_page(&mut self, slot_size: usize, align: usize) -> NonNull<u8> {
+        let key = (slot_size as u32, align as u32);
+        if let Some((_, list)) = self.released.iter_mut().find(|(k, _)| *k == key)
+            && let Some(i) = list.pop()
+            && let Some(c) = self.chunks.get(i)
+        {
+            // Same size class, so the table's meta still describes it.
+            let ptr = c.ptr;
+            return self.carve_slots(ptr, slot_size, align, false);
+        }
         let ptr = map_chunk(CHUNK);
+        self.carve_slots(ptr, slot_size, align, true)
+    }
+
+    fn carve_slots(&mut self, ptr: *mut u8, slot_size: usize, align: usize, new_chunk: bool) -> NonNull<u8> {
         let first = align_up(ptr as usize, align);
         let first_off = first - ptr as usize;
         let end = ptr as usize + CHUNK;
@@ -228,19 +376,26 @@ impl Slab {
             }
             p += slot_size;
         }
-        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
-            slots.append(&mut rest);
+        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+            class.slots.append(&mut rest);
         } else if !rest.is_empty() {
-            self.free.push((key, rest));
+            let low_water = rest.len();
+            self.free.push(FreeClass {
+                key,
+                slots: rest,
+                low_water,
+            });
         }
-        self.chunks.push(Chunk {
-            ptr,
-            meta: PageMeta {
-                slot_size: slot_size as u32,
-                slot_align: align as u32,
-                first_off: first_off as u32,
-            },
-        });
+        if new_chunk {
+            self.chunks.push(Chunk {
+                ptr,
+                meta: PageMeta {
+                    slot_size: slot_size as u32,
+                    slot_align: align as u32,
+                    first_off: first_off as u32,
+                },
+            });
+        }
         first_slot.expect("gc slab chunk smaller than one slot")
     }
 
@@ -312,6 +467,17 @@ fn unmap(ptr: *mut u8, len: usize) {
         libc::munmap(ptr.cast(), len);
     }
 }
+
+/// Drop a chunk's pages but keep the range mapped: later reads see zeros.
+#[cfg(unix)]
+fn release_pages(ptr: *mut u8, len: usize) {
+    unsafe {
+        libc::madvise(ptr.cast(), len, libc::MADV_DONTNEED);
+    }
+}
+
+#[cfg(not(unix))]
+fn release_pages(_ptr: *mut u8, _len: usize) {}
 
 #[cfg(not(unix))]
 fn map_chunk(len: usize) -> *mut u8 {

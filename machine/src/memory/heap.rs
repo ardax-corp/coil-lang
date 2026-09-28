@@ -509,6 +509,8 @@ impl Heap {
             .alloc_bytes
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD);
+        // Empty chunks the program did not touch all cycle go back to the OS.
+        self.slab.release_idle_chunks();
         self.gc_phase = GcPhase::Idle;
         self.gc_sweep_cursor = None;
         self.gc_sweep_prev = None;
@@ -815,12 +817,13 @@ impl Heap {
         let chunk = mapped.checked_div(total_chunks).unwrap_or(0);
         let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
         format!(
-            "gc-stats: rss={}KiB mapped={}KiB chunks={} live={} ({}KiB, {:.1}% of mapped) | \
+            "gc-stats: rss={}KiB mapped={}KiB released={}KiB chunks={} live={} ({}KiB, {:.1}% of mapped) | \
              reclaim unmap-empty={}KiB compact={}KiB | \
              roots precise={} ambiguous={} pinned={} | \
              interior refs precise={} ambiguous={} | pinned objs={} ({:.1}% of live; {} via interior)",
             resident_kib(),
             mapped / 1024,
+            self.slab.released_bytes() / 1024,
             total_chunks,
             live,
             live_bytes / 1024,
@@ -3226,6 +3229,49 @@ mod tests {
             heap.find_object_by_addr(addr).is_none(),
             "swept object must be poisoned (kind 0), not a HashSet miss"
         );
+    }
+
+    /// Many strings, all swept: after the release window their chunks' pages
+    /// go back, stale lookups still read a poisoned header, and new
+    /// allocations reuse the released chunks instead of mapping more.
+    #[test]
+    fn idle_chunks_release_and_are_reused() {
+        let mut heap = Heap::default();
+        let mut addrs = Vec::new();
+        for i in 0..20_000 {
+            let (obj, _) = heap.alloc(ObjString::from(format!("s{i}").as_str()), Object::String);
+            addrs.push(obj.addr());
+        }
+        let mapped = heap.slab.mapped_bytes();
+        assert!(mapped >= 4 * 64 * 1024, "test needs several chunks: {mapped}");
+        // Sweep everything, then idle: the first window still saw the
+        // allocation phase drain the list, the second finds it idle.
+        for _ in 0..2 * super::super::slab::RELEASE_WINDOW_FOR_TEST {
+            unsafe { heap.sweep() };
+        }
+        assert!(heap.slab.released_bytes() > 0, "idle chunks must be released");
+        for &a in addrs.iter().step_by(997) {
+            assert!(heap.slot_mapped_for_test(a), "released chunk stays mapped");
+            assert!(heap.find_object_by_addr(a).is_none(), "released slot reads poisoned");
+        }
+        for i in 0..20_000 {
+            let _ = heap.alloc(ObjString::from(format!("t{i}").as_str()), Object::String);
+        }
+        assert_eq!(heap.slab.mapped_bytes(), mapped, "reuse released chunks, map nothing new");
+        assert_eq!(heap.slab.released_bytes(), 0);
+    }
+
+    /// Steady churn drains the free list every cycle: nothing is released.
+    #[test]
+    fn busy_chunks_are_not_released() {
+        let mut heap = Heap::default();
+        for _ in 0..(2 * super::super::slab::RELEASE_WINDOW_FOR_TEST) {
+            for i in 0..20_000 {
+                let _ = heap.alloc(ObjString::from(format!("s{i}").as_str()), Object::String);
+            }
+            unsafe { heap.sweep() };
+        }
+        assert_eq!(heap.slab.released_bytes(), 0);
     }
 
     /// Array elements are raw words (ambiguous); typed members are precise.
