@@ -756,8 +756,10 @@ impl Checker {
             Vec::new()
         };
 
-        let owner_is_class = self.classes.contains_key(&owner_key);
-        if !owner_is_class {
+        // An earlier `impl` on an enum already left a field-less class entry.
+        let owner_is_enum = self.enums.contains_key(&owner_key);
+        let owner_is_class = !owner_is_enum && self.classes.contains_key(&owner_key);
+        if !self.classes.contains_key(&owner_key) {
             self.classes.insert(owner_key.clone(), Vec::new());
             self.env
                 .insert_top(owner_key.clone(), Scheme::mono(Ty::Con(owner_key.clone())));
@@ -819,7 +821,13 @@ impl Checker {
                         self.check_drop_decl(
                             what,
                             &owner_key,
-                            owner_is_class,
+                            if owner_is_enum {
+                                super::checker::DropOwner::Enum
+                            } else if owner_is_class {
+                                super::checker::DropOwner::Class
+                            } else {
+                                super::checker::DropOwner::Other
+                            },
                             *is_static,
                             args,
                             &method.0.into_range(),

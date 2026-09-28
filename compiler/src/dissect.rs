@@ -278,6 +278,7 @@ fn format_operands(
         Instruction::BoxValue | Instruction::UnboxValue => {
             format!("tag={}", byte.operand_u32())
         }
+        Instruction::TagEnumType => format!("type_id={}", byte.operand_u32()),
         Instruction::CodePtr | Instruction::MakePolyFn => {
             let t = byte.operand_u32() as usize;
             format!("entry={}", annotate_pc(t, pc_names))

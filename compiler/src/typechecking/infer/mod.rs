@@ -247,6 +247,8 @@ pub struct Checker {
     next_class_type_id: u32,
     /// Classes that declared inherent `fn drop(self)`.
     classes_with_drop: std::collections::HashSet<String>,
+    /// Subset of [`Self::classes_with_drop`] whose owner is an enum.
+    enums_with_drop: std::collections::HashSet<String>,
 
     /// Method declarations: owner class → method name →
     /// (visibility, scheme). Methods are stored here so they can be

@@ -187,7 +187,8 @@ fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         | StoreIndex | StoreIndexUnchecked | ArrayLen | ArrayPush | GetField | SetField
         | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
         | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
-        | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic => Some(0),
+        | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic
+        | TagEnumType => Some(0),
         _ => None,
     }
 }
@@ -910,6 +911,11 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             step.record = Some(st.heap_slots(st.hi, true));
         }
         UnboxValue | LoadField => {
+            st.pop()?;
+            st.push(true)?;
+        }
+        // Stamps metadata on the enum at TOS; no allocation, no safepoint.
+        TagEnumType => {
             st.pop()?;
             st.push(true)?;
         }
