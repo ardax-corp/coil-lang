@@ -346,6 +346,19 @@ pure byte are re-materialized in the guard instead of spilled, worth 4.28G →
 work has to remove the call itself — real inlining of a recursive body, or a
 frame representation cheaper than `CALL` — not move the guard.
 
+**Runtime base-case return (VM).** A direct unary `CALL` whose callee opens
+with `slot0 ? imm; jump ConstReturnImm k` returns `k` without a frame when the
+guard holds. The callee prologue used to be re-decoded on every such call
+(opcode, pool entry, return word: ~25% of `fib` samples). It is now decoded
+once per program into `UnaryBaseTable` (built with the frame reserve, keyed
+by code), with integer orderings pre-resolved and the `Jmpf` sense folded in:
+`fib(32)` 879M → 799M instructions (−9.2%), wall −5%; `pair_fib` /
+`triple_fib` −9.2% instructions; `tak` / `mandelbrot` / `nsieve` unchanged.
+What remains on `fib` is per-dispatch: the outer `match`, then a second
+dispatch on the fused op's sub-op (`eval_bin` / `eval_cmp`), then frame
+push / `after_return`. Removing the second dispatch would mean sub-op
+specialized opcodes — fuse debt, not taken.
+
 ### 5. Dispatch and trace fusion
 
 Priority: medium to low until measured.
