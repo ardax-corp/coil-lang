@@ -135,15 +135,37 @@ pub fn try_specialize_body_side(
     // Registers may sit past the cursor at a safepoint, and generic host
     // results are heap words typed `i64` that S2b maps miss: cover the frame.
     side.needs_frame_extent = has_alloc;
-    // Strict slot typing first; an allocating body whose slots are recycled
-    // across types (format args, then a string) retries with LIR-style typing.
-    let attempt = |recycle| lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc, recycle);
-    let (hints, mut func) = match attempt(false) {
+    // Strict first. An allocating body whose slots are recycled across types
+    // (format args, then a string) retries with LIR-style typing; a body that
+    // leaves values on the stack across an edge (two-slot `?`, match arms)
+    // retries with stack φs and must then win a loop-weighted cost compare.
+    let attempt = |recycle, edge_stack| {
+        let relax = DenseRelax {
+            recycle,
+            edge_stack,
+        };
+        lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc, relax)
+    };
+    let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
+    let mut edge_stack = false;
+    let mut first = attempt(false, false);
+    if first.as_ref().is_err_and(edge_refusal) {
+        edge_stack = true;
+        first = attempt(false, true);
+    }
+    let (hints, mut func) = match first {
         Ok(v) => v,
-        Err(e) if has_alloc => match attempt(true) {
-            Ok(v) => v,
-            Err(_) => return refuse_dense(e),
-        },
+        Err(e) if has_alloc => {
+            let mut retry = attempt(true, edge_stack);
+            if !edge_stack && retry.as_ref().is_err_and(edge_refusal) {
+                edge_stack = true;
+                retry = attempt(true, true);
+            }
+            match retry {
+                Ok(v) => v,
+                Err(_) => return refuse_dense(e),
+            }
+        }
         Err(e) => return refuse_dense(e),
     };
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
@@ -222,6 +244,23 @@ pub fn try_specialize_body_side(
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return refuse_dense("dense cost gate");
     }
+    // Stack φs cost moves on every edge and loops skip the gate above:
+    // compare dispatches after fuse-select, where fuse-IL packs its loop
+    // tests and slot arithmetic.
+    if edge_stack {
+        let dense_cost = crate::il::fused_dispatch_cost(&out, pool);
+        if dense_cost > crate::il::fused_dispatch_cost(ops, pool) {
+            return refuse_dense("dense edge-stack cost gate");
+        }
+        // Dense is tried first; a stack-φ body must not pre-empt the MIR→LIR
+        // reconstruct the next tier would pick.
+        let mut lir_pool = pool.clone();
+        if let Some(lir) = try_lower_abi_body(ops, name, entry_sp, &mut lir_pool)
+            && dense_cost > crate::il::fused_dispatch_cost(&lir, &lir_pool)
+        {
+            return refuse_dense("dense edge-stack loses to LIR");
+        }
+    }
     // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
     if count_make_enum(&out) > count_make_enum(ops) {
         return refuse_dense("MakeEnum growth");
@@ -232,6 +271,15 @@ pub fn try_specialize_body_side(
 /// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
 /// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
 /// as match — that densifies `if !flag` and drops LogNotJmpt.
+/// Relaxations a dense retry may ask for.
+#[derive(Clone, Copy)]
+struct DenseRelax {
+    /// Type recycled slots by last use (LIR-style).
+    recycle: bool,
+    /// Carry operand-stack values across CFG edges as stack φs.
+    edge_stack: bool,
+}
+
 /// Infer + lower a dense body; `Err` is the refusal key.
 fn lower_dense_attempt(
     ops: &[IlOp],
@@ -240,8 +288,12 @@ fn lower_dense_attempt(
     pool: &[u64],
     calls: &DenseCallMap,
     has_alloc: bool,
-    recycle: bool,
+    relax: DenseRelax,
 ) -> Result<(LowerHints, crate::mir::MirFunc), String> {
+    let DenseRelax {
+        recycle,
+        edge_stack,
+    } = relax;
     let inferred = if has_alloc {
         infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls, recycle)
     } else {
@@ -252,7 +304,8 @@ fn lower_dense_attempt(
         return Err("no numeric arith".into());
     }
     let mut hints = LowerHints::new(name);
-    hints.allow_match = match_shaped_il(ops)
+    hints.allow_match = edge_stack
+        || match_shaped_il(ops)
         || inferred
             .slot_ty
             .values()

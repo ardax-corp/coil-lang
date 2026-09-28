@@ -307,10 +307,13 @@ fn perf_operators_loop_inverts_not_into_bin_slot_jmpf() {
         0,
         "main should not emit LogNotJmpf after if(!c) invert"
     );
+    // Fuse-IL folds the BITAND into BinSlotImmJmpf; dense packs it as
+    // DenseBinJmpf (IAND64 + compare-jump).
     assert!(
         main.iter().any(|b| {
-            matches!(*b.bytecode(), Instruction::BinSlotImmJmpf)
-                && b.bin_slot_imm_jmpf_parts().0 == Instruction::BITAND as u8
+            (matches!(*b.bytecode(), Instruction::BinSlotImmJmpf)
+                && b.bin_slot_imm_jmpf_parts().0 == Instruction::BITAND as u8)
+                || matches!(*b.bytecode(), Instruction::DenseBinJmpf)
         }),
         "operators loop should fuse BITAND into BinSlotImmJmpf"
     );
