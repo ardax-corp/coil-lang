@@ -850,6 +850,14 @@ pub struct Compiler {
     /// statement. `Some` inside a statement; the block re-emits it with the
     /// boxes hoisted to its start so box slots never land on live operands.
     escape_hoist: Option<Vec<String>>,
+    /// Nesting of [`Compiler::compile_block_stmt`] frames: a statement in a
+    /// loop body or `if` arm is one deeper than the loop / `if` itself.
+    stmt_depth: u32,
+    /// Statement depth of the `let` that bound each local (block-scoped).
+    /// A first escape deeper than its local's `let` must box at the `let`'s
+    /// depth: boxing inside a loop body re-boxes stale slots every pass, and
+    /// inside an `if` arm only one path boxes.
+    escape_decl_depth: HashMap<String, u32>,
 
     /// Top-level functions whose frames can never hold a heap word
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
@@ -1067,6 +1075,8 @@ impl Default for Compiler {
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             escape_hoist: None,
+            stmt_depth: 0,
+            escape_decl_depth: HashMap::new(),
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
             codegen_depth: 0,
