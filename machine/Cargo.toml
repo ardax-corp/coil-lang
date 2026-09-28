@@ -9,6 +9,8 @@ debugger = []
 vm_profile = []
 # Collect at every allocation safepoint (GC soundness testing only).
 gc-stress = []
+# Print moving-GC feasibility numbers after each mark (docs/internals/moving-gc.md).
+gc-stats = []
 
 [dependencies]
 common = { path = "../common" }

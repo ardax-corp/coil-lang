@@ -1710,12 +1710,18 @@
         }]);
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();
-            vm.collect_stack_roots(&mut roots);
+            vm.for_each_stack_root(&mut |addr, _| roots.push(addr));
             roots
         };
 
         let r = roots(&vm);
         assert!(r.contains(&main_obj.addr()), "unmapped caller is scanned");
+        let mut kinds = Vec::new();
+        vm.for_each_stack_root(&mut |addr, kind| kinds.push((addr, kind)));
+        assert!(
+            kinds.contains(&(main_obj.addr(), crate::memory::RootKind::Ambiguous)),
+            "a scanned word may be an immediate: ambiguous"
+        );
         assert!(!r.contains(&f_obj.addr()), "precise heap-free frame is skipped");
         assert!(r.contains(&g_obj.addr()), "top frame without a safepoint PC is scanned");
 
@@ -1749,7 +1755,7 @@
         vm.gc_top_ip = Some(3);
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();
-            vm.collect_stack_roots(&mut roots);
+            vm.for_each_stack_root(&mut |addr, _| roots.push(addr));
             roots
         };
         let row = |frame_words| PreciseFrameMap {

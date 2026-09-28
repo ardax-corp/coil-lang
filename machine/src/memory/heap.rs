@@ -752,6 +752,92 @@ impl Heap {
     }
 
     /// Head of the intrusive object list (for address lookup).
+    /// One line of moving-GC feasibility numbers for the current mark
+    /// (`gc-stats` feature, `docs/internals/moving-gc.md` Stage 0). Call
+    /// after marking completes: marked objects are the live set.
+    #[cfg(feature = "gc-stats")]
+    pub fn census(&self, roots: &[(u64, RootKind)]) -> String {
+        use std::collections::{HashMap, HashSet};
+        // chunk -> (live slots, slots, slot size)
+        let mut chunks: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+        let (mut live, mut live_bytes) = (0usize, 0usize);
+        let mut pinned: HashSet<u64> = HashSet::new();
+        let (mut precise_refs, mut ambiguous_refs) = (0usize, 0usize);
+        let mut current = self.head_for_lookup();
+        while let Some(obj) = current {
+            if obj.is_marked() {
+                live += 1;
+                if let Some((i, size, slots)) = self.slab.slot_meta(obj.addr()) {
+                    live_bytes += size;
+                    let e = chunks.entry(i).or_insert((0, slots, size));
+                    e.0 += 1;
+                }
+                obj.for_each_reference(self, &mut |addr, precise| {
+                    if precise {
+                        precise_refs += 1;
+                    } else {
+                        ambiguous_refs += 1;
+                        pinned.insert(addr);
+                    }
+                });
+            }
+            current = obj.get_next();
+        }
+        let interior_pinned = pinned.len();
+        let (mut root_precise, mut root_ambiguous, mut root_pinned) = (0usize, 0usize, 0usize);
+        for &(addr, kind) in roots {
+            match kind {
+                RootKind::Precise => root_precise += 1,
+                RootKind::Ambiguous => {
+                    root_ambiguous += 1;
+                    pinned.insert(addr);
+                }
+                RootKind::Pinned => {
+                    root_pinned += 1;
+                    pinned.insert(addr);
+                }
+            }
+        }
+        let mapped = self.slab.mapped_bytes();
+        let total_chunks = self.slab.chunk_count();
+        let empty = total_chunks.saturating_sub(chunks.len());
+        // Per size class: chunks in use vs chunks the live slots would fill.
+        let mut by_size: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+        for &(n, slots, size) in chunks.values() {
+            let e = by_size.entry(size).or_insert((0, 0, slots));
+            e.0 += 1;
+            e.1 += n;
+        }
+        let packable: usize = by_size
+            .values()
+            .map(|&(used, live_slots, per)| used - live_slots.div_ceil(per.max(1)).min(used))
+            .sum();
+        let chunk = mapped.checked_div(total_chunks).unwrap_or(0);
+        let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+        format!(
+            "gc-stats: rss={}KiB mapped={}KiB chunks={} live={} ({}KiB, {:.1}% of mapped) | \
+             reclaim unmap-empty={}KiB compact={}KiB | \
+             roots precise={} ambiguous={} pinned={} | \
+             interior refs precise={} ambiguous={} | pinned objs={} ({:.1}% of live; {} via interior)",
+            resident_kib(),
+            mapped / 1024,
+            total_chunks,
+            live,
+            live_bytes / 1024,
+            pct(live_bytes, mapped),
+            empty * chunk / 1024,
+            packable * chunk / 1024,
+            root_precise,
+            root_ambiguous,
+            root_pinned,
+            precise_refs,
+            ambiguous_refs,
+            pinned.len(),
+            pct(pinned.len(), live),
+            interior_pinned,
+        )
+    }
+
     pub fn head_for_lookup(&self) -> Option<Object> {
         self.head
     }
@@ -1068,6 +1154,82 @@ impl Object {
         }
     }
 
+    /// Every heap reference `self` holds, with whether the word is precise.
+    ///
+    /// Precise: `Member::Object` fields, coroutine links, and coroutine stack
+    /// words named by a nonzero `saved_live_mask`. Everything else is a raw
+    /// `Value` word that is traced by address lookup and may be an immediate
+    /// (tuple / array elements, closure captures, unmasked coroutine words,
+    /// `Member::Value` fields) — a moving collector cannot rewrite those
+    /// (`docs/internals/moving-gc.md`). Not on the mark path.
+    pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
+        let word = |v: Value, precise: bool, visit: &mut dyn FnMut(u64, bool)| {
+            let addr = v.heap_addr();
+            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                visit(addr, precise);
+            }
+        };
+        let member = |m: &Member, visit: &mut dyn FnMut(u64, bool)| match m {
+            Member::Object(o) => visit(o.addr(), true),
+            Member::Value(v) => word(*v, false, visit),
+        };
+        match self {
+            Self::Instance(i) => {
+                let inst = i.as_ref();
+                match &inst.storage {
+                    InstanceStorage::Table(table) => {
+                        table.iter().for_each(|(_, v)| member(&v, visit));
+                    }
+                    InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
+                        for m in inst.storage.as_slice().into_iter().flatten() {
+                            member(m, visit);
+                        }
+                    }
+                }
+            }
+            Self::Enum(e) => e.as_ref().payload.iter().for_each(|m| member(m, visit)),
+            Self::Tuple(t) => t.as_ref().elements.iter().for_each(|v| word(*v, false, visit)),
+            Self::Array(a) => a.as_ref().elements.iter().for_each(|v| word(*v, false, visit)),
+            Self::Coroutine(c) => {
+                let coro = c.as_ref();
+                let mask = coro.saved_live_mask;
+                for (i, v) in coro.saved_stack.iter().enumerate() {
+                    let masked = mask != 0 && i < 64;
+                    if masked && mask & (1u64 << i) == 0 {
+                        continue;
+                    }
+                    word(*v, masked, visit);
+                }
+                word(coro.pending_send, false, visit);
+                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
+                    visit(Object::Coroutine(link).addr(), true);
+                }
+            }
+            Self::Boxed(b) => member(&b.as_ref().payload, visit),
+            Self::Root(r) => {
+                if let Some(m) = &r.as_ref().payload {
+                    member(m, visit);
+                }
+            }
+            Self::PolyFn(p) => p.as_ref().captured_dicts.iter().flatten().for_each(|m| member(m, visit)),
+            Self::Fn(f) => {
+                let f = f.as_ref();
+                for v in f.captures.iter().chain(f.captured_args.iter()) {
+                    word(*v, false, visit);
+                }
+            }
+            Self::String(_)
+            | Self::Library(_)
+            | Self::Weak(_)
+            | Self::Stream(_)
+            | Self::Thread(_)
+            | Self::Sender(_)
+            | Self::Receiver(_)
+            | Self::Mutex(_)
+            | Self::RwLock(_) => {}
+        }
+    }
+
     #[must_use]
     pub fn get_next(&self) -> Option<Self> {
         match self {
@@ -1288,6 +1450,18 @@ impl Object {
             | Self::RwLock(_) => std::ptr::null(),
         }
     }
+}
+
+/// How a moving collector may treat a root (`docs/internals/moving-gc.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootKind {
+    /// A word the VM knows is a heap reference; could be rewritten.
+    Precise,
+    /// A word that may be an immediate (conservative frame, static); the
+    /// object it hits must not move.
+    Ambiguous,
+    /// Keyed by address outside the heap (FFI library handles); never moves.
+    Pinned,
 }
 
 #[derive(Clone, Copy)]
@@ -2604,6 +2778,22 @@ struct EntryInner<V> {
     val: V,
 }
 
+/// Resident set size of this process in KiB (`gc-stats`; 0 off Linux).
+#[cfg(feature = "gc-stats")]
+fn resident_kib() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+        let pages: usize = statm.split_whitespace().nth(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+        pages * 4
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3038,6 +3228,26 @@ mod tests {
         );
     }
 
+    /// Array elements are raw words (ambiguous); typed members are precise.
+    #[test]
+    fn for_each_reference_marks_array_words_ambiguous() {
+        let mut heap = Heap::default();
+        let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let (arr, _) = heap.alloc(
+            ObjArray {
+                elements: vec![Value::from(s.addr()), Value::from(7i64)],
+            },
+            Object::Array,
+        );
+        let (en, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Member::Object(s))), Object::Enum);
+        let mut seen = Vec::new();
+        arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+        assert_eq!(seen, vec![(s.addr(), false)], "immediate 7 is not a reference");
+        seen.clear();
+        en.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+        assert_eq!(seen, vec![(s.addr(), true)]);
+    }
+
     #[test]
     fn cstr_from_addr_string_hit_and_type_miss() {
         let mut heap = Heap::default();
@@ -3273,3 +3483,4 @@ mod tests {
         assert_eq!((&heap).into_iter().count(), 2);
     }
 }
+

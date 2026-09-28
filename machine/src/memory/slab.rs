@@ -183,6 +183,16 @@ impl Slab {
         self.chunks.len() * CHUNK
     }
 
+    /// `(chunk index, slot size, slots in that chunk)` for a slot address.
+    #[cfg(feature = "gc-stats")]
+    pub fn slot_meta(&self, addr: u64) -> Option<(usize, usize, usize)> {
+        let i = self.chunks.position(addr)?;
+        let c = self.chunks.get(i)?;
+        let size = c.meta.slot_size as usize;
+        let slots = (CHUNK - c.meta.first_off as usize) / size;
+        Some((i, size, slots))
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
