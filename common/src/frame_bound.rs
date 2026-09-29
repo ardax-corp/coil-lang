@@ -299,7 +299,7 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         // One new word at most (pops, if any, come first).
         DUPLICATE | CONST | STRING | CodePtr | INIT | InitTyped | MakeEnum | MakeEnumK
         | MakeTuple | MakeTupleK
-        | MakeArray | MakeDict | MakePolyFn | MakePolyFnCapture | MakeFn | LoadStatic | FfiLoad
+        | MakeArray | MakeArrayK | MakeDict | MakePolyFn | MakePolyFnCapture | MakeFn | LoadStatic | FfiLoad
         | FfiInvoke | DeclareFFI | HostInvoke => s.push = 1,
         // Net pops or in place.
         NOOP | DATA | NATIVE | POP | ADD | SUB | MUL | DIV | MOD | ADDF | SUBF | MULF | DIVF

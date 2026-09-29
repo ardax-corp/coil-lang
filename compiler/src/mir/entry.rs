@@ -279,7 +279,7 @@ mod tests {
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 0, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::MakeArray { arity: 2, loc },
+            IlOp::MakeArray { elem_kind: 0, arity: 2, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
         assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));

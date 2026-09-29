@@ -1367,7 +1367,7 @@
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
             IlOp::Const { imm: 2, loc },
-            IlOp::MakeArray { arity: 2, loc },
+            IlOp::MakeArray { elem_kind: 0, arity: 2, loc },
             IlOp::Return { loc, ret_words: 1},
         ];
 

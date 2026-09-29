@@ -9509,6 +9509,23 @@ impl Compiler {
         }
     }
 
+    /// Element word kind of an array literal (`common::WORD_POINTER` when
+    /// its static element type is a ground heap type, else unknown).
+    fn array_literal_elem_kind(&self, literal: &Output) -> u8 {
+        use crate::typechecking::value_layout::{vec_elem_ty, word_kind};
+        let Some(ty) = self.codegen_expr_ty(literal) else {
+            return common::WORD_UNKNOWN;
+        };
+        let elem = match crate::typechecking::ty::strip_readonly(&ty) {
+            Ty::Array { element, .. } => Some(element.as_ref().clone()),
+            _ => vec_elem_ty(&self.checker, &ty),
+        };
+        match elem.map(|e| word_kind(&self.checker, &e)) {
+            Some(common::WORD_POINTER) => common::WORD_POINTER,
+            _ => common::WORD_UNKNOWN,
+        }
+    }
+
     /// Thunk for `Vec::{name}` whose elements are ground pointers.
     pub(super) fn pointer_vec_ctor_name(name: &str) -> String {
         format!("{}::{name}$ptr", common::BUILTIN_VEC_TYPE)
@@ -15359,7 +15376,8 @@ impl Compiler {
                     bytecode.append(&mut bc);
                 }
                 let arity = items.len() as u32;
-                bytecode.push_make_array(arity);
+                let elem_kind = self.array_literal_elem_kind(ast);
+                bytecode.push_make_array_kind(arity, elem_kind);
             }
             Expression::Dict(items) => {
                 // Eagerly resolve field names to strings before

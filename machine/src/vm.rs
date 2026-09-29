@@ -1293,6 +1293,7 @@ impl<const S: usize> Machine<S> {
             if self.heap.gc_is_sweeping() {
                 self.heap.finish_sweep();
             }
+            self.clear_dense_obj_cache();
 
             self.mark_from_vm_roots();
             let queue = self.queue_unmarked_finalizers();
@@ -1406,6 +1407,10 @@ impl<const S: usize> Machine<S> {
     }
 
     fn gc_start_mark(&mut self) {
+        // The dense-index cache is not a root (it kept the last indexed
+        // array alive after its frame returned); drop it before objects can
+        // be freed or moved under it.
+        self.clear_dense_obj_cache();
         let roots = self.collect_vm_root_addrs();
         self.heap.begin_mark(&roots);
         self.heap.restore_gc_roots(roots);
@@ -1534,9 +1539,6 @@ impl<const S: usize> Machine<S> {
             for obj in pins.by_slot.iter().flatten() {
                 visit(obj.addr(), crate::memory::RootKind::Precise);
             }
-        }
-        if let Some(obj) = self.dense_obj {
-            visit(obj.addr(), crate::memory::RootKind::Precise);
         }
         // `FfiLoad` keeps `ObjLibrary` in `userland_libraries` for the VM
         // lifetime; the Coil handle is only an addr. Root those keys so GC
@@ -3225,7 +3227,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::TagArrayKind as u8);
+            promise!(*bc as u8 <= Instruction::MakeArrayK as u8);
 
             match bc {
                 Instruction::STORE => {

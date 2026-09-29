@@ -1735,7 +1735,7 @@ mod tests {
         let ops = vec![
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 1, loc },
-            IlOp::MakeArray { arity: 1, loc },
+            IlOp::MakeArray { elem_kind: 0, arity: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
         let mut hints = LowerHints::new("arr");

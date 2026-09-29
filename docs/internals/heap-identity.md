@@ -105,12 +105,15 @@ round's whole structure alive.
 
 Arrays carry an element kind (archive minor 27). `Vec::new` /
 `with_capacity` / `from` calls whose static element type is a ground
-pointer (class, string, niche `Option` / `Result`, nested `Vec`) call
-`Vec::{name}$ptr` thunks, which end in `TagArrayKind`. Marking then treats
+pointer (class, string, niche `Option` / `Result`, nested `Vec` or fixed
+array) call `Vec::{name}$ptr` thunks, which end in `TagArrayKind`. Array
+literals of such elements are built with `MakeArrayK` (archive minor 28).
+They cover literals the interpreter materializes, such as a returned or
+stored row; stack and dense arrays carry no kind. Marking then treats
 every element as `0` or an object: precise, no classification. Only the
 pointer kind is ever kept; a scalar stamp would be unsound because generic
-shared bodies may store boxed values. Arrays from other natives, literals,
-and generic code stay ambiguous. `gc-stress` checks every element of a
+shared bodies may store boxed values. Arrays from other natives, dense
+`DenseMake`, and generic code stay ambiguous. `gc-stress` checks every element of a
 pointer-kind array. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 

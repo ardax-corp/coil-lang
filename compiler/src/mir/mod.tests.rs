@@ -2739,7 +2739,7 @@ fn i5_alloc_edges_visible_and_emit_refuses() {
         IlOp::Label(Label(0)),
         IlOp::Const { imm: 1, loc },
         IlOp::Const { imm: 2, loc },
-        IlOp::MakeArray { arity: 2, loc },
+        IlOp::MakeArray { elem_kind: 0, arity: 2, loc },
         IlOp::Return { loc, ret_words: 1 },
     ];
     let mut pool = Vec::new();

@@ -2006,7 +2006,7 @@ mod tests {
         ops.extend([
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Const { imm: 2, loc: loc() },
-            IlOp::MakeArray {
+            IlOp::MakeArray { elem_kind: 0,
                 arity: 2,
                 loc: loc(),
             },
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn hoists_invariant_array_len() {
         let mut ops = vec![
-            IlOp::MakeArray {
+            IlOp::MakeArray { elem_kind: 0,
                 arity: 0,
                 loc: loc(),
             },
@@ -2136,7 +2136,7 @@ mod tests {
         // Inlined `Vec::push` is ArrayPush, not HostInvoke, so the loop is not a
         // general LICM barrier — but `len(a)` still changes each iteration.
         let mut ops = vec![
-            IlOp::MakeArray {
+            IlOp::MakeArray { elem_kind: 0,
                 arity: 0,
                 loc: loc(),
             },

@@ -261,7 +261,7 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
                         if tuples.contains(&slot) {
                             out.push(IlOp::MakeTuple { kinds: 0, arity, loc });
                         } else {
-                            out.push(IlOp::MakeArray { arity, loc });
+                            out.push(IlOp::MakeArray { elem_kind: 0, arity, loc });
                         }
                         out.push(IlOp::Dup { loc });
                         out.push(IlOp::StorePop { slot, loc });

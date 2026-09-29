@@ -101,10 +101,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 27 — `TagArrayKind`: arrays built by typed `Vec` constructors carry an
 ///      element word kind. Older archives never emit it (elements stay
 ///      ambiguous).
+/// 28 — `MakeArrayK`: array literals of ground pointer elements carry the
+///      pointer element kind. Older archives never emit it.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 27;
+pub const ARCHIVE_MINOR: u16 = 28;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -819,9 +821,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 27);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 27));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.27");
+        assert_eq!(ARCHIVE_MINOR, 28);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 28));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.28");
     }
 
     #[test]

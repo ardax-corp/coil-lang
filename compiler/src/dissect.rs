@@ -293,6 +293,7 @@ fn format_operands(
         }
         Instruction::TagEnumType => format!("type_id={}", byte.operand_u32()),
         Instruction::TagArrayKind => format!("kind={}", byte.operand_u32()),
+        Instruction::MakeArrayK => format!("arity={} kind={}", byte.make_arity(), byte.operand_u32() >> 16),
         Instruction::CodePtr | Instruction::MakePolyFn => {
             let t = byte.operand_u32() as usize;
             format!("entry={}", annotate_pc(t, pc_names))

@@ -25,7 +25,8 @@ These **pin** the object they reach:
 - every ambiguous word (unknown kinds, closure captures, `Member::Value`,
   conservative frames, non-must slots, MIR stack-map slots);
 - statics and the steal join root;
-- `frame_pins` / `dense_obj` (Rust-held handles);
+- `frame_pins` (Rust-held handles; the `dense_obj` index cache is not a root
+  and is cleared at every collection);
 - FFI library keys;
 - the targets of `Root` (FFI may hold the address) and `Weak` handles.
 

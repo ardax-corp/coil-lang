@@ -185,6 +185,8 @@ pub enum IlOp {
     /// `MakeArray` — pop `arity` values, push array.
     MakeArray {
         arity: u32,
+        /// Element word kind (`common::WORD_*`); only pointer is encoded.
+        elem_kind: u8,
         loc: DebugLoc,
     },
     /// `MakeEnum` — pop `arity` payloads, push enum with `tag`.
@@ -402,6 +404,12 @@ impl IlOp {
             },
             Instruction::MakeArray => Self::MakeArray {
                 arity: byte.operand_u32(),
+                elem_kind: common::WORD_UNKNOWN,
+                loc,
+            },
+            Instruction::MakeArrayK => Self::MakeArray {
+                arity: byte.make_arity(),
+                elem_kind: (byte.operand_u32() >> 16) as u8 & 0x3,
                 loc,
             },
             Instruction::MakeEnum | Instruction::MakeEnumK => Self::MakeEnum {
@@ -509,8 +517,15 @@ impl IlOp {
                     Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
                 }
             }
-            IlOp::MakeArray { arity, .. } => {
-                Byte::new(Instruction::MakeArray).with_operand_u32(*arity)
+            IlOp::MakeArray {
+                arity, elem_kind, ..
+            } => {
+                if *elem_kind == common::WORD_POINTER && *arity <= 0xFFFF {
+                    Byte::new(Instruction::MakeArrayK)
+                        .with_operand_u32((u32::from(*elem_kind) << 16) | *arity)
+                } else {
+                    Byte::new(Instruction::MakeArray).with_operand_u32(*arity)
+                }
             }
             IlOp::MakeEnum {
                 tag, arity, kinds, ..
@@ -1163,7 +1178,7 @@ mod tests {
                 arity: 2,
                 loc: DebugLoc::unknown(),
             },
-            IlOp::MakeArray {
+            IlOp::MakeArray { elem_kind: 0,
                 arity: 3,
                 loc: DebugLoc::unknown(),
             },
