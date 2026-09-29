@@ -68,6 +68,34 @@ fn run_debug_script_on(
     (out, cwd)
 }
 
+/// Every statement has a line: a line breakpoint hits, `bt` names the
+/// file:line, and `next` moves to another line.
+#[test]
+fn debug_batch_line_breakpoint_bt_and_next() {
+    let (out, _cwd) = run_debug_script(
+        "break 12\nrun\nbt\ndelete\nnext\ncontinue\nquit\n",
+        "line_bp",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "debug failed: {}\nstdout={stdout}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("Breakpoint 1, fib at") && stdout.contains("fib.hy:12"),
+        "expected a stop at fib.hy:12, stdout={stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.contains("fib pc=") && l.contains("fib.hy:12")),
+        "bt should show fib.hy:12, stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Next, "),
+        "next should stop on a source line, stdout={stdout}"
+    );
+}
+
 #[test]
 fn debug_batch_fib_break_bt_continue() {
     let (out, cwd) = run_debug_script(
