@@ -95,7 +95,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
-        rename_provider: Some(lsp_types::OneOf::Left(true)),
+        rename_provider: Some(lsp_types::OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         semantic_tokens_provider: Some(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -398,8 +401,34 @@ fn handle_request(
                 data: tokens,
             }))?)
         }
+        "textDocument/prepareRename" => {
+            let params: lsp_types::TextDocumentPositionParams =
+                serde_json::from_value(request.params.clone())?;
+            let range = state.documents.get(&params.text_document.uri).and_then(|document| {
+                let offset = position_to_byte(&document.text, params.position)?;
+                let word = word_range(&document.text, offset)?;
+                let name = &document.text[word.clone()];
+                if coil_keywords().contains(&name) || name == "self" {
+                    return None;
+                }
+                // Only symbols we can resolve: renaming a stray word would
+                // silently leave its real uses behind.
+                let found = !identifier_locations(
+                    state,
+                    &params.text_document.uri,
+                    params.position,
+                    true,
+                )
+                .is_empty();
+                found.then(|| byte_range(&document.text, &word))
+            });
+            Some(serde_json::to_value(range)?)
+        }
         "textDocument/rename" => {
             let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
+            if !is_valid_identifier(&params.new_name) {
+                return Err(format!("`{}` is not a valid identifier", params.new_name).into());
+            }
             let edits = rename_identifier(
                 state,
                 &params.text_document_position.text_document.uri,
@@ -825,6 +854,19 @@ fn identifier_locations(
     let Some(name) = identifier_name(document, position) else {
         return Vec::new();
     };
+    // Function locals resolve through lexical scopes, never by name.
+    if let Some(offset) = position_to_byte(&document.text, position)
+        && let Some(binding) = compiler::binding_at(&document.text, offset)
+    {
+        return binding
+            .occurrences()
+            .skip(usize::from(!include_declaration))
+            .map(|range| Location {
+                uri: uri.clone(),
+                range: byte_range(&document.text, range),
+            })
+            .collect();
+    }
     let mut locations = Vec::new();
     let mut seen = HashSet::new();
 
@@ -842,6 +884,12 @@ fn identifier_locations(
     };
 
     let mut visit_index = |path: &Path, source: &str, index: &SymbolIndex| {
+        // A local that happens to share the global's name is not a use of it.
+        let local_starts: HashSet<usize> = compiler::local_bindings(source)
+            .iter()
+            .filter(|binding| binding.name == name)
+            .flat_map(|binding| binding.occurrences().map(|r| r.start).collect::<Vec<_>>())
+            .collect();
         if include_declaration {
             for definition in index.definitions(&name) {
                 if let Some(location) = location_for_file(state, path, &definition.name_range)
@@ -857,6 +905,9 @@ fn identifier_locations(
             }
         }
         for site in index.references(&name) {
+            if local_starts.contains(&site.range.start) {
+                continue;
+            }
             if let Some(location) = location_for_file(state, path, &site.range) {
                 push(location);
             }
@@ -2864,12 +2915,23 @@ fn occurrences(source: &str, word: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !coil_keywords().contains(&name)
+        && name != "self"
+}
+
 fn coil_keywords() -> &'static [&'static str] {
     &[
         "fn", "let", "const", "class", "enum", "type", "if", "else", "for", "while", "in",
         "match", "return", "true", "false", "use", "mod", "pub", "static", "async", "defer",
         "raise", "panic", "yield", "break", "continue", "where", "impl", "trait", "extern", "as",
-        "readonly", "new", "default", "typeof", "resume", "with", "done",
+        "readonly", "new", "default", "typeof", "resume", "with", "done", "attr", "struct",
+        "test", "forall", "from",
     ]
 }
 
@@ -4074,5 +4136,101 @@ fn main() {
         let uri: Uri = "file:///tmp/my%20pkg/src/lib.hy".parse().unwrap();
         let path = uri_path(&uri).expect("path");
         assert!(path.ends_with("my pkg/src/lib.hy"), "{path:?}");
+    }
+
+    fn state_with(source: &str) -> (ServerState, Uri) {
+        let mut state = ServerState::default();
+        let uri: Uri = "file:///tmp/coil-lsp-test.hy".parse().unwrap();
+        state.documents.insert(
+            uri.clone(),
+            Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
+        );
+        (state, uri)
+    }
+
+    fn renamed_ranges(source: &str, edits: lsp_types::WorkspaceEdit, uri: &Uri) -> Vec<Range<usize>> {
+        let mut ranges: Vec<_> = edits
+            .changes
+            .unwrap_or_default()
+            .remove(uri)
+            .unwrap_or_default()
+            .iter()
+            .map(|edit| lsp_range_to_byte_range(source, edit.range).unwrap())
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        ranges
+    }
+
+    #[test]
+    fn rename_local_includes_declaration_and_stays_in_scope() {
+        let source = "fn a() {\n    let p = 1;\n    let _ = p;\n}\nfn b() {\n    let p = 2;\n    let _ = p;\n}\n";
+        let (state, uri) = state_with(source);
+        let use_offset = source.find("_ = p").unwrap() + 4;
+        let edits = rename_identifier(&state, &uri, byte_position(source, use_offset), "q");
+        let decl = source.find("let p").unwrap() + 4;
+        assert_eq!(
+            renamed_ranges(source, edits, &uri),
+            vec![decl..decl + 1, use_offset..use_offset + 1],
+            "only fn a's `p`, declaration included"
+        );
+    }
+
+    #[test]
+    fn rename_global_skips_same_named_local() {
+        let source = "fn helper() -> int { return 1; }\nfn main() {\n    let _ = helper();\n}\nfn other() {\n    let helper = 2;\n    let _ = helper;\n}\n";
+        let (state, uri) = state_with(source);
+        let call = source.find("helper()").unwrap();
+        let edits = rename_identifier(&state, &uri, byte_position(source, call), "util");
+        let ranges = renamed_ranges(source, edits, &uri);
+        assert_eq!(ranges.len(), 2, "decl + call only: {ranges:?}");
+        assert!(ranges.iter().all(|r| r.end <= source.find("fn other").unwrap()));
+    }
+
+    #[test]
+    fn identifier_validation_rejects_keywords_and_junk() {
+        assert!(is_valid_identifier("value_2"));
+        assert!(!is_valid_identifier("2value"));
+        assert!(!is_valid_identifier("let"));
+        assert!(!is_valid_identifier("self"));
+        assert!(!is_valid_identifier("a-b"));
+        assert!(!is_valid_identifier(""));
+    }
+
+    #[test]
+    fn hover_type_of_let_uses_initializer_not_statement() {
+        let source = "fn two() -> int { return 2; }\nfn main() {\n    let s = two();\n    let t: string = \"x\";\n}\n";
+        let ast = Pratt::default().parse(source).unwrap();
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&ast);
+        let at = |needle: &str| {
+            let offset = source.find(needle).unwrap() + 4;
+            let range = offset..offset + 1;
+            hover_type(&ast, Some(&checker), source, &source[range.clone()], offset, &range)
+        };
+        assert_eq!(at("let s").as_deref(), Some("int"));
+        assert_eq!(at("let t").as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn call_paren_scan_handles_nesting_strings_and_commas() {
+        assert_eq!(enclosing_call_paren("f(a, g(b), "), Some((1, 2)));
+        assert_eq!(enclosing_call_paren("f(g(x"), Some((3, 0)));
+        assert_eq!(enclosing_call_paren("f(\"(,\", "), Some((1, 1)));
+        assert_eq!(enclosing_call_paren("f(a)"), None);
+        assert_eq!(enclosing_call_paren("f([1, "), None);
+    }
+
+    #[test]
+    fn signature_help_reads_declaration_with_return_type() {
+        let source = "fn add(int a, int b) -> int { return a + b; }\nfn main() {\n    let _ = add(1, add(2, \n}\n";
+        let (state, uri) = state_with(source);
+        let offset = source.find("add(2, ").unwrap() + "add(2, ".len();
+        let help = decl_signature_help(&state, &uri, byte_position(source, offset)).expect("help");
+        assert_eq!(help.signatures[0].label, "add(int a, int b) -> int");
+        assert_eq!(help.active_parameter, Some(1));
     }
 }

@@ -15,15 +15,17 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Capability | Behavior |
 |---|---|
 | Full-document sync | `didOpen` / `didChange` / `didClose`; published parse and type diagnostics |
+| Per-file diagnostics | Every file in the project typecheck gets its own list (an imported file's parse error lands on that file; its importers skip cascade errors until it parses). Files that become clean are cleared. Nothing is rendered to stderr |
+| Protocol | Unsupported requests get `MethodNotFound`; malformed params get `InvalidParams`. A failing notification is logged, never fatal |
 | Project overlays | Unsaved buffers overlay disk via `Pipeline::set_file_text`; `ProjectIndex` is refreshed on each change |
 | Multi-file navigation | Goto-definition uses the use-graph `ProjectIndex` and can land in **unopened** imported `.hy` files |
-| Hover | Inferred types, `///` docs, parameter docs, virtual-module stubs |
+| Hover | Types from the project checker (cross-file, `let x = e` shows the type of `e`, `let x: T` shows `T`), `///` docs including at the definition site in another file, parameter docs, virtual-module stubs. Unparsable buffers fall back to the single-file / last-good path |
 | Completion | Keywords, decls, inferred types, function snippets, mid-edit sanitize / last-good fallback; `Enum.Case` after `.`; virtual exports after `::` |
-| Signature help | Local `fn` parameter lists; imported / virtual names from the completion index |
+| Signature help | Declaration-based `name(T a, U b) -> R` for local and imported `fn`s and methods; nesting / string aware active parameter; virtual names from the completion index |
 | Format | Whole-document `coil fmt` |
 | Range format | Reformats **overlapping top-level items** only (not a token-precise rustfmt range) |
 | Document / workspace symbols | Top-level decls; workspace symbols include indexed use-graph files |
-| Highlights / references / rename | `SymbolIndex` identifier sites — not substring hits in comments or strings |
+| Highlights / references / rename | Function locals resolve through lexical scopes (`compiler::local_scopes`: `let`, params, `for`, match / `if let` patterns, lambda args and `use (…)` captures), so renaming a local touches only that binding, declaration included. Globals use `SymbolIndex` sites minus same-named locals. `prepareRename` refuses keywords / unresolved words; `rename` rejects invalid identifiers |
 | Folding | One fold per top-level document symbol that spans lines |
 | Selection ranges | Nested AST spans containing the cursor (full file if parse fails) |
 | Semantic tokens | Lexical comments/strings/numbers/operators plus AST / `Checker` classification |
@@ -59,7 +61,6 @@ Leave these for a later LSP pass unless they block daily editing:
 - `coil.toml` `[module].roots` (compiler language path ignores it; pass
   `--root` on CLI).
 - Incremental (`TextDocumentSyncKind::INCREMENTAL`) edits.
-- Rename prepare / invalid-identifier rejection.
 - Semantic token modifiers (`declaration`, `readonly`, …).
 
 The reporting crate exposes byte-to-LSP UTF-16 position conversion so other
