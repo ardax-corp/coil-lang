@@ -37,7 +37,9 @@ impl ProjectIndex {
 
     /// Index with explicit search roots (CLI `--root` / LSP workspace).
     pub fn with_roots(project_root: PathBuf, roots: Vec<PathBuf>) -> Self {
-        let mut pipeline = Pipeline::new();
+        // Diagnostics are returned to the caller; never render them to stderr.
+        let mut pipeline =
+            Pipeline::with_reporter(reporting::ReportConfig::default(), Box::new(std::io::sink()));
         pipeline.bind_project_root(project_root.clone(), roots);
         Self {
             pipeline,

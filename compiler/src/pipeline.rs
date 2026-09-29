@@ -311,7 +311,27 @@ impl Pipeline {
         self.discover_all();
 
         let mut results = Vec::new();
+        // Discovery drops files that fail to parse from the worklist; still
+        // report their parse error against the file itself.
+        let mut broken = HashSet::new();
+        for file in &self.processed {
+            if let Some(err) = self.ast_cache.get(file).and_then(|c| c.parse_error()) {
+                results.push((file.clone(), vec![err.clone()]));
+                broken.insert(file.clone());
+            }
+        }
         for item in self.worklist_in_dependency_order() {
+            // Importers of an unparsable module would only report cascades
+            // ("non-class type") from its missing decls; wait for the fix.
+            let dep_broken = self
+                .module_deps
+                .get(&item.file)
+                .is_some_and(|deps| deps.iter().any(|d| broken.contains(d)));
+            if dep_broken {
+                broken.insert(item.file.clone());
+                results.push((item.file, Vec::new()));
+                continue;
+            }
             let namespace = if self.entry_file.as_ref() == Some(&item.file) {
                 String::new()
             } else {
