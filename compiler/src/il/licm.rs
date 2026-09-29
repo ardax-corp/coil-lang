@@ -833,6 +833,40 @@ fn loop_has_field_ops(ops: &[IlOp], lp: &NaturalLoop) -> bool {
 
 pub(super) fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
     let mut s = HashSet::new();
+    // `Unpack` / a taken `JumpIfMatch` push their payload through the shared
+    // cursor straight into the binding slots (no STORE), from the scrutinee's
+    // slot upward. Hoisting a `LOAD` of such a slot would read the previous
+    // iteration's payload, or garbage on the first.
+    let tell = super::tell::analyze_il_at(ops, 0);
+    let mut unknown_payload = false;
+    for (idx, op) in ops
+        .iter()
+        .enumerate()
+        .take(lp.latch.saturating_add(1))
+        .skip(lp.header)
+    {
+        let arity = match op {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                byte.operand_u32()
+            }
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { arity, .. },
+                ..
+            } => *arity,
+            _ => 0,
+        };
+        if arity == 0 {
+            continue;
+        }
+        match tell.tell_before(idx).known() {
+            Some(cursor) if cursor >= 1 => s.extend(cursor - 1..cursor - 1 + arity),
+            _ => unknown_payload = true,
+        }
+    }
+    if unknown_payload {
+        // Payload slots unknown: every slot the function touches may change.
+        s.extend(slots_referenced(ops));
+    }
     for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
         match op {
             IlOp::StorePop { slot, .. } => {
@@ -846,6 +880,40 @@ pub(super) fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u3
             {
                 let n = byte.load_store_count();
                 for i in 0..n {
+                    s.insert(byte.load_store_slot_at(i));
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+/// Every slot a `LOAD` / `STORE` / slot-operand op names.
+fn slots_referenced(ops: &[IlOp]) -> HashSet<u32> {
+    let mut s = HashSet::new();
+    for op in ops {
+        match op {
+            IlOp::StorePop { slot, .. } => {
+                s.insert(*slot);
+            }
+            IlOp::BinSlotImm { slot, .. } => {
+                s.insert(*slot as u32);
+            }
+            IlOp::Load { slot, .. } => {
+                s.insert(*slot);
+            }
+            IlOp::BinSlotSlot { a, b, .. } => {
+                s.insert(*a as u32);
+                s.insert(*b as u32);
+            }
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::LOAD | Instruction::STORE | Instruction::StorePop
+                ) =>
+            {
+                for i in 0..byte.load_store_count() {
                     s.insert(byte.load_store_slot_at(i));
                 }
             }
@@ -1017,6 +1085,37 @@ mod tests {
         let before = ops.clone();
         licm(&mut ops);
         assert_eq!(ops.len(), before.len());
+    }
+
+    /// A match in a loop: `Unpack` writes its payload into the binding slots
+    /// through the cursor, with no STORE. Those slots are loop-variant.
+    #[test]
+    fn unpack_payload_slots_count_as_stored() {
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Byte {
+                byte: common::Byte::new(common::Instruction::Seek).with_operand_u32(3),
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
+            IlOp::Byte {
+                byte: common::Byte::new(common::Instruction::Unpack).with_operand_u32(2),
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+                hint: Default::default(),
+            },
+        ];
+        let lp = find_natural_loops(&ops).into_iter().next().expect("loop");
+        let stored = slots_stored_in_loop(&ops, &lp);
+        assert!(stored.contains(&3) && stored.contains(&4), "payload slots: {stored:?}");
+        assert!(!stored.contains(&0), "the scrutinee's own slot is only read");
     }
 
     #[test]
