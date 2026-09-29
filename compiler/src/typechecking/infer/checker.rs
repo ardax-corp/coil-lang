@@ -120,6 +120,8 @@ impl Checker {
             infer_depth: 0,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
+            ident_binding_frames: HashMap::new(),
+            static_decl_frames: HashMap::new(),
             node_ids_by_span: HashMap::new(),
             codegen_var_types: std::collections::HashMap::new(),
             polyfn_binding_spans: std::collections::HashSet::new(),
@@ -1428,6 +1430,7 @@ impl Checker {
         self.infer_depth = 0;
         self.cache.clear();
         self.codegen_types_by_span.clear();
+        self.ident_binding_frames.clear();
         self.node_ids_by_span.clear();
         self.codegen_var_types.clear();
         self.polyfn_binding_spans.clear();
@@ -3235,6 +3238,8 @@ impl Checker {
                 } else {
                     apply_ty_prune(&self.subst, &init_ty)
                 };
+                self.static_decl_frames
+                    .insert(fqn.clone(), self.env.depth().saturating_sub(1));
                 self.register_static_slot(fqn, *is_const, slot_ty.clone(), range.clone());
                 self.env
                     .insert_top(name.to_string(), Scheme::mono(slot_ty.clone()));
@@ -4010,6 +4015,7 @@ impl Checker {
             );
         }
 
+        self.record_ident_binding(name, &range);
         let scheme = self.env.lookup(name).cloned();
         match scheme {
             Some(s) => {
@@ -6298,7 +6304,11 @@ impl Checker {
             Expression::Identifier(n) => {
                 let ident = n.to_string();
                 let module_fqn = self.qualify_module_name(&ident);
-                if self.static_slots.contains_key(&module_fqn) {
+                let span = target.0.into_range();
+                self.record_ident_binding(&ident, &span);
+                if self.static_slots.contains_key(&module_fqn)
+                    && !self.ident_shadows_static((span.start, span.end), &module_fqn)
+                {
                     if self.is_static_const_fqn(&module_fqn) {
                         let mut msg = Message::error(
                             ErrorCode::InvalidAssignment,
@@ -15555,6 +15565,48 @@ impl Checker {
     /// Static slot for a name in the current module namespace.
     pub fn static_slot_for_module_name(&self, name: &str) -> Option<u32> {
         self.static_slot_index(&self.qualify_module_name(name))
+    }
+
+    /// Record which env frame the identifier at `range` binds to. Inside an
+    /// isolated lambda env every hit other than a rebound import is a
+    /// capture, parameter, or local.
+    fn record_ident_binding(&mut self, name: &str, range: &Range<usize>) {
+        let Some(frame) = self.env.lookup_frame(name) else {
+            return;
+        };
+        let frame = if self.lambda_uncaptured_outer.is_some() {
+            if frame == 0
+                && (self.disk_imports.contains(name) || self.scope_bindings.contains_key(name))
+            {
+                return;
+            }
+            super::LAMBDA_LOCAL_FRAME
+        } else {
+            frame
+        };
+        self.ident_binding_frames
+            .insert((range.start, range.end), frame);
+    }
+
+    /// Whether the identifier at `span` binds to a local (parameter, `let`,
+    /// capture, pattern binding) that shadows the static `fqn`: its binding
+    /// frame is deeper than the static's declaration frame. Also true for a
+    /// same-named parameter of a function declared before the static.
+    /// [`Self::ident_shadows_static`] for codegen: `resolved` is the
+    /// import-resolved name, `name` the bare identifier (current module).
+    pub fn ident_shadows_static_name(&self, span: (usize, usize), name: &str, resolved: &str) -> bool {
+        self.ident_shadows_static(span, resolved)
+            || self.ident_shadows_static(span, &self.qualify_module_name(name))
+    }
+
+    pub fn ident_shadows_static(&self, span: (usize, usize), fqn: &str) -> bool {
+        match (
+            self.ident_binding_frames.get(&span),
+            self.static_decl_frames.get(fqn),
+        ) {
+            (Some(&site), Some(&decl)) => site > decl,
+            _ => false,
+        }
     }
 
     /// Whether `class.field` is declared `const`.

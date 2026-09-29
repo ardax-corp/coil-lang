@@ -173,6 +173,13 @@ impl Env {
         None
     }
 
+    /// Index of the innermost frame that binds `name` (0 = outermost).
+    pub fn lookup_frame(&self, name: &str) -> Option<usize> {
+        self.frames
+            .iter()
+            .rposition(|frame| frame.lookup(name).is_some())
+    }
+
     /// Free type variables of every scheme in the environment,
     /// excluding each scheme's quantified variables.
     pub fn ftv(&self) -> HashSet<TyVarId> {

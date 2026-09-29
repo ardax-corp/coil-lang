@@ -14471,10 +14471,15 @@ impl Compiler {
             }
             Expression::Identifier(name) => {
                 let resolved = self.resolve_free_fn(name);
+                let site = lhs.0.into_range();
+                let shadows_static =
+                    self.checker
+                        .ident_shadows_static_name((site.start, site.end), name, &resolved);
                 if let Some(static_slot) = self
                     .checker
                     .static_slot_index(&resolved)
                     .or_else(|| self.checker.static_slot_for_module_name(name))
+                    .filter(|_| !shadows_static)
                 {
                     self.append_binding_rhs(bytecode, value);
                     bytecode.push(
@@ -14897,6 +14902,11 @@ impl Compiler {
             unreachable!("compile_identifier_into on another expression");
         };
             let resolved = self.resolve_free_fn(n);
+            // A parameter / local / capture named like a static shadows it.
+            let site = span.into_range();
+            let shadows_static =
+                self.checker
+                    .ident_shadows_static_name((site.start, site.end), n, &resolved);
             if let Some(v) = self
                 .const_env()
                 .get(&resolved)
@@ -14907,7 +14917,7 @@ impl Compiler {
             } else if let Some(v) = self
                 .static_const_values
                 .get(&resolved)
-                .filter(|_| self.checker.is_static_const_fqn(&resolved))
+                .filter(|_| !shadows_static && self.checker.is_static_const_fqn(&resolved))
                 .cloned()
             {
                 self.emit_const_value(&v, bytecode);
@@ -14915,8 +14925,10 @@ impl Compiler {
                 .static_const_values
                 .get(&self.qualify_static_fqn(n))
                 .filter(|_| {
-                    self.checker
-                        .is_static_const_fqn(&self.qualify_static_fqn(n))
+                    !shadows_static
+                        && self
+                            .checker
+                            .is_static_const_fqn(&self.qualify_static_fqn(n))
                 })
                 .cloned()
             {
@@ -14925,6 +14937,7 @@ impl Compiler {
                 .checker
                 .static_slot_index(&resolved)
                 .or_else(|| self.checker.static_slot_for_module_name(n))
+                .filter(|_| !shadows_static)
             {
                 bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
             } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
