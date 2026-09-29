@@ -57,11 +57,51 @@ generic returns, stay unknown). Fork workers (`__coil_par_f`) reuse `f`'s.
 The analysis tracks the kinds of the top operands relative to the cursor,
 so a push / `STORE` pair keeps its kind at loop heads where the cursor is
 only known as a range. `MakeEnumReturn(K)` records its allocation. The VM
-reports flagged slots as precise roots and the rest as ambiguous. What
-stays ambiguous: slots a loop reads only after rewriting (stale values
-from the previous iteration, unwritten on entry; a liveness pass could
-drop them) and generic call results, so objects held that way would still
-pin under a moving collector.
+reports flagged slots as precise roots and the rest as ambiguous. Generic
+call results stay ambiguous, so objects held that way would still pin
+under a moving collector.
+
+Three things keep loop frames precise:
+
+1. **Loop cursor raise.** A loop whose body stores locals above the entry
+   cursor reaches its header with one cursor on entry and a higher one on
+   the back edge, so the map only knows a range there. The fresh object and
+   last iteration's value then share ambiguous words. For interpreted
+   (fuse-IL) bodies, `IlModule::apply_loop_cursor_raises` adds a
+   `CONST 0; STORE b-1` preheader that raises the entry cursor to the
+   back-edge one `b`.
+   - `b` comes from the tell analysis, iterated one loop pass at a time.
+   - The raise runs after IL optimization and MIR tiering, so neither sees
+     it; dense / LIR bodies manage their own frame.
+   - It applies only to loops that can reach a GC safepoint, and only when
+     the tell analysis confirms the entry cursor is below `b` (so slot `b-1`
+     holds no live local) and the header then has cursor `b` on every edge.
+2. **Unwritten words.** Words this frame never wrote since entry (stale, or
+   left by a callee) hold no root: the program stores before it reads them.
+   Merges union what either path wrote.
+3. **Overwrite liveness.** A listed slot is dropped at a safepoint when every
+   path overwrites it before reading it *or leaving the function*, such as
+   last iteration's object in a loop local. A local merely past its last
+   read stays until it is overwritten or the function returns (scope
+   lifetime), because a `gc::root` handle or an FFI buffer held only by a
+   local must survive.
+   - Reads are over-approximated: every slot an op names unless it is a pure
+     overwrite; every word a pop could read under a range cursor; and every
+     word at exits, yields, `UnpackAt` and `TailCall`.
+   - Writes are under-approximated: slot stores and exact-cursor pushes.
+   - `CallIndirect` rows are never filtered.
+
+Effect on `examples/perf`:
+
+| Bench | Ambiguous roots / GC | Peak RSS |
+|-------|---------------------:|---------:|
+| `gc_churn` | 2.0 → 0 | — |
+| `gc_shrink` | 1.0 → 0 | — |
+| `class_wide_live` | 3.3 → 1.0 | 58 → 29 MB |
+| `tuple_live` | 2.0 → 1.8 | 52 → 29 MB |
+
+In `class_wide_live` and `tuple_live`, stale loop roots used to keep last
+round's whole structure alive.
 
 Arrays carry an element kind (archive minor 27). `Vec::new` /
 `with_capacity` / `from` calls whose static element type is a ground
