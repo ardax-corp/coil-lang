@@ -214,6 +214,7 @@ fn two_module_and_class_static_assignments_run() {
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
+        class_word_kinds: pipeline.class_word_kinds(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

@@ -8290,6 +8290,7 @@ fn main() {
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
+        class_word_kinds: pipeline.class_word_kinds(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -8317,6 +8318,7 @@ fn main() {
         operand_stack_slots: loaded.operand_stack_slots,
         stack_maps: loaded.stack_maps.clone(),
         precise_frames: loaded.precise_frames.clone(),
+        class_word_kinds: loaded.class_word_kinds.clone(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
@@ -11115,6 +11117,7 @@ fn main() {
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
+        class_word_kinds: pipeline.class_word_kinds(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

@@ -159,6 +159,8 @@ pub struct ThreadProgram {
     pub stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps; frames without one keep the conservative scan.
     pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
+    /// Per class `type_id`: field word kinds (see [`crate::class_kind_table`]).
+    pub class_word_kinds: Arc<Vec<Box<[u8]>>>,
 }
 
 /// Tag indices for [`ThreadError`](common::BUILTIN_THREAD_ERROR_ENUM).

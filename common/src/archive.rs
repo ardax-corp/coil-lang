@@ -89,10 +89,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      `DenseCast` kind `CAST_F2I` (`f64` → `i64`).
 /// 23 — `TagEnumType`: stamp an enum's type id so its `fn drop()` runs
 ///      (COI-26). Older archives never emit it.
+/// 24 — [`ClassWordKinds`]: per-class field word kinds (scalar / pointer /
+///      unknown) from static types. Older archives load with none, so every
+///      typed field stays ambiguous.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 23;
+pub const ARCHIVE_MINOR: u16 = 24;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -123,6 +126,23 @@ pub const fn archive_version_compatible(archive: u32, runtime: u32) -> bool {
 /// Human-readable `major.minor` for diagnostics.
 pub fn format_archive_version(version: u32) -> String {
     format!("{}.{}", archive_major(version), archive_minor(version))
+}
+
+/// A heap word whose static type says nothing (generic, boxed, unresolved):
+/// the GC resolves it through the slab.
+pub const WORD_UNKNOWN: u8 = 0;
+/// A number, bool or scalar enum: never a heap reference.
+pub const WORD_SCALAR: u8 = 1;
+/// `0` or a heap object address, possibly with bit 0 set (`Result` niche).
+pub const WORD_POINTER: u8 = 2;
+
+/// Word kinds of a class's typed fields, in slot order (minor 24+).
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ClassWordKinds {
+    pub type_id: u32,
+    /// One of [`WORD_UNKNOWN`] / [`WORD_SCALAR`] / [`WORD_POINTER`] per field.
+    pub kinds: Vec<u8>,
 }
 
 /// Persisted C struct layout (SysV-style align and trailing pad).
@@ -246,6 +266,26 @@ pub struct ArchivedProgram {
     pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
     /// Complete frame maps (minor 21+); frames without one are scanned.
     pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
+    /// Per-class field word kinds (minor 24+); empty keeps fields ambiguous.
+    pub class_word_kinds: Vec<ClassWordKinds>,
+}
+
+/// Minor 22–23 envelope (no class word kinds).
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV23 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
+    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
 }
 
 /// Minor-21 envelope (precise frame maps without `frame_words`).
@@ -348,6 +388,9 @@ pub const PRECISE_FRAMES_MINOR: u16 = 21;
 /// First minor whose precise frame rows carry `frame_words`.
 pub const FRAME_WORDS_MINOR: u16 = 22;
 
+/// First minor that stores [`ArchivedProgram::class_word_kinds`].
+pub const CLASS_WORD_KINDS_MINOR: u16 = 24;
+
 pub use crate::opcode::Byte;
 
 impl ArchivedProgram {
@@ -375,6 +418,7 @@ impl ArchivedProgramV12 {
             operand_stack_slots: 0,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         }
     }
 }
@@ -394,6 +438,27 @@ impl ArchivedProgramV21 {
             operand_stack_slots: self.operand_stack_slots,
             stack_maps: self.stack_maps,
             precise_frames: self.precise_frames.into_iter().map(Into::into).collect(),
+            class_word_kinds: Vec::new(),
+        }
+    }
+}
+
+impl ArchivedProgramV23 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: self.operand_stack_slots,
+            stack_maps: self.stack_maps,
+            precise_frames: self.precise_frames,
+            class_word_kinds: Vec::new(),
         }
     }
 }
@@ -413,6 +478,7 @@ impl ArchivedProgramV20 {
             operand_stack_slots: self.operand_stack_slots,
             stack_maps: self.stack_maps,
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         }
     }
 }
@@ -432,6 +498,7 @@ impl ArchivedProgramV13 {
             operand_stack_slots: self.operand_stack_slots,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         }
     }
 }
@@ -482,6 +549,9 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let v23 = rkyv::access::<ArchivedArchivedProgramV23, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV23, Error>(archived).ok());
     let v21 = rkyv::access::<ArchivedArchivedProgramV21, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV21, Error>(archived).ok());
@@ -497,7 +567,7 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
 
     if let Some(program) = current {
         if archive_version_compatible(program.version, ARCHIVE_VERSION)
-            && archive_minor(program.version) >= FRAME_WORDS_MINOR
+            && archive_minor(program.version) >= CLASS_WORD_KINDS_MINOR
         {
             return Ok(DecodedArchive {
                 program,
@@ -507,6 +577,20 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         }
         if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
             return Err(ArchiveDecodeError::Version(program.version));
+        }
+    }
+    if let Some(old) = v23 {
+        if archive_version_compatible(old.version, ARCHIVE_VERSION)
+            && archive_minor(old.version) >= FRAME_WORDS_MINOR
+        {
+            return Ok(DecodedArchive {
+                program: old.into_program(),
+                operand_stack_slots_persisted: true,
+                stack_maps_persisted: true,
+            });
+        }
+        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
+            return Err(ArchiveDecodeError::Version(old.version));
         }
     }
     if let Some(old) = v21 {
@@ -610,6 +694,7 @@ mod tests {
             operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -639,6 +724,7 @@ mod tests {
                 operand_stack_slots,
                 stack_maps,
                 precise_frames,
+                class_word_kinds,
             } = p;
             let _ = (
                 version,
@@ -653,6 +739,7 @@ mod tests {
                 operand_stack_slots,
                 stack_maps,
                 precise_frames,
+                class_word_kinds,
             );
         };
     }
@@ -683,6 +770,7 @@ mod tests {
             operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -699,9 +787,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 23);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 23));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.23");
+        assert_eq!(ARCHIVE_MINOR, 24);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 24));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.24");
     }
 
     #[test]
@@ -792,6 +880,7 @@ mod tests {
             operand_stack_slots: 512,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -820,6 +909,7 @@ mod tests {
             operand_stack_slots: 512,
             stack_maps: Vec::new(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -893,6 +983,7 @@ mod tests {
             operand_stack_slots: 256,
             stack_maps: maps.clone(),
             precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -924,6 +1015,7 @@ mod tests {
             operand_stack_slots: 256,
             stack_maps: Vec::new(),
             precise_frames: precise.clone(),
+            class_word_kinds: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -958,6 +1050,53 @@ mod tests {
         let row = &decoded.program.precise_frames[0];
         assert_eq!(row.at_pc[0].slots, vec![2]);
         assert_eq!(row.frame_words, 0);
+    }
+
+    #[test]
+    fn decode_minor23_envelope_has_no_class_word_kinds() {
+        let old = ArchivedProgramV23 {
+            version: pack_archive_version(4, 23),
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown()],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
+            stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v23");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v23");
+        assert!(decoded.program.class_word_kinds.is_empty());
+        assert_eq!(decoded.program.operand_stack_slots, 256);
+    }
+
+    #[test]
+    fn decode_persists_class_word_kinds_on_current_minor() {
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown()],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
+            stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            class_word_kinds: vec![ClassWordKinds {
+                type_id: 3,
+                kinds: vec![WORD_SCALAR, WORD_POINTER, WORD_UNKNOWN],
+            }],
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+        assert_eq!(decoded.program.class_word_kinds, program.class_word_kinds);
     }
 
     #[test]

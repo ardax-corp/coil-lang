@@ -43,6 +43,9 @@ pub struct Heap {
     slab: Slab,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
     live_count: usize,
+    /// Per class `type_id`: field word kinds from static types
+    /// (`common::WORD_*`). Missing rows / fields are unknown.
+    class_kinds: std::sync::Arc<Vec<Box<[u8]>>>,
     /// Live `Weak` objects, so [`Self::clear_dead_weaks`] can skip its heap
     /// walk (weak handles are rare).
     weak_count: usize,
@@ -85,6 +88,7 @@ impl Default for Heap {
             strings: Table::default(),
             slab: Slab::new(),
             live_count: 0,
+            class_kinds: std::sync::Arc::default(),
             weak_count: 0,
             immortal_enums: HashMap::default(),
             unit_enum: None,
@@ -853,6 +857,36 @@ impl Heap {
         )
     }
 
+    /// Install the program's per-class field word kinds.
+    pub fn set_class_word_kinds(&mut self, table: std::sync::Arc<Vec<Box<[u8]>>>) {
+        self.class_kinds = table;
+    }
+
+    pub fn class_word_kinds_table(&self) -> std::sync::Arc<Vec<Box<[u8]>>> {
+        std::sync::Arc::clone(&self.class_kinds)
+    }
+
+    /// Word kinds of `type_id`'s typed fields (empty = all unknown).
+    #[inline]
+    pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
+        self.class_kinds
+            .get(type_id as usize)
+            .map_or(&[][..], |row| &row[..])
+    }
+
+    /// `gc-stress`: a field's declared kind must match what it holds.
+    #[cfg(feature = "gc-stress")]
+    fn verify_field_word(&self, type_id: u32, index: usize, kind: u8, v: Value) {
+        let addr = v.heap_addr();
+        let resolves = addr != 0 && self.find_object_by_addr(addr).is_some();
+        if kind == common::WORD_SCALAR && resolves {
+            panic!("gc-stress: scalar field {index} of type {type_id} holds a heap reference");
+        }
+        if kind == common::WORD_POINTER && addr != 0 && !resolves {
+            panic!("gc-stress: pointer field {index} of type {type_id} holds a non-object");
+        }
+    }
+
     /// Every live object, in slab order.
     pub fn objects(&self) -> HeapIter<'_> {
         HeapIter {
@@ -1235,8 +1269,12 @@ impl Object {
                         table.iter().for_each(|(_, v)| member(&v, visit));
                     }
                     InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                        for v in inst.storage.as_slice().into_iter().flatten() {
-                            word(*v, false, visit);
+                        let kinds = heap.class_field_kinds(inst.type_id);
+                        for (i, v) in inst.storage.as_slice().into_iter().flatten().enumerate() {
+                            match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
+                                common::WORD_SCALAR => {}
+                                kind => word(*v, kind == common::WORD_POINTER, visit),
+                            }
                         }
                     }
                 }
@@ -1673,8 +1711,14 @@ impl ObjInstance {
             }
             InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
                 if let Some(slots) = self.storage.as_slice() {
-                    for v in slots {
-                        heap.mark_value(*v, grey_objects);
+                    let kinds = heap.class_field_kinds(self.type_id);
+                    for (i, v) in slots.iter().enumerate() {
+                        let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
+                        #[cfg(feature = "gc-stress")]
+                        heap.verify_field_word(self.type_id, i, kind, *v);
+                        if kind != common::WORD_SCALAR {
+                            heap.mark_value(*v, grey_objects);
+                        }
                     }
                 }
             }
@@ -3165,6 +3209,39 @@ mod tests {
         assert!(live.contains(&a.addr()));
         assert!(live.contains(&b.addr()));
         assert!(live.contains(&obj.addr()));
+    }
+
+    /// Field word kinds: pointer fields are traced and reported precise;
+    /// a scalar field is skipped even if its bits look like an address.
+    #[test]
+    fn class_word_kinds_skip_scalars_and_trace_pointers() {
+        let mut heap = Heap::default();
+        heap.set_class_word_kinds(crate::class_kind_table(&[common::ClassWordKinds {
+            type_id: 7,
+            kinds: vec![common::WORD_POINTER, common::WORD_SCALAR],
+        }]));
+        let (kept, _) = heap.alloc(ObjString::from("kept"), Object::String);
+        let (lookalike, _) = heap.alloc(ObjString::from("lookalike"), Object::String);
+        let inst = ObjInstance::with_slots(
+            7,
+            vec![Value::from(kept.addr()), Value::from(lookalike.addr())],
+        );
+        let (obj, _) = heap.alloc(inst, Object::Instance);
+
+        let mut seen = Vec::new();
+        obj.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+        assert_eq!(seen, vec![(kept.addr(), true)]);
+
+        let mut gray = Vec::new();
+        heap.trace(&[obj.addr()]);
+        obj.mark_references(&heap, &mut gray);
+        while let Some(next) = gray.pop() {
+            next.mark_references(&heap, &mut gray);
+        }
+        unsafe { heap.sweep() };
+        let live = live_object_addrs(&heap);
+        assert!(live.contains(&kept.addr()));
+        assert!(!live.contains(&lookalike.addr()), "a scalar field is not a root");
     }
 
     #[test]

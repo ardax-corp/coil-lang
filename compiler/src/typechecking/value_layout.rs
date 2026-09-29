@@ -67,6 +67,27 @@ pub fn value_layout(checker: &Checker, ty: &Ty) -> ValueLayout {
     ValueLayout::Boxed
 }
 
+/// How a heap word of static type `ty` reads (`common::WORD_*`): a number /
+/// bool / scalar enum is never a reference; a ground heap object or a niche
+/// word is `0` or an object address (bit 0 set for a `Result` `Err`);
+/// anything generic or unresolved stays unknown.
+pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let ty = strip_readonly(&ty);
+    if let Ty::Con(name) = ty
+        && (matches!(
+            name.as_str(),
+            super::ty::INT | super::ty::FLOAT | super::ty::BOOL | super::ty::BYTE | UNIT
+        ) || checker.is_scalar_enum(name))
+    {
+        return common::WORD_SCALAR;
+    }
+    if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
+        return common::WORD_POINTER;
+    }
+    common::WORD_UNKNOWN
+}
+
 /// True when `ty` is a ground heap object, so a niche can use `0` / bit 0.
 pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
     let ty = strip_readonly(ty);
@@ -160,6 +181,22 @@ mod tests {
         );
         assert_eq!(layout(result_ty(int(), string())), ValueLayout::Boxed);
         assert_eq!(layout(string()), ValueLayout::Boxed);
+    }
+
+    #[test]
+    fn word_kinds_follow_static_types() {
+        let c = Checker::new();
+        let kind = |ty: Ty| word_kind(&c, &ty);
+        assert_eq!(kind(int()), common::WORD_SCALAR);
+        assert_eq!(kind(Ty::Con("float".into())), common::WORD_SCALAR);
+        assert_eq!(kind(Ty::Con("bool".into())), common::WORD_SCALAR);
+        assert_eq!(kind(unit()), common::WORD_SCALAR);
+        assert_eq!(kind(string()), common::WORD_POINTER);
+        assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
+        assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
+        // Boxed `Option<int>` and unresolved generics stay unknown.
+        assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
+        assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
     }
 
     #[test]

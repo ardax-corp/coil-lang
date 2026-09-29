@@ -15610,6 +15610,30 @@ impl Checker {
         }
     }
 
+    /// Every class key with its `InitTyped` type id.
+    pub fn class_type_id_entries(&self) -> impl Iterator<Item = (&str, u32)> {
+        self.class_type_ids.iter().map(|(k, id)| (k.as_str(), *id))
+    }
+
+    /// Field word kinds (`common::WORD_*`) of every class with typed slots,
+    /// in slot order. Generic fields stay unknown.
+    pub fn class_word_kinds(&self) -> Vec<common::ClassWordKinds> {
+        let mut rows: Vec<common::ClassWordKinds> = self
+            .class_type_id_entries()
+            .filter(|(_, id)| *id != 0)
+            .filter_map(|(key, type_id)| {
+                let fields = self.class_fields(key)?;
+                let kinds = fields
+                    .iter()
+                    .map(|(_, ty)| crate::typechecking::value_layout::word_kind(self, ty))
+                    .collect();
+                Some(common::ClassWordKinds { type_id, kinds })
+            })
+            .collect();
+        rows.sort_by_key(|r| r.type_id);
+        rows
+    }
+
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).
     pub fn class_type_id(&self, name: &str) -> u32 {
         let key = self
