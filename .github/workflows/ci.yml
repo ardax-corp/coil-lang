@@ -52,6 +52,32 @@ jobs:
       - name: Clippy (${{ matrix.features.id }})
         run: cargo clippy --workspace --lib --tests --bins ${{ matrix.features.flags }} -- -D warnings
 
+  # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
+  # deliberately broken programs and is not checked.
+  fmt:
+    name: coil fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev build-essential
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fmt
+
+      - name: coil fmt --check
+        run: |
+          cargo build -p coil-fmt
+          ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy
+
   test:
     name: test (${{ matrix.os }}, ${{ matrix.features.id }})
     runs-on: ${{ matrix.os }}
