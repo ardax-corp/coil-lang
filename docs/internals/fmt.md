@@ -43,7 +43,22 @@ import has more than three path segments.
 
 ## Comments and docs
 
-- `//` line comments are preserved (AST `Expression::Comment`).
+- `//` and `/* */` comments are parser **trivia** (`trivia()` in
+  `parser/src/lib.rs`): they may sit between any two tokens and never reach
+  the AST. The formatter reads them from `parser::comments::collect` and
+  reattaches them by byte position: a comment on its own line leads the next
+  item (at that item's indent), a comment after code on the same line trails
+  it (`let x = 1; // why`, `fn f() { // why`, `}, // arm`). A comment inside an
+  otherwise flat list / record forces the multi-line layout. A comment in the
+  middle of an expression moves to the next line boundary; none is ever dropped.
+- Blank lines: a single blank line between statements, fields, arms or list
+  items is kept (runs collapse to one); none is added at the start or end of
+  a body. Top level: one blank line between items, except that a comment
+  directly above an item stays attached and a header comment block stays one
+  block.
+- Safety net: `format_source` re-parses its output and recounts comments. If
+  either check fails it returns a `coil fmt bug` error and the file is left
+  unchanged.
 - `///` doc comments attach to the following declaration (`fn`, `class`, `field`, `trait`, `enum`, …) as `docs: Vec<&str>`. Read them later via [`parser::item_docs`](../../parser/src/ast.rs).
 - `///` lines immediately inside a function parameter list attach to that
   parameter; documented parameter lists are formatted one item per line with
@@ -53,6 +68,5 @@ import has more than three path segments.
 
 ## Limitations
 
-- Style is fixed (4 spaces); there is no config file yet.
-- No `/* */` block comments.
+- Style is fixed (4 spaces, 100 columns); there is no config file by design.
 - Parse errors abort that file (pretty diagnostics via the reporting crate); other files in a multi-path run still process.
