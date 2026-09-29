@@ -751,7 +751,7 @@ impl Compiler {
                         label,
                         BbJumpKind::JumpIfMatch {
                             tag: group.tag,
-                            arity: 0,
+                            arity: group.arity,
                         },
                         self.bytecode.il_mut(),
                     );

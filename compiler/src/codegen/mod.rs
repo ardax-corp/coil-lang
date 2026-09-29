@@ -50,6 +50,8 @@ macro_rules! binary {
 #[derive(Debug, Clone)]
 struct TagGroup {
     tag: u32,
+    /// Payload words the VM pushes when `tag` matches (IL tell / MIR edges).
+    arity: u32,
     arm_indices: Vec<usize>,
     is_single_arm_group: bool,
 }
@@ -260,13 +262,16 @@ fn group_arms_by_outer_tag(arms: &[&MatchArm], checker: &Checker) -> Vec<TagGrou
     let mut groups: Vec<TagGroup> = Vec::new();
     let mut tag_to_idx: HashMap<u32, usize> = HashMap::new();
     for (i, arm) in arms.iter().enumerate() {
-        let tag = match &arm.pattern.1 {
+        let (tag, arity) = match &arm.pattern.1 {
             Pattern::Constructor {
                 enum_name,
                 variant_name,
                 ..
-            } => checker.tag_for(enum_name, variant_name).unwrap_or(u32::MAX),
-            _ => u32::MAX,
+            } => (
+                checker.tag_for(enum_name, variant_name).unwrap_or(u32::MAX),
+                checker.arity_for(enum_name, variant_name).unwrap_or(0) as u32,
+            ),
+            _ => (u32::MAX, 0),
         };
         if let Some(&idx) = tag_to_idx.get(&tag) {
             groups[idx].arm_indices.push(i);
@@ -274,6 +279,7 @@ fn group_arms_by_outer_tag(arms: &[&MatchArm], checker: &Checker) -> Vec<TagGrou
             tag_to_idx.insert(tag, groups.len());
             groups.push(TagGroup {
                 tag,
+                arity,
                 arm_indices: vec![i],
                 is_single_arm_group: false,
             });
@@ -410,7 +416,10 @@ fn emit_inner_test<'compiler>(args: EmitInnerTestArgs<'_, 'compiler>) {
                                     label,
                                     BbJumpKind::JumpIfMatch {
                                         tag: inner_tag,
-                                        arity: 0,
+                                        arity: checker
+                                            .arity_for(sub_enum, sub_variant)
+                                            .unwrap_or(0)
+                                            as u32,
                                     },
                                     bytecode.il_mut(),
                                 );
@@ -495,7 +504,10 @@ fn emit_inner_test<'compiler>(args: EmitInnerTestArgs<'_, 'compiler>) {
                                     label,
                                     BbJumpKind::JumpIfMatch {
                                         tag: inner_tag,
-                                        arity: 0,
+                                        arity: checker
+                                            .arity_for(sub_enum, sub_variant)
+                                            .unwrap_or(0)
+                                            as u32,
                                     },
                                     bytecode.il_mut(),
                                 );

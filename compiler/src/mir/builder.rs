@@ -56,6 +56,9 @@ pub struct MirBuilder {
     pub pending_loc: DebugLoc,
     /// Last match-arm `Seek` (payload_base for arity-0 JumpIfMatch).
     pub match_seek: Option<u32>,
+    /// Scrutinee slot of the `JumpIfMatch` / `Unpack` being lowered, from
+    /// the IL cursor (`tell - 1`): the VM writes payloads from here up.
+    pub match_base: Option<u32>,
 }
 
 impl MirBuilder {
@@ -74,6 +77,7 @@ impl MirBuilder {
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
             match_seek: None,
+            match_base: None,
         }
     }
 

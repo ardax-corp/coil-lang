@@ -87,6 +87,9 @@ pub struct LowerHints {
     pub allow_string: bool,
     /// S2b map lift: skip SSA verify so mixed heap/i64 returns still encode slots.
     pub skip_verify: bool,
+    /// Frame cursor at body entry. With `allow_match`, pins match payloads
+    /// to the scrutinee's slot instead of guessing from the arm's loads.
+    pub entry_tell: Option<u32>,
 }
 
 impl Default for LowerHints {
@@ -111,6 +114,7 @@ impl Default for LowerHints {
             allow_deopt: false,
             allow_string: false,
             skip_verify: false,
+            entry_tell: None,
         }
     }
 }
@@ -207,6 +211,14 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
     }
 
+    let tells = hints
+        .entry_tell
+        .filter(|_| hints.allow_match)
+        .map(|t| crate::il::tell::analyze_il_at(ops, t));
+    let match_base = |idx: usize| -> Option<u32> {
+        let t = tells.as_ref()?.tell_before(idx).known()?;
+        t.checked_sub(1)
+    };
     let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = HashMap::new();
     let mut started: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
     let mut overlap_defs: HashMap<BlockId, Vec<(LocalId, ValueId)>> = HashMap::new();
@@ -231,6 +243,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
             let rest = &ops[i + 1..end];
             let next = first_emitting(rest);
             b.pending_loc = op.loc();
+            b.match_base = match_base(i);
             lower_op(&mut b, &mut tos, op, next, rest, hints)?;
             maybe_ins_deopt(&mut b, op, hints)?;
         }
@@ -239,6 +252,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
             if let Some(op) = last {
                 b.pending_loc = op.loc();
             }
+            b.match_base = end.checked_sub(1).and_then(match_base);
             emit_term(EmitTermArgs {
                 b: &mut b,
                 tos: &mut tos,
@@ -427,6 +441,14 @@ fn bind_match_payloads(args: BindMatchPayloadsArgs<'_>) -> Result<Vec<ValueId>, 
         && (slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return)) {
             slot = Some(base);
         }
+    // Known cursor: the VM overwrites the scrutinee slot with payload[0].
+    // The arm's first load need not be payload[0] (slot_promote may drop
+    // the binding copies), so the exact base wins over the guess.
+    if let Some(base) = b.match_base
+        && slot.is_some()
+    {
+        slot = Some(base);
+    }
     if let Some(slot) = slot {
         for (i, &p) in payloads.iter().enumerate() {
             let local = LocalId(slot + i as u32);

@@ -171,8 +171,9 @@ pub fn emit_dense(
                         scrutinee: *scrutinee,
                         plan: &plan,
                         regs: &regs,
+                        pool,
                         loc,
-                    });
+                    })?;
                 }
                 continue;
             }
@@ -1070,7 +1071,12 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             if let Some(make_kind) = dense_make_kind(*kind)? {
                 let arity = u8::try_from(elems.len())
                     .map_err(|_| LowerError::Refused("DenseMake arity".into()))?;
-                let slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
+                let mut slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
+                // `elems` is push order; `MakeEnum` pops, so payload[0] is the
+                // last push. DenseMake reads declaration order.
+                if matches!(kind, MirAllocKind::Enum { .. }) {
+                    slots.reverse();
+                }
                 let base = gather_base(out, &slots, scratch, loc)?;
                 out.push(byte(
                     Byte::new(Instruction::DenseMake).with_dense_abc(
@@ -1686,6 +1692,20 @@ fn seed_jim_taken_stack(
     }
 }
 
+/// Every pred reaches `block` as the miss edge of a `JumpIfMatch` on
+/// `scrutinee`, which peeks and so leaves it on top of the stack.
+fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> bool {
+    let preds = &func.preds()[block.index()];
+    !preds.is_empty()
+        && preds.iter().all(|p| {
+            matches!(
+                &func.block(*p).term,
+                Some(Terminator::JumpIfMatch { scrutinee: s, not_taken, .. })
+                    if *s == scrutinee && *not_taken == block
+            )
+        })
+}
+
 fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
     let mut group = Vec::new();
     for inst in &func.block(block).insts {
@@ -1717,10 +1737,11 @@ struct EmitBoxedLastArmUnpackArgs<'args> {
     scrutinee: ValueId,
     plan: &'args ConvoyPlan,
     regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
 }
 
-fn emit_boxed_last_arm_unpack(args: EmitBoxedLastArmUnpackArgs<'_>) {
+fn emit_boxed_last_arm_unpack(args: EmitBoxedLastArmUnpackArgs<'_>) -> Result<(), LowerError> {
     let EmitBoxedLastArmUnpackArgs {
         out,
         stacked,
@@ -1729,13 +1750,30 @@ fn emit_boxed_last_arm_unpack(args: EmitBoxedLastArmUnpackArgs<'_>) {
         scrutinee,
         plan,
         regs,
+        pool,
         loc,
     } = args;
 
     let group = last_arm_payloads(func, block, scrutinee);
     let arity = group.len() as u32;
     if arity == 0 {
-        return;
+        return Ok(());
+    }
+    // `Unpack` pops the scrutinee. A `JumpIfMatch` miss leaves it on the
+    // stack; otherwise (single-variant match) it may live in a register,
+    // e.g. a `DenseIndex` result.
+    if !scrutinee_left_by_miss(func, block, scrutinee) {
+        emit_stack_value(EmitStackValueArgs {
+            out,
+            stacked,
+            v: scrutinee,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        })?;
+        stacked.pop();
     }
     out.push(IlOp::from_plain_byte(
         Byte::new(Instruction::Unpack).with_operand_u32(arity),
@@ -1753,6 +1791,7 @@ fn emit_boxed_last_arm_unpack(args: EmitBoxedLastArmUnpackArgs<'_>) {
         stacked.clear();
         stacked.extend(group);
     }
+    Ok(())
 }
 
 struct EmitBoxedJumpIfMatchArgs<'args> {
