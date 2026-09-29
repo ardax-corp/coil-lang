@@ -92,7 +92,7 @@ fn worth_it(bytes: usize, slab_bytes: usize) -> bool {
 impl Object {
     /// Slot layout of a kind evacuation may move; `None` for the rest.
     #[cold]
-    fn movable_layout(&self) -> Option<Layout> {
+    pub(super) fn movable_layout(&self) -> Option<Layout> {
         Some(match self {
             Self::Instance(_) => Layout::new::<GcData<ObjInstance>>(),
             // Unit variants are shared immortals.
@@ -107,7 +107,7 @@ impl Object {
     /// Rewrite this object's precise references to moved objects. Mirrors
     /// the precise cases of [`Object::for_each_reference`].
     #[cold]
-    fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
+    pub(super) fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
         let fix = |v: &mut Value| {
             if let Some(n) = forward(fwd, *v) {
                 *v = n;
@@ -132,7 +132,7 @@ impl Object {
         };
         match self {
             Self::Instance(i) => {
-                let inst = i.payload_mut();
+                let inst = i.payload_mut_unbarriered();
                 match &mut inst.storage {
                     InstanceStorage::Table(table) => {
                         let updates: Vec<_> = table
@@ -159,23 +159,23 @@ impl Object {
                 }
             }
             Self::Enum(e) => {
-                let payload = &mut e.payload_mut().payload;
+                let payload = &mut e.payload_mut_unbarriered().payload;
                 let kinds = payload.kinds();
                 fix_kinded(payload.as_mut_slice(), kinds);
             }
             Self::Tuple(t) => {
-                let t = t.payload_mut();
+                let t = t.payload_mut_unbarriered();
                 let kinds = t.kinds();
                 fix_kinded(t.elements.as_mut_slice(), kinds);
             }
             Self::Array(a) => {
-                let a = a.payload_mut();
+                let a = a.payload_mut_unbarriered();
                 if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
                     a.elements_mut_no_new_values().iter_mut().for_each(fix);
                 }
             }
             Self::Coroutine(c) => {
-                let coro = c.payload_mut();
+                let coro = c.payload_mut_unbarriered();
                 let mask = coro.saved_live_mask;
                 if mask != 0 {
                     for (i, v) in coro.saved_stack.iter_mut().enumerate().take(64) {
@@ -186,15 +186,15 @@ impl Object {
                 }
             }
             Self::Boxed(b) => {
-                fix_member(&mut b.payload_mut().payload);
+                fix_member(&mut b.payload_mut_unbarriered().payload);
             }
             Self::Root(r) => {
-                if let Some(m) = &mut r.payload_mut().payload {
+                if let Some(m) = &mut r.payload_mut_unbarriered().payload {
                     fix_member(m);
                 }
             }
             Self::PolyFn(p) => {
-                for m in p.payload_mut().captured_dicts.iter_mut().flatten() {
+                for m in p.payload_mut_unbarriered().captured_dicts.iter_mut().flatten() {
                     fix_member(m);
                 }
             }

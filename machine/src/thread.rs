@@ -427,7 +427,7 @@ thread_local! {
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
-    begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
+    begin_shared_steal: unsafe fn(*mut (), &[Value]) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
     end_shared_steal: unsafe fn(*mut (), Value),
     debugger_attached: bool,
     spawn_context: Option<ThreadSpawnContext>,
@@ -483,8 +483,9 @@ impl HostStateGuard {
 
     unsafe fn begin_steal<const N: usize>(
         raw: *mut (),
+        pins: &[Value],
     ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
-        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
+        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal(pins) }
     }
 
     unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
@@ -527,13 +528,15 @@ fn host_debugger_attached() -> bool {
     })
 }
 
-fn host_begin_shared_steal() -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+fn host_begin_shared_steal(
+    pins: &[Value],
+) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
     HOST_STATE.with(|c| {
         let state = c.borrow();
         let Some(state) = state.as_ref() else {
             return Err(ThreadErrorTag::Other);
         };
-        Ok(unsafe { (state.begin_shared_steal)(state.raw) })
+        Ok(unsafe { (state.begin_shared_steal)(state.raw, pins) })
     })?
 }
 
@@ -1159,7 +1162,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
             return try_host_spawn(heap, args);
         }
     }
-    let epoch = host_begin_shared_steal()?;
+    let epoch = host_begin_shared_steal(args)?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));

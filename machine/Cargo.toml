@@ -11,6 +11,8 @@ vm_profile = []
 gc-stress = []
 # Print GC census numbers after each mark (docs/internals/gc-evacuation.md).
 gc-stats = []
+# Generational nursery: bump allocation + minor collections (docs/internals/gc-nursery.md).
+gc-nursery = []
 
 [dependencies]
 common = { path = "../common" }

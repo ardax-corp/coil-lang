@@ -230,13 +230,42 @@ impl Heap {
         F: Fn(Gc<T>) -> Object,
     {
         let layout = Layout::new::<GcData<T>>();
-        let slot = self.slab.alloc(layout).cast::<GcData<T>>();
+        #[cfg(feature = "gc-nursery")]
+        let (slot, young) = match (data.nursery_ok() && self.nursery_open())
+            .then(|| self.slab.alloc_young(layout))
+        {
+            Some(Some(slot)) => (slot, true),
+            full => {
+                if full.is_some() {
+                    nursery::request_minor();
+                }
+                (self.slab.alloc(layout), false)
+            }
+        };
+        #[cfg(not(feature = "gc-nursery"))]
+        let (slot, young) = (self.slab.alloc(layout), false);
+        let slot = slot.cast::<GcData<T>>();
         unsafe {
             slot.as_ptr().write(GcData::new(data));
         }
         let content = Gc::from_slot(slot);
         let object = map(content);
         content.set_kind(object.kind());
+        #[cfg(feature = "gc-nursery")]
+        if young {
+            content.header.young.set(true);
+            nursery::set_young_live();
+            // Stress: collect the nursery at every allocation safepoint.
+            #[cfg(feature = "gc-stress")]
+            nursery::request_minor();
+        } else if nursery::young_live() {
+            // An old object born while young ones exist may already hold
+            // young references (a `Root`, a closure, an array built old).
+            content.header.remembered.set(true);
+            nursery::remember(object.addr());
+        }
+        #[cfg(not(feature = "gc-nursery"))]
+        let _ = young;
         let size = object.size();
         self.alloc_bytes += size;
         self.live_count += 1;
@@ -244,7 +273,9 @@ impl Heap {
             self.weak_count += 1;
         }
         // Objects allocated while a cycle is open (finalizers) are black.
-        if self.gc_phase == GcPhase::Marking {
+        // Young objects live outside the sweep (young chunks are skipped).
+        if young {
+        } else if self.gc_phase == GcPhase::Marking {
             let _ = content.mark();
         } else if self.gc_phase == GcPhase::Sweeping
             && let Some(cur) = &self.gc_sweep_cursor
@@ -346,7 +377,7 @@ impl Heap {
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
         self.finish_sweep();
     }
 
@@ -450,7 +481,7 @@ impl Heap {
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
     }
 
     /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
@@ -1215,7 +1246,7 @@ impl Object {
                         }
                     }
                     if !any {
-                        a.payload_mut().may_hold_refs = false;
+                        a.payload_mut_unbarriered().may_hold_refs = false;
                     }
                 }
             }
@@ -1777,6 +1808,10 @@ impl Iterator for InstanceFieldIter<'_> {
 }
 
 impl GcSized for ObjInstance {
+    fn nursery_ok(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> usize {
         // `Table` / inline slots live in the object; only a spill `Vec` is extra.
         std::mem::size_of::<Self>()
@@ -1981,6 +2016,11 @@ impl ObjEnum {
 }
 
 impl GcSized for ObjEnum {
+    /// Unit variants are shared immortals.
+    fn nursery_ok(&self) -> bool {
+        !self.payload.is_empty()
+    }
+
     fn size(&self) -> usize {
         std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
     }
@@ -2415,12 +2455,20 @@ impl fmt::Display for ObjRwLock {
 }
 
 impl GcSized for ObjTuple {
+    fn nursery_ok(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
     }
 }
 
 impl GcSized for ObjArray {
+    fn nursery_ok(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.elements.capacity() * mem::size_of::<Value>()
     }
@@ -2435,6 +2483,10 @@ impl GcSized for ObjCoroutine {
 }
 
 impl GcSized for ObjBoxed {
+    fn nursery_ok(&self) -> bool {
+        true
+    }
+
     fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
@@ -2678,6 +2730,12 @@ impl fmt::Display for ObjLibrary {
 
 pub trait GcSized {
     fn size(&self) -> usize;
+
+    /// May be allocated in the nursery (`gc-nursery`): a kind the minor
+    /// collector can move.
+    fn nursery_ok(&self) -> bool {
+        false
+    }
 }
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
@@ -2688,6 +2746,10 @@ struct GcHeader {
     marked: Cell<bool>,
     /// Allocated while a sweep was running; that sweep skips it once.
     fresh: Cell<bool>,
+    /// Lives in a nursery chunk (`gc-nursery`).
+    young: Cell<bool>,
+    /// Old object already in the remembered set this minor cycle.
+    remembered: Cell<bool>,
 }
 
 #[repr(C)]
@@ -2703,6 +2765,8 @@ impl<T> GcData<T> {
                 kind: Cell::new(0),
                 marked: Cell::new(false),
                 fresh: Cell::new(false),
+                young: Cell::new(false),
+                remembered: Cell::new(false),
             },
             data,
         }
@@ -2784,6 +2848,8 @@ impl<T> Gc<T> {
             (*p).header.kind.set(0);
             (*p).header.marked.set(false);
             (*p).header.fresh.set(false);
+            (*p).header.young.set(false);
+            (*p).header.remembered.set(false);
         }
     }
 
@@ -2806,9 +2872,32 @@ impl<T> Gc<T> {
     /// Mutable access to the inner payload (single-threaded VM only).
     #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the VM mutates the payload through shared `&self`
     pub fn payload_mut(&self) -> &mut T {
+        #[cfg(feature = "gc-nursery")]
+        self.write_barrier();
+        self.payload_mut_unbarriered()
+    }
+
+    /// [`Self::payload_mut`] without the nursery write barrier, for collector
+    /// internals (marking, evacuation rewrites) that store no new reference.
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn payload_mut_unbarriered(&self) -> &mut T {
         unsafe {
             let ptr = self.ptr.as_ptr().cast::<GcData<T>>();
             (*ptr).as_mut()
+        }
+    }
+
+    /// Nursery write barrier: the first mutation of an old object while
+    /// young objects exist puts it in the remembered set (a minor collection
+    /// scans it as a root, since the store may have added an old → young
+    /// reference).
+    #[cfg(feature = "gc-nursery")]
+    #[inline(always)]
+    fn write_barrier(&self) {
+        let header = unsafe { &(*self.ptr.as_ptr()).header };
+        if !header.young.get() && !header.remembered.get() && nursery::young_live() {
+            header.remembered.set(true);
+            nursery::remember(self.ptr.as_ptr() as u64);
         }
     }
 }
@@ -2829,6 +2918,8 @@ impl<T> ops::Deref for Gc<T> {
 
 impl<T> ops::DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        #[cfg(feature = "gc-nursery")]
+        self.write_barrier();
         unsafe { self.ptr.as_mut() }
     }
 }
@@ -3159,6 +3250,9 @@ fn resident_kib() -> usize {
 #[path = "compact.rs"]
 mod compact;
 pub use compact::{AddrMap, EvacPlan, Evacuation};
+#[cfg(feature = "gc-nursery")]
+#[path = "nursery.rs"]
+pub mod nursery;
 
 #[cfg(test)]
 mod tests {

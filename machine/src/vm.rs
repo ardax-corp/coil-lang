@@ -1293,6 +1293,8 @@ impl<const S: usize> Machine<S> {
             if self.heap.gc_is_sweeping() {
                 self.heap.finish_sweep();
             }
+            #[cfg(feature = "gc-nursery")]
+            self.gc_minor(&[]);
 
             self.mark_from_vm_roots();
             let queue = self.queue_unmarked_finalizers();
@@ -1329,6 +1331,78 @@ impl<const S: usize> Machine<S> {
         self.gc_in_progress = false;
     }
 
+    /// Minor collection (`gc-nursery`, `docs/internals/gc-nursery.md`): copy
+    /// the nursery's survivors to the old slab and reset it. Must-pointer frame
+    /// slots are rewritten; every other VM root (and `extra_pins`, a host
+    /// native's own handles) pins its young target in place. Skipped while a
+    /// host frame sits between VM frames, in a shared-heap epoch, during a
+    /// mark, or under the debugger; the nursery then stays full and new
+    /// objects are allocated old.
+    #[cfg(feature = "gc-nursery")]
+    #[cold]
+    #[inline(never)]
+    fn gc_minor(&mut self, extra_pins: &[Value]) {
+        use crate::memory::nursery;
+        if !nursery::young_live() {
+            nursery::clear_minor_request();
+            return;
+        }
+        if IN_EXECUTE.get() > 1
+            || self.shared_epoch.is_some()
+            || self.heap.epoch_stw()
+            || self.heap.is_borrowed()
+            || self.heap.gc_phase() == crate::memory::GcPhase::Marking
+        {
+            return;
+        }
+        #[cfg(any(test, feature = "debugger"))]
+        if self.debug.is_some() {
+            return;
+        }
+        let mut pins = self.heap.take_gc_roots();
+        pins.extend(extra_pins.iter().map(|v| v.heap_addr()));
+        let mut must_idx = Vec::new();
+        self.for_each_stack_word(&mut |idx, kind| match kind {
+            crate::memory::RootKind::Precise => must_idx.push(idx),
+            _ => pins.push(self.stack[idx].heap_addr()),
+        });
+        self.for_each_non_stack_root(&mut |addr, _| pins.push(addr));
+        let must: Vec<Value> = must_idx.iter().map(|&i| self.stack[i]).collect();
+        let finalizable_types: std::collections::HashSet<u32> =
+            self.finalizer_by_type.keys().copied().collect();
+        let finalizable = |obj: crate::memory::Object| -> bool {
+            let (type_id, finalized) = match obj {
+                crate::memory::Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                crate::memory::Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                _ => return false,
+            };
+            type_id != 0 && !finalized && finalizable_types.contains(&type_id)
+        };
+        let plan = self.heap.minor_plan(&must, &pins, &finalizable);
+        self.heap.restore_gc_roots(pins);
+        for idx in must_idx {
+            if let Some(v) = plan.forward(self.stack[idx]) {
+                self.stack[idx] = v;
+            }
+        }
+        #[cfg(feature = "gc-stress")]
+        {
+            self.heap.verify_minor(&plan);
+            let heap = &self.heap;
+            self.for_each_vm_root(&mut |addr, kind| {
+                assert!(
+                    !plan.is_stale(heap, addr),
+                    "gc-stress: {kind:?} VM root still names a moved/dying young {addr:#x}"
+                );
+            });
+        }
+        let minor = self.heap.minor_finish(plan);
+        self.clear_dense_obj_cache();
+        #[cfg(feature = "gc-stats")]
+        eprintln!("gc-stats minor: {minor:?}");
+        let _ = minor;
+    }
+
     /// Evacuate sparse chunks after a finished cycle
     /// (`docs/internals/gc-evacuation.md`). Must-pointer frame slots are
     /// rewritten; every other VM root pins its target. Skipped while a host
@@ -1361,6 +1435,14 @@ impl<const S: usize> Machine<S> {
             return;
         }
         COMPACT_PACING.set((0, window));
+        // Evacuation plans over old objects only.
+        #[cfg(feature = "gc-nursery")]
+        {
+            self.gc_minor(&[]);
+            if crate::memory::nursery::young_live() {
+                return;
+            }
+        }
         let mut pins = self.heap.take_gc_roots();
         let mut must = Vec::new();
         self.for_each_stack_word(&mut |idx, kind| match kind {
@@ -1406,6 +1488,9 @@ impl<const S: usize> Machine<S> {
     }
 
     fn gc_start_mark(&mut self) {
+        // The major collector never sees young objects.
+        #[cfg(feature = "gc-nursery")]
+        self.gc_minor(&[]);
         let roots = self.collect_vm_root_addrs();
         self.heap.begin_mark(&roots);
         self.heap.restore_gc_roots(roots);
@@ -1422,6 +1507,10 @@ impl<const S: usize> Machine<S> {
     fn gc_safepoint(&mut self) {
         if self.gc_in_progress {
             return;
+        }
+        #[cfg(feature = "gc-nursery")]
+        if crate::memory::nursery::minor_requested() {
+            self.gc_minor(&[]);
         }
         if self.heap.epoch_stw() {
             if !self.heap.gc_is_idle() || self.heap.should_collect() {
@@ -1837,7 +1926,11 @@ impl<const S: usize> Machine<S> {
     /// Incremental GC work after an allocation safepoint.
     #[inline]
     fn maybe_gc_after_alloc(&mut self, ip: usize) {
-        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+        #[cfg(feature = "gc-nursery")]
+        let minor = crate::memory::nursery::minor_requested();
+        #[cfg(not(feature = "gc-nursery"))]
+        let minor = false;
+        if likely(self.heap.gc_is_idle() && !self.heap.should_collect() && !minor) {
             return;
         }
         self.gc_safepoint_from_alloc(ip);
@@ -2670,8 +2763,21 @@ impl<const S: usize> Machine<S> {
     /// Drain incremental GC and open a Layer A steal epoch on this Heap.
     pub fn begin_shared_steal(
         &mut self,
+        pins: &[Value],
     ) -> Result<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>, crate::thread::ThreadErrorTag>
     {
+        #[cfg(feature = "gc-nursery")]
+        if crate::memory::nursery::young_live() && self.shared_epoch.is_none() {
+            // Workers share this heap: no young objects (and no barrier
+            // traffic on other threads) while the epoch is open. `pins` are
+            // the spawning native's arguments; they stay in place.
+            self.gc_minor(pins);
+            if crate::memory::nursery::young_live() {
+                return Err(crate::thread::ThreadErrorTag::Other);
+            }
+        }
+        #[cfg(not(feature = "gc-nursery"))]
+        let _ = pins;
         if let Some(e) = &self.shared_epoch {
             e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(std::sync::Arc::clone(e));

@@ -280,7 +280,27 @@ pub struct Slab {
     /// Per chunk index: pages given back (the slot walk skips them so it
     /// does not fault zero pages back in).
     released_mask: Vec<bool>,
+    /// Nursery bump regions per size class (`gc-nursery`).
+    #[cfg(feature = "gc-nursery")]
+    nursery: Vec<NurseryClass>,
+    /// Per chunk index: a nursery chunk (the sweep skips it).
+    #[cfg(feature = "gc-nursery")]
+    young_mask: Vec<bool>,
 }
+
+/// Nursery chunks of one size class and the bump cursor in the current one.
+#[cfg(feature = "gc-nursery")]
+struct NurseryClass {
+    key: (u32, u32),
+    chunks: Vec<usize>,
+    cur: usize,
+    next: u64,
+    end: u64,
+}
+
+/// Nursery budget in chunks (1 MiB, L2-sized): allocation stays in hot memory.
+#[cfg(feature = "gc-nursery")]
+pub const NURSERY_CHUNKS: usize = 16;
 
 /// Position of a walk over every slot of the resident chunks (sweep, heap
 /// iteration). A slot is live iff its header `kind != 0`: chunks are carved
@@ -293,6 +313,9 @@ pub struct Slab {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SlotCursor {
     started: bool,
+    /// Skip nursery chunks (the sweep: young objects are the minor
+    /// collector's).
+    skip_young: bool,
     /// Current chunk index; the next chunk entered is `chunk - 1`.
     chunk: usize,
     /// Slots of the current chunk not returned yet.
@@ -300,6 +323,16 @@ pub struct SlotCursor {
     /// Next slot address to return (descending).
     next: u64,
     slot_size: u64,
+}
+
+impl SlotCursor {
+    /// A sweep walk: skips nursery chunks.
+    pub fn sweep() -> Self {
+        Self {
+            skip_young: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Slab {
@@ -311,6 +344,10 @@ impl Slab {
             cycles_since_scan: 0,
             last: AtomicPtr::new(std::ptr::null_mut()),
             released_mask: Vec::new(),
+            #[cfg(feature = "gc-nursery")]
+            nursery: Vec::new(),
+            #[cfg(feature = "gc-nursery")]
+            young_mask: Vec::new(),
         }
     }
 
@@ -362,6 +399,10 @@ impl Slab {
                 continue;
             };
             if self.released_mask.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            #[cfg(feature = "gc-nursery")]
+            if cur.skip_young && self.young_mask.get(i).copied().unwrap_or(false) {
                 continue;
             }
             let base = c.ptr as u64;
@@ -623,6 +664,144 @@ impl Slab {
             class.low_water = class.low_water.min(class.slots.len());
         }
         released_bytes
+    }
+
+    /// Bump-allocate a nursery slot for `layout` (`gc-nursery`). `None`
+    /// when the nursery budget is used up: the caller allocates old and asks
+    /// for a minor collection.
+    #[cfg(feature = "gc-nursery")]
+    pub fn alloc_young(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let (size, align) = slot_dims(layout);
+        let key = (size as u32, align as u32);
+        let ci = match self.nursery.iter().position(|c| c.key == key) {
+            Some(ci) => ci,
+            None => {
+                self.nursery.push(NurseryClass {
+                    key,
+                    chunks: Vec::new(),
+                    cur: 0,
+                    next: 0,
+                    end: 0,
+                });
+                self.nursery.len() - 1
+            }
+        };
+        loop {
+            let class = &mut self.nursery[ci];
+            if class.next != 0 && class.next + size as u64 <= class.end {
+                let p = class.next;
+                class.next += size as u64;
+                return Some(unsafe { NonNull::new_unchecked(p as *mut u8) });
+            }
+            if class.next != 0 && class.cur + 1 < class.chunks.len() {
+                class.cur += 1;
+                let i = class.chunks[class.cur];
+                let (next, end) = self.young_bounds(i);
+                let class = &mut self.nursery[ci];
+                class.next = next;
+                class.end = end;
+                continue;
+            }
+            if class.next == 0 && !class.chunks.is_empty() {
+                // Reset class: start over at its first chunk.
+                let i = class.chunks[0];
+                let (next, end) = self.young_bounds(i);
+                let class = &mut self.nursery[ci];
+                class.cur = 0;
+                class.next = next;
+                class.end = end;
+                continue;
+            }
+            let young: usize = self.nursery.iter().map(|c| c.chunks.len()).sum();
+            if young >= NURSERY_CHUNKS {
+                return None;
+            }
+            let ptr = map_chunk(CHUNK);
+            let first_off = align_up(ptr as usize, align) - ptr as usize;
+            let i = self.chunks.len();
+            self.chunks.push(Chunk {
+                ptr,
+                meta: PageMeta {
+                    slot_size: size as u32,
+                    slot_align: align as u32,
+                    first_off: first_off as u32,
+                },
+            });
+            if self.young_mask.len() <= i {
+                self.young_mask.resize(i + 1, false);
+            }
+            self.young_mask[i] = true;
+            let (next, end) = self.young_bounds(i);
+            let class = &mut self.nursery[ci];
+            class.chunks.push(i);
+            class.cur = class.chunks.len() - 1;
+            class.next = next;
+            class.end = end;
+        }
+    }
+
+    /// `[first slot, end of last whole slot)` of chunk `i`.
+    #[cfg(feature = "gc-nursery")]
+    fn young_bounds(&self, i: usize) -> (u64, u64) {
+        let c = self.chunks.get(i).expect("young chunk");
+        let size = u64::from(c.meta.slot_size);
+        let first = c.ptr as u64 + u64::from(c.meta.first_off);
+        let slots = (c.ptr as u64 + CHUNK as u64 - first) / size;
+        (first, first + slots * size)
+    }
+
+    /// Every allocated nursery slot range `(first, end, slot size, chunk)`:
+    /// whole chunks before each class's current one, then up to its cursor.
+    #[cfg(feature = "gc-nursery")]
+    pub fn young_ranges(&self) -> Vec<(u64, u64, u64, usize)> {
+        let mut out = Vec::new();
+        for class in &self.nursery {
+            if class.next == 0 {
+                continue;
+            }
+            for (k, &i) in class.chunks.iter().enumerate().take(class.cur + 1) {
+                let (first, end) = self.young_bounds(i);
+                let end = if k == class.cur { class.next } else { end };
+                out.push((first, end, u64::from(class.key.0), i));
+            }
+        }
+        out
+    }
+
+    /// Start every class over at its first chunk (the minor collector has
+    /// emptied them).
+    #[cfg(feature = "gc-nursery")]
+    pub fn reset_nursery(&mut self) {
+        for class in &mut self.nursery {
+            class.cur = 0;
+            class.next = 0;
+            class.end = 0;
+        }
+    }
+
+    /// Turn nursery chunk `i` into an old chunk (it holds pinned survivors).
+    /// Its slots from `from` on (never handed out) go to the free list; the
+    /// caller frees the dead ones below.
+    #[cfg(feature = "gc-nursery")]
+    pub fn promote_young_chunk(&mut self, i: usize, from: u64) {
+        if let Some(m) = self.young_mask.get_mut(i) {
+            *m = false;
+        }
+        for class in &mut self.nursery {
+            if let Some(k) = class.chunks.iter().position(|&c| c == i) {
+                class.chunks.remove(k);
+                class.cur = 0;
+                class.next = 0;
+                class.end = 0;
+            }
+        }
+        let (_, end) = self.young_bounds(i);
+        let size = self.chunks.get(i).map_or(0, |c| u64::from(c.meta.slot_size));
+        let mut p = from;
+        while size > 0 && p + size <= end {
+            self.free(unsafe { NonNull::new_unchecked(p as *mut u8) });
+            p += size;
+        }
     }
 
     /// Bytes of chunks whose pages were given back and not yet reused.
