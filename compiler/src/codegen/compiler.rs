@@ -10831,6 +10831,74 @@ impl Compiler {
         false
     }
 
+    /// Parameter / return word kinds of every emitted function, from its
+    /// checked scheme. Types are curried (`Fun(param, ret)`), so the walk
+    /// takes exactly the entry height's worth of params (a zero-arity fn has
+    /// one `unit` param); a scheme shorter than the entry (dictionary params)
+    /// is skipped. Generic parameters and returns stay unknown.
+    fn fn_word_kinds(
+        &self,
+        entries: &[(String, u32)],
+        entry_sps: &HashMap<String, u32>,
+    ) -> HashMap<String, super::precise_frames::FnWordKinds> {
+        use crate::typechecking::value_layout::word_kind;
+        let mut out = HashMap::new();
+        for (name, _) in entries {
+            if out.contains_key(name) {
+                continue;
+            }
+            let Some(&arity) = entry_sps.get(name) else {
+                continue;
+            };
+            // A fork worker (`__coil_par_f`) returns what `f` returns and
+            // takes `f`'s params plus an int hop count.
+            let par_base = name
+                .strip_prefix("__coil_par_")
+                .filter(|_| !name.starts_with("__coil_par_loop_"));
+            let base = par_base.unwrap_or(name);
+            let Some(scheme) = self.checker.env().lookup(base) else {
+                continue;
+            };
+            let Some(declared) = (arity as usize).checked_sub(usize::from(par_base.is_some()))
+            else {
+                continue;
+            };
+            let mut params = Vec::with_capacity(declared);
+            let mut current = &scheme.ty;
+            for _ in 0..declared.max(1) {
+                let Ty::Fun(param, ret) = current else {
+                    break;
+                };
+                params.push(word_kind(&self.checker, param));
+                current = ret;
+            }
+            if params.len() != declared.max(1) {
+                continue;
+            }
+            if declared == 0 {
+                if params != [common::WORD_SCALAR]
+                    || !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT))
+                {
+                    continue;
+                }
+                params.clear();
+            }
+            if par_base.is_some() {
+                params.push(common::WORD_SCALAR);
+            }
+            let ret = if self.generic_return_is_boxed(base) {
+                common::WORD_UNKNOWN
+            } else {
+                word_kind(&self.checker, current)
+            };
+            out.insert(
+                name.clone(),
+                super::precise_frames::FnWordKinds { params, ret },
+            );
+        }
+        out
+    }
+
     /// Whether a generic call's return value is boxed at the ABI boundary.
     ///
     /// Direct type-parameter arguments (`id<T>(T x) -> T`) are boxed at the
@@ -17784,6 +17852,7 @@ impl Compiler {
             self.bytecode.as_slice(),
             &entries,
         );
+        let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,
             &lowered.needs_frame_extent,
@@ -17793,6 +17862,7 @@ impl Compiler {
             &entries,
             &entry_sps,
             self.prologue_jmp_target(),
+            &fn_kinds,
         );
 
         let dense_seek = self

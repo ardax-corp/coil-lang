@@ -19,6 +19,14 @@ use common::{Byte, Instruction, PreciseFrameMap, SlotMap};
 /// be described, and a frame extent for `needs_extent` bodies (allocating
 /// dense code without S2b maps, whose registers may sit past the cursor).
 /// Without a decodable extent such a frame is scanned to the end of the stack.
+/// Word kinds (`common::WORD_*`) of a function's parameters (entry slots,
+/// in order) and of its one-word return, from its checked signature.
+#[derive(Clone, Debug, Default)]
+pub struct FnWordKinds {
+    pub params: Vec<u8>,
+    pub ret: u8,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn bind_precise_frames(
     heap_free: &HashSet<String>,
@@ -29,7 +37,18 @@ pub fn bind_precise_frames(
     entries: &[(String, u32)],
     entry_sps: &HashMap<String, u32>,
     prologue_entry: u32,
+    fn_kinds: &HashMap<String, FnWordKinds>,
 ) -> Vec<PreciseFrameMap> {
+    // A `CALL` result is a must-pointer when every name bound to the target
+    // declares a pointer return.
+    let mut ret_ptr: HashMap<u32, bool> = HashMap::new();
+    for (name, pc) in entries {
+        let ptr = fn_kinds
+            .get(name)
+            .is_some_and(|k| k.ret == common::WORD_POINTER);
+        let e = ret_ptr.entry(*pc).or_insert(ptr);
+        *e = *e && ptr;
+    }
     let mut starts: Vec<u32> = entries.iter().map(|(_, pc)| *pc).collect();
     starts.sort_unstable();
     starts.dedup();
@@ -75,13 +94,29 @@ pub fn bind_precise_frames(
                 let declared = names()
                     .filter_map(|n| entry_sps.get(n).map(|&sp| sp as usize))
                     .max();
+                // Parameter kinds, when every name for this body agrees.
+                let mut kinds = names().map(|n| fn_kinds.get(n).map(|k| &k.params));
+                let first = kinds.next().flatten();
+                let params: Vec<bool> = match first {
+                    Some(p) if kinds.all(|k| k == Some(p)) => {
+                        p.iter().map(|&k| k == common::WORD_POINTER).collect()
+                    }
+                    _ => Vec::new(),
+                };
                 let seed = EntrySeed {
                     prologue_entry: prologue_entry as usize,
                     declared,
+                    params,
                 };
-                if let Some(at_pc) =
-                    analyze_body(bytecode, constants, match_arities, entry, end, &seed)
-                {
+                if let Some(at_pc) = analyze_body(
+                    bytecode,
+                    constants,
+                    match_arities,
+                    entry,
+                    end,
+                    &seed,
+                    &ret_ptr,
+                ) {
                     row.at_pc = at_pc;
                 }
             }
@@ -307,6 +342,11 @@ struct FrameState {
     /// carry `common::PRECISE_SLOT_MUST`; a moving collector may rewrite
     /// them. Missing = no.
     ptr: Vec<bool>,
+    /// Must-pointer bits of the top operands (TOS last), tracked relative to
+    /// the cursor so a push / pop pair keeps its kind even when the cursor
+    /// is inexact. Cleared when the cursor jumps or a slot write may alias
+    /// an operand.
+    ops: Vec<bool>,
 }
 
 /// Words the analysis refuses to track (keeps `u16` slots in range).
@@ -351,20 +391,26 @@ impl FrameState {
     /// Push that copies a word's heap / pointer state; an inexact cursor
     /// loses the pointer guarantee.
     fn push_copy(&mut self, heap: bool, must: bool) -> Option<()> {
-        let exact = self.lo == self.hi;
-        let at = self.lo;
+        let (lo, hi) = (self.lo, self.hi);
+        // An inexact push leaves each word in range either as it was or
+        // holding the new value.
+        let kept: Vec<bool> = (lo..=hi).map(|p| self.must_ptr(p)).collect();
         self.push(heap)?;
-        if exact {
-            self.set_must(at, must);
+        for (p, old) in (lo..=hi).zip(kept) {
+            self.set_must(p, must && (lo == hi || old));
+        }
+        if let Some(top) = self.ops.last_mut() {
+            *top = must;
         }
         Some(())
     }
 
     /// Pop returning `(may be heap, must be pointer)`.
     fn pop_copy(&mut self) -> Option<(bool, bool)> {
+        let tracked = self.ops.last().copied();
         self.pop_n(1)?;
         let heap = (self.lo..=self.hi).any(|p| self.bit(p));
-        let must = self.lo == self.hi && self.must_ptr(self.lo);
+        let must = tracked.unwrap_or(self.lo == self.hi && self.must_ptr(self.lo));
         Some((heap, must))
     }
 
@@ -383,6 +429,10 @@ impl FrameState {
         if p >= MAX_WORDS {
             return None;
         }
+        // Operands sit just below the cursor: `[cursor - ops.len(), cursor)`.
+        if slot && p + self.ops.len() >= self.lo && p < self.hi {
+            self.ops.clear();
+        }
         if self.bits.len() <= p {
             self.bits.resize(p + 1, true);
             self.slot.resize(p + 1, true);
@@ -396,6 +446,17 @@ impl FrameState {
     fn seek(&mut self, t: usize) {
         self.lo = t;
         self.hi = t;
+        self.ops.clear();
+    }
+
+    /// The cursor moved without a push / pop (store past it, unpack, a
+    /// two-word call result): tracked operands no longer sit at the top.
+    fn raise(&mut self, lo: usize, hi: usize) {
+        if (lo, hi) != (self.lo, self.hi) {
+            self.ops.clear();
+        }
+        self.lo = lo;
+        self.hi = hi;
     }
 
     /// Operand push at the cursor; an inexact cursor may write any word in
@@ -411,6 +472,7 @@ impl FrameState {
         }
         self.lo += 1;
         self.hi += 1;
+        self.ops.push(false);
         Some(())
     }
 
@@ -432,13 +494,16 @@ impl FrameState {
     fn pop_n(&mut self, n: usize) -> Option<()> {
         self.lo = self.lo.checked_sub(n)?;
         self.hi -= n;
+        match self.ops.len().checked_sub(n) {
+            Some(k) => self.ops.truncate(k),
+            None => self.ops.clear(),
+        }
         Some(())
     }
 
     fn store(&mut self, slot: usize, heap: bool) -> Option<()> {
         self.set(slot, heap)?;
-        self.lo = self.lo.max(slot + 1);
-        self.hi = self.hi.max(slot + 1);
+        self.raise(self.lo.max(slot + 1), self.hi.max(slot + 1));
         Some(())
     }
 
@@ -489,6 +554,13 @@ impl FrameState {
             next.pop();
             slot.pop();
         }
+        // Operand bits align at the top of the stack.
+        let olen = self.ops.len().min(other.ops.len());
+        let ops: Vec<bool> = self.ops[self.ops.len() - olen..]
+            .iter()
+            .zip(&other.ops[other.ops.len() - olen..])
+            .map(|(a, b)| *a && *b)
+            .collect();
         let plen = self.ptr.len().min(other.ptr.len());
         let mut ptr: Vec<bool> = (0..plen).map(|p| self.ptr[p] && other.ptr[p]).collect();
         while ptr.last() == Some(&false) {
@@ -497,10 +569,12 @@ impl FrameState {
         let changed = next != self.bits
             || slot != self.slot
             || ptr != self.ptr
+            || ops != self.ops
             || (lo, hi) != (self.lo, self.hi);
         self.bits = next;
         self.slot = slot;
         self.ptr = ptr;
+        self.ops = ops;
         self.lo = lo;
         self.hi = hi;
         Some(changed)
@@ -518,6 +592,7 @@ fn analyze_body(
     entry: u32,
     end: u32,
     seed: &EntrySeed,
+    ret_ptr: &HashMap<u32, bool>,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
     let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
@@ -527,6 +602,8 @@ fn analyze_body(
         match_arities,
         entry,
         end,
+        params: (!coroutine && seed.params.len() == arity).then_some(&seed.params[..]),
+        ret_ptr,
     };
     let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
         std::collections::BTreeMap::new();
@@ -542,7 +619,14 @@ fn analyze_body(
             .into_iter()
             .map(|(pc, slots)| SlotMap {
                 pc: pc as u32,
-                slots: slots.into_iter().collect(),
+                slots: slots
+                    .iter()
+                    .copied()
+                    .filter(|&s| {
+                        !common::precise_slot_must(s)
+                            || !slots.contains(&(common::precise_slot_index(s) as u16))
+                    })
+                    .collect(),
             })
             .collect(),
     )
@@ -592,6 +676,10 @@ struct Body<'a> {
     match_arities: &'a HashMap<u32, u32>,
     entry: usize,
     end: usize,
+    /// Must-pointer entry slots (signature kinds matching the entry arity).
+    params: Option<&'a [bool]>,
+    /// Callee entry PC → its one-word result is a must-pointer.
+    ret_ptr: &'a HashMap<u32, bool>,
 }
 
 impl Body<'_> {
@@ -605,7 +693,11 @@ impl Body<'_> {
         let (entry, end) = (self.entry, self.end);
         let mut states: HashMap<usize, FrameState> = HashMap::new();
         let mut work = vec![start];
-        // Parameters are live words of unknown kind.
+        // Parameters are live words; the signature may prove some pointers.
+        let ptr = match self.params {
+            Some(p) if start == entry => p.to_vec(),
+            _ => Vec::new(),
+        };
         states.insert(
             start,
             FrameState {
@@ -613,7 +705,8 @@ impl Body<'_> {
                 hi: arity,
                 bits: vec![true; arity],
                 slot: vec![true; arity],
-                ptr: Vec::new(),
+                ptr,
+                ops: Vec::new(),
             },
         );
         let step_at = |pc: usize, st: &mut FrameState| transfer(self, pc, coroutine, st);
@@ -668,6 +761,9 @@ struct EntrySeed {
     prologue_entry: usize,
     /// Codegen's entry height (params, `self`, dictionaries) for this body.
     declared: Option<usize>,
+    /// Must-pointer parameters from the signature (used only when their
+    /// count matches the entry arity).
+    params: Vec<bool>,
 }
 
 /// Words on the frame when the body at `entry` starts, and whether it runs
@@ -808,6 +904,9 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.pop()?;
             st.push(false)?;
         }
+        // Literal `0` is a valid must-pointer value (null / `None`): joined
+        // with an allocation the word stays a must-pointer.
+        CONST if b.operand_u32() == 0 => st.push_copy(false, true)?,
         CONST | CodePtr => st.push(false)?,
         LOAD => {
             for i in 0..b.load_store_count() {
@@ -864,8 +963,16 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         BinSlotImmJmpf | BinSlotImmJmpt | BinSlotSlotJmpf | BinSlotSlotJmpt => {
             step.jump = Some(jump_target(b, constants)?);
         }
-        RETURN | LoadReturnSlot | ConstReturnImm | BinReturn | ReturnPair | TailCall
-        | MakeEnumReturn | MakeEnumReturnK | HALT | Panic => {
+        RETURN | LoadReturnSlot | ConstReturnImm | BinReturn | ReturnPair | TailCall | HALT
+        | Panic => {
+            step.fallthrough = false;
+        }
+        // Allocates (a safepoint with the payload still on the stack), then
+        // returns the new enum.
+        MakeEnumReturn | MakeEnumReturnK => {
+            st.pop_n(b.make_arity() as usize)?;
+            st.push_ptr()?;
+            step.record = Some(st.heap_slots(st.hi, true));
             step.fallthrough = false;
         }
         CALL => {
@@ -876,8 +983,10 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.pop_n(arity)?;
             step.record = Some(st.heap_slots(st.hi, false));
             st.clobber_from(st.lo);
-            for _ in 0..b.call_ret_words() {
-                st.push(true)?;
+            let ret_words = b.call_ret_words();
+            let must = ret_words == 1 && body.ret_ptr.get(&(target as u32)) == Some(&true);
+            for _ in 0..ret_words {
+                st.push_copy(true, must)?;
             }
         }
         // Pops the target, dictionaries and args; the callee frame starts at
@@ -892,7 +1001,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.push(true)?;
             // The callee's return width is not encoded: one or two words.
             st.write(st.hi, true, false)?;
-            st.hi += 1;
+            st.raise(st.lo, st.hi + 1);
         }
         // Suspends: the frame's words below the cursor are saved and restored
         // on resume; anything above is gone. Outside a coroutine the value
@@ -929,7 +1038,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             for p in slot..slot + arity {
                 st.set(p, true)?;
             }
-            st.hi = st.hi.max(slot + arity);
+            st.raise(st.lo, st.hi.max(slot + arity));
         }
         DictEntries => {
             st.pop()?;
@@ -1036,7 +1145,10 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         // Dense register ops write frame slots without moving the cursor.
         DenseBin | DenseCmp => st.set(b.dense_abc_parts().1, false)?,
         DenseUnary | DenseCast => st.set(b.dense_unary_parts().1, false)?,
-        DenseConst => st.set(b.dense_const_parts().1, false)?,
+        DenseConst => {
+            let (_, dest, value, pooled) = b.dense_const_parts();
+            st.set_copy(dest, false, value == 0 && !pooled)?;
+        }
         DenseArrayLen => st.set(b.dense_move_parts().0, false)?,
         DenseMove => {
             let (dest, src) = b.dense_move_parts();
@@ -1092,8 +1204,13 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         SetField => {
             let n = if common::set_field_slot_index(b.operand_u32()).is_some() { 2 } else { 3 };
+            // Pushes back the stored value (the lowest popped word).
+            let tracked = st.ops.len().checked_sub(n).map(|i| st.ops[i]);
             st.pop_n(n)?;
-            st.push(true)?;
+            let exact = st.lo == st.hi;
+            let heap = !exact || st.bit(st.lo);
+            let must = tracked.unwrap_or(exact && st.must_ptr(st.lo));
+            st.push_copy(heap, must)?;
         }
         _ => return None,
     }
@@ -1122,10 +1239,26 @@ mod tests {
 
     /// `[0] CALL 1 → 2; [1] HALT; [2..] body`, bound as `f` at PC 2.
     fn bind(body: &[Byte]) -> Vec<PreciseFrameMap> {
+        bind_with(body, FnWordKinds::default())
+    }
+
+    /// [`bind`] with `f`'s signature word kinds.
+    fn bind_with(body: &[Byte], kinds: FnWordKinds) -> Vec<PreciseFrameMap> {
         let mut code = vec![call(1, 2), op(Instruction::HALT)];
         code.extend_from_slice(body);
         let entries = vec![("f".to_string(), 2)];
-        bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
+        let fn_kinds = HashMap::from([("f".to_string(), kinds)]);
+        bind_precise_frames(
+            &HashSet::new(),
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &HashMap::new(),
+            u32::MAX,
+            &fn_kinds,
+        )
     }
 
     /// Slot indices (flags stripped), ascending.
@@ -1271,6 +1404,7 @@ mod tests {
             &entries,
             &declared,
             u32::MAX,
+            &HashMap::new(),
         );
         assert_eq!(slots_at(&maps, 2), Some(vec![0, 1]));
 
@@ -1285,6 +1419,7 @@ mod tests {
             &entries,
             &HashMap::new(),
             u32::MAX,
+            &HashMap::new(),
         );
         assert!(no_precise(&maps));
     }
@@ -1315,6 +1450,7 @@ mod tests {
             &entries,
             &HashMap::new(),
             u32::MAX,
+            &HashMap::new(),
         );
         // After resume: saved local 0, the sent value in slot 1, a new object.
         assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
@@ -1378,6 +1514,7 @@ mod tests {
                 &entries,
                 &HashMap::new(),
                 u32::MAX,
+                &HashMap::new(),
             )
         };
         let plain = bind_with(HashSet::new());
@@ -1410,7 +1547,99 @@ mod tests {
         ]);
         let entries = vec![("f".to_string(), 2)];
         let maps =
-            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX);
+            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX, &HashMap::new());
         assert!(no_precise(&maps));
     }
+    #[test]
+    fn pointer_params_from_the_signature_are_must_pointers() {
+        let body = [op(Instruction::InitTyped), op(Instruction::RETURN)];
+        let ptr = FnWordKinds {
+            params: vec![common::WORD_POINTER],
+            ret: common::WORD_UNKNOWN,
+        };
+        assert_eq!(must_at(&bind_with(&body, ptr), 2), Some(vec![0, 1]));
+        // Without a signature the param is only a may-pointer.
+        assert_eq!(must_at(&bind(&body), 2), Some(vec![1]));
+    }
+
+    #[test]
+    fn pointer_returning_call_result_is_a_must_pointer() {
+        // [2] load 0 [3] CALL f [4] store 1 [5] InitTyped [6] RETURN
+        let body = [
+            load(0),
+            call(1, 2),
+            store(1),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ];
+        let ptr = FnWordKinds {
+            params: vec![common::WORD_SCALAR],
+            ret: common::WORD_POINTER,
+        };
+        assert_eq!(must_at(&bind_with(&body, ptr), 5), Some(vec![1, 2]));
+        assert_eq!(must_at(&bind(&body), 5), Some(vec![2]));
+    }
+
+    #[test]
+    fn null_joined_with_an_allocation_stays_a_must_pointer() {
+        // [2] CONST [3] JMPF 7 [4] InitTyped [5] store 0 [6] JMP 9
+        // [7] CONST 0 [8] store 0 [9] InitTyped [10] RETURN
+        let maps = bind(&[
+            konst(1),
+            op(Instruction::JMPF).with_operand_u32(7),
+            op(Instruction::InitTyped),
+            store(0),
+            op(Instruction::JMP).with_operand_u32(9),
+            konst(0),
+            store(0),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert!(must_at(&maps, 9).expect("safepoint row").contains(&0));
+    }
+
+    #[test]
+    fn push_pop_pair_keeps_its_kind_under_an_inexact_cursor() {
+        // The then-arm leaves one extra word, so at [6] the cursor is 1 or 2.
+        // [6] InitTyped [7] store 5 [8] InitTyped [9] RETURN
+        let maps = bind(&[
+            load(0),
+            op(Instruction::JMPF).with_operand_u32(6),
+            load(0),
+            op(Instruction::JMP).with_operand_u32(6),
+            op(Instruction::InitTyped),
+            store(5),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert!(must_at(&maps, 8).expect("safepoint row").contains(&5));
+    }
+
+    #[test]
+    fn set_field_result_keeps_the_stored_value_kind() {
+        // [2] InitTyped (value) [3] InitTyped (target) [4] SetField
+        // [5] store 3 [6] InitTyped [7] RETURN
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            op(Instruction::InitTyped),
+            op(Instruction::SetField).with_operand_u32(common::pack_set_field_slot(0)),
+            store(3),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert!(must_at(&maps, 6).expect("safepoint row").contains(&3));
+    }
+
+    #[test]
+    fn make_enum_return_records_its_allocation() {
+        // [2] InitTyped [3] load 0 [4] MakeEnumReturnK arity 2
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            load(0),
+            op(Instruction::MakeEnumReturnK).with_operand_u32(2),
+        ]);
+        assert_eq!(slots_at(&maps, 4), Some(vec![0, 1]));
+        assert_eq!(must_at(&maps, 4), Some(vec![1]));
+    }
+
 }

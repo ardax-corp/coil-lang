@@ -50,11 +50,18 @@ marking.
 Frame roots follow the same split (archive minor 26). A precise frame map
 lists the slots that may hold heap words; the compiler flags
 (`PRECISE_SLOT_MUST`) those whose every reaching definition is an
-allocation or a copy of one. The VM reports flagged slots as precise roots
-and the rest as ambiguous. Call results and parameters stay ambiguous at
-the bytecode level (no types there), and `Vec<T>` elements have no kinds
-(generic bodies), so objects held that way would still pin under a moving
-collector. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+allocation, a literal `0`, or a copy of one. Parameters and one-word
+`CALL` results take their kind from the checked signature (walked for
+exactly the entry height; bodies whose scheme lacks dictionary params, and
+generic returns, stay unknown). Fork workers (`__coil_par_f`) reuse `f`'s.
+The analysis tracks the kinds of the top operands relative to the cursor,
+so a push / `STORE` pair keeps its kind at loop heads where the cursor is
+only known as a range. `MakeEnumReturn(K)` records its allocation. The VM
+reports flagged slots as precise roots and the rest as ambiguous. What
+stays ambiguous: slots a loop reads only after rewriting (stale values
+from the previous iteration, unwritten on entry; a liveness pass could
+drop them), generic call results, and `Vec<T>` elements (no kinds), so
+objects held that way would still pin under a moving collector. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal walks the slab: every slot of each resident chunk, live iff its
