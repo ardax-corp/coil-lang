@@ -2507,3 +2507,13 @@
         assert!(ok("fn f(int d) {\n    match d {\n        default => {},\n    };\n}\n"));
         assert!(ok("fn f(int d) {\n    match d {\n        default => 1,\n    }.to_string();\n}\n"));
     }
+
+    /// In a value body (match arm, lambda) a final `match` without `;` is
+    /// the body's value, not a statement.
+    #[test]
+    fn trailing_match_in_arm_body_is_the_value() {
+        let src = "fn f(int d) -> int {\n    return match d {\n        default => {\n            let x = 1;\n            match x {\n                default => 2,\n            }\n        },\n    };\n}\n";
+        let ast = Pratt::default().parse(src).expect("parse");
+        let text = format!("{:?}", ast.1);
+        assert!(!text.contains("ExprStatement"), "tail match must stay an expression: {text}");
+    }
