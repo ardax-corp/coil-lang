@@ -30,8 +30,11 @@ elements, interned string bytes) stay ordinary Rust allocs in this cut.
 Typed class instances use dense slots
 ([#287](https://github.com/ardax-corp/coil-lang/pull/287)); small `ObjEnum`
 payloads can inline ([#290](https://github.com/ardax-corp/coil-lang/pull/290));
-typed instances with ≤2 fields keep those slots in the header
-([#299](https://github.com/ardax-corp/coil-lang/pull/299)).
+typed instances with ≤4 fields keep those slots in the header
+([#299](https://github.com/ardax-corp/coil-lang/pull/299)). Typed slots are
+raw `Value` words, not tagged `Member`s: stores skip the heap probe, and
+mark / root census resolve each word through the slab like tuple elements.
+Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal stays the intrusive `head` list. Collection trigger stays
