@@ -61,6 +61,9 @@ struct Breakpoint {
 pub struct LineIndex {
     by_file: HashMap<String, HashMap<u32, Vec<usize>>>,
     by_basename: HashMap<String, String>,
+    /// Canonical path → stored key: DAP clients send absolute paths while
+    /// the archive stores them as compiled (often relative).
+    by_canonical: HashMap<PathBuf, String>,
 }
 
 impl LineIndex {
@@ -77,6 +80,9 @@ impl LineIndex {
             };
             let text = texts.entry(loc.file).or_insert_with(|| {
                 let resolved = resolve_path(&path, base_dir);
+                if let Ok(canonical) = resolved.canonicalize() {
+                    idx.by_canonical.insert(canonical, path.clone());
+                }
                 fs::read_to_string(resolved).unwrap_or_default()
             });
             if text.is_empty() {
@@ -102,6 +108,12 @@ impl LineIndex {
         let key = if let Some(hint) = file_hint {
             if self.by_file.contains_key(hint) {
                 hint.to_string()
+            } else if let Some(stored) = Path::new(hint)
+                .canonicalize()
+                .ok()
+                .and_then(|c| self.by_canonical.get(&c))
+            {
+                stored.clone()
             } else if let Some(full) = self.by_basename.get(hint) {
                 full.clone()
             } else {
