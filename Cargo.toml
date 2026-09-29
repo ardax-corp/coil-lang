@@ -45,6 +45,7 @@ harness = false
 default = []
 gc-stress = ["machine/gc-stress"]
 gc-stats = ["machine/gc-stats"]
+gc-compact = ["machine/gc-compact"]
 
 [profile.release]
 opt-level=3

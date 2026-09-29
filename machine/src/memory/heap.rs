@@ -773,7 +773,7 @@ impl Heap {
 
     /// Head of the intrusive object list (for address lookup).
     /// One line of moving-GC feasibility numbers for the current mark
-    /// (`gc-stats` feature, `docs/internals/moving-gc.md` Stage 0). Call
+    /// (`gc-stats` feature, `docs/internals/gc-evacuation.md`). Call
     /// after marking completes: marked objects are the live set.
     #[cfg(feature = "gc-stats")]
     pub fn census(&self, roots: &[(u64, RootKind)]) -> String {
@@ -1267,7 +1267,7 @@ impl Object {
     /// `Value` word that is traced by address lookup and may be an immediate
     /// (tuple / array elements, closure captures, unmasked coroutine words,
     /// `Member::Value` fields) — a moving collector cannot rewrite those
-    /// (`docs/internals/moving-gc.md`). Not on the mark path.
+    /// (`docs/internals/gc-evacuation.md`). Not on the mark path.
     pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
         let word = |v: Value, precise: bool, visit: &mut dyn FnMut(u64, bool)| {
             let addr = v.heap_addr();
@@ -1541,7 +1541,7 @@ impl Object {
     }
 }
 
-/// How a moving collector may treat a root (`docs/internals/moving-gc.md`).
+/// How a moving collector may treat a root (`docs/internals/gc-evacuation.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootKind {
     /// A word the VM knows is a heap reference; could be rewritten.
@@ -1888,6 +1888,15 @@ impl EnumPayload {
         match &self.inner {
             EnumPayloadInner::Inline { len, slots, .. } => &slots[..*len as usize],
             EnumPayloadInner::Spill { words, .. } => words.as_slice(),
+        }
+    }
+
+    /// Payload words for in-place reference rewrites (`gc-compact`).
+    #[cfg(feature = "gc-compact")]
+    fn as_mut_slice(&mut self) -> &mut [Value] {
+        match &mut self.inner {
+            EnumPayloadInner::Inline { len, slots, .. } => &mut slots[..*len as usize],
+            EnumPayloadInner::Spill { words, .. } => words.as_mut_slice(),
         }
     }
 
@@ -3147,6 +3156,12 @@ fn resident_kib() -> usize {
     }
 }
 
+
+#[cfg(feature = "gc-compact")]
+#[path = "compact.rs"]
+mod compact;
+#[cfg(feature = "gc-compact")]
+pub use compact::{AddrMap, EvacPlan, Evacuation};
 
 #[cfg(test)]
 mod tests {

@@ -276,6 +276,13 @@ macro_rules! unary {
 #[inline(always)]
 fn prefetch_code(_code: &[Byte], _ip: usize) {}
 
+/// Collections between evacuation attempts outside stress mode
+/// (`gc-compact`), and the ceiling unproductive attempts back off to.
+#[cfg(feature = "gc-compact")]
+const COMPACT_WINDOW: u32 = 8;
+#[cfg(feature = "gc-compact")]
+const COMPACT_WINDOW_MAX: u32 = 256;
+
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     // Lowering may target `code.len()` as “fall out of the loop” (next `while`
@@ -485,6 +492,17 @@ pub struct Machine<const S: usize> {
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
     nested_return: Option<Value>,
+    /// Active `execute` invocations. More than one means a host frame
+    /// (native re-entry via `call_function`, a finalizer) sits between VM
+    /// frames and may hold raw heap handles, so `gc-compact` must not move.
+    #[cfg(feature = "gc-compact")]
+    in_execute: u32,
+    /// Collections since the last evacuation attempt (`gc-compact`).
+    #[cfg(feature = "gc-compact")]
+    compact_cycles: u32,
+    /// Collections to wait before the next attempt (backs off when idle).
+    #[cfg(feature = "gc-compact")]
+    compact_window: u32,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
     /// Set when `await_*` parks until fd readiness (CPU help-steals meanwhile).
@@ -593,6 +611,12 @@ impl<const S: usize> Machine<S> {
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
+            #[cfg(feature = "gc-compact")]
+            in_execute: 0,
+            #[cfg(feature = "gc-compact")]
+            compact_cycles: 0,
+            #[cfg(feature = "gc-compact")]
+            compact_window: COMPACT_WINDOW,
             pending_ffi: None,
             pending_io: None,
             panicked: false,
@@ -847,7 +871,7 @@ impl<const S: usize> Machine<S> {
         let mut ip = start_ip;
         loop {
             self.pending_debug_stop = None;
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -1306,7 +1330,74 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
+        #[cfg(feature = "gc-compact")]
+        self.gc_compact();
         self.gc_in_progress = false;
+    }
+
+    /// Evacuate sparse chunks after a finished cycle (`gc-compact`,
+    /// `docs/internals/gc-evacuation.md`). Must-pointer frame slots are
+    /// rewritten; every other VM root pins its target. Skipped while a host
+    /// frame sits between VM frames (native re-entry, finalizers), in a
+    /// shared-heap epoch, or under the debugger. `gc-stress` moves everything
+    /// movable each cycle and checks that no word still names an old slot.
+    #[cfg(feature = "gc-compact")]
+    fn gc_compact(&mut self) {
+        if self.in_execute > 1
+            || self.shared_epoch.is_some()
+            || self.heap.epoch_stw()
+            || self.heap.is_borrowed()
+            || !self.heap.gc_is_idle()
+        {
+            return;
+        }
+        #[cfg(any(test, feature = "debugger"))]
+        if self.debug.is_some() {
+            return;
+        }
+        // Outside stress mode, wait `compact_window` collections between
+        // attempts; unproductive attempts double it (the analysis walks the
+        // whole heap), a productive one resets it.
+        let stress = cfg!(feature = "gc-stress");
+        self.compact_cycles += 1;
+        if !stress && self.compact_cycles < self.compact_window {
+            return;
+        }
+        self.compact_cycles = 0;
+        let mut pins = self.heap.take_gc_roots();
+        let mut must = Vec::new();
+        self.for_each_stack_word(&mut |idx, kind| match kind {
+            crate::memory::RootKind::Precise => must.push(idx),
+            _ => pins.push(self.stack[idx].heap_addr()),
+        });
+        self.for_each_non_stack_root(&mut |addr, _| pins.push(addr));
+        let Some(plan) = self.heap.evacuate_plan(&pins, stress) else {
+            self.heap.restore_gc_roots(pins);
+            self.compact_window = (self.compact_window * 2).min(COMPACT_WINDOW_MAX);
+            return;
+        };
+        self.heap.restore_gc_roots(pins);
+        for idx in must {
+            if let Some(v) = plan.forward(self.stack[idx]) {
+                self.stack[idx] = v;
+            }
+        }
+        #[cfg(feature = "gc-stress")]
+        {
+            self.heap.verify_evacuation(&plan);
+            self.for_each_vm_root(&mut |addr, kind| {
+                assert!(
+                    !plan.moved().contains_key(&addr),
+                    "gc-stress: {kind:?} VM root still names moved {addr:#x}"
+                );
+            });
+        }
+        let evacuation = self.heap.evacuate_finish(plan);
+        self.clear_dense_obj_cache();
+        self.compact_window = if evacuation.capped { 1 } else { COMPACT_WINDOW };
+        #[cfg(feature = "gc-stats")]
+        eprintln!("gc-stats evacuate: {evacuation:?}");
+        let _ = evacuation;
     }
 
     /// `gc-stats`: census of the live set just marked, before weaks clear.
@@ -1405,6 +1496,8 @@ impl<const S: usize> Machine<S> {
         let n = self.heap.gc_sweep_quantum();
         if self.heap.sweep_quantum(n) {
             self.invalidate_program_string_cache();
+            #[cfg(feature = "gc-compact")]
+            self.gc_compact();
         }
     }
 
@@ -1415,10 +1508,17 @@ impl<const S: usize> Machine<S> {
     }
 
     /// Every VM root that resolves to a live heap object, tagged with how a
-    /// moving collector could treat it (see `docs/internals/moving-gc.md`).
+    /// moving collector could treat it (see `docs/internals/gc-evacuation.md`).
     /// Heap-owned roots (immortal unit enums, handle roots) are seeded by
     /// [`crate::memory::Heap::take_gc_roots`], not here.
     pub(crate) fn for_each_vm_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+        self.for_each_stack_root(visit);
+        self.for_each_non_stack_root(visit);
+    }
+
+    /// VM roots outside the operand stack. None of them can be rewritten by
+    /// a moving collector (untyped words, or Rust-held handles).
+    fn for_each_non_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
@@ -1426,7 +1526,6 @@ impl<const S: usize> Machine<S> {
                 visit(addr, kind);
             }
         };
-        self.for_each_stack_root(visit);
         // Untyped words: the join result and statics may be immediates.
         word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
         for v in &self.statics {
@@ -1461,29 +1560,41 @@ impl<const S: usize> Machine<S> {
     /// roots only its heap slots; every other stack word is scanned.
     fn for_each_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
-        let mut root = |v: Value, kind: crate::memory::RootKind| {
+        self.for_each_stack_word(&mut |idx, kind| {
+            let v = self.stack[idx];
             let addr = v.heap_addr();
+            #[cfg(feature = "gc-stress")]
+            if kind == crate::memory::RootKind::Precise {
+                assert!(
+                    addr == 0 || heap.find_object_by_addr(addr).is_some(),
+                    "gc-stress: must-pointer frame slot at stack word {idx} holds a non-object"
+                );
+            }
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
                 visit(addr, kind);
             }
-        };
+        });
+    }
+
+    /// Every operand-stack word that may root the heap, by stack index, frame
+    /// by frame: a frame with a trusted precise map yields only its heap
+    /// slots (must-pointer ones as `Precise`, the rest `Ambiguous`); every
+    /// other word is scanned (`Ambiguous`).
+    fn for_each_stack_word(&self, visit: &mut dyn FnMut(usize, crate::memory::RootKind)) {
         let scanned = crate::memory::RootKind::Ambiguous;
-        let stack = self.stack.as_slice();
+        let top = self.stack.as_slice().len();
         let n = self.frames.len();
         if self.precise_frames.is_empty() || n == 0 {
-            stack.iter().for_each(|&v| root(v, scanned));
+            (0..top).for_each(|idx| visit(idx, scanned));
             return;
         }
-        let top = stack.len();
-        stack[..self.frames[0].get().min(top)]
-            .iter()
-            .for_each(|&v| root(v, scanned));
+        (0..self.frames[0].get().min(top)).for_each(|idx| visit(idx, scanned));
         for i in 0..n {
             let lo = self.frames[i].get();
             let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
             if lo > hi || hi > top {
                 // Unexpected frame layout: everything from here up is scanned.
-                stack[lo.min(top)..].iter().for_each(|&v| root(v, scanned));
+                (lo.min(top)..top).for_each(|idx| visit(idx, scanned));
                 return;
             }
             match self.trusted_precise_slots(i, lo, hi) {
@@ -1500,16 +1611,7 @@ impl<const S: usize> Machine<S> {
                             } else {
                                 crate::memory::RootKind::Ambiguous
                             };
-                            #[cfg(feature = "gc-stress")]
-                            if common::precise_slot_must(s) {
-                                let addr = self.stack[idx].heap_addr();
-                                assert!(
-                                    addr == 0 || heap.find_object_by_addr(addr).is_some(),
-                                    "gc-stress: must-pointer frame slot {} holds a non-object",
-                                    common::precise_slot_index(s)
-                                );
-                            }
-                            root(self.stack[idx], kind);
+                            visit(idx, kind);
                         }
                     }
                 }
@@ -1519,7 +1621,7 @@ impl<const S: usize> Machine<S> {
                         .frame_extent(i)
                         .map_or(hi, |words| lo.saturating_add(words).max(hi))
                         .min(self.stack.capacity());
-                    (lo..reach).for_each(|idx| root(self.stack[idx], scanned));
+                    (lo..reach).for_each(|idx| visit(idx, scanned));
                 }
             }
         }
@@ -2646,7 +2748,7 @@ impl<const S: usize> Machine<S> {
         };
         let mut ip = start_ip;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -2697,7 +2799,7 @@ impl<const S: usize> Machine<S> {
         self.sync_thread_program_from_current();
         let mut ip = 0usize;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -2963,7 +3065,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
         loop {
-            let paused = self.execute(code, constants, ip);
+            let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
                 self.finish_pending_ffi_invoke(pending);
@@ -3041,6 +3143,22 @@ impl<const S: usize> Machine<S> {
     /// the guard compare retired on every dispatch.
     /// An always-hot arm continues the streak in `execute_dense`, so a dense
     /// loop does not return here per opcode. CALL/RETURN stay on this match.
+    /// [`Self::execute`], counted as active for the `gc-compact` re-entrancy
+    /// check (outside the loop, so it costs nothing per op).
+    #[inline(always)]
+    fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
+        #[cfg(feature = "gc-compact")]
+        {
+            self.in_execute += 1;
+        }
+        let paused = self.execute(code, constants, start_ip);
+        #[cfg(feature = "gc-compact")]
+        {
+            self.in_execute -= 1;
+        }
+        paused
+    }
+
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);

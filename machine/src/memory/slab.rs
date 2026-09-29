@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 
+/// Bytes per slab chunk (`gc-compact` accounting).
+#[cfg(feature = "gc-compact")]
+pub const CHUNK_BYTES: usize = CHUNK;
+
 /// Sweep cycles a free slot must stay unused before its empty chunk's pages
 /// go back to the OS. Longer than the phase of typical periodic churn, so
 /// released chunks are not refaulted a cycle later.
@@ -542,8 +546,91 @@ impl Slab {
         released_bytes
     }
 
+    /// Chunk index of a slot address (`gc-compact`).
+    #[cfg(feature = "gc-compact")]
+    pub fn chunk_of(&self, addr: u64) -> Option<usize> {
+        self.chunks.position(addr)
+    }
+
+    /// `(slot size, align)` class and slot count of chunk `i` (`gc-compact`).
+    #[cfg(feature = "gc-compact")]
+    pub fn chunk_shape(&self, i: usize) -> Option<((u32, u32), usize)> {
+        let c = self.chunks.get(i)?;
+        let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
+        Some(((c.meta.slot_size, c.meta.slot_align), slots))
+    }
+
+    /// Bytes of free slots across every class (`gc-compact` gate).
+    #[cfg(feature = "gc-compact")]
+    pub fn free_slot_bytes(&self) -> usize {
+        self.free
+            .iter()
+            .map(|c| c.slots.len() * c.key.0 as usize)
+            .sum()
+    }
+
+    /// Take every free slot lying in a `chunks[i]` chunk off the free lists,
+    /// so new copies land elsewhere (`gc-compact`). Give them back with
+    /// [`Self::free`].
+    #[cfg(feature = "gc-compact")]
+    pub fn take_free_in(&mut self, chunks: &[bool]) -> Vec<NonNull<u8>> {
+        let mut parked = Vec::new();
+        let table = &self.chunks;
+        for class in &mut self.free {
+            class.slots.retain(|p| {
+                let inside = table
+                    .position(p.as_ptr() as u64)
+                    .is_some_and(|i| chunks.get(i).copied().unwrap_or(false));
+                if inside {
+                    parked.push(*p);
+                }
+                !inside
+            });
+            class.low_water = class.low_water.min(class.slots.len());
+        }
+        parked
+    }
+
+    /// Give back the pages of `emptied` chunks (every slot free) at once and
+    /// drop their slots from the free lists; they are re-carved before a new
+    /// chunk is mapped (`gc-compact`). Returns bytes released.
+    #[cfg(feature = "gc-compact")]
+    pub fn release_chunks(&mut self, emptied: &[bool]) -> usize {
+        if !cfg!(unix) || !emptied.contains(&true) {
+            return 0;
+        }
+        let mut released_bytes = 0;
+        for (i, _) in emptied.iter().enumerate().filter(|(_, e)| **e) {
+            let Some(c) = self.chunks.get(i) else {
+                continue;
+            };
+            if self.released_mask.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let key = (c.meta.slot_size, c.meta.slot_align);
+            release_pages(c.ptr, CHUNK);
+            self.set_released(i, true);
+            released_bytes += CHUNK;
+            match self.released.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, list)) => list.push(i),
+                None => self.released.push((key, vec![i])),
+            }
+        }
+        let table = &self.chunks;
+        let mask = &self.released_mask;
+        for class in &mut self.free {
+            class.slots.retain(|p| {
+                table
+                    .position(p.as_ptr() as u64)
+                    .is_none_or(|i| !mask.get(i).copied().unwrap_or(false))
+            });
+            class.low_water = class.low_water.min(class.slots.len());
+        }
+        released_bytes
+    }
+
     /// Bytes of chunks whose pages were given back and not yet reused.
-    #[cfg(any(test, feature = "gc-stats"))]
+    #[cfg(any(test, feature = "gc-stats", feature = "gc-compact"))]
     pub fn released_bytes(&self) -> usize {
         self.released.iter().map(|(_, l)| l.len()).sum::<usize>() * CHUNK
     }
