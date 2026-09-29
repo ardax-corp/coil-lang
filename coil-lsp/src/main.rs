@@ -54,6 +54,11 @@ struct ServerState {
     project_index: Option<ProjectIndex>,
     workspace_root: Option<PathBuf>,
     last_typecheck: Vec<(PathBuf, Vec<CoilMessage>)>,
+    /// URIs (as strings: `Uri` is not a sound hash key) whose last
+    /// published diagnostics were non-empty.
+    dirty_uris: HashSet<String>,
+    /// Entry of `last_typecheck`; the project checker holds its span types.
+    last_entry: Option<PathBuf>,
 }
 
 fn main() {
@@ -478,23 +483,94 @@ fn handle_notification(
     Ok(())
 }
 
+/// Publish diagnostics for `uri` and every file in the last project
+/// typecheck (an imported file's parse error belongs to that file). Files
+/// published earlier that are now clean get an empty list.
 fn publish_diagnostics(
     connection: &Connection,
-    state: &ServerState,
+    state: &mut ServerState,
     uri: &Uri,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(document) = state.documents.get(uri) else {
-        return Ok(());
-    };
-    let diagnostics = project_diagnostics(state, uri, document);
+    let mut batch: Vec<(Uri, Vec<Diagnostic>, Option<i32>)> = Vec::new();
+    if let Some(document) = state.documents.get(uri) {
+        batch.push((
+            uri.clone(),
+            project_diagnostics(state, uri, document),
+            Some(document.version),
+        ));
+    }
+    let own_path = uri_path(uri);
+    for (path, messages) in &state.last_typecheck {
+        if own_path.as_ref() == Some(path) {
+            continue;
+        }
+        let Some(file_uri) = path_to_uri(path) else {
+            continue;
+        };
+        let open = state.documents.get(&file_uri);
+        let text = match open {
+            Some(document) => document.text.clone(),
+            None => match state
+                .project_index
+                .as_ref()
+                .and_then(|index| index.source_for(path))
+            {
+                Some(text) => text.to_owned(),
+                None => std::fs::read_to_string(path).unwrap_or_default(),
+            },
+        };
+        let diagnostics = messages
+            .iter()
+            .map(|message| diagnostic(&file_uri, &text, message))
+            .collect();
+        batch.push((file_uri, diagnostics, open.map(|d| d.version)));
+    }
+    let mut now_dirty = HashSet::new();
+    for (file_uri, diagnostics, version) in batch {
+        let key = file_uri.to_string();
+        let dirty = !diagnostics.is_empty();
+        // Skip clean files nobody saw diagnostics for.
+        if !dirty && !state.dirty_uris.contains(&key) && &file_uri != uri {
+            continue;
+        }
+        if dirty {
+            now_dirty.insert(key);
+        }
+        send_diagnostics(connection, file_uri, diagnostics, version)?;
+    }
+    // Clear files that had diagnostics and are no longer in the result.
+    let current: HashSet<String> = state
+        .last_typecheck
+        .iter()
+        .filter_map(|(p, _)| path_to_uri(p).map(|u| u.to_string()))
+        .chain(std::iter::once(uri.to_string()))
+        .collect();
+    for stale in state.dirty_uris.difference(&now_dirty) {
+        if current.contains(stale) {
+            continue;
+        }
+        if let Ok(stale_uri) = stale.parse::<Uri>() {
+            send_diagnostics(connection, stale_uri, Vec::new(), None)?;
+        }
+    }
+    state.dirty_uris = now_dirty;
+    Ok(())
+}
+
+fn send_diagnostics(
+    connection: &Connection,
+    uri: Uri,
+    diagnostics: Vec<Diagnostic>,
+    version: Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     connection
         .sender
         .send(Message::Notification(Notification::new(
             "textDocument/publishDiagnostics".into(),
             PublishDiagnosticsParams {
-                uri: uri.clone(),
+                uri,
                 diagnostics,
-                version: Some(document.version),
+                version,
             },
         )))?;
     Ok(())
@@ -543,6 +619,7 @@ fn refresh_project(state: &mut ServerState, entry: &Path) {
         }
     }
     state.last_typecheck = index.typecheck_entry(entry);
+    state.last_entry = Some(entry.to_path_buf());
 }
 
 fn project_diagnostics(state: &ServerState, uri: &Uri, document: &Document) -> Vec<Diagnostic> {
