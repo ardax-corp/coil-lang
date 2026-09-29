@@ -14,6 +14,7 @@ pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
 mod host_grants;
+mod local_scopes;
 mod lockfile;
 mod manifest;
 mod monomorphize;
@@ -52,4 +53,5 @@ pub use typechecking::{
 };
 
 pub use codegen::{Compiler, PROLOGUE_BYTECODE_LEN, unescape_coil_string};
+pub use local_scopes::{binding_at, local_bindings, local_bindings_in, LocalBinding};
 pub use symbols::{RefSite, SymbolDef, SymbolIndex, SymbolKind};
