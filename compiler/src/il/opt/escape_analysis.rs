@@ -113,7 +113,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
                 continue;
             }
         }
-        match owned_loads(ops, &blocks, a.make_idx + 1, a.store_slot) {
+        match owned_loads(ops, &blocks, &[a.make_idx + 1], a.store_slot) {
             Some(owned) => a.owned = owned,
             None => {
                 a.escaped = true;
@@ -339,22 +339,22 @@ fn classify_site_uses(ops: &[IlOp], site: &AllocSite) -> SiteUses {
     }
 }
 
-/// Loads of `slot` that only `store_idx` reaches (forward reaching
+/// Loads of `slot` that only the stores in `mine` reach (forward reaching
 /// definitions over the body's blocks). `None` refuses the site: some read
 /// of the slot is reached by this store *and* another definition, or reads
 /// it in a form the rewrite cannot replace (packed / fused / opaque). An op
 /// whose slot footprint is unknown may or may not have overwritten the slot,
 /// so it adds "other" without clearing "mine".
-fn owned_loads(
+pub(super) fn owned_loads(
     ops: &[IlOp],
     blocks: &[super::super::analysis::Block],
-    store_idx: usize,
+    mine: &[usize],
     slot: u32,
 ) -> Option<Vec<usize>> {
     const MINE: u8 = 1;
     const OTHER: u8 = 2;
     let step = |i: usize, op: &IlOp, st: u8| -> u8 {
-        if i == store_idx {
+        if mine.contains(&i) {
             return MINE;
         }
         match slot_touch(op, slot) {
@@ -396,7 +396,7 @@ fn owned_loads(
         }
         let block = &blocks[b];
         for (i, op) in ops.iter().enumerate().take(block.end).skip(block.start) {
-            if i != store_idx && st & MINE != 0 {
+            if !mine.contains(&i) && st & MINE != 0 {
                 match slot_touch(op, slot) {
                     SlotTouch::Load if st & OTHER == 0 => owned.push(i),
                     // Mixed reach, or a read / footprint the rewrite cannot
@@ -414,7 +414,7 @@ fn owned_loads(
 
 /// How one op touches a local slot, for [`owned_loads`].
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SlotTouch {
+pub(super) enum SlotTouch {
     None,
     /// Single-slot `LOAD` the rewrite can replace.
     Load,
@@ -426,7 +426,7 @@ enum SlotTouch {
     Unknown,
 }
 
-fn slot_touch(op: &IlOp, slot: u32) -> SlotTouch {
+pub(super) fn slot_touch(op: &IlOp, slot: u32) -> SlotTouch {
     let hit = |s: u32, t: SlotTouch| if s == slot { t } else { SlotTouch::None };
     match op {
         IlOp::Load { slot: s, .. } => hit(*s, SlotTouch::Load),
@@ -744,7 +744,7 @@ fn is_unit_push(op: &IlOp) -> bool {
     )
 }
 
-fn max_slot_used(ops: &[IlOp]) -> u32 {
+pub(super) fn max_slot_used(ops: &[IlOp]) -> u32 {
     let mut max = 0u32;
     for op in ops {
         match op {

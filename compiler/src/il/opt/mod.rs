@@ -227,6 +227,7 @@ mod dce;
 mod dest_prop;
 mod instcombine;
 mod early_cse;
+mod enum_sroa;
 pub(crate) mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;

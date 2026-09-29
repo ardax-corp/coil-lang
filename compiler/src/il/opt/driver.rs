@@ -233,8 +233,9 @@ fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) 
     0
 }
 
-fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::escape_analysis::escape_analysis(ops);
+    super::enum_sroa::scalarize_enums(ops, ctx.entry_tell, ctx.next_label);
     0
 }
 

@@ -2934,14 +2934,17 @@ fn match_with_same_tag_and_wildcard_subpatterns_keeps_current_layout() {
     // neither carries a Binding, so `arm_has_runtime_test`
     // returns false for both arms. No test chain is emitted;
     // the codegen keeps the existing layout.
+    // `x` is a parameter: a local would be scalarized (`enum_sroa`).
     let (bc, _pool) = compile_src(
         "enum E { A(Option) } \
- fn main() { \
- let x = E::A(Option::None); \
- let _ = match x { \
+ fn pick(E x) -> int { \
+ return match x { \
  E::A(Option::None) => 1, \
  E::A(Option::Some(_)) => 2, \
  }; \
+ } \
+ fn main() { \
+ let _ = pick(E::A(Option::None)); \
  }",
     );
     let jimp_count = bc

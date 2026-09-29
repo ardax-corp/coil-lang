@@ -63,7 +63,7 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 | `*Jmpt` / fused invert — **implemented** (`*Jmpt` twins; invert fused `*Jmpf; JMP`) | [COI-87](https://linear.app/ardax/issue/COI-87) |
 | `multi_op_join_convoy` JMPF mis-sink — **decided: whole-buffer only**; two-slot `CALL` / `Entry` is never an independent JMPF cond (delta +1 is the Result tag) | [COI-91](https://linear.app/ardax/issue/COI-91) / [COI-400](https://linear.app/ardax/issue/COI-400) |
 | Loop `LEQ` headers / float identity refusals — **decided: keep numeric contract** (`i < bound` only; no `x - 0.0` / `x * 0.0`) | [COI-93](https://linear.app/ardax/issue/COI-93) |
-| Enum escape elimination vs heap — **decided: unary/discarded-only** (this pass is not a second ABI). Niches, two-slot CALL/RETURN, and scalar `#[repr]` are extra ABIs elsewhere (COI-92 / [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); escape-elim ceiling is still unary/discarded | [COI-94](https://linear.app/ardax/issue/COI-94) |
+| Enum escape elimination vs heap — **implemented for match-only locals** (`il::opt::enum_sroa`: tag slot + shared payload slots, not a second ABI). Whole-value uses (calls, returns, `==`, bindings), `fn drop()` enums, and a second match after a `Seek` while the value is live keep the heap enum. Niches, two-slot CALL/RETURN, and scalar `#[repr]` are extra ABIs elsewhere (COI-92 / [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)) | [COI-94](https://linear.app/ardax/issue/COI-94) |
 | GC drop storing `self` / resurrection — **decided: allow-once** (see Userland footguns) | [COI-79](https://linear.app/ardax/issue/COI-79) |
 | Option/Result ABI — **heap `Option<T>` pointer niche** (`None` = `0`); **heap-heap `Result<T,E>`** (`Ok` = aligned pointer, `Err` = `pointer \| 1`); **two-slot** `[payload, tag]` on *direct* `CALL`/`RETURN` for `Option<int>` / immediate-Ok `Result` (and arity-≤1 user payload enums); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)) — not always boxed. Nested / mixed-heap / wider / `CallIndirect` / unsure stay boxed. Host packs Option + `Result<(),E>` / heap-heap once (`host_enum`). `?` / bind two-slot path: [#297](https://github.com/ardax-corp/coil-lang/pull/297); `?` flatten: [#307](https://github.com/ardax-corp/coil-lang/pull/307). Host never two-slot / convoy JMPF refusals: [#452](https://github.com/ardax-corp/coil-lang/pull/452). Cross-module `Result<Path, IoError>` keeps virtual-error tags for layout (constructors stay import-gated); namespaced `fn_return_ty` uses DefId / FQN so `text::to_lower` is not `ascii::to_lower` (COI-404). Pair/niche opcodes remain tombstones | [COI-92](https://linear.app/ardax/issue/COI-92) / [COI-404](https://linear.app/ardax/issue/COI-404) |
 | Enum / generic `fn drop()` — **implemented**: inherent `impl E { fn drop() }` on non-scalar enums (payload variants boxed and tagged with `TagEnumType`, finalized once; unit variants are shared immortals and never drop); generic class drop already worked. `#[derive(Drop)]` is not a derive (drop is a hook, not a structural trait) | [COI-26](https://linear.app/ardax/issue/COI-26) |
@@ -79,7 +79,22 @@ refusals below are array-only); an escaping tuple is rebuilt once with
 `MakeTuple`. The pass owns only the `LOAD`s its store reaches (forward
 reaching definitions), so a slot reused for another value later in the body
 no longer refuses the site. `let t = (i, i + 1); … t[1] - t[0]` in a loop
-allocates nothing.
+allocates nothing. Each element is stored as soon as it is computed (the
+element code is split at its stack boundaries): popping several values into
+slots above the cursor is unsound, because a `STORE` past the cursor raises
+it and the next pop reads the slot just written.
+
+**Local enums** (`enum_sroa`, same pass slot): a slot whose every reaching
+definition is `MakeEnum; STORE` and whose every read is a match dispatch
+(`LOAD; JumpIfMatch*; Unpack | POP`, which also covers `if let` and
+`default`) becomes a tag slot plus payload slots shared by all variants. A
+site stores the payload words then the tag; a dispatch compares the tag and
+stores the payload from the scrutinee's slot upward, exactly where the VM
+would have written it, so arms are unchanged. Tags no local site builds drop
+their arm. The fresh slots sit above every named local and `Seek` floor; a
+`Seek` at or below them while the value is still live (a second match of the
+same local, or a match on it inside a loop that does not rebuild it) keeps
+the heap enum, since the arm's operand pushes would overwrite them.
 
 **MakeArray frame scalarization (Q1 / COI-334).** One escape answer
 (`compiler/src/escape.rs` + IL `escape_analysis`): non-escaping `[T; N]` /
