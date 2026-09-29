@@ -38,7 +38,11 @@ Enum payloads and tuples are raw words the same way, with up to four inline
 before a spill `Vec`. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
-Traversal stays the intrusive `head` list. Collection trigger stays
+Traversal walks the slab: every slot of each resident chunk, live iff its
+header `kind != 0` (chunks are carved whole and keep their size class;
+released chunks are skipped so their zero pages are not refaulted). The
+header is `kind` / `marked` / `fresh`, with no intrusive `next` link, which
+saves 16 bytes per object. Collection trigger stays
 `alloc_bytes` versus `gc_next_threshold` while **idle**. Safepoint mark +
 lazy sweep (COI-309 S4) is documented in
 [gc-incremental.md](gc-incremental.md). Mark seeds roots via slab lookup;
