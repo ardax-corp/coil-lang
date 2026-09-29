@@ -624,22 +624,9 @@ impl Compiler {
         }
 
         // Emit args in reverse declaration order for MAKE_ENUM stack discipline.
-        match fields {
-            EnumConstructPayload::Unit => {}
-            EnumConstructPayload::Tuple(args) => {
-                let in_generic = self
-                    .current_function_qualified
-                    .as_deref()
-                    .is_some_and(|n| self.generic_return_is_boxed(n));
-                for arg in args.iter().rev() {
-                    let mut arg_bc = self.do_compile(arg);
-                    if in_generic
-                        && let Some(ty) = self.codegen_expr_ty(arg) {
-                            Self::emit_unbox_if_needed(&mut arg_bc, &ty);
-                        }
-                    bytecode.append(&mut arg_bc);
-                }
-            }
+        let emit_order: Vec<&Output<'_>> = match fields {
+            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Tuple(args) => args.iter().rev().collect(),
             EnumConstructPayload::Record(parts) => {
                 // Build a name → &Output map for the call site.
                 let call_site: std::collections::HashMap<&str, &Output> =
@@ -647,15 +634,47 @@ impl Compiler {
                 let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
                 // Walk DECLARATION order REVERSED, so when
                 // MAKE_ENUM pops, payload[0] is `decl_fields[0]`.
-                for (decl_name, _) in decl_order.iter().rev() {
-                    if let Some(arg) = call_site.get(decl_name.as_str()) {
-                        bytecode.append(&mut self.do_compile(arg));
-                    }
-                    // Missing field: typechecker has already
-                    // reported; skip silently to keep bytecode
-                    // emission in lockstep with IDs.
-                }
+                // Missing field: typechecker has already reported; skip
+                // silently to keep bytecode emission in lockstep with IDs.
+                decl_order
+                    .iter()
+                    .rev()
+                    .filter_map(|(decl_name, _)| call_site.get(decl_name.as_str()).copied())
+                    .collect()
             }
+        };
+        let unbox_generic = matches!(fields, EnumConstructPayload::Tuple(_))
+            && self
+                .current_function_qualified
+                .as_deref()
+                .is_some_and(|n| self.generic_return_is_boxed(n));
+        let mut arg_bufs = Vec::with_capacity(emit_order.len());
+        for arg in &emit_order {
+            let mut arg_bc = self.do_compile(arg);
+            if unbox_generic && let Some(ty) = self.codegen_expr_ty(arg) {
+                Self::emit_unbox_if_needed(&mut arg_bc, &ty);
+            }
+            arg_bufs.push(arg_bc);
+        }
+        // Locals and operands share memory: an arg whose code writes a slot
+        // (inlined call temps, match, `new`) would overwrite the args already
+        // pushed under it. Stage every arg through a temp, then push them in
+        // order. Plain calls leave the stack alone and keep the direct form.
+        let stage = arg_bufs
+            .iter()
+            .skip(1)
+            .any(|b| b.il().ops().iter().any(Self::op_writes_slot));
+        let mut staged = Vec::new();
+        for mut arg_bc in arg_bufs {
+            bytecode.append(&mut arg_bc);
+            if stage {
+                let tmp = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp);
+                staged.push(tmp);
+            }
+        }
+        for tmp in staged {
+            bytecode.push_load(tmp);
         }
 
         // Emit MAKE_ENUM with the tag (upper 16) and
@@ -4347,6 +4366,25 @@ impl Compiler {
 
     /// True when compiling `expr` writes into [`Self::bytecode`] (HostInvoke,
     /// `string::format`, `match`, …) rather than only returning a local `Vec`.
+    /// `STORE` / `Seek` / in-place unpack: writes a frame slot, so operands
+    /// left under this code may be overwritten.
+    fn op_writes_slot(op: &crate::il::IlOp) -> bool {
+        use crate::il::IlOp;
+        match op {
+            IlOp::StorePop { .. } => true,
+            IlOp::Byte { byte, .. } => matches!(
+                *byte.bytecode(),
+                Instruction::STORE
+                    | Instruction::StorePop
+                    | Instruction::Seek
+                    | Instruction::UnpackAt
+                    | Instruction::BinSlotImmStore
+                    | Instruction::FloatChainStore
+            ),
+            _ => false,
+        }
+    }
+
     fn arg_emits_on_self_bytecode(&self, expr: &Output<'_>) -> bool {
         match expr.1.as_ref() {
             Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {

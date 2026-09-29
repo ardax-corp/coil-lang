@@ -58,3 +58,30 @@ test("payloads above scalarized tuple slots") {
     assert(measure_after_tuple(1, pick(1)) == 1 + 11 + 21 + 20)?;
     assert(measure_after_tuple(3, pick(3)) == 3 + 13 + 23 + 28)?;
 }
+
+enum Quad {
+    Four(int, int, int, int),
+    Named { a: int, b: int, c: int },
+}
+
+/// Inlined calls in payload args STORE temps; earlier args stay intact.
+fn quad(int i) -> int {
+    let q = Quad::Four(id(i), id(i + 1), id(i + 2), id(i + 3));
+    return match q {
+        Quad::Four(a, b, c, d) => a * 1000 + b * 100 + c * 10 + d,
+        Quad::Named { a, b, c } => a + b + c,
+    };
+}
+
+fn named(int i) -> int {
+    let q = Quad::Named { a: id(i), b: id(i + 1), c: id(i + 2) };
+    return match q {
+        Quad::Four(a, b, c, d) => a + b + c + d,
+        Quad::Named { a, b, c } => a * 100 + b * 10 + c,
+    };
+}
+
+test("payload args with inlined calls keep their order") {
+    assert(quad(1) == 1234)?;
+    assert(named(1) == 123)?;
+}
