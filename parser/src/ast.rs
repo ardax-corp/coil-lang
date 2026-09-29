@@ -201,8 +201,6 @@ pub enum Expression<'expr> {
     },
     /// Function type annotation `A -> B`.
     TypeFun(Output<'expr>, Output<'expr>),
-    /// Line comment `// …` (body without the `//` prefix).
-    Comment(&'expr str),
     Return(Output<'expr>),
     ImplicitReturn(Output<'expr>),
     /// `raise expr` — early-return `Err(expr)` from a Result-mode function.
@@ -1541,13 +1539,6 @@ impl<'a> Display for Expression<'a> {
                     write!(f, " as {}", a)?;
                 }
                 write!(f, ";")
-            }
-            Self::Comment(text) => {
-                write!(f, "//")?;
-                if !text.is_empty() {
-                    write!(f, " {}", text)?;
-                }
-                Ok(())
             }
             Self::Field {
                 docs,

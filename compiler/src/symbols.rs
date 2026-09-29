@@ -147,7 +147,6 @@ impl SymbolIndex {
                 | Expression::Bool(_)
                 | Expression::Type(_)
                 | Expression::TypeProjection { .. }
-                | Expression::Comment(_)
                 | Expression::Default(_)
                 | Expression::QualifiedAccess { .. }
                 | Expression::Use { .. }

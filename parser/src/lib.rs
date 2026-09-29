@@ -19,7 +19,7 @@ use chumsky::{
     error::{Rich, RichReason},
     extra,
     pratt::{infix, left, none, postfix, prefix, right},
-    prelude::{any, choice, empty, just, none_of, recursive},
+    prelude::{any, choice, custom, empty, just, none_of, recursive},
     text, IterParser, Parser,
 };
 use reporting::{ErrorCode, Label, Message};
@@ -47,15 +47,83 @@ enum Precedence {
     Primary,
 }
 
+/// Whitespace and comments between tokens.
+///
+/// `// …` line comments and `/* … */` block comments (nestable) are trivia:
+/// they may appear between any two tokens and never reach the AST. Tooling
+/// that needs them (the formatter) reads [`comments::collect`]. `///` (exactly
+/// three slashes) is a doc comment and stays a token for `docs_prefix`;
+/// `////…` is an ordinary comment.
+fn trivia<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + Clone {
+    custom(|inp| {
+        loop {
+            match inp.peek() {
+                Some(c) if c.is_whitespace() => inp.skip(),
+                Some('/') => {
+                    let before = inp.save();
+                    let start = inp.cursor();
+                    inp.skip();
+                    match inp.peek() {
+                        Some('*') => {
+                            inp.skip();
+                            let mut depth = 1usize;
+                            while depth > 0 {
+                                match inp.next() {
+                                    Some('*') if inp.peek() == Some('/') => {
+                                        inp.skip();
+                                        depth -= 1;
+                                    }
+                                    Some('/') if inp.peek() == Some('*') => {
+                                        inp.skip();
+                                        depth += 1;
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        return Err(Rich::custom(
+                                            inp.span_since(&start),
+                                            "unterminated block comment (missing `*/`)",
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Some('/') => {
+                            inp.skip();
+                            if inp.peek() == Some('/') {
+                                let third = inp.save();
+                                inp.skip();
+                                let doc = inp.peek() != Some('/');
+                                inp.rewind(third);
+                                if doc {
+                                    inp.rewind(before);
+                                    return Ok(());
+                                }
+                            }
+                            while inp.peek().is_some_and(|c| c != '\n') {
+                                inp.skip();
+                            }
+                        }
+                        _ => {
+                            inp.rewind(before);
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => return Ok(()),
+            }
+        }
+    })
+}
+
 macro_rules! op {
     ($operator: literal) => {
-        just($operator).padded()
+        just($operator).padded_by(trivia())
     };
 }
 
 macro_rules! keyword {
     ($word: literal) => {
-        text::keyword($word).padded()
+        text::keyword($word).padded_by(trivia())
     };
 }
 
@@ -170,7 +238,7 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        text::ident().padded().map_with(output!(Identifier))
+        text::ident().padded_by(trivia()).map_with(output!(Identifier))
     }
 
     /// Type atoms and function types without nested `fn(...)` signatures in
@@ -211,7 +279,7 @@ impl<'pratt> Pratt<'pratt> {
                             .from_str::<i64>()
                             .validate(|v: Result<i64, _>, _, _| v.unwrap_or(0))
                             .map_with(|n, e| (e.span(), Box::new(Expression::Integer(n)))),
-                        text::ident().padded().map_with(output!(Type)),
+                        text::ident().padded_by(trivia()).map_with(output!(Type)),
                     )))
                     .or_not(),
             )
@@ -222,7 +290,7 @@ impl<'pratt> Pratt<'pratt> {
             });
         let tuple_type = self.tuple_atom(type_ann.clone());
         let named_type = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then(
                 type_ann
                     .clone()
@@ -237,9 +305,9 @@ impl<'pratt> Pratt<'pratt> {
                 None => (e.span(), Box::new(Expression::Type(name))),
             });
         let projection_type = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!("::"))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(
                 type_ann
                     .clone()
@@ -324,7 +392,7 @@ impl<'pratt> Pratt<'pratt> {
 
         let kind_ann = recursive(|kind| {
             let atom = just('*')
-                .padded()
+                .padded_by(trivia())
                 .to(Kind::Type)
                 .or(keyword!("Constraint").to(Kind::Constraint))
                 .or(kind.clone().delimited_by(op!("("), op!(")")));
@@ -336,7 +404,7 @@ impl<'pratt> Pratt<'pratt> {
                 })
         });
 
-        let class_bound = text::ident().padded().then_ignore(op!(":").not());
+        let class_bound = text::ident().padded_by(trivia()).then_ignore(op!(":").not());
         let class_bounds = class_bound
             .separated_by(op!("+"))
             .at_least(1)
@@ -344,12 +412,12 @@ impl<'pratt> Pratt<'pratt> {
 
         // After `:`, try kind first (leading `*` or `(`), else class bounds.
         let after_colon = kind_ann
-            .then(op!(",").ignore_then(class_bounds).or_not())
+            .then(op!(",").ignore_then(class_bounds.clone()).or_not())
             .map(|(kind, bounds)| (bounds.unwrap_or_default(), kind))
             .or(class_bounds.map(|bounds| (bounds, Kind::Type)));
 
         text::ident()
-            .padded()
+            .padded_by(trivia())
             .then(op!(":").ignore_then(after_colon).or_not())
             .map(|(name, ann)| {
                 let (bounds, kind) = ann.unwrap_or_else(|| (Vec::new(), Kind::Type));
@@ -761,7 +829,7 @@ impl<'pratt> Pratt<'pratt> {
         // `... name` (tuple rest), `T... name` (homogeneous rest), or `T name` (fixed).
         let tuple_rest_arg = self
             .docs_prefix()
-            .then(op!("...").ignore_then(text::ident().padded()))
+            .then(op!("...").ignore_then(text::ident().padded_by(trivia())))
             .map_with(|(docs, name), e| {
                 (
                     e.span(),
@@ -778,8 +846,8 @@ impl<'pratt> Pratt<'pratt> {
             .then(
                 ty_parser
                     .clone()
-                    .then_ignore(just("...").padded())
-                    .then(text::ident().padded()),
+                    .then_ignore(just("...").padded_by(trivia()))
+                    .then(text::ident().padded_by(trivia())),
             )
             .map_with(|(docs, (ty, name)), e| {
                 (
@@ -794,7 +862,7 @@ impl<'pratt> Pratt<'pratt> {
             });
         let fixed_arg = self
             .docs_prefix()
-            .then(ty_parser.clone().then(text::ident().padded()))
+            .then(ty_parser.clone().then(text::ident().padded_by(trivia())))
             .map_with(|(docs, (ty, name)), e| {
                 (
                     e.span(),
@@ -810,7 +878,7 @@ impl<'pratt> Pratt<'pratt> {
         // Common mistake: Rust-style `name: Type` instead of coil `Type name`.
         let rust_style_param = self
             .docs_prefix()
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then_ignore(op!(":"))
             .then(ty_parser.clone())
             .try_map(|((docs, name), _ty), span| {
@@ -827,7 +895,7 @@ impl<'pratt> Pratt<'pratt> {
         // (which otherwise wins on `found ')' expected identifier`).
         let untyped_param = self
             .docs_prefix()
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(choice((op!(','), op!(')'))))
             .try_map(|((docs, name), _), span| {
                 let _ = docs;
@@ -886,7 +954,7 @@ impl<'pratt> Pratt<'pratt> {
         let captures = keyword!("use")
             .ignore_then(
                 text::ident()
-                    .padded()
+                    .padded_by(trivia())
                     .separated_by(op!(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -923,7 +991,7 @@ impl<'pratt> Pratt<'pratt> {
            + Clone
            + 'pratt {
         text::ident()
-            .padded()
+            .padded_by(trivia())
             .then(
                 self.type_annotation()
                     .separated_by(op!(','))
@@ -966,7 +1034,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(keyword!("async").or_not())
             .then(keyword!("static").or_not())
             .then(keyword!("fn"))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(self.arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
@@ -1005,7 +1073,7 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(
                 keyword!("attr")
-                    .ignore_then(text::ident().padded())
+                    .ignore_then(text::ident().padded_by(trivia()))
                     .then(self.type_param_list())
                     .then(self.arg_list_typed(self.type_annotation()))
                     .then(op!("->").ignore_then(self.type_annotation()).or_not())
@@ -1063,7 +1131,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(keyword!("async").or_not())
             .then(keyword!("static").or_not())
             .then(keyword!("fn"))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(self.arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
@@ -1146,7 +1214,7 @@ impl<'pratt> Pratt<'pratt> {
         let captures = keyword!("use")
             .ignore_then(
                 text::ident()
-                    .padded()
+                    .padded_by(trivia())
                     .separated_by(op!(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -1243,11 +1311,11 @@ impl<'pratt> Pratt<'pratt> {
         // `for (k, v) in expr` / `for _` / `for { … }` via LetPattern.
         // Tried before `c_style_for_removed` so `for (` is a tuple pattern.
         let ident_bind = text::ident()
-            .padded()
+            .padded_by(trivia())
             .map_with(output!(Identifier))
             .map(|identifier| (Some(identifier), None));
         let pattern_bind = choice((
-            just("_").padded().to(LetPattern::Wildcard),
+            just("_").padded_by(trivia()).to(LetPattern::Wildcard),
             self.let_tuple_pattern(),
             self.let_record_pattern(),
         ))
@@ -1424,22 +1492,6 @@ impl<'pratt> Pratt<'pratt> {
             .map_with(|result, e| (e.span(), Box::new(Expression::Panic(result))))
     }
 
-    fn comment(
-        &self,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        // `//` that is not `///` — doc comments are handled by `docs_prefix`.
-        just("//")
-            .then_ignore(just('/').not())
-            .ignore_then(none_of('\n').repeated().to_slice())
-            .then_ignore(just('\n').or_not())
-            .map_with(|text: &str, e| {
-                let text = text.strip_prefix(' ').unwrap_or(text);
-                (e.span(), Box::new(Expression::Comment(text)))
-            })
-            .padded()
-    }
-
     /// One `///` doc line; returns the body without the `///` prefix.
     fn doc_comment_line(
         &self,
@@ -1449,7 +1501,7 @@ impl<'pratt> Pratt<'pratt> {
             .ignore_then(none_of('\n').repeated().to_slice())
             .then_ignore(just('\n').or_not())
             .map(|text: &str| text.strip_prefix(' ').unwrap_or(text))
-            .padded()
+            .padded_by(trivia())
     }
 
     /// Zero or more leading `///` lines before a declaration.
@@ -1546,7 +1598,6 @@ impl<'pratt> Pratt<'pratt> {
                 // parsed as a bare identifier call / expression.
                 self.defer(stmt.clone()),
                 self.expr_statement(expr.clone()),
-                self.comment(),
                 self.orphan_doc_comment(),
             ))
         })
@@ -1615,7 +1666,7 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(
                 keyword!("type")
-                    .ignore_then(text::ident().padded())
+                    .ignore_then(text::ident().padded_by(trivia()))
                     .then(self.type_param_list())
                     .then_ignore(op!("="))
                     .then(self.type_annotation())
@@ -1641,20 +1692,20 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        let segment = text::ident().padded();
+        let segment = text::ident().padded_by(trivia());
 
         // One item inside `{ … }`: `name`, `path::name`, or either with `as`.
         let brace_item = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then(
                 op!("::")
-                    .ignore_then(text::ident().padded().map(|s: &str| s.to_string()))
+                    .ignore_then(text::ident().padded_by(trivia()).map(|s: &str| s.to_string()))
                     .repeated()
                     .collect::<Vec<String>>(),
             )
             .then(
                 keyword!("as")
-                    .ignore_then(text::ident().padded())
+                    .ignore_then(text::ident().padded_by(trivia()))
                     .map(|s: &str| s.to_string())
                     .or_not(),
             )
@@ -1667,7 +1718,7 @@ impl<'pratt> Pratt<'pratt> {
 
         // Empty `{ }` is a parse error (silent no-op would hide typos).
         let brace_group = just('{')
-            .padded()
+            .padded_by(trivia())
             .ignore_then(
                 brace_item
                     .separated_by(op!(","))
@@ -1675,12 +1726,12 @@ impl<'pratt> Pratt<'pratt> {
                     .at_least(1)
                     .collect::<Vec<_>>(),
             )
-            .then_ignore(just('}').padded());
+            .then_ignore(just('}').padded_by(trivia()));
 
         // After the first ident: zero or more `::ident`, then either
         // `::{…}`, `::*`, or end-of-path (+ optional `as`).
         let path_middle = op!("::")
-            .ignore_then(text::ident().padded().map(|s: &str| s.to_string()))
+            .ignore_then(text::ident().padded_by(trivia()).map(|s: &str| s.to_string()))
             .repeated()
             .collect::<Vec<String>>();
 
@@ -1695,10 +1746,10 @@ impl<'pratt> Pratt<'pratt> {
             // `::{a, b as c}`
             op!("::").ignore_then(brace_group).map(EndKind::Brace),
             // `::*`
-            op!("::").ignore_then(just('*').padded()).to(EndKind::Glob),
+            op!("::").ignore_then(just('*').padded_by(trivia())).to(EndKind::Glob),
             // bare end — optional `as alias`
             keyword!("as")
-                .ignore_then(text::ident().padded())
+                .ignore_then(text::ident().padded_by(trivia()))
                 .map(|s: &str| s.to_string())
                 .or_not()
                 .map(EndKind::Concrete),
@@ -1778,7 +1829,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         keyword!("mod")
-            .ignore_then(text::ident().padded().map(|s: &str| s))
+            .ignore_then(text::ident().padded_by(trivia()).map(|s: &str| s))
             .then_ignore(op!(";"))
             .map_with(|name: &'pratt str, e| {
                 let noop_span = e.span();
@@ -1800,14 +1851,14 @@ impl<'pratt> Pratt<'pratt> {
     {
         use crate::ast::ExternStructDecl;
         let field = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!(":"))
             .then(self.type_annotation())
             .map_with(|(name, ty), _e| (name.to_string(), ty));
 
         keyword!("extern")
             .ignore_then(keyword!("struct"))
-            .ignore_then(text::ident().padded())
+            .ignore_then(text::ident().padded_by(trivia()))
             .then(
                 field
                     .separated_by(op!(","))
@@ -1841,12 +1892,12 @@ impl<'pratt> Pratt<'pratt> {
 
         let illegal_rest = self
             .type_annotation()
-            .then_ignore(just("...").padded())
-            .then(text::ident().padded())
+            .then_ignore(just("...").padded_by(trivia()))
+            .then(text::ident().padded_by(trivia()))
             .to(ExternArg::IllegalRest);
         let fixed_arg = self
             .type_annotation()
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .map_with(|(ty, name), e| {
                 ExternArg::Fixed((
                     e.span(),
@@ -1862,7 +1913,7 @@ impl<'pratt> Pratt<'pratt> {
         let arg = illegal_rest.or(fixed_arg);
 
         let bare_only = just("...")
-            .padded()
+            .padded_by(trivia())
             .map_with(|_, e| ((e.span(), Box::new(Expression::Fragment(Vec::new()))), true));
 
         let fixed_then_ellipsis = arg
@@ -1871,7 +1922,7 @@ impl<'pratt> Pratt<'pratt> {
             .collect::<Vec<_>>()
             .then(
                 op!(',')
-                    .ignore_then(just("...").padded())
+                    .ignore_then(just("...").padded_by(trivia()))
                     .or_not()
                     .map(|o| o.is_some()),
             )
@@ -1926,7 +1977,7 @@ impl<'pratt> Pratt<'pratt> {
         // declaration chain accepts parsers of any output type
         // as long as the final `map_with` produces an `Output`.
         let extern_function_decl = keyword!("fn")
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(self.extern_arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             // The trailing `;` is required (no body).
@@ -1998,7 +2049,7 @@ impl<'pratt> Pratt<'pratt> {
 
         let attr_args = choice((
             attr_kv
-                .padded()
+                .padded_by(trivia())
                 .separated_by(op!(','))
                 .at_least(1)
                 .collect::<Vec<_>>()
@@ -2008,13 +2059,13 @@ impl<'pratt> Pratt<'pratt> {
                 .then_ignore(just('"'))
                 .map(AttrArgs::String),
             attr_lit
-                .padded()
+                .padded_by(trivia())
                 .separated_by(op!(','))
                 .at_least(1)
                 .collect::<Vec<_>>()
                 .map(AttrArgs::Positional),
             text::ident()
-                .padded()
+                .padded_by(trivia())
                 .separated_by(op!(','))
                 .at_least(1)
                 .collect::<Vec<_>>()
@@ -2045,7 +2096,7 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(self.attr_list())
             .then(keyword!("class"))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(
                 self.field_decl()
@@ -2077,7 +2128,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(keyword!("pub").or_not())
             .then(
                 choice((
-                    just("static").padded().to(FieldModifier::Static),
+                    just("static").padded_by(trivia()).to(FieldModifier::Static),
                     keyword!("const").to(FieldModifier::Const),
                 ))
                 .or_not(),
@@ -2115,12 +2166,12 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         just("static")
-            .padded()
+            .padded_by(trivia())
             .ignore_then(choice((
                 keyword!("const").to(true),
-                just("let").padded().to(false),
+                just("let").padded_by(trivia()).to(false),
             )))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(op!(":").ignore_then(self.type_annotation()).or_not())
             .then_ignore(op!("="))
             .then(self.expr())
@@ -2145,7 +2196,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         text::ident()
-            .then_ignore(just("::").padded())
+            .then_ignore(just("::").padded_by(trivia()))
             .then(text::ident())
             .then_ignore(choice((op!("("), op!("{"))).not())
             .map_with(|(owner, member), e| {
@@ -2240,7 +2291,7 @@ impl<'pratt> Pratt<'pratt> {
 
         // Associated type declaration: `type Elem;` / `type Ref<T>;`
         let assoc_decl = keyword!("type")
-            .ignore_then(text::ident().padded())
+            .ignore_then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then_ignore(op!(";"))
             .map_with(|(name, type_params), e| {
@@ -2253,11 +2304,11 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(
                 keyword!("trait")
-                    .ignore_then(text::ident().padded())
+                    .ignore_then(text::ident().padded_by(trivia()))
                     .then(self.type_param_list())
                     .then(
                         choice((assoc_decl, sig_only, default_method))
-                            .padded()
+                            .padded_by(trivia())
                             .repeated()
                             .collect::<Vec<_>>()
                             .delimited_by(op!("{"), op!("}")),
@@ -2292,7 +2343,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         let assoc_def = keyword!("type")
-            .ignore_then(text::ident().padded())
+            .ignore_then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then_ignore(op!("="))
             .then(self.type_annotation())
@@ -2310,7 +2361,7 @@ impl<'pratt> Pratt<'pratt> {
 
         let opt_bracket_args = self
             .type_annotation()
-            .padded()
+            .padded_by(trivia())
             .separated_by(op!(","))
             .allow_trailing()
             .at_least(1)
@@ -2323,7 +2374,7 @@ impl<'pratt> Pratt<'pratt> {
             .ignore_then(text::ident())
             .then(opt_bracket_args)
             .then_ignore(keyword!("for"))
-            .then(self.type_annotation().padded())
+            .then(self.type_annotation().padded_by(trivia()))
             .then(
                 choice((assoc_def, self.method_decl(stmt)))
                     .repeated()
@@ -2528,7 +2579,7 @@ impl<'pratt> Pratt<'pratt> {
            + Clone
            + 'pratt {
         let field = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then(op!(":").ignore_then(self.let_pattern()).or_not())
             .map(|(name, sub)| {
                 let pattern = sub.unwrap_or(LetPattern::Binding { name });
@@ -2555,7 +2606,7 @@ impl<'pratt> Pratt<'pratt> {
            + 'pratt {
         recursive(|pattern_parser| {
             let record_field = text::ident()
-                .padded()
+                .padded_by(trivia())
                 .then(op!(":").ignore_then(pattern_parser.clone()).or_not())
                 .map(|(name, sub)| {
                     let pattern = sub.unwrap_or(LetPattern::Binding { name });
@@ -2591,11 +2642,11 @@ impl<'pratt> Pratt<'pratt> {
             let tuple = choice((tuple_multi, tuple_trailing)).map(LetPattern::Tuple);
 
             choice((
-                just("_").padded().to(LetPattern::Wildcard),
+                just("_").padded_by(trivia()).to(LetPattern::Wildcard),
                 tuple,
                 record,
                 text::ident()
-                    .padded()
+                    .padded_by(trivia())
                     .map(|name| LetPattern::Binding { name }),
             ))
         })
@@ -2636,7 +2687,7 @@ impl<'pratt> Pratt<'pratt> {
         // weird binary form. Positional `expr` still wins when there is
         // no colon after the identifier.
         let named = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!(":"))
             .then(expr.clone())
             .map_with(|(name, value), e| (e.span(), Box::new(Expression::NamedArg(name, value))))
@@ -2704,7 +2755,7 @@ impl<'pratt> Pratt<'pratt> {
         use chumsky::Parser;
         // Each field: `name : expr`.
         let field = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!(":"))
             .then(expr)
             .map_with(|(name, value), e| (e.span(), RecordFieldValue { name, value }))
@@ -2760,7 +2811,7 @@ impl<'pratt> Pratt<'pratt> {
         // Record field: `name : expr`. Duplicate names emit a chumsky
         // error so fmt/parser tooling never round-trips illegal records.
         let record_field = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!(":"))
             .then(expr.clone())
             .map_with(|(name, value), e| (e.span(), RecordFieldValue { name, value }))
@@ -2797,8 +2848,8 @@ impl<'pratt> Pratt<'pratt> {
         // `Enum::Variant` or `ffi::types::Int` (multi-segment path;
         // last segment is the variant, the rest is the enum/module path).
         text::ident()
-            .padded()
-            .separated_by(just("::").padded())
+            .padded_by(trivia())
+            .separated_by(just("::").padded_by(trivia()))
             .at_least(2)
             .collect::<Vec<_>>()
             .then(shape)
@@ -2939,7 +2990,7 @@ impl<'pratt> Pratt<'pratt> {
            + 'pratt {
         recursive(|pattern_parser| {
             let record_pattern_field = text::ident()
-                .padded()
+                .padded_by(trivia())
                 .then(op!(":").ignore_then(pattern_parser.clone()).or_not())
                 .map_with(|(name, sub_pat), e| {
                     let pattern = match sub_pat {
@@ -2993,9 +3044,9 @@ impl<'pratt> Pratt<'pratt> {
                 .map(|opt| opt.unwrap_or(PatternPayload::Unit));
 
             let constructor = text::ident()
-                .padded()
-                .then_ignore(just("::").padded())
-                .then(text::ident().padded())
+                .padded_by(trivia())
+                .then_ignore(just("::").padded_by(trivia()))
+                .then(text::ident().padded_by(trivia()))
                 .then(payload_choice)
                 .map_with(|((enum_name, variant_name), payload), e| {
                     (
@@ -3010,7 +3061,7 @@ impl<'pratt> Pratt<'pratt> {
 
             choice((
                 just("_")
-                    .padded()
+                    .padded_by(trivia())
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
                 text::int(10)
@@ -3023,9 +3074,9 @@ impl<'pratt> Pratt<'pratt> {
                             0_i64
                         }
                     })
-                    .padded()
+                    .padded_by(trivia())
                     .map_with(|n, e| (e.span(), Pattern::Integer(n))),
-                text::ident().padded().map_with(|name, e| {
+                text::ident().padded_by(trivia()).map_with(|name, e| {
                     let pat = if name == "default" {
                         Pattern::Default
                     } else {
@@ -3050,7 +3101,7 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(self.attr_list())
             .then(keyword!("enum"))
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(
                 self.enum_variant()
@@ -3082,9 +3133,9 @@ impl<'pratt> Pratt<'pratt> {
         // `type_annotation()` so it can be generic (`Inner<T>`), an array,
         // or a tuple. Duplicate names are rejected at parse time.
         let record_field_decl = text::ident()
-            .padded()
+            .padded_by(trivia())
             .then_ignore(op!(":"))
-            .then(self.type_annotation().padded())
+            .then(self.type_annotation().padded_by(trivia()))
             .map_with(|(name, value), _| RecordFieldDecl { name, value })
             .labelled("record field declaration");
 
@@ -3105,7 +3156,7 @@ impl<'pratt> Pratt<'pratt> {
         // generic payloads like `Node(Tree<T>, Tree<T>)` are accepted.
         let tuple_payload_decl = self
             .type_annotation()
-            .padded()
+            .padded_by(trivia())
             .separated_by(op!(','))
             .allow_trailing()
             .collect::<Vec<_>>()
@@ -3131,7 +3182,7 @@ impl<'pratt> Pratt<'pratt> {
         let discriminant = op!("=").ignore_then(scalar_lit).or_not();
 
         self.docs_prefix()
-            .then(text::ident().padded())
+            .then(text::ident().padded_by(trivia()))
             .then(payload_choice)
             .then(discriminant)
             .validate(|(((docs, name), payload), discriminant), e, emitter| {
@@ -3154,12 +3205,9 @@ impl<'pratt> Pratt<'pratt> {
     }
 
     pub fn parse(&self, input: &'pratt str) -> Result<Output<'pratt>, Message> {
-        match self
-            .declaration()
-            .repeated()
-            .collect()
-            .map_with(output!(Program))
-            .or(self.comment())
+        match trivia()
+            .ignore_then(self.declaration().repeated().collect().map_with(output!(Program)))
+            .then_ignore(trivia())
             .parse(input)
             .into_result()
         {
