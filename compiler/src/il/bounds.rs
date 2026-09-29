@@ -2089,7 +2089,7 @@ mod tests {
     /// n=slot0, flags=1, i=2, p=3.
     fn fill_then_scan_ops(scan: ScanHeader) -> Vec<IlOp> {
         let mut ops = vec![
-            IlOp::MakeArray {
+            IlOp::MakeArray { elem_kind: 0,
                 arity: 0,
                 loc: loc(),
             },

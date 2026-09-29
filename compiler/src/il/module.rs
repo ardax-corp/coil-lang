@@ -1688,7 +1688,11 @@ mod tests {
     /// a loop whose header cursor is already known is left alone.
     #[test]
     fn loop_cursor_raise_makes_the_header_cursor_exact() {
-        let alloc = || IlOp::MakeArray { arity: 0, loc: loc() };
+        let alloc = || IlOp::MakeArray {
+            arity: 0,
+            elem_kind: 0,
+            loc: loc(),
+        };
         let jump = |kind, target| IlOp::Jump {
             kind,
             target,

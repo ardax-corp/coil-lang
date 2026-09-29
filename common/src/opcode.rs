@@ -460,6 +460,9 @@ pub enum Instruction {
     /// every element the program stores has that static kind. Stack-neutral;
     /// never allocates. Archive **minor 27**.
     TagArrayKind,
+    /// [`Self::MakeArray`] plus the element word kind: `[17:16]` kind
+    /// (`WORD_*`; only pointer is kept), `[15:0]` arity. Archive **minor 28**.
+    MakeArrayK,
 }
 
 impl From<u8> for Instruction {
@@ -910,6 +913,7 @@ impl Instruction {
             Self::MakeTupleK => "MakeTupleK",
             Self::DenseMakeK => "DenseMakeK",
             Self::TagArrayKind => "TagArrayKind",
+            Self::MakeArrayK => "MakeArrayK",
         }
     }
 }
@@ -2027,7 +2031,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::TagArrayKind as u8;
+        let last = Instruction::MakeArrayK as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

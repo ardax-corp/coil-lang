@@ -3227,7 +3227,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::TagArrayKind as u8);
+            promise!(*bc as u8 <= Instruction::MakeArrayK as u8);
 
             match bc {
                 Instruction::STORE => {

@@ -85,8 +85,9 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
         return common::WORD_POINTER;
     }
-    // A `Vec<T>` / `[T]` word is always an array object, whatever `T` is.
-    if matches!(ty, Ty::List(_))
+    // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
+    // `T` is (a fixed array stored as a word is materialized on the heap).
+    if matches!(ty, Ty::List(_) | Ty::Array { .. })
         || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
     {
         return common::WORD_POINTER;

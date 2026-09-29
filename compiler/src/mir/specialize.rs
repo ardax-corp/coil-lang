@@ -471,6 +471,7 @@ fn is_stack_heap_op(inst: Instruction) -> bool {
             | Instruction::StoreIndexUnchecked
             | Instruction::ArrayLen
             | Instruction::MakeArray
+            | Instruction::MakeArrayK
             | Instruction::MakeTuple
             | Instruction::MakeTupleK
             | Instruction::MakeEnum
@@ -730,7 +731,7 @@ mod cost_gate_tests {
 
     #[test]
     fn residual_make_counts_as_boxed() {
-        let ops = [IlOp::MakeArray { arity: 2, loc: loc() }];
+        let ops = [IlOp::MakeArray { elem_kind: 0, arity: 2, loc: loc() }];
         assert!(residual_heap_box(&ops));
         let native = [IlOp::byte(
             Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 2, 3),

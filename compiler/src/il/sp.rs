@@ -232,6 +232,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::CastIntToBool
         | Instruction::CastBoolToInt => Some(0),
         Instruction::MakeTuple | Instruction::MakeArray => Some(1 - byte.operand_u32() as i32),
+        Instruction::MakeArrayK => Some(1 - byte.make_arity() as i32),
         Instruction::MakeTupleK => Some(1 - byte.make_arity() as i32),
         Instruction::MakeDict => {
             let arity = (byte.operand_u32() & 0xFFFF) as i32;
@@ -671,7 +672,7 @@ mod tests {
             Some(-2)
         );
         assert_eq!(
-            stack_delta(&IlOp::MakeArray {
+            stack_delta(&IlOp::MakeArray { elem_kind: 0,
                 arity: 2,
                 loc: loc(),
             }),

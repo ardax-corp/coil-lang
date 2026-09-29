@@ -650,7 +650,10 @@ impl<const S: usize> Machine<S> {
                 Instruction::MakeEnum | Instruction::MakeEnumK => {
                     self.push_make_enum(opcode, ip);
                 }
-                Instruction::MakeTuple | Instruction::MakeArray | Instruction::MakeTupleK => {
+                Instruction::MakeTuple
+                | Instruction::MakeArray
+                | Instruction::MakeTupleK
+                | Instruction::MakeArrayK => {
                     let arity = opcode.make_arity() as usize;
                     let sp = self.stack.tell();
                     promise!(sp >= arity);
@@ -660,14 +663,21 @@ impl<const S: usize> Machine<S> {
                         note_make_fast();
                     }
                     // Declaration order; keep args on stack through alloc for rooting.
-                    let addr = if !matches!(opcode.bytecode(), Instruction::MakeArray) {
+                    let array = matches!(
+                        opcode.bytecode(),
+                        Instruction::MakeArray | Instruction::MakeArrayK
+                    );
+                    let addr = if !array {
                         let tuple = ObjTuple::from_slice(&self.stack[base..base + n])
                             .with_kinds(opcode.make_kinds());
                         let (object, _) = self.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
                         let values = Self::stack_copy_decl(&self.stack, base, n);
-                        let arr = ObjArray::from_values(values, &self.heap);
+                        let mut arr = ObjArray::from_values(values, &self.heap);
+                        if matches!(opcode.bytecode(), Instruction::MakeArrayK) {
+                            arr.set_elem_kind((opcode.operand_u32() >> 16) as u8 & 0x3);
+                        }
                         let (object, _) = self.heap.alloc(arr, Object::Array);
                         object.addr()
                     };

@@ -242,8 +242,14 @@ impl IlBuilder {
     }
 
     pub fn push_make_array(&mut self, arity: u32) {
+        self.push_make_array_kind(arity, common::WORD_UNKNOWN);
+    }
+
+    /// `MakeArray` with the element word kind (`common::WORD_*`).
+    pub fn push_make_array_kind(&mut self, arity: u32, elem_kind: u8) {
         self.push_op(IlOp::MakeArray {
             arity,
+            elem_kind,
             loc: DebugLoc::unknown(),
         });
     }

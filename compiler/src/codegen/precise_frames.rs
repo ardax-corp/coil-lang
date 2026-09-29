@@ -221,7 +221,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt | JMP | JMPF | JMPT
         | CmpJmpf | CmpJmpt | LogNotJmpf | LogNotJmpt | JumpIfMatch | Unpack | RETURN
         | ConstReturnImm | BinReturn | ReturnPair | MakeEnumReturn | CALL | CallIndirect
-        | HostInvoke | MakeArray | MakeTuple | MakeEnum | MakeDict | DictEntries | InitTyped
+        | HostInvoke | MakeArray | MakeArrayK | MakeTuple | MakeEnum | MakeDict | DictEntries | InitTyped
         | INIT | BoxValue | UnboxValue | FORMAT | STRINGIFY | Index | IndexUnchecked
         | StoreIndex | StoreIndexUnchecked | ArrayLen | ArrayPush | GetField | SetField
         | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
@@ -1352,7 +1352,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
-        MakeTupleK | MakeEnumK => {
+        MakeTupleK | MakeEnumK | MakeArrayK => {
             st.pop_n(b.make_arity() as usize)?;
             st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));

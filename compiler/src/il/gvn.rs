@@ -241,6 +241,7 @@ fn is_get_field_barrier(op: &IlOp) -> bool {
                 | Instruction::MakeTuple
                 | Instruction::MakeTupleK
                 | Instruction::MakeArray
+                | Instruction::MakeArrayK
                 | Instruction::MakeEnum
                 | Instruction::MakeEnumK
                 | Instruction::BoxValue

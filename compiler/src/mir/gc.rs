@@ -357,7 +357,7 @@ mod tests {
     fn make_and_init_are_alloc_barriers() {
         let loc = loc();
         assert_eq!(
-            refuse_reason(&IlOp::MakeArray { arity: 1, loc }),
+            refuse_reason(&IlOp::MakeArray { elem_kind: 0, arity: 1, loc }),
             Some("heap/aggregate")
         );
         assert_eq!(
@@ -509,7 +509,7 @@ mod tests {
         let ops = vec![
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 1, loc },
-            IlOp::MakeArray { arity: 1, loc },
+            IlOp::MakeArray { elem_kind: 0, arity: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 0, loc },
             IlOp::Load { slot: 1, loc },

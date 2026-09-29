@@ -2528,7 +2528,7 @@ pub(super) fn il_for_alloc(
     loc: DebugLoc,
 ) -> Result<IlOp, LowerError> {
     match kind {
-        MirAllocKind::Array => Ok(IlOp::MakeArray { arity, loc }),
+        MirAllocKind::Array => Ok(IlOp::MakeArray { elem_kind: 0, arity, loc }),
         MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds: 0, arity, loc }),
         MirAllocKind::Enum { tag } => {
             let tag = u16::try_from(tag).map_err(|_| LowerError::Refused("enum tag".into()))?;

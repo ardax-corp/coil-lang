@@ -15,7 +15,7 @@ fn make_and_store(arity: u32, slot: u32) -> Vec<IlOp> {
             loc: loc(),
         });
     }
-    ops.push(IlOp::MakeArray { arity, loc: loc() });
+    ops.push(IlOp::MakeArray { elem_kind: 0, arity, loc: loc() });
     ops.push(IlOp::StorePop { slot, loc: loc() });
     ops
 }
@@ -395,7 +395,7 @@ fn private_computed_elems_stay_heap() {
             op: Instruction::ADD,
             loc: loc(),
         },
-        IlOp::MakeArray {
+        IlOp::MakeArray { elem_kind: 0,
             arity: 2,
             loc: loc(),
         },
@@ -431,7 +431,7 @@ fn computed_storeindex_stays_heap() {
             op: Instruction::ADD,
             loc: loc(),
         },
-        IlOp::MakeArray {
+        IlOp::MakeArray { elem_kind: 0,
             arity: 2,
             loc: loc(),
         },
@@ -487,7 +487,7 @@ fn box_snapshot_of_mutated_slots_stays_heap() {
             slot: 2,
             loc: loc(),
         },
-        IlOp::MakeArray {
+        IlOp::MakeArray { elem_kind: 0,
             arity: 3,
             loc: loc(),
         },
@@ -527,7 +527,7 @@ fn boxes_once_when_computed_elems_escape() {
             op: Instruction::ADD,
             loc: loc(),
         },
-        IlOp::MakeArray {
+        IlOp::MakeArray { elem_kind: 0,
             arity: 2,
             loc: loc(),
         },

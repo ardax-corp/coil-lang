@@ -157,6 +157,7 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
     matches!(
         inst,
         Instruction::MakeArray
+            | Instruction::MakeArrayK
             | Instruction::MakeTuple
             | Instruction::MakeTupleK
             | Instruction::MakeEnum
@@ -269,7 +270,7 @@ mod tests {
         let ops = vec![
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 1, loc },
-            IlOp::MakeArray { arity: 1, loc },
+            IlOp::MakeArray { elem_kind: 0, arity: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 0, loc },
             IlOp::Return { loc, ret_words: 1 },

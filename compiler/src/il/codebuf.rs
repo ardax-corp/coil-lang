@@ -141,6 +141,11 @@ impl CodeBuf {
         self.il.push_make_array(arity);
     }
 
+    pub fn push_make_array_kind(&mut self, arity: u32, elem_kind: u8) {
+        self.invalidate_lowered();
+        self.il.push_make_array_kind(arity, elem_kind);
+    }
+
     pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
         self.invalidate_lowered();
         self.il.push_make_enum(tag, arity);
