@@ -17,7 +17,10 @@ Each `DebugLoc` records:
 - `start_byte` / `end_byte` — UTF-8 byte range in that source file
 
 Debug locs are attached to IL ops and carried through `il::lower` fuse-select
-(one loc per final bytecode slot).
+(one loc per final bytecode slot). Codegen gives every op a statement emits
+the statement's span (`Compiler::fill_statement_locs` after each block
+statement); ops that already have a narrower location (a nested statement,
+`panic`, a call) keep it. Labels carry none.
 
 ## Archive version
 
