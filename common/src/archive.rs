@@ -98,10 +98,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 26 — `PRECISE_SLOT_MUST` (bit 15) on precise frame-map slots: the word
 ///      definitely holds a pointer or `0`. Older archives never set it, so
 ///      every listed slot stays "may hold a heap word".
+/// 27 — `TagArrayKind`: arrays built by typed `Vec` constructors carry an
+///      element word kind. Older archives never emit it (elements stay
+///      ambiguous).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 26;
+pub const ARCHIVE_MINOR: u16 = 27;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -816,9 +819,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 26);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 26));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.26");
+        assert_eq!(ARCHIVE_MINOR, 27);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 27));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.27");
     }
 
     #[test]

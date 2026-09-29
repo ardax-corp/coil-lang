@@ -60,8 +60,18 @@ only known as a range. `MakeEnumReturn(K)` records its allocation. The VM
 reports flagged slots as precise roots and the rest as ambiguous. What
 stays ambiguous: slots a loop reads only after rewriting (stale values
 from the previous iteration, unwritten on entry; a liveness pass could
-drop them), generic call results, and `Vec<T>` elements (no kinds), so
-objects held that way would still pin under a moving collector. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+drop them) and generic call results, so objects held that way would still
+pin under a moving collector.
+
+Arrays carry an element kind (archive minor 27). `Vec::new` /
+`with_capacity` / `from` calls whose static element type is a ground
+pointer (class, string, niche `Option` / `Result`, nested `Vec`) call
+`Vec::{name}$ptr` thunks, which end in `TagArrayKind`. Marking then treats
+every element as `0` or an object: precise, no classification. Only the
+pointer kind is ever kept; a scalar stamp would be unsound because generic
+shared bodies may store boxed values. Arrays from other natives, literals,
+and generic code stay ambiguous. `gc-stress` checks every element of a
+pointer-kind array. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal walks the slab: every slot of each resident chunk, live iff its

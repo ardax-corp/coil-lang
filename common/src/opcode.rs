@@ -456,6 +456,10 @@ pub enum Instruction {
     /// `[31:24]` kind, `[23:16]` dest, `[15:0]` pool index of
     /// `base | arity << 8 | kinds << 16`.
     DenseMakeK,
+    /// Stamp the element word kind (operand, `WORD_*`) on the array at TOS:
+    /// every element the program stores has that static kind. Stack-neutral;
+    /// never allocates. Archive **minor 27**.
+    TagArrayKind,
 }
 
 impl From<u8> for Instruction {
@@ -905,6 +909,7 @@ impl Instruction {
             Self::MakeEnumReturnK => "MakeEnumReturnK",
             Self::MakeTupleK => "MakeTupleK",
             Self::DenseMakeK => "DenseMakeK",
+            Self::TagArrayKind => "TagArrayKind",
         }
     }
 }
@@ -2022,7 +2027,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseMakeK as u8;
+        let last = Instruction::TagArrayKind as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
