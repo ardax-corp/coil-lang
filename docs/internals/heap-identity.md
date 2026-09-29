@@ -39,8 +39,13 @@ before a spill `Vec`. Class fields carry compile-time word kinds (archive
 minor 24, `ClassWordKinds` per `type_id`): a scalar field (`int` / `float` /
 `bool` / `byte` / scalar enum) is never traced; a pointer field (ground heap
 type or niche word) is a precise reference; a generic or unresolved field
-stays ambiguous. `gc-stress` builds check every declared kind against the
-slab while marking. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+stays ambiguous. Enum payloads and tuples carry construction-site kinds
+(archive minor 25: `MakeEnumK` / `MakeEnumReturnK` / `MakeTupleK` /
+`DenseMakeK`, 2 bits for each of the first four words, kept in the payload's
+padding). Codegen classifies constructor arguments by static type and MIR by
+`MirTy`. Generic shared bodies and host-built enums stay unknown.
+`gc-stress` builds check every declared kind against the slab while
+marking. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal walks the slab: every slot of each resident chunk, live iff its
