@@ -53,3 +53,22 @@ test("destructuring still works") {
     assert(a == 3)?;
     assert(b == 6)?;
 }
+
+fn id(int x) -> int {
+    return x;
+}
+
+fn wide_tuple(int i) -> int {
+    let t = (id(i), id(i + 1), id(i + 2), id(i + 3), id(i + 4));
+    return t[0] * 10000 + t[1] * 1000 + t[2] * 100 + t[3] * 10 + t[4];
+}
+
+fn wide_strings() -> string {
+    let t = ("a", "b", "c", "d", "e");
+    return t[0] + t[1] + t[2] + t[3] + t[4];
+}
+
+test("five-element tuples keep element order") {
+    assert(wide_tuple(1) == 12345)?;
+    assert(wide_strings() == "abcde")?;
+}
