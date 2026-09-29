@@ -363,7 +363,7 @@ fn array_buffer_from_value(
     if let Some(obj) = heap.find_object_by_addr(addr) {
         let elements = match obj {
             Object::Array(gc) => gc.as_ref().elements().clone(),
-            Object::Tuple(gc) => gc.as_ref().elements().clone(),
+            Object::Tuple(gc) => gc.as_ref().elements().to_vec(),
             _ => Vec::new(),
         };
         if !elements.is_empty() {

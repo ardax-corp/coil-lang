@@ -962,9 +962,7 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
 
 fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple {
-            elements: vec![a, b],
-        },
+        ObjTuple::new(vec![a, b]),
         Object::Tuple,
     );
     Value::from(obj.addr())
@@ -972,9 +970,7 @@ fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
 
 fn alloc_tuple3(heap: &mut Heap, a: Value, b: Value, c: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple {
-            elements: vec![a, b, c],
-        },
+        ObjTuple::new(vec![a, b, c]),
         Object::Tuple,
     );
     Value::from(obj.addr())
@@ -1512,7 +1508,7 @@ mod tests {
 
     fn tuple_elems(heap: &Heap, v: Value) -> Vec<Value> {
         match heap.find_object_by_addr(v.raw() as u64) {
-            Some(Object::Tuple(gc)) => gc.as_ref().elements().clone(),
+            Some(Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
             _ => panic!("expected tuple"),
         }
     }

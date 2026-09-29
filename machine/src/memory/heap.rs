@@ -1911,13 +1911,28 @@ impl From<&str> for ObjString {
     }
 }
 
+/// Immutable tuple: up to [`ENUM_INLINE_ARITY`] words live in the object,
+/// wider tuples spill (same storage as enum payloads).
 pub struct ObjTuple {
-    pub elements: Vec<Value>,
+    elements: EnumPayload,
 }
 
 impl ObjTuple {
+    pub fn new(elements: Vec<Value>) -> Self {
+        Self {
+            elements: EnumPayload::from_vec(elements),
+        }
+    }
+
     #[inline]
-    pub fn elements(&self) -> &Vec<Value> {
+    pub fn from_slice(elements: &[Value]) -> Self {
+        Self {
+            elements: EnumPayload::from_slice(elements),
+        }
+    }
+
+    #[inline]
+    pub fn elements(&self) -> &[Value] {
         &self.elements
     }
 }
@@ -2259,7 +2274,7 @@ impl fmt::Display for ObjRwLock {
 
 impl GcSized for ObjTuple {
     fn size(&self) -> usize {
-        mem::size_of::<Self>() + self.elements.capacity() * mem::size_of::<Value>()
+        mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
     }
 }
 

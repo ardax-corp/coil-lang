@@ -391,7 +391,7 @@ impl<const S: usize> Machine<S> {
                     let lib_addr = lib_val.raw() as u64;
 
                     let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
-                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().clone(),
+                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
                         _ => Vec::new(),
                     };
 
@@ -661,13 +661,12 @@ impl<const S: usize> Machine<S> {
                         note_make_fast();
                     }
                     // Declaration order; keep args on stack through alloc for rooting.
-                    let values = Self::stack_copy_decl(&self.stack, base, n);
                     let addr = if matches!(opcode.bytecode(), Instruction::MakeTuple) {
-                        let (object, _) = self
-                            .heap
-                            .alloc(ObjTuple { elements: values }, Object::Tuple);
+                        let tuple = ObjTuple::from_slice(&self.stack[base..base + n]);
+                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
+                        let values = Self::stack_copy_decl(&self.stack, base, n);
                         let arr = ObjArray::from_values(values, &self.heap);
                         let (object, _) = self.heap.alloc(arr, Object::Array);
                         object.addr()
@@ -961,10 +960,8 @@ impl<const S: usize> Machine<S> {
                         let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE {
-                        let values = Self::stack_copy_decl(&self.stack, lo, arity);
-                        let (object, _) = self
-                            .heap
-                            .alloc(ObjTuple { elements: values }, Object::Tuple);
+                        let tuple = ObjTuple::from_slice(&self.stack[lo..lo + arity]);
+                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
@@ -1059,9 +1056,7 @@ impl<const S: usize> Machine<S> {
                                 Member::Object(o) => Value::from(o.addr()),
                             };
                             let (tuple_obj, _) = self.heap.alloc(
-                                ObjTuple {
-                                    elements: vec![key_val, val],
-                                },
+                                ObjTuple::new(vec![key_val, val]),
                                 Object::Tuple,
                             );
                             pair_addrs.push(Value::from(tuple_obj.addr()));
