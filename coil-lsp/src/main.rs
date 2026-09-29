@@ -11,7 +11,7 @@ use compiler::{
     BuiltinExport, Checker, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
     format_ty_for_diag,
 };
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError};
 use lsp_types::{
     Command, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, Diagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, Documentation, DocumentFormattingParams,
@@ -148,15 +148,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     send_response(&connection, request.id, Value::Null)?;
                     continue;
                 }
-                if let Some(value) = handle_request(&mut state, &request)? {
-                    send_response(&connection, request.id, value)?;
+                match handle_request(&mut state, &request) {
+                    Ok(Some(value)) => send_response(&connection, request.id, value)?,
+                    // Every request needs a reply; silence hangs the client.
+                    Ok(None) => send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::MethodNotFound,
+                        format!("unsupported request `{}`", request.method),
+                    )?,
+                    Err(error) => send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("{}: {error}", request.method),
+                    )?,
                 }
             }
             Message::Notification(notification) => {
                 if notification.method == "exit" {
                     break;
                 }
-                handle_notification(&connection, &mut state, &notification)?;
+                // A bad notification must not take the server down.
+                if let Err(error) = handle_notification(&connection, &mut state, &notification) {
+                    eprintln!("coil-lsp: {}: {error}", notification.method);
+                }
             }
             Message::Response(_) => {}
         }
@@ -174,6 +190,24 @@ fn send_response(
         id,
         result: Some(result),
         error: None,
+    }))?;
+    Ok(())
+}
+
+fn send_error(
+    connection: &Connection,
+    id: RequestId,
+    code: ErrorCode,
+    message: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    connection.sender.send(Message::Response(Response {
+        id,
+        result: None,
+        error: Some(ResponseError {
+            code: code as i32,
+            message,
+            data: None,
+        }),
     }))?;
     Ok(())
 }
