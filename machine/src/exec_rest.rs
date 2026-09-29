@@ -647,12 +647,11 @@ impl<const S: usize> Machine<S> {
                     *sp_out = sp;
                     return dispatch::RestFlow::Continue;
                 }
-                Instruction::MakeEnum => {
-                    self.push_make_enum(opcode.operand_u32(), ip);
+                Instruction::MakeEnum | Instruction::MakeEnumK => {
+                    self.push_make_enum(opcode, ip);
                 }
-                Instruction::MakeTuple | Instruction::MakeArray => {
-                    let operands = opcode.operand_u32();
-                    let arity = (operands & 0xFFFF) as usize;
+                Instruction::MakeTuple | Instruction::MakeArray | Instruction::MakeTupleK => {
+                    let arity = opcode.make_arity() as usize;
                     let sp = self.stack.tell();
                     promise!(sp >= arity);
                     let n = arity;
@@ -661,8 +660,9 @@ impl<const S: usize> Machine<S> {
                         note_make_fast();
                     }
                     // Declaration order; keep args on stack through alloc for rooting.
-                    let addr = if matches!(opcode.bytecode(), Instruction::MakeTuple) {
-                        let tuple = ObjTuple::from_slice(&self.stack[base..base + n]);
+                    let addr = if !matches!(opcode.bytecode(), Instruction::MakeArray) {
+                        let tuple = ObjTuple::from_slice(&self.stack[base..base + n])
+                            .with_kinds(opcode.make_kinds());
                         let (object, _) = self.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
@@ -967,6 +967,34 @@ impl<const S: usize> Machine<S> {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
                         let arr = ObjArray::from_values(values, &self.heap);
                         let (object, _) = self.heap.alloc(arr, Object::Array);
+                        object.addr()
+                    };
+                    self.stack[sp + dest] = Value::from(addr);
+                    self.maybe_gc_after_alloc(ip);
+                }
+                Instruction::DenseMakeK => {
+                    // Tuple / enum only; the verifier checked the pool index.
+                    let Some((kind, dest, arity, base, kinds)) =
+                        opcode.dense_make_k_parts(constants)
+                    else {
+                        *ip_out = ip;
+                        *sp_out = sp;
+                        return dispatch::RestFlow::Done(
+                            self.runtime_panic("DenseMakeK pool", ip.saturating_sub(1)),
+                        );
+                    };
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + base + arity.max(1) - 1 < stack_cap);
+                    let lo = sp + base;
+                    let words = &self.stack[lo..lo + arity];
+                    let addr = if kind >= common::dense::MAKE_ENUM {
+                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
+                        let payload = Self::dense_enum_payload(words).with_kinds(kinds);
+                        let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
+                        object.addr()
+                    } else {
+                        let tuple = ObjTuple::from_slice(words).with_kinds(kinds);
+                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);

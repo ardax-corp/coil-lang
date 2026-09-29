@@ -874,16 +874,30 @@ impl Heap {
             .map_or(&[][..], |row| &row[..])
     }
 
-    /// `gc-stress`: a field's declared kind must match what it holds.
+    /// `gc-stress`: a word's declared kind must match what it holds.
     #[cfg(feature = "gc-stress")]
-    fn verify_field_word(&self, type_id: u32, index: usize, kind: u8, v: Value) {
+    fn verify_kinded_word(&self, what: &str, index: usize, kind: u8, v: Value) {
         let addr = v.heap_addr();
         let resolves = addr != 0 && self.find_object_by_addr(addr).is_some();
         if kind == common::WORD_SCALAR && resolves {
-            panic!("gc-stress: scalar field {index} of type {type_id} holds a heap reference");
+            panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
         }
         if kind == common::WORD_POINTER && addr != 0 && !resolves {
-            panic!("gc-stress: pointer field {index} of type {type_id} holds a non-object");
+            panic!("gc-stress: pointer word {index} of {what} holds a non-object");
+        }
+    }
+
+    /// Mark enum payload / tuple words, skipping those the construction
+    /// site proved scalar.
+    #[inline]
+    fn mark_kinded_words(&self, words: &[Value], kinds: u8, grey_objects: &mut Vec<Object>) {
+        for (i, v) in words.iter().enumerate() {
+            let kind = common::packed_word_kind(kinds, i);
+            #[cfg(feature = "gc-stress")]
+            self.verify_kinded_word("an enum payload / tuple", i, kind, *v);
+            if kind != common::WORD_SCALAR {
+                self.mark_value(*v, grey_objects);
+            }
         }
     }
 
@@ -1176,15 +1190,13 @@ impl Object {
             Self::String(_) => {}
             Self::Instance(i) => i.as_ref().mark_members(heap, grey_objects),
             Self::Enum(e) => {
-                for v in e.as_ref().payload.iter() {
-                    heap.mark_value(*v, grey_objects);
-                }
+                let payload = &e.as_ref().payload;
+                heap.mark_kinded_words(payload, payload.kinds(), grey_objects);
             }
             Self::Library(_) => {}
             Self::Tuple(t) => {
-                for v in t.as_ref().elements() {
-                    heap.mark_value(*v, grey_objects);
-                }
+                let t = t.as_ref();
+                heap.mark_kinded_words(t.elements(), t.kinds(), grey_objects);
             }
             Self::Array(a) => {
                 // Clear flag: scanned clean at a previous mark, unwritten since.
@@ -1257,6 +1269,14 @@ impl Object {
                 visit(addr, precise);
             }
         };
+        let kinded = |words: &[Value], kinds: u8, visit: &mut dyn FnMut(u64, bool)| {
+            for (i, v) in words.iter().enumerate() {
+                match common::packed_word_kind(kinds, i) {
+                    common::WORD_SCALAR => {}
+                    kind => word(*v, kind == common::WORD_POINTER, visit),
+                }
+            }
+        };
         let member = |m: &Member, visit: &mut dyn FnMut(u64, bool)| match m {
             Member::Object(o) => visit(o.addr(), true),
             Member::Value(v) => word(*v, false, visit),
@@ -1279,8 +1299,14 @@ impl Object {
                     }
                 }
             }
-            Self::Enum(e) => e.as_ref().payload.iter().for_each(|v| word(*v, false, visit)),
-            Self::Tuple(t) => t.as_ref().elements().iter().for_each(|v| word(*v, false, visit)),
+            Self::Enum(e) => {
+                let payload = &e.as_ref().payload;
+                kinded(payload, payload.kinds(), visit);
+            }
+            Self::Tuple(t) => {
+                let t = t.as_ref();
+                kinded(t.elements(), t.kinds(), visit);
+            }
             Self::Array(a) => {
                 let a = a.as_ref();
                 if a.may_hold_refs() {
@@ -1715,7 +1741,7 @@ impl ObjInstance {
                     for (i, v) in slots.iter().enumerate() {
                         let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
                         #[cfg(feature = "gc-stress")]
-                        heap.verify_field_word(self.type_id, i, kind, *v);
+                        heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
                         if kind != common::WORD_SCALAR {
                             heap.mark_value(*v, grey_objects);
                         }
@@ -1763,11 +1789,16 @@ pub struct EnumPayload {
 }
 
 enum EnumPayloadInner {
+    /// `kinds`: packed word kinds (`common::packed_word_kind`), in padding.
     Inline {
         len: u8,
+        kinds: u8,
         slots: [Value; ENUM_INLINE_ARITY],
     },
-    Spill(Vec<Value>),
+    Spill {
+        words: Vec<Value>,
+        kinds: u8,
+    },
 }
 
 impl EnumPayload {
@@ -1777,6 +1808,7 @@ impl EnumPayload {
         Self {
             inner: EnumPayloadInner::Inline {
                 len: 0,
+                kinds: 0,
                 slots: [Value::default(); ENUM_INLINE_ARITY],
             },
         }
@@ -1788,7 +1820,11 @@ impl EnumPayload {
         let mut slots = [Value::default(); ENUM_INLINE_ARITY];
         slots[0] = v;
         Self {
-            inner: EnumPayloadInner::Inline { len: 1, slots },
+            inner: EnumPayloadInner::Inline {
+                len: 1,
+                kinds: 0,
+                slots,
+            },
         }
     }
 
@@ -1799,7 +1835,11 @@ impl EnumPayload {
         slots[0] = a;
         slots[1] = b;
         Self {
-            inner: EnumPayloadInner::Inline { len: 2, slots },
+            inner: EnumPayloadInner::Inline {
+                len: 2,
+                kinds: 0,
+                slots,
+            },
         }
     }
 
@@ -1811,12 +1851,16 @@ impl EnumPayload {
             Self {
                 inner: EnumPayloadInner::Inline {
                     len: words.len() as u8,
+                    kinds: 0,
                     slots,
                 },
             }
         } else {
             Self {
-                inner: EnumPayloadInner::Spill(words.to_vec()),
+                inner: EnumPayloadInner::Spill {
+                    words: words.to_vec(),
+                    kinds: 0,
+                },
             }
         }
     }
@@ -1827,7 +1871,7 @@ impl EnumPayload {
             Self::from_slice(&words)
         } else {
             Self {
-                inner: EnumPayloadInner::Spill(words),
+                inner: EnumPayloadInner::Spill { words, kinds: 0 },
             }
         }
     }
@@ -1835,9 +1879,30 @@ impl EnumPayload {
     #[inline]
     fn as_slice(&self) -> &[Value] {
         match &self.inner {
-            EnumPayloadInner::Inline { len, slots } => &slots[..*len as usize],
-            EnumPayloadInner::Spill(v) => v.as_slice(),
+            EnumPayloadInner::Inline { len, slots, .. } => &slots[..*len as usize],
+            EnumPayloadInner::Spill { words, .. } => words.as_slice(),
         }
+    }
+
+    /// Packed word kinds of the first words (`common::packed_word_kind`).
+    #[inline]
+    pub fn kinds(&self) -> u8 {
+        match &self.inner {
+            EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
+                *kinds
+            }
+        }
+    }
+
+    /// Record the construction site's word kinds.
+    #[inline]
+    pub fn with_kinds(mut self, k: u8) -> Self {
+        match &mut self.inner {
+            EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
+                *kinds = k;
+            }
+        }
+        self
     }
 
     /// True when payload lives in the object header (no spill `Vec`).
@@ -1849,7 +1914,7 @@ impl EnumPayload {
     fn spill_capacity(&self) -> usize {
         match &self.inner {
             EnumPayloadInner::Inline { .. } => 0,
-            EnumPayloadInner::Spill(v) => v.capacity(),
+            EnumPayloadInner::Spill { words, .. } => words.capacity(),
         }
     }
 }
@@ -1956,6 +2021,19 @@ impl ObjTuple {
         Self {
             elements: EnumPayload::from_slice(elements),
         }
+    }
+
+    /// Record the construction site's element word kinds.
+    #[inline]
+    pub fn with_kinds(self, kinds: u8) -> Self {
+        Self {
+            elements: self.elements.with_kinds(kinds),
+        }
+    }
+
+    #[inline]
+    pub fn kinds(&self) -> u8 {
+        self.elements.kinds()
     }
 
     #[inline]
@@ -3242,6 +3320,41 @@ mod tests {
         let live = live_object_addrs(&heap);
         assert!(live.contains(&kept.addr()));
         assert!(!live.contains(&lookalike.addr()), "a scalar field is not a root");
+    }
+
+    /// Payload / element word kinds from the construction site: a scalar
+    /// word is not traced even if its bits look like an address.
+    #[test]
+    fn payload_and_tuple_kinds_skip_scalars() {
+        let mut heap = Heap::default();
+        let (kept, _) = heap.alloc(ObjString::from("kept"), Object::String);
+        let (lookalike, _) = heap.alloc(ObjString::from("lookalike"), Object::String);
+        let kinds = common::pack_word_kinds([common::WORD_POINTER, common::WORD_SCALAR]);
+        let words = [Value::from(kept.addr()), Value::from(lookalike.addr())];
+        let (en, _) = heap.alloc(
+            ObjEnum::new(1, EnumPayload::from_slice(&words).with_kinds(kinds)),
+            Object::Enum,
+        );
+        let (tup, _) = heap.alloc(ObjTuple::from_slice(&words).with_kinds(kinds), Object::Tuple);
+
+        for obj in [en, tup] {
+            let mut seen = Vec::new();
+            obj.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+            assert_eq!(seen, vec![(kept.addr(), true)]);
+        }
+
+        let mut gray = Vec::new();
+        heap.trace(&[en.addr(), tup.addr()]);
+        for obj in [en, tup] {
+            obj.mark_references(&heap, &mut gray);
+        }
+        while let Some(next) = gray.pop() {
+            next.mark_references(&heap, &mut gray);
+        }
+        unsafe { heap.sweep() };
+        let live = live_object_addrs(&heap);
+        assert!(live.contains(&kept.addr()));
+        assert!(!live.contains(&lookalike.addr()), "a scalar payload word is not a root");
     }
 
     #[test]
