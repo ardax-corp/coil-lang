@@ -3591,8 +3591,30 @@ impl Compiler {
             self.escape_decl_depth.insert(name.to_string(), depth);
         }
         self.stmt_depth = depth;
+        let il_start = self.bytecode.il_mut().ops_mut().len();
         self.compile_block_stmt_at(child, depth);
         self.stmt_depth = depth - 1;
+        self.fill_statement_locs(il_start, child.0);
+    }
+
+    /// Give every op a statement emitted without a location the statement's
+    /// span, so each source line with code maps to bytecode (line
+    /// breakpoints, `step` / `next`, backtraces, panic locations). Nested
+    /// statements ran first and keep their own, narrower spans.
+    fn fill_statement_locs(&mut self, il_start: usize, span: SimpleSpan) {
+        let loc = self.loc_from_span(span);
+        if !loc.is_known() {
+            return;
+        }
+        let ops = self.bytecode.il_mut().ops_mut();
+        if il_start >= ops.len() {
+            return;
+        }
+        for op in &mut ops[il_start..] {
+            if !op.loc().is_known() && !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
+                op.set_loc(loc);
+            }
+        }
     }
 
     fn compile_block_stmt_at(&mut self, child: &Output<'_>, depth: u32) {
