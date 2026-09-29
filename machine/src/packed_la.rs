@@ -25,7 +25,7 @@ fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
 fn elements_of(obj: &Object) -> Option<&[Value]> {
     match obj {
         Object::Array(gc) => Some(gc.as_ref().elements().as_slice()),
-        Object::Tuple(gc) => Some(gc.as_ref().elements().as_slice()),
+        Object::Tuple(gc) => Some(gc.as_ref().elements()),
         _ => None,
     }
 }
@@ -112,7 +112,7 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
 
 fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value {
     let addr = if is_tuple {
-        let (object, _) = heap.alloc(ObjTuple { elements: values }, Object::Tuple);
+        let (object, _) = heap.alloc(ObjTuple::new(values), Object::Tuple);
         object.addr()
     } else {
         let arr = ObjArray::from_values(values, heap);

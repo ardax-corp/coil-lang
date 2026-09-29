@@ -184,15 +184,11 @@ mod tests {
     fn tuple_deep_eq() {
         let mut heap = Heap::default();
         let (ta, _) = heap.alloc(
-            ObjTuple {
-                elements: vec![Value::from(3_i64), Value::from(4_i64)],
-            },
+            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
             Object::Tuple,
         );
         let (tb, _) = heap.alloc(
-            ObjTuple {
-                elements: vec![Value::from(3_i64), Value::from(4_i64)],
-            },
+            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
             Object::Tuple,
         );
         assert!(values_eq(

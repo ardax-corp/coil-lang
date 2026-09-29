@@ -919,7 +919,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             for e in elems {
                 elements.push(decode_portable(heap, e)?);
             }
-            let (obj, _) = heap.alloc(ObjTuple { elements }, Object::Tuple);
+            let (obj, _) = heap.alloc(ObjTuple::new(elements), Object::Tuple);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Enum {
@@ -1249,7 +1249,7 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     );
     let (rx_obj, _) = heap.alloc(ObjReceiver { inner }, Object::Receiver);
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
-    let (tup, _) = heap.alloc(ObjTuple { elements: pair }, Object::Tuple);
+    let (tup, _) = heap.alloc(ObjTuple::new(pair), Object::Tuple);
     let v = Value::from(tup.addr());
     as_result_value(heap, Ok(v))
 }
@@ -1748,9 +1748,7 @@ mod tests {
     fn portable_roundtrip_tuple_and_enum() {
         let mut heap = Heap::default();
         let (tup, _) = heap.alloc(
-            ObjTuple {
-                elements: vec![Value::from(7_i64), Value::from(8_i64)],
-            },
+            ObjTuple::new(vec![Value::from(7_i64), Value::from(8_i64)]),
             Object::Tuple,
         );
         let pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
@@ -1889,9 +1887,7 @@ mod tests {
 
         // Nested in a tuple (request/reply spawn arg shape).
         let (tup, _) = heap.alloc(
-            ObjTuple {
-                elements: vec![tx, rx],
-            },
+            ObjTuple::new(vec![tx, rx]),
             Object::Tuple,
         );
         let tup_pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
