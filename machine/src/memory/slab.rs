@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 
-/// Bytes per slab chunk (`gc-compact` accounting).
-#[cfg(feature = "gc-compact")]
+/// Bytes per slab chunk (evacuation accounting).
 pub const CHUNK_BYTES: usize = CHUNK;
 
 /// Sweep cycles a free slot must stay unused before its empty chunk's pages
@@ -546,22 +545,19 @@ impl Slab {
         released_bytes
     }
 
-    /// Chunk index of a slot address (`gc-compact`).
-    #[cfg(feature = "gc-compact")]
+    /// Chunk index of a slot address (evacuation).
     pub fn chunk_of(&self, addr: u64) -> Option<usize> {
         self.chunks.position(addr)
     }
 
-    /// `(slot size, align)` class and slot count of chunk `i` (`gc-compact`).
-    #[cfg(feature = "gc-compact")]
+    /// `(slot size, align)` class and slot count of chunk `i` (evacuation).
     pub fn chunk_shape(&self, i: usize) -> Option<((u32, u32), usize)> {
         let c = self.chunks.get(i)?;
         let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
         Some(((c.meta.slot_size, c.meta.slot_align), slots))
     }
 
-    /// Bytes of free slots across every class (`gc-compact` gate).
-    #[cfg(feature = "gc-compact")]
+    /// Bytes of free slots across every class (evacuation gate).
     pub fn free_slot_bytes(&self) -> usize {
         self.free
             .iter()
@@ -570,9 +566,9 @@ impl Slab {
     }
 
     /// Take every free slot lying in a `chunks[i]` chunk off the free lists,
-    /// so new copies land elsewhere (`gc-compact`). Give them back with
+    /// so new copies land elsewhere (evacuation). Give them back with
     /// [`Self::free`].
-    #[cfg(feature = "gc-compact")]
+    #[cold]
     pub fn take_free_in(&mut self, chunks: &[bool]) -> Vec<NonNull<u8>> {
         let mut parked = Vec::new();
         let table = &self.chunks;
@@ -593,8 +589,8 @@ impl Slab {
 
     /// Give back the pages of `emptied` chunks (every slot free) at once and
     /// drop their slots from the free lists; they are re-carved before a new
-    /// chunk is mapped (`gc-compact`). Returns bytes released.
-    #[cfg(feature = "gc-compact")]
+    /// chunk is mapped (evacuation). Returns bytes released.
+    #[cold]
     pub fn release_chunks(&mut self, emptied: &[bool]) -> usize {
         if !cfg!(unix) || !emptied.contains(&true) {
             return 0;
@@ -630,7 +626,6 @@ impl Slab {
     }
 
     /// Bytes of chunks whose pages were given back and not yet reused.
-    #[cfg(any(test, feature = "gc-stats", feature = "gc-compact"))]
     pub fn released_bytes(&self) -> usize {
         self.released.iter().map(|(_, l)| l.len()).sum::<usize>() * CHUNK
     }

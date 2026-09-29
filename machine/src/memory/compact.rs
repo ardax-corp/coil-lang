@@ -1,4 +1,4 @@
-//! Mostly-copying evacuation of sparse slab chunks (`gc-compact`).
+//! Mostly-copying evacuation of sparse slab chunks.
 //!
 //! Bartlett-style. An object moves only when every reference to it is
 //! precise: a pointer-kind field / payload / tuple / array word, a
@@ -91,6 +91,7 @@ fn worth_it(bytes: usize, slab_bytes: usize) -> bool {
 
 impl Object {
     /// Slot layout of a kind evacuation may move; `None` for the rest.
+    #[cold]
     fn movable_layout(&self) -> Option<Layout> {
         Some(match self {
             Self::Instance(_) => Layout::new::<GcData<ObjInstance>>(),
@@ -105,6 +106,7 @@ impl Object {
 
     /// Rewrite this object's precise references to moved objects. Mirrors
     /// the precise cases of [`Object::for_each_reference`].
+    #[cold]
     fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
         let fix = |v: &mut Value| {
             if let Some(n) = forward(fwd, *v) {
@@ -207,6 +209,7 @@ impl Heap {
     /// references. `vm_pins` are the VM roots it cannot rewrite; each pins
     /// its target. `None` when nothing is worth moving. The old copies stay
     /// readable until [`Self::evacuate_finish`].
+    #[cold]
     pub fn evacuate_plan(&mut self, vm_pins: &[u64], everything: bool) -> Option<EvacPlan> {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw {
             return None;
@@ -357,6 +360,7 @@ impl Heap {
 
     /// `gc-stress`: no live heap word still names a moved object's old slot.
     #[cfg(feature = "gc-stress")]
+    #[cold]
     pub fn verify_evacuation(&self, plan: &EvacPlan) {
         for obj in self.objects() {
             if plan.fwd.contains_key(&obj.addr()) {
@@ -375,6 +379,7 @@ impl Heap {
 
     /// Poison and free the old slots, give back parked free slots, and
     /// release chunks the plan emptied.
+    #[cold]
     pub fn evacuate_finish(&mut self, plan: EvacPlan) -> Evacuation {
         let EvacPlan {
             fwd,

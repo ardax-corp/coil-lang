@@ -1,7 +1,7 @@
-# GC evacuation (`gc-compact`, off by default)
+# GC evacuation
 
-Mostly-copying (Bartlett) compaction of sparse slab chunks. It sits behind
-the `gc-compact` cargo feature; default builds compile none of it.
+Mostly-copying (Bartlett) compaction of sparse slab chunks, on by default.
+Set `COIL_GC_COMPACT=0` to turn it off (debugging a suspected move bug).
 Mark / lazy sweep are unchanged ([gc-incremental.md](gc-incremental.md)).
 Evacuation runs **between** cycles, once a sweep has finished.
 
@@ -65,21 +65,25 @@ These **pin** the object they reach:
   - the whole plan must empty that much too.
 - **Step size:** one step moves at most 64 chunks (4 MiB). A capped plan
   continues at the next collection.
-- **Stress mode:** `gc-stress` builds move every movable object at every
-  collection. CI runs `coil test` that way (compact stress).
+- **Stress mode:** `gc-stress` builds collect at every allocation and move
+  every movable object each time. CI runs `coil test` that way.
 
 ## Numbers (release, `examples/perf`)
 
-| Bench | Plain | `gc-compact` |
+| Bench | Without | With evacuation |
 |-------|------:|-------------:|
 | `gc_frag` final RSS (400k list thinned to 100k, then churn) | 35.0 MB | **21.5 MB** (slab 21.9 → 5.5 MB resident; live 5.4 MB) |
 | `gc_frag` wall | 294 ms | 302 ms |
 | `gc_churn` / `class_wide_live` / `binary_trees` / `gc_shrink` wall | — | within noise |
 
+On by default. Instruction counts are
+unchanged on programs that never collect (fib, tak, nsieve, mandelbrot) and
++0.4–0.6% on collection-heavy ones (the analysis walk). Wall-time
+differences on non-collecting programs are code layout, since the
+instruction counts are equal.
+
 ## Not yet
 
-- Default on: this needs longer soak on real programs and a decision on the
-  RSS / wall trade.
 - Liveness in precise frame maps. Stale loop slots stay ambiguous and pin
   what they hit.
 - A nursery with bump allocation. That needs a write barrier, a separate
