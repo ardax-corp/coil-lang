@@ -113,6 +113,10 @@ pub struct ForInInfo {
 use crate::typechecking::ty::{EnumVariantPayloadTy, STRING, Ty, TyVarId};
 use crate::typechecking::virtual_modules::{BuiltinExport, VirtualModules};
 
+/// Binding frame recorded for identifiers bound inside an isolated lambda env
+/// (captures, parameters, body locals): always deeper than any static.
+const LAMBDA_LOCAL_FRAME: usize = usize::MAX;
+
 /// One candidate in a compile-time overload set (arity and/or parameter types).
 ///
 /// Stored in [`Checker::overload_sets`] keyed by the function's simple
@@ -277,6 +281,13 @@ pub struct Checker {
 
     /// Source-span fallback for codegen when pre-walk IDs are misaligned.
     codegen_types_by_span: HashMap<(usize, usize), Ty>,
+    /// Identifier site span → env frame its binding was found in
+    /// ([`LAMBDA_LOCAL_FRAME`] inside an isolated lambda env). A site bound
+    /// deeper than a same-named static's declaration frame is a local that
+    /// shadows the static.
+    ident_binding_frames: HashMap<(usize, usize), usize>,
+    /// Static FQN → env frame its `static let` / `static const` was bound in.
+    static_decl_frames: HashMap<String, usize>,
     /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
     node_ids_by_span: HashMap<(usize, usize), NodeId>,
 
