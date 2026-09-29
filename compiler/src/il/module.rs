@@ -130,6 +130,8 @@ impl IlModule {
         let mut prior_labels = HashMap::new();
         let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
+        // Old label ids bound in each body+glue chunk (before remap).
+        let mut chunk_bound: Vec<std::collections::HashSet<u32>> = Vec::new();
         let mut segment_ranges: Vec<(usize, usize)> = Vec::new();
         if !self.prologue.is_empty() {
             let start = out.len();
@@ -143,6 +145,15 @@ impl IlModule {
                 chunk.extend(g.iter().cloned());
             }
             let old_entry = body.meta.entry.map(|Label(id)| id);
+            chunk_bound.push(
+                chunk
+                    .iter()
+                    .filter_map(|op| match op {
+                        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                        _ => None,
+                    })
+                    .collect(),
+            );
             let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
             // Prefer the remapped emit-time entry. If opts dropped that id
             // (preheader / relabel), CALL still has to land on this body.
@@ -162,6 +173,26 @@ impl IlModule {
             out.extend(module.epilogue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
+        // Function entry → flat id, taken from the chunk that binds the entry
+        // label: the function's own body, else the previous chunk's glue.
+        // `prior_labels` is first-wins over every body's private label space,
+        // and per-body opts mint ids that may equal a later function's entry.
+        let mut jump_entries: HashMap<u32, u32> = HashMap::new();
+        for (k, body) in module.funcs.iter().enumerate() {
+            let Some(Label(old)) = body.meta.entry else {
+                continue;
+            };
+            let owner = if chunk_bound[k].contains(&old) {
+                Some(k)
+            } else if k > 0 && chunk_bound[k - 1].contains(&old) {
+                Some(k - 1)
+            } else {
+                None
+            };
+            if let Some(new) = owner.and_then(|i| func_label_maps[i].get(&old).copied()) {
+                jump_entries.insert(old, new);
+            }
+        }
         let flat_label_ids: std::collections::HashSet<u32> =
             prior_labels.values().copied().collect();
         for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
@@ -175,12 +206,14 @@ impl IlModule {
                 remap_cross_function_jump_targets(
                     &mut out[start..end],
                     &prior_labels,
+                    &jump_entries,
                     &flat_label_ids,
                 );
             } else {
                 remap_cross_function_jump_targets(
                     &mut out[start..end],
                     &prior_labels,
+                    &jump_entries,
                     &flat_label_ids,
                 );
                 remap_cross_function_entry_call_targets(
@@ -766,9 +799,14 @@ fn remap_cross_function_entry_call_targets(
     }
 }
 
+/// A jump into another function (the setup region's `JMP → main`) targets
+/// that function's entry: prefer the recorded entry remap, since `prior` is a
+/// first-wins merge of every body's private label space and an earlier body
+/// may reuse the same old id for an internal label.
 fn remap_cross_function_jump_targets(
     ops: &mut [IlOp],
     prior: &HashMap<u32, u32>,
+    entry_labels: &HashMap<u32, u32>,
     flat_label_ids: &std::collections::HashSet<u32>,
 ) {
     use std::collections::HashSet;
@@ -786,6 +824,10 @@ fn remap_cross_function_jump_targets(
                 continue;
             }
             if flat_label_ids.contains(&target.0) {
+                continue;
+            }
+            if let Some(&new_id) = entry_labels.get(&target.0) {
+                target.0 = new_id;
                 continue;
             }
             if let Some(&new_id) = prior.get(&target.0)
