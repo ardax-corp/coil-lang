@@ -302,6 +302,11 @@ struct FrameState {
     hi: usize,
     bits: Vec<bool>,
     slot: Vec<bool>,
+    /// The word definitely holds a heap pointer (or `0`): every reaching
+    /// definition is an allocation or a copy of one. Recorded slots with it
+    /// carry `common::PRECISE_SLOT_MUST`; a moving collector may rewrite
+    /// them. Missing = no.
+    ptr: Vec<bool>,
 }
 
 /// Words the analysis refuses to track (keeps `u16` slots in range).
@@ -310,6 +315,63 @@ const MAX_WORDS: usize = 4096;
 impl FrameState {
     fn bit(&self, p: usize) -> bool {
         self.bits.get(p).copied().unwrap_or(true)
+    }
+
+    fn must_ptr(&self, p: usize) -> bool {
+        self.ptr.get(p).copied().unwrap_or(false)
+    }
+
+    fn set_must(&mut self, p: usize, must: bool) {
+        if self.ptr.len() <= p {
+            if !must {
+                return;
+            }
+            self.ptr.resize(p + 1, false);
+        }
+        self.ptr[p] = must;
+    }
+
+    /// Slot write of an allocation result (dense `DenseMake*`).
+    fn set_ptr(&mut self, p: usize) -> Option<()> {
+        self.set_copy(p, true, true)
+    }
+
+    /// Slot write that copies another word's heap / pointer state.
+    fn set_copy(&mut self, p: usize, heap: bool, must: bool) -> Option<()> {
+        self.set(p, heap)?;
+        self.set_must(p, must);
+        Some(())
+    }
+
+    /// Push of an allocation result.
+    fn push_ptr(&mut self) -> Option<()> {
+        self.push_copy(true, true)
+    }
+
+    /// Push that copies a word's heap / pointer state; an inexact cursor
+    /// loses the pointer guarantee.
+    fn push_copy(&mut self, heap: bool, must: bool) -> Option<()> {
+        let exact = self.lo == self.hi;
+        let at = self.lo;
+        self.push(heap)?;
+        if exact {
+            self.set_must(at, must);
+        }
+        Some(())
+    }
+
+    /// Pop returning `(may be heap, must be pointer)`.
+    fn pop_copy(&mut self) -> Option<(bool, bool)> {
+        self.pop_n(1)?;
+        let heap = (self.lo..=self.hi).any(|p| self.bit(p));
+        let must = self.lo == self.hi && self.must_ptr(self.lo);
+        Some((heap, must))
+    }
+
+    fn store_copy(&mut self, slot: usize, heap: bool, must: bool) -> Option<()> {
+        self.store(slot, heap)?;
+        self.set_must(slot, must);
+        Some(())
     }
 
     /// Slot write (store, dense register, match payload).
@@ -327,6 +389,7 @@ impl FrameState {
         }
         self.bits[p] = heap;
         self.slot[p] = slot;
+        self.set_must(p, false);
         Some(())
     }
 
@@ -383,6 +446,7 @@ impl FrameState {
     fn clobber_from(&mut self, base: usize) {
         self.bits.truncate(base);
         self.slot.truncate(base);
+        self.ptr.truncate(base);
     }
 
     /// Slots that may hold heap words: every word below `limit` that may, plus
@@ -401,7 +465,13 @@ impl FrameState {
                     self.bits[p] && self.slot[p]
                 }
             })
-            .map(|p| p as u16)
+            .map(|p| {
+                if self.must_ptr(p) {
+                    p as u16 | common::PRECISE_SLOT_MUST
+                } else {
+                    p as u16
+                }
+            })
             .collect()
     }
 
@@ -419,10 +489,18 @@ impl FrameState {
             next.pop();
             slot.pop();
         }
-        let changed =
-            next != self.bits || slot != self.slot || (lo, hi) != (self.lo, self.hi);
+        let plen = self.ptr.len().min(other.ptr.len());
+        let mut ptr: Vec<bool> = (0..plen).map(|p| self.ptr[p] && other.ptr[p]).collect();
+        while ptr.last() == Some(&false) {
+            ptr.pop();
+        }
+        let changed = next != self.bits
+            || slot != self.slot
+            || ptr != self.ptr
+            || (lo, hi) != (self.lo, self.hi);
         self.bits = next;
         self.slot = slot;
+        self.ptr = ptr;
         self.lo = lo;
         self.hi = hi;
         Some(changed)
@@ -535,6 +613,7 @@ impl Body<'_> {
                 hi: arity,
                 bits: vec![true; arity],
                 slot: vec![true; arity],
+                ptr: Vec::new(),
             },
         );
         let step_at = |pc: usize, st: &mut FrameState| transfer(self, pc, coroutine, st);
@@ -733,22 +812,22 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         LOAD => {
             for i in 0..b.load_store_count() {
                 let slot = b.load_store_slot_at(i) as usize;
-                let heap = st.bit(slot);
-                st.push(heap)?;
+                let (heap, must) = (st.bit(slot), st.must_ptr(slot));
+                st.push_copy(heap, must)?;
             }
         }
         STORE | StorePop => {
             for i in 0..b.load_store_count() {
                 let slot = b.load_store_slot_at(i) as usize;
-                let heap = st.pop()?;
-                st.store(slot, heap)?;
+                let (heap, must) = st.pop_copy()?;
+                st.store_copy(slot, heap, must)?;
             }
         }
         Seek => st.seek(b.operand_u32() as usize),
         DUPLICATE => {
-            let heap = st.pop()?;
-            st.push(heap)?;
-            st.push(heap)?;
+            let (heap, must) = st.pop_copy()?;
+            st.push_copy(heap, must)?;
+            st.push_copy(heap, must)?;
         }
         POP | PRINT | StoreStatic => {
             st.pop()?;
@@ -861,19 +940,19 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             if matches!(inst, MakePolyFnCapture) {
                 st.pop_n((b.operand_u32() & 0xFF) as usize + 1)?;
             }
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         // Pops `[captures..., filled..., mask, entry]`, pushes the closure.
         MakeFn => {
             let op = b.operand_u32();
             st.pop_n((op & 0xFF) as usize + ((op >> 8) & 0xFF) as usize + 2)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         MakeCoro => {
             st.pop_n(b.call_parts().0)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         HostInvoke => {
@@ -884,39 +963,39 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         MakeTuple | MakeArray | MakeEnum => {
             st.pop_n((b.operand_u32() & 0xFFFF) as usize)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         MakeTupleK | MakeEnumK => {
             st.pop_n(b.make_arity() as usize)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         InitTyped | INIT | STRING => {
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         BoxValue | STRINGIFY => {
             st.pop()?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         FORMAT => {
             let n = b.operand_u32() as usize;
             if n != 0 {
                 st.pop_n(n + 1)?;
-                st.push(true)?;
+                st.push_ptr()?;
             }
             step.record = Some(st.heap_slots(st.hi, true));
         }
         MakeDict => {
             st.pop_n(2 * (b.operand_u32() & 0xFFFF) as usize)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         ArrayPush => {
             st.pop_n(2)?;
-            st.push(true)?;
+            st.push_ptr()?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         UnboxValue | LoadField => {
@@ -925,8 +1004,8 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         // Stamps metadata on the enum at TOS; no allocation, no safepoint.
         TagEnumType => {
-            st.pop()?;
-            st.push(true)?;
+            let (heap, must) = st.pop_copy()?;
+            st.push_copy(heap, must)?;
         }
         Index | IndexUnchecked | GetField => {
             st.pop_n(2)?;
@@ -961,8 +1040,8 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         DenseArrayLen => st.set(b.dense_move_parts().0, false)?,
         DenseMove => {
             let (dest, src) = b.dense_move_parts();
-            let heap = st.bit(src);
-            st.set(dest, heap)?;
+            let (heap, must) = (st.bit(src), st.must_ptr(src));
+            st.set_copy(dest, heap, must)?;
         }
         DenseIndex | DenseFieldLoad => st.set(b.dense_abc_parts().1, true)?,
         DenseStoreIndex | DenseFieldStore => {}
@@ -972,18 +1051,18 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         DensePush => {
             let (arity, base) = b.dense_move_parts();
             for i in 0..arity {
-                let heap = st.bit(base + i);
-                st.push(heap)?;
+                let (heap, must) = (st.bit(base + i), st.must_ptr(base + i));
+                st.push_copy(heap, must)?;
             }
         }
         // `DenseMakeK` keeps `dest` in the same byte as `DenseMake`.
         DenseMake | DenseMakeK | DenseArrayPush => {
-            st.set(b.dense_abc_parts().1, true)?;
+            st.set_ptr(b.dense_abc_parts().1)?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         DenseMakeObject => {
             let (dest, _, _) = common::dense::unpack_make_object(b.operand_u32());
-            st.set(dest as usize, true)?;
+            st.set_ptr(dest as usize)?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
         DenseBin2 | DenseBinJmpf | DenseIndexJmpf => {
@@ -1049,8 +1128,26 @@ mod tests {
         bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX)
     }
 
+    /// Slot indices (flags stripped), ascending.
     fn slots_at(maps: &[PreciseFrameMap], pc: u32) -> Option<Vec<u16>> {
-        precise_map_for_pc(maps, pc)?.slots_at_pc(pc).map(<[u16]>::to_vec)
+        precise_map_for_pc(maps, pc)?.slots_at_pc(pc).map(|s| {
+            let mut v: Vec<u16> = s.iter().map(|&w| common::precise_slot_index(w) as u16).collect();
+            v.sort_unstable();
+            v
+        })
+    }
+
+    /// Slots flagged as definitely holding a pointer, ascending.
+    fn must_at(maps: &[PreciseFrameMap], pc: u32) -> Option<Vec<u16>> {
+        precise_map_for_pc(maps, pc)?.slots_at_pc(pc).map(|s| {
+            let mut v: Vec<u16> = s
+                .iter()
+                .filter(|&&w| common::precise_slot_must(w))
+                .map(|&w| common::precise_slot_index(w) as u16)
+                .collect();
+            v.sort_unstable();
+            v
+        })
     }
 
     use common::precise_map_for_pc;
@@ -1088,6 +1185,41 @@ mod tests {
         ]);
         // Caller words below the callee base (2): param 0 heap, slot 1 int.
         assert_eq!(slots_at(&maps, 6), Some(vec![0]));
+    }
+
+    #[test]
+    fn allocation_copies_stay_must_pointers() {
+        // [2] InitTyped [3] store 0 [4] load 0 [5] store 1 [6] InitTyped [7] RETURN
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(0),
+            load(0),
+            store(1),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert_eq!(must_at(&maps, 6), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn join_with_a_constant_is_not_a_must_pointer() {
+        // [2] CONST [3] JMPF 7 [4] InitTyped [5] store 0 [6] JMP 9
+        // [7] CONST [8] store 0 [9] InitTyped [10] RETURN
+        let maps = bind(&[
+            konst(1),
+            op(Instruction::JMPF).with_operand_u32(7),
+            op(Instruction::InitTyped),
+            store(0),
+            op(Instruction::JMP).with_operand_u32(9),
+            konst(5),
+            store(0),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        let may = slots_at(&maps, 9).expect("safepoint row");
+        assert!(may.contains(&0), "the allocation path may leave a heap word: {may:?}");
+        let must = must_at(&maps, 9).expect("safepoint row");
+        assert!(!must.contains(&0), "one path stores an int: {must:?}");
     }
 
     #[test]
@@ -1186,6 +1318,8 @@ mod tests {
         );
         // After resume: saved local 0, the sent value in slot 1, a new object.
         assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
+        // Allocations are definitely pointers; the sent value is not known.
+        assert_eq!(must_at(&maps, 7), Some(vec![0, 2]));
     }
 
     #[test]
