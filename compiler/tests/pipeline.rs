@@ -8290,6 +8290,7 @@ fn main() {
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
+        class_word_kinds: pipeline.class_word_kinds(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -11116,6 +11117,7 @@ fn main() {
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
+        class_word_kinds: pipeline.class_word_kinds(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =
