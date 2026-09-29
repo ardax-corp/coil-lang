@@ -57,11 +57,26 @@ generic returns, stay unknown). Fork workers (`__coil_par_f`) reuse `f`'s.
 The analysis tracks the kinds of the top operands relative to the cursor,
 so a push / `STORE` pair keeps its kind at loop heads where the cursor is
 only known as a range. `MakeEnumReturn(K)` records its allocation. The VM
-reports flagged slots as precise roots and the rest as ambiguous. What
-stays ambiguous: slots a loop reads only after rewriting (stale values
-from the previous iteration, unwritten on entry; a liveness pass could
-drop them) and generic call results, so objects held that way would still
-pin under a moving collector.
+reports flagged slots as precise roots and the rest as ambiguous. Generic
+call results stay ambiguous, so objects held that way would still pin
+under a moving collector.
+
+Maps also drop **overwritten** slots. A backward pass drops a listed slot at
+a safepoint when every path from there overwrites it before reading it
+*or leaving the function*, for example last iteration's object in a loop
+local. Such a slot is then neither a root nor a pin. A local merely past
+its last read stays until it is overwritten or the function returns
+(scope lifetime): a `gc::root` handle or an FFI buffer held only by a local
+must survive. Reads are over-approximated:
+- every slot an op names, unless it is a pure overwrite (`STORE`,
+  `DenseConst` / `DenseMove` / `BinSlot*Store` destinations);
+- every word a pop could read while the cursor is only known as a range,
+  which covers `Seek`-exposed words;
+- every word, at exits, yields, `UnpackAt` and `TailCall`.
+
+Writes are under-approximated: pure slot stores and exact-cursor pushes.
+`CallIndirect` rows are never filtered, and an op without a model leaves
+the body's maps unfiltered.
 
 Arrays carry an element kind (archive minor 27). `Vec::new` /
 `with_capacity` / `from` calls whose static element type is a ground

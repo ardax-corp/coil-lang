@@ -232,6 +232,114 @@ fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
     }
 }
 
+/// Frame slots an op names, split for liveness: `uses` it may read, `defs`
+/// it only overwrites. Every named slot that is not a pure overwrite counts
+/// as read (a dense destination too), so the model can only keep extra
+/// words alive. `All` reads every frame word; `None` refuses (unmodeled).
+enum SlotEffect {
+    Named { uses: Vec<usize>, defs: Vec<usize> },
+    All,
+}
+
+fn slot_effect(b: &Byte, constants: &[u64]) -> Option<SlotEffect> {
+    use Instruction::*;
+    let pool = |i: usize| constants.get(i).copied();
+    let uses = |u: Vec<usize>| Some(SlotEffect::Named { uses: u, defs: Vec::new() });
+    Some(match *b.bytecode() {
+        LOAD => return uses((0..b.load_store_count()).map(|i| b.load_store_slot_at(i) as usize).collect()),
+        STORE | StorePop => SlotEffect::Named {
+            uses: Vec::new(),
+            defs: (0..b.load_store_count()).map(|i| b.load_store_slot_at(i) as usize).collect(),
+        },
+        LoadReturnSlot => return uses(vec![b.operand_u32() as usize]),
+        BinSlotImm => return uses(vec![b.bin_slot_imm_parts().1]),
+        BinSlotSlot => {
+            let (_, a, c) = b.bin_slot_slot_parts();
+            return uses(vec![a, c]);
+        }
+        BinSlotImmJmpf | BinSlotImmJmpt => return uses(vec![b.bin_slot_imm_jmpf_parts().1]),
+        BinSlotSlotJmpf | BinSlotSlotJmpt => {
+            let (_, a, pool_idx) = b.bin_slot_slot_jmpf_parts();
+            return uses(vec![a, (pool(pool_idx)? as u32 & 0xFF) as usize]);
+        }
+        BinSlotImmStore => {
+            let (_, src, pool_idx) = b.bin_slot_imm_store_parts();
+            SlotEffect::Named {
+                uses: vec![src],
+                defs: vec![(pool(pool_idx)? >> 32) as usize],
+            }
+        }
+        BinSlotSlotStore => {
+            let (_, a, c, dest) = b.bin_slot_slot_store_parts();
+            SlotEffect::Named {
+                uses: vec![a, c],
+                defs: vec![dest],
+            }
+        }
+        INC | DEC => return uses(vec![b.inc_dec_parts().0]),
+        // Moves the cursor; the words it exposes are read by later pops.
+        Seek => SlotEffect::Named {
+            uses: Vec::new(),
+            defs: Vec::new(),
+        },
+        UnpackAt | TailCall | YieldCoro | YieldFromCoro => SlotEffect::All,
+        DenseBin | DenseBin2 | DenseBinJmpf | DenseCmp | DenseIndex | DenseIndexJmpf
+        | DenseStoreIndex | DenseFieldLoad | DenseFieldStore | DenseArrayPush => {
+            let (_, d, x, y) = b.dense_abc_parts();
+            return uses(vec![d, x, y]);
+        }
+        DenseMake => {
+            let (_, dest, arity, base) = b.dense_abc_parts();
+            return uses(std::iter::once(dest).chain(base..base + arity).collect());
+        }
+        DenseMakeK => {
+            let (_, dest, arity, base, _) = b.dense_make_k_parts(constants)?;
+            return uses(std::iter::once(dest).chain(base..base + arity).collect());
+        }
+        DenseMakeObject => return uses(vec![common::dense::unpack_make_object(b.operand_u32()).0 as usize]),
+        DenseConst => SlotEffect::Named {
+            uses: Vec::new(),
+            defs: vec![b.dense_const_parts().1],
+        },
+        DenseMove => {
+            let (d, s) = b.dense_move_parts();
+            SlotEffect::Named {
+                uses: vec![s],
+                defs: vec![d],
+            }
+        }
+        DenseArrayLen => {
+            let (d, a) = b.dense_move_parts();
+            return uses(vec![d, a]);
+        }
+        DenseUnary | DenseCast => {
+            let (_, d, s) = b.dense_unary_parts();
+            return uses(vec![d, s]);
+        }
+        DensePush => {
+            let (arity, base) = b.dense_move_parts();
+            return uses((base..base + arity).collect());
+        }
+        VLoad | VStore => {
+            let (_, _, arr, idx) = b.dense_abc_parts();
+            return uses(vec![arr, idx]);
+        }
+        VBin => return uses(vec![b.dense_abc_parts().2]),
+        VReduce => return uses(vec![b.dense_abc_parts().1]),
+        _ => {
+            // Slot-free ops (operands only); anything `slot_extent` does not
+            // know is refused.
+            if slot_extent(b, constants)? != 0 {
+                return None;
+            }
+            SlotEffect::Named {
+                uses: Vec::new(),
+                defs: Vec::new(),
+            }
+        }
+    })
+}
+
 fn ends_in_exit(body: &[Byte]) -> bool {
     body.last().is_some_and(|b| {
         matches!(
@@ -347,6 +455,12 @@ struct FrameState {
     /// is inexact. Cleared when the cursor jumps or a slot write may alias
     /// an operand.
     ops: Vec<bool>,
+    /// Lowest cursor a pop reached (liveness reads `[popped, hi)` of the
+    /// pre-op state). Scratch: not part of the dataflow value.
+    popped: usize,
+    /// Words exact-cursor pushes wrote during the op (liveness defs).
+    /// Scratch, like `popped`.
+    pushed: Vec<usize>,
 }
 
 /// Words the analysis refuses to track (keeps `u16` slots in range).
@@ -464,6 +578,7 @@ impl FrameState {
     fn push(&mut self, heap: bool) -> Option<()> {
         if self.lo == self.hi {
             self.write(self.lo, heap, false)?;
+            self.pushed.push(self.lo);
         } else {
             for p in self.lo..=self.hi {
                 let slot = self.slot.get(p).copied().unwrap_or(true);
@@ -494,6 +609,7 @@ impl FrameState {
     fn pop_n(&mut self, n: usize) -> Option<()> {
         self.lo = self.lo.checked_sub(n)?;
         self.hi -= n;
+        self.popped = self.popped.min(self.lo);
         match self.ops.len().checked_sub(n) {
             Some(k) => self.ops.truncate(k),
             None => self.ops.clear(),
@@ -707,6 +823,8 @@ impl Body<'_> {
                 slot: vec![true; arity],
                 ptr,
                 ops: Vec::new(),
+                popped: arity,
+                pushed: Vec::new(),
             },
         );
         let step_at = |pc: usize, st: &mut FrameState| transfer(self, pc, coroutine, st);
@@ -745,13 +863,165 @@ impl Body<'_> {
                 }
             }
         }
-        // Recorded sets must reflect the fixpoint: recompute from final states.
+        // Recorded sets must reflect the fixpoint: recompute from final states,
+        // then drop slots no later op reads (when liveness is modeled).
+        let live_out = self.liveness(&states, coroutine);
         let mut out = Vec::with_capacity(recorded.len());
         for pc in recorded {
             let mut st = states.get(&pc)?.clone();
-            out.push((pc, step_at(pc, &mut st)?.record?));
+            let mut slots = step_at(pc, &mut st)?.record?;
+            if let Some(live) = live_out.as_ref().and_then(|l| l.get(&pc)) {
+                slots.retain(|&s| {
+                    live.get(common::precise_slot_index(s)).copied().unwrap_or(false)
+                });
+            }
+            out.push((pc, slots));
         }
         Some(out)
+    }
+
+    /// Backward liveness over frame words: `live_out[pc][p]` is true when a
+    /// path from after `pc` may read word `p`, or leave the function, before
+    /// overwriting it. So a dropped word is one every path overwrites first
+    /// (last iteration's value in a loop local), never a local merely past
+    /// its last read. Reads are over-approximated (every slot an op names
+    /// but does not purely overwrite, every word a pop could read under an
+    /// inexact cursor, every word at an exit), writes under-approximated
+    /// (pure slot stores and exact-cursor pushes). Only safepoints
+    /// that resume in this frame are filtered: exits and `CallIndirect`
+    /// (whose base word the VM keeps during a partial application) are not
+    /// in the result. `None` when an op has no model.
+    fn liveness(
+        &self,
+        states: &HashMap<usize, FrameState>,
+        coroutine: bool,
+    ) -> Option<HashMap<usize, Vec<bool>>> {
+        use Instruction::*;
+        struct Node {
+            uses: Vec<usize>,
+            defs: Vec<usize>,
+            all: bool,
+            succs: Vec<usize>,
+            filter: bool,
+        }
+        let mut nodes: HashMap<usize, Node> = HashMap::with_capacity(states.len());
+        let mut words = 0usize;
+        for (&pc, pre) in states {
+            let b = self.bytecode.get(pc)?;
+            let mut st = pre.clone();
+            st.popped = st.lo;
+            st.pushed.clear();
+            let step = transfer(self, pc, coroutine, &mut st)?;
+            let mut effect = slot_effect(b, self.constants)?;
+            if step.width == 2 {
+                // The tail word of a two-word dense pack names its own slots.
+                match (effect, slot_effect(self.bytecode.get(pc + 1)?, self.constants)?) {
+                    (
+                        SlotEffect::Named { mut uses, mut defs },
+                        SlotEffect::Named { uses: u2, defs: d2 },
+                    ) => {
+                        uses.extend(u2);
+                        // A def of the tail may be read by the head: keep it
+                        // a use.
+                        uses.extend(d2);
+                        defs.retain(|d| !uses.contains(d));
+                        effect = SlotEffect::Named { uses, defs };
+                    }
+                    _ => effect = SlotEffect::All,
+                }
+            }
+            let (mut uses, mut defs, all) = match effect {
+                SlotEffect::Named { uses, defs } => (uses, defs, false),
+                SlotEffect::All => (Vec::new(), Vec::new(), true),
+            };
+            // Words a pop may have read; words an exact push wrote.
+            uses.extend(st.popped..pre.hi);
+            defs.extend(st.pushed.iter().copied());
+            let inst = *b.bytecode();
+            let exit = !step.fallthrough && step.jump.is_none();
+            if matches!(inst, JumpIfMatch) {
+                uses.extend(pre.lo.saturating_sub(1)..pre.hi);
+            }
+            // Exits read every word: a local keeps its value alive until it
+            // is overwritten or the function returns (scope lifetime, which
+            // `gc::root` handles and FFI buffers rely on), not only until its
+            // last read.
+            let all = all || exit;
+            words = words
+                .max(pre.hi + 1)
+                .max(pre.bits.len())
+                .max(uses.iter().chain(&defs).map(|&p| p + 1).max().unwrap_or(0));
+            let succs = step
+                .fallthrough
+                .then_some(pc + step.width)
+                .into_iter()
+                .chain(step.jump)
+                .filter(|s| states.contains_key(s))
+                .collect();
+            let filter = step.record.is_some() && !exit && !matches!(inst, CallIndirect);
+            nodes.insert(pc, Node { uses, defs, all, succs, filter });
+        }
+        if words > MAX_WORDS {
+            return None;
+        }
+        let mut preds: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (&pc, n) in &nodes {
+            for &s in &n.succs {
+                preds.entry(s).or_default().push(pc);
+            }
+        }
+        let mut live_in: HashMap<usize, Vec<bool>> =
+            nodes.keys().map(|&pc| (pc, vec![false; words])).collect();
+        let mut work: Vec<usize> = nodes.keys().copied().collect();
+        let mut queued: HashSet<usize> = work.iter().copied().collect();
+        let out_of = |pc: usize, live_in: &HashMap<usize, Vec<bool>>| -> Vec<bool> {
+            let mut out = vec![false; words];
+            for s in &nodes[&pc].succs {
+                for (o, &l) in out.iter_mut().zip(&live_in[s]) {
+                    *o |= l;
+                }
+            }
+            out
+        };
+        let mut steps = 0usize;
+        while let Some(pc) = work.pop() {
+            queued.remove(&pc);
+            steps += 1;
+            if steps > 2_000_000 {
+                return None;
+            }
+            let n = &nodes[&pc];
+            let mut inn = if n.all {
+                vec![true; words]
+            } else {
+                let mut inn = out_of(pc, &live_in);
+                for &d in &n.defs {
+                    inn[d] = false;
+                }
+                for &u in &n.uses {
+                    inn[u] = true;
+                }
+                inn
+            };
+            if n.all {
+                inn.fill(true);
+            }
+            if inn != live_in[&pc] {
+                live_in.insert(pc, inn);
+                for &p in preds.get(&pc).map(Vec::as_slice).unwrap_or(&[]) {
+                    if queued.insert(p) {
+                        work.push(p);
+                    }
+                }
+            }
+        }
+        Some(
+            nodes
+                .iter()
+                .filter(|(_, n)| n.filter)
+                .map(|(&pc, _)| (pc, out_of(pc, &live_in)))
+                .collect(),
+        )
     }
 }
 
@@ -1300,6 +1570,10 @@ mod tests {
             load(0),
             op(Instruction::MakeArray).with_operand_u32(1),
             store(2),
+            load(0),
+            op(Instruction::POP),
+            load(2),
+            op(Instruction::POP),
             load(1),
             op(Instruction::RETURN),
         ]);
@@ -1315,6 +1589,8 @@ mod tests {
             op(Instruction::Seek).with_operand_u32(2),
             konst(3),
             call(1, 2),
+            load(0),
+            op(Instruction::POP),
             op(Instruction::RETURN),
         ]);
         // Caller words below the callee base (2): param 0 heap, slot 1 int.
@@ -1330,6 +1606,8 @@ mod tests {
             load(0),
             store(1),
             op(Instruction::InitTyped),
+            load(0),
+            op(Instruction::POP),
             op(Instruction::RETURN),
         ]);
         assert_eq!(must_at(&maps, 6), Some(vec![0, 1, 2]));
@@ -1439,6 +1717,8 @@ mod tests {
             op(Instruction::YieldCoro),
             store(1),
             op(Instruction::InitTyped),
+            load(0),
+            op(Instruction::POP),
             op(Instruction::RETURN),
         ]);
         let entries = vec![("co".to_string(), 2)];
@@ -1468,7 +1748,7 @@ mod tests {
             op(Instruction::CodePtr).with_operand_u32(10),
             op(Instruction::MakeFn).with_operand_u32(1 | (1 << 16)),
             store(1),
-            konst(0),
+            load(0),
             op(Instruction::RETURN),
             op(Instruction::HALT),
             // closure frame: [capture, param]
@@ -1478,7 +1758,7 @@ mod tests {
         ]);
         // Enclosing MakeFn at 5: param 0 and the new closure at 1.
         assert_eq!(slots_at(&maps, 5), Some(vec![0, 1]));
-        // Closure MakeArray at 11: capture, param, array.
+        // Closure MakeArray at 11: capture, param, array (all in scope).
         assert_eq!(slots_at(&maps, 11), Some(vec![0, 1, 2]));
     }
 
@@ -1641,6 +1921,82 @@ mod tests {
         ]);
         assert_eq!(slots_at(&maps, 4), Some(vec![0, 1]));
         assert_eq!(must_at(&maps, 4), Some(vec![1]));
+    }
+
+    #[test]
+    fn local_overwritten_before_any_read_is_dropped() {
+        // [2] InitTyped [3] store 0 [4] InitTyped [5] store 1 [6] CONST 0
+        // [7] store 0 [8] load 1 [9] RETURN: at 4, slot 0 is written again
+        // (7) before any read.
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(0),
+            op(Instruction::InitTyped),
+            store(1),
+            konst(0),
+            store(0),
+            load(1),
+            op(Instruction::RETURN),
+        ]);
+        assert_eq!(slots_at(&maps, 4), Some(vec![1]));
+    }
+
+    #[test]
+    fn stale_loop_local_is_dropped_but_loop_reads_stay() {
+        // [2] NOOP [3] Seek 1 [4] load 0 [5] JMPF 11 [6] InitTyped
+        // [7] store 5 [8] load 5 [9] POP [10] JMP 3 [11] CONST 0 [12] RETURN
+        let maps = bind(&[
+            op(Instruction::NOOP),
+            op(Instruction::Seek).with_operand_u32(1),
+            load(0),
+            op(Instruction::JMPF).with_operand_u32(11),
+            op(Instruction::InitTyped),
+            store(5),
+            load(5),
+            op(Instruction::POP),
+            op(Instruction::JMP).with_operand_u32(3),
+            konst(0),
+            op(Instruction::RETURN),
+        ]);
+        let at = slots_at(&maps, 6).expect("safepoint row");
+        assert!(at.contains(&0), "the loop head reads the param: {at:?}");
+        assert!(at.contains(&1), "the new object is stored next: {at:?}");
+        assert!(!at.contains(&5), "last iteration's object is dead: {at:?}");
+    }
+
+    #[test]
+    fn word_a_seek_exposes_to_a_pop_stays_live() {
+        // [2] InitTyped [3] store 3 [4] InitTyped [5] Seek 4 [6] store 0
+        // [7] load 0 [8] RETURN: the STORE after `Seek 4` pops word 3.
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(3),
+            op(Instruction::InitTyped),
+            op(Instruction::Seek).with_operand_u32(4),
+            store(0),
+            load(0),
+            op(Instruction::RETURN),
+        ]);
+        assert!(slots_at(&maps, 4).expect("safepoint row").contains(&3));
+    }
+
+    #[test]
+    fn local_past_its_last_read_stays_until_it_is_overwritten() {
+        // [2] InitTyped [3] store 0 [4] load 0 [5] POP [6] InitTyped
+        // [7] store 1 [8] load 1 [9] RETURN: slot 0 is never read after 4,
+        // but nothing overwrites it before the return (a `gc::root` handle
+        // or an FFI buffer held only by a local must survive).
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(0),
+            load(0),
+            op(Instruction::POP),
+            op(Instruction::InitTyped),
+            store(1),
+            load(1),
+            op(Instruction::RETURN),
+        ]);
+        assert!(slots_at(&maps, 6).expect("safepoint row").contains(&0));
     }
 
 }
