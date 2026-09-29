@@ -231,8 +231,14 @@ impl Heap {
     {
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
+        // Write the header and the payload straight into the slot. Building a
+        // `GcData` on the stack first cost a second payload copy, and its
+        // misaligned read-back straddled the separately stored header bytes
+        // (a store-forwarding stall on every allocation).
         unsafe {
-            slot.as_ptr().write(GcData::new(data));
+            let p = slot.as_ptr();
+            ptr::addr_of_mut!((*p).header).write(GcHeader::new());
+            ptr::addr_of_mut!((*p).data).write(data);
         }
         let content = Gc::from_slot(slot);
         let object = map(content);
@@ -2696,14 +2702,20 @@ pub struct GcData<T> {
     data: T,
 }
 
+impl GcHeader {
+    const fn new() -> Self {
+        Self {
+            kind: Cell::new(0),
+            marked: Cell::new(false),
+            fresh: Cell::new(false),
+        }
+    }
+}
+
 impl<T> GcData<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            header: GcHeader {
-                kind: Cell::new(0),
-                marked: Cell::new(false),
-                fresh: Cell::new(false),
-            },
+            header: GcHeader::new(),
             data,
         }
     }
