@@ -10,28 +10,16 @@ class Node {
 }
 
 static let head: Option<Node> = Option::None;
-static let nodes: Option<Vec<Node>> = Option::None;
+static let nodes: Vec<Node> = Vec::new();
 static let count: int = 0;
 static let label: string = "static";
-
-// The registry Vec, created on first use (a static initializer cannot call).
-fn registry() -> Vec<Node> {
-    return match nodes {
-        Option::Some(v) => v,
-        Option::None => {
-            let v: Vec<Node> = Vec::new();
-            nodes = Option::Some(v);
-            v
-        },
-    };
-}
 
 fn fill(int n) {
     let i = 0;
     while i < n {
         let node = new Node(i, head);
         head = Option::Some(node);
-        registry().push(node);
+        nodes.push(node);
         count = count + 1;
         i = i + 1;
     }
@@ -52,8 +40,8 @@ test("static roots survive collections") {
         Option::None => -1,
     };
     assert(first == 9)?;
-    assert(len(registry()) == 510)?;
-    assert(registry()[499].v == 499)?;
+    assert(len(nodes) == 510)?;
+    assert(nodes[499].v == 499)?;
     assert(count == 510)?;
     assert(len(label) == 6)?;
 }

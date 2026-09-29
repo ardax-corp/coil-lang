@@ -169,3 +169,49 @@ fn default_run_compile_error_exits_without_out_hyc() {
     );
     cleanup(&cwd);
 }
+
+/// With a static initializer, the setup region's jump to `main` resolved
+/// through a first-wins label merge and could land on an earlier function
+/// whose optimized body reused `main`'s old label id (the recursive `fib`
+/// here), so `main` never ran and the program exited 0 silently.
+#[test]
+fn default_run_static_init_reaches_main() {
+    let bin = coil_bin();
+    let cwd = temp_cwd("static_main");
+    let entry = cwd.join("static_main.hy");
+    std::fs::write(
+        &entry,
+        r#"use io::{stdout};
+use io::sync::{write_all};
+use string::{to_bytes};
+
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+static let k: int = 4;
+
+fn main() {
+    if fib(k) == 3 {
+        write_all(stdout(), to_bytes("main ran"))?;
+    }
+}
+"#,
+    )
+    .expect("write entry");
+
+    let out = coil_on_entry(&bin, &cwd, &entry)
+        .output()
+        .expect("spawn coil");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("main ran"),
+        "status={:?} stdout={stdout} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    cleanup(&cwd);
+}

@@ -13,27 +13,15 @@ class Node {
 }
 
 static let head: Option<Node> = Option::None;
-static let nodes: Option<Vec<Node>> = Option::None;
+static let nodes: Vec<Node> = Vec::new();
 static let total: int = 0;
-
-// The registry Vec, created on first use (a static initializer cannot call).
-fn registry() -> Vec<Node> {
-    return match nodes {
-        Option::Some(v) => v,
-        Option::None => {
-            let v: Vec<Node> = Vec::new();
-            nodes = Option::Some(v);
-            v
-        },
-    };
-}
 
 fn fill(int n) {
     let i = 0;
     while i < n {
         let node = new Node(i, head);
         head = Option::Some(node);
-        registry().push(node);
+        nodes.push(node);
         i = i + 1;
     }
 }
@@ -42,13 +30,13 @@ fn fill(int n) {
 fn thin() {
     let kept: Vec<Node> = Vec::new();
     let j = 0;
-    while j < len(registry()) {
+    while j < len(nodes) {
         if j % 2 == 0 {
-            kept.push(registry()[j]);
+            kept.push(nodes[j]);
         }
         j = j + 1;
     }
-    nodes = Option::Some(kept);
+    nodes = kept;
     head = Option::None;
 }
 
@@ -68,8 +56,8 @@ fn main() {
             junk = junk + t.v - t.v + 1;
         }
         let i = 0;
-        while i < len(registry()) {
-            total = total + registry()[i].v % 7;
+        while i < len(nodes) {
+            total = total + nodes[i].v % 7;
             i = i + 1;
         }
         settle();
