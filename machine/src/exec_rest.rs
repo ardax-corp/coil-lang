@@ -763,8 +763,7 @@ impl<const S: usize> Machine<S> {
                     let target_addr = target_val.raw() as u64;
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
                         Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
-                            Some(crate::memory::Member::Value(v)) => v,
-                            Some(crate::memory::Member::Object(o)) => Value::from(o.addr()),
+                            Some(v) => v,
                             None => {
                                 *ip_out = ip;
                     *sp_out = sp;
@@ -789,8 +788,7 @@ impl<const S: usize> Machine<S> {
                         {
                             let idx = slot as usize;
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
-                            gc.as_mut()
-                                .set_slot(idx, Self::value_as_member(&self.heap, value));
+                            gc.as_mut().set_slot(idx, value);
                         } else {
                             *ip_out = ip;
                     *sp_out = sp;
@@ -1161,15 +1159,8 @@ impl<const S: usize> Machine<S> {
                         Some(Object::Instance(gc)) => {
                             if let Some(n) = gc.as_ref().slot_len() {
                                 promise!(field_index < n);
-                                let member = gc
-                                    .as_ref()
-                                    .slot(field_index)
-                                    .unwrap_or(Member::Value(Value::default()));
-                                let value = match member {
-                                    Member::Value(v) => v,
-                                    Member::Object(o) => Value::from(o.addr()),
-                                };
-                                self.stack.push(value);
+                                self.stack
+                                    .push(gc.as_ref().slot(field_index).unwrap_or_default());
                             } else {
                                 self.stack.push(Value::default());
                             }

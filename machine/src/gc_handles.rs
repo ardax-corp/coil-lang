@@ -168,7 +168,7 @@ mod tests {
         let (leaf, _) = heap.alloc(ObjString::from("leaf"), Object::String);
         let w = host_gc_weak(&mut heap, &[Value::from(leaf.addr())]);
         let (holder, mut holder_gc) = heap.alloc(
-            ObjInstance::with_slots(1, vec![Member::Value(Value::from(0i64))]),
+            ObjInstance::with_slots(1, vec![Value::from(0i64)]),
             Object::Instance,
         );
         let roots = [holder.addr(), w.raw() as u64];
@@ -179,7 +179,7 @@ mod tests {
         let opt = host_gc_upgrade(&mut heap, &[w]);
         let got = option_payload(&heap, opt).expect("weak not cleared yet");
         assert_eq!(got.raw() as u64, leaf.addr());
-        holder_gc.as_mut().set_slot(0, Member::Object(leaf));
+        holder_gc.as_mut().set_slot(0, Value::from(leaf.addr()));
 
         heap.remark_roots(&roots);
         while !heap.mark_quantum(usize::MAX) {}

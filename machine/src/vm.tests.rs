@@ -5329,17 +5329,17 @@
     }
 
     #[test]
-    fn typed_instance_three_fields_spill() {
+    fn typed_instance_five_fields_spill() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
-            Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(9, 3)),
+            Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(9, 5)),
             Byte::new(Instruction::HALT),
         ]);
         let addr = vm.pop().raw() as u64;
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Instance(gc)) => {
                 assert!(!gc.as_ref().slots_are_inline());
-                assert_eq!(gc.as_ref().slot_len(), Some(3));
+                assert_eq!(gc.as_ref().slot_len(), Some(5));
             }
             _ => panic!("expected spilled typed instance"),
         }
