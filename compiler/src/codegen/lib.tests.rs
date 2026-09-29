@@ -1400,10 +1400,10 @@ fn construct_emits_make_enum_with_correct_tag_and_arity() {
     // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
     let make_enum = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum))
+        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
         .expect("expected at least one MakeEnum in the bytecode");
     let tag = (make_enum.operand_u32() >> 16) as u16;
-    let arity = (make_enum.operand_u32() & 0xFFFF) as u16;
+    let arity = make_enum.make_arity() as u16;
     assert_eq!(tag, 1, "expected tag=1 (Some)");
     assert_eq!(arity, 1, "expected arity=1 for Some(int)");
 }
@@ -2679,10 +2679,10 @@ fn main() {
     // Verify MAKE_ENUM has the right tag and arity.
     let make_enum = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum))
+        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
         .expect("expected MAKE_ENUM in the bytecode");
     let tag = (make_enum.operand_u32() >> 16) as u16;
-    let arity = (make_enum.operand_u32() & 0xFFFF) as u16;
+    let arity = make_enum.make_arity() as u16;
     assert_eq!(tag, 0, "expected tag=0 for the only variant Foo");
     assert_eq!(arity, 3, "expected arity=3 for Foo {{ x, y, z }}");
 }
@@ -2700,10 +2700,10 @@ fn record_construct_one_field_emits_correct_bytecode() {
     // arity (lower 16).
     let make_enum = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum))
+        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
         .expect("expected at least one MAKE_ENUM");
     let tag = (make_enum.operand_u32() >> 16) as u16;
-    let arity = (make_enum.operand_u32() & 0xFFFF) as u16;
+    let arity = make_enum.make_arity() as u16;
     assert_eq!(tag, 0);
     assert_eq!(arity, 1, "expected arity=1 for Foo {{ x }}");
 
@@ -2779,7 +2779,7 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
     // MAKE_ENUM, even for Unit, with arity=0).
     let make_enums: Vec<_> = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeEnum))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
         .collect();
     assert_eq!(
         make_enums.len(),
@@ -2793,7 +2793,7 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
         .iter()
         .map(|b| {
             let tag = (b.operand_u32() >> 16) as u16;
-            let arity = (b.operand_u32() & 0xFFFF) as u16;
+            let arity = b.make_arity() as u16;
             (tag, arity)
         })
         .collect();
@@ -6518,7 +6518,7 @@ fn user_typeclass_constrained_call_emits_dict_tuple_and_bumps_arity() {
 
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "expected MakeTuple for dict emission; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -6540,7 +6540,7 @@ fn two_user_typeclass_constraints_emit_two_dicts_and_arity_plus_two() {
 
     let make_tuple_count = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
         .count();
     assert!(
         make_tuple_count >= 2,
@@ -6563,7 +6563,7 @@ fn builtin_num_constraint_emits_dict_tuple() {
 
     let make_tuple_count = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
         .count();
     assert_eq!(
         make_tuple_count, 0,
@@ -6592,7 +6592,7 @@ fn ground_user_typeclass_call_uses_dict_not_mono() {
 
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "ground user-trait CALL must not pass a dict; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -6660,7 +6660,7 @@ fn user_trait_ground_method_call_vs_generic_dictionary() {
     assert!(
         generic
             .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "PolyFn escape of a user-trait generic must pass a dict; ops={:?}",
         generic.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -6676,7 +6676,7 @@ fn show_bound_ground_call_uses_dictionary_not_mono() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "Show ground CALL must not pass a dict; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -6728,7 +6728,7 @@ fn num_plus_show_ground_call_keeps_dictionary() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "Num+Show ground CALL must not pass dicts; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -6745,7 +6745,7 @@ fn omitted_default_method_dict_slot_has_real_target() {
     );
     let tuple_index = bc
         .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple))
+        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
         .expect("default method dictionary");
     assert!(tuple_index > 0);
     assert!(
@@ -6771,7 +6771,7 @@ fn dictionary_entries_emit_code_ptr() {
     );
     let tuple_pos = bc
         .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple))
+        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
         .expect("expected dict MakeTuple");
     assert!(
         matches!(bc[tuple_pos - 1].bytecode(), Instruction::CodePtr),
@@ -6997,7 +6997,7 @@ fn main() { \
         .expect("expected FfiInvoke");
     let make_tuple_idx = bc[..ffi_idx]
         .iter()
-        .rposition(|b| matches!(b.bytecode(), Instruction::MakeTuple))
+        .rposition(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
         .expect("expected MakeTuple before FfiInvoke");
     // Callback fn arg is the first tuple element → last CodePtr before
     // MakeTuple (args are emitted bottom-to-top; doubler then 21).
@@ -7306,7 +7306,7 @@ fn main() {
     );
     let heap_ops = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::Index | Instruction::MakeTuple))
+        .filter(|b| matches!(b.bytecode(), Instruction::Index | Instruction::MakeTuple | Instruction::MakeTupleK))
         .count();
     assert_eq!(heap_ops, 0, "literal destructure should need no tuple or Index");
 }
@@ -8112,7 +8112,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "in-frame Some/None match must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -8142,7 +8142,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "escaping Some at a call must still box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -8168,7 +8168,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "unary Option<int> bind of a two-slot CALL must not box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -8933,7 +8933,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "nested Option must stay boxed; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9009,7 +9009,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "ground Option<class> None must niche as CONST 0; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9036,7 +9036,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "escaping Option<class> Some must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9070,7 +9070,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "Option<int> bind+match must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9090,7 +9090,7 @@ fn gc_churn_option_node_does_not_make_enum() {
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "gc_churn Option<Node> must not allocate ObjEnum Some; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9128,7 +9128,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "Result<class, class> Ok must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9163,7 +9163,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "Result<int, int> bind+match must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9199,7 +9199,7 @@ fn main() {
     assert!(
         bc.iter().any(|b| matches!(
             b.bytecode(),
-            Instruction::MakeEnum | Instruction::MakeEnumReturn
+            Instruction::MakeEnum | Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK
         )),
         "Result with an immediate payload must stay boxed; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
@@ -9228,7 +9228,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "`?` on two-slot Result must not box ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9320,7 +9320,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "return e? must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9361,7 +9361,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "escaping two-slot bind must box at the call; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9373,7 +9373,7 @@ fn result_try_churn_does_not_make_enum() {
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "result_try_churn must not allocate ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9409,7 +9409,7 @@ fn result_heap_churn_does_not_make_enum() {
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "result_heap_churn must not allocate ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9449,7 +9449,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "destructure of two-slot product must not box ObjTuple; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9478,7 +9478,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "bind+index of two-slot product must not box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9509,7 +9509,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "escaping two-slot product must box at the heap consumer; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9531,7 +9531,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "mixed-heap product must stay boxed; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9559,7 +9559,7 @@ fn pair_int_churn_stays_two_slot() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
         "pair_int_churn must not allocate ObjTuple; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9630,7 +9630,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "Option<int> `?` chain must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9686,7 +9686,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeTuple)),
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeTuple | Instruction::MakeTupleK)),
         "try+product convoy must not box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );

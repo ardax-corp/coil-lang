@@ -178,8 +178,10 @@ fn promote_barrier(op: &IlOp) -> bool {
                     | Instruction::GetField
                     | Instruction::SetField
                     | Instruction::MakeTuple
+                    | Instruction::MakeTupleK
                     | Instruction::MakeArray
                     | Instruction::MakeEnum
+                    | Instruction::MakeEnumK
                     | Instruction::BoxValue
                     | Instruction::FfiInvoke
             )

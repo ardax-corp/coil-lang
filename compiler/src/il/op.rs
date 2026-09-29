@@ -178,6 +178,8 @@ pub enum IlOp {
     /// `MakeTuple` — pop `arity` values, push tuple.
     MakeTuple {
         arity: u32,
+        /// Element word kinds (`common::pack_word_kinds`); `0` = unknown.
+        kinds: u8,
         loc: DebugLoc,
     },
     /// `MakeArray` — pop `arity` values, push array.
@@ -189,6 +191,8 @@ pub enum IlOp {
     MakeEnum {
         tag: u16,
         arity: u16,
+        /// Payload word kinds (`common::pack_word_kinds`); `0` = unknown.
+        kinds: u8,
         loc: DebugLoc,
     },
     BoxValue {
@@ -391,17 +395,19 @@ impl IlOp {
                 slot: byte.operand_u32(),
                 loc,
             },
-            Instruction::MakeTuple => Self::MakeTuple {
-                arity: byte.operand_u32(),
+            Instruction::MakeTuple | Instruction::MakeTupleK => Self::MakeTuple {
+                arity: byte.make_arity(),
+                kinds: byte.make_kinds(),
                 loc,
             },
             Instruction::MakeArray => Self::MakeArray {
                 arity: byte.operand_u32(),
                 loc,
             },
-            Instruction::MakeEnum => Self::MakeEnum {
+            Instruction::MakeEnum | Instruction::MakeEnumK => Self::MakeEnum {
                 tag: byte.operand_u16(0),
-                arity: byte.operand_u16(1),
+                arity: byte.make_arity() as u16,
+                kinds: byte.make_kinds(),
                 loc,
             },
             Instruction::BoxValue => Self::BoxValue {
@@ -495,14 +501,29 @@ impl IlOp {
             IlOp::StoreIndexPinUnchecked { slot, .. } => {
                 Byte::new(Instruction::StoreIndexPinUnchecked).with_operand_u32(*slot)
             }
-            IlOp::MakeTuple { arity, .. } => {
-                Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
+            IlOp::MakeTuple { arity, kinds, .. } => {
+                if *kinds != 0 && *arity <= 0xFF {
+                    Byte::new(Instruction::MakeTupleK)
+                        .with_operand_u32((u32::from(*kinds) << 8) | *arity)
+                } else {
+                    Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
+                }
             }
             IlOp::MakeArray { arity, .. } => {
                 Byte::new(Instruction::MakeArray).with_operand_u32(*arity)
             }
-            IlOp::MakeEnum { tag, arity, .. } => {
-                Byte::new(Instruction::MakeEnum).with_operands_u16([*tag, *arity])
+            IlOp::MakeEnum {
+                tag, arity, kinds, ..
+            } => {
+                if *kinds != 0 && *arity <= 0xFF {
+                    Byte::new(Instruction::MakeEnumK).with_make_enum_kinds(
+                        *tag,
+                        *arity as u8,
+                        *kinds,
+                    )
+                } else {
+                    Byte::new(Instruction::MakeEnum).with_operands_u16([*tag, *arity])
+                }
             }
             IlOp::BoxValue { tag, .. } => Byte::new(Instruction::BoxValue).with_operand_u32(*tag),
             IlOp::UnboxValue { tag, .. } => {
@@ -632,6 +653,7 @@ impl IlOp {
                     | Instruction::ConstReturnImm
                     | Instruction::BinReturn
                     | Instruction::MakeEnumReturn
+                    | Instruction::MakeEnumReturnK
                     | Instruction::TailCall
             )
         )
@@ -1137,6 +1159,7 @@ mod tests {
                 loc: DebugLoc::unknown(),
             },
             IlOp::MakeTuple {
+                kinds: 0,
                 arity: 2,
                 loc: DebugLoc::unknown(),
             },
@@ -1145,6 +1168,7 @@ mod tests {
                 loc: DebugLoc::unknown(),
             },
             IlOp::MakeEnum {
+                kinds: 0,
                 tag: 9,
                 arity: 1,
                 loc: DebugLoc::unknown(),

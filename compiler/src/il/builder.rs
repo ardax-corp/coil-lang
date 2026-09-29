@@ -229,7 +229,13 @@ impl IlBuilder {
     }
 
     pub fn push_make_tuple(&mut self, arity: u32) {
+        self.push_make_tuple_kinds(arity, 0);
+    }
+
+    /// `MakeTuple` with element word kinds (`common::pack_word_kinds`).
+    pub fn push_make_tuple_kinds(&mut self, arity: u32, kinds: u8) {
         self.push_op(IlOp::MakeTuple {
+            kinds,
             arity,
             loc: DebugLoc::unknown(),
         });
@@ -243,7 +249,13 @@ impl IlBuilder {
     }
 
     pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
+        self.push_make_enum_kinds(tag, arity, 0);
+    }
+
+    /// `MakeEnum` with payload word kinds (`common::pack_word_kinds`).
+    pub fn push_make_enum_kinds(&mut self, tag: u16, arity: u16, kinds: u8) {
         self.push_op(IlOp::MakeEnum {
+            kinds,
             tag,
             arity,
             loc: DebugLoc::unknown(),

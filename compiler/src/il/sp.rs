@@ -190,6 +190,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::DenseStoreIndex
         | Instruction::DenseArrayLen
         | Instruction::DenseMake
+        | Instruction::DenseMakeK
         | Instruction::DenseArrayPush
         | Instruction::DenseFieldLoad
         | Instruction::DenseFieldStore
@@ -209,7 +210,9 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
         Instruction::ReturnPair => Some(-2),
         Instruction::BinReturn => Some(-2),
-        Instruction::MakeEnumReturn => Some(-(byte.operand_u16(1) as i32)),
+        Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK => {
+            Some(-(byte.make_arity() as i32))
+        }
         Instruction::HALT | Instruction::NOOP => Some(0),
         Instruction::JMP => Some(0),
         Instruction::JMPF | Instruction::JMPT => Some(-1),
@@ -229,6 +232,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::CastIntToBool
         | Instruction::CastBoolToInt => Some(0),
         Instruction::MakeTuple | Instruction::MakeArray => Some(1 - byte.operand_u32() as i32),
+        Instruction::MakeTupleK => Some(1 - byte.make_arity() as i32),
         Instruction::MakeDict => {
             let arity = (byte.operand_u32() & 0xFFFF) as i32;
             Some(1 - 2 * arity)
@@ -242,7 +246,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
             }
         }
         Instruction::DoneCoro => Some(0),
-        Instruction::MakeEnum => Some(1 - byte.operand_u16(1) as i32),
+        Instruction::MakeEnum | Instruction::MakeEnumK => Some(1 - byte.make_arity() as i32),
         Instruction::CALL => {
             let (arity, _) = byte.call_parts();
             Some(byte.call_ret_words() as i32 - arity as i32)
@@ -660,6 +664,7 @@ mod tests {
         assert_eq!(stack_delta(&IlOp::Index { loc: loc() }), Some(-1));
         assert_eq!(
             stack_delta(&IlOp::MakeTuple {
+                kinds: 0,
                 arity: 3,
                 loc: loc(),
             }),
@@ -674,6 +679,7 @@ mod tests {
         );
         assert_eq!(
             stack_delta(&IlOp::MakeEnum {
+                kinds: 0,
                 tag: 1,
                 arity: 0,
                 loc: loc(),
@@ -682,6 +688,7 @@ mod tests {
         );
         assert_eq!(
             stack_delta(&IlOp::MakeEnum {
+                kinds: 0,
                 tag: 1,
                 arity: 2,
                 loc: loc(),

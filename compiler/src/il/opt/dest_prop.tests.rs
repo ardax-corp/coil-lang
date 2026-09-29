@@ -47,6 +47,7 @@ fn dest_prop_forwards_load_across_make_enum() {
         store(3),
         load(3),
         IlOp::MakeEnum {
+            kinds: 0,
             tag: 1,
             arity: 1,
             loc: loc(),
@@ -227,6 +228,7 @@ fn dest_prop_then_dead_store_drops_unread_copy() {
         store(3),
         load(3),
         IlOp::MakeEnum {
+            kinds: 0,
             tag: 1,
             arity: 1,
             loc: loc(),

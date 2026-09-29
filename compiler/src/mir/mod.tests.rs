@@ -1623,7 +1623,7 @@ fn main() {
             .collect::<Vec<_>>()
     );
     assert!(
-        !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+        !bc.iter().any(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "match+call must not box; opcodes={:?}",
         bc.iter()
             .map(|b| b.bytecode().mnemonic())
@@ -1795,7 +1795,7 @@ fn main() {
             .collect::<Vec<_>>()
     );
     assert!(
-        !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+        !bc.iter().any(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "self two-slot must not box; opcodes={:?}",
         bc.iter()
             .map(|b| b.bytecode().mnemonic())
@@ -2181,7 +2181,7 @@ fn two_slot_result_lowers_to_lir() {
             op,
             IlOp::Byte { byte, .. } if matches!(
                 *byte.bytecode(),
-                Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum
+                Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum | Instruction::MakeEnumK
             )
         )),
         "P3 must not emit dense or MakeEnum"
@@ -2452,7 +2452,7 @@ fn i2_niche_option_match_enters_lir() {
             op,
             IlOp::Byte { byte, .. } if matches!(
                 *byte.bytecode(),
-                Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum
+                Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum | Instruction::MakeEnumK
             )
         )),
         "I2 must stay MIR→LIR"
@@ -3067,11 +3067,11 @@ fn main() {
     let body = &bc[start..end];
     let fused = body
         .iter()
-        .filter(|b| *b.bytecode() == Instruction::MakeEnumReturn)
+        .filter(|b| matches!(*b.bytecode(), Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK))
         .count();
     let leftover = body
         .iter()
-        .filter(|b| *b.bytecode() == Instruction::MakeEnum)
+        .filter(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
         .count();
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
     assert_eq!(
@@ -4818,7 +4818,7 @@ fn main() {
     let mut p = crate::Pipeline::new();
     let (bc, constants) = p.compile_src(src).expect("compile result helper");
     assert!(
-        !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+        !bc.iter().any(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "two-slot Result must not box; opcodes={:?}",
         bc.iter()
             .map(|b| b.bytecode().mnemonic())
@@ -4860,7 +4860,7 @@ fn main() {
     let mut p = crate::Pipeline::new();
     let (bc, constants) = p.compile_src(src).expect("compile Q8 local match");
     assert!(
-        !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+        !bc.iter().any(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
         "local Option<int> match must stay two-slot; opcodes={:?}",
         bc.iter()
             .map(|b| b.bytecode().mnemonic())

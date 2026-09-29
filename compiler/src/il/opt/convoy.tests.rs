@@ -46,6 +46,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::MakeTuple {
+                kinds: 0,
                 arity: 2,
                 loc: common::DebugLoc::unknown(),
             },
@@ -1156,6 +1157,7 @@
             IlOp::Const { imm: 1, loc },
             IlOp::Const { imm: 2, loc },
             IlOp::MakeEnum {
+                kinds: 0,
                 tag: 3,
                 arity: 2,
                 loc,
@@ -1176,6 +1178,7 @@
         let mut ops = vec![
             IlOp::Const { imm: 42, loc },
             IlOp::MakeEnum {
+                kinds: 0,
                 tag: 3,
                 arity: 1,
                 loc,
@@ -1197,6 +1200,7 @@
         let mut ops = vec![
             IlOp::Const { imm: 42, loc },
             IlOp::MakeEnum {
+                kinds: 0,
                 tag: 3,
                 arity: 1,
                 loc,
@@ -1219,6 +1223,7 @@
         let mut ops = vec![
             IlOp::Const { imm: 42, loc },
             IlOp::MakeEnum {
+                kinds: 0,
                 tag: 1,
                 arity: 1,
                 loc,

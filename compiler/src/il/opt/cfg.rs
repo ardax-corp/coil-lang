@@ -148,6 +148,7 @@ pub(super) fn is_return_terminator(op: &IlOp) -> bool {
                 | Instruction::ConstReturnImm
                 | Instruction::BinReturn
                 | Instruction::MakeEnumReturn
+                | Instruction::MakeEnumReturnK
         )
     )
 }

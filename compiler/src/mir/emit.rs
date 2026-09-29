@@ -1078,14 +1078,35 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                     slots.reverse();
                 }
                 let base = gather_base(out, &slots, scratch, loc)?;
-                out.push(byte(
-                    Byte::new(Instruction::DenseMake).with_dense_abc(
-                        make_kind,
-                        regs[dest.index()],
-                        arity,
-                        base,
+                // Declaration-order word kinds from the element types.
+                let kinds = match kind {
+                    MirAllocKind::Enum { .. } => common::pack_word_kinds(
+                        elems.iter().rev().map(|e| mir_word_kind(func.ty(*e))),
                     ),
-                ));
+                    MirAllocKind::Tuple => {
+                        common::pack_word_kinds(elems.iter().map(|e| mir_word_kind(func.ty(*e))))
+                    }
+                    _ => 0,
+                };
+                if kinds != 0 {
+                    let idx = intern_pool(pool, common::pack_dense_make_k(base, arity, kinds))?;
+                    out.push(byte(
+                        Byte::new(Instruction::DenseMakeK).with_dense_make_k(
+                            make_kind,
+                            regs[dest.index()],
+                            idx,
+                        ),
+                    ));
+                } else {
+                    out.push(byte(
+                        Byte::new(Instruction::DenseMake).with_dense_abc(
+                            make_kind,
+                            regs[dest.index()],
+                            arity,
+                            base,
+                        ),
+                    ));
+                }
             } else if let Some(live) = object_make_dest_reg(*kind, *dest, func, regs) {
                 if let Some(op) = dense_make_object(*kind, live, loc)? {
                     out.push(op);
@@ -2413,6 +2434,15 @@ fn emit_dense_push(
     Ok(())
 }
 
+/// `common::WORD_*` of a heap word of this MIR type.
+fn mir_word_kind(ty: MirTy) -> u8 {
+    match ty {
+        MirTy::I32 | MirTy::I64 | MirTy::F32 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
+        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
+        MirTy::Value | MirTy::Bottom => common::WORD_UNKNOWN,
+    }
+}
+
 fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
     match kind {
         MirAllocKind::Array => Ok(Some(dense::MAKE_ARRAY)),
@@ -2499,12 +2529,12 @@ pub(super) fn il_for_alloc(
 ) -> Result<IlOp, LowerError> {
     match kind {
         MirAllocKind::Array => Ok(IlOp::MakeArray { arity, loc }),
-        MirAllocKind::Tuple => Ok(IlOp::MakeTuple { arity, loc }),
+        MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds: 0, arity, loc }),
         MirAllocKind::Enum { tag } => {
             let tag = u16::try_from(tag).map_err(|_| LowerError::Refused("enum tag".into()))?;
             let arity =
                 u16::try_from(arity).map_err(|_| LowerError::Refused("enum arity".into()))?;
-            Ok(IlOp::MakeEnum { tag, arity, loc })
+            Ok(IlOp::MakeEnum { kinds: 0, tag, arity, loc })
         }
         MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(
             Byte::new(Instruction::InitTyped)

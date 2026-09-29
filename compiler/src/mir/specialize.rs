@@ -419,7 +419,10 @@ fn count_make_enum(ops: &[IlOp]) -> usize {
             IlOp::Byte { byte, .. } => {
                 matches!(
                     *byte.bytecode(),
-                    Instruction::MakeEnum | Instruction::MakeEnumReturn
+                    Instruction::MakeEnum
+                        | Instruction::MakeEnumReturn
+                        | Instruction::MakeEnumK
+                        | Instruction::MakeEnumReturnK
                 )
             }
             _ => false,
@@ -469,8 +472,11 @@ fn is_stack_heap_op(inst: Instruction) -> bool {
             | Instruction::ArrayLen
             | Instruction::MakeArray
             | Instruction::MakeTuple
+            | Instruction::MakeTupleK
             | Instruction::MakeEnum
+            | Instruction::MakeEnumK
             | Instruction::MakeEnumReturn
+            | Instruction::MakeEnumReturnK
             | Instruction::InitTyped
     )
 }
