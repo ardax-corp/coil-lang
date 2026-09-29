@@ -1936,6 +1936,8 @@ impl<const S: usize> Machine<S> {
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
         self.precise_frames = Arc::clone(&program.precise_frames);
+        self.heap
+            .set_class_word_kinds(Arc::clone(&program.class_word_kinds));
         self.thread_program = Some(program);
     }
 
@@ -2045,6 +2047,7 @@ impl<const S: usize> Machine<S> {
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
             precise_frames: Arc::clone(&self.precise_frames),
+            class_word_kinds: self.heap.class_word_kinds_table(),
         }));
     }
 
