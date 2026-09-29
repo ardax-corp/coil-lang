@@ -274,6 +274,29 @@ pub struct Slab {
     /// Entry of the last chunk that contained a lookup. Entries never move,
     /// so one word stays valid and a racing update cannot tear it.
     last: AtomicPtr<Chunk>,
+    /// Per chunk index: pages given back (the slot walk skips them so it
+    /// does not fault zero pages back in).
+    released_mask: Vec<bool>,
+}
+
+/// Position of a walk over every slot of the resident chunks (sweep, heap
+/// iteration). A slot is live iff its header `kind != 0`: chunks are carved
+/// whole and keep their size class, and a freed slot is poisoned.
+///
+/// The walk runs top-down (last chunk first, high slots first), so a sweep
+/// pushes freed slots high-to-low and the LIFO free list hands out the
+/// lowest ones first: survivors pack low and high chunks can go idle and be
+/// released. Chunks mapped after the walk starts are not visited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlotCursor {
+    started: bool,
+    /// Current chunk index; the next chunk entered is `chunk - 1`.
+    chunk: usize,
+    /// Slots of the current chunk not returned yet.
+    remaining: u64,
+    /// Next slot address to return (descending).
+    next: u64,
+    slot_size: u64,
 }
 
 impl Slab {
@@ -284,6 +307,72 @@ impl Slab {
             released: Vec::new(),
             cycles_since_scan: 0,
             last: AtomicPtr::new(std::ptr::null_mut()),
+            released_mask: Vec::new(),
+        }
+    }
+
+    fn set_released(&mut self, chunk: usize, released: bool) {
+        if self.released_mask.len() <= chunk {
+            self.released_mask.resize(chunk + 1, false);
+        }
+        self.released_mask[chunk] = released;
+    }
+
+    /// Next slot address of the walk, or `None` past the last chunk. Chunks
+    /// mapped after the walk started are visited too.
+    #[inline]
+    pub fn next_slot(&self, cur: &mut SlotCursor) -> Option<u64> {
+        if cur.remaining > 0 {
+            let addr = cur.next;
+            cur.next = cur.next.wrapping_sub(cur.slot_size);
+            cur.remaining -= 1;
+            return Some(addr);
+        }
+        self.enter_next_chunk(cur)
+    }
+
+    /// True when this walk will not visit `addr` any more: it already
+    /// returned it, or `addr` lies in a chunk mapped after the walk started.
+    pub fn walk_passed(&self, cur: &SlotCursor, addr: u64) -> bool {
+        if !cur.started {
+            return false;
+        }
+        let Some(i) = self.chunks.position(addr) else {
+            return false;
+        };
+        i > cur.chunk || (i == cur.chunk && (cur.remaining == 0 || addr > cur.next))
+    }
+
+    #[inline(never)]
+    fn enter_next_chunk(&self, cur: &mut SlotCursor) -> Option<u64> {
+        if !cur.started {
+            cur.started = true;
+            cur.chunk = self.chunks.len();
+        }
+        loop {
+            if cur.chunk == 0 {
+                return None;
+            }
+            cur.chunk -= 1;
+            let i = cur.chunk;
+            let Some(c) = self.chunks.get(i) else {
+                continue;
+            };
+            if self.released_mask.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let base = c.ptr as u64;
+            let size = u64::from(c.meta.slot_size);
+            let first = base + u64::from(c.meta.first_off);
+            let slots = (base + CHUNK as u64 - first) / size;
+            if slots == 0 {
+                continue;
+            }
+            let top = first + (slots - 1) * size;
+            cur.slot_size = size;
+            cur.remaining = slots - 1;
+            cur.next = top.wrapping_sub(size);
+            return Some(top);
         }
     }
 
@@ -435,6 +524,7 @@ impl Slab {
             *left -= 1;
             release_pages(c.ptr, CHUNK);
             release[i] = true;
+            self.set_released(i, true);
             released_bytes += CHUNK;
             match self.released.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, list)) => list.push(i),
@@ -466,6 +556,7 @@ impl Slab {
         {
             // Same size class, so the table's meta still describes it.
             let ptr = c.ptr;
+            self.set_released(i, false);
             return self.carve_slots(ptr, slot_size, align, false);
         }
         let ptr = map_chunk(CHUNK);
