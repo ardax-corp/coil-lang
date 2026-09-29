@@ -40,10 +40,12 @@ pub struct Heap {
     /// Heap bytes when the current sweep started (survival for the next budget).
     gc_sweep_start_bytes: usize,
     strings: Table<()>,
-    head: Option<Object>,
     slab: Slab,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
     live_count: usize,
+    /// Live `Weak` objects, so [`Self::clear_dead_weaks`] can skip its heap
+    /// walk (weak handles are rare).
+    weak_count: usize,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
     /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
@@ -57,9 +59,7 @@ pub struct Heap {
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
-    gc_sweep_cursor: Option<Object>,
-    /// Predecessor of [`Self::gc_sweep_cursor`] for intrusive unlink.
-    gc_sweep_prev: Option<Object>,
+    gc_sweep_cursor: Option<super::slab::SlotCursor>,
     /// CString arena for the current FFI invoke (reset after each call).
     ffi_strings: Vec<std::ffi::CString>,
     /// Layer A steal epoch: no collect; `alloc` takes [`Self::alloc_lock`].
@@ -83,9 +83,9 @@ impl Default for Heap {
             gc_growth_factor: GC_GROWTH_FACTOR,
             gc_sweep_start_bytes: 0,
             strings: Table::default(),
-            head: None,
             slab: Slab::new(),
             live_count: 0,
+            weak_count: 0,
             immortal_enums: HashMap::default(),
             unit_enum: None,
             gc_gray: Vec::new(),
@@ -94,7 +94,6 @@ impl Default for Heap {
             gc_dangling_strings: Vec::new(),
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
-            gc_sweep_prev: None,
             ffi_strings: Vec::new(),
             epoch_stw: false,
             alloc_lock: ptr::null(),
@@ -229,22 +228,28 @@ impl Heap {
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
         unsafe {
-            slot.as_ptr().write(GcData::new(self.head, data));
+            slot.as_ptr().write(GcData::new(data));
         }
         let content = Gc::from_slot(slot);
         let object = map(content);
         content.set_kind(object.kind());
         let size = object.size();
-        self.head = Some(object);
         self.alloc_bytes += size;
         self.live_count += 1;
+        if matches!(object, Object::Weak(_)) {
+            self.weak_count += 1;
+        }
         // Objects allocated while a cycle is open (finalizers) are black.
         if self.gc_phase == GcPhase::Marking {
             let _ = content.mark();
-        } else if self.gc_phase == GcPhase::Sweeping && self.gc_sweep_prev.is_none() {
-            // `head == cursor` here; unlinking the cursor must patch this
-            // object's `next`, not overwrite `head` (which would drop it).
-            self.gc_sweep_prev = Some(object);
+        } else if self.gc_phase == GcPhase::Sweeping
+            && let Some(cur) = &self.gc_sweep_cursor
+            && !self.slab.walk_passed(cur, object.addr())
+        {
+            // Ahead of the sweep cursor: the sweep keeps (and clears) a
+            // `fresh` object instead of freeing an unmarked newcomer. Slots
+            // behind it (most reuse, freed by this sweep) need no tag.
+            content.set_fresh();
         }
         crate::vm::note_heap_alloc();
         debug_assert!(
@@ -337,8 +342,7 @@ impl Heap {
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_prev = None;
-        self.gc_sweep_cursor = self.head;
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
         self.finish_sweep();
     }
 
@@ -442,8 +446,7 @@ impl Heap {
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_prev = None;
-        self.gc_sweep_cursor = self.head;
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
     }
 
     /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
@@ -477,23 +480,31 @@ impl Heap {
         self.finish_sweep_cycle();
     }
 
+    /// Visit the next object (free slots are skipped): free it if unmarked,
+    /// unmark it if marked, and let one allocated during this sweep
+    /// (`fresh`) through.
     fn sweep_one(&mut self) {
-        let Some(curr_ref) = self.gc_sweep_cursor else {
+        let Some(mut cur) = self.gc_sweep_cursor else {
             return;
         };
-        let next = curr_ref.get_next();
-        if curr_ref.is_marked() {
-            curr_ref.unmark();
-            self.gc_sweep_prev = self.gc_sweep_cursor;
-            self.gc_sweep_cursor = next;
-        } else {
-            unsafe { self.dealloc(curr_ref) };
-            self.gc_sweep_cursor = next;
-            if let Some(prev_ref) = self.gc_sweep_prev {
-                prev_ref.set_next(next);
-            } else {
-                self.head = self.gc_sweep_cursor;
+        let obj = loop {
+            let Some(addr) = self.slab.next_slot(&mut cur) else {
+                self.gc_sweep_cursor = None;
+                return;
+            };
+            if let Some(obj) = unsafe { Object::from_header(addr) } {
+                break obj;
             }
+        };
+        self.gc_sweep_cursor = Some(cur);
+        // A `fresh` object is kept whatever its mark (it may postdate the
+        // mark phase) — but still unmarked: a stale mark would make the next
+        // cycle skip tracing its children.
+        let fresh = obj.take_fresh();
+        if obj.is_marked() {
+            obj.unmark();
+        } else if !fresh {
+            unsafe { self.dealloc(obj) };
         }
     }
 
@@ -513,7 +524,6 @@ impl Heap {
         self.slab.release_idle_chunks();
         self.gc_phase = GcPhase::Idle;
         self.gc_sweep_cursor = None;
-        self.gc_sweep_prev = None;
     }
 
     fn unlink_unmarked_interns(&mut self) {
@@ -600,6 +610,9 @@ impl Heap {
         self.alloc_bytes -= size;
         debug_assert!(self.live_count > 0);
         self.live_count -= 1;
+        if matches!(object, Object::Weak(_)) {
+            self.weak_count -= 1;
+        }
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
         unsafe { object.recycle_payload() };
         self.slab.free(ptr);
@@ -686,8 +699,10 @@ impl Heap {
     /// Must run after the mark phase and before [`Self::sweep`] so upgrades
     /// never observe a recycled address (ABA).
     pub fn clear_dead_weaks(&self) {
-        let mut current = self.head;
-        while let Some(obj) = current {
+        if self.weak_count == 0 {
+            return;
+        }
+        for obj in self.objects() {
             if let Object::Weak(gc) = obj {
                 let weak = gc.as_ref();
                 if !weak.cleared.get() {
@@ -702,7 +717,6 @@ impl Heap {
                     }
                 }
             }
-            current = obj.get_next();
         }
     }
 
@@ -765,8 +779,7 @@ impl Heap {
         let (mut live, mut live_bytes) = (0usize, 0usize);
         let mut pinned: HashSet<u64> = HashSet::new();
         let (mut precise_refs, mut ambiguous_refs) = (0usize, 0usize);
-        let mut current = self.head_for_lookup();
-        while let Some(obj) = current {
+        for obj in self.objects() {
             if obj.is_marked() {
                 live += 1;
                 if let Some((i, size, slots)) = self.slab.slot_meta(obj.addr()) {
@@ -783,7 +796,6 @@ impl Heap {
                     }
                 });
             }
-            current = obj.get_next();
         }
         let interior_pinned = pinned.len();
         let (mut root_precise, mut root_ambiguous, mut root_pinned) = (0usize, 0usize, 0usize);
@@ -841,8 +853,12 @@ impl Heap {
         )
     }
 
-    pub fn head_for_lookup(&self) -> Option<Object> {
-        self.head
+    /// Every live object, in slab order.
+    pub fn objects(&self) -> HeapIter<'_> {
+        HeapIter {
+            slab: &self.slab,
+            cur: super::slab::SlotCursor::default(),
+        }
     }
 
     /// Find a heap object by its address (mapped slot + header kind).
@@ -895,9 +911,14 @@ impl Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        for object in &*self {
-            unsafe {
-                self.dealloc(object);
+        // Drop payloads in place; the slab (and its free lists) goes away
+        // next, so slots are not returned and nothing is collected first.
+        let mut cur = super::slab::SlotCursor::default();
+        while let Some(addr) = self.slab.next_slot(&mut cur) {
+            if let Some(object) = unsafe { Object::from_header(addr) } {
+                self.alloc_bytes -= object.size();
+                self.live_count -= 1;
+                unsafe { object.recycle_payload() };
             }
         }
 
@@ -905,28 +926,31 @@ impl Drop for Heap {
     }
 }
 
-impl IntoIterator for &Heap {
+impl<'a> IntoIterator for &'a Heap {
     type Item = Object;
 
-    type IntoIter = HeapIter;
+    type IntoIter = HeapIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Self::IntoIter { next: self.head }
+        self.objects()
     }
 }
 
-/// An iterator through all currently allocated objects.
-pub struct HeapIter {
-    next: Option<Object>,
+/// An iterator through all currently allocated objects (slab slots whose
+/// header is live).
+pub struct HeapIter<'a> {
+    slab: &'a super::slab::Slab,
+    cur: super::slab::SlotCursor,
 }
 
-impl Iterator for HeapIter {
+impl Iterator for HeapIter<'_> {
     type Item = Object;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(node) = self.next {
-            self.next = node.get_next();
-            return Some(node);
+        while let Some(addr) = self.slab.next_slot(&mut self.cur) {
+            if let Some(obj) = unsafe { Object::from_header(addr) } {
+                return Some(obj);
+            }
         }
         None
     }
@@ -1265,51 +1289,10 @@ impl Object {
         }
     }
 
-    #[must_use]
-    pub fn get_next(&self) -> Option<Self> {
-        match self {
-            Self::String(s) => s.get_next(),
-            Self::Instance(i) => i.get_next(),
-            Self::Enum(e) => e.get_next(),
-            Self::Library(l) => l.get_next(),
-            Self::Tuple(t) => t.get_next(),
-            Self::Array(a) => a.get_next(),
-            Self::Coroutine(c) => c.get_next(),
-            Self::Boxed(b) => b.get_next(),
-            Self::Root(r) => r.get_next(),
-            Self::Weak(w) => w.get_next(),
-            Self::PolyFn(p) => p.get_next(),
-            Self::Fn(f) => f.get_next(),
-            Self::Stream(s) => s.get_next(),
-            Self::Thread(t) => t.get_next(),
-            Self::Sender(s) => s.get_next(),
-            Self::Receiver(r) => r.get_next(),
-            Self::Mutex(m) => m.get_next(),
-            Self::RwLock(l) => l.get_next(),
-        }
-    }
-
-    pub fn set_next(&self, next: Option<Self>) {
-        match self {
-            Self::String(s) => s.set_next(next),
-            Self::Instance(i) => i.set_next(next),
-            Self::Enum(e) => e.set_next(next),
-            Self::Library(l) => l.set_next(next),
-            Self::Tuple(t) => t.set_next(next),
-            Self::Array(a) => a.set_next(next),
-            Self::Coroutine(c) => c.set_next(next),
-            Self::Boxed(b) => b.set_next(next),
-            Self::Root(r) => r.set_next(next),
-            Self::Weak(w) => w.set_next(next),
-            Self::PolyFn(p) => p.set_next(next),
-            Self::Fn(f) => f.set_next(next),
-            Self::Stream(s) => s.set_next(next),
-            Self::Thread(t) => t.set_next(next),
-            Self::Sender(s) => s.set_next(next),
-            Self::Receiver(r) => r.set_next(next),
-            Self::Mutex(m) => m.set_next(next),
-            Self::RwLock(l) => l.set_next(next),
-        }
+    /// Clear the header's `fresh` bit (allocated during a sweep), returning
+    /// whether it was set. Every kind shares the `repr(C)` header layout.
+    fn take_fresh(&self) -> bool {
+        unsafe { &*(self.addr() as *const GcHeader) }.fresh.replace(false)
     }
 
     #[must_use]
@@ -2544,7 +2527,8 @@ pub trait GcSized {
 struct GcHeader {
     kind: Cell<u8>,
     marked: Cell<bool>,
-    next: Cell<Option<Object>>,
+    /// Allocated while a sweep was running; that sweep skips it once.
+    fresh: Cell<bool>,
 }
 
 #[repr(C)]
@@ -2554,12 +2538,12 @@ pub struct GcData<T> {
 }
 
 impl<T> GcData<T> {
-    pub const fn new(next: Option<Object>, data: T) -> Self {
+    pub const fn new(data: T) -> Self {
         Self {
             header: GcHeader {
                 kind: Cell::new(0),
                 marked: Cell::new(false),
-                next: Cell::new(next),
+                fresh: Cell::new(false),
             },
             data,
         }
@@ -2569,12 +2553,8 @@ impl<T> GcData<T> {
         self.header.kind.set(kind);
     }
 
-    pub const fn get_next(&self) -> Option<Object> {
-        self.header.next.get()
-    }
-
-    pub fn set_next(&self, next: Option<Object>) {
-        self.header.next.set(next);
+    fn set_fresh(&self) {
+        self.header.fresh.set(true);
     }
 
     pub const fn is_marked(&self) -> bool {
@@ -2606,9 +2586,15 @@ impl<T> AsMut<T> for GcData<T> {
     }
 }
 
+/// Header bytes charged to the collection trigger per object. The header
+/// shrank to one word when the intrusive `next` link went away; charging
+/// the old three words keeps collection pacing (cycles per object) as it
+/// was, so the smaller header lowers the peak instead of delaying GC.
+const PACED_HEADER_BYTES: usize = 24;
+
 impl<T: GcSized> GcSized for GcData<T> {
     fn size(&self) -> usize {
-        mem::size_of::<GcHeader>() + self.data.size()
+        PACED_HEADER_BYTES + self.data.size()
     }
 }
 
@@ -2638,6 +2624,7 @@ impl<T> Gc<T> {
             ptr::drop_in_place(&mut (*p).data);
             (*p).header.kind.set(0);
             (*p).header.marked.set(false);
+            (*p).header.fresh.set(false);
         }
     }
 
@@ -3676,6 +3663,35 @@ mod tests {
         heap.finish_sweep();
         assert!(heap.find_object_by_addr(baby.addr()).is_some());
         assert!(heap.find_object_by_addr(root.addr()).is_some());
+    }
+
+    #[test]
+    fn object_allocated_behind_the_sweep_is_traced_next_cycles() {
+        let mut heap = Heap::default();
+        // Garbage in `P`'s size class, swept first so its slot is reused.
+        let (garbage, _) = heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
+        heap.mark_from_roots(&[]);
+        heap.begin_sweep();
+        while heap.find_object_by_addr(garbage.addr()).is_some() {
+            assert!(!heap.sweep_quantum(1), "sweep ended before freeing the garbage");
+        }
+        // Allocated mid-sweep into the freed slot, behind the cursor.
+        let (parent, mut parent_gc) =
+            heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
+        assert_eq!(parent.addr(), garbage.addr());
+        heap.finish_sweep();
+
+        let (child, _) = heap.alloc(ObjString::from("child"), Object::String);
+        parent_gc.as_mut().set_slot(0, Value::from(child.addr()));
+        for cycle in 0..3 {
+            heap.mark_from_roots(&[parent.addr()]);
+            heap.begin_sweep();
+            heap.finish_sweep();
+            assert!(
+                heap.find_object_by_addr(child.addr()).is_some(),
+                "cycle {cycle}: child of a once-fresh object was freed"
+            );
+        }
     }
 
     #[test]

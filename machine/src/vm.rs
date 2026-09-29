@@ -1621,10 +1621,8 @@ impl<const S: usize> Machine<S> {
     }
 
     fn unmark_heap(&self) {
-        let mut current = self.heap.head_for_lookup();
-        while let Some(obj) = current {
+        for obj in self.heap.objects() {
             obj.unmark();
-            current = obj.get_next();
         }
     }
 
@@ -1633,14 +1631,12 @@ impl<const S: usize> Machine<S> {
             return Vec::new();
         }
         let mut out = Vec::new();
-        let mut current = self.heap.head_for_lookup();
-        while let Some(obj) = current {
+        for obj in self.heap.objects() {
             if !obj.is_marked()
                 && let Some(pc) = self.pending_finalizer(obj)
             {
                 out.push((Value::from(obj.addr()), pc));
             }
-            current = obj.get_next();
         }
         out
     }
@@ -1697,12 +1693,10 @@ impl<const S: usize> Machine<S> {
             return;
         }
         let mut queue = Vec::new();
-        let mut current = self.heap.head_for_lookup();
-        while let Some(obj) = current {
+        for obj in self.heap.objects() {
             if let Some(pc) = self.pending_finalizer(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
-            current = obj.get_next();
         }
         for (val, pc) in queue {
             self.run_finalizer(val, pc);

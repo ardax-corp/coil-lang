@@ -21,10 +21,14 @@ across safepoints:
    before their `drop` runs. New objects allocated while a cycle is open are
    **black**. (The earlier Yuasa SATB deletion barriers on vec / IO / unroot
    never fired with an empty gray list and were removed.)
-4. **Lazy sweep** — after weaks are cleared, `sweep_quantum` unlinks unmarked
-   objects from a cursor (`gc_sweep_quantum`, doubled under pressure).
-   Allocations during sweep go at list head and are not visited this cycle
-   (unmarked; next mark treats them as white).
+4. **Lazy sweep** — after weaks are cleared, `sweep_quantum` walks the slab's
+   resident chunks slot by slot from a cursor (`gc_sweep_quantum` objects,
+   doubled under pressure; free slots are skipped) and frees unmarked
+   objects. There is no per-object list link. An allocation during sweep
+   may land ahead of the cursor, so it is tagged `fresh`: the sweep keeps it
+   and clears the tag (and any mark) instead of freeing it. One allocated
+   behind the cursor keeps the tag to the next sweep, which is harmless
+   floating garbage for at most one cycle.
 
 `Heap::collect` and `Machine::gc_collect` finish any in-flight sweep, then
 drain mark + sweep so `gc::collect()` still reclaims in one call (`gc_churn`).
