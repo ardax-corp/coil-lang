@@ -835,10 +835,7 @@ fn encode_value(
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
             for m in &gc.as_ref().payload {
-                payload.push(match m {
-                    Member::Value(iv) => encode_value(heap, *iv, visited)?,
-                    Member::Object(o) => encode_object(heap, *o, visited)?,
-                });
+                payload.push(encode_value(heap, *m, visited)?);
             }
             Ok(PortableValue::Enum {
                 tag: gc.as_ref().tag,
@@ -933,7 +930,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let mut members = Vec::with_capacity(payload.len());
             for pv in payload {
                 let v = decode_portable(heap, pv)?;
-                members.push(member_from_value(heap, v));
+                members.push(v);
             }
             let mut obj_enum = ObjEnum::new(tag, EnumPayload::from_vec(members));
             obj_enum.type_id = type_id;
@@ -1683,7 +1680,7 @@ mod tests {
             panic!("expected Result enum");
         };
         assert_eq!(gc.as_ref().tag, 1, "expected Result::Err");
-        let Member::Object(Object::Enum(err)) = &gc.as_ref().payload[0] else {
+        let Member::Object(Object::Enum(err)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected ThreadError payload");
         };
         match err.as_ref().tag {
@@ -1702,7 +1699,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0);
-        let Member::Object(Object::Tuple(tup)) = &gc.as_ref().payload[0] else {
+        let Member::Object(Object::Tuple(tup)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected (Sender, Receiver) tuple");
         };
         let elems = &tup.as_ref().elements();
@@ -1766,7 +1763,7 @@ mod tests {
         assert_eq!(gc.as_ref().elements()[1].as_int(), 8);
 
         let (en, _) = heap.alloc(
-            ObjEnum::new(3, EnumPayload::one(Member::Value(Value::from(11_i64)))),
+            ObjEnum::new(3, EnumPayload::one(Value::from(11_i64))),
             Object::Enum,
         );
         let pv = value_to_portable(&heap, Value::from(en.addr())).unwrap();
@@ -1784,7 +1781,7 @@ mod tests {
         let mut heap = Heap::default();
         let leaf = heap.immortal_unit_enum(0);
         let (node, _) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::two(Member::Object(leaf), Member::Object(leaf))),
+            ObjEnum::new(1, EnumPayload::two(Value::from(leaf.addr()), Value::from(leaf.addr()))),
             Object::Enum,
         );
         let pv = value_to_portable(&heap, Value::from(node.addr())).expect("shared Leaf DAG");
@@ -1810,11 +1807,11 @@ mod tests {
     fn portable_rejects_shared_payload_enum_dag() {
         let mut heap = Heap::default();
         let (shared, _) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(7_i64)))),
+            ObjEnum::new(0, EnumPayload::one(Value::from(7_i64))),
             Object::Enum,
         );
         let (node, _) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::two(Member::Object(shared), Member::Object(shared))),
+            ObjEnum::new(1, EnumPayload::two(Value::from(shared.addr()), Value::from(shared.addr()))),
             Object::Enum,
         );
         assert_eq!(
@@ -1872,7 +1869,7 @@ mod tests {
         let Object::Enum(gc) = heap.find_object_by_addr(mtx.raw() as u64).unwrap() else {
             panic!("expected Result");
         };
-        let Member::Object(obj @ Object::Mutex(_)) = &gc.as_ref().payload[0] else {
+        let Member::Object(obj @ Object::Mutex(_)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected Mutex");
         };
         let mtx_val = Value::from(obj.addr());
@@ -1883,7 +1880,7 @@ mod tests {
         let Object::Enum(gc) = heap.find_object_by_addr(rw.raw() as u64).unwrap() else {
             panic!("expected Result");
         };
-        let Member::Object(obj @ Object::RwLock(_)) = &gc.as_ref().payload[0] else {
+        let Member::Object(obj @ Object::RwLock(_)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected RwLock");
         };
         let rw_val = Value::from(obj.addr());
@@ -1919,7 +1916,7 @@ mod tests {
         let Object::Enum(gc) = heap.find_object_by_addr(mtx.raw() as u64).unwrap() else {
             panic!("expected Result");
         };
-        let Member::Object(obj @ Object::Mutex(_)) = &gc.as_ref().payload[0] else {
+        let Member::Object(obj @ Object::Mutex(_)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected Mutex");
         };
         let mtx_val = Value::from(obj.addr());

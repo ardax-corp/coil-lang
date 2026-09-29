@@ -1756,14 +1756,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    #[inline]
-    fn member_value(member: Member) -> Value {
-        match member {
-            Member::Value(v) => v,
-            Member::Object(o) => Value::from(o.addr()),
-        }
-    }
-
     /// `MakeEnum` packing: tag in `[31:16]`, arity in `[15:0]`.
     /// Payloads stay on the stack through alloc so GC can root them; the
     /// fresh object is pushed before `maybe_gc_after_alloc`.
@@ -1780,7 +1772,7 @@ impl<const S: usize> Machine<S> {
         if arity <= 3 {
             note_make_fast();
         }
-        let payload = Self::stack_copy_enum_payload(&self.heap, &self.stack, sp, arity);
+        let payload = Self::stack_copy_enum_payload(&self.stack, sp, arity);
         let obj_enum = ObjEnum::new(tag, payload);
         let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
         self.stack.seek(sp - arity);
@@ -1812,44 +1804,23 @@ impl<const S: usize> Machine<S> {
     /// Codegen reverse-pushes constructor args so this yields declaration order.
     /// Arity ≤ [`crate::ENUM_INLINE_ARITY`] stays off the Rust global allocator.
     #[inline]
-    fn stack_copy_enum_payload(
-        heap: &Heap,
-        stack: &Stack<Value>,
-        sp: usize,
-        n: usize,
-    ) -> EnumPayload {
+    fn stack_copy_enum_payload(stack: &Stack<Value>, sp: usize, n: usize) -> EnumPayload {
         match n {
             0 => EnumPayload::empty(),
-            1 => EnumPayload::one(Self::value_as_member(heap, stack[sp - 1])),
-            2 => EnumPayload::two(
-                Self::value_as_member(heap, stack[sp - 1]),
-                Self::value_as_member(heap, stack[sp - 2]),
-            ),
-            _ => {
-                let mut payload = Vec::with_capacity(n);
-                for i in 0..n {
-                    payload.push(Self::value_as_member(heap, stack[sp - 1 - i]));
-                }
-                EnumPayload::from_vec(payload)
-            }
+            1 => EnumPayload::one(stack[sp - 1]),
+            2 => EnumPayload::two(stack[sp - 1], stack[sp - 2]),
+            _ => EnumPayload::from_vec((0..n).map(|i| stack[sp - 1 - i]).collect()),
         }
     }
 
     /// Declaration-order slots (DenseMake), not TOS-first stack pops.
-    fn dense_enum_payload(heap: &Heap, values: &[Value]) -> EnumPayload {
+    #[inline]
+    fn dense_enum_payload(values: &[Value]) -> EnumPayload {
         match values.len() {
             0 => EnumPayload::empty(),
-            1 => EnumPayload::one(Self::value_as_member(heap, values[0])),
-            2 => EnumPayload::two(
-                Self::value_as_member(heap, values[0]),
-                Self::value_as_member(heap, values[1]),
-            ),
-            _ => EnumPayload::from_vec(
-                values
-                    .iter()
-                    .map(|v| Self::value_as_member(heap, *v))
-                    .collect(),
-            ),
+            1 => EnumPayload::one(values[0]),
+            2 => EnumPayload::two(values[0], values[1]),
+            _ => EnumPayload::from_slice(values),
         }
     }
 

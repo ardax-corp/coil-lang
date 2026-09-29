@@ -957,7 +957,7 @@ impl<const S: usize> Machine<S> {
                         // Inline payloads read the registers directly (no Vec).
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload =
-                            Self::dense_enum_payload(&self.heap, &self.stack[lo..lo + arity]);
+                            Self::dense_enum_payload(&self.stack[lo..lo + arity]);
                         let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE {
@@ -1092,7 +1092,7 @@ impl<const S: usize> Machine<S> {
                             promise!(pool_idx < constants.len());
                             let target_offset = opcode.jump_if_match_target(constants);
                             let _ = self.stack.pop();
-                            let payload: &[Member] = &enum_ref.payload;
+                            let payload: &[Value] = &enum_ref.payload;
                             // The frame reserve counts the widest payload the program builds.
                             let wide = payload.len() > self.match_payload_bound;
                             if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
@@ -1103,10 +1103,7 @@ impl<const S: usize> Machine<S> {
                                 );
                             }
                             for member in payload {
-                                let value = match member {
-                                    Member::Value(v) => *v,
-                                    Member::Object(o) => Value::from(o.addr()),
-                                };
+                                let value = *member;
                                 self.stack.push(value);
                             }
                             if unlikely(wide) {
@@ -1131,10 +1128,7 @@ impl<const S: usize> Machine<S> {
                         promise!(arity == enum_ref.payload.len());
                         for i in 0..arity {
                             let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = match member {
-                                Member::Value(v) => *v,
-                                Member::Object(o) => Value::from(o.addr()),
-                            };
+                            let value = *member;
                             self.stack.push(value);
                         }
                     }
@@ -1150,10 +1144,7 @@ impl<const S: usize> Machine<S> {
                             let enum_ref = enum_ref.as_ref();
                             promise!(field_index < enum_ref.payload.len());
                             let member = unsafe { enum_ref.payload.get_unchecked(field_index) };
-                            let value = match member {
-                                Member::Value(v) => *v,
-                                Member::Object(o) => Value::from(o.addr()),
-                            };
+                            let value = *member;
                             self.stack.push(value);
                         }
                         Some(Object::Instance(gc)) => {
@@ -1189,10 +1180,7 @@ impl<const S: usize> Machine<S> {
                         promise!(arity == enum_ref.payload.len());
                         for i in 0..arity {
                             let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = match member {
-                                Member::Value(v) => *v,
-                                Member::Object(o) => Value::from(o.addr()),
-                            };
+                            let value = *member;
                             self.stack[slot + i] = value;
                         }
                         let end = slot + arity;

@@ -161,14 +161,10 @@ mod tests {
     }
 
     fn option_some_int(heap: &Heap, v: Value) -> i64 {
-        use crate::memory::Member;
         match heap.find_object_by_addr(v.raw() as u64) {
             Some(Object::Enum(gc)) => {
                 assert_eq!(gc.as_ref().tag, 1, "expected Option::Some");
-                match gc.as_ref().payload[0] {
-                    Member::Value(inner) => inner.as_int(),
-                    Member::Object(_) => panic!("expected int Option payload"),
-                }
+                gc.as_ref().payload[0].as_int()
             }
             _ => panic!("expected Option enum"),
         }

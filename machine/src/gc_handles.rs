@@ -151,7 +151,7 @@ mod tests {
     fn option_payload(heap: &Heap, opt: Value) -> Option<Value> {
         match heap.find_object_by_addr(opt.raw() as u64) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
-                Some(member_to_value(&gc.as_ref().payload[0]))
+                Some(gc.as_ref().payload[0])
             }
             Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => None,
             _ => panic!("expected Option"),
@@ -267,7 +267,7 @@ mod tests {
         match heap.find_object_by_addr(up.raw() as u64) {
             Some(Object::Enum(gc)) => {
                 assert_eq!(gc.as_ref().tag, 1);
-                assert_eq!(member_to_value(&gc.as_ref().payload[0]).as_int(), 42);
+                assert_eq!(gc.as_ref().payload[0].as_int(), 42);
             }
             _ => panic!("expected Some(42)"),
         }

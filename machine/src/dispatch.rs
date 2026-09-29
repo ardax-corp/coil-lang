@@ -577,9 +577,7 @@ pub(super) fn dense_field_load(
             Some(Object::Enum(enum_ref)) => {
                 let enum_ref = enum_ref.as_ref();
                 promise!(field_index < enum_ref.payload.len());
-                Some(super::Machine::<8>::member_value(unsafe {
-                    *enum_ref.payload.get_unchecked(field_index)
-                }))
+                Some(unsafe { *enum_ref.payload.get_unchecked(field_index) })
             }
             Some(Object::Instance(gc)) => {
                 if let Some(n) = gc.as_ref().slot_len() {

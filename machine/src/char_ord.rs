@@ -64,7 +64,7 @@ pub fn prelude_hash_string(heap: &mut Heap, args: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Member, Object};
+    use crate::memory::Object;
 
     fn str_arg(heap: &mut Heap, s: &str) -> Value {
         string_val(heap, s)
@@ -75,10 +75,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0, "expected Ok");
-        match &gc.as_ref().payload[0] {
-            Member::Value(val) => val.as_int(),
-            _ => panic!("expected int payload"),
-        }
+        gc.as_ref().payload[0].as_int()
     }
 
     fn result_err_string(heap: &Heap, v: Value) -> String {
@@ -86,11 +83,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 1, "expected Err");
-        match &gc.as_ref().payload[0] {
-            Member::Object(Object::String(s)) => s.as_ref().data.clone(),
-            Member::Value(val) => value_as_string(heap, *val).unwrap(),
-            _ => panic!("expected string error"),
-        }
+        value_as_string(heap, gc.as_ref().payload[0]).expect("expected string error")
     }
 
     fn result_ok_string(heap: &Heap, v: Value) -> String {
@@ -98,11 +91,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0, "expected Ok");
-        match &gc.as_ref().payload[0] {
-            Member::Object(Object::String(s)) => s.as_ref().data.clone(),
-            Member::Value(val) => value_as_string(heap, *val).unwrap(),
-            _ => panic!("expected string payload"),
-        }
+        value_as_string(heap, gc.as_ref().payload[0]).expect("expected string payload")
     }
 
     #[test]

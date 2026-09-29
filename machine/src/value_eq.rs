@@ -89,7 +89,7 @@ fn values_eq_rec(
             ea.payload
                 .iter()
                 .zip(eb.payload.iter())
-                .all(|(ma, mb)| members_eq(heap, ma, mb, fwd, rev))
+                .all(|(a, b)| values_eq_rec(heap, *a, *b, fwd, rev))
         }
         (Object::Boxed(ga), Object::Boxed(gb)) => {
             members_eq(heap, &ga.as_ref().payload, &gb.as_ref().payload, fwd, rev)
@@ -122,7 +122,7 @@ fn members_eq(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{EnumPayload, Member, ObjArray, ObjEnum, ObjString, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjString, ObjTuple, Object};
 
     fn set_array_elem(heap: &Heap, addr: u64, index: usize, value: Value) {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
@@ -284,11 +284,11 @@ mod tests {
         let mut heap = Heap::default();
         let (payload, _) = heap.alloc(ObjString::from("n"), Object::String);
         let (ok_a, _) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(payload.addr())))),
+            ObjEnum::new(0, EnumPayload::one(Value::from(payload.addr()))),
             Object::Enum,
         );
         let (ok_b, _) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(payload.addr())))),
+            ObjEnum::new(0, EnumPayload::one(Value::from(payload.addr()))),
             Object::Enum,
         );
         assert_ne!(ok_a.addr(), ok_b.addr());
@@ -303,7 +303,7 @@ mod tests {
     fn boxed_enum_ne_ok_vs_err_same_payload() {
         let mut heap = Heap::default();
         let (payload, _) = heap.alloc(ObjString::from("n"), Object::String);
-        let member = Member::Value(Value::from(payload.addr()));
+        let member = Value::from(payload.addr());
         let (ok, _) = heap.alloc(
             ObjEnum::new(0, EnumPayload::one(member)),
             Object::Enum,

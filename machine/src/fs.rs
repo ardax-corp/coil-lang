@@ -326,19 +326,13 @@ pub const FS_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
 mod tests {
     use super::*;
     use crate::io::IoErrorTag;
-    use crate::memory::{Heap, Member};
+    use crate::memory::Heap;
     use std::fs;
 
     fn coil_string(heap: &mut Heap, s: &str) -> Value {
         alloc_path_string(heap, s)
     }
 
-    fn member_to_value(_heap: &Heap, m: &Member) -> Value {
-        match m {
-            Member::Value(v) => *v,
-            Member::Object(o) => Value::from(o.addr()),
-        }
-    }
 
     fn io_tag_from_u32(tag: u32) -> Option<IoErrorTag> {
         match tag {
@@ -372,7 +366,7 @@ mod tests {
         if outer.as_ref().tag != 1 {
             return None;
         }
-        let err_val = member_to_value(heap, outer.as_ref().payload.first()?);
+        let err_val = *outer.as_ref().payload.first()?;
         let Object::Enum(inner) = heap.find_object_by_addr(err_val.raw() as u64)? else {
             return None;
         };
@@ -384,7 +378,7 @@ mod tests {
             panic!("expected Result enum");
         };
         assert_eq!(outer.as_ref().tag, 0);
-        member_to_value(heap, &outer.as_ref().payload[0]).as_bool()
+        outer.as_ref().payload[0].as_bool()
     }
 
     fn instance_field_bool(heap: &mut Heap, v: Value, field: &str) -> bool {
@@ -413,7 +407,7 @@ mod tests {
         let Object::Enum(outer) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
             panic!("expected Result");
         };
-        let payload = member_to_value(heap, &outer.as_ref().payload[0]);
+        let payload = outer.as_ref().payload[0];
         value_as_string(heap, payload).unwrap()
     }
 
@@ -422,7 +416,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(outer.as_ref().tag, 0);
-        member_to_value(heap, &outer.as_ref().payload[0])
+        outer.as_ref().payload[0]
     }
 
     fn array_strings(heap: &Heap, v: Value) -> Vec<String> {
@@ -472,7 +466,7 @@ mod tests {
         let Object::Enum(outer) = heap.find_object_by_addr(r.raw() as u64).unwrap() else {
             panic!();
         };
-        let rec = member_to_value(&heap, &outer.as_ref().payload[0]);
+        let rec = outer.as_ref().payload[0];
         assert_eq!(instance_field_int(&mut heap, rec, "size"), 4);
         assert!(instance_field_bool(&mut heap, rec, "is_file"));
         assert!(!instance_field_bool(&mut heap, rec, "is_dir"));

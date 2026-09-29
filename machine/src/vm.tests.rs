@@ -306,13 +306,13 @@
         assert_eq!(obj.payload.len(), 2);
         assert!(obj.payload.is_inline());
         assert!(
-            matches!(obj.payload[0], Member::Object(Object::String(_))),
+            matches!(vm.heap().member_of(obj.payload[0]), Member::Object(Object::String(_))),
             "the top operand must land in payload[0]"
         );
-        match obj.payload[1] {
-            Member::Value(v) => assert_eq!(v.as_int(), 41),
-            Member::Object(_) => panic!("an immediate int must not be classified as a heap object"),
-        }
+        assert!(
+            matches!(vm.heap().member_of(obj.payload[1]), Member::Value(v) if v.as_int() == 41),
+            "an immediate int must not be classified as a heap object"
+        );
     }
 
     /// binary_trees' `Node(Tree, Tree)`: the fresh arity-2 enum has to be
@@ -341,8 +341,8 @@
 
         assert_eq!(node.as_ref().tag, 4);
         assert_eq!(node.as_ref().payload.len(), 2);
-        for member in &node.as_ref().payload {
-            match member {
+        for word in &node.as_ref().payload {
+            match vm.heap().member_of(*word) {
                 Member::Object(child) => assert!(
                     vm.heap().find_object_by_addr(child.addr()).is_some(),
                     "a child enum was swept while reachable from the Node payload"
@@ -594,11 +594,8 @@
                 let e = gc.as_ref();
                 assert_eq!(e.tag, 3);
                 assert_eq!(e.payload.len(), 2);
-                match &e.payload[0] {
-                    Member::Value(v) => assert_eq!(v.as_int(), 7),
-                    Member::Object(_) => panic!("payload[0] should be int Value"),
-                }
-                match &e.payload[1] {
+                assert_eq!(e.payload[0].as_int(), 7);
+                match &vm.heap().member_of(e.payload[1]) {
                     Member::Object(Object::String(s)) => {
                         assert_eq!(s.as_ref().data, "payload");
                     }
@@ -1115,15 +1112,15 @@
 
     /// Arity above [`crate::ENUM_INLINE_ARITY`] uses a spill `Vec`.
     #[test]
-    fn make_enum_arity3_spills_payload() {
-        use crate::Member;
-
+    fn make_enum_arity5_spills_payload() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(1),
             const_int(2),
             const_int(3),
-            make_enum(4, 3),
+            const_int(4),
+            const_int(5),
+            make_enum(4, 5),
             Byte::new(Instruction::HALT),
         ]);
         let addr = vm.pop().raw() as u64;
@@ -1131,12 +1128,9 @@
             Some(Object::Enum(gc)) => {
                 let e = gc.as_ref();
                 assert_eq!(e.tag, 4);
-                assert_eq!(e.payload.len(), 3);
+                assert_eq!(e.payload.len(), 5);
                 assert!(!e.payload.is_inline());
-                match e.payload[0] {
-                    Member::Value(v) => assert_eq!(v.as_int(), 3),
-                    Member::Object(_) => panic!("expected immediate TOS in payload[0]"),
-                }
+                assert_eq!(e.payload[0].as_int(), 5);
             }
             _ => panic!("expected spilled enum"),
         }
@@ -1773,7 +1767,7 @@
 
     #[test]
     fn nested_enum_gc_traces_correctly() {
-        use crate::{Heap, Member, ObjString, Object};
+        use crate::{Heap, ObjString, Object};
         use std::collections::HashSet;
 
         let mut heap = Heap::default();
@@ -1790,7 +1784,7 @@
         let (outer_obj, _) = heap.alloc(
             ObjEnum::new(
                 0,
-                crate::EnumPayload::two(Member::Object(inner_obj), Member::Object(string_obj)),
+                crate::EnumPayload::two(Value::from(inner_obj.addr()), Value::from(string_obj.addr())),
             ),
             Object::Enum,
         );
@@ -3058,7 +3052,7 @@
     fn userland_library_survives_gc_for_ffi_invoke() {
         use crate::ffi::FfiSignature;
         use crate::memory::FfiType;
-        use crate::{Member, ObjString};
+        use crate::ObjString;
 
         let Some((lib_name, lib_path)) = crate::ffi::require_examples_libsum() else {
             return;
@@ -3115,7 +3109,7 @@
         );
         let ok_int = match vm.heap().find_object_by_addr(out.raw() as u64) {
             Some(Object::Enum(gc)) => match gc.as_ref().payload.first() {
-                Some(Member::Value(v)) => v.as_int(),
+                Some(v) => v.as_int(),
                 _ => panic!("expected Result::Ok int payload"),
             },
             _ => panic!("expected Result enum from FfiInvoke"),

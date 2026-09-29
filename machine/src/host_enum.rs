@@ -17,7 +17,7 @@ use common::{
 };
 
 use crate::io::{alloc_option_none, alloc_option_some, alloc_result_err, alloc_result_ok};
-use crate::memory::{Heap, Member, Object};
+use crate::memory::{Heap, Object};
 
 thread_local! {
     static HOST_ENUM_LAYOUT: Cell<u32> = const { Cell::new(HOST_ENUM_LAYOUT_BOXED) };
@@ -272,7 +272,7 @@ fn unpack_boxed_option(heap: &Heap, value: Value) -> Result<Option<Value>, HostE
             if e.payload.len() != 1 {
                 return Err(HostEnumMismatch("Option::Some arity is not 1"));
             }
-            Ok(Some(member_to_value(&e.payload[0])))
+            Ok(Some(e.payload[0]))
         }
         _ => Err(HostEnumMismatch("boxed Option tag is not None/Some")),
     }
@@ -344,18 +344,11 @@ fn unpack_boxed_result(heap: &Heap, value: Value) -> Result<Result<Value, Value>
     if e.payload.len() != 1 {
         return Err(HostEnumMismatch("boxed Result arity is not 1"));
     }
-    let payload = member_to_value(&e.payload[0]);
+    let payload = e.payload[0];
     match e.tag {
         0 => Ok(Ok(payload)),
         1 => Ok(Err(payload)),
         _ => Err(HostEnumMismatch("boxed Result tag is not Ok/Err")),
-    }
-}
-
-fn member_to_value(m: &Member) -> Value {
-    match m {
-        Member::Value(v) => *v,
-        Member::Object(o) => Value::from(o.addr()),
     }
 }
 
@@ -410,7 +403,7 @@ mod tests {
     fn unpack_boxed_option_refuses_tag_payload_disagreement() {
         let mut heap = Heap::default();
         let (none_with_payload, _) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Member::Value(Value::from(1i64)))),
+            ObjEnum::new(0, EnumPayload::one(Value::from(1i64))),
             Object::Enum,
         );
         assert!(unpack_option(

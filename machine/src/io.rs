@@ -153,12 +153,12 @@ impl IoErrorTag {
 /// so niche vs boxed is chosen once.
 pub fn alloc_result_ok(heap: &mut Heap, payload: Value) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
-    alloc_enum(heap, 0, EnumPayload::one(member_from_value(heap, payload)))
+    alloc_enum(heap, 0, EnumPayload::one(payload))
 }
 
 /// Allocate `Result::Err(payload)` on the heap.
 pub fn alloc_result_err(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
+    alloc_enum(heap, 1, EnumPayload::one(payload))
 }
 
 /// Allocate boxed `Option::None`. Prefer [`crate::host_enum::pack_option`].
@@ -169,7 +169,7 @@ pub fn alloc_option_none(heap: &mut Heap) -> Value {
 
 /// Allocate boxed `Option::Some(payload)`. Prefer [`crate::host_enum::pack_option`].
 pub fn alloc_option_some(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
+    alloc_enum(heap, 1, EnumPayload::one(payload))
 }
 
 /// Allocate a unit-payload `IoError` variant.
@@ -180,16 +180,6 @@ pub fn alloc_io_error(heap: &mut Heap, tag: IoErrorTag) -> Value {
 
 fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
-}
-
-fn member_from_value(heap: &Heap, value: Value) -> Member {
-    if !value.raw().is_null()
-        && let Some(obj) = heap.find_object_by_addr(value.raw() as u64)
-    {
-        Member::Object(obj)
-    } else {
-        Member::Value(value)
-    }
 }
 
 /// Convert coil millisecond timeout: `<= 0` clears / means wait forever.

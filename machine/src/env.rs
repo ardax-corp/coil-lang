@@ -269,7 +269,6 @@ pub use host_var as env_var;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Member;
     use std::sync::Mutex;
 
     static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
@@ -286,10 +285,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0);
-        match &gc.as_ref().payload[0] {
-            Member::Value(v) => *v,
-            Member::Object(o) => Value::from(o.addr()),
-        }
+        gc.as_ref().payload[0]
     }
 
     fn result_err_tag(heap: &Heap, result: Value) -> EnvErrorTag {
@@ -297,7 +293,8 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 1);
-        let Member::Object(Object::Enum(err)) = &gc.as_ref().payload[0] else {
+        let Some(Object::Enum(err)) = heap.find_object_by_addr(gc.as_ref().payload[0].heap_addr())
+        else {
             panic!("expected EnvError");
         };
         match err.as_ref().tag {
