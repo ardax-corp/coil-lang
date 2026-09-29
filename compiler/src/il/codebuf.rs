@@ -273,11 +273,18 @@ impl CodeBuf {
     }
 
     fn rewrite_abs_entries_from(&mut self, from_code: usize) {
+        self.rewrite_abs_entries_in(from_code, usize::MAX);
+    }
+
+    fn rewrite_abs_entries_in(&mut self, from_code: usize, to_code: usize) {
         let mut emitting = 0usize;
         let mut rewrites = Vec::new();
         for (i, op) in self.il.ops().iter().enumerate() {
             if !op.emits_code() {
                 continue;
+            }
+            if emitting >= to_code {
+                break;
             }
             if emitting >= from_code
                 && let IlOp::Byte { byte, loc } = op
@@ -507,9 +514,16 @@ impl CodeBuf {
 
     /// Splice another buffer's IL before logical code index `code_pos`,
     /// remapping labels into this buffer's namespace.
+    ///
+    /// Packed CALL/CodePtr Bytes in `other` (static inits are compiled into a
+    /// side buffer with an empty entry map) are resolved against this
+    /// buffer's entry map. Call before bumping entry offsets for the splice:
+    /// the packed targets are pre-splice PCs.
     pub fn splice_buf_at(&mut self, code_pos: usize, other: CodeBuf) {
         self.invalidate_lowered();
+        let n = other.len();
         self.il.splice_code_at(code_pos, other.il);
+        self.rewrite_abs_entries_in(code_pos, code_pos + n);
     }
 
     /// Move IL ops `[raw_start..]` to logical code index `code_pos` without

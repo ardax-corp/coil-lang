@@ -3,6 +3,9 @@ use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInCounted, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
+/// Synthetic function name prefix for a static initializer body.
+const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
+
 #[path = "emit_call.rs"]
 mod emit_call;
 #[path = "emit_match.rs"]
@@ -13203,10 +13206,77 @@ impl Compiler {
             && self.checker.is_static_const_fqn(fqn) {
                 self.static_const_values.insert(fqn.to_string(), val);
             }
+        // Compile the initializer as its own zero-arg function in the module
+        // stream; the setup region only calls it. Call lowering (inline /
+        // self-unroll peels, forward-referenced entries) writes straight into
+        // `self.bytecode`, so an initializer compiled into a side buffer
+        // leaked those ops into whatever function came before it.
+        let name = format!("{STATIC_INIT_FN_PREFIX}{fqn}");
+        let (offset, _) = self.bind_function_entry(name.clone());
+        self.fn_arities.insert(name.clone(), (0, false));
+
+        let prev_fn_vars = std::mem::take(&mut self.context.variables);
+        let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
+        let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
+        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+        let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+        let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
+        let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
+        let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
+        let prev_pins = std::mem::take(&mut self.pinned_array_slots);
+        let prev_field_keys = std::mem::take(&mut self.field_key_slots);
+        let prev_fn_defers = std::mem::take(&mut self.fn_defers);
+        let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
+        let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
+        let prev_result_mode = std::mem::replace(&mut self.compiling_result_mode, false);
+        let prev_result_ok_is_result =
+            std::mem::replace(&mut self.compiling_result_ok_is_result, false);
+        let prev_two_word_enum = self.compiling_two_word_enum.take();
+        let prev_try_fail = self.compiling_try_fail.take();
+        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
+
+        let body_start = self.bytecode.len();
+        self.record_fn_span(name.clone(), body_start, body_start);
         let mut init_bc = self.do_compile(init);
-        self.static_init.append(&mut init_bc);
-        self.static_init
+        self.bytecode.append(&mut init_bc);
+        self.bytecode
             .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+        self.emit_fallthrough_return(&name, init.0);
+        self.emit_shared_try_fail_epilogue();
+        let body_end = self.bytecode.len();
+        self.record_fn_span(name.clone(), body_start, body_end);
+        let entry = self.fn_entry_labels.get(&name).copied();
+        self.bytecode
+            .record_func_with_sp(name, entry, body_start, body_end, 0);
+
+        self.expr_depth = prev_depth;
+        self.compiling_try_fail = prev_try_fail;
+        self.compiling_two_word_enum = prev_two_word_enum;
+        self.compiling_result_ok_is_result = prev_result_ok_is_result;
+        self.compiling_result_mode = prev_result_mode;
+        self.current_function_table_key = prev_fn_table_key;
+        self.current_function_qualified = prev_fn_qualified;
+        self.fn_defers = prev_fn_defers;
+        self.field_key_slots = prev_field_keys;
+        self.pinned_array_slots = prev_pins;
+        self.polyfn_sources = prev_polyfn_sources;
+        self.polyfn_vars = prev_polyfn_vars;
+        self.context.unboxed_class_box = prev_unboxed_class_box;
+        self.context.unboxed_class_locals = prev_unboxed_class;
+        self.context.unboxed_enum_locals = prev_unboxed_enum;
+        self.context.stack_array_box = prev_stack_boxes;
+        self.context.stack_array_locals = prev_stack_arrays;
+        self.context.variables = prev_fn_vars;
+
+        // Setup region: `CALL init; POP`. The packed target is resolved to
+        // the entry label when the region is spliced (`splice_buf_at`).
+        self.static_init.push(Self::packed_entry_byte_ret(
+            crate::il::EntryKind::Call,
+            0,
+            offset as u32,
+            1,
+        ));
+        self.static_init.push(Byte::new(Instruction::POP));
     }
 
     /// Receiver type for field access / method calls.
