@@ -297,12 +297,19 @@ fn handle_request(
         }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
-            let hover = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    hover(document, params.text_document_position_params.position)
-                });
+            let hover = project_hover(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+            .or_else(|| {
+                state
+                    .documents
+                    .get(&params.text_document_position_params.text_document.uri)
+                    .and_then(|document| {
+                        hover(document, params.text_document_position_params.position)
+                    })
+            });
             Some(serde_json::to_value(hover)?)
         }
         "textDocument/completion" => {
@@ -1849,6 +1856,165 @@ fn function_snippet(name: &str, parameters: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})$0")
+}
+
+/// Hover from the project typecheck: cross-file types and docs.
+///
+/// The checker keeps the span tables of the last checked module (the
+/// entry), so re-run the project with this document as entry if needed.
+/// `None` when the buffer does not parse; the single-file path handles that.
+fn project_hover(state: &mut ServerState, uri: &Uri, position: Position) -> Option<Hover> {
+    let path = uri_path(uri)?;
+    state.project_index.as_ref()?;
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let range = word_range(&text, offset)?;
+    let name = text.get(range.clone())?.to_owned();
+    let ast = Pratt::default().parse(&text).ok()?;
+    if state.last_entry.as_ref() != Some(&path) {
+        refresh_project(state, &path);
+    }
+    let checker = state.project_index.as_ref()?.checker();
+    let ty_text = hover_type(&ast, Some(checker), &text, &name, offset, &range);
+    let docs = find_param_docs_for_name(ast.1.as_ref(), &name)
+        .or_else(|| find_docs_for_name(ast.1.as_ref(), &name))
+        .or_else(|| definition_docs(state, uri, position, &name))
+        .or_else(|| {
+            virtual_completion_candidates(ast.1.as_ref())
+                .remove(&name)
+                .map(|(_, docs)| docs)
+        });
+    if ty_text.is_none() && docs.is_none() {
+        return None;
+    }
+    hover_markup(&text, &name, range, ty_text, docs)
+}
+
+/// `///` docs at the definition site of the word under the cursor, which may
+/// live in another (possibly unopened) file.
+fn definition_docs(state: &ServerState, uri: &Uri, position: Position, name: &str) -> Option<String> {
+    goto_definitions(state, uri, position).into_iter().find_map(|location| {
+        let path = uri_path(&location.uri)?;
+        let source = match state.documents.get(&location.uri) {
+            Some(document) => document.text.clone(),
+            None => state
+                .project_index
+                .as_ref()
+                .and_then(|index| index.source_for(&path).map(str::to_owned))
+                .or_else(|| std::fs::read_to_string(&path).ok())?,
+        };
+        let ast = Pratt::default().parse(&source).ok()?;
+        find_docs_for_name(ast.1.as_ref(), name)
+    })
+}
+
+/// Type text for `name` at `offset`, most specific source first.
+fn hover_type(
+    ast: &Output<'_>,
+    checker: Option<&Checker>,
+    source: &str,
+    name: &str,
+    offset: usize,
+    range: &Range<usize>,
+) -> Option<String> {
+    let show = |checker: &Checker, ty: &compiler::Ty| format_ty_for_diag(checker.subst(), ty);
+    // `let x: T = …` names its own type; `let x = e` has the type of `e`.
+    let binding = let_binding_at(ast, name, range.start);
+    if let Some((Some(annotation), _)) = &binding {
+        return source.get(annotation.clone()).map(|text| text.trim().to_owned());
+    }
+    let checker = checker?;
+    if let Some(ty) = checker.lookup_for_codegen_span(range.start, range.end) {
+        return Some(show(checker, &ty));
+    }
+    if let Some((None, Some(value))) = &binding
+        && let Some(ty) = checker.lookup_for_codegen_span(value.start, value.end)
+    {
+        return Some(show(checker, &ty));
+    }
+    if let Some(text) = find_parameter_type_for_name(ast.1.as_ref(), name) {
+        return Some(text);
+    }
+    // Member names (`p.sum`) have no node of their own: use the smallest
+    // enclosing access / call. Statement spans type as `unit`; skip them.
+    let mut enclosing = Vec::new();
+    collect_nodes_containing(ast, offset, &mut enclosing);
+    enclosing.sort_by_key(|node| node.0.end - node.0.start);
+    for node in enclosing {
+        if !matches!(
+            node.1.as_ref(),
+            Expression::Access(..)
+                | Expression::OptionalAccess(..)
+                | Expression::Call { .. }
+                | Expression::QualifiedAccess { .. }
+                | Expression::Instantiate(..)
+        ) {
+            continue;
+        }
+        if let Some(ty) = checker.lookup_for_codegen_span(node.0.start, node.0.end) {
+            return Some(show(checker, &ty));
+        }
+    }
+    checker
+        .env()
+        .lookup(name)
+        .map(|scheme| show(checker, &scheme.ty))
+}
+
+/// `(annotation, initializer)` spans of a `let`.
+type LetSpans = (Option<Range<usize>>, Option<Range<usize>>);
+
+/// For `let name[: T] [= value]` whose name starts at `name_start`, the
+/// annotation and initializer spans.
+fn let_binding_at(
+    ast: &Output<'_>,
+    name: &str,
+    name_start: usize,
+) -> Option<LetSpans> {
+    let mut found = None;
+    visit_nodes(ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::Fragment(items) = node.1.as_ref() else {
+            return;
+        };
+        let Some((span, head)) = items.first() else {
+            return;
+        };
+        let Expression::Variable(var, annotation) = head.as_ref() else {
+            return;
+        };
+        // `let` + space, then the name: the name sits inside the head span
+        // and before the annotation / initializer.
+        let before_rest = annotation
+            .as_ref()
+            .map(|a| a.0.start)
+            .or_else(|| items.get(1).map(|v| v.0.start))
+            .unwrap_or(span.end);
+        if *var == name && name_start >= span.start && name_start < before_rest {
+            found = Some((
+                annotation.as_ref().map(|a| a.0.start..a.0.end),
+                items.get(1).map(|v| v.0.start..v.0.end),
+            ));
+        }
+    });
+    found
+}
+
+/// Pre-order walk of every node.
+fn visit_nodes<'a, 'e>(node: &'a Output<'e>, f: &mut dyn FnMut(&'a Output<'e>)) {
+    f(node);
+    node.1.for_each_child(&mut |child| visit_nodes(child, f));
+}
+
+fn collect_nodes_containing<'a, 'e>(node: &'a Output<'e>, offset: usize, out: &mut Vec<&'a Output<'e>>) {
+    if offset < node.0.start || offset > node.0.end {
+        return;
+    }
+    out.push(node);
+    node.1
+        .for_each_child(&mut |child| collect_nodes_containing(child, offset, out));
 }
 
 fn hover(document: &Document, position: Position) -> Option<Hover> {
