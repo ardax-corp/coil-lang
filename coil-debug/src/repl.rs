@@ -9,7 +9,7 @@ use compiler::{format_bytecode_section, matches_fn_pat, HostGrants};
 use machine::StopReason;
 use reporting::{ReportConfig, ReportFormat};
 
-use crate::session::{DebugSession, symbol_at_pc};
+use crate::session::{Condition, DebugSession, symbol_at_pc};
 
 pub struct DebugArgs {
     pub filename: String,
@@ -72,23 +72,24 @@ pub fn cmd_debug(config: ReportConfig, args: DebugArgs) {
         }
     }
 
+    // Like gdb -batch: a failing command is reported and the script goes
+    // on (so `bt` after a panic still runs); the exit status reports it.
+    let mut failed = false;
     for line in &script_lines {
-        match exec_line(&mut session, line, batch) {
+        match exec_line(&mut session, line) {
             Ok(CmdResult::Quit) => {
-                exit(if session.panicked() { 1 } else { 0 });
+                exit(if failed || session.panicked() { 1 } else { 0 });
             }
             Ok(CmdResult::ContinuePrompt) => {}
             Err(e) => {
                 eprintln!("debug: {e}");
-                if batch {
-                    exit(1);
-                }
+                failed = true;
             }
         }
     }
 
     if batch {
-        exit(if session.panicked() { 1 } else { 0 });
+        exit(if failed || session.panicked() { 1 } else { 0 });
     }
 
     let stdin = io::stdin();
@@ -104,7 +105,7 @@ pub fn cmd_debug(config: ReportConfig, args: DebugArgs) {
                 break;
             }
         }
-        match exec_line(&mut session, &line, false) {
+        match exec_line(&mut session, &line) {
             Ok(CmdResult::Quit) => break,
             Ok(CmdResult::ContinuePrompt) => {}
             Err(e) => eprintln!("debug: {e}"),
@@ -115,7 +116,7 @@ pub fn cmd_debug(config: ReportConfig, args: DebugArgs) {
     }
 }
 
-fn exec_line(session: &mut DebugSession, line: &str, batch: bool) -> Result<CmdResult, String> {
+fn exec_line(session: &mut DebugSession, line: &str) -> Result<CmdResult, String> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return Ok(CmdResult::ContinuePrompt);
@@ -134,8 +135,13 @@ fn exec_line(session: &mut DebugSession, line: &str, batch: bool) -> Result<CmdR
             let arg = rest
                 .first()
                 .copied()
-                .ok_or("usage: break <fn|file:line|line>")?;
-            let info = session.break_at(arg)?;
+                .ok_or("usage: break <fn|file:line|line> [if <name> <op> <value>]")?;
+            let condition = match rest.get(1) {
+                None => None,
+                Some(&"if") => Some(Condition::parse(&rest[2..].join(" "))?),
+                Some(other) => return Err(format!("unexpected `{other}` (did you mean `if`?)")),
+            };
+            let info = session.break_at_if(arg, condition)?;
             println!("Breakpoint {} at {}", info.id, info.label);
             Ok(CmdResult::ContinuePrompt)
         }
@@ -178,49 +184,31 @@ fn exec_line(session: &mut DebugSession, line: &str, batch: bool) -> Result<CmdR
         "run" | "r" => {
             let reason = session.start();
             report_stop(session, &reason);
-            if matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "continue" | "c" => {
             let reason = session.continue_exec()?;
             report_stop(session, &reason);
-            if batch && matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "stepi" | "si" => {
             let reason = session.stepi()?;
             report_stop(session, &reason);
-            if batch && matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "step" | "s" => {
             let reason = session.step_in()?;
             report_stop(session, &reason);
-            if batch && matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "next" | "n" => {
             let reason = session.step_over()?;
             report_stop(session, &reason);
-            if batch && matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "finish" | "fin" => {
             let reason = session.step_out()?;
             report_stop(session, &reason);
-            if batch && matches!(reason, StopReason::Panic) {
-                return Err("program panicked".into());
-            }
             Ok(CmdResult::ContinuePrompt)
         }
         "print" | "p" => {
@@ -248,7 +236,8 @@ fn exec_line(session: &mut DebugSession, line: &str, batch: bool) -> Result<CmdR
 fn print_help() {
     println!(
         "Commands:\n\
-         \x20 break / b <fn|file:line|line>  Set breakpoint\n\
+         \x20 break / b <fn|file:line|line> [if <name|$N> <op> <value>]\n\
+         \x20                                Set a (conditional) breakpoint\n\
          \x20 delete / d [n]                 Delete breakpoint(s)\n\
          \x20 info break | info registers    Status\n\
          \x20 run / r                        Start or restart\n\
@@ -278,7 +267,7 @@ fn cmd_print(session: &DebugSession, arg: &str) -> Result<(), String> {
 }
 
 fn cmd_info_locals(session: &DebugSession) -> Result<(), String> {
-    if !session.started() {
+    if !session.inspectable() {
         return Err("not started; use `run` first".into());
     }
     let depth = session.registers().2;
@@ -306,7 +295,7 @@ fn cmd_bt(session: &DebugSession) {
         println!("No stack.");
         return;
     }
-    let depth = frames.len();
+    // gdb numbering: #0 is the innermost frame.
     for (i, frame) in frames.iter().enumerate() {
         let loc = frame
             .path
@@ -314,13 +303,7 @@ fn cmd_bt(session: &DebugSession) {
             .zip(frame.line)
             .map(|(p, l)| format!(" at {p}:{l}"))
             .unwrap_or_default();
-        println!(
-            "#{:<2} {} pc={}{}",
-            depth - 1 - i,
-            frame.name,
-            frame.pc,
-            loc
-        );
+        println!("#{:<2} {} pc={}{}", i, frame.name, frame.pc, loc);
     }
 }
 
@@ -410,7 +393,9 @@ fn report_stop(session: &DebugSession, reason: &StopReason) {
         StopReason::Next => println!("Next, {sym}{loc} (pc {ip})"),
         StopReason::Finish => println!("Finish, {sym}{loc} (pc {ip})"),
         StopReason::Halt => println!("Program exited normally."),
-        StopReason::Panic => println!("Program panicked."),
+        StopReason::Panic => {
+            println!("\nProgram panicked; frames kept for `bt`, `print` and `info locals`.")
+        }
     }
 }
 

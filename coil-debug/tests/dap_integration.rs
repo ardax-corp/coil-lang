@@ -530,3 +530,44 @@ fn dap_launch_allow_attach_grant() {
     via_launch.disconnect();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A panic is a `stopped` (reason `exception`) event with the stack intact;
+/// resuming afterwards ends the session with exit code 1.
+#[test]
+fn dap_panic_stops_for_inspection() {
+    let dir = std::env::temp_dir().join(format!("coil-dap-panic-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("panics.hy");
+    std::fs::write(
+        &prog,
+        "fn inner(int n) -> int {\n    if n > 2 {\n        panic \"boom\";\n    }\n    return n;\n}\n\nfn outer(int n) -> int {\n    return inner(n + 1) + 1;\n}\n\nfn main() {\n    let _ = outer(5);\n}\n",
+    )
+    .unwrap();
+    let mut client = DapClient::spawn(&dir);
+    initialize_and_launch(&mut client, prog.to_str().unwrap(), dir.to_str().unwrap(), false);
+    let done = client.request("configurationDone", serde_json::json!({}));
+    assert_eq!(done.get("success"), Some(&serde_json::json!(true)));
+    let stopped = client.wait_for_event("stopped");
+    assert_eq!(
+        stopped.pointer("/body/reason").and_then(|v| v.as_str()),
+        Some("exception"),
+        "stopped={stopped}"
+    );
+    let stack = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frames = stack
+        .pointer("/body/stackFrames")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        frames.first().and_then(|f| f.get("name")).and_then(|n| n.as_str()) == Some("inner"),
+        "top frame is the panicking fn: {stack}"
+    );
+    let _ = client.request("continue", serde_json::json!({ "threadId": 1 }));
+    let exited = client.wait_for_event("exited");
+    assert_eq!(exited.pointer("/body/exitCode"), Some(&serde_json::json!(1)));
+    let _ = client.wait_for_event("terminated");
+    client.disconnect();
+}
+

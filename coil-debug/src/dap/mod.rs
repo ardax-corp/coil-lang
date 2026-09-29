@@ -24,6 +24,9 @@ struct DapServer {
     stop_on_entry: bool,
     pending_start: bool,
     exited: bool,
+    /// The program panicked and is stopped for inspection; the next resume
+    /// ends the session.
+    panic_stopped: bool,
     /// Captures inferior stdout so it does not corrupt the DAP stdio stream.
     print_buf: Arc<Mutex<Vec<u8>>>,
     extra_roots: Vec<PathBuf>,
@@ -41,6 +44,7 @@ impl DapServer {
             stop_on_entry: false,
             pending_start: false,
             exited: false,
+            panic_stopped: false,
             print_buf,
             extra_roots,
             grants,
@@ -358,7 +362,7 @@ impl DapServer {
                 )?;
                 match reason {
                     Ok(r) => self.emit_stop_or_exit(writer, &r)?,
-                    Err(e) => self.send_error(writer, request_seq, command, &e)?,
+                    Err(e) => self.resume_failed(writer, request_seq, command, &e)?,
                 }
             }
             "next" => {
@@ -370,7 +374,7 @@ impl DapServer {
                 self.send_response(writer, request_seq, command, json!({}))?;
                 match reason {
                     Ok(r) => self.emit_stop_or_exit(writer, &r)?,
-                    Err(e) => self.send_error(writer, request_seq, command, &e)?,
+                    Err(e) => self.resume_failed(writer, request_seq, command, &e)?,
                 }
             }
             "stepIn" => {
@@ -382,7 +386,7 @@ impl DapServer {
                 self.send_response(writer, request_seq, command, json!({}))?;
                 match reason {
                     Ok(r) => self.emit_stop_or_exit(writer, &r)?,
-                    Err(e) => self.send_error(writer, request_seq, command, &e)?,
+                    Err(e) => self.resume_failed(writer, request_seq, command, &e)?,
                 }
             }
             "stepOut" => {
@@ -394,7 +398,7 @@ impl DapServer {
                 self.send_response(writer, request_seq, command, json!({}))?;
                 match reason {
                     Ok(r) => self.emit_stop_or_exit(writer, &r)?,
-                    Err(e) => self.send_error(writer, request_seq, command, &e)?,
+                    Err(e) => self.resume_failed(writer, request_seq, command, &e)?,
                 }
             }
             "disconnect" | "terminate" => {
@@ -472,15 +476,26 @@ impl DapServer {
                     self.send_event(writer, "terminated", None)?;
                 }
             }
+            // Stop (not exit) so the client can inspect the stack and
+            // locals; resuming afterwards ends the session.
             StopReason::Panic => {
-                if !self.exited {
-                    self.exited = true;
+                if !self.exited && !self.panic_stopped {
+                    self.panic_stopped = true;
                     self.send_event(writer, "output", Some(json!({
                         "category": "stderr",
                         "output": "Program panicked.\n",
                     })))?;
-                    self.send_event(writer, "exited", Some(json!({ "exitCode": 1 })))?;
-                    self.send_event(writer, "terminated", None)?;
+                    self.send_event(
+                        writer,
+                        "stopped",
+                        Some(json!({
+                            "reason": "exception",
+                            "description": "Program panicked",
+                            "text": "panic",
+                            "threadId": THREAD_ID,
+                            "allThreadsStopped": true,
+                        })),
+                    )?;
                 }
             }
             StopReason::Breakpoint { .. } => {
@@ -507,6 +522,25 @@ impl DapServer {
             }
         }
         Ok(())
+    }
+}
+
+impl DapServer {
+    /// A resume request failed. After a panic stop that is the end of the
+    /// program: report the exit instead of an error.
+    fn resume_failed<W: Write>(
+        &mut self,
+        writer: &mut W,
+        request_seq: i64,
+        command: &str,
+        error: &str,
+    ) -> io::Result<()> {
+        if self.panic_stopped && !self.exited {
+            self.exited = true;
+            self.send_event(writer, "exited", Some(json!({ "exitCode": 1 })))?;
+            return self.send_event(writer, "terminated", None);
+        }
+        self.send_error(writer, request_seq, command, error)
     }
 }
 
