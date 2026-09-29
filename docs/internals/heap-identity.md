@@ -35,7 +35,12 @@ typed instances with ≤4 fields keep those slots in the header
 raw `Value` words, not tagged `Member`s: stores skip the heap probe, and
 mark / root census resolve each word through the slab like tuple elements.
 Enum payloads and tuples are raw words the same way, with up to four inline
-before a spill `Vec`. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+before a spill `Vec`. Class fields carry compile-time word kinds (archive
+minor 24, `ClassWordKinds` per `type_id`): a scalar field (`int` / `float` /
+`bool` / `byte` / scalar enum) is never traced; a pointer field (ground heap
+type or niche word) is a precise reference; a generic or unresolved field
+stays ambiguous. `gc-stress` builds check every declared kind against the
+slab while marking. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal walks the slab: every slot of each resident chunk, live iff its
