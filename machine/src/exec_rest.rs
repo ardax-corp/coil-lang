@@ -619,17 +619,27 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::Panic => {
                     let panic_ip = ip.saturating_sub(1);
+                    // Record where the frame stopped: backtraces and the
+                    // debugger read each frame's saved ip.
+                    if !self.frames.is_empty() {
+                        self.frames.get_mut().seek(panic_ip);
+                    }
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
                     let s = unsafe { (*ptr).as_ref() };
                     let loc_suffix = self
                         .format_panic_location(panic_ip)
                         .map(|loc| format!(" at {loc}"))
                         .unwrap_or_default();
+                    let backtrace = self
+                        .explicit_panic_backtrace(panic_ip)
+                        .filter(|bt| !bt.is_empty())
+                        .map(|bt| format!("\n{bt}"))
+                        .unwrap_or_default();
                     if let Some(out) = self.output.as_mut() {
-                        let _ = write!(out, "panic: {}{}", s, loc_suffix);
+                        let _ = write!(out, "panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = out.flush();
                     } else {
-                        eprint!("panic: {}{}", s, loc_suffix);
+                        eprint!("panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = io::stderr().flush();
                     }
                     self.panicked = true;
