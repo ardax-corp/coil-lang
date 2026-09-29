@@ -33,7 +33,18 @@ Soft wraps kick in when a construct would exceed **100** columns:
 
 Short forms stay on one line (except 1-tuples, which always keep `(x,)`).
 
-Class and enum bodies are always multiline when non-empty and use trailing commas after each field/variant.
+Class and enum bodies are always multiline when non-empty and use trailing commas after each field/variant. Match arms are one per line with a trailing comma after every arm, including the last.
+
+## Normalization
+
+- A statement-position `match` loses its trailing `;` (it ends at `}` like `if`).
+- Redundant parentheses are removed: around a whole initializer, return value,
+  argument, element or `if` / `while` / `match` head (`let w = ((1 + 2));` →
+  `let w = 1 + 2;`, `if (a > 1)` → `if a > 1`), and around atoms anywhere
+  (`(y).z` → `y.z`). Parens that change precedence (`(1 + 2) * 3`), tuples, and
+  `(1).f()` (which would read as a float) are kept. A `{` record head keeps its
+  parens so it does not read as the body.
+- An empty block is `{}`.
 
 Adjacent `use` statements are kept together without blank separator lines.
 Imports with the same namespace are grouped, such as
