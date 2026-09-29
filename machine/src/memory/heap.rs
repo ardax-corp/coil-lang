@@ -1891,8 +1891,7 @@ impl EnumPayload {
         }
     }
 
-    /// Payload words for in-place reference rewrites (`gc-compact`).
-    #[cfg(feature = "gc-compact")]
+    /// Payload words for in-place reference rewrites (evacuation).
     fn as_mut_slice(&mut self) -> &mut [Value] {
         match &mut self.inner {
             EnumPayloadInner::Inline { len, slots, .. } => &mut slots[..*len as usize],
@@ -3157,10 +3156,8 @@ fn resident_kib() -> usize {
 }
 
 
-#[cfg(feature = "gc-compact")]
 #[path = "compact.rs"]
 mod compact;
-#[cfg(feature = "gc-compact")]
 pub use compact::{AddrMap, EvacPlan, Evacuation};
 
 #[cfg(test)]

@@ -276,11 +276,23 @@ macro_rules! unary {
 #[inline(always)]
 fn prefetch_code(_code: &[Byte], _ip: usize) {}
 
-/// Collections between evacuation attempts outside stress mode
-/// (`gc-compact`), and the ceiling unproductive attempts back off to.
-#[cfg(feature = "gc-compact")]
+thread_local! {
+    /// Active `execute` invocations on this thread. More than one means a
+    /// host frame (native re-entry via `call_function`, a finalizer) sits
+    /// between VM frames and may hold raw heap handles, so evacuation must
+    /// not move. Kept out of `Machine` so its hot-loop field layout is
+    /// unchanged.
+    static IN_EXECUTE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Evacuation pacing for this thread's VM: `(cycles since the last
+    /// attempt, collections to wait)`. Also outside `Machine` / `Heap`.
+    static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
+    /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug).
+    static COMPACT_ENABLED: bool = std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
+}
+
+/// Collections between evacuation attempts outside stress mode, and the
+/// ceiling unproductive attempts back off to.
 const COMPACT_WINDOW: u32 = 8;
-#[cfg(feature = "gc-compact")]
 const COMPACT_WINDOW_MAX: u32 = 256;
 
 #[inline(always)]
@@ -492,17 +504,6 @@ pub struct Machine<const S: usize> {
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
     nested_return: Option<Value>,
-    /// Active `execute` invocations. More than one means a host frame
-    /// (native re-entry via `call_function`, a finalizer) sits between VM
-    /// frames and may hold raw heap handles, so `gc-compact` must not move.
-    #[cfg(feature = "gc-compact")]
-    in_execute: u32,
-    /// Collections since the last evacuation attempt (`gc-compact`).
-    #[cfg(feature = "gc-compact")]
-    compact_cycles: u32,
-    /// Collections to wait before the next attempt (backs off when idle).
-    #[cfg(feature = "gc-compact")]
-    compact_window: u32,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
     /// Set when `await_*` parks until fd readiness (CPU help-steals meanwhile).
@@ -611,12 +612,6 @@ impl<const S: usize> Machine<S> {
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
-            #[cfg(feature = "gc-compact")]
-            in_execute: 0,
-            #[cfg(feature = "gc-compact")]
-            compact_cycles: 0,
-            #[cfg(feature = "gc-compact")]
-            compact_window: COMPACT_WINDOW,
             pending_ffi: None,
             pending_io: None,
             panicked: false,
@@ -1330,20 +1325,21 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        #[cfg(feature = "gc-compact")]
         self.gc_compact();
         self.gc_in_progress = false;
     }
 
-    /// Evacuate sparse chunks after a finished cycle (`gc-compact`,
-    /// `docs/internals/gc-evacuation.md`). Must-pointer frame slots are
+    /// Evacuate sparse chunks after a finished cycle
+    /// (`docs/internals/gc-evacuation.md`). Must-pointer frame slots are
     /// rewritten; every other VM root pins its target. Skipped while a host
     /// frame sits between VM frames (native re-entry, finalizers), in a
     /// shared-heap epoch, or under the debugger. `gc-stress` moves everything
     /// movable each cycle and checks that no word still names an old slot.
-    #[cfg(feature = "gc-compact")]
+    #[cold]
+    #[inline(never)]
     fn gc_compact(&mut self) {
-        if self.in_execute > 1
+        if !COMPACT_ENABLED.with(|e| *e)
+            || IN_EXECUTE.get() > 1
             || self.shared_epoch.is_some()
             || self.heap.epoch_stw()
             || self.heap.is_borrowed()
@@ -1359,11 +1355,12 @@ impl<const S: usize> Machine<S> {
         // attempts; unproductive attempts double it (the analysis walks the
         // whole heap), a productive one resets it.
         let stress = cfg!(feature = "gc-stress");
-        self.compact_cycles += 1;
-        if !stress && self.compact_cycles < self.compact_window {
+        let (cycles, window) = COMPACT_PACING.get();
+        if !stress && cycles + 1 < window {
+            COMPACT_PACING.set((cycles + 1, window));
             return;
         }
-        self.compact_cycles = 0;
+        COMPACT_PACING.set((0, window));
         let mut pins = self.heap.take_gc_roots();
         let mut must = Vec::new();
         self.for_each_stack_word(&mut |idx, kind| match kind {
@@ -1373,7 +1370,7 @@ impl<const S: usize> Machine<S> {
         self.for_each_non_stack_root(&mut |addr, _| pins.push(addr));
         let Some(plan) = self.heap.evacuate_plan(&pins, stress) else {
             self.heap.restore_gc_roots(pins);
-            self.compact_window = (self.compact_window * 2).min(COMPACT_WINDOW_MAX);
+            COMPACT_PACING.set((0, (window * 2).min(COMPACT_WINDOW_MAX)));
             return;
         };
         self.heap.restore_gc_roots(pins);
@@ -1394,7 +1391,7 @@ impl<const S: usize> Machine<S> {
         }
         let evacuation = self.heap.evacuate_finish(plan);
         self.clear_dense_obj_cache();
-        self.compact_window = if evacuation.capped { 1 } else { COMPACT_WINDOW };
+        COMPACT_PACING.set((0, if evacuation.capped { 1 } else { COMPACT_WINDOW }));
         #[cfg(feature = "gc-stats")]
         eprintln!("gc-stats evacuate: {evacuation:?}");
         let _ = evacuation;
@@ -1496,7 +1493,6 @@ impl<const S: usize> Machine<S> {
         let n = self.heap.gc_sweep_quantum();
         if self.heap.sweep_quantum(n) {
             self.invalidate_program_string_cache();
-            #[cfg(feature = "gc-compact")]
             self.gc_compact();
         }
     }
@@ -3143,19 +3139,13 @@ impl<const S: usize> Machine<S> {
     /// the guard compare retired on every dispatch.
     /// An always-hot arm continues the streak in `execute_dense`, so a dense
     /// loop does not return here per opcode. CALL/RETURN stay on this match.
-    /// [`Self::execute`], counted as active for the `gc-compact` re-entrancy
+    /// [`Self::execute`], counted as active for the evacuation re-entrancy
     /// check (outside the loop, so it costs nothing per op).
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
-        #[cfg(feature = "gc-compact")]
-        {
-            self.in_execute += 1;
-        }
+        IN_EXECUTE.set(IN_EXECUTE.get() + 1);
         let paused = self.execute(code, constants, start_ip);
-        #[cfg(feature = "gc-compact")]
-        {
-            self.in_execute -= 1;
-        }
+        IN_EXECUTE.set(IN_EXECUTE.get() - 1);
         paused
     }
 

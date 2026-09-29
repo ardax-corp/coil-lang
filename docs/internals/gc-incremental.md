@@ -33,8 +33,8 @@ across safepoints:
 `Heap::collect` and `Machine::gc_collect` finish any in-flight sweep, then
 drain mark + sweep so `gc::collect()` still reclaims in one call (`gc_churn`).
 
-Objects do not move during mark or sweep. The optional `gc-compact`
-evacuation runs between cycles ([gc-evacuation.md](gc-evacuation.md)).
+Objects do not move during mark or sweep. Evacuation runs between cycles
+([gc-evacuation.md](gc-evacuation.md)).
 
 ## Memory return
 

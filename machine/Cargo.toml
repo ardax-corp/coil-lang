@@ -11,8 +11,6 @@ vm_profile = []
 gc-stress = []
 # Print GC census numbers after each mark (docs/internals/gc-evacuation.md).
 gc-stats = []
-# Mostly-copying evacuation of sparse slab chunks (docs/internals/gc-evacuation.md).
-gc-compact = []
 
 [dependencies]
 common = { path = "../common" }
