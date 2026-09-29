@@ -650,6 +650,7 @@ mod tests {
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             class_word_kinds: Arc::default(),
+            static_word_kinds: Arc::default(),
         })
     }
 
@@ -899,6 +900,7 @@ mod tests {
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             class_word_kinds: Arc::default(),
+            static_word_kinds: Arc::default(),
         });
         let vm = machine_for_program(&prog);
         assert_eq!(vm.operand_stack_capacity(), 1024);

@@ -428,6 +428,9 @@ pub struct Checker {
     /// Key = FQN (`module::name` or `Class::field`). Persists across modules.
     static_slots: HashMap<String, (u32, bool)>,
     static_slot_types: HashMap<String, Ty>,
+    /// Compiler-allocated statics (FFI library / fn-id handles): their
+    /// declared type does not describe the word, so their kind stays unknown.
+    synthetic_statics: std::collections::HashSet<String>,
     next_static_slot: u32,
 
     /// `const` class fields: class name → field names (immutable for everyone).

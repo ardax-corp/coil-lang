@@ -103,6 +103,12 @@ Effect on `examples/perf`:
 In `class_wide_live` and `tuple_live`, stale loop roots used to keep last
 round's whole structure alive.
 
+Statics carry a word kind per slot (archive minor 29), from their declared
+type. A scalar static is no root, and a pointer static is a precise root
+that evacuation rewrites. Generic and compiler-allocated statics (FFI
+library / fn-id handles) stay ambiguous. A static is one word, so this
+unpins at most its direct target.
+
 Arrays carry an element kind (archive minor 27). `Vec::new` /
 `with_capacity` / `from` calls whose static element type is a ground
 pointer (class, string, niche `Option` / `Result`, nested `Vec` or fixed

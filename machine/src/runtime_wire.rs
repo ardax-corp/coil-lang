@@ -73,6 +73,7 @@ pub fn wire_thread_program<const N: usize>(
         stack_maps: Vec::new(),
         precise_frames: Vec::new(),
         class_word_kinds: Vec::new(),
+        static_word_kinds: Vec::new(),
     })
 }
 
@@ -88,6 +89,8 @@ pub struct WireThreadProgramWithMapsArgs<'a, const N: usize> {
     pub stack_maps: Vec<common::FrameStackMap>,
     pub precise_frames: Vec<common::PreciseFrameMap>,
     pub class_word_kinds: Vec<common::ClassWordKinds>,
+    /// Per static slot word kind (`common::WORD_*`).
+    pub static_word_kinds: Vec<u8>,
 }
 
 /// Like [`wire_thread_program`], attaching S2b maps for compile-and-run
@@ -104,6 +107,7 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
         stack_maps,
         precise_frames,
         class_word_kinds,
+        static_word_kinds,
     } = args;
     machine.set_thread_program(Arc::new(ThreadProgram {
         code: Arc::from(bytecode.to_vec()),
@@ -115,6 +119,7 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
         stack_maps,
         precise_frames: Arc::new(precise_frames),
         class_word_kinds: crate::class_kind_table(&class_word_kinds),
+        static_word_kinds: Arc::new(static_word_kinds),
     }));
 }
 

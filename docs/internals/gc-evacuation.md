@@ -24,7 +24,9 @@ These **pin** the object they reach:
 
 - every ambiguous word (unknown kinds, closure captures, `Member::Value`,
   conservative frames, non-must slots, MIR stack-map slots);
-- statics and the steal join root;
+- statics of unknown kind (generic or compiler-allocated) and the steal join
+  root; pointer-kind statics are precise and rewritten, scalar ones are no
+  roots (archive minor 29);
 - `frame_pins` (Rust-held handles; the `dense_obj` index cache is not a root
   and is cleared at every collection);
 - FFI library keys;
