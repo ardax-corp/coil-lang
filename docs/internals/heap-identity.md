@@ -45,7 +45,16 @@ stays ambiguous. Enum payloads and tuples carry construction-site kinds
 padding). Codegen classifies constructor arguments by static type and MIR by
 `MirTy`. Generic shared bodies and host-built enums stay unknown.
 `gc-stress` builds check every declared kind against the slab while
-marking. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+marking.
+
+Frame roots follow the same split (archive minor 26). A precise frame map
+lists the slots that may hold heap words; the compiler flags
+(`PRECISE_SLOT_MUST`) those whose every reaching definition is an
+allocation or a copy of one. The VM reports flagged slots as precise roots
+and the rest as ambiguous. Call results and parameters stay ambiguous at
+the bytecode level (no types there), and `Vec<T>` elements have no kinds
+(generic bodies), so objects held that way would still pin under a moving
+collector. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal walks the slab: every slot of each resident chunk, live iff its
