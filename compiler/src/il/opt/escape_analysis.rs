@@ -37,6 +37,8 @@ pub struct AllocSite {
     /// `LOAD`s of `store_slot` reached only by this site's store (the slot
     /// may be reused for other values elsewhere in the body).
     pub owned: Vec<usize>,
+    /// First op of each element's straight-line code, in push order.
+    pub elem_starts: Vec<usize>,
 }
 
 impl AllocSite {
@@ -89,6 +91,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
                 escaped: false,
                 box_at_escape: false,
                 owned: Vec::new(),
+                elem_starts: Vec::new(),
             });
             i += 2;
             continue;
@@ -102,6 +105,13 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
         if slots.iter().filter(|s| **s == a.store_slot).count() > 1 {
             a.escaped = true;
             continue;
+        }
+        match element_starts(ops, a.make_idx, a.arity) {
+            Some(starts) => a.elem_starts = starts,
+            None => {
+                a.escaped = true;
+                continue;
+            }
         }
         match owned_loads(ops, &blocks, a.make_idx + 1, a.store_slot) {
             Some(owned) => a.owned = owned,
@@ -167,19 +177,39 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
         return;
     }
 
+    // Store each element as soon as it is computed. Popping several values
+    // into slots above the cursor is unsound: a `STORE` past the cursor
+    // raises it, so the next pop would read the slot just written.
+    let mut elem_stores: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for s in info.stack_allocatable() {
+        let Some(&(_, b, _, _)) = map.iter().find(|(_, _, _, m)| *m == s.make_idx) else {
+            continue;
+        };
+        for k in 1..s.elem_starts.len() {
+            elem_stores.insert(s.elem_starts[k], b + k as u32 - 1);
+        }
+    }
+
     let mut boxed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(ops.len());
     let mut i = 0;
     while i < ops.len() {
+        if let Some(&slot) = elem_stores.get(&i) {
+            out.push(IlOp::StorePop {
+                slot,
+                loc: ops[i].loc(),
+            });
+        }
         if let Some((_, b, arity, _)) = map.iter().copied().find(|(_, _, _, m)| *m == i)
             && matches!(ops[i], IlOp::MakeArray { .. } | IlOp::MakeTuple { .. })
             && i + 1 < ops.len()
             && matches!(ops[i + 1], IlOp::StorePop { .. })
         {
             let loc = ops[i].loc();
-            for k in (0..arity).rev() {
-                out.push(IlOp::StorePop { slot: b + k, loc });
-            }
+            out.push(IlOp::StorePop {
+                slot: b + arity - 1,
+                loc,
+            });
             i += 2;
             continue;
         }
@@ -593,6 +623,45 @@ fn classify_local_use(ops: &[IlOp], load_idx: usize, arity: u32) -> Option<Local
         });
     }
     None
+}
+
+/// Start of each of the `arity` values `ops[make_idx]` consumes, in push
+/// order. `None` unless they are straight-line code with known stack
+/// effects: walking back, a proper suffix of one element's postfix code
+/// never nets a value, so the net first reaches `k` at the start of the
+/// k-th element from the top.
+pub(super) fn element_starts(ops: &[IlOp], make_idx: usize, arity: u32) -> Option<Vec<usize>> {
+    let mut starts = Vec::with_capacity(arity as usize);
+    let mut net = 0i32;
+    let mut j = make_idx;
+    while (starts.len() as u32) < arity {
+        j = j.checked_sub(1)?;
+        let op = &ops[j];
+        if matches!(
+            op,
+            IlOp::Label(_)
+                | IlOp::JoinLabel(_)
+                | IlOp::Jump { .. }
+                | IlOp::Return { .. }
+                | IlOp::LoadReturnSlot { .. }
+                | IlOp::ConstReturnImm { .. }
+                | IlOp::BinReturn { .. }
+                | IlOp::Halt { .. }
+                | IlOp::PrologueJmp { .. }
+        ) || op
+            .as_plain_byte()
+            .is_some_and(|b| *b.bytecode() == Instruction::Seek)
+            || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
+        {
+            return None;
+        }
+        net += crate::il::sp::stack_delta(op)?;
+        if net == starts.len() as i32 + 1 {
+            starts.push(j);
+        }
+    }
+    starts.reverse();
+    Some(starts)
 }
 
 fn makearray_elems_are_immediate(ops: &[IlOp], make_idx: usize, arity: u32) -> bool {
