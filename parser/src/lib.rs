@@ -69,6 +69,7 @@ macro_rules! output {
 }
 
 pub mod ast;
+pub mod comments;
 pub mod fmt;
 
 pub use ast::item_docs;
