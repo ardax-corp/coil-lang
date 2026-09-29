@@ -1011,6 +1011,15 @@ pub struct Compiler {
     /// consumed immediately by `StorePop` / `StoreStatic` (e.g. `let x = match …`).
     suppress_match_fusion_barrier: bool,
 
+    /// Set by a statement `match` (`ExprStatement(Match)`) for the next
+    /// [`Expression::Match`] compiled; taken at its entry so the scrutinee
+    /// and nested matches never see it.
+    statement_match_pending: bool,
+    /// Per match being compiled (innermost last): whether each arm discards
+    /// its own value. Arm bodies of a statement match need not push a value
+    /// (`B => {}`), so a single POP after the match would pop a local.
+    arm_discard: Vec<bool>,
+
     /// User `fn` names that sit on a call-graph cycle (self or mutual).
     recursive_fns: HashSet<String>,
     /// Self-recursive pure function names eligible for auto fork-join.
@@ -1132,6 +1141,8 @@ impl Default for Compiler {
             fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
             suppress_match_fusion_barrier: false,
+            statement_match_pending: false,
+            arm_discard: Vec::new(),
             match_tail_call: false,
             recursive_fns: HashSet::new(),
             recursive_pure: HashSet::new(),

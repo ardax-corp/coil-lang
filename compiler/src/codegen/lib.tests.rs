@@ -6150,13 +6150,15 @@ fn match_nested_record_missing_field_consumes_slot() {
     let (bc, _pool) = compile_src(
         "enum Inner { I { v: int } } \
  fn main() { \
- match Result::Ok(Inner::I { v: 42 }) { \
+ let r = match Result::Ok(Inner::I { v: 42 }) { \
  Result::Err(_) => 0, \
  Result::Ok(Inner::I { }) => 99, \
  }; \
  }",
     );
 
+    // Bound to `r` so the arm value is used: a statement match drops each
+    // arm's value, and `CONST 99; POP` folds away.
     // The pattern omits the `v` field. The codegen walks
     // the inner record's declared fields in decl_order
     // and emits POP for the missing field. Pre-18B, the
