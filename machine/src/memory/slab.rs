@@ -683,10 +683,12 @@ fn release_pages(ptr: *mut u8, len: usize) {
 #[cfg(not(unix))]
 fn release_pages(_ptr: *mut u8, _len: usize) {}
 
+/// Zeroed like `mmap`: an untouched slot must read as a poisoned header
+/// (`kind == 0`), or the slot walk would take it for a live object.
 #[cfg(not(unix))]
 fn map_chunk(len: usize) -> *mut u8 {
     let layout = Layout::from_size_align(len, 4096).expect("layout");
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
