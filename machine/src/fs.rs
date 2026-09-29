@@ -393,7 +393,7 @@ mod tests {
         };
         let key = heap.intern(field.to_string());
         match inst.as_ref().get(key) {
-            Some(Member::Value(v)) => v.as_bool(),
+            Some(v) => v.as_bool(),
             _ => panic!("missing field {field}"),
         }
     }
@@ -404,7 +404,7 @@ mod tests {
         };
         let key = heap.intern(field.to_string());
         match inst.as_ref().get(key) {
-            Some(Member::Value(v)) => v.as_int(),
+            Some(v) => v.as_int(),
             _ => panic!("missing field {field}"),
         }
     }

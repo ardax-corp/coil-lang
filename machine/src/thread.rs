@@ -850,12 +850,8 @@ fn encode_value(
             let inst = gc.as_ref();
             let mut fields = Vec::new();
             if let Some(slots) = inst.slots() {
-                for m in slots {
-                    let pv = match m {
-                        Member::Value(iv) => encode_value(heap, *iv, visited)?,
-                        Member::Object(o) => encode_object(heap, *o, visited)?,
-                    };
-                    fields.push((String::new(), pv));
+                for v in slots {
+                    fields.push((String::new(), encode_value(heap, *v, visited)?));
                 }
             } else {
                 for (k, m) in inst.iter_fields() {
@@ -948,8 +944,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             if type_id != 0 && !fields.is_empty() && fields.iter().all(|(n, _)| n.is_empty()) {
                 let mut slots = Vec::with_capacity(fields.len());
                 for (_, pv) in fields {
-                    let val = decode_portable(heap, pv)?;
-                    slots.push(member_from_value(heap, val));
+                    slots.push(decode_portable(heap, pv)?);
                 }
                 let inst = ObjInstance::with_slots(type_id, slots);
                 let (obj, _) = heap.alloc(inst, Object::Instance);

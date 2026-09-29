@@ -18,7 +18,7 @@ use common::{
 };
 
 use super::{FramePins, prefetch_code, resolve_dense_index_object_in, set_jump_target};
-use crate::{Frame, Heap, Member, Object, Stack};
+use crate::{Frame, Heap, Object, Stack};
 
 struct HotExtra<'a> {
     frames_len: usize,
@@ -567,7 +567,7 @@ pub(super) fn dense_field_load(
         let key = super::Machine::<8>::intern_key(heap, stack[sp + c]);
         match heap.find_object_by_addr(addr) {
             Some(Object::Instance(gc)) => {
-                gc.as_ref().get(key).map(super::Machine::<8>::member_value)
+                gc.as_ref().get(key)
             }
             _ => None,
         }
@@ -584,11 +584,7 @@ pub(super) fn dense_field_load(
             Some(Object::Instance(gc)) => {
                 if let Some(n) = gc.as_ref().slot_len() {
                     promise!(field_index < n);
-                    Some(super::Machine::<8>::member_value(
-                        gc.as_ref()
-                            .slot(field_index)
-                            .unwrap_or(Member::Value(Value::default())),
-                    ))
+                    Some(gc.as_ref().slot(field_index).unwrap_or_default())
                 } else {
                     Some(Value::default())
                 }
@@ -626,8 +622,7 @@ pub(super) fn dense_field_store(
         } else {
             let idx = c;
             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
-            gc.as_mut()
-                .set_slot(idx, super::Machine::<8>::value_as_member(heap, value));
+            gc.as_mut().set_slot(idx, value);
         }
     } else {
         return Err(DenseFail::SetFieldNonInstance);

@@ -176,13 +176,6 @@ impl Drop for FfiStringReset {
     }
 }
 
-fn member_to_value(member: &Member) -> Value {
-    match member {
-        Member::Value(v) => *v,
-        Member::Object(o) => Value::from(o.addr()),
-    }
-}
-
 fn instance_field(heap: &mut Heap, addr: u64, fname: &str) -> Result<Value, FfiError> {
     let obj = heap
         .find_object_by_addr(addr)
@@ -192,7 +185,6 @@ fn instance_field(heap: &mut Heap, addr: u64, fname: &str) -> Result<Value, FfiE
             let key = heap.intern(fname.to_string());
             gc.as_ref()
                 .get(key)
-                .map(|member| member_to_value(&member))
                 .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`")))
         }
         _ => Err(FfiError::Unsupported(
