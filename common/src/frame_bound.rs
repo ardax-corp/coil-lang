@@ -28,7 +28,7 @@ pub struct FrameReserve {
 /// [`FrameReserve`] for every frame `code` can run.
 #[must_use]
 pub fn frame_reserve(code: &[Byte], pool: &[u64]) -> FrameReserve {
-    let match_payload = widest_payload(code);
+    let match_payload = widest_payload(code, pool);
     let args = code
         .iter()
         .filter(|b| matches!(*b.bytecode(), Instruction::CALL | Instruction::TailCall))
@@ -47,13 +47,20 @@ pub fn frame_reserve(code: &[Byte], pool: &[u64]) -> FrameReserve {
 /// Host natives build `Option` / `Result` payloads of one word.
 const HOST_PAYLOAD: usize = 2;
 
-fn widest_payload(code: &[Byte]) -> usize {
+fn widest_payload(code: &[Byte], pool: &[u64]) -> usize {
     code.iter()
         .filter_map(|b| match *b.bytecode() {
-            Instruction::MakeEnum | Instruction::MakeEnumReturn => Some(b.operand_u16(1) as usize),
+            Instruction::MakeEnum
+            | Instruction::MakeEnumReturn
+            | Instruction::MakeEnumK
+            | Instruction::MakeEnumReturnK => Some(b.make_arity() as usize),
             Instruction::DenseMake if b.dense_abc_parts().0 >= crate::dense::MAKE_ENUM => {
                 Some(b.dense_abc_parts().2)
             }
+            Instruction::DenseMakeK => b
+                .dense_make_k_parts(pool)
+                .filter(|p| p.0 >= crate::dense::MAKE_ENUM)
+                .map(|p| p.2),
             _ => None,
         })
         .max()
@@ -159,7 +166,8 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
     match *b.bytecode() {
         // Leave the frame, or abort the VM (retired and unhandled opcodes panic).
         HALT | RETURN | LoadReturnSlot | ConstReturnImm | BinReturn | ReturnPair
-        | MakeEnumReturn | TailCall | Panic | SET | OptionNicheToHeap | HeapOptionToNiche
+        | MakeEnumReturn | MakeEnumReturnK | TailCall | Panic | SET | OptionNicheToHeap
+        | HeapOptionToNiche
         | PairJumpIfTag | PairToHeap | HeapToPair | HostInvokeNiche | FloatChainStore
         | BinSlotSlotConstJmpf => {
             s.falls = false;
@@ -259,6 +267,11 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
             let (_, dest, arity, base) = b.dense_abc_parts();
             s.slots = hi(&[dest, base + arity.max(1) - 1]);
         }
+        DenseMakeK => {
+            if let Some((_, dest, arity, base, _)) = b.dense_make_k_parts(pool) {
+                s.slots = hi(&[dest, base + arity.max(1) - 1]);
+            }
+        }
         DenseMakeObject => {
             s.slots = hi(&[crate::dense::unpack_make_object(b.operand_u32()).0 as usize]);
         }
@@ -284,7 +297,8 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         VReduce => s.slots = hi(&[b.dense_abc_parts().1]),
         VMove | VFma => {}
         // One new word at most (pops, if any, come first).
-        DUPLICATE | CONST | STRING | CodePtr | INIT | InitTyped | MakeEnum | MakeTuple
+        DUPLICATE | CONST | STRING | CodePtr | INIT | InitTyped | MakeEnum | MakeEnumK
+        | MakeTuple | MakeTupleK
         | MakeArray | MakeDict | MakePolyFn | MakePolyFnCapture | MakeFn | LoadStatic | FfiLoad
         | FfiInvoke | DeclareFFI | HostInvoke => s.push = 1,
         // Net pops or in place.

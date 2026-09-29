@@ -443,6 +443,19 @@ pub enum Instruction {
     /// the GC runs its `fn drop()`. Stack-neutral; never allocates. A unit
     /// variant (shared immortal) passes through untagged. Archive **minor 23**.
     TagEnumType,
+    /// [`Self::MakeEnum`] plus payload word kinds: `[31:16]` tag, `[15:8]`
+    /// kinds (2 bits per word, first four words, `WORD_*`), `[7:0]` arity.
+    /// Archive **minor 25**.
+    MakeEnumK,
+    /// [`Self::MakeEnumReturn`] with the [`Self::MakeEnumK`] operand.
+    MakeEnumReturnK,
+    /// [`Self::MakeTuple`] plus element word kinds: `[15:8]` kinds, `[7:0]`
+    /// arity.
+    MakeTupleK,
+    /// [`Self::DenseMake`] (tuple / enum kinds only) plus word kinds:
+    /// `[31:24]` kind, `[23:16]` dest, `[15:0]` pool index of
+    /// `base | arity << 8 | kinds << 16`.
+    DenseMakeK,
 }
 
 impl From<u8> for Instruction {
@@ -460,6 +473,11 @@ impl From<Instruction> for u8 {
 /// `InitTyped` operand: `[31:16] field_count`, `[15:0] type_id`.
 #[inline]
 #[must_use]
+/// Pool entry of a [`Instruction::DenseMakeK`]: `base | arity << 8 | kinds << 16`.
+pub const fn pack_dense_make_k(base: u8, arity: u8, kinds: u8) -> u64 {
+    (base as u64) | ((arity as u64) << 8) | ((kinds as u64) << 16)
+}
+
 pub const fn pack_init_typed(type_id: u32, field_count: u32) -> u32 {
     ((field_count & 0xFFFF) << 16) | (type_id & 0xFFFF)
 }
@@ -883,6 +901,10 @@ impl Instruction {
             Self::DenseIndexJmpf => "DenseIndexJmpf",
             Self::MakeEnumReturn => "MakeEnumReturn",
             Self::TagEnumType => "TagEnumType",
+            Self::MakeEnumK => "MakeEnumK",
+            Self::MakeEnumReturnK => "MakeEnumReturnK",
+            Self::MakeTupleK => "MakeTupleK",
+            Self::DenseMakeK => "DenseMakeK",
         }
     }
 }
@@ -1012,6 +1034,55 @@ impl Byte {
 
     pub fn operand_u32(&self) -> u32 {
         self.operands
+    }
+
+    /// Payload / element count of `MakeEnum` / `MakeEnumReturn` /
+    /// `MakeTuple` and their `…K` forms (whose arity is 8 bits).
+    #[inline]
+    pub fn make_arity(&self) -> u32 {
+        match self.bytecode {
+            Instruction::MakeEnumK | Instruction::MakeEnumReturnK | Instruction::MakeTupleK => {
+                self.operands & 0xFF
+            }
+            _ => self.operands & 0xFFFF,
+        }
+    }
+
+    /// Word kinds (`crate::WORD_*`, 2 bits per word) of a `…K` make op;
+    /// `0` (all unknown) for the plain forms.
+    #[inline]
+    pub fn make_kinds(&self) -> u8 {
+        match self.bytecode {
+            Instruction::MakeEnumK | Instruction::MakeEnumReturnK | Instruction::MakeTupleK => {
+                (self.operands >> 8) as u8
+            }
+            _ => 0,
+        }
+    }
+
+    /// `DenseMakeK`: `(kind, dest, arity, base, kinds)` from the operand and
+    /// its pool entry (`None` if the index is out of range).
+    pub fn dense_make_k_parts(&self, pool: &[u64]) -> Option<(u8, usize, usize, usize, u8)> {
+        let op = self.operands;
+        let entry = *pool.get((op & 0xFFFF) as usize)?;
+        Some((
+            (op >> 24) as u8,
+            ((op >> 16) & 0xFF) as usize,
+            ((entry >> 8) & 0xFF) as usize,
+            (entry & 0xFF) as usize,
+            (entry >> 16) as u8,
+        ))
+    }
+
+    /// `DenseMakeK` operand: `kind`, `dest`, and the pool index of
+    /// [`pack_dense_make_k`].
+    pub fn with_dense_make_k(self, kind: u8, dest: u8, pool_idx: u16) -> Self {
+        self.with_operand_u32((u32::from(kind) << 24) | (u32::from(dest) << 16) | u32::from(pool_idx))
+    }
+
+    /// `MakeEnumK` / `MakeEnumReturnK` operand (`arity` ≤ 255).
+    pub fn with_make_enum_kinds(self, tag: u16, arity: u8, kinds: u8) -> Self {
+        self.with_operand_u32((u32::from(tag) << 16) | (u32::from(kinds) << 8) | u32::from(arity))
     }
 
     /// `RETURN` operand: `0` (old archives / default) means one word;
@@ -1448,6 +1519,43 @@ impl ArchivedByte {
 
     pub fn operand_u32(&self) -> u32 {
         self.operands.into()
+    }
+
+    /// See [`Byte::make_arity`].
+    #[inline]
+    pub fn make_arity(&self) -> u32 {
+        let op: u32 = self.operands.into();
+        match self.bytecode {
+            ArchivedInstruction::MakeEnumK
+            | ArchivedInstruction::MakeEnumReturnK
+            | ArchivedInstruction::MakeTupleK => op & 0xFF,
+            _ => op & 0xFFFF,
+        }
+    }
+
+    /// See [`Byte::make_kinds`].
+    #[inline]
+    pub fn make_kinds(&self) -> u8 {
+        let op: u32 = self.operands.into();
+        match self.bytecode {
+            ArchivedInstruction::MakeEnumK
+            | ArchivedInstruction::MakeEnumReturnK
+            | ArchivedInstruction::MakeTupleK => (op >> 8) as u8,
+            _ => 0,
+        }
+    }
+
+    /// See [`Byte::dense_make_k_parts`].
+    pub fn dense_make_k_parts(&self, pool: &[u64]) -> Option<(u8, usize, usize, usize, u8)> {
+        let op: u32 = self.operands.into();
+        let entry = *pool.get((op & 0xFFFF) as usize)?;
+        Some((
+            (op >> 24) as u8,
+            ((op >> 16) & 0xFF) as usize,
+            ((entry >> 8) & 0xFF) as usize,
+            (entry & 0xFF) as usize,
+            (entry >> 16) as u8,
+        ))
     }
 
     pub fn operand_u16(&self, index: usize) -> u16 {
@@ -1914,7 +2022,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::TagEnumType as u8;
+        let last = Instruction::DenseMakeK as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

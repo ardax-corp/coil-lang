@@ -146,6 +146,9 @@ pub fn verify_bytecode(
             BinSlotImmStore => {
                 pool(byte.bin_slot_imm_store_parts().2, "BinSlotImmStore")?;
             }
+            DenseMakeK => {
+                pool((operand & 0xFFFF) as usize, "DenseMakeK")?;
+            }
             _ => {}
         }
     }
