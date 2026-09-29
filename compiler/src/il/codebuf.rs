@@ -131,6 +131,11 @@ impl CodeBuf {
         self.il.push_make_tuple(arity);
     }
 
+    pub fn push_make_tuple_kinds(&mut self, arity: u32, kinds: u8) {
+        self.invalidate_lowered();
+        self.il.push_make_tuple_kinds(arity, kinds);
+    }
+
     pub fn push_make_array(&mut self, arity: u32) {
         self.invalidate_lowered();
         self.il.push_make_array(arity);
@@ -139,6 +144,11 @@ impl CodeBuf {
     pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
         self.invalidate_lowered();
         self.il.push_make_enum(tag, arity);
+    }
+
+    pub fn push_make_enum_kinds(&mut self, tag: u16, arity: u16, kinds: u8) {
+        self.invalidate_lowered();
+        self.il.push_make_enum_kinds(tag, arity, kinds);
     }
 
     pub fn push_box_value(&mut self, tag: u32) {

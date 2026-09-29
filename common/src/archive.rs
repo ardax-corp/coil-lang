@@ -92,10 +92,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 24 — [`ClassWordKinds`]: per-class field word kinds (scalar / pointer /
 ///      unknown) from static types. Older archives load with none, so every
 ///      typed field stays ambiguous.
+/// 25 — `MakeEnumK` / `MakeEnumReturnK` / `MakeTupleK` / `DenseMakeK`: enum
+///      payloads and tuples carry construction-site word kinds. Older
+///      archives never emit them (every payload word stays ambiguous).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 24;
+pub const ARCHIVE_MINOR: u16 = 25;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -135,6 +138,29 @@ pub const WORD_UNKNOWN: u8 = 0;
 pub const WORD_SCALAR: u8 = 1;
 /// `0` or a heap object address, possibly with bit 0 set (`Result` niche).
 pub const WORD_POINTER: u8 = 2;
+
+/// Words whose kinds a packed `u8` records (2 bits each). Later words of a
+/// wider payload are unknown.
+pub const PACKED_KIND_WORDS: usize = 4;
+
+/// Kind of word `i` in a packed `u8` (see [`PACKED_KIND_WORDS`]).
+#[inline]
+pub const fn packed_word_kind(kinds: u8, i: usize) -> u8 {
+    if i < PACKED_KIND_WORDS {
+        (kinds >> (2 * i)) & 3
+    } else {
+        WORD_UNKNOWN
+    }
+}
+
+/// Pack per-word kinds (first [`PACKED_KIND_WORDS`]) into a `u8`.
+pub fn pack_word_kinds(kinds: impl IntoIterator<Item = u8>) -> u8 {
+    kinds
+        .into_iter()
+        .take(PACKED_KIND_WORDS)
+        .enumerate()
+        .fold(0, |acc, (i, k)| acc | ((k & 3) << (2 * i)))
+}
 
 /// Word kinds of a class's typed fields, in slot order (minor 24+).
 #[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -787,9 +813,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 24);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 24));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.24");
+        assert_eq!(ARCHIVE_MINOR, 25);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 25));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.25");
     }
 
     #[test]

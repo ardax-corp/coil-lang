@@ -263,6 +263,19 @@ fn format_operands(
         Instruction::MakeTuple | Instruction::MakeArray | Instruction::MakeDict => {
             format!("arity={}", byte.operand_u32())
         }
+        Instruction::MakeTupleK => {
+            format!("arity={} kinds={:#04x}", byte.make_arity(), byte.make_kinds())
+        }
+        Instruction::MakeEnumK | Instruction::MakeEnumReturnK => format!(
+            "tag={} arity={} kinds={:#04x}",
+            byte.operand_u16(0),
+            byte.make_arity(),
+            byte.make_kinds()
+        ),
+        Instruction::DenseMakeK => {
+            let o = byte.operand_u32();
+            format!("kind={} dest={} pool_idx={}", o >> 24, (o >> 16) & 0xFF, o & 0xFFFF)
+        }
         Instruction::HostInvoke | Instruction::FfiInvoke => {
             format!("arity={}", byte.operand_u32() & 0xFFFF)
         }

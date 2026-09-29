@@ -32,6 +32,7 @@ fn jim(tag: u32, arity: u32, target: u32) -> IlOp {
 
 fn make(tag: u16, arity: u16) -> IlOp {
     IlOp::MakeEnum {
+        kinds: 0,
         tag,
         arity,
         loc: loc(),

@@ -149,6 +149,10 @@ fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
             let (_, dest, arity, base) = b.dense_abc_parts();
             max(&[dest, base + arity.max(1) - 1])
         }
+        DenseMakeK => {
+            let (_, dest, arity, base, _) = b.dense_make_k_parts(constants)?;
+            max(&[dest, base + arity.max(1) - 1])
+        }
         DenseMakeObject => one(common::dense::unpack_make_object(b.operand_u32()).0 as usize),
         DenseConst => one(b.dense_const_parts().1),
         DenseMove => {
@@ -188,7 +192,7 @@ fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
         | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
         | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic
-        | TagEnumType => Some(0),
+        | TagEnumType | MakeEnumK | MakeEnumReturnK | MakeTupleK => Some(0),
         _ => None,
     }
 }
@@ -782,7 +786,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             step.jump = Some(jump_target(b, constants)?);
         }
         RETURN | LoadReturnSlot | ConstReturnImm | BinReturn | ReturnPair | TailCall
-        | MakeEnumReturn | HALT | Panic => {
+        | MakeEnumReturn | MakeEnumReturnK | HALT | Panic => {
             step.fallthrough = false;
         }
         CALL => {
@@ -883,6 +887,11 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.push(true)?;
             step.record = Some(st.heap_slots(st.hi, true));
         }
+        MakeTupleK | MakeEnumK => {
+            st.pop_n(b.make_arity() as usize)?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
+        }
         InitTyped | INIT | STRING => {
             st.push(true)?;
             step.record = Some(st.heap_slots(st.hi, true));
@@ -967,7 +976,8 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
                 st.push(heap)?;
             }
         }
-        DenseMake | DenseArrayPush => {
+        // `DenseMakeK` keeps `dest` in the same byte as `DenseMake`.
+        DenseMake | DenseMakeK | DenseArrayPush => {
             st.set(b.dense_abc_parts().1, true)?;
             step.record = Some(st.heap_slots(st.hi, true));
         }

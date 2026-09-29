@@ -253,9 +253,12 @@ fn copy_prop_barrier(op: &IlOp) -> bool {
                     | Instruction::GetField
                     | Instruction::SetField
                     | Instruction::MakeTuple
+                    | Instruction::MakeTupleK
                     | Instruction::MakeArray
                     | Instruction::MakeEnum
+                    | Instruction::MakeEnumK
                     | Instruction::MakeEnumReturn
+                    | Instruction::MakeEnumReturnK
                     | Instruction::BoxValue
                     | Instruction::FfiInvoke
             )

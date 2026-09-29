@@ -1189,6 +1189,7 @@ fn main() {
                     | Instruction::DenseStoreIndex
                     | Instruction::DenseArrayLen
                     | Instruction::DenseMake
+                    | Instruction::DenseMakeK
                     | Instruction::DensePush
             )
         });

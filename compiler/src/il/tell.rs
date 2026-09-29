@@ -146,6 +146,7 @@ fn effect(byte: &Byte, pool: &[u64]) -> Effect {
         | Instruction::ConstReturnImm
         | Instruction::BinReturn
         | Instruction::MakeEnumReturn
+        | Instruction::MakeEnumReturnK
         | Instruction::ReturnPair
         | Instruction::TailCall => Effect::Terminator,
         other => match super::sp::byte_stack_delta(other, byte) {
@@ -285,6 +286,7 @@ fn is_unconditional_transfer(byte: &Byte) -> bool {
             | Instruction::ConstReturnImm
             | Instruction::BinReturn
             | Instruction::MakeEnumReturn
+            | Instruction::MakeEnumReturnK
             | Instruction::TailCall
     )
 }

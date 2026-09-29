@@ -691,6 +691,7 @@ fn slot_is_return_fusion(s: &Slot) -> bool {
                 | Instruction::ConstReturnImm
                 | Instruction::BinReturn
                 | Instruction::MakeEnumReturn
+                | Instruction::MakeEnumReturnK
         ),
         _ => false,
     }
@@ -1140,13 +1141,15 @@ fn try_fuse_bin_return_local(window: &[Byte; 2]) -> Option<Byte> {
 }
 
 fn try_fuse_make_enum_return_local(window: &[Byte; 2]) -> Option<Byte> {
-    if *window[0].bytecode() != Instruction::MakeEnum {
-        return None;
-    }
+    let fused = match *window[0].bytecode() {
+        Instruction::MakeEnum => Instruction::MakeEnumReturn,
+        Instruction::MakeEnumK => Instruction::MakeEnumReturnK,
+        _ => return None,
+    };
     if !is_one_word_return(&window[1]) {
         return None;
     }
-    Some(Byte::new(Instruction::MakeEnumReturn).with_operand_u32(window[0].operand_u32()))
+    Some(Byte::new(fused).with_operand_u32(window[0].operand_u32()))
 }
 
 #[cfg(test)]
@@ -1342,6 +1345,7 @@ mod tests {
     fn lower_fuses_make_enum_return() {
         let mut il = IlBuilder::new();
         il.push_op(IlOp::MakeEnum {
+            kinds: 0,
             tag: 1,
             arity: 2,
             loc: DebugLoc::unknown(),
@@ -1362,9 +1366,40 @@ mod tests {
     }
 
     #[test]
+    fn lower_keeps_word_kinds_through_make_enum_return_fusion() {
+        let kinds = common::pack_word_kinds([common::WORD_POINTER, common::WORD_SCALAR]);
+        let mut il = IlBuilder::new();
+        il.push_op(IlOp::MakeEnum {
+            kinds,
+            tag: 1,
+            arity: 2,
+            loc: DebugLoc::unknown(),
+        });
+        il.push_op(IlOp::Return {
+            loc: DebugLoc::unknown(),
+            ret_words: 1,
+        });
+        il.push_op(IlOp::MakeTuple {
+            kinds,
+            arity: 2,
+            loc: DebugLoc::unknown(),
+        });
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(il.ops(), &mut pool);
+        let fused = &lowered.bytecode[0];
+        assert!(matches!(*fused.bytecode(), Instruction::MakeEnumReturnK));
+        assert_eq!(fused.operand_u16(0), 1);
+        assert_eq!((fused.make_arity(), fused.make_kinds()), (2, kinds));
+        let tuple = &lowered.bytecode[1];
+        assert!(matches!(*tuple.bytecode(), Instruction::MakeTupleK));
+        assert_eq!((tuple.make_arity(), tuple.make_kinds()), (2, kinds));
+    }
+
+    #[test]
     fn lower_refuses_make_enum_two_word_return() {
         let mut il = IlBuilder::new();
         il.push_op(IlOp::MakeEnum {
+            kinds: 0,
             tag: 0,
             arity: 0,
             loc: DebugLoc::unknown(),

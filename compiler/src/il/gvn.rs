@@ -239,8 +239,10 @@ fn is_get_field_barrier(op: &IlOp) -> bool {
                 | Instruction::TailCall
                 | Instruction::MakeCoro
                 | Instruction::MakeTuple
+                | Instruction::MakeTupleK
                 | Instruction::MakeArray
                 | Instruction::MakeEnum
+                | Instruction::MakeEnumK
                 | Instruction::BoxValue
                 | Instruction::FORMAT
                 | Instruction::FfiInvoke

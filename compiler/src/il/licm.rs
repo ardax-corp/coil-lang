@@ -1983,6 +1983,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Const { imm: 2, loc: loc() },
             IlOp::MakeTuple {
+                kinds: 0,
                 arity: 2,
                 loc: loc(),
             },

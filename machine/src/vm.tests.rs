@@ -1112,6 +1112,40 @@
 
     /// Arity above [`crate::ENUM_INLINE_ARITY`] uses a spill `Vec`.
     #[test]
+    fn make_k_ops_record_word_kinds() {
+        let kinds = common::pack_word_kinds([common::WORD_SCALAR, common::WORD_UNKNOWN]);
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(1),
+            const_int(2),
+            Byte::new(Instruction::MakeEnumK)
+                .with_operand_u32((3 << 16) | (u32::from(kinds) << 8) | 2),
+            const_int(4),
+            const_int(5),
+            Byte::new(Instruction::MakeTupleK).with_operand_u32((u32::from(kinds) << 8) | 2),
+            Byte::new(Instruction::HALT),
+        ]);
+        let tup = vm.pop().raw() as u64;
+        let en = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(en) {
+            Some(Object::Enum(gc)) => {
+                assert_eq!(gc.as_ref().tag, 3);
+                assert_eq!(gc.as_ref().payload.kinds(), kinds);
+                // Declaration order: payload[0] was the top of stack.
+                assert_eq!(gc.as_ref().payload[0].as_int(), 2);
+            }
+            _ => panic!("expected enum"),
+        }
+        match vm.heap().find_object_by_addr(tup) {
+            Some(Object::Tuple(gc)) => {
+                assert_eq!(gc.as_ref().kinds(), kinds);
+                assert_eq!(gc.as_ref().elements()[0].as_int(), 4);
+            }
+            _ => panic!("expected tuple"),
+        }
+    }
+
+    #[test]
     fn make_enum_arity5_spills_payload() {
         let mut vm = Machine::<8>::default();
         vm.run(&[

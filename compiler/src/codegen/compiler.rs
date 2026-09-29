@@ -678,8 +678,14 @@ impl Compiler {
         }
 
         // Emit MAKE_ENUM with the tag (upper 16) and
-        // arity (lower 16) packed in the operand.
-        bytecode.push_make_enum(tag as u16, arity as u16);
+        // arity (lower 16) packed in the operand, plus payload word kinds
+        // in declaration order (`emit_order` is reversed).
+        let kinds = if emit_order.len() == arity {
+            self.word_kinds_of(emit_order.iter().rev().copied())
+        } else {
+            0
+        };
+        bytecode.push_make_enum_kinds(tag as u16, arity as u16, kinds);
         // `fn drop()` enums: tag payload variants so the GC finalizes them.
         // Unit variants are shared immortals and never drop.
         if arity > 0 && self.checker.enum_has_drop(enum_name) {
@@ -1448,8 +1454,10 @@ impl Compiler {
                     | Instruction::YieldFromCoro
                     | Instruction::LoadField
                     | Instruction::MakeEnum
+                    | Instruction::MakeEnumK
                     | Instruction::MakeArray
                     | Instruction::MakeTuple
+                    | Instruction::MakeTupleK
                     | Instruction::JumpIfMatch
                     | Instruction::Unpack
                     | Instruction::UnpackAt
@@ -4366,6 +4374,22 @@ impl Compiler {
 
     /// True when compiling `expr` writes into [`Self::bytecode`] (HostInvoke,
     /// `string::format`, `match`, …) rather than only returning a local `Vec`.
+    /// Packed word kinds (`common::pack_word_kinds`) of values built from
+    /// `exprs`, from their static types. A generic shared body boxes type
+    /// parameters, which stay unknown.
+    fn word_kinds_of<'e, 'a: 'e>(&self, exprs: impl Iterator<Item = &'e Output<'a>>) -> u8 {
+        let boxed_generic = self
+            .current_function_qualified
+            .as_deref()
+            .is_some_and(|n| self.generic_return_is_boxed(n));
+        common::pack_word_kinds(exprs.map(|e| match self.codegen_expr_ty(e) {
+            Some(ty) if !boxed_generic => {
+                crate::typechecking::value_layout::word_kind(&self.checker, &ty)
+            }
+            _ => common::WORD_UNKNOWN,
+        }))
+    }
+
     /// `STORE` / `Seek` / in-place unpack: writes a frame slot, so operands
     /// left under this code may be overwritten.
     fn op_writes_slot(op: &crate::il::IlOp) -> bool {
@@ -15160,7 +15184,8 @@ impl Compiler {
                     bytecode.append(&mut bc);
                 }
                 let arity = items.len() as u32;
-                bytecode.push_make_tuple(arity);
+                let kinds = self.word_kinds_of(items.iter());
+                bytecode.push_make_tuple_kinds(arity, kinds);
             }
             Expression::Array(items) => {
                 for c in items {

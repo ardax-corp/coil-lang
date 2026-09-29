@@ -40,6 +40,7 @@ pub fn is_alloc_inst(inst: Instruction) -> bool {
     matches!(
         inst,
         Instruction::InitTyped | Instruction::INIT | Instruction::DenseMake
+            | Instruction::DenseMakeK
             | Instruction::DenseMakeObject
     )
 }
@@ -57,7 +58,7 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         }
         IlOp::Byte { byte, .. }
             if is_alloc_inst(*byte.bytecode())
-                || *byte.bytecode() == Instruction::DenseMake =>
+                || matches!(*byte.bytecode(), Instruction::DenseMake | Instruction::DenseMakeK) =>
         {
             Some("heap/alloc")
         }
@@ -360,11 +361,12 @@ mod tests {
             Some("heap/aggregate")
         );
         assert_eq!(
-            refuse_reason(&IlOp::MakeTuple { arity: 2, loc }),
+            refuse_reason(&IlOp::MakeTuple { kinds: 0, arity: 2, loc }),
             Some("heap/aggregate")
         );
         assert_eq!(
             refuse_reason(&IlOp::MakeEnum {
+                kinds: 0,
                 tag: 0,
                 arity: 1,
                 loc,

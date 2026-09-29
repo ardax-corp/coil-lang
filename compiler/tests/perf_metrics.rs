@@ -42,10 +42,18 @@ fn fn_pc_range(syms: &[FnDebugSym], name: &str, bytecode_len: usize) -> (usize, 
     (start, end)
 }
 
+/// Counts `op`; a `…K` make op (word kinds) counts as its plain form.
 fn count_opcodes_in(bytecode: &[Byte], start: usize, end: usize, op: Instruction) -> usize {
+    let base = |i: Instruction| match i {
+        Instruction::MakeEnumK => Instruction::MakeEnum,
+        Instruction::MakeEnumReturnK => Instruction::MakeEnumReturn,
+        Instruction::MakeTupleK => Instruction::MakeTuple,
+        Instruction::DenseMakeK => Instruction::DenseMake,
+        other => other,
+    };
     bytecode[start..end]
         .iter()
-        .filter(|b| *b.bytecode() == op)
+        .filter(|b| base(*b.bytecode()) == op)
         .count()
 }
 

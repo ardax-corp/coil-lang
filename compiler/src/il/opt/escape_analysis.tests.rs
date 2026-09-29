@@ -598,7 +598,7 @@ fn computed_tuple(slot: u32) -> Vec<IlOp> {
         IlOp::Load { slot: 0, loc: loc() },
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::byte(Byte::new(Instruction::ADD)),
-        IlOp::MakeTuple { arity: 2, loc: loc() },
+        IlOp::MakeTuple { kinds: 0, arity: 2, loc: loc() },
         IlOp::StorePop { slot, loc: loc() },
         IlOp::Const { imm: 9, loc: loc() },
         IlOp::StorePop { slot: 0, loc: loc() },

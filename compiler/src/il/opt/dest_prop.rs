@@ -50,8 +50,10 @@ fn dest_prop_barrier(op: &IlOp) -> bool {
             | Instruction::SetField
             | Instruction::LoadField
             | Instruction::MakeTuple
+            | Instruction::MakeTupleK
             | Instruction::MakeArray
             | Instruction::MakeEnum
+            | Instruction::MakeEnumK
             | Instruction::BoxValue
             | Instruction::LOAD
             | Instruction::DUPLICATE

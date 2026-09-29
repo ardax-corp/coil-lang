@@ -561,7 +561,10 @@ fn main() {
     assert!(
         !bytecode
             .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::MakeEnum)),
+            .any(|b| matches!(
+                b.bytecode(),
+                common::Instruction::MakeEnum | common::Instruction::MakeEnumK
+            )),
         "scalar-backed HttpCode::Ok must not allocate ObjEnum (MakeEnum)"
     );
 }
