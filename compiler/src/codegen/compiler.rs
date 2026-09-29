@@ -11416,8 +11416,12 @@ impl Compiler {
     /// the current `emit_idx` (since `lhs` is the next AST node to be
     /// visited). Returns true iff that type is the float constructor.
     ///
+    /// The `%s%s` format string is pushed before the operands, so an operand
+    /// whose code may `STORE` (an inlined call's parameter temp, a match, a
+    /// constructor) would write over it: locals and the operand stack share
+    /// memory. Such operands are staged into temps first.
     fn string_concat_needs_staging(&self, lhs: &Output, rhs: &Output) -> bool {
-        if self.arg_emits_on_self_bytecode(lhs) || self.arg_emits_on_self_bytecode(rhs) {
+        if self.expr_may_clobber_operand_stack(lhs) || self.expr_may_clobber_operand_stack(rhs) {
             return true;
         }
         matches!(lhs.1.as_ref(), Expression::Add(_, _))
@@ -12841,9 +12845,24 @@ impl Compiler {
             && self.is_string_expr(target)
             && self.is_string_expr(rhs)
         {
-            self.emit_raw_string_literal(bytecode, "%s%s");
-            let _ = self.emit_read_lvalue(bytecode, target);
-            bytecode.append(&mut self.do_compile(rhs));
+            if self.expr_may_clobber_operand_stack(rhs) {
+                // Stage both operands (target first, keeping evaluation
+                // order) so the rhs cannot write over the format string.
+                let mut read = CodeBuf::new();
+                let _ = self.emit_read_lvalue(&mut read, target);
+                self.bytecode.append(&mut read);
+                let lhs_slot = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(lhs_slot);
+                let mut rhs_slot = 0;
+                self.stage_call_arg_to_temp(rhs, false, &mut rhs_slot);
+                self.emit_raw_string_literal(bytecode, "%s%s");
+                bytecode.push_load(lhs_slot);
+                bytecode.push_load(rhs_slot);
+            } else {
+                self.emit_raw_string_literal(bytecode, "%s%s");
+                let _ = self.emit_read_lvalue(bytecode, target);
+                bytecode.append(&mut self.do_compile(rhs));
+            }
             bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
             self.emit_write_lvalue(bytecode, target, false);
             return;
