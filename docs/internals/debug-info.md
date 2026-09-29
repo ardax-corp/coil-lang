@@ -46,7 +46,11 @@ stored path (relative paths are resolved against the entry script’s
 directory).
 
 If the location is unknown or the file cannot be read, only
-`panic: <message>` is shown.
+`panic: <message>` is shown. Runtime errors (out-of-bounds index, resume of a
+finished coroutine, …) also print the call stack (`  in <fn> at <file:line>`,
+repeated recursion collapsed). An explicit `panic` prints it when
+`COIL_BACKTRACE=1` is set; by default it does not, because checksum boards
+print their result with `panic` and compare the text.
 
 ## Limitations (MVP)
 
@@ -57,4 +61,3 @@ If the location is unknown or the file cannot be read, only
   Unmapped lines stay unverified. `coil debug` `list` may snap to a nearby
   known loc in the same function; `bt` / DAP stack frames stay exact
   (no path / line 0).
-- No call-stack walk on panic yet (planned follow-up).
