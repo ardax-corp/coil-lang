@@ -85,7 +85,28 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
         return common::WORD_POINTER;
     }
+    // A `Vec<T>` / `[T]` word is always an array object, whatever `T` is.
+    if matches!(ty, Ty::List(_))
+        || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
+    {
+        return common::WORD_POINTER;
+    }
     common::WORD_UNKNOWN
+}
+
+/// `Some(elem)` when `ty` is `Vec<elem>` / `[elem]`.
+pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    match strip_readonly(&ty) {
+        Ty::List(inner) => Some(inner.as_ref().clone()),
+        Ty::App(head, args)
+            if args.len() == 1
+                && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    }
 }
 
 /// True when `ty` is a ground heap object, so a niche can use `0` / bit 0.
@@ -197,6 +218,8 @@ mod tests {
         // Boxed `Option<int>` and unresolved generics stay unknown.
         assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
+        // Arrays are objects whatever their element type.
+        assert_eq!(kind(Ty::List(Box::new(Ty::Var(crate::typechecking::ty::TyVarId(0))))), common::WORD_POINTER);
     }
 
     #[test]

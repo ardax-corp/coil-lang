@@ -1629,6 +1629,12 @@ impl<const S: usize> Machine<S> {
                         gc.payload_mut().type_id = opcode.operand_u32();
                     }
                 }
+                Instruction::TagArrayKind => {
+                    let v = *self.stack.top();
+                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, v.raw() as u64) {
+                        gc.payload_mut().set_elem_kind(opcode.operand_u32() as u8);
+                    }
+                }
                 Instruction::UnboxValue => {
                     let expected_tag = (opcode.operand_u32() & 0xFFFF) as u16;
                     let v = self.stack.pop();

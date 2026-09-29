@@ -1201,9 +1201,15 @@ impl Object {
             Self::Array(a) => {
                 // Clear flag: scanned clean at a previous mark, unwritten since.
                 if a.as_ref().may_hold_refs() {
+                    let pointers = a.as_ref().elem_kind() == common::WORD_POINTER;
                     let mut any = false;
                     for v in a.as_ref().elements() {
-                        if heap.may_be_ref(*v) {
+                        #[cfg(feature = "gc-stress")]
+                        if pointers {
+                            heap.verify_kinded_word("a pointer-kind array", 0, common::WORD_POINTER, *v);
+                        }
+                        // Pointer kind: `0` or an object, no classification.
+                        if (pointers && v.heap_addr() != 0) || (!pointers && heap.may_be_ref(*v)) {
                             any = true;
                             heap.mark_value(*v, grey_objects);
                         }
@@ -1310,7 +1316,8 @@ impl Object {
             Self::Array(a) => {
                 let a = a.as_ref();
                 if a.may_hold_refs() {
-                    a.elements().iter().for_each(|v| word(*v, false, visit));
+                    let precise = a.elem_kind() == common::WORD_POINTER;
+                    a.elements().iter().for_each(|v| word(*v, precise, visit));
                 }
             }
             Self::Coroutine(c) => {
@@ -2055,6 +2062,10 @@ impl ObjTuple {
 pub struct ObjArray {
     elements: Vec<Value>,
     may_hold_refs: bool,
+    /// Element word kind (`common::WORD_*`) stamped by a typed constructor
+    /// (`TagArrayKind`). Only `WORD_POINTER` is ever set: each element is `0`
+    /// or an object address, so marking treats them as precise references.
+    elem_kind: u8,
 }
 
 impl ObjArray {
@@ -2064,6 +2075,7 @@ impl ObjArray {
         Self {
             elements,
             may_hold_refs,
+            elem_kind: common::WORD_UNKNOWN,
         }
     }
 
@@ -2073,6 +2085,7 @@ impl ObjArray {
         Self {
             elements,
             may_hold_refs,
+            elem_kind: common::WORD_UNKNOWN,
         }
     }
 
@@ -2080,6 +2093,22 @@ impl ObjArray {
         Self {
             elements: Vec::with_capacity(n),
             may_hold_refs: false,
+            elem_kind: common::WORD_UNKNOWN,
+        }
+    }
+
+    /// Element word kind (`common::WORD_*`).
+    #[inline]
+    pub fn elem_kind(&self) -> u8 {
+        self.elem_kind
+    }
+
+    /// Stamp the static element kind. Only a pointer kind is kept: a scalar
+    /// stamp would be unsound for generic bodies that box values.
+    #[inline]
+    pub fn set_elem_kind(&mut self, kind: u8) {
+        if kind == common::WORD_POINTER {
+            self.elem_kind = kind;
         }
     }
 
@@ -3680,6 +3709,28 @@ mod tests {
         root(&mut heap);
         assert!(heap.find_object_by_addr(s.addr()).is_some(), "stored reference survives");
         assert!(gc.as_ref().may_hold_refs());
+    }
+
+    /// A pointer element kind makes array words precise references; a scalar
+    /// stamp is ignored (generic bodies may store boxed values).
+    #[test]
+    fn pointer_kind_array_words_are_precise() {
+        let mut heap = Heap::default();
+        let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let (arr, mut gc) = heap.alloc(
+            ObjArray::new(vec![Value::from(s.addr()), Value::from(0i64)]),
+            Object::Array,
+        );
+        gc.as_mut().set_elem_kind(common::WORD_SCALAR);
+        assert_eq!(gc.as_ref().elem_kind(), common::WORD_UNKNOWN);
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        let mut seen = Vec::new();
+        arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+        assert_eq!(seen, vec![(s.addr(), true)], "`0` is a hole, not a reference");
+        heap.begin_mark(&[arr.addr()]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        assert!(heap.find_object_by_addr(s.addr()).is_some(), "element survives");
     }
 
     /// Array elements and enum payloads are raw words (ambiguous).

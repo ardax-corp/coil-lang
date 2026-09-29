@@ -482,7 +482,9 @@ impl Compiler {
                     }
                 };
                 let arity = self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
-                let _ = self.emit_direct_fn_call(&mut bytecode, &fqn, arity);
+                // `Vec<Node>::new()` → the pointer-element constructor.
+                let target = self.pointer_vec_ctor(&fqn, ast).unwrap_or(fqn);
+                let _ = self.emit_direct_fn_call(&mut bytecode, &target, arity);
                 return bytecode;
             }
             match fields {
@@ -9507,6 +9509,26 @@ impl Compiler {
         }
     }
 
+    /// Thunk for `Vec::{name}` whose elements are ground pointers.
+    pub(super) fn pointer_vec_ctor_name(name: &str) -> String {
+        format!("{}::{name}$ptr", common::BUILTIN_VEC_TYPE)
+    }
+
+    /// The pointer-element constructor for a call to `Vec::new` /
+    /// `with_capacity` / `from` whose result type is `Vec<P>` with `P` a
+    /// ground heap type.
+    pub(super) fn pointer_vec_ctor(&self, callee: &str, call: &Output) -> Option<String> {
+        let name = callee.strip_prefix(common::BUILTIN_VEC_TYPE)?.strip_prefix("::")?;
+        if !matches!(name, "new" | "with_capacity" | "from") {
+            return None;
+        }
+        let ty = self.codegen_expr_ty(call)?;
+        let elem = crate::typechecking::value_layout::vec_elem_ty(&self.checker, &ty)?;
+        let kind = crate::typechecking::value_layout::word_kind(&self.checker, &elem);
+        let fqn = Self::pointer_vec_ctor_name(name);
+        (kind == common::WORD_POINTER && self.functions.contains_key(&fqn)).then_some(fqn)
+    }
+
     /// Emit intrinsic bodies for builtin `Vec<T>` methods and register
     /// them in the function / method tables so `v.push(x)` / `Vec::new()`
     /// lower to direct `CALL`s.
@@ -9570,6 +9592,41 @@ impl Compiler {
 
         // static fn from(arr) -> Vec<T>
         emit_host(self, format!("{owner}::from"), "vec_from_array", &[0]);
+
+        // Constructors for a ground pointer element type (`Vec<Node>`): the
+        // same bodies, then `TagArrayKind` so marking treats the elements as
+        // precise references. Call sites pick them by static type.
+        for (name, native) in [
+            ("new", None),
+            ("with_capacity", Some("vec_with_capacity")),
+            ("from", Some("vec_from_array")),
+        ] {
+            let fqn = Self::pointer_vec_ctor_name(name);
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            let native_id = match native {
+                Some(native) => match self.native_id(native) {
+                    Some(id) => Some(id),
+                    None => continue,
+                },
+                None => None,
+            };
+            self.bind_function_entry(fqn);
+            match native_id {
+                Some(id) => {
+                    self.bytecode
+                        .push(Byte::new(Instruction::CONST).with_value_u32(id as u32));
+                    self.bytecode.push_load(0);
+                    self.bytecode.push_host_invoke(1);
+                }
+                None => self.bytecode.push_make_array(0),
+            }
+            self.bytecode.push(
+                Byte::new(Instruction::TagArrayKind).with_operand_u32(common::WORD_POINTER as u32),
+            );
+            self.bytecode.push_return();
+        }
 
         // fn push(x)
         {
@@ -10850,6 +10907,28 @@ impl Compiler {
             let Some(&arity) = entry_sps.get(name) else {
                 continue;
             };
+            // `Vec` constructor thunks always return an array.
+            let ctor = name
+                .strip_prefix(common::BUILTIN_VEC_TYPE)
+                .and_then(|n| n.strip_prefix("::"))
+                .map(|n| n.strip_suffix("$ptr").unwrap_or(n));
+            if matches!(ctor, Some("new" | "with_capacity" | "from")) {
+                let params = match ctor {
+                    Some("with_capacity") => vec![common::WORD_SCALAR],
+                    Some("from") => vec![common::WORD_POINTER],
+                    _ => Vec::new(),
+                };
+                if params.len() == arity as usize {
+                    out.insert(
+                        name.clone(),
+                        super::precise_frames::FnWordKinds {
+                            params,
+                            ret: common::WORD_POINTER,
+                        },
+                    );
+                }
+                continue;
+            }
             // A fork worker (`__coil_par_f`) returns what `f` returns and
             // takes `f`'s params plus an int hop count.
             let par_base = name

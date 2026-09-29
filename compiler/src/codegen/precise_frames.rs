@@ -227,7 +227,7 @@ fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
         | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
         | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic
-        | TagEnumType | MakeEnumK | MakeEnumReturnK | MakeTupleK => Some(0),
+        | TagEnumType | TagArrayKind | MakeEnumK | MakeEnumReturnK | MakeTupleK => Some(0),
         _ => None,
     }
 }
@@ -1111,8 +1111,9 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.pop()?;
             st.push(true)?;
         }
-        // Stamps metadata on the enum at TOS; no allocation, no safepoint.
-        TagEnumType => {
+        // Stamps metadata on the enum / array at TOS; no allocation, no
+        // safepoint.
+        TagEnumType | TagArrayKind => {
             let (heap, must) = st.pop_copy()?;
             st.push_copy(heap, must)?;
         }
