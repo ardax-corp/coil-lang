@@ -1491,9 +1491,25 @@ impl<const S: usize> Machine<S> {
                     // The top frame's stored locals may sit above the cursor.
                     let limit = if i + 1 == n { self.stack.capacity() } else { hi };
                     for &s in slots {
-                        let idx = lo + usize::from(s);
+                        let idx = lo + common::precise_slot_index(s);
                         if idx < limit {
-                            root(self.stack[idx], crate::memory::RootKind::Precise);
+                            // Listed slots may hold heap words; only those
+                            // flagged must-pointer are safe to rewrite.
+                            let kind = if common::precise_slot_must(s) {
+                                crate::memory::RootKind::Precise
+                            } else {
+                                crate::memory::RootKind::Ambiguous
+                            };
+                            #[cfg(feature = "gc-stress")]
+                            if common::precise_slot_must(s) {
+                                let addr = self.stack[idx].heap_addr();
+                                assert!(
+                                    addr == 0 || heap.find_object_by_addr(addr).is_some(),
+                                    "gc-stress: must-pointer frame slot {} holds a non-object",
+                                    common::precise_slot_index(s)
+                                );
+                            }
+                            root(self.stack[idx], kind);
                         }
                     }
                 }
