@@ -8317,6 +8317,7 @@ fn main() {
         operand_stack_slots: loaded.operand_stack_slots,
         stack_maps: loaded.stack_maps.clone(),
         precise_frames: loaded.precise_frames.clone(),
+        class_word_kinds: loaded.class_word_kinds.clone(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
