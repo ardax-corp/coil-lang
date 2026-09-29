@@ -326,12 +326,14 @@ fn handle_request(
         "textDocument/signatureHelp" => {
             let params: lsp_types::SignatureHelpParams =
                 serde_json::from_value(request.params.clone())?;
-            let signature = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    signature_help(document, params.text_document_position_params.position)
-                });
+            let uri = &params.text_document_position_params.text_document.uri;
+            let position = params.text_document_position_params.position;
+            let signature = decl_signature_help(state, uri, position).or_else(|| {
+                state
+                    .documents
+                    .get(uri)
+                    .and_then(|document| signature_help(document, position))
+            });
             Some(serde_json::to_value(signature)?)
         }
         "textDocument/documentHighlight" => {
@@ -2352,6 +2354,190 @@ fn find_param_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<S
             .find_map(|(_, method)| find_param_docs_for_name(method, name)),
         _ => None,
     }
+}
+
+/// Innermost unclosed `(` before the end of `prefix` (skipping strings and
+/// `//` comments) and the number of top-level commas after it.
+fn enclosing_call_paren(prefix: &str) -> Option<(usize, u32)> {
+    let mut stack: Vec<(usize, u32)> = Vec::new();
+    let bytes = prefix.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'(' | b'[' | b'{' => stack.push((i, 0)),
+            b')' | b']' | b'}' => {
+                stack.pop();
+            }
+            b',' => {
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let &(open, commas) = stack.last()?;
+    (bytes[open] == b'(').then_some((open, commas))
+}
+
+/// Signature of the call around the cursor, read from the callee's
+/// declaration (possibly in another file).
+fn decl_signature_help(state: &ServerState, uri: &Uri, position: Position) -> Option<SignatureHelp> {
+    let text = &state.documents.get(uri)?.text;
+    let offset = position_to_byte(text, position)?;
+    let (open, commas) = enclosing_call_paren(&text[..offset])?;
+    let name_end = text[..open].trim_end().len();
+    let name_start = text[..name_end]
+        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .map_or(0, |i| i + 1);
+    let name = &text[name_start..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let name_position = byte_position(text, name_start);
+    let mut sources: Vec<String> = goto_definitions(state, uri, name_position)
+        .into_iter()
+        .filter_map(|location| {
+            let path = uri_path(&location.uri)?;
+            state
+                .documents
+                .get(&location.uri)
+                .map(|d| d.text.clone())
+                .or_else(|| {
+                    state
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.source_for(&path).map(str::to_owned))
+                })
+                .or_else(|| std::fs::read_to_string(&path).ok())
+        })
+        .collect();
+    // Methods have no goto target yet: fall back to this file and the
+    // indexed project files. The call being typed rarely parses; blank its
+    // lines (same length, so declaration spans stay valid).
+    sources.push(text.clone());
+    let line_start = text[..open].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);
+    let mut repaired = text.clone().into_bytes();
+    for byte in &mut repaired[line_start..line_end] {
+        if *byte != b'\n' {
+            *byte = b' ';
+        }
+    }
+    sources.push(String::from_utf8(repaired).unwrap_or_default());
+    if let Some(index) = &state.project_index {
+        for path in index.indexed_paths() {
+            if let Some(source) = index.source_for(path) {
+                sources.push(source.to_owned());
+            }
+        }
+    }
+    let signature = sources
+        .iter()
+        .find_map(|source| function_signature(source, name))?;
+    let active = commas.min(signature.parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: signature.label,
+            documentation: signature.docs.map(|docs| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: docs,
+                })
+            }),
+            parameters: Some(signature.parameters),
+            active_parameter: Some(active),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active),
+    })
+}
+
+struct FnSignature {
+    label: String,
+    docs: Option<String>,
+    parameters: Vec<ParameterInformation>,
+}
+
+/// `name(T a, U b) -> R` for the first `fn name` declared in `source`.
+fn function_signature(source: &str, name: &str) -> Option<FnSignature> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::Function {
+            name: fn_name,
+            docs,
+            args,
+            returns,
+            ..
+        } = node.1.as_ref()
+        else {
+            return;
+        };
+        if *fn_name != name {
+            return;
+        }
+        let mut parameters = Vec::new();
+        if let Expression::Fragment(items) = args.1.as_ref() {
+            for (span, item) in items {
+                let Expression::Argument { docs, .. } = item.as_ref() else {
+                    continue;
+                };
+                // Source text of the parameter, minus its `///` lines.
+                let label = source[span.start..span.end]
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("///"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parameters.push(ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(label),
+                    documentation: docs_markdown(docs).map(|value| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value,
+                        })
+                    }),
+                });
+            }
+        }
+        let params_text = parameters
+            .iter()
+            .map(|p| match &p.label {
+                lsp_types::ParameterLabel::Simple(label) => label.clone(),
+                lsp_types::ParameterLabel::LabelOffsets(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = returns
+            .as_ref()
+            .map(|r| format!(" -> {}", source[r.0.start..r.0.end].trim()))
+            .unwrap_or_default();
+        found = Some(FnSignature {
+            label: format!("{name}({params_text}){ret}"),
+            docs: docs_markdown(docs),
+            parameters,
+        });
+    });
+    found
 }
 
 fn signature_help(document: &Document, position: Position) -> Option<SignatureHelp> {
