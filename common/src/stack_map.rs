@@ -6,6 +6,24 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// Flag on a [`PreciseFrameMap`] slot (archive minor 26+): the word
+/// definitely holds a heap pointer or `0` (every reaching definition is an
+/// allocation or a copy of one), so a moving collector may rewrite it. Other
+/// listed slots only may hold heap words. Slots stay below 4096.
+pub const PRECISE_SLOT_MUST: u16 = 0x8000;
+
+/// Frame slot index of a [`PreciseFrameMap`] entry (flag bits stripped).
+#[inline]
+pub const fn precise_slot_index(s: u16) -> usize {
+    (s & !PRECISE_SLOT_MUST) as usize
+}
+
+/// Whether a [`PreciseFrameMap`] entry definitely holds a pointer.
+#[inline]
+pub const fn precise_slot_must(s: u16) -> bool {
+    s & PRECISE_SLOT_MUST != 0
+}
+
 /// Live heap IL slots at one alloc / `GcBarrier` bytecode PC.
 #[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(compare(PartialEq))]

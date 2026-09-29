@@ -95,10 +95,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 25 — `MakeEnumK` / `MakeEnumReturnK` / `MakeTupleK` / `DenseMakeK`: enum
 ///      payloads and tuples carry construction-site word kinds. Older
 ///      archives never emit them (every payload word stays ambiguous).
+/// 26 — `PRECISE_SLOT_MUST` (bit 15) on precise frame-map slots: the word
+///      definitely holds a pointer or `0`. Older archives never set it, so
+///      every listed slot stays "may hold a heap word".
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 25;
+pub const ARCHIVE_MINOR: u16 = 26;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -813,9 +816,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 25);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 25));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.25");
+        assert_eq!(ARCHIVE_MINOR, 26);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 26));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.26");
     }
 
     #[test]
