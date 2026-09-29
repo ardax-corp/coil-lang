@@ -2482,3 +2482,28 @@
         }
     }
 
+
+    /// Statement `match` ends at `}`: the next statement is not absorbed
+    /// as an operand, index or call on the match value.
+    #[test]
+    fn statement_match_ends_at_closing_brace() {
+        let src = "fn f(int d) {\n    match d {\n        default => {},\n    }\n    -d;\n    (d);\n}\n";
+        let ast = Pratt::default().parse(src).expect("parse");
+        let Expression::Program(items) = ast.1.as_ref() else {
+            panic!("program");
+        };
+        let Expression::Function { body: Some(body), .. } = items[0].1.as_ref() else {
+            panic!("fn");
+        };
+        let Expression::Block(stmts) = body.1.as_ref() else {
+            panic!("block");
+        };
+        assert_eq!(stmts.len(), 3, "match, -d, (d): {stmts:?}");
+    }
+
+    #[test]
+    fn statement_match_semicolon_and_method_chain_still_parse() {
+        let ok = |src: &str| Pratt::default().parse(src).is_ok();
+        assert!(ok("fn f(int d) {\n    match d {\n        default => {},\n    };\n}\n"));
+        assert!(ok("fn f(int d) {\n    match d {\n        default => 1,\n    }.to_string();\n}\n"));
+    }

@@ -1597,6 +1597,13 @@ impl<'pratt> Pratt<'pratt> {
                 // `defer { … }` before `expr_statement` so `defer` is not
                 // parsed as a bare identifier call / expression.
                 self.defer(stmt.clone()),
+                // A `match` at statement start ends at its `}` like `if`;
+                // `;` after it is optional. `.` / `?` continue an expression
+                // (`match x { … }.len();`), which `expr_statement` parses.
+                self.match_expr(expr.clone(), stmt.clone())
+                    .then_ignore(choice((op!("."), op!("?"))).not())
+                    .then_ignore(op!(';').or_not())
+                    .map_with(output!(ExprStatement)),
                 self.expr_statement(expr.clone()),
                 self.orphan_doc_comment(),
             ))
@@ -2940,6 +2947,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(
                 self.arm(expr.clone(), stmt)
                     .separated_by(op!(','))
+                    .at_least(1)
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(op!('{'), op!('}')),
