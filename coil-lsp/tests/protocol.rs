@@ -1,4 +1,7 @@
 //! Protocol-level tests: spawn `coil-lsp` and speak JSON-RPC over stdio.
+//!
+//! Unix-only: the tests build `file://` URIs from raw paths.
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -111,7 +114,8 @@ fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
-    dir
+    // macOS temp dirs are symlinks; the server reports canonical paths.
+    dir.canonicalize().unwrap()
 }
 
 fn uri(path: &Path) -> String {
