@@ -4,7 +4,7 @@ use common::{BUILTIN_FFI_ERROR_KIND_VARIANTS, BUILTIN_FFI_ERROR_VARIANT, Value};
 
 #[cfg(test)]
 use crate::memory::Object;
-use crate::memory::{Heap, Member};
+use crate::memory::Heap;
 
 use super::signature::FfiError;
 
@@ -57,8 +57,8 @@ pub fn alloc_ffi_error(heap: &mut Heap, kind: FfiErrorKindTag, message: String) 
         heap,
         0,
         crate::EnumPayload::two(
-            member_from_value(heap, kind_val),
-            member_from_value(heap, msg_val),
+            kind_val,
+            msg_val,
         ),
     )
 }
@@ -73,20 +73,10 @@ fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>)
     heap.alloc_enum_value(tag, payload)
 }
 
-fn member_from_value(heap: &Heap, value: Value) -> Member {
-    if !value.raw().is_null()
-        && let Some(obj) = heap.find_object_by_addr(value.raw() as u64)
-    {
-        Member::Object(obj)
-    } else {
-        Member::Value(value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Heap;
+    use crate::memory::{Heap, Member};
 
     #[test]
     fn alloc_ffi_error_packs_kind_and_message() {
@@ -105,7 +95,7 @@ mod tests {
         let e = gc.as_ref();
         assert_eq!(e.tag, 0);
         assert_eq!(e.payload.len(), 2);
-        match &e.payload[0] {
+        match &heap.member_of(e.payload[0]) {
             Member::Object(Object::Enum(kind_gc)) => {
                 assert_eq!(
                     kind_gc.as_ref().tag,
@@ -114,7 +104,7 @@ mod tests {
             }
             _ => panic!("kind should be ErrorKind unit enum"),
         }
-        match &e.payload[1] {
+        match &heap.member_of(e.payload[1]) {
             Member::Object(Object::String(s)) => {
                 assert_eq!(s.as_ref().data, "missing lib");
             }

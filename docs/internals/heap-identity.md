@@ -34,7 +34,8 @@ typed instances with ≤4 fields keep those slots in the header
 ([#299](https://github.com/ardax-corp/coil-lang/pull/299)). Typed slots are
 raw `Value` words, not tagged `Member`s: stores skip the heap probe, and
 mark / root census resolve each word through the slab like tuple elements.
-Named `Table` instances (dicts, `INIT`) still hold `Member`s.
+Enum payloads are raw words the same way, with up to four inline before a
+spill `Vec`. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal stays the intrusive `head` list. Collection trigger stays

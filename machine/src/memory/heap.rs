@@ -853,6 +853,15 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
+    /// Classify a raw payload / field word as an object or an immediate.
+    #[cfg(test)]
+    pub(crate) fn member_of(&self, v: Value) -> Member {
+        match self.find_object_by_addr(v.raw() as u64) {
+            Some(o) => Member::Object(o),
+            None => Member::Value(v),
+        }
+    }
+
     /// Write back scratch-buffer values into a live `ObjArray`.
     pub fn update_array_elements(&mut self, addr: u64, values: &[i64]) {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
@@ -1109,8 +1118,8 @@ impl Object {
             Self::String(_) => {}
             Self::Instance(i) => i.as_ref().mark_members(heap, grey_objects),
             Self::Enum(e) => {
-                for member in e.as_ref().payload.iter() {
-                    Self::mark_member(heap, member, grey_objects);
+                for v in e.as_ref().payload.iter() {
+                    heap.mark_value(*v, grey_objects);
                 }
             }
             Self::Library(_) => {}
@@ -1208,7 +1217,7 @@ impl Object {
                     }
                 }
             }
-            Self::Enum(e) => e.as_ref().payload.iter().for_each(|m| member(m, visit)),
+            Self::Enum(e) => e.as_ref().payload.iter().for_each(|v| word(*v, false, visit)),
             Self::Tuple(t) => t.as_ref().elements().iter().for_each(|v| word(*v, false, visit)),
             Self::Array(a) => {
                 let a = a.as_ref();
@@ -1716,13 +1725,12 @@ impl GcSized for ObjInstance {
 }
 
 /// Max payload arity stored inside [`ObjEnum`] without a Rust `Vec`.
-    ///
-/// Covers unary `Option`/`Result` and arity-2 `Tree::Node(Tree, Tree)`.
-/// Each extra slot is `size_of::<Member>()` on every enum, including those
-/// hot unary paths, so the cap stays at 2; larger variants spill.
-pub const ENUM_INLINE_ARITY: usize = 2;
+///
+/// Payload words are raw [`Value`]s (the GC resolves them through the slab),
+/// so four fit where two tagged [`Member`]s used to; larger variants spill.
+pub const ENUM_INLINE_ARITY: usize = 4;
 
-/// Flat enum payload: inline slots up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+/// Flat enum payload: inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
 pub struct EnumPayload {
     inner: EnumPayloadInner,
 }
@@ -1730,9 +1738,9 @@ pub struct EnumPayload {
 enum EnumPayloadInner {
     Inline {
         len: u8,
-        slots: [Member; ENUM_INLINE_ARITY],
+        slots: [Value; ENUM_INLINE_ARITY],
     },
-    Spill(Vec<Member>),
+    Spill(Vec<Value>),
 }
 
 impl EnumPayload {
@@ -1742,16 +1750,16 @@ impl EnumPayload {
         Self {
             inner: EnumPayloadInner::Inline {
                 len: 0,
-                slots: [Member::Value(Value::default()); ENUM_INLINE_ARITY],
+                slots: [Value::default(); ENUM_INLINE_ARITY],
             },
         }
     }
 
     /// Unary payload without a heap `Vec` (Option/Result).
     #[inline]
-    pub fn one(member: Member) -> Self {
-        let mut slots = [Member::Value(Value::default()); ENUM_INLINE_ARITY];
-        slots[0] = member;
+    pub fn one(v: Value) -> Self {
+        let mut slots = [Value::default(); ENUM_INLINE_ARITY];
+        slots[0] = v;
         Self {
             inner: EnumPayloadInner::Inline { len: 1, slots },
         }
@@ -1759,29 +1767,46 @@ impl EnumPayload {
 
     /// Arity-2 payload without a heap `Vec` (`Tree::Node`).
     #[inline]
-    pub fn two(a: Member, b: Member) -> Self {
+    pub fn two(a: Value, b: Value) -> Self {
+        let mut slots = [Value::default(); ENUM_INLINE_ARITY];
+        slots[0] = a;
+        slots[1] = b;
         Self {
-            inner: EnumPayloadInner::Inline {
-                len: 2,
-                slots: [a, b],
-            },
+            inner: EnumPayloadInner::Inline { len: 2, slots },
         }
     }
 
-    /// Build from owned members; spills only when `members.len()` exceeds the cap.
-    pub fn from_vec(members: Vec<Member>) -> Self {
-        match members.len() {
-            0 => Self::empty(),
-            1 => Self::one(members[0]),
-            2 => Self::two(members[0], members[1]),
-            _ => Self {
-                inner: EnumPayloadInner::Spill(members),
-            },
+    /// Build from declaration-order words; spills past the inline cap.
+    pub fn from_slice(words: &[Value]) -> Self {
+        if words.len() <= ENUM_INLINE_ARITY {
+            let mut slots = [Value::default(); ENUM_INLINE_ARITY];
+            slots[..words.len()].copy_from_slice(words);
+            Self {
+                inner: EnumPayloadInner::Inline {
+                    len: words.len() as u8,
+                    slots,
+                },
+            }
+        } else {
+            Self {
+                inner: EnumPayloadInner::Spill(words.to_vec()),
+            }
+        }
+    }
+
+    /// Build from owned words; spills only when `words.len()` exceeds the cap.
+    pub fn from_vec(words: Vec<Value>) -> Self {
+        if words.len() <= ENUM_INLINE_ARITY {
+            Self::from_slice(&words)
+        } else {
+            Self {
+                inner: EnumPayloadInner::Spill(words),
+            }
         }
     }
 
     #[inline]
-    fn as_slice(&self) -> &[Member] {
+    fn as_slice(&self) -> &[Value] {
         match &self.inner {
             EnumPayloadInner::Inline { len, slots } => &slots[..*len as usize],
             EnumPayloadInner::Spill(v) => v.as_slice(),
@@ -1802,31 +1827,31 @@ impl EnumPayload {
     }
 }
 
-impl From<Vec<Member>> for EnumPayload {
-    fn from(members: Vec<Member>) -> Self {
-        Self::from_vec(members)
+impl From<Vec<Value>> for EnumPayload {
+    fn from(words: Vec<Value>) -> Self {
+        Self::from_vec(words)
     }
 }
 
 impl ops::Deref for EnumPayload {
-    type Target = [Member];
+    type Target = [Value];
 
     #[inline]
-    fn deref(&self) -> &[Member] {
+    fn deref(&self) -> &[Value] {
         self.as_slice()
     }
 }
 
 impl<'a> IntoIterator for &'a EnumPayload {
-    type Item = &'a Member;
-    type IntoIter = std::slice::Iter<'a, Member>;
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.as_slice().iter()
     }
 }
 
-/// Heap-allocated enum variant (`tag` + inline-or-spill `Member` payload).
+/// Heap-allocated enum variant (`tag` + inline-or-spill word payload).
 pub struct ObjEnum {
     pub tag: u32,
     pub payload: EnumPayload,
@@ -2996,7 +3021,7 @@ mod tests {
         // 1. Allocate the inner object (a string).
         let (string_obj, string_ref) = heap.alloc(ObjString::from("inner"), Object::String);
         let string_addr = string_obj.addr();
-        let string_member = Member::Object(string_obj);
+        let string_member = Value::from(string_obj.addr());
 
         // 2. Allocate the enum with the string in its payload.
         let enum_value = ObjEnum::new(0, EnumPayload::one(string_member));
@@ -3041,7 +3066,7 @@ mod tests {
 
         // Outer enum: payload contains the inner enum as a
         // `Member::Object`.
-        let outer = ObjEnum::new(0, EnumPayload::one(Member::Object(inner_obj)));
+        let outer = ObjEnum::new(0, EnumPayload::one(Value::from(inner_obj.addr())));
         let (outer_obj, _outer_ref) = heap.alloc(outer, Object::Enum);
         let outer_addr = outer_obj.addr();
 
@@ -3075,25 +3100,21 @@ mod tests {
     #[test]
     fn enum_payload_inlines_upto_cap_and_spills_above() {
         assert!(EnumPayload::empty().is_inline());
-        assert!(EnumPayload::one(Member::Value(Value::from(1i64))).is_inline());
+        assert!(EnumPayload::one(Value::from(1i64)).is_inline());
         assert!(
             EnumPayload::two(
-                Member::Value(Value::from(1i64)),
-                Member::Value(Value::from(2i64)),
+                Value::from(1i64),
+                Value::from(2i64),
             )
             .is_inline()
         );
-        let spilled = EnumPayload::from_vec(vec![
-            Member::Value(Value::from(0i64)),
-            Member::Value(Value::from(1i64)),
-            Member::Value(Value::from(2i64)),
-        ]);
+        let four: Vec<Value> = (0..ENUM_INLINE_ARITY as i64).map(Value::from).collect();
+        assert!(EnumPayload::from_vec(four).is_inline());
+        let spilled =
+            EnumPayload::from_vec((0..=ENUM_INLINE_ARITY as i64).map(Value::from).collect());
         assert!(!spilled.is_inline());
-        assert_eq!(spilled.len(), 3);
-        match spilled[2] {
-            Member::Value(v) => assert_eq!(v.as_int(), 2),
-            Member::Object(_) => panic!("expected immediate"),
-        }
+        assert_eq!(spilled.len(), ENUM_INLINE_ARITY + 1);
+        assert_eq!(spilled[2].as_int(), 2);
     }
 
     #[test]
@@ -3177,14 +3198,12 @@ mod tests {
         let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
         let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
         let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
-        let payload = EnumPayload::from_vec(vec![
-            Member::Object(a),
-            Member::Object(b),
-            Member::Object(c),
-        ]);
+        let mut words = vec![Value::from(a.addr()), Value::from(b.addr()), Value::from(c.addr())];
+        words.resize(ENUM_INLINE_ARITY + 1, Value::from(9i64));
+        let payload = EnumPayload::from_vec(words);
         assert!(!payload.is_inline());
         let (enum_obj, enum_ref) = heap.alloc(ObjEnum::new(0, payload), Object::Enum);
-        assert_eq!(enum_ref.as_ref().payload.len(), 3);
+        assert_eq!(enum_ref.as_ref().payload.len(), ENUM_INLINE_ARITY + 1);
 
         let mut gray = Vec::new();
         heap.trace(&[enum_obj.addr()]);
@@ -3471,7 +3490,7 @@ mod tests {
         assert!(gc.as_ref().may_hold_refs());
     }
 
-    /// Array elements are raw words (ambiguous); typed members are precise.
+    /// Array elements and enum payloads are raw words (ambiguous).
     #[test]
     fn for_each_reference_marks_array_words_ambiguous() {
         let mut heap = Heap::default();
@@ -3480,13 +3499,13 @@ mod tests {
             ObjArray::new(vec![Value::from(s.addr()), Value::from(7i64)]),
             Object::Array,
         );
-        let (en, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Member::Object(s))), Object::Enum);
+        let (en, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(s.addr()))), Object::Enum);
         let mut seen = Vec::new();
         arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
         assert_eq!(seen, vec![(s.addr(), false)], "immediate 7 is not a reference");
         seen.clear();
         en.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-        assert_eq!(seen, vec![(s.addr(), true)]);
+        assert_eq!(seen, vec![(s.addr(), false)]);
     }
 
     #[test]
