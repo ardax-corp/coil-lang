@@ -33,7 +33,8 @@ across safepoints:
 `Heap::collect` and `Machine::gc_collect` finish any in-flight sweep, then
 drain mark + sweep so `gc::collect()` still reclaims in one call (`gc_churn`).
 
-Objects **do not move**.
+Objects do not move during mark or sweep. The optional `gc-compact`
+evacuation runs between cycles ([gc-evacuation.md](gc-evacuation.md)).
 
 ## Memory return
 
@@ -43,7 +44,7 @@ peak without moving anything: `examples/perf/gc_shrink.hy` goes from ~96 MB
 to ~40 MB resident while it keeps running. Build with `--features gc-stats`
 for a per-mark census (RSS, mapped / released slab, live bytes, reclaim by
 unmap vs compaction, precise vs ambiguous roots and interior references) —
-the Stage 0 numbers in [moving-gc.md](moving-gc.md).
+the numbers in [gc-evacuation.md](gc-evacuation.md).
 
 ## Clean arrays
 
@@ -61,7 +62,7 @@ element store (+2.6% instructions on the tight `stride_store_iv` loop,
 
 - Incremental mark interleaved with the mutator (would need a real write
   barrier on opcode stores, not only host natives)
-- Moving / compacting GC, forwarding pointers, handle-table `Value`
+- Default-on compaction; handle-table `Value` (refused)
 - Generational / nursery split
 - Concurrent mark on OS worker threads
 - Cranelift, PGO, register-VM, extra MIR island score-chasing
