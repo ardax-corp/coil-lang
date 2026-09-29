@@ -161,6 +161,8 @@ pub struct ThreadProgram {
     pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// Per class `type_id`: field word kinds (see [`crate::class_kind_table`]).
     pub class_word_kinds: Arc<Vec<Box<[u8]>>>,
+    /// Per static slot word kind (`common::WORD_*`); empty = all ambiguous.
+    pub static_word_kinds: Arc<Vec<u8>>,
 }
 
 /// Tag indices for [`ThreadError`](common::BUILTIN_THREAD_ERROR_ENUM).

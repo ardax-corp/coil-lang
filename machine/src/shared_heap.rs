@@ -101,6 +101,7 @@ mod tests {
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             class_word_kinds: Arc::default(),
+            static_word_kinds: Arc::default(),
         };
         assert!(!program_has_real_maps(&p));
     }

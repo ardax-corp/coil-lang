@@ -211,6 +211,7 @@ impl DebugSession {
             stack_maps: pipeline.stack_maps().to_vec(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
+            static_word_kinds: pipeline.static_word_kinds(),
         });
         machine.set_program_debug(artifacts.debug.clone());
         machine.attach_debug(DebugController::new());

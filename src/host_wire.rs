@@ -68,5 +68,6 @@ pub fn wire_pipeline_threads<const N: usize>(
         stack_maps: pipeline.stack_maps().to_vec(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
+        static_word_kinds: pipeline.static_word_kinds(),
     });
 }

@@ -283,6 +283,10 @@ thread_local! {
     /// not move. Kept out of `Machine` so its hot-loop field layout is
     /// unchanged.
     static IN_EXECUTE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Per static slot word kind of the program installed on this thread
+    /// (archive minor 29). Only GC root walks read it; kept out of `Machine`
+    /// / `Heap` so their hot-loop layout is unchanged.
+    static STATIC_KINDS: std::cell::RefCell<Arc<Vec<u8>>> = std::cell::RefCell::new(Arc::default());
     /// Evacuation pacing for this thread's VM: `(cycles since the last
     /// attempt, collections to wait)`. Also outside `Machine` / `Heap`.
     static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
@@ -1368,7 +1372,12 @@ impl<const S: usize> Machine<S> {
             crate::memory::RootKind::Precise => must.push(idx),
             _ => pins.push(self.stack[idx].heap_addr()),
         });
-        self.for_each_non_stack_root(&mut |addr, _| pins.push(addr));
+        let mut must_statics = Vec::new();
+        self.for_each_static_root(&mut |i, addr, kind| match kind {
+            crate::memory::RootKind::Precise => must_statics.push(i),
+            _ => pins.push(addr),
+        });
+        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
         let Some(plan) = self.heap.evacuate_plan(&pins, stress) else {
             self.heap.restore_gc_roots(pins);
             COMPACT_PACING.set((0, (window * 2).min(COMPACT_WINDOW_MAX)));
@@ -1378,6 +1387,11 @@ impl<const S: usize> Machine<S> {
         for idx in must {
             if let Some(v) = plan.forward(self.stack[idx]) {
                 self.stack[idx] = v;
+            }
+        }
+        for i in must_statics {
+            if let Some(v) = plan.forward(self.statics[i]) {
+                self.statics[i] = v;
             }
         }
         #[cfg(feature = "gc-stress")]
@@ -1517,9 +1531,41 @@ impl<const S: usize> Machine<S> {
         self.for_each_non_stack_root(visit);
     }
 
-    /// VM roots outside the operand stack. None of them can be rewritten by
-    /// a moving collector (untyped words, or Rust-held handles).
+    /// VM roots outside the operand stack: typed statics, then
+    /// [`Self::for_each_handle_root`].
     fn for_each_non_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+        self.for_each_static_root(&mut |_, addr, kind| visit(addr, kind));
+        self.for_each_handle_root(visit);
+    }
+
+    /// Static slots by their compile-time word kind (archive minor 29): a
+    /// scalar static is no root, a pointer static is a precise root (a moving
+    /// collector rewrites it), anything else stays ambiguous.
+    fn for_each_static_root(&self, visit: &mut dyn FnMut(usize, u64, crate::memory::RootKind)) {
+        let heap = &self.heap;
+        let kinds = STATIC_KINDS.with_borrow(Arc::clone);
+        for (i, v) in self.statics.iter().enumerate() {
+            let kind = match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
+                common::WORD_SCALAR => continue,
+                common::WORD_POINTER => crate::memory::RootKind::Precise,
+                _ => crate::memory::RootKind::Ambiguous,
+            };
+            let addr = v.heap_addr();
+            let live = addr != 0 && heap.find_object_by_addr(addr).is_some();
+            #[cfg(feature = "gc-stress")]
+            assert!(
+                addr == 0 || live || kind != crate::memory::RootKind::Precise,
+                "gc-stress: pointer static {i} holds a non-object"
+            );
+            if live {
+                visit(i, addr, kind);
+            }
+        }
+    }
+
+    /// VM roots outside the operand stack and statics. None of them can be
+    /// rewritten by a moving collector (untyped words, or Rust-held handles).
+    fn for_each_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
@@ -1527,11 +1573,8 @@ impl<const S: usize> Machine<S> {
                 visit(addr, kind);
             }
         };
-        // Untyped words: the join result and statics may be immediates.
+        // Untyped word: the join result may be an immediate.
         word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
-        for v in &self.statics {
-            word(*v, crate::memory::RootKind::Ambiguous, visit);
-        }
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
@@ -2055,6 +2098,7 @@ impl<const S: usize> Machine<S> {
         self.precise_frames = Arc::clone(&program.precise_frames);
         self.heap
             .set_class_word_kinds(Arc::clone(&program.class_word_kinds));
+        STATIC_KINDS.with_borrow_mut(|k| *k = Arc::clone(&program.static_word_kinds));
         self.thread_program = Some(program);
     }
 
@@ -2165,6 +2209,7 @@ impl<const S: usize> Machine<S> {
             stack_maps: self.stack_maps.clone(),
             precise_frames: Arc::clone(&self.precise_frames),
             class_word_kinds: self.heap.class_word_kinds_table(),
+            static_word_kinds: STATIC_KINDS.with_borrow(Arc::clone),
         }));
     }
 

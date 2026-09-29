@@ -164,6 +164,7 @@ impl Checker {
             const_fold_env: HashMap::new(),
             static_slots: HashMap::new(),
             static_slot_types: HashMap::new(),
+            synthetic_statics: std::collections::HashSet::new(),
             next_static_slot: 0,
             const_class_fields: HashMap::new(),
             impl_owner: None,
@@ -15634,6 +15635,21 @@ impl Checker {
         rows
     }
 
+    /// Word kind (`common::WORD_*`) of every static slot, by slot index, from
+    /// its declared type. Compiler-allocated slots stay unknown.
+    pub fn static_word_kinds(&self) -> Vec<u8> {
+        let mut kinds = vec![common::WORD_UNKNOWN; self.next_static_slot as usize];
+        for (fqn, &(id, _)) in &self.static_slots {
+            if self.synthetic_statics.contains(fqn) {
+                continue;
+            }
+            if let (Some(k), Some(ty)) = (kinds.get_mut(id as usize), self.static_slot_types.get(fqn)) {
+                *k = crate::typechecking::value_layout::word_kind(self, ty);
+            }
+        }
+        kinds
+    }
+
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).
     pub fn class_type_id(&self, name: &str) -> u32 {
         let key = self
@@ -15699,6 +15715,7 @@ impl Checker {
         let id = self.next_static_slot;
         self.next_static_slot += 1;
         self.static_slots.insert(fqn.clone(), (id, true));
+        self.synthetic_statics.insert(fqn.clone());
         self.static_slot_types.insert(fqn, ty);
         id
     }

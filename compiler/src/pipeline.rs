@@ -222,6 +222,7 @@ impl Pipeline {
             stack_maps: self.stack_maps().to_vec(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: self.static_word_kinds(),
         });
     }
 
@@ -1267,6 +1268,7 @@ impl Pipeline {
             stack_maps: self.stack_maps().to_vec(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: self.static_word_kinds(),
             bytecode: self.bytecode,
         };
 
@@ -1640,6 +1642,10 @@ impl Pipeline {
     }
 
     /// Per-class field word kinds from the checked program (archive minor 24).
+    pub fn static_word_kinds(&self) -> Vec<u8> {
+        self.compiler_lazy().checker().static_word_kinds()
+    }
+
     pub fn class_word_kinds(&self) -> Vec<common::ClassWordKinds> {
         self.compiler_lazy().checker().class_word_kinds()
     }
@@ -1881,6 +1887,7 @@ fn main() {
             stack_maps: pipeline.stack_maps().to_vec(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
+            static_word_kinds: pipeline.static_word_kinds(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1924,6 +1931,7 @@ fn main() {
             stack_maps: pipeline.stack_maps().to_vec(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
+            static_word_kinds: pipeline.static_word_kinds(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
