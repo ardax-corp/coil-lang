@@ -72,6 +72,9 @@ pub struct Pipeline {
     /// Extra Host Rust closures from [`Self::register_host_native`].
     #[cfg(any(test, feature = "vm-wire"))]
     host_natives: Vec<std::sync::Arc<dyn NativeFn>>,
+    /// Test-native signatures (and host ids), replayed when the compiler is rebuilt.
+    #[cfg(any(test, feature = "vm-wire"))]
+    native_sigs: Vec<(String, Vec<crate::typechecking::ty::Ty>, crate::typechecking::ty::Ty, Option<usize>)>,
     /// The entry file (the file passed to `compile`).
     /// This file is special: it's the program root and
     /// lives in the top-level namespace (no prefix),
@@ -165,6 +168,7 @@ impl Pipeline {
         self.compiler_lazy_mut().register(&sig.name, &params, &ret);
         let id = common::HOST_NATIVES.len() + self.host_natives.len();
         self.compiler_lazy_mut().register_native_id(&sig.name, id);
+        self.native_sigs.push((sig.name.clone(), params, ret, Some(id)));
         self.host_natives
             .push(std::sync::Arc::new(HostClosureFn::new(sig, func)));
         id
@@ -179,6 +183,7 @@ impl Pipeline {
             sig.args.iter().copied().map(ffi_type_to_ty).collect();
         let ret = ffi_type_to_ty(sig.ret);
         self.compiler_lazy_mut().register(&name, &params, &ret);
+        self.native_sigs.push((name.clone(), params, ret, None));
         self.natives.push(NativeDecl {
             name,
             namespace,
@@ -257,8 +262,24 @@ impl Pipeline {
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
+            c.set_include_tests(self.include_tests);
+            #[cfg(any(test, feature = "vm-wire"))]
+            for (name, params, ret, id) in &self.native_sigs {
+                c.register(name, params, ret);
+                if let Some(id) = id {
+                    c.register_native_id(name, *id);
+                }
+            }
             c
         })
+    }
+
+    /// Drop the compiler so the next access builds a fresh one. Checker
+    /// tables (instances, overloads) are per-session: a second typecheck on
+    /// the same compiler re-registers every decl as a duplicate.
+    fn reset_compiler(&mut self) {
+        self.compiler = std::cell::OnceCell::new();
+        self.messages_emitted = 0;
     }
 
     fn compiler_lazy_mut(&mut self) -> &mut Compiler {
@@ -282,6 +303,7 @@ impl Pipeline {
     ///
     /// Does not load `coil.toml`. Bind roots with [`Self::bind_project_root`].
     pub fn typecheck_project(&mut self, file: &Path) -> Vec<(PathBuf, Vec<Message>)> {
+        self.reset_compiler();
         self.reset_session();
         self.sync_host_caps();
         self.entry_file = Some(file.to_path_buf());
@@ -613,6 +635,8 @@ impl Pipeline {
             natives: Vec::new(),
             #[cfg(any(test, feature = "vm-wire"))]
             host_natives: Vec::new(),
+            #[cfg(any(test, feature = "vm-wire"))]
+            native_sigs: Vec::new(),
             entry_file: None,
             source_interner: common::Interner::default(),
             source_cache: Vec::new(),

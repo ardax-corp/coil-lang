@@ -401,4 +401,32 @@ mod tests {
         assert_eq!(index.pipeline().overlay_text(&main), Some(overlay));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn repeated_typecheck_does_not_duplicate_decls() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-project-index-retypecheck-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        write_project(
+            &dir,
+            &[(
+                "main.hy",
+                "class P {\n    pub x: int,\n}\nimpl P {\n    pub fn get() -> int {\n        return self.x;\n    }\n}\nfn main() {\n    let p = new P(1);\n    let _ = p.get();\n}\n",
+            )],
+        );
+        let main = dir.join("main.hy");
+        let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
+        for round in 0..3 {
+            let errors: Vec<String> = index
+                .typecheck_entry(&main)
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .map(|m| m.message().to_string())
+                .collect();
+            assert!(errors.is_empty(), "round {round}: {errors:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
