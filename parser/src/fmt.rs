@@ -463,6 +463,30 @@ impl<'s> Formatter<'s> {
 
         self.push_str(open);
         self.newline();
+        if !has_comments && !has_docs && items.iter().all(|item| is_short_literal(item.1.as_ref())) {
+            // Many short literals (`[0, 1, 2, …]`): fill lines instead of one
+            // item per line.
+            self.with_indent(|f| {
+                f.write_indent();
+                for (i, item) in items.iter().enumerate() {
+                    let text = f.render_flat(strip_groups(item).1.as_ref());
+                    if i > 0 {
+                        if f.current_col() + 1 + text.len() + 1 > MAX_WIDTH {
+                            f.newline();
+                            f.write_indent();
+                        } else {
+                            f.push_str(" ");
+                        }
+                    }
+                    f.push_str(&text);
+                    f.push_str(",");
+                }
+                f.newline();
+            });
+            self.write_indent();
+            self.push_str(close);
+            return;
+        }
         self.with_indent(|f| {
             for item in items {
                 f.body_item(item.0, |f| {
@@ -1420,19 +1444,33 @@ impl<'s> Formatter<'s> {
             let start = self.content_start(items[i].0);
             self.top_level_comments(start, &mut prev);
             self.top_level_separator(prev, start);
-            let last = if matches!(items[i].1.as_ref(), Expression::Use { .. }) {
+            let last = if is_use_item(items[i].1.as_ref()) {
                 let run_start = i;
                 i += 1;
-                // A comment between two `use`s ends the run and stays put.
+                // A comment or a blank line between two `use`s ends the run:
+                // import groups the author separated stay separated.
                 while i < items.len()
-                    && matches!(items[i].1.as_ref(), Expression::Use { .. })
+                    && is_use_item(items[i].1.as_ref())
                     && !self
                         .pending()
                         .is_some_and(|c| c.span.start < self.content_start(items[i].0))
+                    && !self
+                        .src
+                        .get(self.content_end(items[i - 1].0)..self.content_start(items[i].0))
+                        .is_some_and(|gap| gap.matches('\n').count() >= 2)
                 {
                     i += 1;
                 }
-                self.fmt_use_group(&items[run_start..i]);
+                // `use a::{b, c};` is a fragment of `use`s: group them with
+                // their plain neighbours.
+                let mut uses = Vec::new();
+                for item in &items[run_start..i] {
+                    match item.1.as_ref() {
+                        Expression::Fragment(parts) => uses.extend(parts.iter().cloned()),
+                        _ => uses.push(item.clone()),
+                    }
+                }
+                self.fmt_use_group(&uses);
                 &items[i - 1]
             } else {
                 self.fmt_expression(items[i].1.as_ref());
@@ -2244,6 +2282,27 @@ fn binary_op(expr: &Expression<'_>) -> &'static str {
     }
 }
 
+/// Numbers and short strings: list items worth packing several per line.
+fn is_short_literal(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Integer(_) | Expression::Float(_) | Expression::Bool(_) => true,
+        Expression::String(s) => s.len() <= 8,
+        Expression::Negate(inner) | Expression::Expr(inner) => is_short_literal(inner.1.as_ref()),
+        _ => false,
+    }
+}
+
+/// A top-level `use`, or a brace group `use a::{b, c};` (a fragment of them).
+fn is_use_item(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Use { .. } => true,
+        Expression::Fragment(parts) => {
+            !parts.is_empty() && parts.iter().all(|p| matches!(p.1.as_ref(), Expression::Use { .. }))
+        }
+        _ => false,
+    }
+}
+
 fn use_parts<'a, 'expr>(
     expr: &'a Expression<'expr>,
 ) -> Option<(&'a [String], &'a str, Option<&'a String>)> {
@@ -2837,5 +2896,30 @@ fn main() { return; }
     #[test]
     fn meaningful_parens_are_kept() {
         stable("fn main() {\n    let z = (1 + 2) * 3;\n    let n = (1).to_string();\n    let t = (1, 2);\n    let u = (1,);\n}\n");
+    }
+
+    #[test]
+    fn brace_group_uses_join_their_run() {
+        let src = "use io::{stdout};\nuse io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {}\n";
+        assert_eq!(
+            format_source(src).unwrap(),
+            "use io::stdout;\nuse io::sync::write_all;\nuse string::{format, to_bytes};\n\nfn main() {}\n"
+        );
+    }
+
+    #[test]
+    fn blank_line_between_use_groups_is_kept() {
+        stable("use io::stdout;\n\nuse string::format;\n\nfn main() {}\n");
+    }
+
+    #[test]
+    fn long_literal_lists_fill_lines() {
+        let items: Vec<String> = (0..60).map(|n| n.to_string()).collect();
+        let src = format!("fn main() {{\n    let a = [{}];\n}}\n", items.join(", "));
+        let formatted = format_source(&src).unwrap();
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert!(lines.len() < 10, "packed, not one per line:\n{formatted}");
+        assert!(lines.iter().all(|l| l.len() <= MAX_WIDTH), "{formatted}");
+        stable(&formatted);
     }
 }

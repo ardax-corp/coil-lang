@@ -12,6 +12,10 @@ coil fmt --check .
 coil-fmt --check examples/fib.hy
 ```
 
+CI runs `coil-fmt --check` over `examples`, `tests/positive`,
+`tests/negative_runtime` and `tests/*.hy` (`tests/compile_fail` holds
+deliberately broken programs and is skipped).
+
 ## Behavior
 
 | Mode | Effect |
@@ -33,6 +37,10 @@ Soft wraps kick in when a construct would exceed **100** columns:
 
 Short forms stay on one line (except 1-tuples, which always keep `(x,)`).
 
+A broken list made only of short literals (numbers, `true`/`false`, strings of
+up to 8 characters) fills each line up to the width instead of one item per
+line, still with a trailing comma.
+
 Class and enum bodies are always multiline when non-empty and use trailing commas after each field/variant. Match arms are one per line with a trailing comma after every arm, including the last.
 
 ## Normalization
@@ -46,7 +54,8 @@ Class and enum bodies are always multiline when non-empty and use trailing comma
   parens so it does not read as the body.
 - An empty block is `{}`.
 
-Adjacent `use` statements are kept together without blank separator lines.
+Adjacent `use` statements are kept together; a blank line or a comment the
+author put between two `use`s starts a new group and is kept.
 Imports with the same namespace are grouped, such as
 `use io::{stdout, open};`. Brace-group forms (`use io::{stdout, open};`) round-trip
 through the same grouping. Different nested namespaces are grouped only when each
