@@ -125,6 +125,11 @@ impl CachedAst {
         &self.expand.pending
     }
 
+    /// Queue macro uses found in generated code for the next round.
+    pub fn push_pending_macros(&mut self, pending: impl IntoIterator<Item = PendingMacro>) {
+        self.expand.pending.extend(pending);
+    }
+
     /// Take the pending user macro uses (the pipeline resolves or reports them).
     pub fn take_pending_macros(&mut self) -> Vec<PendingMacro> {
         std::mem::take(&mut self.expand.pending)

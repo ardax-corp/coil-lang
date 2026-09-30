@@ -40,7 +40,7 @@ impl Hoist {
 pub struct Strip<'s> {
     /// Drop `#[derive(...)]`.
     pub derive: bool,
-    /// Drop the attribute macro's own `#[name(...)]`.
+    /// Drop the attribute macro's own `#[name(...)]` (its first occurrence).
     pub attr: Option<&'s str>,
 }
 
@@ -150,10 +150,18 @@ fn attr(h: &mut Hoist, a: &Attribute<'_>) -> String {
     h.bind(format!("new Attr({}, {args})", string_lit(a.name)))
 }
 
+/// Attributes that stay on the item: all but `#[derive]` (when stripped)
+/// and the first `#[attr]` of the macro being expanded — a second one of the
+/// same name expands in the next round.
 fn kept<'a, 'b>(attrs: &'b [Attribute<'a>], strip: &Strip<'_>) -> Vec<&'b Attribute<'a>> {
+    let own = strip
+        .attr
+        .and_then(|name| attrs.iter().position(|a| a.name == name));
     attrs
         .iter()
-        .filter(|a| !(strip.derive && a.name == "derive") && Some(a.name) != strip.attr)
+        .enumerate()
+        .filter(|(i, a)| !(strip.derive && a.name == "derive") && Some(*i) != own)
+        .map(|(_, a)| a)
         .collect()
 }
 
@@ -376,6 +384,7 @@ pub fn fn_decl(
     node: &Output<'_>,
     source: &str,
     owner: Option<&str>,
+    is_pub: bool,
     strip: &Strip<'_>,
 ) -> Option<String> {
     let Expression::Function {
@@ -424,7 +433,7 @@ pub fn fn_decl(
     let attrs_v = attrs_model(h, attrs, strip);
     let docs = strings(h, docs);
     Some(h.bind(format!(
-        "new FnDecl({name}, {params}, {ret}, {type_params}, {attrs_v}, {}, {is_static}, {is_coro}, {docs}, {}, {})",
+        "new FnDecl({name}, {params}, {ret}, {type_params}, {attrs_v}, {}, {is_pub}, {is_static}, {is_coro}, {docs}, {}, {})",
         string_lit(owner.unwrap_or("")),
         string_lit(&body_text),
         string_lit(&source_without_attrs(node, source, attrs, strip)),
