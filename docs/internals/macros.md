@@ -196,7 +196,9 @@ Module statics of providers are not initialised (the expansion program has no
 built, as source: `Show` / `String` format fields (`Name { a: %v }`) or
 variants (`E::V(%v)`), `Eq` / `Ord` compare field-wise then by variant order
 (`Lt` / `Le` / `Gt` / `Ge` plus an empty `Ord`), `Hash` combines with
-`* 31 +` from the variant index, `Default` zeroes, and scalar-backed enums
+`* 31 +` from the variant index, `Default` is a `static fn` that gives each
+field its type's default (`0`, `0.0`, `false`, `""`, or `Ty::default()`; an
+enum takes its first variant), and scalar-backed enums
 compare / show their backing. When they replaced the Rust code, every
 derive-using program compiled to identical bytecode except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old

@@ -9919,6 +9919,14 @@ fn main() {
     assert_eq!(output, "Color::Red");
 }
 
+/// `static fn` in a trait: `Point::from_val(v)`, `T::from_val(v)` chosen by
+/// the expected type, and `Config::default()` from `#[derive(Default)]`.
+#[test]
+fn example_static_trait_method_prints_4_8_0() {
+    let output = run_example("examples/static_trait_method.hy");
+    assert_eq!(output, "4,8,0");
+}
+
 /// Recursive `#[derive(Hash)]` + primitive Hash instances.
 #[test]
 fn example_derive_hash_prints_true_true_true_true() {

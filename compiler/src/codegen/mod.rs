@@ -1046,6 +1046,9 @@ pub struct Compiler {
     mono_names: HashMap<MonoKey, String>,
     /// Temporary variable-type overrides while emitting a specialized clone.
     mono_codegen_var_types: Vec<HashMap<String, Ty>>,
+    /// Type parameter name → concrete type of the mono clone being
+    /// compiled (`T::from_val(v)` selects `T`'s instance directly).
+    mono_type_param_tys: Vec<HashMap<String, Ty>>,
 
     /// Project-relative path of the module currently being codegen'd.
     current_source_file: Option<std::path::PathBuf>,
@@ -1209,6 +1212,7 @@ impl Default for Compiler {
             mono_offsets: HashMap::new(),
             mono_names: HashMap::new(),
             mono_codegen_var_types: Vec::new(),
+            mono_type_param_tys: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,

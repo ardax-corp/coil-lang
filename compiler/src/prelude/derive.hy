@@ -5,7 +5,7 @@
 // Generated code matches what the former Rust expansion built: payloads are
 // read by field access (`p.w`) for records and bound by the pattern for tuple
 // variants; scalar-backed enums compare / show their backing value.
-use macro::{TypeDecl, Field, Variant, Code, raw, lit};
+use macro::{TypeDecl, Field, Variant, TypeRef, Code, raw, lit};
 
 fn format_int(int n) -> string {
     return string::format("%i", n);
@@ -357,8 +357,28 @@ derive Hash(TypeDecl t) -> Code {
     };
 }
 
-/// `impl Default`: zero for every class field; an enum's first variant with
-/// zero payloads.
+/// Default value expression for a field or payload of type `ty`: a literal
+/// for the primitives, `Ty::default()` for anything else.
+fn default_value_for(TypeRef ty) -> string {
+    let name = ty.str();
+    if name == "int" || name == "byte" {
+        return "0";
+    }
+    if name == "float" {
+        return "0.0";
+    }
+    if name == "bool" {
+        return "false";
+    }
+    if name == "string" {
+        return "\"\"";
+    }
+    return name + "::default()";
+}
+
+/// `impl Default`: every class field takes its type's default (`0`, `0.0`,
+/// `false`, `""`, or `Ty::default()`); an enum takes its first variant with
+/// defaulted payloads.
 derive Default(TypeDecl t) -> Code {
     let value = "";
     if t.is_class() {
@@ -368,7 +388,7 @@ derive Default(TypeDecl t) -> Code {
             if i > 0 {
                 args += ", ";
             }
-            args += "0";
+            args += default_value_for(f.ty);
             i += 1;
         }
         value = "new " + t.name.str() + "(" + args + ")";
@@ -377,26 +397,25 @@ derive Default(TypeDecl t) -> Code {
     } else {
         let v = t.variants()[0];
         value = t.name.str() + "::" + v.name.str();
-        let names = payload_names(v);
         if v.is_tuple() {
             let args = "";
             let i = 0;
-            while i < len(names) {
+            while i < len(v.tuple) {
                 if i > 0 {
                     args += ", ";
                 }
-                args += "0";
+                args += default_value_for(v.tuple[i]);
                 i += 1;
             }
             value += "(" + args + ")";
         } else if v.is_record() {
             let args = "";
             let i = 0;
-            while i < len(names) {
+            while i < len(v.fields) {
                 if i > 0 {
                     args += ", ";
                 }
-                args += names[i] + ": 0";
+                args += v.fields[i].name.str() + ": " + default_value_for(v.fields[i].ty);
                 i += 1;
             }
             value += " { " + args + " }";
@@ -404,7 +423,7 @@ derive Default(TypeDecl t) -> Code {
     }
     return quote items {
         impl Default for ${t.name} {
-            fn default() -> ${t.name} {
+            static fn default() -> ${t.name} {
                 return ${raw(value)};
             }
         }
