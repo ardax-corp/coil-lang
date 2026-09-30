@@ -1473,7 +1473,17 @@ impl Checker {
         self.existential_method_calls_by_span.clear();
         self.for_in_infos.clear();
         self.for_in_infos_by_span.clear();
-        self.typeclass_method_schemes.clear();
+        // Traits declared in a named module stay registered in `generics`
+        // across files (importers `use` them); keep their method schemes too
+        // so an importer can call and implement them. Entry-file traits and
+        // builtins (re-registered below) are dropped.
+        let generics = &self.generics;
+        self.typeclass_method_schemes.retain(|(class, _), _| {
+            generics.typeclass(class).is_some_and(|def| {
+                !def.defined_module.is_empty()
+                    && def.defined_module != crate::typechecking::generics::BUILTIN_MODULE
+            })
+        });
         self.current_expected = None;
         self.expected_here = None;
         self.type_aliases.clear();
