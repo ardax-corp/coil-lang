@@ -2,7 +2,7 @@
 // a constructed argument (`Option::Some(42)` is `Option<int>`).
 trait Collect<C> {
     type Elem;
-    fn head(C xs) -> Elem;
+    fn head(C xs) -> Elem {}
 }
 
 impl Collect for Option<int> {

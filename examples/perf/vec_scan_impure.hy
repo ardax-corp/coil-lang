@@ -1,8 +1,8 @@
 // CPU: `while i < len(v) { f(v[i]) }` where `f` is impure but cannot resize
 // an array — it only writes a field. `len(v)` stays invariant across the CALL,
 // so it hoists and `v[i]` unchecks, as for a pure helper (vec_scan_pure.hy).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Tally {

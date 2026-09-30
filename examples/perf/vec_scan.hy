@@ -1,7 +1,7 @@
 // CPU: `while i < len(v)` scan + in-place fill — the P2 counted-loop shape.
 // `len(v)` is invariant across element writes, so it hoists to the preheader.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn fill(Vec<int> v) -> int {

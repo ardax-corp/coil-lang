@@ -1,9 +1,10 @@
 // Nominal `Matrix` — `*` is matmul (Mul), `+` is element-wise.
 // Expected output: 19,22,43,502
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn main() {
     let a = matrix([[1, 2], [3, 4]]);
     let b = matrix([[5, 6], [7, 8]]);

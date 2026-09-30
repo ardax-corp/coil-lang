@@ -1,6 +1,6 @@
 use thread::{join, mutex, spawn, with_lock};
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn bump(Mutex m) {

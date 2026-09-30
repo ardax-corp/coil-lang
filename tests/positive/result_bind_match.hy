@@ -8,7 +8,7 @@ enum Node {
 
 impl Svc {
     pub fn decode() -> Result<Node, string> {
-        return Node::Obj { v: 42 };
+        return Node::Obj{ v: 42 };
     }
 
     pub fn fail() -> Result<Node, string> {
@@ -38,7 +38,7 @@ test("method result bind preserves nested Ok payload") {
     let r = s.decode();
     let v = match r {
         Result::Ok(n) => match n {
-            Node::Obj { v } => v,
+            Node::Obj{ v } => v,
         },
         Result::Err(_) => -1,
     };

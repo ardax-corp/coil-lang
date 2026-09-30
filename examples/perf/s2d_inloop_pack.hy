@@ -1,7 +1,7 @@
 // S2d A/B shape; S2f SROA deletes MakeArray (S2k dense select).
 // N=2000000; expected checksum 2000000999999.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn pack(int n) -> int {

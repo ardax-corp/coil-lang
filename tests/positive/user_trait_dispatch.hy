@@ -3,7 +3,7 @@
 // generics specialize to CALL; dictionaries stay on the shared body.
 
 trait Measurable<T> {
-    fn size(T x) -> int;
+    fn size(T x) -> int {}
 }
 
 impl Measurable for int {
@@ -22,8 +22,8 @@ fn size_of_ufcs<T: Measurable>(T x) -> int {
 
 // Second method exercises Index slot selection under an open bound.
 trait PairOps<T> {
-    fn left(T x) -> int;
-    fn right(T x) -> int;
+    fn left(T x) -> int {}
+    fn right(T x) -> int {}
 }
 
 impl PairOps for int {

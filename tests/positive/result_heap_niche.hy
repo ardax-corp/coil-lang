@@ -1,4 +1,4 @@
-use gc::{collect};
+use gc::collect;
 
 class Node {
     pub v: int,

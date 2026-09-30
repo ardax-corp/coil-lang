@@ -2,6 +2,7 @@
 // Outer locals must be listed in `use (…)` — same capture rule as lambdas.
 use io::{stdout, write};
 use string::{format, to_bytes};
+
 fn with_cleanup() {
     defer {
         write(stdout(), to_bytes("leave"));

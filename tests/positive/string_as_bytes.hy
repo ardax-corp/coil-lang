@@ -1,4 +1,4 @@
-use string::{to_bytes};
+use string::to_bytes;
 
 test("non-literal string via to_bytes") {
     let s = "hi";

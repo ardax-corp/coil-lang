@@ -17,9 +17,10 @@
 // The return value of `add(3, 4)` is
 // discarded (it's an expression statement with no consumer).
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn add(int a, int b) -> int {
     return a + b;
 }

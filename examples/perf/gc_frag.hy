@@ -1,9 +1,9 @@
 // Memory: a long-lived list thinned in place leaves survivors scattered over
 // half-empty slab chunks. Unmapping empty chunks cannot return that memory;
 // evacuation (`gc-compact`) can. Walks the survivors after churn.
-use gc::{collect};
-use io::{stdout};
-use io::sync::{write_all};
+use gc::collect;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Node {
@@ -43,7 +43,7 @@ fn thin(Option<Node> head, int keep) {
             Option::None => {
                 go = false;
             },
-        };
+        }
     }
 }
 
@@ -60,7 +60,7 @@ fn sum(Option<Node> head) -> int {
             Option::None => {
                 go = false;
             },
-        };
+        }
     }
     return total;
 }

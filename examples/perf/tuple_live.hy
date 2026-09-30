@@ -1,7 +1,7 @@
 // Memory: 200k live heap pairs in a `Vec`. Tuple words live inside the
 // object (no separate `Vec` allocation per tuple).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn build(int n) -> Vec<(int, int)> {

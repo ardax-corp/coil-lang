@@ -2,7 +2,7 @@
 // An operand whose code STOREs (an inlined call's parameter temp, a match, a
 // constructor) must be staged first: locals and the operand stack share
 // memory, so the store would overwrite the format string.
-use string::{format};
+use string::format;
 
 fn get(int k) -> string {
     return "a";

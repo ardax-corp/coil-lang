@@ -1,7 +1,7 @@
 // CPU: recursive alloc + walk (cross-lang fair bench).
 // Binary trees checksum; max depth 10.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 enum Tree {

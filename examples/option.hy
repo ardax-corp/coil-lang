@@ -1,7 +1,8 @@
 // Built-in Option — unwrap via match.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn unwrap(Option o) -> int {
     return match o {
         Option::None => 0,

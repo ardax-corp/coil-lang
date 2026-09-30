@@ -2,8 +2,8 @@
 // GetField uses. copy_prop refuses GetField-shaped loads; slot_promote
 // clears aliases at the first GetField, so later field reads stay on the
 // dest slot unless dest_prop forwards them.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Cell {

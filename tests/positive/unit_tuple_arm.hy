@@ -10,11 +10,11 @@ test("unit call arm next to a () arm") {
     match a {
         Option::Some(_) => bump(),
         Option::None => (),
-    };
+    }
     let b: Option<int> = Option::None;
     match b {
         Option::None => (),
         Option::Some(_) => bump(),
-    };
+    }
     assert(hits == 1)?;
 }

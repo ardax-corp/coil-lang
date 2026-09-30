@@ -1,8 +1,12 @@
 // Stream.fd() is the explicit marshal after silent Stream→Int FFI was removed.
 // `?` inside Result<int, IoError> must not treat the HostInvoke thunk as a
 // two-slot CALL (that made TLS enable see InvalidInput on a live socket).
-use io::{stdout, Stream, IoError};
-use io::net::tcp::{listen, connect, local_addr};
+use io::stdout;
+use io::Stream;
+use io::IoError;
+use io::net::tcp::listen;
+use io::net::tcp::connect;
+use io::net::tcp::local_addr;
 
 fn fd_via_try(Stream s) -> Result<int, IoError> {
     return s.fd()?;
@@ -16,7 +20,7 @@ test("stdout has a fd") {
         Result::Err(_) => {
             panic "stdout fd";
         },
-    };
+    }
 }
 
 test("tcp listener fd is distinct from a connected client") {

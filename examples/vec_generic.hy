@@ -3,9 +3,10 @@
 // monomorphizes to zip when called with ground tuples.
 // Expected output: 24,55
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn scale<T: Num>((T, T) v, T s) -> (T, T) {
     return v * s;
 }

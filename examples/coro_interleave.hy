@@ -1,8 +1,9 @@
 // Two handles from the SAME parameterized async fn, interleaved,
 // with `resume` used inline directly as a `print` argument.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 async fn counter(int base) {
     yield base;
     yield base + 1;

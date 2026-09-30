@@ -1,7 +1,7 @@
 // CPU: nested loops + float arithmetic (cross-lang fair bench).
 // Checksum of Mandelbrot escape iterations; size=160, max_iter=50.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn mandelbrot(int size, int max_iter) -> int {

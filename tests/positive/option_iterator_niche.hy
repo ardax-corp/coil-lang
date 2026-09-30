@@ -21,7 +21,7 @@ impl Iterator for TextCounter {
     fn next(TextCounter value) -> Option<string> {
         if value.cur < value.end {
             value.cur = value.cur + 1;
-            return Option::Some(value.text,);
+            return Option::Some(value.text);
         }
         return Option::None;
     }

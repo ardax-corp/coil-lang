@@ -11,9 +11,10 @@
 //   100
 //   42
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn main() {
     let d = { foo: 42, bar: 100 };
     write_all(stdout(), to_bytes(format("%i", d.foo)));

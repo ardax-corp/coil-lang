@@ -1,8 +1,12 @@
 // UDP datagram round-trip via `io::net::udp`.
 // Server binds ephemeral port; client send_to; server recv_from_wait.
-use io::{close, stdout};
-use io::net::udp::{bind, local_port, send_to};
-use io::sync::{recv_from_wait, write_all};
+use io::close;
+use io::stdout;
+use io::net::udp::bind;
+use io::net::udp::local_port;
+use io::net::udp::send_to;
+use io::sync::recv_from_wait;
+use io::sync::write_all;
 
 use string::{format, to_bytes};
 
@@ -21,8 +25,16 @@ fn echo_once() {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%s", match echo_once() {
-        Result::Ok(s) => s,
-        Result::Err(_) => "err",
-    })));
+    write_all(
+        stdout(),
+        to_bytes(
+            format(
+                "%s",
+                match echo_once() {
+                    Result::Ok(s) => s,
+                    Result::Err(_) => "err",
+                },
+            ),
+        ),
+    );
 }

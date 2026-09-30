@@ -1,6 +1,6 @@
 // COI-16: Construct with nested format must stage the Vec::push receiver.
 // (Nested format-inside-Construct field values are a separate open clobber.)
-use string::{format};
+use string::format;
 
 enum Row {
     Pair(string, string),

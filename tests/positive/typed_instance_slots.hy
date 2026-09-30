@@ -59,4 +59,3 @@ test("gc_churn shape checksum") {
     // 3 * 20 * 19 / 2
     assert(acc == 570)?;
 }
-

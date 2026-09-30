@@ -5,15 +5,16 @@
 // flattened (Ordered methods, then Equal methods). A generic with only
 // `T: Ordered` can call `eq_val` via the implied Equal bound.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 trait Equal<T> {
-    fn eq_val(T a, T b) -> bool;
+    fn eq_val(T a, T b) -> bool {}
 }
 
 trait Ordered<T: Equal> {
-    fn lt_val(T a, T b) -> bool;
+    fn lt_val(T a, T b) -> bool {}
 }
 
 impl Equal for int {

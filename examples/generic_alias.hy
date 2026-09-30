@@ -1,9 +1,10 @@
 // Generic type aliases expand at typecheck time.
 // Expected output: `7`
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 type Pair<T> = (T, T);
 
 fn main() {

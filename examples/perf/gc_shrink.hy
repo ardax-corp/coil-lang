@@ -2,8 +2,8 @@
 // Empty slab chunks idle for a whole release window go back to the OS
 // (`Slab::release_idle_chunks`); RSS after the peak should drop. Checksum is
 // the phase-2 work.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Node {
@@ -34,7 +34,7 @@ fn sum(Option<Node> list) -> int {
             Option::None => {
                 done = true;
             },
-        };
+        }
     }
     return s;
 }

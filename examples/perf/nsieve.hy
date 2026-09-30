@@ -1,7 +1,7 @@
 // CPU: integer loops + array mutation (cross-lang fair bench).
 // Sieve of Eratosthenes; n = 1<<14; prints prime count.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn nsieve(int n) -> int {

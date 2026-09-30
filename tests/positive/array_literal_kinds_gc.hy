@@ -2,7 +2,7 @@
 // (`MakeArrayK`): marking treats the elements as precise references and the
 // collector may move what they point at. Collections in between must keep
 // every element, including `None` holes and nested literals.
-use gc::{collect};
+use gc::collect;
 
 class Node {
     pub v: int,

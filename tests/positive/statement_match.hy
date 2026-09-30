@@ -24,7 +24,7 @@ fn with_semicolon(Dir d) -> int {
         Dir::Right => {
             return 20;
         },
-    };
+    }
 }
 
 test("statement match without semicolon") {

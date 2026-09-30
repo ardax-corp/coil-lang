@@ -13,6 +13,6 @@ fn inc(int value) {
 test("negative pair propagation") {
     assert(match inc(-1) {
         Result::Ok(_) => false,
-        Result::Err(_) => true
-})?;
+        Result::Err(_) => true,
+    })?;
 }

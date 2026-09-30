@@ -1,6 +1,6 @@
 // COI-404: module-sized Result<string, string> next to colliding short names.
 use string::{to_bytes, from_bytes};
-use coi404_ascii::{to_lower as ascii_lower};
+use coi404_ascii::to_lower as ascii_lower;
 
 fn utf8_ok(Vec<byte> b) -> Result<string, string> {
     return match from_bytes(b) {

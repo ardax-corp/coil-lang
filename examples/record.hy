@@ -10,9 +10,10 @@
 //
 // Output: the distance² from origin (5² + 12² = 169) and the
 // x-coordinate of `p` (5).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 enum Point {
     Origin,
     Point { x: int, y: int },
@@ -21,7 +22,7 @@ enum Point {
 fn distance_squared(Point p) -> int {
     return match p {
         Point::Origin => 0,
-        Point::Point { x, y } => x * x + y * y,
+        Point::Point{ x, y } => x * x + y * y,
     };
 }
 
@@ -41,10 +42,10 @@ fn y_coord(Point p) -> int {
 
 fn main() {
     // Pattern-destructured access (Phase 17B).
-    write_all(stdout(), to_bytes(format("%i", distance_squared(Point::Point { x: 5, y: 12 }))));
+    write_all(stdout(), to_bytes(format("%i", distance_squared(Point::Point{ x: 5, y: 12 }))));
 
     // Field access (Phase 18D) — `p.x` and `p.y` extract the
     // record fields without a match.
-    write_all(stdout(), to_bytes(format("%i", x_coord(Point::Point { x: 5, y: 12 }))));
-    write_all(stdout(), to_bytes(format("%i", y_coord(Point::Point { x: 5, y: 12 }))));
+    write_all(stdout(), to_bytes(format("%i", x_coord(Point::Point{ x: 5, y: 12 }))));
+    write_all(stdout(), to_bytes(format("%i", y_coord(Point::Point{ x: 5, y: 12 }))));
 }

@@ -1,6 +1,6 @@
 use thread::{Sender, channel, join, recv, send, spawn};
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn producer(Sender tx) {

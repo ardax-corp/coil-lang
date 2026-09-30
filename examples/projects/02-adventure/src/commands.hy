@@ -3,7 +3,7 @@
 // Cmd kind: 0=look 1=go 2=take 3=inv 4=save 5=load 6=help 7=quit 8=bad
 // Dir: 0=north 1=south 2=east 3=west; unused sentinel = 99.
 
-use string::{to_bytes};
+use string::to_bytes;
 
 class Cmd {
     pub kind: int,

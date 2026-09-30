@@ -1,5 +1,5 @@
 use commands::{cmd_dir, cmd_kind, parse_line};
-use string::{to_bytes};
+use string::to_bytes;
 
 test("parse look") {
     let look = to_bytes("look");

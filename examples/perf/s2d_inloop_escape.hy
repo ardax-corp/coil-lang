@@ -1,7 +1,7 @@
 // S2l leftover: in-loop MakeArray that escapes (SROA cannot delete).
 // N=2000000; checksum n^2 = 4000000000000.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn take([int] xs) -> int {

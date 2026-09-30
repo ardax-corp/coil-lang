@@ -1,7 +1,7 @@
 // CPU: `while i < len(v) { f(v[i]) }` with a non-inlined pure helper — COI-99.
 // `len(v)` is invariant across the CALL, so it hoists; `v[i]` may uncheck.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn absorb(int x) -> int {

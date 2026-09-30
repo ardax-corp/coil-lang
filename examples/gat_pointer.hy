@@ -5,12 +5,13 @@
 // returns the applied projection `P::Ref<A>`, pinned by the
 // `Pointer<Option>` instance to `A`.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 trait Pointer<P: * -> *> {
     type Ref<T>;
-    fn deref<T>(P<T> ptr) -> Ref<T>;
+    fn deref<T>(P<T> ptr) -> Ref<T> {}
 }
 
 impl Pointer for Option {

@@ -2,8 +2,8 @@
 // diamond arms and again after the join. Same-block CSE cannot share
 // those; LICM cannot hoist (xf varies). Parent pays two FDIV64s per
 // trip; PRE+GVN keep one.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn hot(float scale, int n) -> float {

@@ -1,5 +1,5 @@
 // Large ints cannot use inline CONST (i32); two-word Result Ok must pool them.
-use io::{IoError};
+use io::IoError;
 
 fn big() -> Result<int, IoError> {
     return 94805378185680;
@@ -13,5 +13,5 @@ test("two-word Result Ok keeps ints above i32::MAX") {
         Result::Err(_) => {
             panic "big";
         },
-    };
+    }
 }

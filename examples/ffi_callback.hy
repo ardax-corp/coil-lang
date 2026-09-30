@@ -1,9 +1,12 @@
 // C calls back into coil via ffi::types::Callback. Expected output: `42`.
 
-use ffi::{declare, dload, invoke};
-use ffi::types::{Callback, Int};
-use io::{stdout};
-use io::sync::{write_all};
+use ffi::declare;
+use ffi::dload;
+use ffi::invoke;
+use ffi::types::Callback;
+use ffi::types::Int;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn doubler(int x) -> int {

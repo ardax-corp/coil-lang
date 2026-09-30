@@ -1,9 +1,12 @@
 // Sum a coil int array via C `sum_array`. Expected output: `15`.
 
-use ffi::{declare, dload, invoke};
-use ffi::types::{Int, Ptr};
-use io::{stdout};
-use io::sync::{write_all};
+use ffi::declare;
+use ffi::dload;
+use ffi::invoke;
+use ffi::types::Int;
+use ffi::types::Ptr;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {

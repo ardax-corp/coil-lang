@@ -1,14 +1,16 @@
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn fizbuz(int n) {
     if (n % 3) == 0 {
         write_all(stdout(), to_bytes("FIZ"));
-    } 
+    }
     if (n % 5) == 0 {
         write_all(stdout(), to_bytes("BUZ"));
-    } 
+    }
 }
+
 fn main() {
     fizbuz(1);
     fizbuz(2);

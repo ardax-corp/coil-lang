@@ -1,7 +1,7 @@
 // Q6: for-in pin over a large int Vec. The `sum` helper is the counted
 // island (same shape as `while i < len`). `main` keeps fill + format.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn sum(Vec<int> v) -> int {

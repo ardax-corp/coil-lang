@@ -19,7 +19,7 @@ fn describe(int n) -> int {
         other => {
             return other * 100;
         },
-    };
+    }
 }
 
 fn big(int n) -> int {

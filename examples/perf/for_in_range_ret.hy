@@ -1,6 +1,6 @@
 // C2 / Q6: returned Range as two-slot [start, end], then counted for-in.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn make_range(int n) -> Range<int> {

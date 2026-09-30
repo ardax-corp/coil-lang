@@ -9,15 +9,12 @@ test("empty frame") {
 }
 
 test("truncate payload at five bytes") {
-    let long = Vec::from([
-        1 as byte, 2 as byte, 3 as byte, 4 as byte,
-        5 as byte, 6 as byte, 7 as byte,
-    ]);
+    let long = Vec::from(
+        [1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte, 6 as byte, 7 as byte],
+    );
     let capped = encode_frame(long);
     assert(frame_len(capped) == 5, "cap at 5")?;
-    let expect = Vec::from([
-        1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte,
-    ]);
+    let expect = Vec::from([1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte]);
     assert(payload_eq(capped, expect) == 1, "truncated payload")?;
 }
 

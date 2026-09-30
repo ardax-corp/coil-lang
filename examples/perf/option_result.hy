@@ -7,7 +7,7 @@ use string::{format, to_bytes};
 
 fn maybe_text(int value) -> Option<string> {
     if value % 3 == 0 {
-        return Option::Some("hit",);
+        return Option::Some("hit");
     }
     return Option::None;
 }
@@ -25,12 +25,12 @@ fn main() {
     while value < 10000 {
         total = total + match maybe_text(value) {
             Option::Some(_) => 1,
-            Option::None => 0
-};
+            Option::None => 0,
+        };
         total = total + match checked_value(value) {
             Result::Ok(result) => result,
-            Result::Err(_) => -1
-};
+            Result::Err(_) => -1,
+        };
         value = value + 1;
     }
     write_all(stdout(), to_bytes(format("%i", total)));

@@ -1,8 +1,8 @@
 // Memory: a loop rebuilds a large list into the same local. The previous
 // round's list is dead once the local is about to be overwritten; a frame
 // map that still lists the local keeps both lists alive at peak.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Node {
@@ -33,7 +33,7 @@ fn len_of(Option<Node> head) -> int {
             Option::None => {
                 go = false;
             },
-        };
+        }
     }
     return n;
 }

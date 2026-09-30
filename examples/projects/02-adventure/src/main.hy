@@ -8,21 +8,14 @@
 //   printf 'look\ngo north\ntake key\ninventory\ngo south\ngo east\nlook\nquit\n' | \
 //     timeout 10s ./target/release/coil examples/projects/02-adventure/src/main.hy
 
-use io::{close, open, stdin, stdout};
-use io::sync::{read_to_end, write_all};
+use io::close;
+use io::open;
+use io::stdin;
+use io::stdout;
+use io::sync::read_to_end;
+use io::sync::write_all;
 
-use world::{
-    Player,
-    key_here,
-    move_ok,
-    new_player,
-    player_has_key,
-    player_room,
-    room_exits,
-    room_title,
-    try_move,
-    try_take_key,
-};
+use world::{Player, key_here, move_ok, new_player, player_has_key, player_room, room_exits, room_title, try_move, try_take_key};
 
 use commands::{cmd_dir, cmd_kind, parse_line};
 
@@ -63,7 +56,12 @@ fn print_look(Player p) {
 }
 
 fn print_help() {
-    write_all(stdout(), to_bytes("Commands: look, go north/south/east/west, take [key], inventory, save, load, help, quit"));
+    write_all(
+        stdout(),
+        to_bytes(
+            "Commands: look, go north/south/east/west, take [key], inventory, save, load, help, quit",
+        ),
+    );
 }
 
 fn handle_line(Player p, Vec<byte> line, string save_path) -> int {
@@ -105,10 +103,18 @@ fn handle_line(Player p, Vec<byte> line, string save_path) -> int {
     }
     if k == 4 {
         let r = save_player(save_path, player_room(p), player_has_key(p));
-        write_all(stdout(), to_bytes(format("%s", match r {
-            Result::Ok(_) => "Saved. ",
-            Result::Err(_) => "Save failed. ",
-        })));
+        write_all(
+            stdout(),
+            to_bytes(
+                format(
+                    "%s",
+                    match r {
+                        Result::Ok(_) => "Saved. ",
+                        Result::Err(_) => "Save failed. ",
+                    },
+                ),
+            ),
+        );
     }
     if k == 5 {
         let r = load_player(save_path);

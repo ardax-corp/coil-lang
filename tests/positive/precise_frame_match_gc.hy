@@ -1,6 +1,6 @@
 // Frames with per-PC precise maps: match payload bindings, loop joins and
 // locals must stay rooted across calls that collect.
-use gc::{collect};
+use gc::collect;
 
 class Cell {
     pub v: int,
@@ -36,7 +36,7 @@ fn sum_picks(int n) -> int {
             Option::None => {
                 total = total + churn();
             },
-        };
+        }
         i = i + 1;
     }
     return total + keep[0].v + keep[1].v;

@@ -2,9 +2,9 @@
 // half the rows are dropped, then churn on top. Literal elements carry a
 // pointer element kind (`MakeArrayK`), so marking treats them as precise
 // references and evacuation may move the objects they hold.
-use gc::{collect};
-use io::{stdout};
-use io::sync::{write_all};
+use gc::collect;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Cell {

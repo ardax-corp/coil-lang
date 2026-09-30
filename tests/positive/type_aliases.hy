@@ -1,5 +1,6 @@
 // type Name = T; aliases in annotations and locals.
 type IntPair = (int, int);
+
 type Int3 = [int; 3];
 
 fn sum_pair(IntPair p) -> int {

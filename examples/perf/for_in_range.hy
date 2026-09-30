@@ -1,6 +1,6 @@
 // Q6 friend: literal `0..n` for-in as a counted cur/end loop (no range dict).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn range_sum(int n) -> int {

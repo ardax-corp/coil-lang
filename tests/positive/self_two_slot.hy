@@ -43,10 +43,12 @@ test("self two-slot Option walk") {
 }
 
 test("self two-slot Option tail") {
-    assert(match walk_tail(7, 0) {
-        Option::Some(v) => v == 7,
-        Option::None => false,
-    })?;
+    assert(
+        match walk_tail(7, 0) {
+            Option::Some(v) => v == 7,
+            Option::None => false,
+        },
+    )?;
 }
 
 test("self two-slot product walk") {

@@ -14,9 +14,10 @@
 // value, which is an enum, not an int).
 //
 // Output: "42" + "7" = "427".
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 enum Inner {
     Inner { v: int },
 }
@@ -34,7 +35,7 @@ fn read_y(Outer o) -> int {
 }
 
 fn main() {
-    let p = Outer::Outer { x: Inner::Inner { v: 42 }, y: 7 };
+    let p = Outer::Outer{ x: Inner::Inner{ v: 42 }, y: 7 };
     write_all(stdout(), to_bytes(format("%i", read_x_v(p))));
     write_all(stdout(), to_bytes(format("%i", read_y(p))));
 }

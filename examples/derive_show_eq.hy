@@ -2,9 +2,10 @@
 //
 // Output: Color::Red,true,false,true,Point::Point { x: 5, y: 12 },true,false,Cell { value: 42 },true,false
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 #[derive(Show, Eq, Ord)]
 enum Color {
     Red,
@@ -28,9 +29,9 @@ fn main() {
     write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Blue)));
     write_all(stdout(), to_bytes(format("%z,", Color::Red < Color::Blue)));
 
-    let p = Point::Point { x: 5, y: 12 };
+    let p = Point::Point{ x: 5, y: 12 };
     write_all(stdout(), to_bytes(format("%v,", p)));
-    write_all(stdout(), to_bytes(format("%z,", p == Point::Point { x: 5, y: 12 })));
+    write_all(stdout(), to_bytes(format("%z,", p == Point::Point{ x: 5, y: 12 })));
     write_all(stdout(), to_bytes(format("%z,", p == Point::Origin)));
 
     let c = new Cell(42);

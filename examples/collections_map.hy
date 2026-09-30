@@ -2,10 +2,10 @@
 //
 // Output: A,2
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
-use collections::map::{HashMap};
+use collections::map::HashMap;
 
 fn main() {
     let m = HashMap::new();
