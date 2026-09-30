@@ -8442,3 +8442,44 @@ fn fixed_array_in_let_still_requires_static_length() {
         .expect("xs");
     assert_eq!(ty, array_fixed(int(), 3));
 }
+
+#[test]
+fn module_qualified_type_paths_resolve_without_use() {
+    let mut c = Checker::new();
+    let parser = Pratt::default();
+
+    c.set_current_module("geo");
+    let ast = parser
+        .parse("class Point { pub x: int, } class Cell<T> { pub v: T, } type Meters = int;")
+        .expect("parse geo");
+    let _ = c.check_program(&ast);
+    assert!(c.take_messages().is_empty());
+
+    c.set_current_module("");
+    let importer = r#"
+fn origin(geo::Point p) -> geo::Cell<int> {
+    let m: geo::Meters = p.x;
+    return new geo::Cell(m);
+}
+"#;
+    let ast = parser.parse(importer).expect("parse importer");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.is_empty(),
+        "qualified type paths should resolve: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+
+    let ast = parser
+        .parse("fn bad(geo::Nope p) -> int { return 0; }")
+        .expect("parse bad");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.iter()
+            .any(|m| m.message().contains("Cannot find type `Nope` in module `geo`")),
+        "expected unknown-item error, got: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+}
