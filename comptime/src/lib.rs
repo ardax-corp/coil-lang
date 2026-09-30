@@ -7,9 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use common::{Byte, Value};
-use compiler::Pipeline;
-use compiler::macros::{MACRO_STEP_BUDGET, MacroHost, native_allowed_at_compile_time};
+use common::Value;
+use compiler::macros::{CompiledExpansion, MACRO_STEP_BUDGET, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object};
 
 /// Runs macros in a sandboxed VM.
@@ -28,16 +27,11 @@ pub fn install() {
 }
 
 impl MacroHost for VmMacroHost {
-    fn run(
-        &self,
-        program: &Pipeline,
-        bytecode: &[Byte],
-        constants: &[u64],
-        entries: &[u32],
-    ) -> Vec<Result<String, String>> {
-        entries
+    fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>> {
+        let natives = sandbox_natives();
+        calls
             .iter()
-            .map(|&entry| run_entry(program, bytecode, constants, entry))
+            .map(|(entry, input)| run_entry(program, &natives, *entry, input))
             .collect()
     }
 }
@@ -79,15 +73,20 @@ impl std::io::Write for Captured {
     }
 }
 
-fn run_entry(program: &Pipeline, bytecode: &[Byte], constants: &[u64], entry: u32) -> Result<String, String> {
+fn run_entry(
+    program: &CompiledExpansion,
+    natives: &[Arc<dyn NativeFn>],
+    entry: u32,
+    input: &str,
+) -> Result<String, String> {
     let captured = Captured::default();
     // `with_output` installs a thread-local redirect pointing into the VM;
     // put the caller's back before the VM is dropped.
     let outer = machine::io::set_output_redirect(None);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut vm = Machine::<256>::with_operand_capacity(program.operand_stack_slots() as usize);
+        let mut vm = Machine::<256>::with_operand_capacity(program.operand_stack_slots as usize);
         let _ = vm.with_output(captured.clone());
-        let result = run_on(&mut vm, program, bytecode, constants, entry);
+        let result = run_on(&mut vm, program, natives, entry, input);
         let _ = vm.restore_output();
         result
     }));
@@ -111,19 +110,25 @@ fn run_entry(program: &Pipeline, bytecode: &[Byte], constants: &[u64], entry: u3
 
 fn run_on(
     vm: &mut Machine<256>,
-    program: &Pipeline,
-    bytecode: &[Byte],
-    constants: &[u64],
+    program: &CompiledExpansion,
+    natives: &[Arc<dyn NativeFn>],
     entry: u32,
+    input: &str,
 ) -> Result<String, String> {
-    for native in sandbox_natives() {
-        vm.register_native(native);
+    for native in natives {
+        vm.register_native(native.clone());
     }
-    vm.set_program_debug(program.program_debug());
-    vm.init_static_slots(program.static_slot_count());
-    vm.load_program(bytecode, constants, program.strings());
+    vm.set_program_debug(program.program_debug.clone());
+    vm.init_static_slots(program.static_slot_count);
+    vm.load_shared_program(
+        program.bytecode.clone(),
+        program.constants.clone(),
+        program.strings.clone(),
+    );
     vm.set_step_budget(Some(MACRO_STEP_BUDGET));
-    let ret: Value = vm.call_function(entry, &[]);
+    let input = vm.heap_mut().intern(input.to_string());
+    let arg = Value::from(input.as_ptr() as *mut u8 as u64);
+    let ret: Value = vm.call_function(entry, &[arg]);
     if vm.step_budget_exhausted() {
         return Err("it ran too long (step budget exhausted; is there an infinite loop?)".to_string());
     }

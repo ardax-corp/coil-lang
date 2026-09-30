@@ -161,18 +161,25 @@ pub struct PendingMacro {
     pub member_attrs: Vec<String>,
 }
 
+/// A compiled expansion program: everything a host needs to run its entries.
+/// It depends only on the providing modules, so one is compiled per provider
+/// set and reused for every macro call (see `pipeline_macros`).
+pub struct CompiledExpansion {
+    pub bytecode: std::sync::Arc<Vec<Byte>>,
+    pub constants: std::sync::Arc<Vec<u64>>,
+    pub strings: std::sync::Arc<Vec<String>>,
+    pub static_slot_count: u32,
+    pub operand_stack_slots: u32,
+    pub program_debug: common::ProgramDebug,
+}
+
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
-    /// Call each entry (a zero-argument function returning `string`) and
-    /// return its result, or the panic / error text.
-    fn run(
-        &self,
-        program: &crate::Pipeline,
-        bytecode: &[Byte],
-        constants: &[u64],
-        entries: &[u32],
-    ) -> Vec<Result<String, String>>;
+    /// Call each `(entry, input)`: `entry` is the offset of a
+    /// `fn(string input) -> string`. Returns each result, or the panic /
+    /// error text.
+    fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>>;
 }
 
 static DEFAULT_HOST: std::sync::OnceLock<std::sync::Arc<dyn MacroHost>> = std::sync::OnceLock::new();
