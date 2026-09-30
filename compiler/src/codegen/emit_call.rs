@@ -802,6 +802,7 @@ impl Compiler {
             } else if self.functions.contains_key(&n) || self.fn_entry_labels.contains_key(&n) {
                 let offset = self.functions.get(&n).copied();
                 let mono_offset = self.mono_call_offset(&n, args.as_ref());
+                let mono_name = self.mono_call_name(&n, args.as_ref());
                 let target_offset = mono_offset.or(offset);
                 let lookup_name = strip_overload_key(&n).to_string();
                 let pair_kind = self.two_word_return_kind(&lookup_name);
@@ -1010,10 +1011,14 @@ impl Compiler {
                         arity,
                         common::HOST_ENUM_LAYOUT_OPTION_NICHE,
                     ) {
-                        if let Some(off) = mono_offset {
-                            bytecode.push(Self::packed_entry_byte_ret(
-                                entry_kind, arity, off as u32, ret_words,
-                            ));
+                        if let Some(mono) = mono_name.as_deref() {
+                            let _ = self.emit_named_entry_ret(
+                                &mut bytecode,
+                                mono,
+                                arity,
+                                entry_kind,
+                                ret_words,
+                            );
                         } else if !self.emit_named_entry_ret(
                             &mut bytecode,
                             &n,
@@ -1024,10 +1029,15 @@ impl Compiler {
                             self.missing_call_target(&n, span.into_range());
                         }
                     }
-                } else if let Some(off) = mono_offset {
-                    bytecode.push(Self::packed_entry_byte_ret(
-                        entry_kind, arity, off as u32, ret_words,
-                    ));
+                } else if let Some(mono) = mono_name.as_deref() {
+                    // Bind through the clone's entry label, like named calls.
+                    let _ = self.emit_named_entry_ret(
+                        &mut bytecode,
+                        mono,
+                        arity,
+                        entry_kind,
+                        ret_words,
+                    );
                 } else if !self.emit_named_entry_ret(
                     &mut bytecode,
                     &n,

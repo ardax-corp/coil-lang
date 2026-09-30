@@ -976,6 +976,9 @@ pub struct Compiler {
     /// Monomorphization plan for this compile unit plus emitted clone offsets.
     mono_plan: MonoPlan,
     mono_offsets: HashMap<MonoKey, usize>,
+    /// Entry name of each mono clone: calls bind through its entry label
+    /// (a raw offset goes stale when code moves before it).
+    mono_names: HashMap<MonoKey, String>,
     /// Temporary variable-type overrides while emitting a specialized clone.
     mono_codegen_var_types: Vec<HashMap<String, Ty>>,
 
@@ -1138,6 +1141,7 @@ impl Default for Compiler {
             polyfn_sources: HashMap::new(),
             mono_plan: MonoPlan::default(),
             mono_offsets: HashMap::new(),
+            mono_names: HashMap::new(),
             mono_codegen_var_types: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),

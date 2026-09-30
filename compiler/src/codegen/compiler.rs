@@ -11618,9 +11618,11 @@ impl Compiler {
                 specialization.key.def_id.raw(),
                 subst_ids
             );
-            let (clone_offset, _) = self.bind_function_entry(mono_name);
+            let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
             self.mono_offsets
                 .insert(specialization.key.clone(), clone_offset);
+            self.mono_names
+                .insert(specialization.key.clone(), mono_name.clone());
 
             let prev_fn_vars = std::mem::take(&mut self.context.variables);
             let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
@@ -11643,6 +11645,7 @@ impl Compiler {
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
             self.emit_sidecar_array_pins(args);
+            let clone_entry_sp = self.context.variables.len() as u32;
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
@@ -11652,6 +11655,19 @@ impl Compiler {
             if !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
+            // Its own IL function: a clone left as trailing glue of the source
+            // body has no registered entry, so a CALL to it from another
+            // function was resolved through another body's private label ids.
+            let clone_end = self.bytecode.len();
+            self.record_fn_span(mono_name.clone(), clone_offset, clone_end);
+            let entry = self.fn_entry_labels.get(&mono_name).copied();
+            self.bytecode.record_func_with_sp(
+                mono_name,
+                entry,
+                clone_offset,
+                clone_end,
+                clone_entry_sp,
+            );
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
@@ -11733,6 +11749,16 @@ impl Compiler {
             .mono_plan
             .specialization_for_call(fn_name, &arg_types)?;
         self.mono_offsets.get(&spec.key).copied()
+    }
+
+    /// Entry name of the mono clone a call to `fn_name` with `args` uses
+    /// (same keying as [`Self::mono_call_offset`]).
+    fn mono_call_name(&self, fn_name: &str, args: Option<&Vec<Output<'_>>>) -> Option<String> {
+        let off = self.mono_call_offset(fn_name, args)?;
+        self.mono_offsets
+            .iter()
+            .find(|(_, o)| **o == off)
+            .and_then(|(k, _)| self.mono_names.get(k).cloned())
     }
 
     fn consume_function_signature_output<'compiler>(&mut self, method: &Output<'compiler>) {
@@ -18049,6 +18075,7 @@ impl Compiler {
             self.string_indices.clear();
         }
         self.mono_offsets.clear();
+        self.mono_names.clear();
         self.mono_codegen_var_types.clear();
         self.test_cases.clear();
         self.user_main_defined = false;
