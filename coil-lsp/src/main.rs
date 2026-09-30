@@ -1134,7 +1134,7 @@ fn workspace_symbols(state: &ServerState, query: &str) -> Vec<SymbolInformation>
                 compiler::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
                 compiler::SymbolKind::Namespace => lsp_types::SymbolKind::NAMESPACE,
                 compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
-                compiler::SymbolKind::Macro => lsp_types::SymbolKind::MACRO,
+                compiler::SymbolKind::Macro => lsp_types::SymbolKind::FUNCTION,
             },
             tags: None,
             deprecated: None,
@@ -1286,7 +1286,7 @@ fn symbol_for(source: &str, item: &Output<'_>) -> Option<DocumentSymbol> {
         Expression::StaticDecl { name, .. } => (*name, lsp_types::SymbolKind::VARIABLE),
         Expression::AttrDecl { name, .. } => (*name, lsp_types::SymbolKind::METHOD),
         Expression::DeriveDecl { name, .. } | Expression::FnMacroDecl { name, .. } => {
-            (*name, lsp_types::SymbolKind::MACRO)
+            (*name, lsp_types::SymbolKind::FUNCTION)
         }
         Expression::Use { name, alias, .. } => (
             alias.as_deref().unwrap_or(name),
@@ -4534,8 +4534,8 @@ derive Answer(TypeDecl t) -> Code { return quote items {}; }
             .iter()
             .map(|s| (s.name.as_str(), s.kind))
             .collect();
-        assert_eq!(by_name.get("twice"), Some(&lsp_types::SymbolKind::MACRO));
-        assert_eq!(by_name.get("Answer"), Some(&lsp_types::SymbolKind::MACRO));
+        assert_eq!(by_name.get("twice"), Some(&lsp_types::SymbolKind::FUNCTION));
+        assert_eq!(by_name.get("Answer"), Some(&lsp_types::SymbolKind::FUNCTION));
     }
 
     #[test]
