@@ -5,10 +5,14 @@ use std::path::PathBuf;
 use compiler::{HostGrants, OptLevel};
 use reporting::ReportConfig;
 
+use crate::order::{Order, fresh_seed, parse_seed};
 use crate::runner::TestOptions;
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
+
+/// Environment fallback for `--seed` (CI can pin an order without editing argv).
+pub const SEED_ENV: &str = "COIL_TEST_SEED";
 
 pub enum Parsed {
     Help,
@@ -26,6 +30,9 @@ pub fn print_help() {
          \n\
          Options:\n\
          \x20 --fail-fast        Stop after the first failed case\n\
+         \x20 --seed N           Shuffle files and cases with seed N (decimal or 0x hex;\n\
+         \x20                    default: random, or $COIL_TEST_SEED; printed in the header)\n\
+         \x20 --no-shuffle       Run files in sorted path order and cases in source order\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
@@ -45,6 +52,8 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut log_json = false;
     let mut log_lsp = false;
     let mut fail_fast = false;
+    let mut seed: Option<u64> = None;
+    let mut no_shuffle = false;
     let mut path: Option<String> = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut grants = HostGrants::deny_all();
@@ -70,6 +79,14 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--log-json" => log_json = true,
             "--log-lsp" => log_lsp = true,
             "--fail-fast" => fail_fast = true,
+            "--no-shuffle" => no_shuffle = true,
+            "--seed" => {
+                i += 1;
+                seed = Some(parse_seed(&value(i, "N", a)?)?);
+            }
+            s if s.starts_with("--seed=") => {
+                seed = Some(parse_seed(s.trim_start_matches("--seed="))?);
+            }
             "-O" | "--opt-level" => {
                 i += 1;
                 opt_level = parse_level(&value(i, "LEVEL", a)?)?;
@@ -118,16 +135,43 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     }
 
     let config = ReportConfig::from_cli_flags(log_json, log_lsp).map_err(|e| e.to_string())?;
+    let env_seed = std::env::var(SEED_ENV).ok();
+    let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
     Ok(Parsed::Run(
         config,
         TestOptions {
             root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
             fail_fast,
+            order,
             opt_level,
             grants,
             extra_roots,
         },
     ))
+}
+
+/// `--no-shuffle` > `--seed` > `$COIL_TEST_SEED` > a fresh random seed.
+fn resolve_order(
+    seed: Option<u64>,
+    no_shuffle: bool,
+    env_seed: Option<&str>,
+    fresh: impl FnOnce() -> u64,
+) -> Result<Order, String> {
+    if no_shuffle {
+        if seed.is_some() {
+            return Err("`--seed` and `--no-shuffle` cannot be combined".into());
+        }
+        return Ok(Order::Sorted);
+    }
+    if let Some(seed) = seed {
+        return Ok(Order::Shuffled(seed));
+    }
+    match env_seed.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(text) => parse_seed(text)
+            .map(Order::Shuffled)
+            .map_err(|e| format!("{SEED_ENV}: {e}")),
+        None => Ok(Order::Shuffled(fresh())),
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +230,45 @@ mod tests {
         assert_eq!(o.opt_level, OptLevel::Aggressive);
         let (_, o) = run(&["--opt-level=g"]);
         assert_eq!(o.opt_level, OptLevel::Debug);
+    }
+
+    #[test]
+    fn seed_and_no_shuffle_flags() {
+        let (_, o) = run(&["--seed", "0x2a"]);
+        assert_eq!(o.order, Order::Shuffled(42));
+        let (_, o) = run(&["--seed=7"]);
+        assert_eq!(o.order, Order::Shuffled(7));
+        let (_, o) = run(&["--no-shuffle"]);
+        assert_eq!(o.order, Order::Sorted);
+        assert!(parse_args(&argv(&["--seed", "1", "--no-shuffle"])).is_err());
+        assert!(parse_args(&argv(&["--seed", "nope"])).is_err());
+        assert!(parse_args(&argv(&["--seed"])).is_err());
+    }
+
+    #[test]
+    fn order_precedence_flag_env_then_fresh() {
+        let fresh = || 99;
+        assert_eq!(
+            resolve_order(None, false, None, fresh),
+            Ok(Order::Shuffled(99))
+        );
+        assert_eq!(
+            resolve_order(None, false, Some("0x10"), fresh),
+            Ok(Order::Shuffled(16))
+        );
+        assert_eq!(
+            resolve_order(None, false, Some("  "), fresh),
+            Ok(Order::Shuffled(99))
+        );
+        assert_eq!(
+            resolve_order(Some(5), false, Some("0x10"), fresh),
+            Ok(Order::Shuffled(5))
+        );
+        assert_eq!(
+            resolve_order(None, true, Some("0x10"), fresh),
+            Ok(Order::Sorted)
+        );
+        assert!(resolve_order(None, false, Some("bad"), fresh).is_err());
     }
 
     #[test]

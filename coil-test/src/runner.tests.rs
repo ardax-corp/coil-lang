@@ -15,6 +15,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
     TestOptions {
         root: root.to_path_buf(),
         fail_fast,
+        order: Order::Sorted,
         opt_level: OptLevel::Standard,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),
@@ -93,7 +94,7 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     // Normal positive case still runs.
     std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  assert(true)?;\n}\n").unwrap();
 
-    let (passed, failed) =
+    let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
     assert_eq!(passed, 2, "bad compile_fail + positive ok");
     assert_eq!(failed, 1, "unexpected_ok under compile_fail must fail");
@@ -115,7 +116,7 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
     )
     .unwrap();
 
-    let (passed, failed) =
+    let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, true)).expect("suite runs");
     assert_eq!(failed, 1, "a_ok should fail (unexpected compile success)");
     assert_eq!(passed, 0, "fail-fast must not reach z_bad");
@@ -170,4 +171,38 @@ assert(true)?;
         passed, 1,
         "later case must still run after earlier failures"
     );
+}
+
+#[test]
+fn seeded_file_order_is_reproducible_and_complete() {
+    let root = unique_tmp("seeded_order");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..12 {
+        std::fs::write(
+            root.join(format!("t{i:02}.hy")),
+            "test(\"ok\") {\n  assert(true)?;\n}\n",
+        )
+        .unwrap();
+    }
+    let run = |order: Order| {
+        let opts = TestOptions {
+            order,
+            ..options(&root, false)
+        };
+        run_test_suite(ReportConfig::default(), &opts).expect("suite runs")
+    };
+    let sorted = run(Order::Sorted);
+    let a = run(Order::Shuffled(0x5eed));
+    let b = run(Order::Shuffled(0x5eed));
+    assert_eq!(sorted.passed, 12);
+    assert_eq!(a.passed, 12);
+    assert_eq!(a.files_run, b.files_run, "same seed, same order");
+    assert_ne!(
+        a.files_run, sorted.files_run,
+        "12 files should not stay sorted"
+    );
+    let mut resorted = a.files_run.clone();
+    resorted.sort();
+    assert_eq!(resorted, sorted.files_run, "shuffle keeps every file");
+    let _ = std::fs::remove_dir_all(&root);
 }

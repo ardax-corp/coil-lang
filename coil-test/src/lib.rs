@@ -5,4 +5,5 @@
 //! `compile_fail/` path segment must be rejected by the compiler instead.
 
 pub mod args;
+pub mod order;
 pub mod runner;

@@ -33,6 +33,34 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | a file with `test("…") { … }` / `#[test] fn` cases | each case runs on a fresh `Machine`: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case |
 
+## Order
+
+Files and the cases inside each file run in a **seeded random order** by
+default, so tests that silently depend on each other (usually through host
+state: files, env, cwd, ports) show up. The header prints the seed:
+
+```text
+running 243 files (seed 0x5eed)
+…
+test result: FAILED. 628 passed; 1 failed; 629 total
+rerun in this order with `--seed 0x5eed`
+```
+
+| Flag / env | Effect |
+|------------|--------|
+| `--seed N` | shuffle with `N` (decimal or `0x` hex) |
+| `COIL_TEST_SEED=N` | same, when `--seed` is absent |
+| `--no-shuffle` | sorted paths, cases in source order (cannot combine with `--seed`) |
+
+The shuffle is two-level: files first, then each file's cases with a seed
+derived from the run seed and the file's path under the test root. A file
+keeps its case order when rerun alone with the same seed. Files are shuffled
+rather than a flat list of all cases so only one compiled file is in memory at
+a time (the leak smoke runs under `ulimit -v 65536`). splitmix64 +
+Fisher–Yates live in `coil-test/src/order.rs`; there is no `rand` dependency.
+
+## Compile
+
 Each file compiles in memory with `Pipeline::set_include_tests(true)` at the
 requested `-O` level (default Standard, same as `coil compile`). Nothing is
 serialized to `.hyc`, so test-only data never touches the archive format.
@@ -41,7 +69,8 @@ serialized to `.hyc`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `-O`, `--root`, host grants, `--log-*`) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-O`, `--root`, host grants, `--log-*`) |
+| `coil-test/src/order.rs` | seeded file / case order |
 | `coil-test/src/runner.rs` | discovery, per-file compile, per-case VM, summary |
 | `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
 

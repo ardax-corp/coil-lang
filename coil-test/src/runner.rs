@@ -10,6 +10,8 @@ use compiler::{HostGrants, OptLevel, Pipeline};
 use machine::Machine;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
+use crate::order::{Order, format_seed};
+
 /// What to run and how to compile it.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
@@ -17,6 +19,8 @@ pub struct TestOptions {
     pub root: PathBuf,
     /// Stop after the first failed case.
     pub fail_fast: bool,
+    /// File and case order (`--seed` / `--no-shuffle`).
+    pub order: Order,
     pub opt_level: OptLevel,
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
@@ -124,21 +128,35 @@ pub fn run_test_case(
     }
 }
 
-/// Run the harness over `options.root` and return `(passed, failed)` without exiting.
-pub fn run_test_suite(
-    config: ReportConfig,
-    options: &TestOptions,
-) -> Result<(usize, usize), String> {
-    let files = collect_test_files(&options.root)?;
+/// Counts plus the order files actually ran in.
+#[derive(Debug, Default)]
+pub struct SuiteResult {
+    pub passed: usize,
+    pub failed: usize,
+    pub files_run: Vec<PathBuf>,
+}
+
+/// Run the harness over `options.root` without exiting.
+pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<SuiteResult, String> {
+    let mut files = collect_test_files(&options.root)?;
+    options.order.order_files(&mut files);
+    eprintln!(
+        "running {} file{} ({})",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        options.order.describe()
+    );
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut stop = false;
+    let mut files_run = Vec::with_capacity(files.len());
 
     for path in &files {
         if stop {
             break;
         }
+        files_run.push(path.clone());
         let display = path.display().to_string();
         let expect_compile_fail = is_compile_fail(path);
         let format = config.format;
@@ -168,7 +186,8 @@ pub fn run_test_suite(
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pipeline.compile_src_from_file(&display)
         }));
-        let cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
+        let mut cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
+        options.order.order_cases(&options.root, path, &mut cases);
         let _ = pipeline.finish_reporting();
 
         let file_ok = if expect_compile_fail {
@@ -281,13 +300,17 @@ pub fn run_test_suite(
         }
     }
 
-    Ok((passed, failed))
+    Ok(SuiteResult {
+        passed,
+        failed,
+        files_run,
+    })
 }
 
 /// `coil test` entry: run the suite, print the summary, exit non-zero on failure.
 pub fn cmd_test(config: ReportConfig, options: TestOptions) {
-    let (passed, failed) = match run_test_suite(config.clone(), &options) {
-        Ok(counts) => counts,
+    let SuiteResult { passed, failed, .. } = match run_test_suite(config.clone(), &options) {
+        Ok(result) => result,
         Err(msg) => {
             let format = config.format;
             let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
@@ -305,6 +328,9 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) {
     );
 
     if failed != 0 {
+        if let Order::Shuffled(seed) = options.order {
+            eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
+        }
         exit(1);
     }
 }
