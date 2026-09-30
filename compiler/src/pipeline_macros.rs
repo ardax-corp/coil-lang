@@ -10,7 +10,7 @@ use reporting::{ErrorCode, Message, ReportConfig};
 use super::Pipeline;
 use crate::macros::encode::{self, Strip};
 use crate::macros::{
-    MacroDecl, MacroInput, MacroKind, PendingMacro, lower::is_synthetic,
+    MacroArg, MacroDecl, MacroInput, MacroKind, PendingMacro, lower::is_synthetic,
 };
 use crate::manifest::resolve_use_in_roots;
 
@@ -33,12 +33,9 @@ struct Job {
     decl: MacroDecl,
     provider_file: PathBuf,
     provider_module: String,
-    /// `let` statements building the macro's input (`TypeDecl` / `FnDecl`).
-    setup: Vec<String>,
-    /// The local the last setup statement binds.
+    /// The call's input, as `macro::Reader` decodes it (`macros::encode`):
+    /// the declaration, then attribute arguments in parameter order.
     input: String,
-    /// Attribute arguments after the input.
-    extra: Vec<String>,
 }
 
 /// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
@@ -137,15 +134,13 @@ impl Pipeline {
                             continue;
                         }
                         match self.encode_input(file, &module, &p, &decl) {
-                            Ok((setup, input, extra)) => file_jobs.push(Job {
+                            Ok(input) => file_jobs.push(Job {
                                 file: file.clone(),
                                 pending: p,
                                 decl,
                                 provider_file: provider,
                                 provider_module,
-                                setup,
                                 input,
-                                extra,
                             }),
                             Err(msg) => errors.push(msg),
                         }
@@ -300,14 +295,9 @@ impl Pipeline {
         }
     }
 
-    /// The macro call's argument list as coil source.
-    fn encode_input(
-        &self,
-        file: &Path,
-        module: &str,
-        p: &PendingMacro,
-        decl: &MacroDecl,
-    ) -> Result<(Vec<String>, String, Vec<String>), Message> {
+    /// The macro call's input: the declaration, then its attribute
+    /// arguments in parameter order.
+    fn encode_input(&self, file: &Path, module: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
         let cached = self.ast_cache.get(file).expect("pending macros come from a cached file");
         // Includes earlier rounds' generated code (its spans point past the file).
         let report = cached.report_source();
@@ -324,15 +314,14 @@ impl Pipeline {
             derive: p.kind == MacroKind::Derive,
             attr: (p.kind == MacroKind::Attr).then_some(p.name.as_str()),
         };
-        let mut hoist = encode::Hoist::default();
-        let input = match decl.input {
-            MacroInput::TypeDecl => encode::type_decl(&mut hoist, node, source, module, &strip),
+        let mut wire = encode::Wire::default();
+        let encoded = match decl.input {
+            MacroInput::TypeDecl => encode::type_decl(&mut wire, node, source, module, &strip),
             MacroInput::FnDecl => {
-                encode::fn_decl(&mut hoist, node, source, p.owner.as_deref(), method_is_pub(ast, p), &strip)
+                encode::fn_decl(&mut wire, node, source, p.owner.as_deref(), method_is_pub(ast, p), &strip)
             }
         };
-        let setup = hoist.statements().to_vec();
-        let Some(input) = input else {
+        if !encoded {
             let want = match decl.input {
                 MacroInput::TypeDecl => "a class or enum",
                 MacroInput::FnDecl => "a function or method",
@@ -342,13 +331,23 @@ impl Pipeline {
                 format!("{} `{}` applies to {want}", p.kind.describe(), p.name),
                 p.range.clone(),
             ));
-        };
+        }
         if decl.kind == MacroKind::Derive {
-            return Ok((setup, input, Vec::new()));
+            return Ok(wire.finish());
+        }
+        if let Some((name, ty)) = decl.params.iter().find(|(_, ty)| !matches!(ty.as_str(), "string" | "int" | "bool")) {
+            return Err(Message::error(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "attribute macro `{}` parameter `{name}` has type `{ty}`; macro parameters are `string`, `int` or `bool`",
+                    p.name
+                ),
+                p.range.clone(),
+            ));
         }
         // Attribute arguments bind to the macro's extra parameters, by name
         // (`key = value`) or in order.
-        let mut values: Vec<Option<String>> = vec![None; decl.params.len()];
+        let mut values: Vec<Option<&MacroArg>> = vec![None; decl.params.len()];
         let mut next = 0;
         for arg in &p.args {
             let slot = if arg.key.is_empty() {
@@ -378,12 +377,11 @@ impl Pipeline {
                     p.range.clone(),
                 ));
             }
-            values[slot] = Some(encode::arg_value(arg));
+            values[slot] = Some(arg);
         }
-        let mut extra = Vec::new();
         for (i, v) in values.into_iter().enumerate() {
             match v {
-                Some(v) => extra.push(v),
+                Some(v) => encode::arg(&mut wire, v),
                 None => {
                     return Err(Message::error(
                         ErrorCode::GenericTypeError,
@@ -396,14 +394,13 @@ impl Pipeline {
                 }
             }
         }
-        Ok((setup, input, extra))
+        Ok(wire.finish())
     }
 
-    /// Hash of a macro call: the sources of its provider and everything the
-    /// provider uses, the macro and its input.
-    fn job_key(&self, job: &Job) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut closure = vec![job.provider_file.clone()];
+    /// Hash the sources of `providers` and every module they use.
+    fn hash_provider_sources(&self, providers: &[PathBuf], h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        let mut closure: Vec<PathBuf> = providers.to_vec();
         let mut i = 0;
         while i < closure.len() {
             for dep in self.module_deps.get(&closure[i]).into_iter().flatten() {
@@ -414,15 +411,26 @@ impl Pipeline {
             i += 1;
         }
         closure.sort();
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        closure.dedup();
         for file in &closure {
-            file.hash(&mut h);
-            self.ast_cache.get(file).map(|c| c.source()).hash(&mut h);
+            file.hash(h);
+            let source = self
+                .ast_cache
+                .get(file)
+                .map(|c| c.source())
+                .or_else(|| crate::macros::embedded_source(file));
+            source.hash(h);
         }
+    }
+
+    /// Hash of a macro call: the sources of its provider and everything the
+    /// provider uses, the macro and its input.
+    fn job_key(&self, job: &Job) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash_provider_sources(std::slice::from_ref(&job.provider_file), &mut h);
         job.decl.fn_name.hash(&mut h);
-        job.setup.hash(&mut h);
         job.input.hash(&mut h);
-        job.extra.hash(&mut h);
         h.finish()
     }
 
@@ -447,6 +455,28 @@ impl Pipeline {
         results
     }
 
+    /// Every macro a provider module declares (all of them, so the compiled
+    /// program serves any call into it).
+    fn provider_decls(&self, file: &Path) -> Vec<MacroDecl> {
+        if file == crate::macros::derive_module_path() {
+            return crate::macros::PRELUDE_DERIVES
+                .iter()
+                .map(|name| MacroDecl {
+                    kind: MacroKind::Derive,
+                    name: name.to_string(),
+                    fn_name: crate::macros::derive_fn_name(name),
+                    helpers: Vec::new(),
+                    input: MacroInput::TypeDecl,
+                    params: Vec::new(),
+                })
+                .collect();
+        }
+        self.ast_cache
+            .get(file)
+            .map(|c| c.macro_decls().to_vec())
+            .unwrap_or_default()
+    }
+
     fn compile_and_run(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let Some(host) = self.macro_host.clone() else {
             return jobs
@@ -454,71 +484,98 @@ impl Pipeline {
                 .map(|_| Err("this build has no compile-time macro host".to_string()))
                 .collect();
         };
-        let mut aliases: HashMap<(String, String), String> = HashMap::new();
-        let mut text = String::from(
-            "use macro::{Code, Ident, TypeRef, AttrArg, Attr, Field, Variant, TypeDecl, Param, FnDecl};\n",
-        );
-        for job in jobs {
-            let key = (job.provider_module.clone(), job.decl.fn_name.clone());
-            if aliases.contains_key(&key) {
-                continue;
-            }
-            let alias = format!("__coil_m{}", aliases.len());
-            text.push_str(&format!(
-                "use {}::{} as {alias};\n",
-                job.provider_module, job.decl.fn_name
-            ));
-            aliases.insert(key, alias);
-        }
-        // One builder per distinct input: every derive on a type (and a
-        // type's macros across rounds) share it.
-        let mut inputs: HashMap<(Vec<String>, String), usize> = HashMap::new();
-        for job in jobs {
-            let key = (job.setup.clone(), job.input.clone());
-            if inputs.contains_key(&key) {
-                continue;
-            }
-            let k = inputs.len();
-            let ty = match job.decl.input {
-                MacroInput::TypeDecl => "TypeDecl",
-                MacroInput::FnDecl => "FnDecl",
-            };
-            text.push_str(&format!("fn __coil_input_{k}() -> {ty} {{\n"));
-            for stmt in &job.setup {
-                text.push_str("    ");
-                text.push_str(stmt);
-                text.push('\n');
-            }
-            text.push_str(&format!("    return {};\n}}\n", job.input));
-            inputs.insert(key, k);
-        }
+        // One program per provider module with every macro it declares, so
+        // `coil test` / the LSP reuse it across files and rounds (compiling
+        // the provider costs the same with fewer wrappers).
+        let mut results: Vec<Option<Result<String, String>>> = vec![None; jobs.len()];
+        let mut groups: Vec<((String, PathBuf), Vec<usize>)> = Vec::new();
         for (i, job) in jobs.iter().enumerate() {
-            let alias = &aliases[&(job.provider_module.clone(), job.decl.fn_name.clone())];
-            let k = inputs[&(job.setup.clone(), job.input.clone())];
-            let mut args = vec![format!("__coil_input_{k}()")];
-            args.extend(job.extra.iter().cloned());
-            text.push_str(&format!(
-                "fn __coil_expand_{i}() -> string {{\n    return {alias}({}).text;\n}}\n",
-                args.join(", ")
-            ));
+            let key = (job.provider_module.clone(), job.provider_file.clone());
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, idx)) => idx.push(i),
+                None => groups.push((key, vec![i])),
+            }
         }
-
-        let mut providers: Vec<&str> = jobs.iter().map(|j| j.provider_module.as_str()).collect();
-        providers.sort_unstable();
-        providers.dedup();
-        let ctx = SubProgram {
-            project_root: self.project_root.clone(),
-            roots: self.roots.clone(),
-            host,
-            macro_stack: self.macro_stack.iter().cloned().chain(jobs.iter().map(|j| j.file.clone())).collect(),
-            overlays: self.overlays.clone(),
-            text,
-            entries: jobs.len(),
-            providers: providers.join(", "),
-        };
-        // A nested compile plus a VM run is deeper than Windows' 1 MiB main
-        // thread stack; continue on a fresh segment when little is left.
-        stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, move || ctx.compile_and_run())
+        for ((module, file), idx) in groups {
+            let decls = self.provider_decls(&file);
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                module.hash(&mut h);
+                self.hash_provider_sources(std::slice::from_ref(&file), &mut h);
+                h.finish()
+            };
+            let mut text = String::from(
+                "use macro::{Code, Ident, TypeRef, AttrArg, Attr, Field, Variant, TypeDecl, Param, FnDecl, Reader};\n",
+            );
+            let mut entries: Vec<String> = Vec::new();
+            for decl in &decls {
+                let i = entries.len();
+                let alias = format!("__coil_m{i}");
+                text.push_str(&format!("use {module}::{} as {alias};\n", decl.fn_name));
+                let (read, input) = match decl.input {
+                    MacroInput::TypeDecl => ("type_decl", "TypeDecl"),
+                    MacroInput::FnDecl => ("fn_decl", "FnDecl"),
+                };
+                let mut body = format!("    let r = Reader::over(input);\n    let decl: {input} = r.{read}();\n");
+                let mut args = vec!["decl".to_string()];
+                for (k, (_, ty)) in decl.params.iter().enumerate() {
+                    let read = match ty.as_str() {
+                        "int" => "int",
+                        "bool" => "bool",
+                        _ => "str",
+                    };
+                    body.push_str(&format!("    let a{k} = r.{read}();\n"));
+                    args.push(format!("a{k}"));
+                }
+                text.push_str(&format!(
+                    "fn __coil_run_{i}(string input) -> string {{\n{body}    return {alias}({}).text;\n}}\n",
+                    args.join(", ")
+                ));
+                entries.push(decl.fn_name.clone());
+            }
+            let ctx = SubProgram {
+                project_root: self.project_root.clone(),
+                roots: self.roots.clone(),
+                host: host.clone(),
+                macro_stack: self
+                    .macro_stack
+                    .iter()
+                    .cloned()
+                    .chain(idx.iter().map(|&i| jobs[i].file.clone()))
+                    .collect(),
+                overlays: self.overlays.clone(),
+                text,
+                entries,
+                provider: module.clone(),
+            };
+            let host = host.clone();
+            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // main thread stack; continue on a fresh segment when little is left.
+            let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
+                let program = match compiled_program(key, ctx) {
+                    Ok(p) => p,
+                    Err(e) => return vec![Err(e); idx.len()],
+                };
+                let mut calls = Vec::with_capacity(idx.len());
+                for &i in &idx {
+                    match program.offsets.get(&jobs[i].decl.fn_name) {
+                        Some(&o) => calls.push((o, jobs[i].input.clone())),
+                        None => {
+                            return vec![Err(format!("`{}` is not a macro of `{module}`", jobs[i].decl.name)); idx.len()];
+                        }
+                    }
+                }
+                host.run(&program.expansion, &calls)
+            });
+            for (&i, out) in idx.iter().zip(outs) {
+                results[i] = Some(out);
+            }
+        }
+        results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err("macro was not run".to_string())))
+            .collect()
     }
 
     /// Parse one macro's output and put it into the file's AST.
@@ -806,7 +863,55 @@ fn check_member_attrs(jobs: &[Job]) -> Vec<Message> {
 const EXPANSION_RED_ZONE: usize = 4 * 1024 * 1024;
 const EXPANSION_STACK: usize = 16 * 1024 * 1024;
 
-/// What an expansion needs from the parent pipeline.
+/// An expansion program compiled for one provider module, with the entry
+/// of each of its macro functions.
+struct CompiledProgram {
+    expansion: crate::macros::CompiledExpansion,
+    offsets: HashMap<String, u32>,
+}
+
+type ProgramSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<CompiledProgram>>>>;
+
+/// Compiled expansion programs by provider module, the macros they call and
+/// the sources of the provider and its dependencies, for the life of the
+/// process.
+static COMPILED: std::sync::Mutex<Option<HashMap<u64, ProgramSlot>>> = std::sync::Mutex::new(None);
+
+thread_local! {
+    /// Keys this thread is compiling: a provider set reached again while
+    /// compiling itself compiles uncached (and reports its cycle) instead of
+    /// waiting on itself.
+    static COMPILING: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The program for `key`, compiled on first use. Parallel pipelines wait
+/// for one compile instead of repeating it; failures are not cached.
+fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, String> {
+    if COMPILING.with(|c| c.borrow().contains(&key)) {
+        return ctx.compile().map(std::sync::Arc::new);
+    }
+    let slot = {
+        let Ok(mut map) = COMPILED.lock() else {
+            return ctx.compile().map(std::sync::Arc::new);
+        };
+        map.get_or_insert_with(HashMap::new).entry(key).or_default().clone()
+    };
+    let Ok(mut slot) = slot.lock() else {
+        return ctx.compile().map(std::sync::Arc::new);
+    };
+    if let Some(program) = slot.as_ref() {
+        return Ok(program.clone());
+    }
+    COMPILING.with(|c| c.borrow_mut().push(key));
+    let result = ctx.compile().map(std::sync::Arc::new);
+    COMPILING.with(|c| c.borrow_mut().retain(|k| *k != key));
+    if let Ok(program) = &result {
+        *slot = Some(program.clone());
+    }
+    result
+}
+
+/// What compiling an expansion program needs from the parent pipeline.
 struct SubProgram {
     project_root: PathBuf,
     roots: Vec<PathBuf>,
@@ -815,14 +920,15 @@ struct SubProgram {
     overlays: HashMap<PathBuf, String>,
     /// Source of `<coil>/expand.hy`.
     text: String,
-    entries: usize,
-    /// Provider modules, for the compile-error message.
-    providers: String,
+    /// Macro function of `__coil_run_i`, by `i`.
+    entries: Vec<String>,
+    /// Provider module, for the compile-error message.
+    provider: String,
 }
 
 impl SubProgram {
-    /// Compile the expansion program in a sub-pipeline and run each entry.
-    fn compile_and_run(self) -> Vec<Result<String, String>> {
+    /// Compile the expansion program in a sub-pipeline.
+    fn compile(self) -> Result<CompiledProgram, String> {
         let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
         sub.project_root = self.project_root;
         sub.roots = self.roots;
@@ -835,8 +941,7 @@ impl SubProgram {
         sub.overlays = self.overlays;
         let entry = expansion_entry_path();
         sub.overlays.insert(entry.clone(), self.text);
-        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
-        let (bytecode, constants) = match compiled {
+        let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -852,19 +957,26 @@ impl SubProgram {
                 } else {
                     detail
                 };
-                let message = format!("could not compile the macro module(s) {}: {detail}", self.providers);
-                return vec![Err(message); self.entries];
+                return Err(format!("could not compile the macro module `{}`: {detail}", self.provider));
             }
         };
-        let mut offsets = Vec::with_capacity(self.entries);
-        for i in 0..self.entries {
-            match sub.function_offset(&format!("__coil_expand_{i}")) {
-                Some(o) => offsets.push(o as u32),
-                None => {
-                    return vec![Err("expansion entry was not compiled".to_string()); self.entries];
-                }
-            }
+        let mut offsets = HashMap::new();
+        for (i, entry) in self.entries.into_iter().enumerate() {
+            let Some(o) = sub.function_offset(&format!("__coil_run_{i}")) else {
+                return Err("expansion entry was not compiled".to_string());
+            };
+            offsets.insert(entry, o as u32);
         }
-        self.host.run(&sub, &bytecode, &constants, &offsets)
+        Ok(CompiledProgram {
+            expansion: crate::macros::CompiledExpansion {
+                bytecode: std::sync::Arc::new(bytecode),
+                constants: std::sync::Arc::new(constants),
+                strings: std::sync::Arc::new(sub.strings().to_vec()),
+                static_slot_count: sub.static_slot_count(),
+                operand_stack_slots: sub.operand_stack_slots(),
+                program_debug: sub.program_debug(),
+            },
+            offsets,
+        })
     }
 }

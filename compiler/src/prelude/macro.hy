@@ -404,3 +404,225 @@ impl FnDecl {
         return out;
     }
 }
+
+/// Reads a macro call's input: length-prefixed fields (`<len>:<bytes>`,
+/// lists as a count then their items) in constructor order, written by the
+/// compiler (`macros::encode`).
+class Reader {
+    pub bytes: Vec<byte>,
+    pub pos: int,
+}
+
+// A free function: a method calling itself here resolved its return type
+// without the module path.
+fn read_type_ref(Reader r) -> TypeRef {
+    let text = r.str();
+    let head = r.str();
+    let n = r.int();
+    let args: Vec<TypeRef> = Vec::new();
+    let i = 0;
+    while i < n {
+        let a = read_type_ref(r);
+        args.push(a);
+        i += 1;
+    }
+    return new TypeRef(text, head, args);
+}
+
+impl Reader {
+    pub static fn over(string input) -> Reader {
+        return new Reader(to_bytes(input), 0);
+    }
+
+    /// One field.
+    pub fn str() -> string {
+        let n = 0;
+        while self.bytes[self.pos] != 58 as byte {
+            n = n * 10 + (self.bytes[self.pos] as int - 48);
+            self.pos += 1;
+        }
+        self.pos += 1;
+        let out: Vec<byte> = Vec::new();
+        let end = self.pos + n;
+        while self.pos < end {
+            out.push(self.bytes[self.pos]);
+            self.pos += 1;
+        }
+        return match from_bytes(out) {
+            Result::Ok(text) => text,
+            Result::Err(_) => "",
+        };
+    }
+
+    /// A field holding a decimal integer, possibly negative.
+    pub fn int() -> int {
+        let digits = to_bytes(self.str());
+        let n = 0;
+        let i = 0;
+        let negative = false;
+        if len(digits) > 0 && digits[0] == 45 as byte {
+            negative = true;
+            i = 1;
+        }
+        while i < len(digits) {
+            n = n * 10 + (digits[i] as int - 48);
+            i += 1;
+        }
+        if negative {
+            return 0 - n;
+        }
+        return n;
+    }
+
+    pub fn bool() -> bool {
+        return self.str() == "1";
+    }
+
+    pub fn strings() -> Vec<string> {
+        let n = self.int();
+        let out: Vec<string> = Vec::new();
+        let i = 0;
+        while i < n {
+            let s = self.str();
+            out.push(s);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn ident() -> Ident {
+        let name = self.str();
+        return new Ident(name);
+    }
+
+    pub fn idents() -> Vec<Ident> {
+        let n = self.int();
+        let out: Vec<Ident> = Vec::new();
+        let i = 0;
+        while i < n {
+            let x = self.ident();
+            out.push(x);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn type_ref() -> TypeRef {
+        return read_type_ref(self);
+    }
+
+    pub fn type_refs() -> Vec<TypeRef> {
+        let n = self.int();
+        let out: Vec<TypeRef> = Vec::new();
+        let i = 0;
+        while i < n {
+            let t = self.type_ref();
+            out.push(t);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn attrs() -> Vec<Attr> {
+        let n = self.int();
+        let out: Vec<Attr> = Vec::new();
+        let i = 0;
+        while i < n {
+            let name = self.str();
+            let argc = self.int();
+            let args: Vec<AttrArg> = Vec::new();
+            let j = 0;
+            while j < argc {
+                let key = self.str();
+                let value = self.str();
+                let kind = self.str();
+                let arg = new AttrArg(key, value, kind);
+                args.push(arg);
+                j += 1;
+            }
+            let a = new Attr(name, args);
+            out.push(a);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn field() -> Field {
+        let name = self.ident();
+        let ty = self.type_ref();
+        let is_pub = self.bool();
+        let attrs = self.attrs();
+        let docs = self.strings();
+        return new Field(name, ty, is_pub, attrs, docs);
+    }
+
+    pub fn fields() -> Vec<Field> {
+        let n = self.int();
+        let out: Vec<Field> = Vec::new();
+        let i = 0;
+        while i < n {
+            let f = self.field();
+            out.push(f);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn variants() -> Vec<Variant> {
+        let n = self.int();
+        let out: Vec<Variant> = Vec::new();
+        let i = 0;
+        while i < n {
+            let name = self.ident();
+            let shape = self.str();
+            let tuple = self.type_refs();
+            let fields = self.fields();
+            let value = self.str();
+            let attrs = self.attrs();
+            let docs = self.strings();
+            let v = new Variant(name, shape, tuple, fields, value, attrs, docs);
+            out.push(v);
+            i += 1;
+        }
+        return out;
+    }
+
+    pub fn type_decl() -> TypeDecl {
+        let name = self.ident();
+        let kind = self.str();
+        let generics = self.idents();
+        let fields = self.fields();
+        let variants = self.variants();
+        let attrs = self.attrs();
+        let repr = self.str();
+        let module = self.str();
+        let docs = self.strings();
+        let source = self.str();
+        return new TypeDecl(name, kind, generics, fields, variants, attrs, repr, module, docs, source);
+    }
+
+    pub fn fn_decl() -> FnDecl {
+        let name = self.ident();
+        let n = self.int();
+        let params: Vec<Param> = Vec::new();
+        let i = 0;
+        while i < n {
+            let pname = self.ident();
+            let pty = self.type_ref();
+            let p = new Param(pname, pty);
+            params.push(p);
+            i += 1;
+        }
+        let ret = self.type_ref();
+        let type_params = self.idents();
+        let attrs = self.attrs();
+        let owner = self.str();
+        let is_pub = self.bool();
+        let is_static = self.bool();
+        let is_coro = self.bool();
+        let docs = self.strings();
+        let body = self.str();
+        let source = self.str();
+        return new FnDecl(name, params, ret, type_params, attrs, owner, is_pub, is_static, is_coro, docs, body, source);
+    }
+}
