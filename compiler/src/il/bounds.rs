@@ -169,27 +169,10 @@ fn header_lt_bound_for_test(ops: &[IlOp], lp: &NaturalLoop) -> Option<(u32, u32)
     header_lt_bound(ops, lp)
 }
 
+/// Slots written in the loop, including match payload slots (see
+/// [`super::licm::slots_stored_in_loop`]).
 fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
-    let mut s = HashSet::new();
-    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
-        match op {
-            IlOp::StorePop { slot, .. } => {
-                s.insert(*slot);
-            }
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::STORE | Instruction::StorePop
-                ) =>
-            {
-                for k in 0..byte.load_store_count() {
-                    s.insert(byte.load_store_slot_at(k));
-                }
-            }
-            _ => {}
-        }
-    }
-    s
+    super::licm::slots_stored_in_loop(ops, lp)
 }
 
 fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> usize {

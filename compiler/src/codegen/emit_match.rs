@@ -9,6 +9,34 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[&MatchArm<'compiler>],
     ) -> CodeBuf {
+        let statement = std::mem::take(&mut self.statement_match_pending);
+        self.arm_discard.push(statement);
+        let out = self.compile_match_expr_inner(scrutinee, arms);
+        self.arm_discard.pop();
+        out
+    }
+
+    /// Compile an arm body into `self.bytecode`. In a statement match the
+    /// arm's value (if it pushes one) is popped here, so every arm leaves the
+    /// stack as it found it.
+    fn emit_arm_body(&mut self, body: &Output<'_>) {
+        let mut bc = self.do_compile(body);
+        self.bytecode.append(&mut bc);
+        self.discard_arm_value(body);
+    }
+
+    /// POP the arm value in a statement match (see [`Self::emit_arm_body`]).
+    fn discard_arm_value(&mut self, body: &Output<'_>) {
+        if self.arm_discard.last().copied().unwrap_or(false) && arm_body_pushes_value(body) {
+            self.bytecode.push_pop();
+        }
+    }
+
+    fn compile_match_expr_inner<'compiler>(
+        &mut self,
+        scrutinee: &Output<'compiler>,
+        arms: &[&MatchArm<'compiler>],
+    ) -> CodeBuf {
         if self.try_compile_scalar_enum_match(scrutinee, arms) {
             return CodeBuf::new();
         }
@@ -126,8 +154,7 @@ impl Compiler {
                     );
                 }
                 self.bytecode.push_pop();
-                let mut body = self.do_compile(&arm.body);
-                self.bytecode.append(&mut body);
+                self.emit_arm_body(&arm.body);
                 if !is_last {
                     bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     if let Some(miss) = miss {
@@ -140,8 +167,7 @@ impl Compiler {
                 Pattern::Integer(_) | Pattern::Constructor { .. } => unreachable!("handled above"),
                 Pattern::Wildcard | Pattern::Default => {
                     self.bytecode.push_pop();
-                    let mut body = self.do_compile(&arm.body);
-                    self.bytecode.append(&mut body);
+                    self.emit_arm_body(&arm.body);
                     if !is_last {
                         bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     }
@@ -156,8 +182,7 @@ impl Compiler {
                     let mut inner = HashMap::new();
                     inner.insert(name.to_string(), slot);
                     let saved = self.push_match_bindings(inner);
-                    let mut body = self.do_compile(&arm.body);
-                    self.bytecode.append(&mut body);
+                    self.emit_arm_body(&arm.body);
                     self.context.match_bindings = saved;
                     if !is_last {
                         bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
@@ -180,8 +205,7 @@ impl Compiler {
             inner.insert(name.to_string(), slot);
         }
         let saved_bindings = self.push_match_bindings(inner);
-        let mut body_bc = self.do_compile(&arm.body);
-        self.bytecode.append(&mut body_bc);
+        self.emit_arm_body(&arm.body);
         self.context.match_bindings = saved_bindings;
     }
 
@@ -688,8 +712,7 @@ impl Compiler {
         if let Some(slot) = slot {
             self.record_debug_local(binding.unwrap_or(""), slot);
         }
-        let mut body_bc = self.do_compile(&arm.body);
-        self.bytecode.append(&mut body_bc);
+        self.emit_arm_body(&arm.body);
         self.context.match_bindings = saved_bindings;
     }
 
@@ -1023,9 +1046,12 @@ impl Compiler {
                         }
                         self.bytecode.append(&mut arm_bc);
                     } else {
-                        let mut body_bc = self.do_compile(&arm.body);
-                        self.bytecode.append(&mut body_bc);
+                        self.emit_arm_body(&arm.body);
                     }
+                } else {
+                    // The bound payload is the arm value; a statement match
+                    // still drops it.
+                    self.discard_arm_value(&arm.body);
                 }
 
                 self.mono_codegen_var_types.pop();
@@ -1054,5 +1080,33 @@ impl Compiler {
             // pending jump is bound.
         }
         bytecode
+    }
+}
+
+/// Whether compiling `body` as a match arm leaves a value on the stack.
+///
+/// A brace body pushes only its bare tail expression (`{ let a = 1; a }`);
+/// `{}` and a body ending in a statement push nothing. Diverging bodies
+/// (`return`, `raise`, …) never reach the arm end.
+fn arm_body_pushes_value(body: &Output<'_>) -> bool {
+    match body.1.as_ref() {
+        Expression::Block(items) => items.last().is_some_and(arm_body_pushes_value),
+        Expression::Expr(inner) | Expression::Group(inner) => arm_body_pushes_value(inner),
+        Expression::Statement(_)
+        | Expression::ExprStatement(_)
+        | Expression::Return(_)
+        | Expression::Raise(_)
+        | Expression::Panic(_)
+        | Expression::Break
+        | Expression::Continue
+        | Expression::If(_)
+        | Expression::Loop { .. }
+        | Expression::IfLet { .. }
+        | Expression::WhileLet { .. }
+        | Expression::Defer { .. }
+        | Expression::Fragment(_)
+        | Expression::TypeAlias { .. }
+        | Expression::Function { .. } => false,
+        _ => true,
     }
 }

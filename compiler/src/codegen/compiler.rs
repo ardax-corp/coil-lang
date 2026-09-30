@@ -15448,11 +15448,24 @@ impl Compiler {
                 bytecode.append(&mut self.do_compile(child))
             }
             Expression::ExprStatement(child) => {
-                bytecode.append(&mut self.do_compile(child));
-                // Bare `yield` matches `expr_statement` before the POP-free yield
-                // statement parser. A trailing POP becomes `resume_ip` and would
-                // pop the resumer's TOS on the next resume (shared stack).
-                Self::discard_statement_value(&mut bytecode);
+                // A statement `match`: each arm drops its own value (arms need
+                // not push one, e.g. `B => {}`), so no POP after the match.
+                let mut inner = child;
+                while let Expression::Expr(e) | Expression::Group(e) = inner.1.as_ref() {
+                    inner = e;
+                }
+                if matches!(inner.1.as_ref(), Expression::Match { .. }) {
+                    self.statement_match_pending = true;
+                    bytecode.append(&mut self.do_compile(inner));
+                    self.statement_match_pending = false;
+                } else {
+                    bytecode.append(&mut self.do_compile(child));
+                    // Bare `yield` matches `expr_statement` before the POP-free
+                    // yield statement parser. A trailing POP becomes `resume_ip`
+                    // and would pop the resumer's TOS on the next resume
+                    // (shared stack).
+                    Self::discard_statement_value(&mut bytecode);
+                }
             }
             Expression::Dload(path) => {
                 let mut bc = self.do_compile(path);
