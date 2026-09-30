@@ -221,3 +221,64 @@ fn dissect_help_lists_host_grant_flags() {
         assert!(text.contains(flag), "help missing {flag}: {text}");
     }
 }
+
+/// Source lines interleave with the bytecode; `-O`, `--il-post` and `--mir`
+/// are accepted and print their sections; `--ast` prints real source.
+#[test]
+fn dissect_views_source_opt_ilpost_mir_ast() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let dir = std::env::temp_dir().join(format!("coil_dissect_views_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("loop.hy");
+    std::fs::write(
+        &entry,
+        "fn total(int n) -> int {\n    let t = 0;\n    let i = 0;\n    while i < n {\n        t = t + i;\n        i = i + 1;\n    }\n    return t;\n}\n\nfn main() {\n    let r = total(10);\n}\n",
+    )
+    .unwrap();
+    let out = coil_dissect(&bin, Some(&dir), &entry)
+        .args(["--fn", "total", "-O", "basic", "--il-post", "--mir", "--ast"])
+        .output()
+        .expect("spawn coil dissect");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("loop.hy:2 │ let t = 0;"), "source interleave: {stdout}");
+    assert!(stdout.contains("=== il (optimized) ==="), "{stdout}");
+    assert!(stdout.contains("=== mir ==="), "{stdout}");
+    assert!(stdout.contains("    let t = 0;"), "--ast prints source: {stdout}");
+    assert!(!stdout.contains("<unhandled"), "{stdout}");
+
+    let plain = coil_dissect(&bin, Some(&dir), &entry)
+        .args(["--fn", "total", "--no-source"])
+        .output()
+        .expect("spawn coil dissect --no-source");
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains(" │ "));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A compiled `.hyc` archive dumps its bytecode without recompiling.
+#[test]
+fn dissect_reads_hyc_archive() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let dir = std::env::temp_dir().join(format!("coil_dissect_hyc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("p.hy"), "fn main() {\n    let x = 41 + 1;\n}\n").unwrap();
+    let st = Command::new(&bin)
+        .current_dir(&dir)
+        .args(["compile", "p.hy", "-o", "p.hyc"])
+        .output()
+        .expect("compile");
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let out = Command::new(&bin)
+        .current_dir(&dir)
+        .args(["dissect", "p.hyc"])
+        .output()
+        .expect("dissect hyc");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("=== bytecode ===") && stdout.contains("HALT"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
