@@ -171,8 +171,8 @@ impl Pipeline {
         if self.entry_file.as_deref() == Some(file) {
             return String::new();
         }
-        if file == crate::macros::macro_module_path() {
-            return crate::macros::MACRO_MODULE.to_string();
+        if let Some(module) = crate::macros::embedded_module(file) {
+            return module.to_string();
         }
         super::namespace_of_in_roots(&self.roots, &self.project_root, file).unwrap_or_else(|| {
             file.file_stem()
@@ -225,6 +225,25 @@ impl Pipeline {
             {
                 found.push((candidate, decl));
             }
+        }
+        // Built-in derives come from the embedded `derive` module. It is not
+        // compiled into the user's program: only the expansion program
+        // imports it.
+        if found.is_empty()
+            && p.kind == MacroKind::Derive
+            && crate::macros::PRELUDE_DERIVES.contains(&p.name.as_str())
+        {
+            found.push((
+                crate::macros::derive_module_path(),
+                MacroDecl {
+                    kind: MacroKind::Derive,
+                    name: p.name.clone(),
+                    fn_name: crate::macros::derive_fn_name(&p.name),
+                    helpers: Vec::new(),
+                    input: MacroInput::TypeDecl,
+                    params: Vec::new(),
+                },
+            ));
         }
         match found.len() {
             0 => Err(None),
@@ -517,6 +536,9 @@ impl Pipeline {
             name: job.decl.name.clone(),
             text: snippet.clone(),
         });
+        // Parentheses in generated text only spelled precedence the tree now
+        // has; `Group` nodes would hide operands from constant folding.
+        strip_groups(&mut generated);
         // Built-in attributes in generated code expand as usual.
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
@@ -574,11 +596,14 @@ impl Pipeline {
                     .iter()
                     .position(|c| c.0 == job.pending.target)
                     .expect("target still present");
-                let n = items.len();
+                // After this type's earlier derive outputs, so impls keep
+                // the order the derives are listed in.
+                let done = self.derived_items.entry(job.pending.target).or_insert(0);
+                let start = at + 1 + *done;
+                *done += items.len();
                 for (k, item) in items.into_iter().enumerate() {
-                    children.insert(at + 1 + k, item);
+                    children.insert(start + k, item);
                 }
-                let _ = n;
             }
             (None, MacroKind::Attr) => {
                 let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
@@ -632,6 +657,15 @@ impl Pipeline {
         out.with_help(help);
         out
     }
+}
+
+/// Replace every `Group(e)` with `e`.
+fn strip_groups(node: &mut Output<'_>) {
+    while let Expression::Group(inner) = node.1.as_mut() {
+        let inner = std::mem::replace(inner, (node.0, Box::new(Expression::Break)));
+        *node = inner;
+    }
+    node.1.for_each_child_mut(&mut |c| strip_groups(c));
 }
 
 /// `(path, name, alias)` of every top-level `use`.

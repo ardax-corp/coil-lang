@@ -133,9 +133,22 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
     }
 }
 
+thread_local! {
+    /// Expand the built-in derives with the coil prelude (`prelude::derive`)
+    /// instead of the Rust synthesizers: the equivalence gate compiles both.
+    static COIL_BUILTIN_DERIVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Choose the coil prelude derives for this thread (see the equivalence gate).
+pub fn set_coil_builtin_derives(on: bool) {
+    COIL_BUILTIN_DERIVES.with(|c| c.set(on));
+}
+
 /// True for a derive the compiler synthesizes itself.
 pub fn is_builtin_derive(name: &str) -> bool {
-    DERIVABLE.contains(&name)
+    let coil = COIL_BUILTIN_DERIVES.with(|c| c.get())
+        && crate::macros::PRELUDE_DERIVES.contains(&name);
+    DERIVABLE.contains(&name) && !coil
 }
 
 fn pending_attr(name: &str, args: &AttrArgs<'_>, target: SimpleSpan, owner: Option<&str>) -> PendingMacro {

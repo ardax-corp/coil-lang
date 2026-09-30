@@ -126,6 +126,8 @@ pub struct Pipeline {
     macro_stack: Vec<PathBuf>,
     /// Generated-code spans per file, for moving diagnostics to macro sites.
     generated_ranges: Vec<macros::GeneratedRange>,
+    /// Items each derived type already received, to splice in derive order.
+    derived_items: HashMap<parser::SimpleSpan, usize>,
 }
 
 /// Native function declaration registered by the host.
@@ -698,6 +700,7 @@ impl Pipeline {
             macro_host: crate::macros::default_host(),
             macro_stack: Vec::new(),
             generated_ranges: Vec::new(),
+            derived_items: HashMap::new(),
         };
         pipeline.register_standard_host_natives();
         pipeline
@@ -1060,6 +1063,7 @@ impl Pipeline {
         self.module_deps.clear();
         self.ast_cache.clear();
         self.generated_ranges.clear();
+        self.derived_items.clear();
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
