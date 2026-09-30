@@ -1593,7 +1593,6 @@ impl<'expr> Expression<'expr> {
             | E::Bool(_)
             | E::Identifier(_)
             | E::Type(_)
-            | E::Comment(_)
             | E::Default(_)
             | E::QualifiedAccess { .. }
             | E::Use { .. }
