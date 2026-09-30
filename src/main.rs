@@ -232,12 +232,20 @@ fn maybe_warn_stale_archive(
     }
 }
 
-/// Warn when a stale default `out.hyc` exists beside an in-memory run entry.
+/// Warn when a stale default `out.hyc` built **from this entry** exists
+/// beside an in-memory run. An `out.hyc` from another program is unrelated.
 fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &ProgramDebug) {
     if !Path::new(DEFAULT_OUT).exists() {
         return;
     }
-    if archive_staleness::archive_is_stale(entry, DEFAULT_OUT, debug) {
+    let from_this_entry = try_load_archive(DEFAULT_OUT).is_ok_and(|archived| {
+        archived
+            .debug
+            .source_files
+            .iter()
+            .any(|src| archive_staleness::same_source_path(src, entry))
+    });
+    if from_this_entry && archive_staleness::archive_is_stale(entry, DEFAULT_OUT, debug) {
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
