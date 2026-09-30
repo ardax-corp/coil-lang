@@ -266,8 +266,10 @@ mod tests {
 }
 
 /// A heap object as the debugger sees it (words stay untyped; the debugger
-/// renders them with compile-time types).
-#[derive(Debug, Clone)]
+/// renders them with compile-time types). `Value` is `Debug` only in debug
+/// builds, so this is too.
+#[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(Clone)]
 pub enum DebugObject {
     Str(String),
     /// Class instance in slot mode: fields in declaration order.
