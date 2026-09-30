@@ -512,6 +512,15 @@ impl Pipeline {
                 let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
                     return messages;
                 };
+                // The replaced type's default `Show` / `String` impls go with
+                // it; generated declarations got their own during expansion.
+                if let Some(type_name) = decl_name(&children[at]).map(str::to_string) {
+                    children.retain(|c| !is_default_display_impl(c, &type_name));
+                }
+                let at = children
+                    .iter()
+                    .position(|c| c.0 == job.pending.target)
+                    .expect("target still present");
                 children.splice(at..=at, items);
             }
         }
@@ -609,18 +618,27 @@ fn impl_heads(items: &[Output<'_>]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The compiler's type-name `impl Show` / `impl String` for `type_name`.
+fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
+    match node.1.as_ref() {
+        Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) => {
+            (*class == "Show" || *class == "String")
+                && args.first().is_some_and(|a| a.1.to_string() == type_name)
+        }
+        _ => false,
+    }
+}
+
 /// A derive that writes `impl Show for T` replaces the compiler's type-name
 /// default for `T` (same for `String`).
 fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, generated: &[Output<'_>]) {
     let heads = impl_heads(generated);
-    children.retain(|c| match c.1.as_ref() {
-        Expression::TypeClassImpl { class, args, .. } if is_synthetic(c.0) => {
-            let head = args.first().map(|a| a.1.to_string()).unwrap_or_default();
-            !(head == type_name
-                && (*class == "Show" || *class == "String")
-                && heads.iter().any(|(c2, h)| c2 == class && h == type_name))
-        }
-        _ => true,
+    children.retain(|c| {
+        !(is_default_display_impl(c, type_name)
+            && heads.iter().any(|(class, head)| {
+                head == type_name
+                    && matches!(c.1.as_ref(), Expression::TypeClassImpl { class: c2, .. } if c2 == class)
+            }))
     });
 }
 

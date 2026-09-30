@@ -145,7 +145,7 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 }
 
 /// Step budget for one macro call (loop back-edges + calls).
-pub const MACRO_STEP_BUDGET: u64 = 50_000_000;
+pub const MACRO_STEP_BUDGET: u64 = 20_000_000;
 
 /// Host natives a macro may call: pure computation only (no IO, files,
 /// network, environment, clocks, threads or process control).
