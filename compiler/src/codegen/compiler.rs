@@ -3269,7 +3269,17 @@ impl Compiler {
                     let owner_key = self.resolve_class_ident(owner);
                     for method in methods {
                         if let Some(name) = Self::impl_method_name(method) {
-                            self.reserve_function_entry(format!("{}::{}", owner_key, name));
+                            let fqn = format!("{}::{}", owner_key, name);
+                            // Method-call lowering resolves `recv.m()` through
+                            // `context.methods`: register it now so code before
+                            // the `impl` can call it (the typechecker already
+                            // accepts that order).
+                            self.context
+                                .methods
+                                .entry(owner_key.clone())
+                                .or_default()
+                                .insert(name.to_string(), fqn.clone());
+                            self.reserve_function_entry(fqn);
                         }
                     }
                 }
@@ -4870,6 +4880,19 @@ impl Compiler {
             // clears any live operand left under the constructor (e.g. the
             // receiver of an inlined `Vec::push`).
             Expression::Instantiate(_, _) => true,
+            // `Class::static_method(..)` parses as a Construct but is a CALL,
+            // also before its `impl` is compiled (entry only reserved).
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                ..
+            } if self.checker.tag_for(enum_name, variant_name).is_none() && {
+                let fqn = self.class_member_fqn(enum_name, variant_name);
+                self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)
+            } =>
+            {
+                true
+            }
             Expression::Construct { fields, .. } => {
                 use parser::ast::EnumConstructPayload;
                 match fields {
