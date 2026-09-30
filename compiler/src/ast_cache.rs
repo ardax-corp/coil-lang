@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use parser::{Pratt, ast::Output};
 use reporting::Message;
 
-use crate::attrs::{ExpandResult, expand_program_in};
+use crate::attrs::{ExpandResult, expand_source_in};
 use crate::macros::{MacroDecl, PendingMacro};
 
 /// Source plus expanded AST for one file. `ast` borrows pinned `source` (and
@@ -103,7 +103,7 @@ impl CachedAst {
         if !self.expanded
             && let Some(ast) = self.ast.as_mut()
         {
-            self.expand = expand_program_in(ast, module);
+            self.expand = expand_source_in(ast, module);
             self.macro_decls = self.expand.macro_decls.clone();
             self.expanded = true;
         }

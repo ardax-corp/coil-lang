@@ -50,6 +50,38 @@ pub fn expand_program_in(ast: &mut Output<'_>, module: &str) -> ExpandResult {
     }
 }
 
+/// [`expand_program_in`] for a file as written (not macro output): also
+/// rejects module-qualified `impl` heads, which only macros write.
+pub fn expand_source_in(ast: &mut Output<'_>, module: &str) -> ExpandResult {
+    let qualified = reject_qualified_impl_heads(ast);
+    let mut expand = expand_program_in(ast, module);
+    expand.messages.extend(qualified);
+    expand
+}
+
+/// `impl m::Trait for T` is how generated code names a provider's trait
+/// without a `use`; source written by hand imports the trait instead.
+fn reject_qualified_impl_heads(ast: &Output<'_>) -> Vec<Message> {
+    let Expression::Program(children) = ast.1.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in children {
+        if let Expression::TypeClassImpl { class, .. } = node.1.as_ref()
+            && let Some((module, name)) = class.rsplit_once("::")
+        {
+            let mut msg = Message::error(
+                ErrorCode::GenericTypeError,
+                format!("module-qualified trait `{class}` in an `impl` head is only written by macros"),
+                node.0.into_range(),
+            );
+            msg.with_help(format!("`use {module}::{name};` and write `impl {name} for …`"));
+            out.push(msg);
+        }
+    }
+    out
+}
+
 /// Diagnostic for a pending macro nothing in scope provides.
 pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
     match p.kind {
