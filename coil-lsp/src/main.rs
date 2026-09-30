@@ -100,6 +100,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             work_done_progress_options: Default::default(),
         })),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
+            lsp_types::CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    lsp_types::CodeActionKind::QUICKFIX,
+                    lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                ]),
+                ..lsp_types::CodeActionOptions::default()
+            },
+        )),
         semantic_tokens_provider: Some(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -298,6 +307,17 @@ fn handle_request(
                 .map(|document| selection_ranges(&document.text, &params.positions))
                 .unwrap_or_default();
             Some(serde_json::to_value(ranges)?)
+        }
+        "textDocument/codeAction" => {
+            let params: lsp_types::CodeActionParams = serde_json::from_value(request.params.clone())?;
+            let actions = code_actions(
+                state,
+                &params.text_document.uri,
+                params.range,
+                &params.context.diagnostics,
+            )
+            .unwrap_or_default();
+            Some(serde_json::to_value(actions)?)
         }
         "textDocument/inlayHint" => {
             let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
@@ -2160,86 +2180,329 @@ fn inlay_hints(state: &mut ServerState, uri: &Uri, range: LspRange) -> Option<Ve
     let checker = state.project_index.as_ref().map(|index| index.checker());
     let mut hints = Vec::new();
     let in_window = |at: usize| window.start <= at && at <= window.end;
-    visit_nodes(&ast, &mut |node| match node.1.as_ref() {
-        Expression::Fragment(items) => {
-            let Some((head_span, head)) = items.first() else {
-                return;
-            };
-            let Expression::Variable(name, None) = head.as_ref() else {
-                return;
-            };
-            let Some((value_span, value)) = items.get(1) else {
-                return;
-            };
-            // `new C(…)` already names its type.
-            if name.starts_with('_') || matches!(value.as_ref(), Expression::Instantiate(..)) {
-                return;
-            }
-            let Some(checker) = checker else {
-                return;
-            };
-            let Some(name_start) = text[head_span.start..head_span.end]
-                .find(name)
-                .map(|i| head_span.start + i)
-            else {
-                return;
-            };
-            let name_end = name_start + name.len();
-            if !in_window(name_end) {
-                return;
-            }
-            let Some(ty) = checker.lookup_for_codegen_span(value_span.start, value_span.end) else {
-                return;
-            };
-            let label = format_ty_for_diag(checker.subst(), &ty);
-            if label.is_empty() || label == "never" {
-                return;
-            }
-            hints.push(lsp_types::InlayHint {
-                position: byte_position(&text, name_end),
-                label: lsp_types::InlayHintLabel::String(format!(": {label}")),
-                kind: Some(lsp_types::InlayHintKind::TYPE),
-                text_edits: None,
-                tooltip: None,
-                padding_left: None,
-                padding_right: None,
-                data: None,
-            });
-        }
-        Expression::Call {
-            name,
-            args: Some(args),
-        } => {
-            let Expression::Identifier(callee) = name.1.as_ref() else {
-                return;
-            };
-            let Some(parameters) = params_of(callee) else {
-                return;
-            };
-            for (arg, parameter) in args.iter().zip(&parameters) {
-                if !in_window(arg.0.start) || matches!(arg.1.as_ref(), Expression::NamedArg(..)) {
-                    continue;
-                }
-                // `f(count)` for parameter `count` says it already.
-                if matches!(arg.1.as_ref(), Expression::Identifier(id) if id == parameter) {
-                    continue;
-                }
+    if let Some(checker) = checker {
+        for (name_end, label) in let_type_hints(&ast, &text, checker) {
+            if in_window(name_end) {
                 hints.push(lsp_types::InlayHint {
-                    position: byte_position(&text, arg.0.start),
-                    label: lsp_types::InlayHintLabel::String(format!("{parameter}:")),
-                    kind: Some(lsp_types::InlayHintKind::PARAMETER),
+                    position: byte_position(&text, name_end),
+                    label: lsp_types::InlayHintLabel::String(format!(": {label}")),
+                    kind: Some(lsp_types::InlayHintKind::TYPE),
                     text_edits: None,
                     tooltip: None,
                     padding_left: None,
-                    padding_right: Some(true),
+                    padding_right: None,
                     data: None,
                 });
             }
         }
-        _ => {}
+    }
+    visit_nodes(&ast, &mut |node| {
+        let Expression::Call {
+            name,
+            args: Some(args),
+        } = node.1.as_ref()
+        else {
+            return;
+        };
+        let Expression::Identifier(callee) = name.1.as_ref() else {
+            return;
+        };
+        let Some(parameters) = params_of(callee) else {
+            return;
+        };
+        for (arg, parameter) in args.iter().zip(&parameters) {
+            if !in_window(arg.0.start) || matches!(arg.1.as_ref(), Expression::NamedArg(..)) {
+                continue;
+            }
+            // `f(count)` for parameter `count` says it already.
+            if matches!(arg.1.as_ref(), Expression::Identifier(id) if id == parameter) {
+                continue;
+            }
+            hints.push(lsp_types::InlayHint {
+                position: byte_position(&text, arg.0.start),
+                label: lsp_types::InlayHintLabel::String(format!("{parameter}:")),
+                kind: Some(lsp_types::InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
     });
     hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
     Some(hints)
+}
+
+/// `(name end, type text)` for every unannotated `let name = value` whose
+/// value has a checked type. Skips `_` names and `new C(…)`, which names
+/// its type already.
+fn let_type_hints(ast: &Output<'_>, text: &str, checker: &Checker) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    visit_nodes(ast, &mut |node| {
+        let Expression::Fragment(items) = node.1.as_ref() else {
+            return;
+        };
+        let (Some((head_span, head)), Some((value_span, value))) = (items.first(), items.get(1)) else {
+            return;
+        };
+        let Expression::Variable(name, None) = head.as_ref() else {
+            return;
+        };
+        if name.starts_with('_') || matches!(value.as_ref(), Expression::Instantiate(..)) {
+            return;
+        }
+        let Some(name_start) = text
+            .get(head_span.start..head_span.end)
+            .and_then(|head| head.find(name))
+            .map(|i| head_span.start + i)
+        else {
+            return;
+        };
+        let Some(ty) = checker.lookup_for_codegen_span(value_span.start, value_span.end) else {
+            return;
+        };
+        let label = format_ty_for_diag(checker.subst(), &ty);
+        if !label.is_empty() && label != "never" {
+            out.push((name_start + name.len(), label));
+        }
+    });
+    out
+}
+
+/// Quick fixes for `diagnostics` and refactors at `range`.
+fn code_actions(
+    state: &mut ServerState,
+    uri: &Uri,
+    range: LspRange,
+    diagnostics: &[Diagnostic],
+) -> Option<Vec<lsp_types::CodeActionOrCommand>> {
+    let path = uri_path(uri)?;
+    let text = state.documents.get(uri)?.text.clone();
+    let mut actions = Vec::new();
+    let edit_action = |title: String, edits: Vec<TextEdit>, diagnostic: Option<&Diagnostic>, kind| {
+        lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+            title,
+            kind: Some(kind),
+            diagnostics: diagnostic.map(|d| vec![d.clone()]),
+            edit: Some(lsp_types::WorkspaceEdit {
+                changes: Some(HashMap::from([(uri.clone(), edits)])),
+                ..lsp_types::WorkspaceEdit::default()
+            }),
+            is_preferred: diagnostic.map(|_| true),
+            ..lsp_types::CodeAction::default()
+        })
+    };
+    for diagnostic in diagnostics {
+        let code = match &diagnostic.code {
+            Some(lsp_types::NumberOrString::String(code)) => code.as_str(),
+            _ => continue,
+        };
+        let Some(start) = position_to_byte(&text, diagnostic.range.start) else {
+            continue;
+        };
+        match code {
+            // Unknown value / function / type: import it from the module
+            // that declares it.
+            "E0100" | "E0101" | "E0110" => {
+                let Some(word) = word_range(&text, start) else {
+                    continue;
+                };
+                let name = &text[word];
+                for module in modules_declaring(state, &path, name) {
+                    let edit = add_use_edit(&text, &module, name);
+                    actions.push(edit_action(
+                        format!("Import `{name}` from `{module}`"),
+                        vec![edit],
+                        Some(diagnostic),
+                        lsp_types::CodeActionKind::QUICKFIX,
+                    ));
+                }
+            }
+            // Non-exhaustive statement `match`: add an empty catch-all.
+            "E0209" => {
+                let Some(end) = position_to_byte(&text, diagnostic.range.end) else {
+                    continue;
+                };
+                let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+                let prefix = &text[line_start..start];
+                // A value `match` needs a value arm; only fix statements.
+                if !prefix.trim().is_empty() {
+                    continue;
+                }
+                let Some(close) = text[start..end].rfind('}').map(|i| start + i) else {
+                    continue;
+                };
+                let close_line = text[..close].rfind('\n').map_or(0, |i| i + 1);
+                let insert = if text[close_line..close].trim().is_empty() {
+                    // `}` on its own line: new arm line above it.
+                    TextEdit {
+                        range: byte_range(&text, &(close_line..close_line)),
+                        new_text: format!("{prefix}    default => {{}},\n"),
+                    }
+                } else {
+                    TextEdit {
+                        range: byte_range(&text, &(close..close)),
+                        new_text: " default => {}, ".into(),
+                    }
+                };
+                actions.push(edit_action(
+                    "Add `default =>` arm".into(),
+                    vec![insert],
+                    Some(diagnostic),
+                    lsp_types::CodeActionKind::QUICKFIX,
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Refactor: spell out the inferred type of the `let` under the cursor.
+    if let (Some(cursor), Ok(ast)) = (position_to_byte(&text, range.start), Pratt::default().parse(&text)) {
+        if state.project_index.is_some() && state.last_entry.as_ref() != Some(&path) {
+            refresh_project(state, &path);
+        }
+        if let Some(checker) = state.project_index.as_ref().map(|index| index.checker()) {
+            let word = word_range(&text, cursor);
+            for (name_end, label) in let_type_hints(&ast, &text, checker) {
+                if word.as_ref().is_some_and(|w| w.end == name_end) {
+                    actions.push(edit_action(
+                        format!("Add type annotation `: {label}`"),
+                        vec![TextEdit {
+                            range: byte_range(&text, &(name_end..name_end)),
+                            new_text: format!(": {label}"),
+                        }],
+                        None,
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                    ));
+                }
+            }
+        }
+    }
+    Some(actions)
+}
+
+/// Module paths (`util`, `geo::shapes`) of workspace files that declare a
+/// top-level `name`, as `use` would spell them from `from`.
+fn modules_declaring(state: &ServerState, from: &Path, name: &str) -> Vec<String> {
+    let Some(root) = &state.workspace_root else {
+        return Vec::new();
+    };
+    let module_roots: Vec<PathBuf> = lsp_module_roots(root)
+        .into_iter()
+        .map(|r| if r.is_absolute() { r } else { root.join(r) })
+        .collect();
+    let mut files = Vec::new();
+    for module_root in &module_roots {
+        collect_hy_files(module_root, &mut files);
+    }
+    let mut modules: Vec<String> = Vec::new();
+    for file in files {
+        if file == from {
+            continue;
+        }
+        let source = state
+            .documents
+            .iter()
+            .find(|(u, _)| uri_path(u).as_deref() == Some(file.as_path()))
+            .map(|(_, d)| d.text.clone())
+            .or_else(|| std::fs::read_to_string(&file).ok());
+        let Some(source) = source else {
+            continue;
+        };
+        if !document_symbols(&source)
+            .iter()
+            .any(|symbol| symbol.name == name && symbol.kind != lsp_types::SymbolKind::NAMESPACE)
+        {
+            continue;
+        }
+        // Shortest spelling across the module roots.
+        let module = module_roots
+            .iter()
+            .filter_map(|module_root| file.strip_prefix(module_root).ok())
+            .map(|rel| {
+                rel.with_extension("")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .min_by_key(|module| module.len());
+        if let Some(module) = module
+            && !modules.contains(&module)
+        {
+            modules.push(module);
+        }
+    }
+    modules.sort();
+    modules
+}
+
+/// `.hy` files under `dir`, skipping hidden directories and `target`.
+fn collect_hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let hidden = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') || n == "target");
+        if path.is_dir() && !hidden {
+            collect_hy_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "hy") && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Edit importing `name` from `module`: joins an existing
+/// `use module::{…};`, else adds a line after the last `use`.
+fn add_use_edit(text: &str, module: &str, name: &str) -> TextEdit {
+    let path: Vec<&str> = module.split("::").collect();
+    let items = match Pratt::default().parse(text) {
+        Ok((_, root)) => match root.as_ref() {
+            Expression::Program(items) => items.clone(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut last_use_end = None;
+    for (span, item) in &items {
+        let Expression::Use { path: use_path, .. } = item.as_ref() else {
+            continue;
+        };
+        // The node span can run past the `;`; the statement ends there.
+        let end = text[span.start..]
+            .find(';')
+            .map_or(span.end, |i| span.start + i + 1);
+        last_use_end = Some(end);
+        let statement = &text[span.start..end];
+        if use_path.iter().map(String::as_str).eq(path.iter().copied())
+            && let (Some(_), Some(close)) = (statement.find('{'), statement.rfind('}'))
+        {
+            let at = span.start + close;
+            let before = text[..at].trim_end();
+            let sep = if before.ends_with(',') { " " } else { ", " };
+            return TextEdit {
+                range: byte_range(text, &(before.len()..before.len())),
+                new_text: format!("{sep}{name}"),
+            };
+        }
+    }
+    match last_use_end {
+        Some(end) => {
+            let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
+            TextEdit {
+                range: byte_range(text, &(line_end..line_end)),
+                new_text: format!("\nuse {module}::{{{name}}};"),
+            }
+        }
+        None => TextEdit {
+            range: byte_range(text, &(0..0)),
+            new_text: format!("use {module}::{{{name}}};\n\n"),
+        },
+    }
 }
 
 /// Parameter names of the first `fn name` declared in `source`.
@@ -3703,6 +3966,22 @@ fn semantic_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_use_edit_joins_or_appends() {
+        let joined = "use geo::{area};\n\nfn main() {}\n";
+        let edit = add_use_edit(joined, "geo", "helper");
+        assert_eq!(edit.new_text, ", helper");
+        assert_eq!(edit.range.start, byte_position(joined, "use geo::{area".len()));
+
+        let appended = "use util::{other};\n\nfn main() {}\n";
+        let edit = add_use_edit(appended, "geo::shapes", "helper");
+        assert_eq!(edit.new_text, "\nuse geo::shapes::{helper};");
+        assert_eq!(edit.range.start, byte_position(appended, "use util::{other};".len()));
+
+        let edit = add_use_edit("fn main() {}\n", "geo", "helper");
+        assert_eq!(edit.new_text, "use geo::{helper};\n\n");
+    }
 
     #[test]
     fn positions_use_utf16_columns() {

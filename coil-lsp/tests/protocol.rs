@@ -295,3 +295,95 @@ fn inlay_hints_show_let_types_and_parameter_names() {
         ]
     );
 }
+
+/// Code actions at `position` for the diagnostics last published on `uri`.
+fn code_actions(client: &mut Client, uri: &str, position: Value) -> Vec<Value> {
+    // Any round-trip collects the diagnostics published so far.
+    client.request("coil/sync", Value::Null);
+    let diagnostics = client
+        .notifications
+        .iter()
+        .rev()
+        .find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == uri)
+        .map(|n| n["params"]["diagnostics"].clone())
+        .unwrap_or(json!([]));
+    let response = client.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": position, "end": position },
+            "context": { "diagnostics": diagnostics },
+        }),
+    );
+    response["result"].as_array().expect("action list").clone()
+}
+
+/// The single edit of `action` on `uri`, applied to `text`.
+fn apply_action(text: &str, uri: &str, action: &Value) -> String {
+    let edits = action["edit"]["changes"][uri].as_array().expect("edits");
+    assert_eq!(edits.len(), 1);
+    let edit = &edits[0];
+    let offset = |p: &Value| {
+        let line = p["line"].as_u64().unwrap() as usize;
+        let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+        start + p["character"].as_u64().unwrap() as usize
+    };
+    let (start, end) = (offset(&edit["range"]["start"]), offset(&edit["range"]["end"]));
+    format!("{}{}{}", &text[..start], edit["newText"].as_str().unwrap(), &text[end..])
+}
+
+#[test]
+fn code_action_imports_unknown_function() {
+    let main_text = "use util::{other};\n\nfn main() {\n    let _ = helper(1) + other();\n}\n";
+    let dir = project(
+        "action-import",
+        &[
+            ("src/main.hy", main_text),
+            ("src/util.hy", "fn other() -> int {\n    return 2;\n}\n"),
+            ("src/geo.hy", "fn helper(int a) -> int {\n    return a;\n}\n"),
+        ],
+    );
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, main_text);
+    let actions = code_actions(&mut client, &main, position_of(main_text, "helper", 0));
+    let import = actions
+        .iter()
+        .find(|a| a["title"] == "Import `helper` from `geo`")
+        .unwrap_or_else(|| panic!("no import action in {actions:?}"));
+    assert_eq!(
+        apply_action(main_text, &main, import),
+        main_text.replace("{other};", "{other};\nuse geo::{helper};")
+    );
+}
+
+#[test]
+fn code_action_adds_default_arm_to_statement_match() {
+    let text = "enum Color {\n    Red,\n    Green,\n}\n\nfn main() {\n    let c = Color::Red;\n    match c {\n        Color::Red => {},\n    };\n}\n";
+    let dir = project("action-default", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let actions = code_actions(&mut client, &main, position_of(text, "match c", 0));
+    let fix = actions
+        .iter()
+        .find(|a| a["title"] == "Add `default =>` arm")
+        .unwrap_or_else(|| panic!("no default-arm action in {actions:?}"));
+    assert_eq!(
+        apply_action(text, &main, fix),
+        text.replace("{},\n    }", "{},\n        default => {},\n    }")
+    );
+}
+
+#[test]
+fn code_action_adds_inferred_type_annotation() {
+    let text = "fn main() {\n    let total = 1 + 2;\n    let _ = total;\n}\n";
+    let dir = project("action-annotate", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let actions = code_actions(&mut client, &main, position_of(text, "total =", 2));
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(actions[0]["title"], "Add type annotation `: int`");
+    assert_eq!(apply_action(text, &main, &actions[0]), text.replace("total =", "total: int ="));
+}
