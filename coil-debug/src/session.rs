@@ -1117,16 +1117,23 @@ fn resolve_local_slot(session: &DebugSession, name: &str) -> Result<usize, Strin
     }
 }
 fn find_fn_decl_line(text: &str, name: &str) -> Option<u32> {
-    let needle = format!("fn {name}");
+    let needles = [
+        format!("fn {name}"),
+        format!("macro {name}"),
+        format!("derive {name}"),
+        format!("attr {name}"),
+    ];
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with(&needle)
-            && trimmed
-                .as_bytes()
-                .get(needle.len())
-                .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_')
-        {
-            return Some((i + 1) as u32);
+        for needle in &needles {
+            if trimmed.starts_with(needle.as_str())
+                && trimmed
+                    .as_bytes()
+                    .get(needle.len())
+                    .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_')
+            {
+                return Some((i + 1) as u32);
+            }
         }
     }
     None
@@ -1525,5 +1532,12 @@ fn main() {
         assert!(Condition::parse("n").is_err());
         assert!(Condition::parse("== 3").is_err());
         assert!(Condition::parse("n == abc").is_err());
+    }
+
+    #[test]
+    fn find_fn_decl_line_sees_macros() {
+        let text = "/// docs\nmacro twice(Expr e) -> Code { return e; }\nfn main() {}\n";
+        assert_eq!(find_fn_decl_line(text, "twice"), Some(2));
+        assert_eq!(find_fn_decl_line(text, "main"), Some(3));
     }
 }
