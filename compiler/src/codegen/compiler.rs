@@ -101,6 +101,15 @@ enum ParCombinePlan {
     Enum { tag: u16, arity: u16 },
 }
 
+/// Where an open dictionary goal comes from (see
+/// `Compiler::resolve_open_dict_goal`).
+enum OpenDictGoal {
+    /// A `__dictN` slot of the current frame.
+    Slot(u32),
+    /// The goal at the mono clone's concrete types.
+    Concrete(Vec<Ty>),
+}
+
 /// Resolved instance entry for a direct static trait method call.
 struct TraitStaticTarget<'a> {
     class: &'a str,
@@ -605,7 +614,7 @@ impl Compiler {
                         .checker
                         .generics()
                         .find_instance_relaxed(&hint.class, &lookup)
-                        .map(|inst| (inst.class.clone(), inst.args.clone(), inst.method_fqns.get(method).cloned()));
+                        .map(|inst| (inst.class.clone(), lookup.clone(), inst.method_fqns.get(method).cloned()));
                     if let Some((class, inst_args, Some(fqn))) = found
                         && (self.functions.contains_key(&fqn)
                             || self.fn_entry_labels.contains_key(&fqn))
@@ -706,7 +715,7 @@ impl Compiler {
         for tmp in &temps {
             bytecode.push_load(*tmp);
         }
-        if is_default && self.emit_instance_dict(bytecode, class, inst_args) {
+        if self.emit_call_instance_dict(bytecode, (class, method, fqn), inst_args, start..end) {
             nargs += 1;
         }
         if !self.emit_direct_fn_call(bytecode, fqn, nargs) {
@@ -3568,6 +3577,7 @@ impl Compiler {
                     class,
                     args,
                     methods,
+                    ..
                 } => {
                     let class = self.checker.impl_trait_key(class);
                     let arg_tys: Vec<Ty> = args
@@ -6655,7 +6665,14 @@ impl Compiler {
         let Some(instance) = instance else {
             return false;
         };
-        let lookup: Vec<Ty> = instance.args.clone();
+        // A generic instance (`Show for Box<T>`) keeps the goal's concrete
+        // types: its head's variables would pick an arbitrary context
+        // dictionary (#551).
+        let lookup: Vec<Ty> = if instance.args.iter().any(Self::ty_has_var) {
+            lookup
+        } else {
+            instance.args.clone()
+        };
         let Some(fqn) = instance.method_fqns.get(method).cloned() else {
             return false;
         };
@@ -6686,7 +6703,8 @@ impl Compiler {
             bytecode.push_load(*tmp);
         }
         let mut arity = temps.len() as u32;
-        if is_default && self.emit_instance_dict(bytecode, &instance.class, &lookup) {
+        let range = call.0.into_range();
+        if self.emit_call_instance_dict(bytecode, (&instance.class, method, &fqn), &lookup, range) {
             arity += 1;
         }
         if !self.emit_direct_fn_call(bytecode, &fqn, arity) {
@@ -7594,9 +7612,13 @@ impl Compiler {
         bytecode.push_load(lhs_slot);
         bytecode.push_load(rhs_slot);
         let mut arity = 2;
-        if Self::is_default_method_fqn(class, method, &fqn)
-            && self.emit_instance_dict(bytecode, class, std::slice::from_ref(&lookup_ty))
-        {
+        let range = lhs.0.start..rhs.0.end;
+        if self.emit_call_instance_dict(
+            bytecode,
+            (class, method, &fqn),
+            std::slice::from_ref(&lookup_ty),
+            range,
+        ) {
             arity += 1;
         }
         self.emit_direct_fn_call(bytecode, &fqn, arity)
@@ -8700,11 +8722,35 @@ impl Compiler {
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
+        // in scope, or by the mono clone's concrete types; looking it up
+        // would match an arbitrary instance (#551).
+        let open = lookup.iter().any(Self::ty_has_var);
+        if open {
+            match self.resolve_open_dict_goal(class, lookup) {
+                Some(OpenDictGoal::Slot(slot)) => {
+                    bytecode.push_load(slot);
+                    return true;
+                }
+                Some(OpenDictGoal::Concrete(tys)) => {
+                    return self.emit_instance_dict(bytecode, class, &tys);
+                }
+                // `Show<Box<T>>`: a generic instance whose context is
+                // resolved from scope below. A bare `Show<T>` has no instance.
+                None if lookup.iter().any(|t| matches!(t, Ty::Var(_))) => return false,
+                None => {}
+            }
+        }
         let (fqns, diag_range) = {
             let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup)
             else {
                 return false;
             };
+            // An open goal may only select a generic instance (a concrete one
+            // would be an arbitrary pick among the heads that unify).
+            if open && !instance.args.iter().any(Self::ty_has_var) {
+                return false;
+            }
             let Some(class_def) = self.checker.generics().typeclass(&instance.class) else {
                 return false;
             };
@@ -8737,16 +8783,214 @@ impl Compiler {
                     fqns.push(name);
                 }
             }
-            (fqns, instance.range.clone())
+            // A bounded generic instance (`Show for Box<T: Show>`) carries its
+            // context dictionaries after the method pointers, instantiated for
+            // this goal (`Show<int>` for `Show<Box<int>>`). The instance's
+            // methods unpack them into `__dict1..` (#551).
+            let mut vars = HashMap::new();
+            for (have, want) in instance.args.iter().zip(lookup) {
+                Self::bind_scheme_vars(have, want, &mut vars);
+            }
+            let context: Vec<(String, Vec<Ty>)> = instance
+                .context
+                .iter()
+                .map(|c| {
+                    (
+                        c.class.clone(),
+                        c.args
+                            .iter()
+                            .map(|a| Self::apply_ty_var_map(a, &vars))
+                            .collect(),
+                    )
+                })
+                .collect();
+            (fqns, (instance.range.clone(), context))
         };
+        let (diag_range, context) = diag_range;
         for name in &fqns {
             if !self.emit_named_entry(bytecode, name, 0, crate::il::EntryKind::CodePtr) {
                 self.missing_call_target(name, diag_range.clone());
                 return false;
             }
         }
-        bytecode.push_make_tuple(fqns.len() as u32);
+        for (ctx_class, ctx_args) in &context {
+            if !self.emit_instance_dict(bytecode, ctx_class, ctx_args) {
+                return false;
+            }
+        }
+        bytecode.push_make_tuple((fqns.len() + context.len()) as u32);
         true
+    }
+
+    /// Dictionary for an open goal: the current bounded instance method's own
+    /// dictionary (`__dict0`) or one of its context dictionaries
+    /// (`__dict{i+1}`), the current generic function's bound (`__dictN`, in
+    /// scheme order), or, in a mono clone, the goal at the clone's types.
+    fn resolve_open_dict_goal(&self, class: &str, args: &[Ty]) -> Option<OpenDictGoal> {
+        use crate::typechecking::subst::apply_ty_prune;
+        let subst = self.checker.subst();
+        let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
+        if let Some(vars) = self.mono_var_tys.last() {
+            let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
+            if !concrete.iter().any(Self::ty_has_var) {
+                return Some(OpenDictGoal::Concrete(concrete));
+            }
+        }
+        let same = |c_class: &str, c_args: &[Ty]| {
+            c_class == class
+                && c_args.len() == args.len()
+                && c_args
+                    .iter()
+                    .zip(&args)
+                    .all(|(a, b)| &apply_ty_prune(subst, a) == b)
+        };
+        let names: Vec<&str> = [
+            self.current_function_qualified.as_deref(),
+            self.current_function_table_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let slot_of = |i: usize| self.lookup_slot(&format!("__dict{i}"));
+        for name in &names {
+            if let Some(inst) = self
+                .checker
+                .generics()
+                .instances
+                .iter()
+                .find(|inst| !inst.context.is_empty() && inst.method_fqns.values().any(|f| f == name))
+            {
+                if same(&inst.class, &inst.args) {
+                    return slot_of(0).map(OpenDictGoal::Slot);
+                }
+                if let Some(i) = inst.context.iter().position(|c| same(&c.class, &c.args)) {
+                    return slot_of(i + 1).map(OpenDictGoal::Slot);
+                }
+            }
+            if let Some(scheme) = self.checker.env().lookup(name)
+                && let Some(i) = scheme.constraints.iter().position(|c| same(&c.class, &c.args))
+            {
+                return slot_of(i).map(OpenDictGoal::Slot);
+            }
+        }
+        None
+    }
+
+    /// Type-parameter variables of mono clone source `name` mapped to the
+    /// clone's concrete types (`scheme.bounds` starts with the type
+    /// parameters in declaration order).
+    fn mono_var_tys_for(
+        &self,
+        source_name: &str,
+        qualified: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        by_name: &HashMap<String, Ty>,
+    ) -> HashMap<crate::typechecking::ty::TyVarId, Ty> {
+        let mut out = HashMap::new();
+        let scheme = self
+            .checker
+            .env()
+            .lookup(qualified)
+            .or_else(|| self.checker.env().lookup(source_name));
+        if let Some(scheme) = scheme {
+            let subst = self.checker.subst();
+            for (var, tp) in scheme.bounds.iter().zip(type_params) {
+                if let Some(ty) = by_name.get(tp.name) {
+                    out.insert(*var, ty.clone());
+                    // The body's types use the parameter's representative.
+                    if let Ty::Var(rep) =
+                        crate::typechecking::subst::apply_ty_prune(subst, &Ty::Var(*var))
+                    {
+                        out.insert(rep, ty.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn ty_has_var(ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(_) => true,
+            Ty::Fun(a, b) => Self::ty_has_var(a) || Self::ty_has_var(b),
+            Ty::App(h, args) => Self::ty_has_var(h) || args.iter().any(Self::ty_has_var),
+            Ty::Tuple(items) => items.iter().any(Self::ty_has_var),
+            Ty::List(inner) | Ty::Readonly(inner) => Self::ty_has_var(inner),
+            Ty::Array { element, .. } => Self::ty_has_var(element),
+            Ty::Constructor { owner, .. } => Self::ty_has_var(owner),
+            _ => false,
+        }
+    }
+
+    /// Whether a direct call to instance method `fqn` passes the instance
+    /// dictionary: a default body reaches its siblings through it, and a
+    /// bounded generic instance's method reads its context dictionaries from
+    /// it (#551).
+    fn instance_call_takes_dict(&self, class: &str, method: &str, fqn: &str) -> bool {
+        Self::is_default_method_fqn(class, method, fqn) || self.instance_context_len(fqn) > 0
+    }
+
+    /// `(first context slot, context count)` in the dictionary of the
+    /// instance that owns method `fqn`, when it has a context.
+    fn instance_ctx_layout(&self, class: &str, fqn: &str) -> Option<(usize, usize)> {
+        let n = self.instance_context_len(fqn);
+        if n == 0 {
+            return None;
+        }
+        let class_def = self.checker.generics().typeclass(class)?;
+        Some((class_def.flattened_methods(self.checker.generics()).len(), n))
+    }
+
+    /// Push the trailing dictionary for a direct call to instance method
+    /// `target = (class, method, fqn)` when it takes one. A bounded instance
+    /// whose context cannot be built here is a compile error, not a
+    /// dictionary-less call that fails at runtime.
+    fn emit_call_instance_dict(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        target: (&str, &str, &str),
+        lookup: &[Ty],
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        let (class, method, fqn) = target;
+        if !self.instance_call_takes_dict(class, method, fqn) {
+            return false;
+        }
+        if self.emit_instance_dict(bytecode, class, lookup) {
+            return true;
+        }
+        if self.instance_context_len(fqn) > 0 {
+            self.missing_context_dict(class, lookup, range);
+        }
+        false
+    }
+
+    fn missing_context_dict(&mut self, class: &str, lookup: &[Ty], range: std::ops::Range<usize>) {
+        let goal = lookup
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut message = Message::error(
+            ErrorCode::CodegenError,
+            format!("Missing trait dictionary for `{class}<{goal}>`"),
+            range.clone(),
+        );
+        message.push(DiagLabel::new(
+            "the instance's context dictionaries are not available here".to_string(),
+            range,
+        ));
+        self.messages.push(message);
+    }
+
+    /// Number of context dictionaries of the instance that owns method `fqn`.
+    fn instance_context_len(&self, fqn: &str) -> usize {
+        self.checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+            .map_or(0, |inst| inst.context.len())
     }
 
     fn emit_existential_pack_recipe(
@@ -11794,6 +12038,19 @@ impl Compiler {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
         let entry_sp = self.context.variables.len() as u32;
+        // Bounded generic instance method: `__dict0` is the instance's own
+        // dictionary, whose tail holds the context dictionaries.
+        if let Some((base, n)) = self.pending_instance_ctx.take()
+            && let Some(own) = self.lookup_slot("__dict0")
+        {
+            for i in 0..n {
+                let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                self.bytecode.push_load(own);
+                self.bytecode.push_const((base + i) as i32);
+                self.bytecode.push_index();
+                self.bytecode.push_store_pop(slot);
+            }
+        }
         let body_op_start = self.bytecode.ops().len();
         let mut c = self.do_compile(body);
         self.bytecode.append(&mut c);
@@ -12231,7 +12488,9 @@ impl Compiler {
             self.current_function_qualified = Some(qualified.to_string());
             self.current_function_table_key = Some(qualified.to_string());
             self.mono_codegen_var_types.push(overrides);
+            let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
             self.mono_type_param_tys.push(type_param_tys);
+            self.mono_var_tys.push(var_tys);
 
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             let mut a = self.do_compile(args);
@@ -12264,6 +12523,7 @@ impl Compiler {
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
+            self.mono_var_tys.pop();
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
@@ -17053,6 +17313,7 @@ impl Compiler {
                 class,
                 args,
                 methods,
+                ..
             } => {
                 let class = self.checker.impl_trait_key(class);
                 // Instance heads from AST shape, not span cache (avoids `Container__unit__first`).
@@ -17083,6 +17344,7 @@ impl Compiler {
                             let unbox_tys =
                                 self.instance_method_unbox_tys(class, method_name, &arg_tys);
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
+                            self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                             self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, 1);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
@@ -17104,6 +17366,7 @@ impl Compiler {
                                     &arg_tys,
                                     &fqn,
                                 );
+                                self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                                 self.compile_function_output_with_name(
                                     body,
                                     fqn.clone(),

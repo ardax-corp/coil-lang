@@ -3441,6 +3441,7 @@ fn ambiguous_instance_discharge_reports_error() {
         args: vec![Ty::Var(TyVarId(999))],
         method_fqns: HashMap::new(),
         assoc_tys: HashMap::new(),
+        context: Vec::new(),
     });
     c.generics.instances.push(InstanceDef {
         class: "Choice".to_string(),
@@ -3449,6 +3450,7 @@ fn ambiguous_instance_discharge_reports_error() {
         args: vec![int()],
         method_fqns: HashMap::new(),
         assoc_tys: HashMap::new(),
+        context: Vec::new(),
     });
 
     c.discharge_constraints(

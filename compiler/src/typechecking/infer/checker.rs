@@ -3263,10 +3263,11 @@ impl Checker {
             Expression::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } => {
                 let class = self.impl_trait_key(class);
-                self.infer_typeclass_impl(class, args, methods, range)
+                self.infer_typeclass_impl(class, args, type_params, methods, range)
             }
 
             Expression::AssocTypeDecl { .. } => unit_ty(),
@@ -5350,20 +5351,29 @@ impl Checker {
         }
     }
 
-    /// The instance's type parameters replaced by fresh variables.
-    fn freshen_instance_args(&mut self, args: &[Ty]) -> Vec<Ty> {
+    /// The instance's type parameters replaced by fresh variables, in its
+    /// head and its context alike.
+    fn freshen_instance(&mut self, args: &[Ty], context: &[Constraint]) -> (Vec<Ty>, Vec<Constraint>) {
         let mut vars = Vec::new();
         for a in args {
             Self::collect_ty_vars(a, &mut vars);
         }
         if vars.is_empty() {
-            return args.to_vec();
+            return (args.to_vec(), context.to_vec());
         }
         let mut fresh = Subst::empty();
         for v in vars {
             fresh.insert(v, Ty::Var(self.counter.fresh()));
         }
-        args.iter().map(|a| apply_ty(&fresh, a)).collect()
+        let args = args.iter().map(|a| apply_ty(&fresh, a)).collect();
+        let context = context
+            .iter()
+            .map(|c| Constraint {
+                class: c.class.clone(),
+                args: c.args.iter().map(|a| apply_ty(&fresh, a)).collect(),
+            })
+            .collect();
+        (args, context)
     }
 
     fn collect_ty_vars(ty: &Ty, out: &mut Vec<TyVarId>) {
@@ -9167,6 +9177,7 @@ impl Checker {
                     Ok(Some(instance)) => {
                         self.record_call_site_dict(call_id, range, instance.clone());
                         self.pin_assoc_types_for_instance(&c.class, &instance, None, range);
+                        self.check_instance_context(&instance, range, 0);
                     }
                     Ok(None) => {
                         self.messages.push(Message::error(
@@ -9182,6 +9193,7 @@ impl Checker {
                     Ok(Some(instance)) => {
                         self.record_call_site_dict(call_id, range, instance.clone());
                         self.pin_assoc_types_for_instance(&c.class, &instance, None, range);
+                        self.check_instance_context(&instance, range, 0);
                     }
                     Ok(None) => {
                         if self.try_lift_aggregate_constraint(&c.class, &resolved_args, range) {
@@ -9202,6 +9214,85 @@ impl Checker {
                     }
                     Err(()) => {}
                 }
+            }
+        }
+    }
+
+    /// A bounded generic instance (`Show for Box<T: Show>`) matched at
+    /// `Show<Box<X>>` needs its context at the goal's types (`Show<X>`):
+    /// ground goals resolve recursively, an open goal on a type parameter
+    /// must be covered by an active bound (#551).
+    fn check_instance_context(&mut self, instance: &InstanceDef, range: &Range<usize>, depth: usize) {
+        if instance.context.is_empty() || depth > 32 {
+            return;
+        }
+        // Diagnostics name type parameters (`T`), not their variables.
+        let mut named = Subst::empty();
+        for frame in &self.type_params_in_scope {
+            for (name, &var) in frame {
+                if let Ty::Var(rep) = apply_ty_prune(&self.subst, &Ty::Var(var)) {
+                    named.insert(rep, Ty::Con(name.clone()));
+                }
+            }
+        }
+        let show = |this: &Self, class: &str, args: &[Ty]| {
+            let args: Vec<Ty> = args
+                .iter()
+                .map(|a| apply_ty(&named, &apply_ty_prune(&this.subst, a)))
+                .collect();
+            this.instance_signature(class, &args)
+        };
+        let needed_by = show(self, &instance.class, &instance.args);
+        for c in &instance.context {
+            let args: Vec<Ty> = c.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect();
+            let goal = Constraint {
+                class: c.class.clone(),
+                args: args.clone(),
+            };
+            if args.iter().any(|a| matches!(a, Ty::Var(_))) {
+                if self.constraint_is_covered(&goal) {
+                    continue;
+                }
+                let rigid = args.iter().all(|a| match a {
+                    Ty::Var(v) => self.type_params_in_scope.iter().any(|frame| {
+                        frame
+                            .values()
+                            .any(|&p| apply_ty_prune(&self.subst, &Ty::Var(p)) == Ty::Var(*v))
+                    }),
+                    _ => true,
+                });
+                if rigid {
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "No instance for `{}` (needed by `{}`)",
+                            show(self, &goal.class, &goal.args),
+                            needed_by
+                        ),
+                        range.clone(),
+                    );
+                    msg.with_help(format!("add a `{}` bound to the type parameter", goal.class));
+                    self.messages.push(msg);
+                }
+                continue;
+            }
+            match self.find_unique_instance(&goal.class, &args, range) {
+                Ok(Some(inner)) => self.check_instance_context(&inner, range, depth + 1),
+                Ok(None) => {
+                    if self.try_lift_aggregate_constraint(&goal.class, &args, range) {
+                        continue;
+                    }
+                    self.messages.push(Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "No instance for `{}` (needed by `{}`)",
+                            self.instance_signature(&goal.class, &goal.args),
+                            needed_by
+                        ),
+                        range.clone(),
+                    ));
+                }
+                Err(()) => {}
             }
         }
     }
@@ -9291,7 +9382,8 @@ impl Checker {
             // A generic instance (`Show for Box<T>`) is instantiated fresh
             // per goal: its own parameters must never be bound globally, or
             // the first `Box<int>` would turn it into `Show for Box<int>`.
-            let inst_args = self.freshen_instance_args(&inst.args);
+            let (inst_args, inst_ctx) = self.freshen_instance(&inst.args, &inst.context);
+            let generic = inst_args != inst.args;
             for (have, need) in inst_args.iter().zip(wanted_lookup.iter()) {
                 // An open goal argument cannot choose a generic instance
                 // (`Show<β>` against `Show for Box<T>` would pin `β`).
@@ -9300,8 +9392,16 @@ impl Checker {
                     ok = false;
                     break;
                 }
-                // Bind open vars in `need` to the concrete instance arg.
-                match unify_with(&local, need, have) {
+                // Bind open vars in `need` to the concrete instance arg. A
+                // generic instance binds its fresh variables to the goal
+                // instead, so the goal's own variables (a type parameter,
+                // an inference variable) are never rebound to them.
+                let unified = if generic {
+                    unify_with(&local, have, need)
+                } else {
+                    unify_with(&local, need, have)
+                };
+                match unified {
                     Ok(s) => local = s,
                     Err(_) => {
                         ok = false;
@@ -9310,6 +9410,21 @@ impl Checker {
                 }
             }
             if ok {
+                // A generic instance is recorded at this goal's types
+                // (`Show for Box<T>` as `Show<Box<int>>`, context
+                // `Show<int>`), so codegen builds dictionaries for the goal,
+                // never for the head's variables.
+                let mut inst = inst;
+                if inst_args != inst.args {
+                    inst.args = inst_args.iter().map(|a| apply_ty_prune(&local, a)).collect();
+                    inst.context = inst_ctx
+                        .iter()
+                        .map(|c| Constraint {
+                            class: c.class.clone(),
+                            args: c.args.iter().map(|a| apply_ty_prune(&local, a)).collect(),
+                        })
+                        .collect();
+                }
                 matches.push((inst, local));
             }
         }
@@ -12887,17 +13002,32 @@ impl Checker {
             let Expression::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } = stmt.1.as_ref()
             else {
                 continue;
             };
             let class = self.impl_trait_key(class);
-            let head_params: Vec<(String, TyVarId)> = Self::instance_head_param_names(args)
+            let head_params: Vec<(String, TyVarId)> = Self::instance_head_params(args, type_params)
                 .into_iter()
                 .map(|n| (n.to_string(), self.counter.fresh()))
                 .collect();
             let param_map: HashMap<String, TyVarId> = head_params.iter().cloned().collect();
+            // Bounds on the head's parameters are the instance's context
+            // (`impl Show for Box<T: Show>` needs `Show<T>`).
+            let context: Vec<Constraint> = type_params
+                .iter()
+                .flat_map(|tp| {
+                    let var = param_map.get(tp.name).copied();
+                    tp.bounds.iter().filter_map(move |b| {
+                        var.map(|v| Constraint {
+                            class: (*b).to_string(),
+                            args: vec![Ty::Var(v)],
+                        })
+                    })
+                })
+                .collect();
             let arg_tys: Vec<Ty> = args
                 .iter()
                 .map(|a| self.ast_instance_head_ty_with(a, &param_map))
@@ -12955,6 +13085,7 @@ impl Checker {
                 args: arg_tys,
                 method_fqns,
                 assoc_tys,
+                context,
             });
         }
         self.next_id_idx = saved_idx;
@@ -12965,6 +13096,19 @@ impl Checker {
     /// Built-in spellings follow [`Self::canonical_ctor_name`].
     fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
         self.ast_instance_head_ty_with(arg, &HashMap::new())
+    }
+
+    /// Type parameters of an instance head: the head's own bounded list when
+    /// written (`impl Show for Box<T: Show>`), else the bare single uppercase
+    /// letters among the `for` type's arguments (`impl Show for Box<T>`).
+    pub fn instance_head_params<'a>(
+        args: &[Output<'a>],
+        type_params: &[parser::ast::TypeParam<'a>],
+    ) -> Vec<&'a str> {
+        if !type_params.is_empty() {
+            return type_params.iter().map(|tp| tp.name).collect();
+        }
+        Self::instance_head_param_names(args)
     }
 
     /// Type parameters of an instance head: the bare single uppercase letters

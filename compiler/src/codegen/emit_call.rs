@@ -339,9 +339,12 @@ impl Compiler {
             }
             // Only a default body reaches siblings through its trailing
             // dictionary; a concrete instance method never reads it.
-            if Self::is_default_method_fqn(&class, method, &fqn)
-                && self.emit_instance_dict(&mut bytecode, &class, &inst_args)
-            {
+            if self.emit_call_instance_dict(
+                &mut bytecode,
+                (&class, method, &fqn),
+                &inst_args,
+                span.into_range(),
+            ) {
                 nargs += 1;
             }
             if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
@@ -433,6 +436,8 @@ impl Compiler {
                 }
                 if self.emit_instance_dict(&mut bytecode, &class, &inst_args) {
                     nargs += 1; // trailing dictionary
+                } else if self.instance_context_len(&fqn) > 0 {
+                    self.missing_context_dict(&class, &inst_args, span.into_range());
                 }
                 if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
                     self.missing_call_target(&fqn, span.into_range());

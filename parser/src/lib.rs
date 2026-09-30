@@ -2614,19 +2614,57 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
             .map(|opt| opt.unwrap_or_default());
 
+        // `impl Show for Box<T: Show>`: a generic head whose parameters carry
+        // bounds is the instance's own parameter list (as inherent
+        // `impl Cell<T: Eq>`), and the `for` type is `Box<T>`. A head without
+        // bounds (`Box<T>`, `Box<int>`) is an ordinary type annotation.
+        let bounded_head = text::ident()
+            .padded_by(trivia())
+            .then(
+                self.single_type_param()
+                    .separated_by(op!(","))
+                    .allow_trailing()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(op!("<"), op!(">")),
+            )
+            .try_map(|(name, params): (&str, Vec<TypeParam<'pratt>>), span| {
+                if params.iter().any(|p| !p.bounds.is_empty()) {
+                    Ok((name, params))
+                } else {
+                    Err(Rich::custom(span, "instance head without bounds"))
+                }
+            })
+            .map_with(|(name, params), e| {
+                let args: Vec<Output<'pratt>> = params
+                    .iter()
+                    .map(|p| (e.span(), Box::new(Expression::Type(p.name))))
+                    .collect();
+                (
+                    (e.span(), Box::new(Expression::TypeApp { name, args })),
+                    params,
+                )
+            });
+        let for_head = choice((
+            bounded_head,
+            self.type_annotation()
+                .padded_by(trivia())
+                .map(|ty| (ty, Vec::new())),
+        ));
+
         // Trait name may be module-qualified: `impl json::Serialize for T`.
         keyword!("impl")
             .ignore_then(self.item_path())
             .then(opt_bracket_args)
             .then_ignore(keyword!("for"))
-            .then(self.type_annotation().padded_by(trivia()))
+            .then(for_head)
             .then(
                 choice((assoc_def, self.method_decl(stmt)))
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(op!("{"), op!("}")),
             )
-            .map_with(|(((class, bracket_args), for_ty), methods), e| {
+            .map_with(|(((class, bracket_args), (for_ty, type_params)), methods), e| {
                 let mut args = Vec::with_capacity(bracket_args.len() + 1);
                 args.push(for_ty);
                 args.extend(bracket_args);
@@ -2635,6 +2673,7 @@ impl<'pratt> Pratt<'pratt> {
                     Box::new(Expression::TypeClassImpl {
                         class,
                         args,
+                        type_params,
                         methods,
                     }),
                 )

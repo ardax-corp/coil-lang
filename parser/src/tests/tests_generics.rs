@@ -338,6 +338,39 @@
     }
 
     #[test]
+    fn typeclass_impl_bounded_generic_head() {
+        // `Box<T: Show>`: the head's parameter list; the `for` type is `Box<T>`.
+        match decl_ast!("impl Show for Box<T: Show, U> { fn show(Box<T> b) -> string {} }") {
+            Expression::TypeClassImpl {
+                class,
+                args,
+                type_params,
+                ..
+            } => {
+                assert_eq!(class, "Show");
+                assert_eq!(type_params.len(), 2);
+                assert_eq!(type_params[0].name, "T");
+                assert_eq!(type_params[0].bounds, vec!["Show"]);
+                assert!(type_params[1].bounds.is_empty());
+                match args[0].1.as_ref() {
+                    Expression::TypeApp { name, args } => {
+                        assert_eq!(*name, "Box");
+                        assert!(matches!(args[0].1.as_ref(), Expression::Type("T")));
+                        assert!(matches!(args[1].1.as_ref(), Expression::Type("U")));
+                    }
+                    other => panic!("expected TypeApp head, got {:?}", other),
+                }
+            }
+            other => panic!("expected TypeClassImpl, got {:?}", other),
+        }
+        // Without bounds the head stays an ordinary type (no parameter list).
+        match decl_ast!("impl Show for Box<int> { fn show(Box<int> b) -> string {} }") {
+            Expression::TypeClassImpl { type_params, .. } => assert!(type_params.is_empty()),
+            other => panic!("expected TypeClassImpl, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn typeclass_angle_form_is_rejected() {
         let result = Pratt::default()
             .declaration()

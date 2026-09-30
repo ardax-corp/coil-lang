@@ -593,6 +593,10 @@ pub enum Expression<'expr> {
         class: &'expr str,
         /// Type annotations for the class type arguments, e.g. `[int]`.
         args: Vec<Output<'expr>>,
+        /// The instance's own type parameters when the head is generic with
+        /// bounds (`impl Show for Box<T: Show>`); `args[0]` is then
+        /// `Box<T>`. Empty for concrete and unbounded heads.
+        type_params: Vec<TypeParam<'expr>>,
         /// Body items: `AssocTypeDef` and method `Function`/`Method` nodes.
         methods: Vec<Output<'expr>>,
     },
@@ -1611,13 +1615,24 @@ impl<'a> Display for Expression<'a> {
             Self::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } => {
                 // Prefer `impl Trait for T` / `impl Trait<A, B> for T` when
                 // there is at least one type argument (Self-first convention).
                 let ms: Vec<String> = methods.iter().map(|m| m.1.to_string()).collect();
                 if let Some((for_ty, rest)) = args.split_first() {
-                    let for_s = for_ty.1.to_string();
+                    let for_s = if type_params.is_empty() {
+                        for_ty.1.to_string()
+                    } else {
+                        // `Box<T: Show>`: the head name with its bounded params.
+                        let head = match for_ty.1.as_ref() {
+                            Self::TypeApp { name, .. } => (*name).to_string(),
+                            other => other.to_string(),
+                        };
+                        let ps: Vec<String> = type_params.iter().map(|p| p.to_string()).collect();
+                        format!("{}<{}>", head, ps.join(", "))
+                    };
                     if rest.is_empty() {
                         write!(f, "impl {} for {} {{ {} }}", class, for_s, ms.join(" "))
                     } else {

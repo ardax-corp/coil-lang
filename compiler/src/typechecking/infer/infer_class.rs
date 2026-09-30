@@ -248,20 +248,26 @@ impl Checker {
         &mut self,
         class: &str,
         args: &[Output],
+        type_params: &[TypeParam<'_>],
         methods: &[Output],
         range: Range<usize>,
     ) -> Ty {
-        // A generic head (`impl Show for Box<T>`) scopes its parameters
-        // over the head and every method, like inherent `impl Cell<T>`.
-        let head_param_names = Checker::instance_head_param_names(args);
-        let head_type_params: Vec<TypeParam<'_>> = head_param_names
-            .iter()
-            .map(|n| TypeParam {
-                name: n,
-                bounds: Vec::new(),
-                kind: parser::ast::Kind::Type,
-            })
-            .collect();
+        // A generic head (`impl Show for Box<T>` / `Box<T: Show>`) scopes its
+        // parameters over the head and every method, like inherent
+        // `impl Cell<T: Eq>`; the bounds are the instance's context.
+        let head_param_names = Checker::instance_head_params(args, type_params);
+        let head_type_params: Vec<TypeParam<'_>> = if type_params.is_empty() {
+            head_param_names
+                .iter()
+                .map(|n| TypeParam {
+                    name: n,
+                    bounds: Vec::new(),
+                    kind: parser::ast::Kind::Type,
+                })
+                .collect()
+        } else {
+            type_params.to_vec()
+        };
         let pushed_head = self.push_type_params_for_type_parsing(&head_type_params);
         let head_params: Vec<(String, TyVarId)> = if pushed_head {
             let frame = self
@@ -275,6 +281,17 @@ impl Checker {
         } else {
             Vec::new()
         };
+        let mut context: Vec<Constraint> = Vec::new();
+        for tp in &head_type_params {
+            let Some((_, var)) = head_params.iter().find(|(n, _)| n == tp.name) else {
+                continue;
+            };
+            for bound in &tp.bounds {
+                if let Some(c) = self.constraint_from_bound(bound, Ty::Var(*var), &range) {
+                    context.push(c);
+                }
+            }
+        }
         // Resolve instance heads (bare ctors stay `Con` for HKT).
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.parse_instance_head(a)).collect();
         // Walk arg type expressions for ID alignment; cache head tys
@@ -409,12 +426,24 @@ impl Checker {
                 args: arg_tys.clone(),
                 method_fqns: stub_fqns,
                 assoc_tys: HashMap::new(),
+                context: context.clone(),
             });
             Some(self.generics.instances.len() - 1)
         } else {
             None
         };
 
+        // Inside a bounded instance the trait's own dictionary is slot 0 (as
+        // in a default body) and the context dictionaries follow, so
+        // `self.item.show()` under `T: Show` dispatches through `__dict1`.
+        let prev_active_len = self.active_constraints.len();
+        if !context.is_empty() {
+            self.active_constraints.push(Constraint {
+                class: class.to_string(),
+                args: arg_tys.clone(),
+            });
+            self.active_constraints.extend(context.iter().cloned());
+        }
         for m in methods {
             match m.1.as_ref() {
                 Expression::AssocTypeDef {
@@ -626,6 +655,7 @@ impl Checker {
                 }
             }
         }
+        self.active_constraints.truncate(prev_active_len);
         let mut invalid_instance =
             class_def.is_none() || orphaned || (overlapping.is_some() && !same_decl);
         if let Some(class_def) = class_def.as_ref() {
@@ -762,6 +792,7 @@ impl Checker {
                 self.generics.instances[idx].assoc_tys = assoc_tys;
                 self.generics.instances[idx].args = arg_tys.clone();
                 self.generics.instances[idx].range = range.clone();
+                self.generics.instances[idx].context = context.clone();
             }
         } else if !invalid_instance {
             self.generics.instances.push(InstanceDef {
@@ -771,6 +802,7 @@ impl Checker {
                 args: arg_tys,
                 method_fqns,
                 assoc_tys,
+                context,
             });
         }
         self.pop_type_params_for_type_parsing(pushed_head);
