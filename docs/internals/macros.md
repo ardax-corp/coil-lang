@@ -3,7 +3,8 @@
 Packages define `derive`s and attribute macros in coil. The compiler runs them
 in the VM at compile time, after parsing and before typechecking, and splices
 their output next to (derive) or in place of (attribute macro) the declaration.
-Built-in derives (`Show`, `Eq`, …) still live in `compiler/src/attrs.rs`.
+The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `String`, `Default`, `Send`,
+`Sensitive`) are derive macros too, in `compiler/src/prelude/derive.hy`.
 
 Code: `compiler/src/macros/` (lowering, input encoding, `MacroHost`),
 `compiler/src/pipeline_macros.rs` (the pipeline stage), `compiler/src/prelude/macro.hy`
@@ -53,8 +54,11 @@ fn triple(int x) -> int { return x * 3; }
   lists the field / variant helper attributes it owns.
 - `attr name(FnDecl f, …) -> Code` or `attr name(TypeDecl t, …) -> Code` declares an
   attribute macro. The extra parameters bind the attribute's arguments, by name
-  (`key = value`) or in order, as literals. An `attr` whose first parameter is
-  anything else is a legacy runtime decorator (`target(...args)`).
+  (`key = value`) or in order, as literals. The runtime `target(...args)`
+  decorators these replaced are gone; that form is now an error.
+- Several attribute macros on one item apply outermost first: only the first
+  runs, and it receives the item with the others still on it (and a type's
+  derives, which run after it) — `FnDecl.with_name` keeps them.
 - `derive`, `attrs` and `quote` are contextual words, not reserved identifiers.
 - Macros are imported with `use` like any item. Derives have their own namespace,
   so `json::ToJson` can be both a trait and its derive. The same name imported
@@ -120,14 +124,17 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 ```
 
 1. **Attribute expansion** (`attrs::expand_program_in`, per file, during
-   discovery) lowers macro items, expands built-in derives as before, and
-   records every derive or attribute that is not built in as a `PendingMacro`
-   instead of rejecting it. A field / variant attribute on a type with no
-   pending derive is an error right away.
+   discovery) lowers macro items and records every derive, and each item's
+   first attribute that is not built in (`derive`, `repr`, `max_depth`, …),
+   as a `PendingMacro`. It still adds the type-name `Show` / `String`
+   defaults. A field / variant attribute on a type with no derive is an
+   error right away.
 2. **Resolve** each pending name through the file's top-level `use` items to a
-   module whose `CachedAst::macro_decls` declares it. Nothing found: the old
-   diagnostic ("Cannot derive unknown or non-derivable trait", "Unknown
-   attribute"). A module using its own macro is a staging error.
+   module whose `CachedAst::macro_decls` declares it; a built-in derive name
+   that is not imported resolves to the embedded `derive` module (which only
+   the expansion program imports, so it is never compiled into the user's
+   program). Nothing found: "Cannot derive unknown or non-derivable trait" /
+   "Unknown attribute". A module using its own macro is a staging error.
 3. **Encode** each call's input as coil source (`macros::encode`). Every object
    is bound to its own `let`, so no constructor is nested in another's
    arguments. This also sidesteps a miscompile where `Vec::from([new A(new
@@ -146,8 +153,10 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 6. **Splice.** `CachedAst::parse_generated` parses each output padded with
    spaces, so its spans sit after the end of the file (and of earlier
    snippets). Spans never collide with the file's own or with the synthetic
-   `0x4000_0000+` spans of built-in derives. Built-in attributes in generated
-   code expand as usual; user macros in generated code are an error. A derive
+   `0x4000_0000+` spans the `Show` / `String` defaults use. Macro uses in
+   generated code (stacked attributes, derives on a generated type) run in the
+   next round, up to 16 rounds. Derive outputs keep the order the derives are
+   listed in. A derive
    that writes `impl Show for T` replaces the compiler's default type-name
    `Show` (same for `String`); an attribute macro that replaces a type drops
    the old type's defaults.
@@ -178,6 +187,21 @@ runs each entry on a fresh `Machine`:
 
 Module statics of providers are not initialised (the expansion program has no
 `main`), so macros should not depend on them.
+
+## Built-in derives
+
+`compiler/src/prelude/derive.hy` generates what the former Rust synthesizers
+built, as source: `Show` / `String` format fields (`Name { a: %v }`) or
+variants (`E::V(%v)`), `Eq` / `Ord` compare field-wise then by variant order
+(`Lt` / `Le` / `Gt` / `Ge` plus an empty `Ord`), `Hash` combines with
+`* 31 +` from the variant index, `Default` zeroes, and scalar-backed enums
+compare / show their backing. When they replaced the Rust code, every
+derive-using program compiled to identical bytecode except enums with tuple
+variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
+`p.0` field access cannot be written in source.
+`comptime/tests/derive_golden.rs` pins the generated source.
+`Serialize` / `Deserialize` were removed (placeholders that cast fields to a
+byte); serializers belong in format packages as user derives.
 
 ## Not yet
 

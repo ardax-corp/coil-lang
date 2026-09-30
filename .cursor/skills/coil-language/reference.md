@@ -100,7 +100,8 @@ use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 |-----------|--------|
 | `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show/String use the backing word (`Status.Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
 | `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
-| User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
+| Attribute macro `#[name(...)]` | `fn`, methods, `class`, `enum` — declared `attr name(FnDecl f, …) -> Code` / `attr name(TypeDecl t, …) -> Code` in another module; returns the code that replaces the item. Stacked ones apply outermost first |
+| User derive `#[derive(X)]` | `class`, `enum` — `derive X(TypeDecl t) -> Code attrs(helper)` in another module; `#[helper(...)]` on fields / variants |
 
 Tests are `test("desc") { … }` statements, not `#[test]` on `fn`.
 

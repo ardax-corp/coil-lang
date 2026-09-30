@@ -29,6 +29,8 @@ See [macros.md](macros.md).
 | Issue | Detail | Linear |
 |-------|--------|--------|
 | Derives on generic types | **Refused** (user and built-in): `impl<T: Show> Show for Box<T>` does not parse and `InstanceDef` has no constraints. Write the `impl` by hand. | — |
+| `Default` call syntax | `#[derive(Default)]` generates `fn default() -> T` but there is no spelling to call a parameterless trait method (`T::default()` resolves as an enum variant). | — |
+| Derived `==` on an empty class | `new Unit() == new Unit()` is false (the derived `eq` is `true`, but `==` does not reach it for a field-less class). | — |
 | Package traits in generated code | A derive that implements its own package's trait for the user's type (`impl json::ToJson for Config`) needs cross-module trait impls, [coil-lang#522](https://github.com/ardax-corp/coil-lang/issues/522). Traits in the using module and prelude traits work. | — |
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
