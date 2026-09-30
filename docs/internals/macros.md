@@ -112,7 +112,11 @@ dropped.
 `name__m` in all of that macro's quotes, so they can't capture names in code
 spliced from the user. Bare names of the provider module's own items
 (`Tag`, `tag_prefix()`) are written as `module::Tag`, so an expansion never
-depends on the user's imports. No hidden `use` lines are added to user code.
+depends on the user's imports. That includes a provider's trait in an `impl`
+head (`impl derive_macros::Summary for Point`,
+`tests/positive/derive_macro_package_trait.hy`); only macro output may write a
+qualified `impl` head, hand-written source gets an error suggesting `use`
+(`attrs::expand_source_in`). No hidden `use` lines are added to user code.
 The provider module itself gets `use macro::{Code, join}` added when its quotes
 need them.
 
@@ -206,9 +210,6 @@ byte); serializers belong in format packages as user derives.
 - Derives on generic types are refused, as for built-ins:
   `impl<T: Show> Show for Box<T>` does not parse, and instances carry no
   constraints.
-- Generated code names a provider trait by path (`impl derive_macros::Summary
-  for Point`, `tests/positive/derive_macro_package_trait.hy`), so it relies on
-  qualified `impl` heads, which user code has no reason to write.
 - Function-style `name!(…)` macros and `comptime` (stages 3–4 of the macro
   design) are not started.
 - The expansion cache is in memory only: a fresh process compiles the
