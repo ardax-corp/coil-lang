@@ -57,6 +57,10 @@ print their result with `panic` and compare the text.
 - Many codegen sites still emit **unknown** locations; coverage grows
   incrementally (`panic`, `raise`, formatting/stdout calls, and padded slots elsewhere).
 - Fused super-instructions keep the **first** slot’s span only.
+- **Macro expansion:** snippets are parsed at byte offsets past the original
+  file. `Pipeline::program_debug` rewrites those `DebugLoc`s onto the
+  `#[derive]` / attribute / `name!(…)` use site so line breakpoints and
+  `coil debug` `list` read the source the user wrote.
 - **Debugger usefulness:** line breakpoints need a known loc at that line.
   Unmapped lines stay unverified. `coil debug` `list` may snap to a nearby
   known loc in the same function; `bt` / DAP stack frames stay exact
