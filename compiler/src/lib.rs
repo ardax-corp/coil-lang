@@ -35,7 +35,6 @@ pub use dissect::{
     format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
-pub use attrs::set_coil_builtin_derives;
 pub use host_grants::HostGrants;
 pub use manifest::{
     DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo, Scripts,
