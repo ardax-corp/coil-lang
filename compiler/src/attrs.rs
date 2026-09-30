@@ -774,8 +774,21 @@ fn collect_free_idents<'a>(
                 collect_free_idents(t, bound, free);
             }
         }
+        Expression::Quote { parts, .. } => {
+            for part in parts {
+                if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                    collect_free_idents(e, bound, free);
+                }
+            }
+        }
         Expression::AttrDecl {
             docs: _,
+            args,
+            returns,
+            body,
+            ..
+        }
+        | Expression::DeriveDecl {
             args,
             returns,
             body,
@@ -1023,6 +1036,8 @@ fn rewrite_expr_inline<'a>(
     let span = expr.0;
     let rw = |e: &Output<'a>| rewrite_expr_inline(e, target, subs, decoratee_args);
     match expr.1.as_ref() {
+        // Macro items never appear inside a legacy `attr` body.
+        Expression::DeriveDecl { .. } | Expression::Quote { .. } => expr.clone(),
         Expression::Call { name, args } => {
             if let Expression::Identifier(callee) = name.1.as_ref()
                 && *callee == "target"
@@ -1425,6 +1440,7 @@ fn rewrite_expr_inline<'a>(
         Expression::Module(path, child) => at(span, Expression::Module(path.clone(), rw(child))),
         Expression::Field {
             docs,
+            attrs,
             visibility,
             modifier,
             name,
@@ -1434,6 +1450,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::Field {
                 docs: docs.clone(),
+                attrs: attrs.clone(),
                 visibility: *visibility,
                 modifier: *modifier,
                 name: rw(name),
@@ -1512,6 +1529,7 @@ fn rewrite_expr_inline<'a>(
         ),
         Expression::EnumVariant {
             docs,
+            attrs,
             name,
             payload,
             discriminant,
@@ -1519,6 +1537,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::EnumVariant {
                 docs: docs.clone(),
+                attrs: attrs.clone(),
                 name,
                 payload: rewrite_enum_variant_payload(payload, target, subs, decoratee_args),
                 discriminant: discriminant

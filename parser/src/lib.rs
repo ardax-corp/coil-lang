@@ -5,8 +5,8 @@
 use ast::{
     AdjustOp, AssignOp, AttrArgs, AttrLit, Attribute, EnumConstructPayload, EnumVariantPayload,
     Expression, FieldModifier, LetFieldPattern, LetPattern, MatchArm, Output, Pattern,
-    PatternField, PatternOutput, PatternPayload, RecordFieldDecl, RecordFieldValue, TypeParam,
-    Visibility,
+    PatternField, PatternOutput, PatternPayload, QuoteKind, QuotePart, RecordFieldDecl,
+    RecordFieldValue, TypeParam, Visibility,
 };
 use std::{
     collections::HashSet,
@@ -523,6 +523,8 @@ impl<'pratt> Pratt<'pratt> {
                         )
                     })
                     .labelled("new"),
+                // Contextual `quote kind { … }`; `quote(x)` stays a call.
+                self.quote_atom(expr.clone()),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
@@ -1120,6 +1122,120 @@ impl<'pratt> Pratt<'pratt> {
             )
     }
 
+    /// `derive Name(TypeDecl t) -> Items attrs(helper, …) { body }`
+    ///
+    /// `derive` and `attrs` are contextual words, so neither is reserved as
+    /// an identifier elsewhere.
+    fn derive_decl(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let helpers = text::ident()
+            .filter(|w: &&str| *w == "attrs")
+            .padded_by(trivia())
+            .ignore_then(
+                text::ident()
+                    .padded_by(trivia())
+                    .separated_by(op!(','))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(op!("("), op!(")")),
+            )
+            .or_not()
+            .map(Option::unwrap_or_default);
+        self.docs_prefix()
+            .then(
+                text::ident()
+                    .filter(|w: &&str| *w == "derive")
+                    .padded_by(trivia())
+                    .ignore_then(text::ident().padded_by(trivia()))
+                    .then(self.arg_list_typed(self.type_annotation()))
+                    .then(op!("->").ignore_then(self.type_annotation()).or_not())
+                    .then(helpers)
+                    .then(self.block(self.statement())),
+            )
+            .map_with(|(docs, ((((name, args), returns), helpers), body)), e| {
+                (
+                    e.span(),
+                    Box::new(Expression::DeriveDecl {
+                        docs,
+                        name,
+                        args,
+                        returns,
+                        helpers,
+                        body,
+                    }),
+                )
+            })
+            .labelled("derive declaration")
+    }
+
+    /// `quote items|expr|stmts|type { template }`.
+    ///
+    /// The template is kept as text with `${expr}` / `$(expr) sep *` holes.
+    /// Braces must balance; holes inside string literals are plain text.
+    fn quote_atom<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let parts = recursive(|body| {
+            let splice = just("${")
+                .ignore_then(expr.clone().padded_by(trivia()))
+                .then_ignore(just('}'))
+                .map(|e| vec![QuotePart::Splice(e)]);
+            let sep = none_of("*{}$() \t\r\n").repeated().at_most(2).to_slice();
+            let repeat = just("$(")
+                .ignore_then(expr.clone().padded_by(trivia()))
+                .then_ignore(just(')'))
+                .then(sep)
+                .then_ignore(just('*'))
+                .map(|(list, sep)| vec![QuotePart::Repeat { list, sep }]);
+            let string_lit = just('"')
+                .then(self.string_lit_body())
+                .then(just('"'))
+                .to_slice()
+                .map(|t| vec![QuotePart::Lit(t)]);
+            let nested = just('{')
+                .to_slice()
+                .then(body)
+                .then(just('}').to_slice())
+                .map(|((open, inner), close): ((&str, Vec<QuotePart>), &str)| {
+                    let mut v = vec![QuotePart::Lit(open)];
+                    v.extend(inner);
+                    v.push(QuotePart::Lit(close));
+                    v
+                });
+            let text = none_of("{}$\"")
+                .repeated()
+                .at_least(1)
+                .to_slice()
+                .map(|t| vec![QuotePart::Lit(t)]);
+            let dollar = just('$').to_slice().map(|t| vec![QuotePart::Lit(t)]);
+            choice((splice, repeat, string_lit, nested, text, dollar))
+                .repeated()
+                .collect::<Vec<Vec<QuotePart>>>()
+                .map(|chunks| chunks.into_iter().flatten().collect::<Vec<_>>())
+        });
+        text::ident()
+            .filter(|w: &&str| *w == "quote")
+            .padded_by(trivia())
+            .ignore_then(text::ident().try_map(|k: &str, span| {
+                QuoteKind::from_name(k).ok_or_else(|| {
+                    Rich::custom(span, "quote kind must be `items`, `expr`, `stmts` or `type`")
+                })
+            }))
+            .then_ignore(trivia())
+            .then(parts.delimited_by(just('{'), just('}')))
+            .then_ignore(trivia())
+            .map_with(|(kind, parts), e| (e.span(), Box::new(Expression::Quote { kind, parts })))
+            .labelled("quote")
+    }
+
     fn func<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1659,6 +1775,7 @@ impl<'pratt> Pratt<'pratt> {
             self.impl_block(stmt.clone()),
             self.test_case(stmt.clone()),
             self.attr_decl(),
+            self.derive_decl(),
             self.func(stmt.clone()),
             self.type_alias(),
             self.use_(),
@@ -2156,6 +2273,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.docs_prefix()
+            .then(self.attr_list())
             .then(keyword!("pub").or_not())
             .then(
                 choice((
@@ -2168,7 +2286,7 @@ impl<'pratt> Pratt<'pratt> {
             .then_ignore(op!(":").labelled("':' before field type"))
             .then(self.type_annotation().labelled("field type"))
             .then(op!("=").ignore_then(self.expr()).or_not())
-            .map_with(|(((((docs, vis), modifier), name), ty), init), e| {
+            .map_with(|((((((docs, attrs), vis), modifier), name), ty), init), e| {
                 let visibility = if vis.is_some() {
                     Visibility::Public
                 } else {
@@ -2180,6 +2298,7 @@ impl<'pratt> Pratt<'pratt> {
                     e.span(),
                     Box::new(Expression::Field {
                         docs,
+                        attrs,
                         visibility,
                         modifier,
                         name: name_output,
@@ -3214,10 +3333,11 @@ impl<'pratt> Pratt<'pratt> {
         let discriminant = op!("=").ignore_then(scalar_lit).or_not();
 
         self.docs_prefix()
+            .then(self.attr_list())
             .then(text::ident().padded_by(trivia()))
             .then(payload_choice)
             .then(discriminant)
-            .validate(|(((docs, name), payload), discriminant), e, emitter| {
+            .validate(|((((docs, attrs), name), payload), discriminant), e, emitter| {
                 if discriminant.is_some() && !matches!(payload, EnumVariantPayload::Unit) {
                     emitter.emit(Rich::custom(
                         e.span(),
@@ -3228,6 +3348,7 @@ impl<'pratt> Pratt<'pratt> {
                     e.span(),
                     Box::new(Expression::EnumVariant {
                         docs,
+                        attrs,
                         name,
                         payload,
                         discriminant,
@@ -3327,6 +3448,7 @@ const EXPRESSION_LABELS: &[&str] = &[
     "return",
     "qualified access",
     "named argument",
+    "quote",
 ];
 
 /// What the parser wanted, in words: `;`, a structural production
@@ -3508,3 +3630,6 @@ mod tests_generics;
 #[cfg(test)]
 #[path = "tests/tests_lambdas.rs"]
 mod tests_lambdas;
+#[cfg(test)]
+#[path = "tests/tests_macros.rs"]
+mod tests_macros;

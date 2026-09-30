@@ -3041,6 +3041,7 @@ fn record_construct_duplicate_field_emits_diagnostic_if_parse_bypassed() {
         type_params: vec![],
         variants: vec![node(Expression::EnumVariant {
             docs: vec![],
+            attrs: vec![],
             name: "Foo",
             payload: EnumVariantPayload::Record(vec![
                 RecordFieldDecl {
@@ -3097,6 +3098,7 @@ fn record_pattern_duplicate_field_emits_diagnostic_if_parse_bypassed() {
         type_params: vec![],
         variants: vec![node(Expression::EnumVariant {
             docs: vec![],
+            attrs: vec![],
             name: "P",
             payload: EnumVariantPayload::Record(vec![
                 RecordFieldDecl {

@@ -11029,6 +11029,7 @@ impl Checker {
         for field in fields {
             if let Expression::Field {
                 docs: _,
+                attrs: _,
                 visibility: vis,
                 modifier,
                 name: fname,
@@ -13686,8 +13687,21 @@ impl Checker {
                 self.pre_register_enums_walk(params, errors);
                 self.pre_register_enums_walk(ret, errors);
             }
+            Expression::Quote { parts, .. } => {
+                for part in parts {
+                    if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                        self.pre_register_enums_walk(e, errors);
+                    }
+                }
+            }
             Expression::AttrDecl {
                 docs: _,
+                args,
+                returns,
+                body,
+                ..
+            }
+            | Expression::DeriveDecl {
                 args,
                 returns,
                 body,

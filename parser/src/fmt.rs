@@ -7,7 +7,7 @@
 //! `///` docs are part of the AST and are emitted with their declaration.
 
 use crate::ast::{
-    AdjustOp, AssignOp, Attribute, EnumConstructPayload, EnumVariantPayload, Expression,
+    AdjustOp, AssignOp, Attribute, QuotePart, EnumConstructPayload, EnumVariantPayload, Expression,
     ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility, WhereConstraint,
 };
@@ -1197,6 +1197,57 @@ impl<'s> Formatter<'s> {
                 self.fmt_block_or_inline(body);
             }
 
+            Expression::DeriveDecl {
+                docs,
+                name,
+                args,
+                returns,
+                helpers,
+                body,
+            } => {
+                self.fmt_docs(docs);
+                self.push_str("derive ");
+                self.push_str(name);
+                self.fmt_paren_arg_list(args);
+                if let Some(ret) = returns {
+                    self.push_str(" -> ");
+                    self.fmt_type(ret);
+                }
+                if !helpers.is_empty() {
+                    self.push_str(" attrs(");
+                    self.push_str(&helpers.join(", "));
+                    self.push_str(")");
+                }
+                self.push_str(" ");
+                self.fmt_block_or_inline(body);
+            }
+
+            // Template text is coil source the user laid out by hand: keep it
+            // verbatim and only format the spliced expressions.
+            Expression::Quote { kind, parts } => {
+                self.push_str("quote ");
+                self.push_str(kind.as_str());
+                self.push_str(" {");
+                for part in parts {
+                    match part {
+                        QuotePart::Lit(text) => self.push_str(text),
+                        QuotePart::Splice(e) => {
+                            self.push_str("${");
+                            self.fmt_output(e);
+                            self.push_str("}");
+                        }
+                        QuotePart::Repeat { list, sep } => {
+                            self.push_str("$(");
+                            self.fmt_output(list);
+                            self.push_str(")");
+                            self.push_str(sep);
+                            self.push_str("*");
+                        }
+                    }
+                }
+                self.push_str("}");
+            }
+
             Expression::TestCase { name, body } => {
                 self.push_str("test(");
                 self.fmt_output(name);
@@ -1220,11 +1271,13 @@ impl<'s> Formatter<'s> {
             }
             Expression::EnumVariant {
                 docs,
+                attrs,
                 name,
                 payload,
                 discriminant,
             } => {
                 self.fmt_docs(docs);
+                self.fmt_member_attrs(attrs);
                 self.push_str(name);
                 self.fmt_enum_variant_payload(payload);
                 if let Some(disc) = discriminant {
@@ -1249,6 +1302,7 @@ impl<'s> Formatter<'s> {
             }
             Expression::Field {
                 docs,
+                attrs,
                 visibility,
                 modifier,
                 name,
@@ -1256,6 +1310,7 @@ impl<'s> Formatter<'s> {
                 init,
             } => {
                 self.fmt_docs(docs);
+                self.fmt_member_attrs(attrs);
                 self.fmt_visibility(*visibility);
                 self.fmt_field_modifier(*modifier);
                 self.fmt_output(name);
@@ -2105,6 +2160,15 @@ impl<'s> Formatter<'s> {
         for attr in attrs {
             self.push_str(&attr.to_string());
             self.newline();
+        }
+    }
+
+    /// Attributes on a field / variant: one per line at the member's indent.
+    fn fmt_member_attrs(&mut self, attrs: &[Attribute<'_>]) {
+        for attr in attrs {
+            self.push_str(&attr.to_string());
+            self.newline();
+            self.write_indent();
         }
     }
 
