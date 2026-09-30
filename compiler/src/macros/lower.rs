@@ -3,6 +3,8 @@
 //! - `derive Name(TypeDecl t) -> Code { … }` → `fn __derive_Name(TypeDecl t) -> Code { … }`
 //! - `attr name(FnDecl f, string msg) -> Code { … }` → `fn __attr_name(…)`
 //!   (the first parameter must be `FnDecl` or `TypeDecl`)
+//! - `macro name(Expr a, Vec<Expr> rest) -> Code { … }` → `fn __macro_name(…)`
+//!   (`Expr` parameters, the last one possibly `Vec<Expr>`)
 //! - `quote kind { text ${e} $(xs) sep * }` →
 //!   `new Code("text" + e.src() + join(xs, "sep"))`
 //!
@@ -19,7 +21,7 @@ use parser::ast::{Expression, Output, QuotePart};
 use parser::SimpleSpan;
 use reporting::{ErrorCode, Message};
 
-use super::{attr_fn_name, derive_fn_name, MacroDecl, MacroInput, MacroKind, MACRO_MODULE};
+use super::{attr_fn_name, derive_fn_name, macro_fn_name, MacroDecl, MacroInput, MacroKind, MACRO_MODULE};
 use crate::attrs::{fresh_span, leak};
 
 /// Suffix hygienic renaming appends to quote-local names.
@@ -206,6 +208,61 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
                 args: args.clone(),
                 returns: returns.clone(),
                 where_constraints: where_constraints.clone(),
+                body: Some(body.clone()),
+            };
+            *item.1 = func;
+        }
+        Expression::FnMacroDecl {
+            docs,
+            name,
+            args,
+            returns,
+            body,
+        } => {
+            let params = param_list(args);
+            let last = params.len().saturating_sub(1);
+            for (i, (pname, ty, rest)) in params.iter().enumerate() {
+                let ok = !*rest
+                    && (is_model_type(ty, "Expr")
+                        || (i == last && (ty == "Vec<Expr>" || ty == &format!("Vec<{MACRO_MODULE}::Expr>"))));
+                if !ok {
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!("macro `{name}` parameter `{pname}` must be an `Expr`"),
+                        span.into_range(),
+                    );
+                    msg.with_help(
+                        "each argument of `name!(…)` arrives as an `Expr`; a last `Vec<Expr>` parameter takes the rest"
+                            .to_string(),
+                    );
+                    out.messages.push(msg);
+                }
+            }
+            if returns.is_none() {
+                out.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("macro `{name}` must return `Code`"),
+                    span.into_range(),
+                ));
+            }
+            out.decls.push(MacroDecl {
+                kind: MacroKind::Function,
+                name: name.to_string(),
+                fn_name: macro_fn_name(name),
+                helpers: Vec::new(),
+                input: MacroInput::Exprs,
+                params: params.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect(),
+            });
+            let func = Expression::Function {
+                docs: std::mem::take(docs),
+                attrs: Vec::new(),
+                name: leak(macro_fn_name(name)),
+                is_coro: false,
+                is_static: false,
+                type_params: Vec::new(),
+                args: args.clone(),
+                returns: returns.clone(),
+                where_constraints: Vec::new(),
                 body: Some(body.clone()),
             };
             *item.1 = func;

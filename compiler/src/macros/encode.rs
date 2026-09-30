@@ -449,6 +449,33 @@ pub fn fn_decl(
 
 /// Write an attribute argument bound to a macro parameter: strings and
 /// identifiers as their text, numbers and booleans as written.
+/// Coarse kind of a function-style macro argument (`Expr::kind()`).
+pub fn expr_kind(e: &Expression<'_>) -> &'static str {
+    match e {
+        Expression::Integer(_) | Expression::Float(_) | Expression::String(_) | Expression::Bool(_) => "literal",
+        Expression::Negate(inner) if matches!(inner.1.as_ref(), Expression::Integer(_) | Expression::Float(_)) => {
+            "literal"
+        }
+        Expression::Identifier(_) => "ident",
+        Expression::QualifiedAccess { .. } | Expression::Access(..) => "path",
+        Expression::Call { .. } | Expression::Construct { .. } | Expression::Instantiate(..) => "call",
+        Expression::Expr(inner) => expr_kind(inner.1.as_ref()),
+        Expression::Group(inner) if expr_kind(inner.1.as_ref()) != "other" => expr_kind(inner.1.as_ref()),
+        _ => "other",
+    }
+}
+
+/// One `Expr`: kind, then the source text (`source` sliced by its span).
+pub fn expr(w: &mut Wire, e: &Output<'_>, source: &str) {
+    w.str(expr_kind(e.1.as_ref()));
+    let text = source
+        .get(e.0.start..e.0.end)
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| e.1.to_string());
+    w.str(&text);
+}
+
 pub fn arg(w: &mut Wire, arg: &MacroArg) {
     w.str(&arg.value);
 }
