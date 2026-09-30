@@ -819,6 +819,15 @@ impl ReprCtx {
     }
 }
 
+/// Target-side layouts at a trait-method call across a generic boundary;
+/// see [`Compiler::trait_method_boundary_sig`].
+pub(super) struct BoundarySig {
+    /// Per parameter: the layout the target reads, when it can differ.
+    pub(super) params: Vec<Option<crate::typechecking::value_layout::ValueLayout>>,
+    /// The layout the target returns, when it can differ.
+    pub(super) ret: Option<crate::typechecking::value_layout::ValueLayout>,
+}
+
 pub struct Compiler {
     namespace: String,
     /// Stack IL during emit; lowered `Vec<Byte>` after [`Self::finalize_bytecode`].
@@ -979,6 +988,19 @@ pub struct Compiler {
     repr_here: ReprCtx,
     /// Per enclosing `match`: the [`ReprCtx`] its arm bodies compile under.
     arm_repr: Vec<ReprCtx>,
+    /// Spans of generic-call arguments whose parameter is not a bare type
+    /// parameter: the shared body does not unbox them, so they are not boxed.
+    generic_arg_no_box: HashSet<(usize, usize)>,
+    /// Pending generic-boundary layout conversions for call arguments, keyed
+    /// by argument span: `(from, to)` applied right after the argument is
+    /// compiled (see [`Compiler::generic_enum_layout`]).
+    boundary_arg_convs: HashMap<
+        (usize, usize),
+        (
+            crate::typechecking::value_layout::ValueLayout,
+            crate::typechecking::value_layout::ValueLayout,
+        ),
+    >,
 
     /// Kind when the function whose body is being compiled uses the
     /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
@@ -1167,6 +1189,8 @@ impl Default for Compiler {
             repr: ReprCtx::default(),
             repr_here: ReprCtx::default(),
             arm_repr: Vec::new(),
+            generic_arg_no_box: HashSet::new(),
+            boundary_arg_convs: HashMap::new(),
             compiling_two_word_enum: None,
             compiling_try_fail: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
