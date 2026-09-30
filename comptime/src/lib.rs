@@ -81,28 +81,17 @@ impl std::io::Write for Captured {
 
 fn run_entry(program: &Pipeline, bytecode: &[Byte], constants: &[u64], entry: u32) -> Result<String, String> {
     let captured = Captured::default();
+    // `with_output` installs a thread-local redirect pointing into the VM;
+    // put the caller's back before the VM is dropped.
+    let outer = machine::io::set_output_redirect(None);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut vm = Machine::<256>::with_operand_capacity(program.operand_stack_slots() as usize);
         let _ = vm.with_output(captured.clone());
-        for native in sandbox_natives() {
-            vm.register_native(native);
-        }
-        vm.set_program_debug(program.program_debug());
-        vm.init_static_slots(program.static_slot_count());
-        vm.load_program(bytecode, constants, program.strings());
-        vm.set_step_budget(Some(MACRO_STEP_BUDGET));
-        let ret: Value = vm.call_function(entry, &[]);
-        if vm.step_budget_exhausted() {
-            return Err("it ran too long (step budget exhausted; is there an infinite loop?)".to_string());
-        }
-        if vm.panicked() {
-            return Err(String::new());
-        }
-        match vm.heap().find_object_by_addr(ret.raw() as u64) {
-            Some(Object::String(s)) => Ok(s.as_ref().data.clone()),
-            _ => Err("it did not return a string".to_string()),
-        }
+        let result = run_on(&mut vm, program, bytecode, constants, entry);
+        let _ = vm.restore_output();
+        result
     }));
+    machine::io::set_output_redirect(outer);
     let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
     match outcome {
         Ok(Ok(text)) => Ok(text),
@@ -117,5 +106,32 @@ fn run_entry(program: &Pipeline, bytecode: &[Byte], constants: &[u64], entry: u3
         } else {
             printed
         }),
+    }
+}
+
+fn run_on(
+    vm: &mut Machine<256>,
+    program: &Pipeline,
+    bytecode: &[Byte],
+    constants: &[u64],
+    entry: u32,
+) -> Result<String, String> {
+    for native in sandbox_natives() {
+        vm.register_native(native);
+    }
+    vm.set_program_debug(program.program_debug());
+    vm.init_static_slots(program.static_slot_count());
+    vm.load_program(bytecode, constants, program.strings());
+    vm.set_step_budget(Some(MACRO_STEP_BUDGET));
+    let ret: Value = vm.call_function(entry, &[]);
+    if vm.step_budget_exhausted() {
+        return Err("it ran too long (step budget exhausted; is there an infinite loop?)".to_string());
+    }
+    if vm.panicked() {
+        return Err(String::new());
+    }
+    match vm.heap().find_object_by_addr(ret.raw() as u64) {
+        Some(Object::String(s)) => Ok(s.as_ref().data.clone()),
+        _ => Err("it did not return a string".to_string()),
     }
 }
