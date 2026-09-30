@@ -251,6 +251,30 @@ impl Checker {
         methods: &[Output],
         range: Range<usize>,
     ) -> Ty {
+        // A generic head (`impl Show for Box<T>`) scopes its parameters
+        // over the head and every method, like inherent `impl Cell<T>`.
+        let head_param_names = Checker::instance_head_param_names(args);
+        let head_type_params: Vec<TypeParam<'_>> = head_param_names
+            .iter()
+            .map(|n| TypeParam {
+                name: n,
+                bounds: Vec::new(),
+                kind: parser::ast::Kind::Type,
+            })
+            .collect();
+        let pushed_head = self.push_type_params_for_type_parsing(&head_type_params);
+        let head_params: Vec<(String, TyVarId)> = if pushed_head {
+            let frame = self
+                .type_params_in_scope
+                .last()
+                .expect("type-param frame just pushed");
+            head_param_names
+                .iter()
+                .map(|n| (n.to_string(), *frame.get(*n).expect("head param registered")))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Resolve instance heads (bare ctors stay `Con` for HKT).
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.parse_instance_head(a)).collect();
         // Walk arg type expressions for ID alignment; cache head tys
@@ -357,11 +381,7 @@ impl Checker {
         // instance under construction. Assoc types are patched
         // onto the stub as they are collected (before methods
         // run), so projections stay valid during body infer.
-        let args_pretty_for_fqn: String = arg_tys
-            .iter()
-            .map(|t| format!("{}", t))
-            .collect::<Vec<_>>()
-            .join("_");
+        let args_pretty_for_fqn = Checker::instance_head_fqn_part(&arg_tys, &head_params);
         let mut stub_fqns = HashMap::new();
         for m in methods {
             let mname = match m.1.as_ref() {
@@ -577,16 +597,7 @@ impl Checker {
                                 m.0.into_range(),
                             ));
                         }
-                        let fqn = format!(
-                            "{}__{}__{}",
-                            class,
-                            arg_tys
-                                .iter()
-                                .map(|t| format!("{}", t))
-                                .collect::<Vec<_>>()
-                                .join("_"),
-                            mname,
-                        );
+                        let fqn = format!("{}__{}__{}", class, args_pretty_for_fqn, mname);
                         method_names.push(mname.to_string());
                         method_fqns.insert(mname.to_string(), fqn.clone());
                         // Inferred under the bare name, which another instance
@@ -762,6 +773,7 @@ impl Checker {
                 assoc_tys,
             });
         }
+        self.pop_type_params_for_type_parsing(pushed_head);
         unit_ty()
     }
 
