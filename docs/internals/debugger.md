@@ -70,7 +70,9 @@ Every statement carries a debug location (see [debug-info.md](debug-info.md)),
 so any line with code verifies; lines without code (signatures, braces, blank
 lines, code the optimizer removed) return `verified: false`. Source paths are
 matched canonically, so the absolute paths DAP clients send resolve against the
-paths stored at compile time.
+paths stored at compile time. Locs from expanded `macro` / `derive` / `attr`
+output are rewritten onto the use site so breakpoints and `list` land in the
+source you wrote.
 
 ## Commands
 

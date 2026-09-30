@@ -79,7 +79,7 @@ import has more than three path segments.
 - Safety net: `format_source` re-parses its output and recounts comments. If
   either check fails it returns a `coil fmt bug` error and the file is left
   unchanged.
-- `///` doc comments attach to the following declaration (`fn`, `class`, `field`, `trait`, `enum`, …) as `docs: Vec<&str>`. Read them later via [`parser::item_docs`](../../parser/src/ast.rs).
+- `///` doc comments attach to the following declaration (`fn`, `class`, `field`, `trait`, `enum`, `macro`, `derive`, …) as `docs: Vec<&str>`. Read them later via [`parser::item_docs`](../../parser/src/ast.rs). `////` is an ordinary line comment, not a doc.
 - `///` lines immediately inside a function parameter list attach to that
   parameter; documented parameter lists are formatted one item per line with
   trailing commas.
