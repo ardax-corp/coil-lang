@@ -345,6 +345,15 @@ fn cmd_compile(
 }
 
 fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
+    if archive.ends_with(".hy") {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!(
+                "`{archive}` is a source file, not a bytecode archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
+            ),
+        );
+    }
     let loaded = match try_load_archive(archive) {
         Ok(ok) => ok,
         Err(LoadErr::Missing) => fail_and_exit(
