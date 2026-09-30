@@ -20,6 +20,13 @@ enum Sh {
     Rect { w: int, h: int },
 }
 
+// Tuple variants of different payload types share payload index 0.
+#[derive(Show, Eq)]
+enum Holder {
+    S(string),
+    B(bool),
+}
+
 #[derive(Show, Eq, Ord, Hash, String, Default)]
 enum Status {
     Ok = 200,
@@ -85,4 +92,11 @@ test("scalar enums use their backing") {
     assert(Status::Ok.hash() == 200.hash())?;
     assert(Mode::Write.show() == "w")?;
     assert(Mode::Read < Mode::Write)?;
+}
+
+test("tuple variants with different payload types") {
+    assert(format("%v", Holder::S("x")) == "Holder::S(x)", format("%v", Holder::S("x")))?;
+    assert(Holder::B(true).show() == "Holder::B(true)")?;
+    assert(Holder::S("x") == Holder::S("x"))?;
+    assert(Holder::S("x") != Holder::B(false))?;
 }

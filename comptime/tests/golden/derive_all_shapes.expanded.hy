@@ -398,6 +398,45 @@ impl String for Sh {
 impl Send for Sh {
 }
 
+enum Holder {
+    S(string),
+    B(bool),
+}
+
+impl Show for Holder {
+    fn show(Holder __show_Holder) -> string {
+        return match __show_Holder {
+            Holder::S(s_p0) => string::format("Holder::S(%v)", s_p0),
+            Holder::B(s_p0) => string::format("Holder::B(%v)", s_p0),
+        };
+    }
+}
+
+impl Eq for Holder {
+    fn eq(Holder __eq_a_Holder, Holder __eq_b_Holder) -> bool {
+        return match __eq_a_Holder {
+            Holder::S(a_p0) => match __eq_b_Holder {
+                Holder::S(b_p0) => (a_p0 == b_p0),
+                default => false,
+            },
+            Holder::B(a_p0) => match __eq_b_Holder {
+                Holder::B(b_p0) => (a_p0 == b_p0),
+                default => false,
+            },
+            default => false,
+        };
+    }
+    fn ne(Holder __eq_a_Holder, Holder __eq_b_Holder) -> bool {
+        return !(__eq_a_Holder == __eq_b_Holder);
+    }
+}
+
+impl String for Holder {
+    fn to_string(Holder __str_Holder) -> string {
+        return "Holder";
+    }
+}
+
 enum Status {
     Ok = 200,
     NotFound = 404,
@@ -600,4 +639,11 @@ test("scalar enums use their backing") {
     assert(Status::Ok.hash() == 200.hash())?;
     assert(Mode::Write.show() == "w")?;
     assert(Mode::Read < Mode::Write)?;
+}
+
+test("tuple variants with different payload types") {
+    assert(format("%v", Holder::S("x")) == "Holder::S(x)", format("%v", Holder::S("x")))?;
+    assert(Holder::B(true).show() == "Holder::B(true)")?;
+    assert(Holder::S("x") == Holder::S("x"))?;
+    assert(Holder::S("x") != Holder::B(false))?;
 }
