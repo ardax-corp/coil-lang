@@ -57,9 +57,34 @@ pub fn try_specialize_body(
 
 type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
 
+/// `(function, "dense" | "lir", MIR text)` captured for `coil dissect --mir`.
+pub type CapturedMir = Vec<(String, &'static str, String)>;
+
 thread_local! {
+    /// `coil dissect --mir`: `(function, form, MIR text)` of each body that
+    /// reached emission. `None` when not capturing.
+    static MIR_CAPTURE: std::cell::RefCell<Option<CapturedMir>> =
+        const { std::cell::RefCell::new(None) };
     static DENSE_REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static LIR_REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Start recording the final MIR of each specialized body (dissect).
+pub fn start_mir_capture() {
+    MIR_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop recording and return `(function, "dense" | "lir", MIR text)`.
+pub fn take_mir_capture() -> CapturedMir {
+    MIR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+fn capture_mir(name: &str, form: &'static str, func: &crate::mir::MirFunc) {
+    MIR_CAPTURE.with(|c| {
+        if let Some(list) = c.borrow_mut().as_mut() {
+            list.push((name.to_string(), form, func.to_string()));
+        }
+    });
 }
 
 /// Why the last [`try_specialize_body_side`] returned `None` (keep-rate census).
@@ -210,6 +235,7 @@ pub fn try_specialize_body_side(
     if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi) {
         return Some((vecd, abi));
     }
+    capture_mir(name, "dense", &func);
     let out = match emit_dense(&func, entry, pool, has_alloc) {
         Ok(o) => o,
         Err(e) => return refuse_dense(format!("emit: {e}")),
@@ -603,6 +629,7 @@ pub fn try_lower_abi_body_side(
     let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
+    capture_mir(name, "lir", &func);
     let out = match emit_lir(&func, entry, pool, has_alloc) {
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),

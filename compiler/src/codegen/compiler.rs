@@ -18363,7 +18363,7 @@ impl Compiler {
             .iter()
             .map(|f| (f.name.clone(), f.entry_sp))
             .collect();
-        let mut lowered = if self.retain_cursor_il {
+        let mut lowered = if self.retain_cursor_il || capture_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
         } else {
             self.bytecode.lower_in_place(&mut self.constants)
@@ -18392,6 +18392,38 @@ impl Compiler {
                 .and_then(|m| m.get(&emit_id).copied())
                 .unwrap_or(emit_id)
         };
+        // `dissect --il-post`: the optimized, pre-fuse IL, split per function
+        // at each function's (flattened) entry label.
+        #[cfg(any(test, feature = "dissect"))]
+        if capture_il && let Some(ops) = cursor_ops.as_ref() {
+            let entries: HashMap<u32, usize> = funcs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| f.entry.map(|l| (flat_label(i, l.0), i)))
+                .collect();
+            let mut post_funcs: Vec<crate::il::IlFunc> = Vec::new();
+            let mut emitting = 0usize;
+            for op in ops {
+                if let IlOp::Label(l) | IlOp::JoinLabel(l) = op
+                    && let Some(&i) = entries.get(&l.0)
+                {
+                    if let Some(prev) = post_funcs.last_mut() {
+                        prev.code_end = emitting;
+                    }
+                    let mut f = funcs[i].clone();
+                    f.code_start = emitting;
+                    post_funcs.push(f);
+                }
+                if op.emits_code() {
+                    emitting += 1;
+                }
+            }
+            if let Some(prev) = post_funcs.last_mut() {
+                prev.code_end = emitting;
+            }
+            self.post_il_snapshot =
+                Some(crate::dissect::IlSnapshot::new(ops.clone(), post_funcs));
+        }
         let func_idx_for_pre = |pre: usize| -> Option<usize> {
             funcs
                 .iter()
@@ -18558,6 +18590,12 @@ impl Compiler {
             );
         }
         syms
+    }
+
+    /// Post-opt IL captured by the last [`Self::finalize_bytecode_capturing_il`].
+    #[cfg(any(test, feature = "dissect"))]
+    pub fn take_post_il_snapshot(&mut self) -> Option<crate::dissect::IlSnapshot> {
+        self.post_il_snapshot.take()
     }
 
     /// Class field and enum variant tables for rendering heap values.

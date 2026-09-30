@@ -27,16 +27,22 @@ fn print_help() {
     eprintln!(
         "Usage:\n\
          \x20 coil-dissect [--log-json | --log-lsp] [--root DIR]... [--entry FILE] <file.hy>\n\
-         \x20              [--fn <pat>] [--il] [--ast]\n\
+         \x20              [--fn <pat>] [--il] [--il-post] [--mir] [--ast] [--no-source] [-O LEVEL]\n\
          \x20              [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
          \x20              [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
          \n\
          Options:\n\
          \x20 --fn <pat>         Filter functions by FQN substring / trailing name\n\
          \x20 --il               Also print pre-opt stack IL\n\
+         \x20 --il-post          Also print the optimized IL (before fuse / lowering)\n\
+         \x20 --mir              Also print the MIR of numeric bodies (dense / LIR)\n\
+         \x20 --no-source        Do not interleave source lines in the bytecode\n\
+         \x20 -O, --opt-level L  none/0, basic/1, standard/2, aggressive/3, size/s, debug/g\n\
+         \x20 --opt-stats        Print IL optimization counters (stderr); --opt-stats-json as JSON\n\
          \x20 --ast              Also print the entry-file AST\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
-         \x20 --entry FILE       Entry `.hy` (instead of the positional file)\n\
+         \x20 --entry FILE       Entry `.hy` (instead of the positional file); a `.hyc`\n\
+         \x20                    archive dumps its bytecode instead of compiling\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
          \x20 --allow-exit       Allow env::exit (default deny)\n\
          \x20 --allow-exec       Allow env::exec (default deny)\n\
@@ -59,6 +65,15 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut entry_flag: Option<String> = None;
     let mut grants = HostGrants::deny_all();
+    let mut show_mir = false;
+    let mut show_il_post = false;
+    let mut source = true;
+    let mut opt_level = compiler::OptLevel::default();
+    let mut opt_stats = false;
+    let mut opt_stats_json = false;
+    let parse_level = |v: &str| {
+        compiler::OptLevel::parse(v).map_err(|_| format!("unknown optimization level `{v}`"))
+    };
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -70,6 +85,22 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             "--log-json" => log_json = true,
             "--log-lsp" => log_lsp = true,
             "--il" => show_il = true,
+            "--mir" => show_mir = true,
+            "--il-post" => show_il_post = true,
+            "--no-source" => source = false,
+            "--opt-stats" => opt_stats = true,
+            "--opt-stats-json" => opt_stats_json = true,
+            "-O" | "--opt-level" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "missing LEVEL after -O".to_string())?;
+                opt_level = parse_level(v)?;
+            }
+            s if s.starts_with("--opt-level=") => {
+                opt_level = parse_level(s.trim_start_matches("--opt-level="))?;
+            }
+            s if s.starts_with("-O") && s.len() > 2 => opt_level = parse_level(&s[2..])?,
             "--ast" => show_ast = true,
             "--allow-attach" => grants.allow_attach = true,
             "--allow-exit" => grants.allow_exit = true,
@@ -153,6 +184,12 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             show_ast,
             extra_roots,
             grants,
+            show_mir,
+            show_il_post,
+            source,
+            opt_level,
+            opt_stats,
+            opt_stats_json,
         },
     ))
 }

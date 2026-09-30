@@ -327,10 +327,19 @@ enum RawCommand {
         /// Also print pre-opt stack IL
         #[arg(long)]
         il: bool,
+        /// Also print the optimized IL (before fuse / lowering)
+        #[arg(long)]
+        il_post: bool,
+        /// Also print the MIR of numeric bodies (dense / LIR)
+        #[arg(long)]
+        mir: bool,
+        /// Do not interleave source lines in the bytecode listing
+        #[arg(long)]
+        no_source: bool,
         /// Also print the entry-file AST
         #[arg(long)]
         ast: bool,
-        /// Entry `.hy` file
+        /// Entry `.hy` file, or a compiled `.hyc` archive (bytecode only)
         file: Option<String>,
     },
     /// GDB-style debugger (REPL; --dap for IDE)
@@ -702,6 +711,9 @@ impl RawCli {
                 entry_flag,
                 fn_pat,
                 il,
+                il_post: _,
+                mir: _,
+                no_source: _,
                 ast,
                 file,
             }) => {

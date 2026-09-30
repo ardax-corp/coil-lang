@@ -73,6 +73,7 @@ pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
 pub use func::{MirBlock, MirFunc};
+pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::{bind_drafts, is_alloc_opcode, try_build_draft, DraftFrameMap};
 pub use inst::{
