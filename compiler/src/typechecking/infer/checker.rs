@@ -5791,7 +5791,11 @@ impl Checker {
                 return boolean();
             }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
-        if let Ty::Var(var) = apply_ty_prune(&self.subst, &unified) {
+        let pruned = apply_ty_prune(&self.subst, &unified);
+        if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
+            self.check_ground_ordering_operands(&pruned, class, method, &range);
+        }
+        if let Ty::Var(var) = pruned {
             if self.user_dict_index(var, class).is_none() {
                 self.bind_matching_abstract_constraints(Some(var), class);
             }
@@ -5953,6 +5957,9 @@ impl Checker {
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
         let pruned = apply_ty_prune(&self.subst, &result);
+        if !matches!(&pruned, Ty::Var(_)) {
+            self.check_ground_arith_operands(&pruned, op, &range);
+        }
         if let Ty::Var(v) = &pruned {
             let (class, method) = match op {
                 "+" => ("Add", "add"),
@@ -6000,6 +6007,107 @@ impl Checker {
             }
         }
         result
+    }
+
+    /// Instance-lookup shape of a ground operand type (`Sum` enums by name,
+    /// `readonly` stripped).
+    fn operand_instance_lookup_ty(ty: &Ty) -> Ty {
+        match ty {
+            Ty::Readonly(inner) => Self::operand_instance_lookup_ty(inner),
+            Ty::Sum { name, .. } => Ty::Con(name.clone()),
+            Ty::Constructor { owner, .. } => Self::operand_instance_lookup_ty(owner),
+            other => other.clone(),
+        }
+    }
+
+    fn is_numeric_operand_ty(ty: &Ty) -> bool {
+        use crate::typechecking::ty::{BYTE, FLOAT, INT};
+        matches!(ty, Ty::Con(n) if n == INT || n == FLOAT || n == BYTE)
+    }
+
+    /// Ground operands of an arithmetic / bitwise operator must be numeric
+    /// (`int` / `float` / `byte`), `string` for `+`, or carry an instance of
+    /// the operator's trait (`impl Sub for Vec2`). The VM would otherwise
+    /// operate on the raw words (a string pointer minus a string pointer),
+    /// which is a bogus value that can crash later (#554).
+    fn check_ground_arith_operands(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
+            return;
+        }
+        let trait_name = match op {
+            "+" => Some("Add"),
+            "-" => Some("Sub"),
+            "*" => Some("Mul"),
+            "/" => Some("Div"),
+            _ => None,
+        };
+        if let Some(class) = trait_name
+            && self
+                .generics
+                .find_instance(class, std::slice::from_ref(&lookup))
+                .is_some()
+        {
+            return;
+        }
+        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let help = match (op, trait_name) {
+            ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
+            (_, Some(class)) => format!(
+                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
+            ),
+            ("%" | "**", None) => format!("`{op}` takes `int` / `float` / `byte` operands"),
+            _ => format!("`{op}` takes `int` / `byte` operands"),
+        };
+        self.messages.push({
+            let mut m = Message::error(
+                ErrorCode::TypeMismatch,
+                format!("cannot apply `{op}` to operands of type `{pretty}`"),
+                range.clone(),
+            );
+            m.with_help(help);
+            m
+        });
+    }
+
+    /// Ground operands of `<` / `<=` / `>` / `>=` must be numeric or carry an
+    /// instance of the comparison's trait (`#[derive(Ord)]`, `impl Lt for …`).
+    fn check_ground_ordering_operands(
+        &mut self,
+        ty: &Ty,
+        class: &str,
+        method: &str,
+        range: &Range<usize>,
+    ) {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
+            return;
+        }
+        if self
+            .generics
+            .find_instance(class, std::slice::from_ref(&lookup))
+            .is_some()
+        {
+            return;
+        }
+        let op = match method {
+            "lt" => "<",
+            "le" => "<=",
+            "gt" => ">",
+            _ => ">=",
+        };
+        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        self.messages.push({
+            let mut m = Message::error(
+                ErrorCode::TypeMismatch,
+                format!("cannot compare operands of type `{pretty}` with `{op}`"),
+                range.clone(),
+            );
+            m.with_help(format!(
+                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+            ));
+            m
+        });
     }
 
     /// Element-wise / broadcast arithmetic on homogeneous tuples and arrays.

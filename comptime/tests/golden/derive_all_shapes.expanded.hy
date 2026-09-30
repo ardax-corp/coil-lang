@@ -148,7 +148,7 @@ impl String for Unit {
 enum Sh {
     Dot,
     Circle(int),
-    Pair(int, string),
+    Pair(int, int),
     Rect { w: int, h: int },
 }
 
@@ -541,33 +541,73 @@ impl Eq for Mode {
 
 impl Lt for Mode {
     fn lt(Mode __ord_lt_a_Mode, Mode __ord_lt_b_Mode) -> bool {
-        let __ord_lt_al_Mode: string = __ord_lt_a_Mode;
-        let __ord_lt_bl_Mode: string = __ord_lt_b_Mode;
-        return __ord_lt_al_Mode < __ord_lt_bl_Mode;
+        return match __ord_lt_a_Mode {
+            Mode::Read => match __ord_lt_b_Mode {
+                Mode::Read => false,
+                Mode::Write => true,
+                default => false,
+            },
+            Mode::Write => match __ord_lt_b_Mode {
+                Mode::Read => false,
+                Mode::Write => false,
+                default => false,
+            },
+            default => false,
+        };
     }
 }
 
 impl Le for Mode {
     fn le(Mode __ord_le_a_Mode, Mode __ord_le_b_Mode) -> bool {
-        let __ord_le_al_Mode: string = __ord_le_a_Mode;
-        let __ord_le_bl_Mode: string = __ord_le_b_Mode;
-        return __ord_le_al_Mode <= __ord_le_bl_Mode;
+        return match __ord_le_a_Mode {
+            Mode::Read => match __ord_le_b_Mode {
+                Mode::Read => true,
+                Mode::Write => true,
+                default => false,
+            },
+            Mode::Write => match __ord_le_b_Mode {
+                Mode::Read => false,
+                Mode::Write => true,
+                default => false,
+            },
+            default => false,
+        };
     }
 }
 
 impl Gt for Mode {
     fn gt(Mode __ord_gt_a_Mode, Mode __ord_gt_b_Mode) -> bool {
-        let __ord_gt_al_Mode: string = __ord_gt_a_Mode;
-        let __ord_gt_bl_Mode: string = __ord_gt_b_Mode;
-        return __ord_gt_al_Mode > __ord_gt_bl_Mode;
+        return match __ord_gt_a_Mode {
+            Mode::Read => match __ord_gt_b_Mode {
+                Mode::Read => false,
+                Mode::Write => false,
+                default => false,
+            },
+            Mode::Write => match __ord_gt_b_Mode {
+                Mode::Read => true,
+                Mode::Write => false,
+                default => false,
+            },
+            default => false,
+        };
     }
 }
 
 impl Ge for Mode {
     fn ge(Mode __ord_ge_a_Mode, Mode __ord_ge_b_Mode) -> bool {
-        let __ord_ge_al_Mode: string = __ord_ge_a_Mode;
-        let __ord_ge_bl_Mode: string = __ord_ge_b_Mode;
-        return __ord_ge_al_Mode >= __ord_ge_bl_Mode;
+        return match __ord_ge_a_Mode {
+            Mode::Read => match __ord_ge_b_Mode {
+                Mode::Read => true,
+                Mode::Write => false,
+                default => false,
+            },
+            Mode::Write => match __ord_ge_b_Mode {
+                Mode::Read => true,
+                Mode::Write => true,
+                default => false,
+            },
+            default => false,
+        };
     }
 }
 
@@ -609,20 +649,20 @@ test("class Ord / Hash") {
 test("enum Show / String") {
     assert(Sh::Dot.show() == "Sh::Dot")?;
     assert(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show())?;
-    assert(Sh::Pair(1, "a").show() == "Sh::Pair(1, a)", Sh::Pair(1, "a").show())?;
+    assert(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)", Sh::Pair(1, 2).show())?;
     assert(Sh::Rect{ w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
 }
 
 test("enum Eq / Ord") {
     assert(Sh::Circle(3) == Sh::Circle(3))?;
     assert(Sh::Circle(3) != Sh::Circle(4))?;
-    assert(Sh::Pair(1, "a") != Sh::Pair(1, "b"))?;
+    assert(Sh::Pair(1, 2) != Sh::Pair(1, 3))?;
     assert(Sh::Dot != Sh::Circle(0))?;
     assert(Sh::Dot < Sh::Circle(0))?;
     assert(Sh::Circle(1) < Sh::Circle(2))?;
     assert(Sh::Rect{ w: 1, h: 2 } < Sh::Rect{ w: 1, h: 3 })?;
     assert(Sh::Rect{ w: 1, h: 2 } >= Sh::Rect{ w: 1, h: 2 })?;
-    assert(Sh::Rect{ w: 0, h: 0 } > Sh::Pair(9, "z"))?;
+    assert(Sh::Rect{ w: 0, h: 0 } > Sh::Pair(9, 9))?;
 }
 
 test("enum Hash") {
