@@ -191,3 +191,76 @@ fn imported_parse_error_is_reported_on_that_file() {
         assert!(messages.is_empty(), "cascade in main.hy: {messages:?}");
     }
 }
+
+fn open(client: &mut Client, uri: &str, text: &str) {
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "coil", "version": 1, "text": text } }),
+    );
+}
+
+/// LSP position of the first `needle` in `text`, plus `delta` bytes.
+fn position_of(text: &str, needle: &str, delta: usize) -> Value {
+    let offset = text.find(needle).expect("needle") + delta;
+    let line = text[..offset].matches('\n').count();
+    let column = offset - text[..offset].rfind('\n').map_or(0, |i| i + 1);
+    json!({ "line": line, "character": column })
+}
+
+#[test]
+fn member_completion_lists_fields_and_methods() {
+    let text = CLASS_SOURCE.replace("let _ = p.get();", "let _ = p.g");
+    let dir = project("member-completion", &[("src/main.hy", &text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, &text);
+    let response = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": main }, "position": position_of(&text, "p.g", 3) }),
+    );
+    let labels: Vec<&str> = response["result"]
+        .as_array()
+        .expect("completion list")
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["get"]);
+
+    let empty = CLASS_SOURCE.replace("let _ = p.get();", "let _ = p.");
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": main, "version": 2 }, "contentChanges": [{ "text": empty }] }),
+    );
+    let response = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": main }, "position": position_of(&empty, "p.", 2) }),
+    );
+    let labels: Vec<&str> = response["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["x", "get"]);
+}
+
+#[test]
+fn member_goto_definition_finds_method_and_field() {
+    let dir = project("member-goto", &[("src/main.hy", CLASS_SOURCE)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, CLASS_SOURCE);
+    let response = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": main }, "position": position_of(CLASS_SOURCE, "p.get", 3) }),
+    );
+    assert_eq!(
+        response["result"][0]["range"]["start"],
+        position_of(CLASS_SOURCE, "get() -> int", 0)
+    );
+    let response = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": main }, "position": position_of(CLASS_SOURCE, "self.x", 5) }),
+    );
+    assert_eq!(response["result"][0]["range"]["start"], position_of(CLASS_SOURCE, "x: int", 0));
+}

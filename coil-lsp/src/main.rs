@@ -317,13 +317,17 @@ fn handle_request(
         }
         "textDocument/completion" => {
             let params: CompletionParams = serde_json::from_value(request.params.clone())?;
-            let items = state
-                .documents
-                .get(&params.text_document_position.text_document.uri)
-                .map(|document| {
-                    completions(document, params.text_document_position.position)
-                })
-                .unwrap_or_default();
+            let uri = &params.text_document_position.text_document.uri;
+            let position = params.text_document_position.position;
+            // `recv.` / `recv.pre`: the receiver's fields and methods.
+            let items = match member_completions(state, uri, position) {
+                Some(items) => items,
+                None => state
+                    .documents
+                    .get(uri)
+                    .map(|document| completions(document, position))
+                    .unwrap_or_default(),
+            };
             Some(serde_json::to_value(items)?)
         }
         "textDocument/signatureHelp" => {
@@ -360,6 +364,13 @@ fn handle_request(
         }
         "textDocument/definition" | "textDocument/typeDefinition" => {
             let params: GotoDefinitionParams = serde_json::from_value(request.params.clone())?;
+            if let Some(location) = member_definition(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            ) {
+                return Ok(Some(serde_json::to_value(vec![location])?));
+            }
             let locations = goto_definitions(
                 state,
                 &params.text_document_position_params.text_document.uri,
@@ -2068,6 +2079,244 @@ fn collect_nodes_containing<'a, 'e>(node: &'a Output<'e>, offset: usize, out: &m
     out.push(node);
     node.1
         .for_each_child(&mut |child| collect_nodes_containing(child, offset, out));
+}
+
+/// `recv.` / `recv.pre` ending at `offset`: receiver path segments
+/// (`self.items` → `["self", "items"]`), the typed member prefix, and the
+/// byte range of `.pre`.
+fn member_access_at(text: &str, offset: usize) -> Option<(Vec<String>, String, Range<usize>)> {
+    let bytes = text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = offset.min(bytes.len());
+    let prefix_end = i;
+    while i > 0 && is_ident(bytes[i - 1]) {
+        i -= 1;
+    }
+    let prefix = text[i..prefix_end].to_string();
+    if i == 0 || bytes[i - 1] != b'.' {
+        return None;
+    }
+    let dot = i - 1;
+    let mut segments = Vec::new();
+    let mut end = dot;
+    loop {
+        let mut start = end;
+        while start > 0 && is_ident(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start == end || bytes[start].is_ascii_digit() {
+            return None;
+        }
+        segments.push(text[start..end].to_string());
+        if start > 0 && bytes[start - 1] == b'.' {
+            end = start - 1;
+        } else {
+            break;
+        }
+    }
+    segments.reverse();
+    Some((segments, prefix, dot..prefix_end))
+}
+
+/// Class name inside a type's display text (`util::Point`, `Box<int>`).
+fn class_of_type_text(text: &str) -> String {
+    text.split('<').next().unwrap_or(text).trim().to_string()
+}
+
+/// A receiver member for completion: name, type text, is a method.
+type MemberInfo = (String, String, bool);
+
+/// Class of `segments` whose `.member` sits at `access` in `uri`'s buffer,
+/// with its members. Typechecks a copy with the access removed (`p.su` →
+/// `p;`) so a half-typed member still types its receiver, then restores
+/// the project.
+fn receiver_class(
+    state: &mut ServerState,
+    uri: &Uri,
+    segments: &[String],
+    access: Range<usize>,
+) -> Option<(String, Vec<MemberInfo>)> {
+    let text = state.documents.get(uri)?.text.clone();
+    let path = uri_path(uri)?;
+    // The receiver's first identifier starts `segments.join(".").len()` before the dot.
+    let chain_len = segments.join(".").len();
+    let base_start = access.start.checked_sub(chain_len)?;
+    let base_range = base_start..base_start + segments[0].len();
+    // Blank the access when the statement goes on (`self.x;` → `self  ;`),
+    // else end it (`p.su⏎}` → `p;⏎}`).
+    let rest = &text[access.end..];
+    let continues = rest.trim_start().starts_with([';', ')', ',', ']']);
+    let filler = if continues {
+        " ".repeat(access.len())
+    } else {
+        ";".to_string()
+    };
+    let repaired = format!("{}{filler}{rest}", &text[..access.start]);
+    let ast = Pratt::default().parse(&repaired).ok()?;
+    let index = state.project_index.as_mut()?;
+    index.apply_open_file(path.clone(), repaired.clone());
+    let _ = index.typecheck_entry(&path);
+    let checker = index.checker();
+    let found = (|| {
+        // `self` has no typed node: it is the enclosing `impl`'s owner.
+        let mut ty = if segments[0] == "self" {
+            let mut owner = None;
+            visit_nodes(&ast, &mut |node| {
+                if let Expression::Implementation { owner: o, .. } = node.1.as_ref()
+                    && (node.0.start..node.0.end).contains(&base_range.start)
+                {
+                    owner = Some(o.to_string());
+                }
+            });
+            owner?
+        } else {
+            hover_type(
+                &ast,
+                Some(checker),
+                &repaired,
+                &segments[0],
+                base_range.start,
+                &base_range,
+            )?
+        };
+        for field in &segments[1..] {
+            let members = members_of(checker, &class_of_type_text(&ty));
+            let (_, field_ty, _, _) = members.into_iter().find(|m| &m.0 == field && !m.2)?;
+            ty = format_ty_for_diag(checker.subst(), &field_ty);
+        }
+        let class = class_of_type_text(&ty);
+        let members: Vec<MemberInfo> = members_of(checker, &class)
+            .into_iter()
+            .map(|(name, ty, is_method, _)| {
+                (name, format_ty_for_diag(checker.subst(), &ty), is_method)
+            })
+            .collect();
+        (!members.is_empty()).then_some((class, members))
+    })();
+    // Back to the real buffer (and its diagnostics / span tables).
+    refresh_project(state, &path);
+    found
+}
+
+/// Members of `class`, trying the bare name when the key is qualified.
+fn members_of(checker: &Checker, class: &str) -> Vec<(String, compiler::Ty, bool, bool)> {
+    let members = checker.class_members(class);
+    if !members.is_empty() {
+        return members;
+    }
+    class
+        .rsplit("::")
+        .next()
+        .map(|bare| checker.class_members(bare))
+        .unwrap_or_default()
+}
+
+/// Completion items for `recv.pre`: the receiver class's fields and methods.
+fn member_completions(
+    state: &mut ServerState,
+    uri: &Uri,
+    position: Position,
+) -> Option<Vec<CompletionItem>> {
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let (segments, prefix, access) = member_access_at(&text, offset)?;
+    let (_, members) = receiver_class(state, uri, &segments, access)?;
+    let items = members
+        .into_iter()
+        .filter(|(name, ..)| name.starts_with(&prefix))
+        .map(|(name, detail, is_method)| CompletionItem {
+            label: name.clone(),
+            kind: Some(if is_method {
+                CompletionItemKind::METHOD
+            } else {
+                CompletionItemKind::FIELD
+            }),
+            detail: Some(detail),
+            insert_text: Some(if is_method { format!("{name}($0)") } else { name }),
+            insert_text_format: is_method.then_some(InsertTextFormat::SNIPPET),
+            ..CompletionItem::default()
+        })
+        .collect();
+    Some(items)
+}
+
+/// Go to the declaration of the member under the cursor (`p.sum`, `p.x`).
+fn member_definition(state: &mut ServerState, uri: &Uri, position: Position) -> Option<Location> {
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let word = word_range(&text, offset)?;
+    let member = text[word.clone()].to_string();
+    let (segments, _, access) = member_access_at(&text, word.end)?;
+    let (class, _) = receiver_class(state, uri, &segments, access)?;
+    let bare = class.rsplit("::").next().unwrap_or(&class).to_string();
+    // Search open buffers, then indexed project files, for the declaration.
+    let mut sources: Vec<(Uri, String)> = state
+        .documents
+        .iter()
+        .map(|(u, d)| (u.clone(), d.text.clone()))
+        .collect();
+    if let Some(index) = &state.project_index {
+        for path in index.indexed_paths() {
+            if let (Some(u), Some(src)) = (path_to_uri(path), index.source_for(path))
+                && !sources.iter().any(|(existing, _)| existing == &u)
+            {
+                sources.push((u, src.to_string()));
+            }
+        }
+    }
+    for (u, src) in sources {
+        if let Some(range) = member_decl_range(&src, &bare, &member) {
+            return Some(Location {
+                uri: u,
+                range: byte_range(&src, &range),
+            });
+        }
+    }
+    None
+}
+
+/// Name span of field `member` in `class Owner` or method `member` in an
+/// `impl Owner` block of `source`.
+fn member_decl_range(source: &str, owner: &str, member: &str) -> Option<Range<usize>> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let offset_of = |name: &str| {
+        let base = source.as_ptr() as usize;
+        let ptr = name.as_ptr() as usize;
+        (ptr >= base && ptr + name.len() <= base + source.len()).then(|| ptr - base)
+    };
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        match node.1.as_ref() {
+            Expression::Class { name, fields, .. } if *name == owner => {
+                for (_, field) in fields {
+                    if let Expression::Field { name: fname, .. } = field.as_ref()
+                        && let Expression::Identifier(f) = fname.1.as_ref()
+                        && *f == member
+                    {
+                        found = offset_of(f).map(|o| o..o + f.len());
+                    }
+                }
+            }
+            Expression::Implementation { owner: o, methods, .. } if *o == owner => {
+                for method in methods {
+                    let mut m = method;
+                    if let Expression::Method(_, inner) = m.1.as_ref() {
+                        m = inner;
+                    }
+                    if let Expression::Function { name, .. } = m.1.as_ref()
+                        && *name == member
+                    {
+                        found = offset_of(name).map(|o| o..o + name.len());
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    found
 }
 
 fn hover(document: &Document, position: Position) -> Option<Hover> {
