@@ -503,65 +503,22 @@ impl Pipeline {
             ));
         }
 
-        let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
-        sub.project_root = self.project_root.clone();
-        sub.roots = self.roots.clone();
-        sub.macro_host = Some(host.clone());
-        sub.macro_stack = self.macro_stack.clone();
-        sub.macro_stack.extend(jobs.iter().map(|j| j.file.clone()));
-        sub.auto_par = false;
-        // Macros run briefly; the full optimizer costs far more than it saves.
-        // (`None` changed some macros' results; see limitations.md.)
-        sub.opt_level = crate::OptLevel::Basic;
-        for (path, source) in &self.overlays {
-            sub.overlays.insert(path.clone(), source.clone());
-        }
-        let entry = expansion_entry_path();
-        sub.overlays.insert(entry.clone(), text.clone());
-        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
-        let (bytecode, constants) = match compiled {
-            Ok(out) => out,
-            Err(_) => {
-                let detail = sub
-                    .messages()
-                    .iter()
-                    .filter(|m| matches!(m.kind(), reporting::MessageKind::ERROR))
-                    .map(|m| m.message().to_string())
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let mut providers: Vec<&str> = jobs.iter().map(|j| j.provider_module.as_str()).collect();
-                providers.sort_unstable();
-                providers.dedup();
-                let detail = if detail.is_empty() {
-                    "see the errors reported for the macro module".to_string()
-                } else {
-                    detail
-                };
-                return jobs
-                    .iter()
-                    .map(|_| {
-                        Err(format!(
-                            "could not compile the macro module(s) {}: {detail}",
-                            providers.join(", ")
-                        ))
-                    })
-                    .collect();
-            }
+        let mut providers: Vec<&str> = jobs.iter().map(|j| j.provider_module.as_str()).collect();
+        providers.sort_unstable();
+        providers.dedup();
+        let ctx = SubProgram {
+            project_root: self.project_root.clone(),
+            roots: self.roots.clone(),
+            host,
+            macro_stack: self.macro_stack.iter().cloned().chain(jobs.iter().map(|j| j.file.clone())).collect(),
+            overlays: self.overlays.clone(),
+            text,
+            entries: jobs.len(),
+            providers: providers.join(", "),
         };
-        let mut offsets = Vec::with_capacity(jobs.len());
-        for i in 0..jobs.len() {
-            match sub.function_offset(&format!("__coil_expand_{i}")) {
-                Some(o) => offsets.push(o as u32),
-                None => {
-                    return jobs
-                        .iter()
-                        .map(|_| Err("expansion entry was not compiled".to_string()))
-                        .collect();
-                }
-            }
-        }
-        host.run(&sub, &bytecode, &constants, &offsets)
+        // A nested compile plus a VM run is deeper than Windows' 1 MiB main
+        // thread stack; continue on a fresh segment when little is left.
+        stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, move || ctx.compile_and_run())
     }
 
     /// Parse one macro's output and put it into the file's AST.
@@ -842,4 +799,72 @@ fn check_member_attrs(jobs: &[Job]) -> Vec<Message> {
         }
     }
     out
+}
+
+/// Below this much remaining stack, an expansion runs on a new segment of
+/// [`EXPANSION_STACK`] bytes.
+const EXPANSION_RED_ZONE: usize = 4 * 1024 * 1024;
+const EXPANSION_STACK: usize = 16 * 1024 * 1024;
+
+/// What an expansion needs from the parent pipeline.
+struct SubProgram {
+    project_root: PathBuf,
+    roots: Vec<PathBuf>,
+    host: std::sync::Arc<dyn crate::macros::MacroHost>,
+    macro_stack: Vec<PathBuf>,
+    overlays: HashMap<PathBuf, String>,
+    /// Source of `<coil>/expand.hy`.
+    text: String,
+    entries: usize,
+    /// Provider modules, for the compile-error message.
+    providers: String,
+}
+
+impl SubProgram {
+    /// Compile the expansion program in a sub-pipeline and run each entry.
+    fn compile_and_run(self) -> Vec<Result<String, String>> {
+        let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
+        sub.project_root = self.project_root;
+        sub.roots = self.roots;
+        sub.macro_host = Some(self.host.clone());
+        sub.macro_stack = self.macro_stack;
+        sub.auto_par = false;
+        // Macros run briefly; the full optimizer costs far more than it saves.
+        // (`None` changed some macros' results; see limitations.md.)
+        sub.opt_level = crate::OptLevel::Basic;
+        sub.overlays = self.overlays;
+        let entry = expansion_entry_path();
+        sub.overlays.insert(entry.clone(), self.text);
+        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
+        let (bytecode, constants) = match compiled {
+            Ok(out) => out,
+            Err(_) => {
+                let detail = sub
+                    .messages()
+                    .iter()
+                    .filter(|m| matches!(m.kind(), reporting::MessageKind::ERROR))
+                    .map(|m| m.message().to_string())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let detail = if detail.is_empty() {
+                    "see the errors reported for the macro module".to_string()
+                } else {
+                    detail
+                };
+                let message = format!("could not compile the macro module(s) {}: {detail}", self.providers);
+                return vec![Err(message); self.entries];
+            }
+        };
+        let mut offsets = Vec::with_capacity(self.entries);
+        for i in 0..self.entries {
+            match sub.function_offset(&format!("__coil_expand_{i}")) {
+                Some(o) => offsets.push(o as u32),
+                None => {
+                    return vec![Err("expansion entry was not compiled".to_string()); self.entries];
+                }
+            }
+        }
+        self.host.run(&sub, &bytecode, &constants, &offsets)
+    }
 }
