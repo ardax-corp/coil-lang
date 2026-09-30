@@ -205,7 +205,6 @@ mod archive_staleness {
     }
 }
 
-/// Canonical entry path for FFI `base_dir` resolution (best-effort absolute).
 /// Warn when a cached `.hyc` is older than sources recorded in its debug bundle.
 fn maybe_warn_stale_archive(
     pipeline: &mut Pipeline,
