@@ -33,7 +33,6 @@ See [macros.md](macros.md).
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Outputs are cached in memory by provider sources + input (the LSP and `coil test` reuse them); a fresh `coil` process compiles the providing modules once more. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
-| `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
 
 ## Lambdas / captures
 

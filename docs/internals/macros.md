@@ -129,8 +129,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    attribute"). A module using its own macro is a staging error.
 3. **Encode** each call's input as coil source (`macros::encode`). Every object
    is bound to its own `let`, so no constructor is nested in another's
-   arguments. This also sidesteps a miscompile where `Vec::from([new A(new
-   B(…))])` aliased the elements' inner objects.
+   arguments.
 4. **Compile** one expansion program (`<coil>/expand.hy`: `use` of each
    provider function under an alias, one `fn __coil_expand_i() -> string` per
    call) in a sub-`Pipeline` with the same roots. The sub-pipeline expands its
