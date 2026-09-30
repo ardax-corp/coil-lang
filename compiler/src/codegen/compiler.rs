@@ -17440,6 +17440,9 @@ impl Compiler {
                 {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
+                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Add", "add") {
+                    // Ground class / enum with a `Add` instance (#554): CALL the
+                    // instance, as `==` / `<` do, instead of the raw opcode.
                 } else {
                     let is_float = likely(self.compile_binary_operands(&mut bytecode, lhs, rhs));
                     bytecode.push(Byte::new(if is_float {
@@ -17475,6 +17478,9 @@ impl Compiler {
                         hint.dict_index,
                         hint.method_slot,
                     ) { true } else { false }) {
+                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Sub", "sub") {
+                    // Ground class / enum with a `Sub` instance (#554): CALL the
+                    // instance, as `==` / `<` do, instead of the raw opcode.
                 } else {
                     let is_float = likely(self.compile_binary_operands(&mut bytecode, lhs, rhs));
                     bytecode.push(Byte::new(if is_float {
@@ -17516,6 +17522,9 @@ impl Compiler {
                             hint.dict_index,
                             hint.method_slot,
                         ) { true } else { false }) {
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Mul", "mul") {
+                        // Ground class / enum with a `Mul` instance (#554): CALL the
+                        // instance, as `==` / `<` do, instead of the raw opcode.
                     } else {
                         let is_float =
                             likely(self.compile_binary_operands(&mut bytecode, lhs, rhs));
@@ -17574,6 +17583,9 @@ impl Compiler {
                             hint.dict_index,
                             hint.method_slot,
                         ) { true } else { false }) {
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Div", "div") {
+                        // Ground class / enum with a `Div` instance (#554): CALL the
+                        // instance, as `==` / `<` do, instead of the raw opcode.
                     } else {
                         let is_float =
                             likely(self.compile_binary_operands(&mut bytecode, lhs, rhs));

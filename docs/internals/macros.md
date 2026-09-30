@@ -206,7 +206,8 @@ variants (`E::V(%v)`), `Eq` / `Ord` compare field-wise then by variant order
 `* 31 +` from the variant index, `Default` is a `static fn` that gives each
 field its type's default (`0`, `0.0`, `false`, `""`, or `Ty::default()`; an
 enum takes its first variant), and scalar-backed enums
-compare / show their backing. When they replaced the Rust code, every
+compare / show their backing (a `#[repr(string)]` enum orders by declaration,
+since strings have no ordering). When they replaced the Rust code, every
 derive-using program compiled to identical bytecode except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
