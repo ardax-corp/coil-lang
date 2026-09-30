@@ -2811,6 +2811,18 @@ impl<const S: usize> Machine<S> {
     }
 
     /// True when `value` is a heap `Result::Ok` (enum tag 0).
+    /// Text of a boxed `Result::Err(payload)` (a string payload as is, other
+    /// payloads stringified), for harness failure reports.
+    pub fn result_err_text(&self, value: Value) -> Option<String> {
+        match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
+            Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
+                let payload = gc.as_ref().payload.first().copied()?;
+                Some(Self::stringify_value(&self.heap, payload))
+            }
+            _ => None,
+        }
+    }
+
     pub fn result_is_ok(&self, value: Value) -> bool {
         match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
             Some(Object::Enum(gc)) => gc.as_ref().tag == 0,

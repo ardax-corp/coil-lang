@@ -232,12 +232,20 @@ fn maybe_warn_stale_archive(
     }
 }
 
-/// Warn when a stale default `out.hyc` exists beside an in-memory run entry.
+/// Warn when a stale default `out.hyc` built **from this entry** exists
+/// beside an in-memory run. An `out.hyc` from another program is unrelated.
 fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &ProgramDebug) {
     if !Path::new(DEFAULT_OUT).exists() {
         return;
     }
-    if archive_staleness::archive_is_stale(entry, DEFAULT_OUT, debug) {
+    let from_this_entry = try_load_archive(DEFAULT_OUT).is_ok_and(|archived| {
+        archived
+            .debug
+            .source_files
+            .iter()
+            .any(|src| archive_staleness::same_source_path(src, entry))
+    });
+    if from_this_entry && archive_staleness::archive_is_stale(entry, DEFAULT_OUT, debug) {
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
@@ -345,6 +353,15 @@ fn cmd_compile(
 }
 
 fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
+    if archive.ends_with(".hy") {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!(
+                "`{archive}` is a source file, not a bytecode archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
+            ),
+        );
+    }
     let loaded = match try_load_archive(archive) {
         Ok(ok) => ok,
         Err(LoadErr::Missing) => fail_and_exit(
@@ -463,12 +480,22 @@ fn run_test_case(
                 }
             }
             let ret = machine.call_function(offset, &[]);
-            !machine.panicked() && machine.result_is_ok(ret)
+            let ok = !machine.panicked() && machine.result_is_ok(ret);
+            let reason = if ok || machine.panicked() {
+                None
+            } else {
+                machine.result_err_text(ret)
+            };
+            (ok, reason)
         }));
     match result {
-        Ok(ok) => {
+        Ok((ok, reason)) => {
             if !ok {
-                eprintln!("> Test \"{name}\" failed");
+                match reason {
+                    // `assert(cond, "message")?` returns `Err("message")`.
+                    Some(reason) => eprintln!("> Test \"{name}\" failed: {reason}"),
+                    None => eprintln!("> Test \"{name}\" failed"),
+                }
             }
             ok
         }
