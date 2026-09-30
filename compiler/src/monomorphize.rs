@@ -882,6 +882,12 @@ where
             returns,
             body,
             ..
+        }
+        | Expression::FnMacroDecl {
+            args,
+            returns,
+            body,
+            ..
         } => {
             f(args);
             if let Some(returns) = returns {
@@ -889,6 +895,7 @@ where
             }
             f(body);
         }
+        Expression::MacroCall { args, .. } => args.iter().for_each(f),
     }
 }
 

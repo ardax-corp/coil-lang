@@ -453,3 +453,24 @@ fn code_action_expands_macros_and_diagnostics_see_generated_code() {
     assert!(expanded.contains("pub static fn answer() -> int"), "{expanded}");
     assert!(!expanded.contains("#[derive(Answer)]"), "{expanded}");
 }
+
+#[test]
+fn code_action_expands_function_macro_calls() {
+    let provider = "use macro::{Expr, Code};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n";
+    let main_text = "use gen::{twice};\n\nfn main() {\n    let x = twice!(21);\n}\n";
+    let dir = project(
+        "action-expand-fn-macro",
+        &[("src/main.hy", main_text), ("src/gen.hy", provider)],
+    );
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, main_text);
+    client.request("coil/sync", Value::Null);
+    let actions = code_actions(&mut client, &main, position_of(main_text, "twice!", 0));
+    let expand = actions
+        .iter()
+        .find(|a| a["title"] == "Expand macros in this file")
+        .unwrap_or_else(|| panic!("no expand action in {actions:?}"));
+    let expanded = apply_action(main_text, &main, expand);
+    assert!(expanded.contains("let x = 21 * 2;"), "{expanded}");
+}

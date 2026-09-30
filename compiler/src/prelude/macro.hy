@@ -1,10 +1,14 @@
-// Compile-time declaration model for derive and attribute macros.
+// Compile-time declaration model for derives, attribute macros and
+// function-style macros.
 //
 // A derive receives a read-only `TypeDecl` describing the declaration as
 // written (types are not resolved) and returns `Code`: coil source that is
 // parsed and typechecked like hand-written code, placed after the type. An
 // attribute macro receives an `FnDecl` or `TypeDecl` and returns the `Code`
-// that replaces it.
+// that replaces it. A function-style macro (`macro name(Expr a, …)`, used as
+// `name!(…)`) receives each argument as an `Expr` and returns the `Code` that
+// replaces the call: items, statements or one expression, by where the call
+// is.
 //
 // `quote items|expr|stmts|type { … }` builds `Code`. `${x}` splices
 // `x.src()` (an `Ident`, `TypeRef` or `Code`; wrap strings with `lit`), and
@@ -86,6 +90,41 @@ impl Ident {
 /// A name, for splicing generated identifiers: `${ident("to_" + n)}`.
 fn ident(string name) -> Ident {
     return new Ident(name);
+}
+
+/// A function-style macro argument as written: `f(1)`, `a + b`, `"text"`.
+class Expr {
+    pub text: string,
+    /// `literal`, `ident`, `path`, `call` or `other`.
+    pub kind_name: string,
+}
+
+impl Expr {
+    /// The source text as written.
+    pub fn str() -> string {
+        return self.text;
+    }
+
+    /// The source to splice: parenthesized unless it is a single term, so
+    /// `${a} * 2` keeps `a` whole.
+    pub fn src() -> string {
+        if self.kind_name == "other" {
+            return "(" + self.text + ")";
+        }
+        return self.text;
+    }
+
+    pub fn kind() -> string {
+        return self.kind_name;
+    }
+
+    pub fn is_literal() -> bool {
+        return self.kind_name == "literal";
+    }
+
+    pub fn is_ident() -> bool {
+        return self.kind_name == "ident";
+    }
 }
 
 /// A type annotation as written (not resolved): `Vec<int>`, `json::Value`.
@@ -493,6 +532,25 @@ impl Reader {
     pub fn ident() -> Ident {
         let name = self.str();
         return new Ident(name);
+    }
+
+    /// A macro argument: kind, then text.
+    pub fn expr() -> Expr {
+        let kind = self.str();
+        let text = self.str();
+        return new Expr(text, kind);
+    }
+
+    pub fn exprs() -> Vec<Expr> {
+        let n = self.int();
+        let out: Vec<Expr> = Vec::new();
+        let i = 0;
+        while i < n {
+            let x = self.expr();
+            out.push(x);
+            i += 1;
+        }
+        return out;
     }
 
     pub fn idents() -> Vec<Ident> {

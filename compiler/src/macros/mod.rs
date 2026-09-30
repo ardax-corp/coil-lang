@@ -1,16 +1,17 @@
-//! User-defined derive and attribute macros.
+//! User-defined derives, attribute macros and function-style macros.
 //!
-//! A macro is ordinary coil that runs at compile time. `derive Name(TypeDecl t)`
-//! and `attr name(FnDecl f, …)` / `attr name(TypeDecl t, …)` are lowered to
-//! plain functions ([`lower`]); `quote` templates become string building on
-//! the embedded `macro` module ([`MACRO_SOURCE`]).
+//! A macro is ordinary coil that runs at compile time. `derive Name(TypeDecl t)`,
+//! `attr name(FnDecl f, …)` / `attr name(TypeDecl t, …)` and
+//! `macro name(Expr a, …)` are lowered to plain functions ([`lower`]); `quote`
+//! templates become string building on the embedded `macro` module
+//! ([`MACRO_SOURCE`]).
 //!
-//! Using one (`#[derive(Name)]`, `#[name(...)]`) records a [`PendingMacro`]
-//! during attribute expansion. After discovery the pipeline compiles the
-//! providing modules into one expansion program, runs it through a
-//! [`MacroHost`] (the VM, with no host access and a step budget), re-parses
+//! Using one (`#[derive(Name)]`, `#[name(...)]`, `name!(…)`) records a
+//! [`PendingMacro`] during attribute expansion. After discovery the pipeline
+//! compiles each providing module into an expansion program, runs it through
+//! a [`MacroHost`] (the VM, with no host access and a step budget), re-parses
 //! the returned source and splices it next to (derive) or in place of
-//! (attribute) the declaration. See `docs/internals/macros.md`.
+//! (attribute, call) the use. See `docs/internals/macros.md`.
 
 pub mod encode;
 pub mod lower;
@@ -96,10 +97,17 @@ pub fn attr_fn_name(name: &str) -> String {
     format!("__attr_{name}")
 }
 
+/// Function a `macro name` is lowered to.
+pub fn macro_fn_name(name: &str) -> String {
+    format!("__macro_{name}")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacroKind {
     Derive,
     Attr,
+    /// `macro name(…)`, used as `name!(…)`.
+    Function,
 }
 
 impl MacroKind {
@@ -107,15 +115,33 @@ impl MacroKind {
         match self {
             Self::Derive => "derive",
             Self::Attr => "attribute macro",
+            Self::Function => "macro",
         }
     }
 }
 
-/// What an attribute macro receives.
+/// What a macro receives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacroInput {
     TypeDecl,
     FnDecl,
+    /// A function-style macro's arguments: `Expr` parameters, the last one
+    /// possibly `Vec<Expr>` (the rest).
+    Exprs,
+}
+
+/// Where a function-style macro call sits, which decides how its output
+/// parses and where it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallPosition {
+    /// A derive or attribute on a declaration.
+    Decl,
+    /// `name!(…);` at the top level: the output is items.
+    Item,
+    /// `name!(…);` in a block: the output is statements.
+    Stmt,
+    /// Anywhere else: the output is one expression.
+    Expr,
 }
 
 /// A `derive` or macro `attr` declared by a module.
@@ -129,7 +155,8 @@ pub struct MacroDecl {
     /// Field / variant attributes a derive owns (`attrs(json)`).
     pub helpers: Vec<String>,
     pub input: MacroInput,
-    /// Extra parameters of an attribute macro: `(name, type as written)`.
+    /// Extra parameters of an attribute macro, or every parameter of a
+    /// function-style macro: `(name, type as written)`.
     pub params: Vec<(String, String)>,
 }
 
@@ -148,17 +175,22 @@ pub struct MacroArg {
 pub struct PendingMacro {
     pub kind: MacroKind,
     pub name: String,
-    /// Span of the declaration it applies to (identifies it in the AST).
+    /// Span of the declaration it applies to, or of the `name!(…)` call
+    /// (identifies it in the AST).
     pub target: parser::SimpleSpan,
+    pub position: CallPosition,
     /// Owning class for an `impl` method, `None` for a top-level item.
     pub owner: Option<String>,
     /// Attribute arguments (attribute macros).
     pub args: Vec<MacroArg>,
-    /// Where diagnostics point: the declaration header.
+    /// Where diagnostics point: the declaration header or the call.
     pub range: Range<usize>,
     /// Field / variant attributes on the type (derives): each must be a
     /// helper of one of the type's derives.
     pub member_attrs: Vec<String>,
+    /// For a use in macro output: the module that produced it, whose own
+    /// macros resolve without an import where the output lands.
+    pub from_provider: Option<PathBuf>,
 }
 
 /// A compiled expansion program: everything a host needs to run its entries.

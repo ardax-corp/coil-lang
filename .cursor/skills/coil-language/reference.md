@@ -102,6 +102,7 @@ use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 | `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
 | Attribute macro `#[name(...)]` | `fn`, methods, `class`, `enum` — declared `attr name(FnDecl f, …) -> Code` / `attr name(TypeDecl t, …) -> Code` in another module; returns the code that replaces the item. Stacked ones apply outermost first |
 | User derive `#[derive(X)]` | `class`, `enum` — `derive X(TypeDecl t) -> Code attrs(helper)` in another module; `#[helper(...)]` on fields / variants |
+| Function-style macro `name!(…)` | expression, statement or top-level item — `macro name(Expr a, …) -> Code` in another module; each argument is an ordinary expression, a last `Vec<Expr>` takes the rest |
 
 Tests are `test("desc") { … }` statements, not `#[test]` on `fn`.
 

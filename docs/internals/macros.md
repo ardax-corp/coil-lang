@@ -1,8 +1,9 @@
-# Macros: user derives and attribute macros
+# Macros: derives, attribute macros and function-style macros
 
-Packages define `derive`s and attribute macros in coil. The compiler runs them
-in the VM at compile time, after parsing and before typechecking, and splices
-their output next to (derive) or in place of (attribute macro) the declaration.
+Packages define `derive`s, attribute macros and function-style macros in coil.
+The compiler runs them in the VM at compile time, after parsing and before
+typechecking, and splices their output next to (derive) or in place of
+(attribute macro) the declaration, or in place of the `name!(…)` call.
 The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `String`, `Default`, `Send`,
 `Sensitive`) are derive macros too, in `compiler/src/prelude/derive.hy`.
 
@@ -50,6 +51,32 @@ class Config {
 fn triple(int x) -> int { return x * 3; }
 ```
 
+```coil
+// provider: examples/src/fn_macros.hy
+use macro::{Expr, Code, lit};
+
+/// A function-style macro: gets each argument as an `Expr`.
+macro check(Expr cond) -> Code {
+    return quote stmts {
+        if !${cond} {
+            panic "check failed: " + ${lit(cond.str())};
+        }
+    };
+}
+```
+
+```coil
+// user
+use fn_macros::{square, check, counter};
+
+counter!(Clicks);          // item: the output is declarations
+
+fn main() {
+    let x = square!(1 + 2); // expression: the output is one expression
+    check!(x == 9);         // statement: the output is statements
+}
+```
+
 - `derive Name(TypeDecl t) -> Code attrs(h, …) { … }` declares a derive. `attrs(...)`
   lists the field / variant helper attributes it owns.
 - `attr name(FnDecl f, …) -> Code` or `attr name(TypeDecl t, …) -> Code` declares an
@@ -59,10 +86,13 @@ fn triple(int x) -> int { return x * 3; }
 - Several attribute macros on one item apply outermost first: only the first
   runs, and it receives the item with the others still on it (and a type's
   derives, which run after it) — `FnDecl.with_name` keeps them.
-- `derive`, `attrs` and `quote` are contextual words, not reserved identifiers.
-- Macros are imported with `use` like any item. Derives have their own namespace,
-  so `json::ToJson` can be both a trait and its derive. The same name imported
-  from two modules is an error.
+- `macro name(Expr a, …, Vec<Expr> rest) -> Code` declares a function-style
+  macro, used as `name!(…)` (see [Function-style macros](#function-style-macros)).
+- `derive`, `attrs`, `macro` and `quote` are contextual words, not reserved
+  identifiers (`use macro::{…}` names the module).
+- Macros are imported with `use` like any item. Derives and function-style
+  macros have their own namespaces, so `json::ToJson` can be both a trait and
+  its derive. The same name imported from two modules is an error.
 
 ## The `macro` module
 
@@ -80,6 +110,7 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 | `TypeRef` | `str()`, `head()`, `args()` |
 | `Attr` / `AttrArg` | `name`, `args`, `has(key)`, `arg(key, fallback)` |
 | `FnDecl` | `name`, `params: Vec<Param>`, `ret`, `type_params`, `attrs`, `owner` (class of an `impl` method), `is_static`, `is_coro`, `body_source()` (braces included), `signature(name)`, `arg_names()`, `source` |
+| `Expr` | a `name!(…)` argument as written: `str()` (source text), `src()` (parenthesized unless a single term), `kind()` (`"literal"` / `"ident"` / `"path"` / `"call"` / `"other"`), `is_literal()`, `is_ident()` |
 | `Code` | generated source: `src()` |
 | helpers | `lit(string)` (string literal), `lit_int`, `raw(text)`, `ident(name)`, `join(Vec<Code>, sep)`, `concat` |
 
@@ -95,7 +126,7 @@ directly.
 The parser keeps the template as text with holes (`Expression::Quote`), and
 `macros::lower` turns it into string building:
 
-- `${e}` splices `e.src()`: an `Ident`, a `TypeRef` or a `Code`. Wrap a string
+- `${e}` splices `e.src()`: an `Ident`, a `TypeRef`, an `Expr` or a `Code`. Wrap a string
   with `lit(...)` (literal) or `raw(...)` (source).
 - `$(xs) sep *` splices a `Vec<Code>` with `sep` (up to two characters, possibly
   none) between the elements.
@@ -127,23 +158,28 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 ```
 
 1. **Attribute expansion** (`attrs::expand_program_in`, per file, during
-   discovery) lowers macro items and records every derive, and each item's
+   discovery) lowers macro items and records every derive, each item's
    first attribute that is not built in (`derive`, `repr`, `max_depth`, …),
-   as a `PendingMacro`. It still adds the type-name `Show` / `String`
+   and every outermost `name!(…)` call, as a `PendingMacro`. It still adds the type-name `Show` / `String`
    defaults. A field / variant attribute on a type with no derive is an
    error right away.
 2. **Resolve** each pending name through the file's top-level `use` items to a
    module whose `CachedAst::macro_decls` declares it; a built-in derive name
    that is not imported resolves to the embedded `derive` module (which only
    the expansion program imports, so it is never compiled into the user's
-   program). Nothing found: "Cannot derive unknown or non-derivable trait" /
-   "Unknown attribute". A module using its own macro is a staging error.
+   program). A use in macro output also resolves to its provider's own
+   macros, so `quote expr { square!(…) }` needs no import where it lands.
+   Nothing found: "Cannot derive unknown or non-derivable trait" /
+   "Unknown attribute" / "unknown macro `name!`". A module using its own
+   macro is a staging error.
 3. **Encode** each call's input as one string (`macros::encode::Wire`):
    length-prefixed fields (`<len>:<bytes>`, lists as a count then their
    items) in the order the model's constructors take them, then the
-   attribute arguments in parameter order. `macro::Reader` (`r.type_decl()`,
-   `r.fn_decl()`, `r.str()`, `r.int()`, `r.bool()`) decodes it in the VM.
-   Attribute-macro parameters are `string`, `int` or `bool`.
+   attribute arguments in parameter order; a call's arguments are
+   `(kind, source text)` each, the rest as a count then its items.
+   `macro::Reader` (`r.type_decl()`, `r.fn_decl()`, `r.expr()`, `r.exprs()`,
+   `r.str()`, `r.int()`, `r.bool()`) decodes it in the VM. Attribute-macro
+   parameters are `string`, `int` or `bool`.
 4. **Compile** the expansion program for the round's provider modules
    (`<coil>/expand.hy`: `use` of every macro function each provider declares,
    under an alias, and one `fn __coil_run_i(string input) -> string` wrapper
@@ -165,7 +201,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    `0x4000_0000+` spans the `Show` / `String` defaults use. Macro uses in
    generated code (stacked attributes, derives on a generated type) run in the
    next round, up to 16 rounds. Derive outputs keep the order the derives are
-   listed in. A derive
+   listed in. A call's output is parsed for its position (below). A derive
    that writes `impl Show for T` replaces the compiler's default type-name
    `Show` (same for `String`); an attribute macro that replaces a type drops
    the old type's defaults.
@@ -176,7 +212,36 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 
 `coil dissect --expand FILE` prints the entry file after expansion. The LSP
 checks projects through `typecheck_project`, which runs the same stage, and
-offers "Expand macros in this file" on attribute lines.
+offers "Expand macros in this file" on attribute lines and `name!(…)` lines.
+
+## Function-style macros
+
+`macro name(Expr a, Expr b) -> Code { … }` is lowered to
+`fn __macro_name(Expr a, Expr b) -> Code`. Every parameter is an `Expr`; a
+last `Vec<Expr>` parameter takes the remaining arguments. The arity is checked
+at the call ("macro `square!` takes 1 argument(s), found 2").
+
+`name!(args)` is an expression atom (`Expression::MacroCall`); `!` must be
+directly followed by `(`, so `a != b` and `!x` are unaffected. Each argument
+parses as an ordinary expression, so there is no custom grammar; named
+arguments and `...` spreads are refused. Only the outermost call of a nest is
+expanded in a round: calls in its arguments are part of its input text and
+expand in its output.
+
+Where the call is decides what its output is (`CallPosition`):
+
+| Call | Output parses as | Spliced |
+|------|------------------|---------|
+| `name!(…);` at the top level | items (a program) | in place of the statement |
+| `name!(…);` in a block | statements (`fn __coil_m() { <output> }`) | in place of the statement, in the enclosing block |
+| anywhere else | one expression (`return (<output>);`) | in place of the call |
+
+Output that does not parse there is "macro `name!` produced code that does not
+parse as an expression / statements", with the code as help. Hygiene applies
+as for other quotes: a `let tmp` in a `quote stmts` is `tmp__m`, so it does not
+clash with the caller's `tmp`. A call that failed to expand stays in the tree;
+the checker gives it a fresh type and codegen skips it, so the macro stage's
+error is the only one reported.
 
 ## Compile-time host
 
@@ -220,8 +285,9 @@ byte); serializers belong in format packages as user derives.
 - Derives on generic types are refused, as for built-ins:
   `impl<T: Show> Show for Box<T>` does not parse, and instances carry no
   constraints.
-- Function-style `name!(…)` macros and `comptime` (stages 3–4 of the macro
-  design) are not started.
+- `comptime` (stage 4 of the macro design) is not started.
+- A function-style macro call names the macro bare (`name!`); a path
+  (`m::name!`) does not parse.
 - Compiled expansion programs and outputs are cached in memory only: a fresh
   process compiles each provider set once more (an on-disk cache needs a
   location policy for user projects).

@@ -18664,6 +18664,10 @@ impl Compiler {
                 // Call sites flatten spread before emission; this arm keeps
                 // ID alignment if a spread node is reached defensively.
             }
+            Expression::MacroCall { .. } => {
+                // A call that failed to expand; the macro stage reported it
+                // and the program does not build.
+            }
 
             _expr => {
                 let mut message = Message::error(

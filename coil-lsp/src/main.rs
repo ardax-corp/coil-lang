@@ -2440,11 +2440,13 @@ fn code_actions(
             _ => {}
         }
     }
-    // Refactor: on an attribute line, replace the file with its macro
-    // expansion (what `coil dissect --expand` prints).
+    // Refactor: on an attribute line or a `name!(…)` call, replace the file
+    // with its macro expansion (what `coil dissect --expand` prints).
     if let Some(cursor) = position_to_byte(&text, range.start) {
         let line_start = text[..cursor].rfind('\n').map_or(0, |i| i + 1);
-        let on_attr = text[line_start..].trim_start().starts_with("#[");
+        let line_end = text[cursor..].find('\n').map_or(text.len(), |i| cursor + i);
+        let line = &text[line_start..line_end];
+        let on_attr = line.trim_start().starts_with("#[") || has_macro_call(line);
         if on_attr && let Some(index) = state.project_index.as_mut() {
             index.apply_open_file(path.clone(), text.clone());
             let expanded = index
@@ -4070,6 +4072,16 @@ fn semantic_tokens(
         None => merged,
     };
     encode_semantic_tokens(source, &filtered)
+}
+
+/// True when `line` has a `name!(` function-style macro call.
+fn has_macro_call(line: &str) -> bool {
+    line.match_indices("!(").any(|(i, _)| {
+        line[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use parser::{
 };
 use reporting::{ErrorCode, Message};
 
-use crate::macros::{MacroDecl, MacroKind, PendingMacro};
+use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
 const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr"];
 
@@ -43,6 +43,7 @@ pub fn expand_program_in(ast: &mut Output<'_>, module: &str) -> ExpandResult {
     let mut messages = lowered.messages;
     let mut pending = Vec::new();
     messages.extend(expand_decls(children, &mut pending));
+    record_macro_calls(children, &mut pending);
     ExpandResult {
         messages,
         macro_decls: lowered.decls,
@@ -82,6 +83,66 @@ fn reject_qualified_impl_heads(ast: &Output<'_>) -> Vec<Message> {
     out
 }
 
+/// Record every `name!(…)` call. Only the outermost call of a nest is
+/// recorded: calls in its arguments are part of its input, and expand in its
+/// output next round.
+fn record_macro_calls(children: &[Output<'_>], pending: &mut Vec<PendingMacro>) {
+    for child in children {
+        match statement_call(child) {
+            Some(call) => push_call(call, CallPosition::Item, pending),
+            None => record_in(child, pending),
+        }
+    }
+}
+
+fn record_in(node: &Output<'_>, pending: &mut Vec<PendingMacro>) {
+    match node.1.as_ref() {
+        Expression::MacroCall { .. } => push_call(node, CallPosition::Expr, pending),
+        Expression::Block(items) => {
+            for item in items {
+                match statement_call(item) {
+                    Some(call) => push_call(call, CallPosition::Stmt, pending),
+                    None => record_in(item, pending),
+                }
+            }
+        }
+        _ => node.1.for_each_child(&mut |c| record_in(c, pending)),
+    }
+}
+
+/// The call of a `name!(…);` statement.
+pub(crate) fn statement_call<'b, 'a>(node: &'b Output<'a>) -> Option<&'b Output<'a>> {
+    let inner = match node.1.as_ref() {
+        Expression::Statement(s) => s,
+        _ => node,
+    };
+    let Expression::ExprStatement(e) = inner.1.as_ref() else {
+        return None;
+    };
+    let mut e = e;
+    while let Expression::Expr(inner) = e.1.as_ref() {
+        e = inner;
+    }
+    matches!(e.1.as_ref(), Expression::MacroCall { .. }).then_some(e)
+}
+
+fn push_call(call: &Output<'_>, position: CallPosition, pending: &mut Vec<PendingMacro>) {
+    let Expression::MacroCall { name, .. } = call.1.as_ref() else {
+        return;
+    };
+    pending.push(PendingMacro {
+        kind: MacroKind::Function,
+        name: name.to_string(),
+        target: call.0,
+        position,
+        owner: None,
+        args: Vec::new(),
+        range: call.0.into_range(),
+        member_attrs: Vec::new(),
+        from_provider: None,
+    });
+}
+
 /// Diagnostic for a pending macro nothing in scope provides.
 pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
     match p.kind {
@@ -103,6 +164,18 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
             format!("Unknown attribute `{}`", p.name),
             p.range.clone(),
         ),
+        MacroKind::Function => {
+            let mut msg = Message::error(
+                ErrorCode::GenericTypeError,
+                format!("unknown macro `{}!`", p.name),
+                p.range.clone(),
+            );
+            msg.with_help(format!(
+                "import a `macro {}` with `use module::{{{}}};`",
+                p.name, p.name
+            ));
+            msg
+        }
     }
 }
 
@@ -111,10 +184,12 @@ fn pending_attr(name: &str, args: &AttrArgs<'_>, target: SimpleSpan, owner: Opti
         kind: MacroKind::Attr,
         name: name.to_string(),
         target,
+        position: CallPosition::Decl,
         owner: owner.map(str::to_string),
         args: crate::macros::encode::attr_args(args),
         range: target.into_range(),
         member_attrs: Vec::new(),
+        from_provider: None,
     }
 }
 
@@ -564,10 +639,12 @@ fn pending_derive(trait_name: &str, span: SimpleSpan) -> PendingMacro {
         kind: MacroKind::Derive,
         name: trait_name.to_string(),
         target: span,
+        position: CallPosition::Decl,
         owner: None,
         args: Vec::new(),
         range: span.into_range(),
         member_attrs: Vec::new(),
+        from_provider: None,
     }
 }
 

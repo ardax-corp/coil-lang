@@ -3323,6 +3323,11 @@ impl Checker {
                 self.forall_type(params, |checker| checker.infer(ty))
             }
 
+            // Expanded before typechecking. One left here failed to expand,
+            // and the macro stage reported why (unresolved, failed, no host):
+            // stay quiet and let the rest of the program check.
+            Expression::MacroCall { .. } => Ty::Var(self.counter.fresh()),
+
             // `unreachable!` because the match above is exhaustive over every
             #[allow(unreachable_patterns)]
             _ => unreachable!("all Expression variants must be handled above"),
@@ -14283,6 +14288,11 @@ impl Checker {
                 self.pre_register_enums_walk(params, errors);
                 self.pre_register_enums_walk(ret, errors);
             }
+            Expression::MacroCall { args, .. } => {
+                for a in args {
+                    self.pre_register_enums_walk(a, errors);
+                }
+            }
             Expression::Quote { parts, .. } => {
                 for part in parts {
                     if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
@@ -14298,6 +14308,12 @@ impl Checker {
                 ..
             }
             | Expression::DeriveDecl {
+                args,
+                returns,
+                body,
+                ..
+            }
+            | Expression::FnMacroDecl {
                 args,
                 returns,
                 body,

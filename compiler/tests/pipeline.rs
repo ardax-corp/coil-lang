@@ -3801,6 +3801,12 @@ fn example_attr_decorator_forwards_args_and_stacks_attrs() {
 }
 
 #[test]
+fn example_macro_fn_expands_in_each_position() {
+    let output = run_example("examples/macro_fn.hy");
+    assert_eq!(output, "9 15 16 swapped 2 1 clicks 2");
+}
+
+#[test]
 fn example_attr_class_decorates_constructor() {
     let output = run_example("examples/attr_class.hy");
     assert_eq!(output, "Point ctor512");

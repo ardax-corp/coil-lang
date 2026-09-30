@@ -10,7 +10,7 @@ use reporting::{ErrorCode, Message, ReportConfig};
 use super::Pipeline;
 use crate::macros::encode::{self, Strip};
 use crate::macros::{
-    MacroArg, MacroDecl, MacroInput, MacroKind, PendingMacro, lower::is_synthetic,
+    CallPosition, MacroArg, MacroDecl, MacroInput, MacroKind, PendingMacro, lower::is_synthetic,
 };
 use crate::manifest::resolve_use_in_roots;
 
@@ -257,6 +257,16 @@ impl Pipeline {
                 found.push((candidate, decl));
             }
         }
+        // Macro output may use its provider's other macros without an import.
+        if found.is_empty()
+            && let Some(provider) = &p.from_provider
+            && let Some(decl) = self
+                .ast_cache
+                .get(provider)
+                .and_then(|c| c.macro_decls().iter().find(|d| d.kind == p.kind && d.name == p.name).cloned())
+        {
+            found.push((provider.clone(), decl));
+        }
         // Built-in derives come from the embedded `derive` module. It is not
         // compiled into the user's program: only the expansion program
         // imports it.
@@ -303,6 +313,9 @@ impl Pipeline {
         let report = cached.report_source();
         let source = report.as_str();
         let ast = cached.ast().expect("parsed");
+        if decl.input == MacroInput::Exprs {
+            return encode_call(ast, source, p, decl);
+        }
         let Some(node) = find_target(ast, p) else {
             return Err(Message::error(
                 ErrorCode::GenericTypeError,
@@ -320,11 +333,13 @@ impl Pipeline {
             MacroInput::FnDecl => {
                 encode::fn_decl(&mut wire, node, source, p.owner.as_deref(), method_is_pub(ast, p), &strip)
             }
+            MacroInput::Exprs => unreachable!("encoded by encode_call"),
         };
         if !encoded {
             let want = match decl.input {
                 MacroInput::TypeDecl => "a class or enum",
                 MacroInput::FnDecl => "a function or method",
+                MacroInput::Exprs => "a call",
             };
             return Err(Message::error(
                 ErrorCode::GenericTypeError,
@@ -506,23 +521,30 @@ impl Pipeline {
                 h.finish()
             };
             let mut text = String::from(
-                "use macro::{Code, Ident, TypeRef, AttrArg, Attr, Field, Variant, TypeDecl, Param, FnDecl, Reader};\n",
+                "use macro::{Code, Ident, TypeRef, AttrArg, Attr, Field, Variant, TypeDecl, Param, FnDecl, Expr, Reader};\n",
             );
             let mut entries: Vec<String> = Vec::new();
             for decl in &decls {
                 let i = entries.len();
                 let alias = format!("__coil_m{i}");
                 text.push_str(&format!("use {module}::{} as {alias};\n", decl.fn_name));
-                let (read, input) = match decl.input {
-                    MacroInput::TypeDecl => ("type_decl", "TypeDecl"),
-                    MacroInput::FnDecl => ("fn_decl", "FnDecl"),
+                let mut body = "    let r = Reader::over(input);\n".to_string();
+                let mut args = Vec::new();
+                let decl_read = match decl.input {
+                    MacroInput::TypeDecl => Some(("type_decl", "TypeDecl")),
+                    MacroInput::FnDecl => Some(("fn_decl", "FnDecl")),
+                    MacroInput::Exprs => None,
                 };
-                let mut body = format!("    let r = Reader::over(input);\n    let decl: {input} = r.{read}();\n");
-                let mut args = vec!["decl".to_string()];
+                if let Some((read, input)) = decl_read {
+                    body.push_str(&format!("    let decl: {input} = r.{read}();\n"));
+                    args.push("decl".to_string());
+                }
                 for (k, (_, ty)) in decl.params.iter().enumerate() {
-                    let read = match ty.as_str() {
-                        "int" => "int",
-                        "bool" => "bool",
+                    let read = match (decl.input, ty.as_str()) {
+                        (MacroInput::Exprs, t) if t.starts_with("Vec<") => "exprs",
+                        (MacroInput::Exprs, _) => "expr",
+                        (_, "int") => "int",
+                        (_, "bool") => "bool",
                         _ => "str",
                     };
                     body.push_str(&format!("    let a{k} = r.{read}();\n"));
@@ -580,6 +602,9 @@ impl Pipeline {
 
     /// Parse one macro's output and put it into the file's AST.
     fn splice(&mut self, job: &Job, text: &str) -> Vec<Message> {
+        if matches!(job.pending.position, CallPosition::Expr | CallPosition::Stmt) {
+            return self.splice_call(job, text);
+        }
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
         let is_method = job.pending.owner.is_some();
@@ -625,6 +650,7 @@ impl Pipeline {
             .into_iter()
             .map(|mut p| {
                 p.range = job.pending.range.clone();
+                p.from_provider = Some(job.provider_file.clone());
                 p
             })
             .collect();
@@ -680,6 +706,16 @@ impl Pipeline {
                     children.insert(start + k, item);
                 }
             }
+            (None, MacroKind::Function) => {
+                // `name!(…);` at the top level: its items replace the statement.
+                let Some(at) = children
+                    .iter()
+                    .position(|c| crate::attrs::statement_call(c).is_some_and(|call| call.0 == job.pending.target))
+                else {
+                    return messages;
+                };
+                children.splice(at..=at, items);
+            }
             (None, MacroKind::Attr) => {
                 let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
                     return messages;
@@ -696,6 +732,95 @@ impl Pipeline {
                 children.splice(at..=at, items);
             }
         }
+        messages
+    }
+
+    /// Splice a call's output in expression or statement position. The
+    /// output parses inside a function (`return (…);` for an expression, the
+    /// body for statements) and replaces the call.
+    fn splice_call(&mut self, job: &Job, text: &str) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let module = self.namespace_for(&job.file);
+        let stmt = job.pending.position == CallPosition::Stmt;
+        let snippet = if stmt {
+            format!("fn __coil_m() {{\n{text}\n}}")
+        } else {
+            format!("fn __coil_m() {{\nreturn (\n{text}\n);\n}}")
+        };
+        let Some(cached) = self.ast_cache.get_mut(&job.file) else {
+            return messages;
+        };
+        let (mut generated, range) = match cached.parse_generated(&snippet) {
+            Ok(ok) => ok,
+            Err(err) => {
+                let want = if stmt { "statements" } else { "an expression" };
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "macro `{}!` produced code that does not parse as {want}: {}",
+                        job.decl.name,
+                        err.message()
+                    ),
+                    job.pending.range.clone(),
+                );
+                msg.with_help(format!("generated code:\n{text}"));
+                return vec![msg];
+            }
+        };
+        self.generated_ranges.push(GeneratedRange {
+            file: job.file.clone(),
+            range,
+            site: job.pending.range.clone(),
+            kind: job.decl.kind,
+            name: job.decl.name.clone(),
+            text: snippet.clone(),
+        });
+        let expand = crate::attrs::expand_program_in(&mut generated, &module);
+        messages.extend(expand.messages);
+        let nested: Vec<PendingMacro> = expand
+            .pending
+            .into_iter()
+            .map(|mut p| {
+                p.range = job.pending.range.clone();
+                p.from_provider = Some(job.provider_file.clone());
+                p
+            })
+            .collect();
+        cached.push_pending_macros(nested);
+        let Some(mut body) = function_body(*generated.1) else {
+            return messages;
+        };
+        let Some(ast) = cached.ast_mut() else {
+            return messages;
+        };
+        let replacement = if stmt {
+            Replacement::Stmts(body)
+        } else {
+            let value = match body.pop().map(|s| *s.1) {
+                Some(Expression::Statement(inner)) => match *inner.1 {
+                    Expression::Return(v) => Some(v),
+                    _ => None,
+                },
+                Some(Expression::Return(v)) => Some(v),
+                _ => None,
+            };
+            let Some(mut value) = value else {
+                return messages;
+            };
+            // Drop the parentheses the snippet put around the output; the
+            // tree already keeps it whole where it lands.
+            while let Expression::Expr(_) = value.1.as_ref() {
+                let Expression::Expr(inner) = *value.1 else { unreachable!() };
+                value = inner;
+            }
+            if let Expression::Group(_) = value.1.as_ref() {
+                let Expression::Group(inner) = *value.1 else { unreachable!() };
+                value = inner;
+            }
+            Replacement::Expr(value)
+        };
+        let mut replacement = Some(replacement);
+        replace_call(ast, job.pending.target, &mut replacement);
         messages
     }
 
@@ -724,6 +849,7 @@ impl Pipeline {
         let origin = match g.kind {
             MacroKind::Derive => format!("derive `{}`", g.name),
             MacroKind::Attr => format!("attribute macro `{}`", g.name),
+            MacroKind::Function => format!("macro `{}!`", g.name),
         };
         let mut help = format!("in code generated by {origin}: `{line_text}`");
         if let Some(h) = msg.help() {
@@ -732,6 +858,114 @@ impl Pipeline {
         out.with_help(help);
         out
     }
+}
+
+/// What a call is replaced by.
+enum Replacement<'a> {
+    Expr(Output<'a>),
+    Stmts(Vec<Output<'a>>),
+}
+
+/// Statements of the one function a call snippet parses to.
+fn function_body(program: Expression<'_>) -> Option<Vec<Output<'_>>> {
+    let Expression::Program(mut items) = program else {
+        return None;
+    };
+    let func = items.pop()?;
+    let Expression::Function { body: Some(body), .. } = *func.1 else {
+        return None;
+    };
+    match *body.1 {
+        Expression::Block(stmts) => Some(stmts),
+        _ => None,
+    }
+}
+
+/// Replace the `name!(…)` call at `target` (the expression, or the whole
+/// `name!(…);` statement in its block).
+fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replacement: &mut Option<Replacement<'a>>) {
+    if replacement.is_none() {
+        return;
+    }
+    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
+        if matches!(replacement, Some(Replacement::Expr(_))) {
+            let Some(Replacement::Expr(value)) = replacement.take() else { unreachable!() };
+            *node = value;
+        }
+        return;
+    }
+    if matches!(replacement, Some(Replacement::Stmts(_)))
+        && let Expression::Block(items) = node.1.as_mut()
+        && let Some(at) = items
+            .iter()
+            .position(|i| crate::attrs::statement_call(i).is_some_and(|c| c.0 == target))
+    {
+        let Some(Replacement::Stmts(stmts)) = replacement.take() else { unreachable!() };
+        items.splice(at..=at, stmts);
+        return;
+    }
+    node.1.for_each_child_mut(&mut |c| replace_call(c, target, replacement));
+}
+
+/// The `name!(…)` call at `target`.
+fn find_call<'b, 'a>(node: &'b Output<'a>, target: parser::SimpleSpan) -> Option<&'b Output<'a>> {
+    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
+        return Some(node);
+    }
+    let mut found = None;
+    node.1.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = find_call(c, target);
+        }
+    });
+    found
+}
+
+/// A function-style macro's input: each `Expr` parameter's argument, then
+/// the rest (count, items) for a last `Vec<Expr>` parameter.
+fn encode_call(ast: &Output<'_>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
+    let err = |text: String| Message::error(ErrorCode::GenericTypeError, text, p.range.clone());
+    let Some(call) = find_call(ast, p.target) else {
+        return Err(err(format!("macro `{}!` call not found", p.name)));
+    };
+    let Expression::MacroCall { args, .. } = call.1.as_ref() else {
+        unreachable!("find_call returns calls");
+    };
+    if let Some(bad) = args
+        .iter()
+        .find(|a| matches!(a.1.as_ref(), Expression::NamedArg(..) | Expression::Spread(_)))
+    {
+        return Err(Message::error(
+            ErrorCode::GenericTypeError,
+            format!("macro `{}!` takes expressions; named arguments and `...` spreads are not macro arguments", p.name),
+            bad.0.into_range(),
+        ));
+    }
+    let variadic = decl.params.last().is_some_and(|(_, t)| t.starts_with("Vec<"));
+    let fixed = decl.params.len() - usize::from(variadic);
+    if args.len() < fixed || (!variadic && args.len() > fixed) {
+        let want = if variadic {
+            format!("at least {fixed}")
+        } else {
+            fixed.to_string()
+        };
+        return Err(err(format!(
+            "macro `{}!` takes {want} argument(s), found {}",
+            p.name,
+            args.len()
+        )));
+    }
+    let mut wire = encode::Wire::default();
+    for a in &args[..fixed] {
+        encode::expr(&mut wire, a, source);
+    }
+    if variadic {
+        wire.count(args.len() - fixed);
+        for a in &args[fixed..] {
+            encode::expr(&mut wire, a, source);
+        }
+    }
+    Ok(wire.finish())
 }
 
 /// `(path, name, alias)` of every top-level `use`.
