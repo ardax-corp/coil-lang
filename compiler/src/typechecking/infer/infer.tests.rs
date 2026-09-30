@@ -8465,6 +8465,8 @@ fn origin(geo::Point p) -> geo::Cell<int> {
     );
 }
 
+/// Macro output writes `impl m::Trait for T` (hygiene); source written by
+/// hand is rejected before checking (`attrs::expand_source_in`).
 #[test]
 fn impl_head_accepts_module_qualified_trait_name() {
     let mut c = Checker::new();

@@ -145,7 +145,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'a>>),
     ) {
-        let expand = crate::attrs::expand_program_in(ast, module);
+        let expand = crate::attrs::expand_source_in(ast, module);
         self.apply_expand_result(expand);
         self.typecheck_module(module, ast);
     }

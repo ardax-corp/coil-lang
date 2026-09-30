@@ -103,3 +103,14 @@ fn expansion_cycle_is_reported() {
 fn attribute_macro_arguments_are_checked() {
     expect("macro_attr_missing_arg", &["missing argument `by`"]);
 }
+
+#[test]
+fn qualified_impl_head_in_source() {
+    expect(
+        "macro_qualified_impl",
+        &[
+            "module-qualified trait `derive_macros::Summary` in an `impl` head is only written by macros",
+            "`use derive_macros::Summary;` and write `impl Summary for …`",
+        ],
+    );
+}
