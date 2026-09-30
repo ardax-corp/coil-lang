@@ -674,6 +674,20 @@ impl IlOp {
         )
     }
 
+    /// Control can continue to the next op: not a [`Self::is_terminator`]
+    /// and not an unconditional jump (conditional jumps fall through when
+    /// not taken).
+    pub fn can_fall_through(&self) -> bool {
+        !self.is_terminator()
+            && !matches!(
+                self,
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    ..
+                }
+            )
+    }
+
     pub fn is_plain_return(&self) -> bool {
         matches!(self, IlOp::Return { ret_words: 1, .. })
             || matches!(
