@@ -529,7 +529,7 @@ pub struct Machine<const S: usize> {
     pending_debug_stop: Option<StopReason>,
     #[cfg(any(test, feature = "coverage"))]
     /// Hit count per PC while coverage is on (see [`Self::begin_coverage`]).
-    coverage: Option<Box<Vec<u32>>>,
+    coverage: Option<Vec<u32>>,
     /// Shared program image for OS thread workers (`spawn`).
     thread_program: Option<std::sync::Arc<crate::thread::ThreadProgram>>,
     /// Optional shared stdout capture for worker threads.
@@ -702,13 +702,13 @@ impl<const S: usize> Machine<S> {
     /// Dense streaks are off while counting, so every instruction is seen.
     #[cfg(any(test, feature = "coverage"))]
     pub fn begin_coverage(&mut self) {
-        self.coverage = Some(Box::new(vec![0; self.program_code.len()]));
+        self.coverage = Some(vec![0; self.program_code.len()]);
     }
 
     #[cfg(any(test, feature = "coverage"))]
     #[cold]
     fn note_coverage(&mut self, ip: usize) {
-        if let Some(counts) = self.coverage.as_deref_mut() {
+        if let Some(counts) = self.coverage.as_mut() {
             if counts.len() <= ip {
                 counts.resize(ip + 1, 0);
             }
@@ -719,7 +719,7 @@ impl<const S: usize> Machine<S> {
     /// Stop counting and return hit counts indexed by PC (`None` if off).
     #[cfg(any(test, feature = "coverage"))]
     pub fn take_coverage(&mut self) -> Option<Vec<u32>> {
-        self.coverage.take().map(|c| *c)
+        self.coverage.take()
     }
 
     /// Attach a debug controller (enables stop checks in `execute`).
