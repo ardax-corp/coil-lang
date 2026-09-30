@@ -1573,7 +1573,8 @@ impl<'a> Display for Expression<'a> {
                 }
                 Ok(())
             }
-            e => write!(f, "<unhandled: {:?}>", e),
+            // Everything else prints as the formatter would write it.
+            e => write!(f, "{}", crate::fmt::format_program(e).trim_end()),
         }
     }
 }
