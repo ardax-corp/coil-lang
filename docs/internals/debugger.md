@@ -97,9 +97,33 @@ paths stored at compile time.
   and `info locals` show the panicking frame. It cannot resume; `run`
   restarts.
 
-- Locals are available by **name** (`print n`, `info locals`) and by slot (`print $0`).
-  Names come from compile-time slot maps (params, `let`s, `self`, match bindings).
-  Shadowing keeps the innermost binding; synthetic `__pad*` / `__dict*` slots are omitted.
+- **Locals under optimization.** `info locals` / `print` show a value only
+  where it is known to be live, and `<optimized out>` elsewhere; never a stale
+  or foreign word. How it works (`compiler::debug_vars`):
+  - Codegen records each binding (`let`, parameter, `for` variable, match
+    binding) with its **source scope** (declaration to the end of its block)
+    and type. The locals visible at a stop are the ones whose scope contains
+    the stop's statement; the innermost wins for a shadowed name.
+  - A binding's defining stores get a debug location equal to its **name
+    token** (its def site). Passes keep op locations when they rewrite or move
+    an op, and MIR moves a store's location onto the value it stores, so the
+    tag follows the variable into whatever slot or dense register now holds
+    it. After finalize, a dataflow over each body's final bytecode builds
+    **location lists** (`pc` range → slot): a tagged write defines the
+    variable (and makes older copies stale), a copy (`DenseMove`,
+    `LOAD s; STORE d`) carries it, any other write kills it, and joins keep
+    only agreeing claims. A body with an unmodeled opcode keeps the codegen
+    slots.
+  - Layouts codegen split are rendered whole: Q2 class locals as
+    `Point { x: 3, y: <optimized out> }`, Q1 fixed arrays as `[1, 2, 3]`,
+    two-slot enums as `Option::Some(5)`; each component is tracked separately.
+  - Heap values render with their static type: strings, class instances
+    (fields by name), arrays / `Vec`, tuples, enums (including the `Option` /
+    `Result` niche layouts), a few levels deep.
+  - `print` takes paths: `print p.x`, `print xs[2]`, `print a.b[1].c`.
+  - Known gaps: a value an optimization turned into an alias of another slot
+    (copy propagation removed its store) shows as `<optimized out>`; match
+    bindings (written through the cursor) use their codegen slot.
 - **Line breakpoints** work on any line with code: every op a statement emits
   carries that statement's span unless a nested statement gave it a narrower
   one. `break 12` on a line without code (or code the optimizer merged away)
@@ -108,10 +132,10 @@ paths stored at compile time.
 - Hot path: stop checks run only when a debug controller is attached.
 - **I7 / B8:** `coil debug` sets `Pipeline::set_debugger_attached(true)`.
   Stops remain on reconstructed bytecode (fuse-IL, LIR, or dense).
-  Function breakpoints and `stepi` work on specialized bodies.
-  **MIR `Deopt` metadata is unused** by `coil-debug` / DAP — emit skips
-  those insts. **C3** keeps compiler-internal resume maps and remaps
-  named `let` slots after SSA register assign; params stay identity.
+  Function breakpoints and `stepi` work on specialized bodies; with a
+  debugger attached the VM checks every instruction (no dense streaks run
+  past a breakpoint). **MIR `Deopt` metadata is unused** by `coil-debug` /
+  DAP — emit skips those insts.
   Dense / LIR reconstruct keeps most statement locations; lines whose ops are
   merged (constant `let`s folded into one dense init, eliminated copies) have
   none. See [mir-deopt.md](mir-deopt.md).

@@ -799,6 +799,46 @@ impl<const S: usize> Machine<S> {
         Some(self.stack[idx])
     }
 
+    /// The heap object at `v` (a bare or `| 1`-tagged address), if any.
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn debug_object(&self, v: Value) -> Option<crate::debug::DebugObject> {
+        use crate::debug::DebugObject;
+        use crate::memory::Object;
+        let addr = v.raw() as u64 & !1;
+        if addr == 0 {
+            return None;
+        }
+        Some(match Self::find_object_by_addr(&self.heap, addr)? {
+            Object::String(gc) => DebugObject::Str(gc.as_ref().data.clone()),
+            Object::Instance(gc) => {
+                let inst = gc.as_ref();
+                match inst.slots() {
+                    Some(fields) => DebugObject::Instance {
+                        type_id: inst.type_id,
+                        fields: fields.to_vec(),
+                    },
+                    None => DebugObject::Other("dict"),
+                }
+            }
+            Object::Array(gc) => DebugObject::Array(gc.as_ref().elements().clone()),
+            Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
+            Object::Enum(gc) => {
+                let e = gc.as_ref();
+                DebugObject::Enum {
+                    tag: e.tag,
+                    payload: e.payload.to_vec(),
+                }
+            }
+            Object::Boxed(gc) => match &gc.as_ref().payload {
+                crate::memory::Member::Value(inner) => DebugObject::Boxed(*inner),
+                _ => DebugObject::Other("boxed"),
+            },
+            Object::Coroutine(_) => DebugObject::Other("coroutine"),
+            Object::Fn(_) | Object::PolyFn(_) => DebugObject::Other("fn"),
+            _ => DebugObject::Other("object"),
+        })
+    }
+
     pub fn debug_format_value(&self, v: Value) -> String {
         Self::stringify_value(&self.heap, v)
     }
@@ -3244,11 +3284,19 @@ impl<const S: usize> Machine<S> {
         let stack_cap = crate::MAX_OPERAND_STACK_SLOTS;
         let code_len = code.len();
 
+        // A debugger checks breakpoints / steps before every instruction:
+        // never run a dense streak past it.
+        #[cfg(any(test, feature = "debugger"))]
+        let streaks_allowed = self.debug.is_none();
+        #[cfg(not(any(test, feature = "debugger")))]
+        let streaks_allowed = true;
+
         macro_rules! then_hot_streak {
             () => {
                 // Inline peek: non-dense code (tak, fib) must not pay the
                 // outlined streak call after every jump.
-                if ip < code_len
+                if streaks_allowed
+                    && ip < code_len
                     && dispatch::is_always_hot_disc(
                         // SAFETY: `ip < code_len` checked above.
                         *unsafe { code.get_unchecked(ip) }.bytecode() as u8,

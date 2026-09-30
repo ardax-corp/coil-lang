@@ -1234,6 +1234,7 @@ impl Pipeline {
                 .ast_cache
                 .get_mut(&file)
                 .expect("parse_expand_check_file filled cache");
+            compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
             compiler.compile_prepared_module(namespace.as_str(), ast)
         };
@@ -1383,6 +1384,7 @@ impl Pipeline {
         }
 
         self.compiler_lazy_mut().set_source_file(path);
+        self.compiler_lazy_mut().set_source_text(src);
         self.compiler_lazy_mut().compile_module("", &mut ast);
 
         // Register source and drain typecheck / codegen diagnostics via the sink.
@@ -1555,6 +1557,7 @@ impl Pipeline {
 
         let functions = self.compiler_lazy_mut().function_symbols();
         let debug = self.program_debug();
+        let (classes, enums) = self.compiler_lazy().debug_type_tables();
         Ok(crate::DissectArtifacts {
             bytecode: std::mem::take(&mut self.bytecode),
             constants: self.compiler_lazy_mut().constants().to_vec(),
@@ -1562,6 +1565,8 @@ impl Pipeline {
             functions,
             il,
             debug,
+            classes,
+            enums,
         })
     }
 

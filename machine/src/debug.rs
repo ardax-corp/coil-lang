@@ -264,3 +264,19 @@ mod tests {
         assert_eq!(c.check_stop(6, 1, None), Some(StopReason::Step));
     }
 }
+
+/// A heap object as the debugger sees it (words stay untyped; the debugger
+/// renders them with compile-time types).
+#[derive(Debug, Clone)]
+pub enum DebugObject {
+    Str(String),
+    /// Class instance in slot mode: fields in declaration order.
+    Instance { type_id: u32, fields: Vec<common::Value> },
+    Array(Vec<common::Value>),
+    Tuple(Vec<common::Value>),
+    Enum { tag: u32, payload: Vec<common::Value> },
+    /// Boxed scalar (`int` / `float` / `bool` payload word).
+    Boxed(common::Value),
+    /// Some other object kind (stream, thread, …).
+    Other(&'static str),
+}

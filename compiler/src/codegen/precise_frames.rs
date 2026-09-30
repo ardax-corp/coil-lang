@@ -402,7 +402,7 @@ fn inbound_targets(bytecode: &[Byte], constants: &[u64]) -> Vec<(u32, u32)> {
     out
 }
 
-fn jump_target(b: &Byte, constants: &[u64]) -> Option<usize> {
+pub(crate) fn jump_target(b: &Byte, constants: &[u64]) -> Option<usize> {
     let pool = |i: usize| constants.get(i).copied();
     match *b.bytecode() {
         Instruction::JMP | Instruction::JMPF | Instruction::JMPT => Some(b.operand_u32() as usize),

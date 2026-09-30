@@ -1,6 +1,7 @@
 //! `coil-debug` — GDB-style REPL and DAP debug adapter.
 
 mod dap;
+mod render;
 mod repl;
 mod session;
 

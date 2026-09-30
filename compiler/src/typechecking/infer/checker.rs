@@ -16250,6 +16250,16 @@ impl Checker {
     }
 
     /// Class fields in declaration order: `(name, Ty)`.
+    /// Every registered class name (debug type tables).
+    pub fn class_names(&self) -> Vec<String> {
+        self.classes.keys().cloned().collect()
+    }
+
+    /// Enum name → variant names in tag order (debug type tables).
+    pub fn enum_variant_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+        self.enums.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
     pub fn class_fields(&self, class: &str) -> Option<Vec<(String, Ty)>> {
         self.classes.get(class).map(|fields| {
             fields

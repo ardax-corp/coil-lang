@@ -1005,6 +1005,15 @@ pub struct Compiler {
     fn_defining_module: HashMap<String, String>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
+    /// Debug variables per function (see [`crate::debug_vars`]).
+    fn_debug_vars: HashMap<String, Vec<crate::debug_vars::DebugVar>>,
+    /// Source end offset of each enclosing scope (block / function body).
+    debug_scope_ends: Vec<u32>,
+    /// Source start of the statement being compiled (a `let`'s scope start).
+    debug_stmt_start: u32,
+    /// `(address, len)` of the current module's source text: AST names are
+    /// slices of it, so a name's byte offset is pointer arithmetic.
+    source_base: (usize, usize),
 
     /// When true, [`Expression::Match`] binds `end` as a plain label instead of
     /// a value-join (`JoinLabel`). Set while compiling a match whose value is
@@ -1140,6 +1149,10 @@ impl Default for Compiler {
             fn_inline_spans: HashMap::new(),
             fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
+            fn_debug_vars: HashMap::new(),
+            debug_scope_ends: Vec::new(),
+            debug_stmt_start: 0,
+            source_base: (0, 0),
             suppress_match_fusion_barrier: false,
             statement_match_pending: false,
             arm_discard: Vec::new(),
@@ -1413,3 +1426,4 @@ mod compiler;
 mod emit_loop;
 mod inline_cost;
 mod precise_frames;
+pub(crate) use precise_frames::jump_target as jump_target_of;
