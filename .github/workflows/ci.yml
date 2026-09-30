@@ -204,6 +204,13 @@ jobs:
         run: |
           ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
+      - name: Language harness at -O0 (`coil test -O 0`)
+        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        run: |
+          # Optimizations hide codegen bugs (LICM materializes invariants,
+          # inlining drops CALL targets); run the unoptimized pipeline too.
+          ./target/debug/coil test -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+
       - name: GC stress (`coil test`, collect and evacuate at every allocation)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
