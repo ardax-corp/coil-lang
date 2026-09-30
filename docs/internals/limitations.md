@@ -34,7 +34,6 @@ See [macros.md](macros.md).
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Compiled expansion programs (one per provider set) and macro outputs are cached in memory; a fresh `coil` process compiles each provider set once more (~1–2 s in a debug build for the built-in derives). | — |
 | Attribute-macro parameters | Parameters after the `FnDecl` / `TypeDecl` are `string`, `int` or `bool` (the input is decoded in the VM); other types are an error at the use site. | — |
-| `-O none` expansion | Compiling the expansion program at `-O none` changed some built-in derives' results (string comparisons on model fields); it compiles at `-O basic`. Not reduced to a standalone repro yet. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
 
 ## Lambdas / captures
