@@ -1149,10 +1149,8 @@ mod tests {
         let env = HashMap::new();
         let lhs = (SimpleSpan::from(0..1), Box::new(Expression::String("he")));
         let rhs = (SimpleSpan::from(0..1), Box::new(Expression::String("llo")));
-        assert_eq!(
-            eval_string_add(&lhs, &rhs, &env),
-            Some(ConstValue::Str("hello".into()))
-        );
+        let add = (SimpleSpan::from(0..1), Box::new(Expression::Add(lhs, rhs)));
+        assert_eq!(eval_expr(&add, &env), Some(ConstValue::Str("hello".into())));
     }
 
     #[test]
