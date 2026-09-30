@@ -88,7 +88,7 @@ and relocate mapped slots on collect.
   native code which re-entered the VM (`call_function`), or that a coroutine
   segment starts above, stays conservative. Worker VMs share the maps by
   `Arc`. The `gc-stress` feature collects at every allocation safepoint;
-  CI runs `coil test` with it.
+  CI runs the language harness (`coil-test`) with it.
 - **Frame extents** (archive **minor 22**). Allocating dense bodies no
   longer need S2b maps: their registers can sit past the cursor, and
   generic host results are heap words typed `i64` that S2b maps miss. So

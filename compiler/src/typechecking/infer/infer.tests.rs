@@ -2241,6 +2241,38 @@ fn format_string_percent_f_requires_float() {
 }
 
 #[test]
+fn format_string_rejects_surplus_arguments() {
+    // The VM drops them; `{}` placeholders are the usual cause.
+    let msgs = assert_messages(r#"string::format("x={}", 1);"#);
+    assert!(
+        msgs.iter()
+            .any(|m| m.message().contains("fewer specifiers than arguments")),
+        "expected 'fewer specifiers than arguments' error, got: {:?}",
+        msgs
+    );
+    let msgs = assert_messages(r#"string::format("a=%i", 1, 2);"#);
+    assert!(
+        msgs.iter().any(|m| m.message().contains("argument #2")),
+        "expected surplus argument #2 error, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn format_string_surplus_arguments_are_still_inferred() {
+    // Inferred even when rejected, so a method call in one reports only the
+    // surplus-argument error (codegen previously hit an untyped receiver).
+    let src = r#"let s = "boom"; string::format("x", s.len());"#;
+    let msgs = assert_messages(src);
+    assert!(
+        msgs.iter()
+            .all(|m| m.message().contains("fewer specifiers than arguments")),
+        "expected only the surplus-argument error, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
 fn format_string_with_constructor_value_errors_on_percent_s() {
     // Red-team critical: passing a `Constructor` (a sum) where
     // a string is expected must be flagged.

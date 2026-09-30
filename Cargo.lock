@@ -289,6 +289,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-cli",
+ "coil-host",
  "common",
  "compiler",
  "comptime",
@@ -351,6 +352,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coil-host"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "compiler",
+ "machine",
+]
+
+[[package]]
 name = "coil-lsp"
 version = "0.1.0"
 dependencies = [
@@ -368,6 +378,17 @@ name = "coil-simd"
 version = "0.1.0"
 dependencies = [
  "criterion",
+]
+
+[[package]]
+name = "coil-test"
+version = "0.1.0"
+dependencies = [
+ "coil-host",
+ "common",
+ "compiler",
+ "machine",
+ "reporting",
 ]
 
 [[package]]

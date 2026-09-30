@@ -484,6 +484,63 @@ impl Compiler {
         }
     }
 
+    /// `Class::method(...)` for a generic static method: the shared-body ABI
+    /// of free generic fns (bare-`T` args boxed, one dictionary per bound
+    /// appended, a boxed `T` return unboxed).
+    fn emit_generic_static_call(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        fqn: &str,
+        args: &[Output],
+        call: &Output,
+    ) {
+        let bare_t: Vec<bool> = self
+            .checker
+            .env()
+            .lookup(fqn)
+            .map(|scheme| {
+                let mut out = Vec::new();
+                let mut cur = &scheme.ty;
+                while let Ty::Fun(p, r) = cur {
+                    out.push(matches!(p.as_ref(), Ty::Var(v) if scheme.bounds.contains(v)));
+                    cur = r;
+                }
+                out
+            })
+            .unwrap_or_default();
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            self.append_with_existential_pack(bytecode, arg);
+            let ty = self.codegen_expr_ty(arg);
+            if bare_t.get(i).copied().unwrap_or(false)
+                && let Some(ty) = ty.as_ref()
+            {
+                Self::emit_box_if_needed(bytecode, ty);
+            }
+            if let Some(ty) = ty {
+                arg_tys.push(ty);
+            }
+        }
+        let mut dicts = 0u32;
+        let id = self.node_id_of(call);
+        if let Some(indices) = self.forwarded_dicts_hint(id, call.0.start, call.0.end) {
+            for dict_index in indices {
+                if let Some(slot) = self.lookup_slot(&format!("__dict{}", dict_index)) {
+                    bytecode.push_load(slot);
+                    dicts += 1;
+                }
+            }
+        }
+        let call_ty = self.codegen_expr_ty(call);
+        dicts += self.emit_call_site_dicts(bytecode, fqn, &arg_tys, call_ty.as_ref()) as u32;
+        let _ = self.emit_direct_fn_call(bytecode, fqn, args.len() as u32 + dicts);
+        if self.generic_return_is_boxed(fqn)
+            && let Some(ty) = call_ty.as_ref()
+        {
+            Self::emit_unbox_if_needed(bytecode, ty);
+        }
+    }
+
     fn emit_scalar_backing(
         &mut self,
         backing: &crate::typechecking::ty::ScalarBacking,
@@ -540,6 +597,10 @@ impl Compiler {
                         return bytecode;
                     }
                 };
+                if self.checker.is_generic_fn(&fqn) {
+                    self.emit_generic_static_call(&mut bytecode, &fqn, arg_slice, ast);
+                    return bytecode;
+                }
                 let arity = self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
                 // `Vec<Node>::new()` → the pointer-element constructor.
                 let target = self.pointer_vec_ctor(&fqn, ast).unwrap_or(fqn);
@@ -573,13 +634,13 @@ impl Compiler {
         // `Option::None` in that CALL's arguments shifts the frame so
         // `Stream.fd()` sees the host string (InvalidInput).
         let niche_option = common::is_builtin_option_enum(enum_name)
-            && !self.force_heap_option
+            && !self.repr_now().force_heap_option
             && (self.expr_layout(ast).is_niche_option()
-                || self.force_niche_option);
+                || self.repr_now().force_niche_option);
         let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
         let niche_result = self.should_niche_result_construct(enum_name, ast);
 
-        if self.unbox_enum_context > 0 && !niche_option && !niche_unit_result && !niche_result {
+        if self.repr_now().unboxing() && !niche_option && !niche_unit_result && !niche_result {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
                     bytecode.push_const(0);
@@ -615,11 +676,11 @@ impl Compiler {
         }
 
         if common::is_builtin_option_enum(enum_name)
-            && !self.force_heap_option
+            && !self.repr_now().force_heap_option
             && self.expr_layout(ast).is_niche_option()
             || (common::is_builtin_option_enum(enum_name)
-                && !self.force_heap_option
-                && self.force_niche_option)
+                && !self.repr_now().force_heap_option
+                && self.repr_now().force_niche_option)
         {
             match (variant_name, fields) {
                 ("None", EnumConstructPayload::Unit) => {
@@ -3272,7 +3333,17 @@ impl Compiler {
                     let owner_key = self.resolve_class_ident(owner);
                     for method in methods {
                         if let Some(name) = Self::impl_method_name(method) {
-                            self.reserve_function_entry(format!("{}::{}", owner_key, name));
+                            let fqn = format!("{}::{}", owner_key, name);
+                            // Method-call lowering resolves `recv.m()` through
+                            // `context.methods`: register it now so code before
+                            // the `impl` can call it (the typechecker already
+                            // accepts that order).
+                            self.context
+                                .methods
+                                .entry(owner_key.clone())
+                                .or_default()
+                                .insert(name.to_string(), fqn.clone());
+                            self.reserve_function_entry(fqn);
                         }
                     }
                 }
@@ -4580,6 +4651,35 @@ impl Compiler {
         bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
+        // The shared generic body unboxes only its bare `T` params; any other
+        // fixed argument (`Node n`, `[T] xs`, `Result<T, E> r`) passes as-is.
+        let mut no_box = Vec::new();
+        if box_generic && let Some(scheme) = self.checker.env().lookup(fn_name) {
+            let bounds = scheme.bounds.clone();
+            let (params, _) = Self::fun_param_and_ret_tys(&scheme.ty);
+            let (fixed, _, _) = self.split_call_args_for_rest(fn_name, args);
+            for (param, arg) in params.iter().zip(fixed.iter()) {
+                let bare_t = matches!(param, Ty::Var(v) if bounds.contains(v));
+                let span = (arg.0.start, arg.0.end);
+                if !bare_t && self.generic_arg_no_box.insert(span) {
+                    no_box.push(span);
+                }
+            }
+        }
+        let n = self.emit_call_args_with_rest_inner(fn_name, args, bytecode, box_generic);
+        for span in no_box {
+            self.generic_arg_no_box.remove(&span);
+        }
+        n
+    }
+
+    fn emit_call_args_with_rest_inner(
+        &mut self,
+        fn_name: &str,
+        args: &[Output<'_>],
+        bytecode: &mut CodeBuf,
+        box_generic: bool,
+    ) -> u32 {
         self.consume_spread_emit_ids(args);
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
 
@@ -4630,6 +4730,7 @@ impl Compiler {
         for arg in &fixed {
             self.append_with_existential_pack(bytecode, arg);
             if box_generic
+                && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                 && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                     self.emit_generic_arg_box(bytecode, &arg_ty);
                 }
@@ -4874,6 +4975,19 @@ impl Compiler {
             // clears any live operand left under the constructor (e.g. the
             // receiver of an inlined `Vec::push`).
             Expression::Instantiate(_, _) => true,
+            // `Class::static_method(..)` parses as a Construct but is a CALL,
+            // also before its `impl` is compiled (entry only reserved).
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                ..
+            } if self.checker.tag_for(enum_name, variant_name).is_none() && {
+                let fqn = self.class_member_fqn(enum_name, variant_name);
+                self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)
+            } =>
+            {
+                true
+            }
             Expression::Construct { fields, .. } => {
                 use parser::ast::EnumConstructPayload;
                 match fields {
@@ -5090,6 +5204,7 @@ impl Compiler {
             }
             self.append_with_existential_pack(bytecode, arg);
             if box_generic
+                && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                 && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                     self.emit_generic_arg_box(bytecode, &arg_ty);
                 }
@@ -5108,6 +5223,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5137,6 +5253,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5174,6 +5291,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5188,6 +5306,7 @@ impl Compiler {
         self.append_with_existential_pack(&mut staged, arg);
         self.bytecode.append(&mut staged);
         if box_generic
+            && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
             && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                 let mut box_bc = CodeBuf::new();
                 self.emit_generic_arg_box(&mut box_bc, &arg_ty);
@@ -5669,9 +5788,9 @@ impl Compiler {
                 .as_deref()
                 .is_some_and(crate::typechecking::return_layout::is_range_kind) =>
             {
-                self.unbox_enum_context += 1;
+                self.repr.unbox_enum_context += 1;
                 self.append_with_existential_pack(bytecode, expr);
-                self.unbox_enum_context -= 1;
+                self.repr.unbox_enum_context -= 1;
             }
             _ => {
                 self.append_with_existential_pack(bytecode, expr);
@@ -5794,13 +5913,13 @@ impl Compiler {
         enum_name: &str,
     ) -> bool {
         let _ = self.next_emit_id();
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if rhs_is_match {
             self.emit_binding_rhs(rhs);
         } else {
             self.append_binding_rhs(bytecode, rhs);
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
         let (payload, tag) = self.alloc_unboxed_enum_slots(name, enum_name);
         if rhs_is_match {
             self.bytecode.push_store_pop(tag);
@@ -6178,6 +6297,7 @@ impl Compiler {
     fn try_emit_ground_bound_method(
         &mut self,
         bytecode: &mut CodeBuf,
+        call: &Output,
         name: &Output,
         args: Option<&Vec<Output>>,
         hint: &crate::typechecking::infer::BoundMethodCall,
@@ -6254,10 +6374,22 @@ impl Compiler {
         if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
             return false;
         }
+        // Box exactly the positions the trait signature types as a class
+        // type parameter: the concrete entry's prologue unboxes those (see
+        // `instance_method_unbox_tys`), and a default body takes them boxed
+        // (dictionary ABI). Other params (`int k`, `Val v`) pass as-is.
+        let unbox_tys = self.instance_method_unbox_tys(&instance.class, method, &lookup);
         let mut temps = Vec::with_capacity(arg_nodes.len());
-        for (node, ty) in arg_nodes.iter().zip(arg_tys.iter()) {
+        let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
+        let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        for (i, (node, ty)) in arg_nodes.iter().zip(arg_tys.iter()).enumerate() {
             bytecode.append(&mut self.do_compile(node));
-            Self::emit_box_if_needed(bytecode, ty);
+            if unbox_tys.get(i).is_some_and(Option::is_some) {
+                Self::emit_box_if_needed(bytecode, ty);
+            }
+            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(i).copied().flatten()) {
+                Self::emit_layout_convert(bytecode, self.expr_layout(node), target);
+            }
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
             temps.push(tmp);
@@ -6266,12 +6398,85 @@ impl Compiler {
             bytecode.push_load(*tmp);
         }
         let mut arity = temps.len() as u32;
-        if Self::is_default_method_fqn(&instance.class, method, &fqn)
-            && self.emit_instance_dict(bytecode, &instance.class, &lookup)
-        {
+        if is_default && self.emit_instance_dict(bytecode, &instance.class, &lookup) {
             arity += 1;
         }
-        self.emit_direct_fn_call(bytecode, &fqn, arity)
+        if !self.emit_direct_fn_call(bytecode, &fqn, arity) {
+            return false;
+        }
+        if let Some(from) = sig.and_then(|s| s.ret) {
+            Self::emit_layout_convert(bytecode, from, self.expr_layout(call));
+        }
+        true
+    }
+
+    /// Target-side layouts of a trait method's `Option` / `Result` params and
+    /// return that mention a class type parameter (others are `None`: both
+    /// sides already agree). A concrete instance method uses the layout of
+    /// its instance types (possibly a niche); a default body is generic and
+    /// takes / builds the boxed enum.
+    pub(super) fn trait_method_boundary_sig(
+        &self,
+        class: &str,
+        method: &str,
+        instance_args: &[Ty],
+        is_default: bool,
+    ) -> Option<BoundarySig> {
+        let scheme = self.checker.typeclass_method_scheme(class, method)?;
+        let mut inst = crate::typechecking::subst::Subst::empty();
+        for (bound, ty) in scheme.bounds.iter().zip(instance_args) {
+            inst.insert(*bound, ty.clone());
+        }
+        let layout_of = |ty: &Ty| -> Option<ValueLayout> {
+            let generic = self.generic_enum_layout(ty)?;
+            Some(if is_default {
+                generic
+            } else {
+                self.value_layout(&crate::typechecking::subst::apply_ty(&inst, ty))
+            })
+        };
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let sig = BoundarySig {
+            params: params.iter().map(layout_of).collect(),
+            ret: layout_of(&ret),
+        };
+        (sig.ret.is_some() || sig.params.iter().any(Option::is_some)).then_some(sig)
+    }
+
+    fn dict_adapter_name(fqn: &str) -> String {
+        format!("{fqn}$dict")
+    }
+
+    /// Dictionary entry for a concrete instance method whose trait signature
+    /// has `Option` / `Result` params or return over a class type parameter:
+    /// callers through a dictionary (shared generic bodies, existentials)
+    /// pass and expect the boxed enum, while the method uses its instance
+    /// types' layout (possibly a niche). Converts on the way in and out; the
+    /// method's own prologue still unboxes bare `T` params.
+    fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
+        let Some(sig) = self.trait_method_boundary_sig(class, method, inst_args, false) else {
+            return;
+        };
+        let adapter = Self::dict_adapter_name(fqn);
+        if self.functions.contains_key(&adapter) {
+            return;
+        }
+        self.bind_function_entry(adapter);
+        let nparams = sig.params.len() as u32;
+        for (slot, target) in sig.params.iter().enumerate() {
+            self.bytecode.push_load(slot as u32);
+            if let Some(target) = target {
+                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, *target);
+            }
+        }
+        self.bytecode.push_load(nparams); // trailing dictionary
+        if !self.emit_named_entry_on_module(fqn, nparams + 1, crate::il::EntryKind::Call) {
+            self.missing_call_target(fqn, 0..0);
+        }
+        if let Some(from) = sig.ret {
+            Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
+        }
+        self.bytecode.push_return();
     }
 
     /// Default trait bodies reach siblings through their trailing dictionary;
@@ -8207,7 +8412,13 @@ impl Compiler {
                     self.missing_call_target(&name, instance.range.clone());
                     return false;
                 }
-                fqns.push(name);
+                // Dictionary calls use the generic signature's layouts.
+                let adapter = Self::dict_adapter_name(&name);
+                if self.functions.contains_key(&adapter) {
+                    fqns.push(adapter);
+                } else {
+                    fqns.push(name);
+                }
             }
             (fqns, instance.range.clone())
         };
@@ -8234,10 +8445,74 @@ impl Compiler {
 
     fn append_with_existential_pack(&mut self, bytecode: &mut CodeBuf, expr: &Output) {
         let pack = self.existential_pack_hint(self.node_id_of(expr), expr);
+        let conv = self.boundary_arg_convs.remove(&(expr.0.start, expr.0.end));
         bytecode.append(&mut self.do_compile(expr));
         if let Some(pack) = pack {
             self.emit_existential_pack_recipe(bytecode, &pack);
         }
+        if let Some((from, to)) = conv {
+            Self::emit_layout_convert(bytecode, from, to);
+        }
+    }
+
+    /// Layout generic code gives a value of static type `ty` when `ty` is an
+    /// `Option` / `Result` whose type still mentions a type parameter. Such a
+    /// value is always a boxed `ObjEnum` on the generic side, while concrete
+    /// code may use a pointer niche (COI-92) for the same type once `T` is
+    /// known. `None` for fully concrete types and for a bare `T` (that
+    /// boundary is `BoxValue` / `UnboxValue`).
+    pub(super) fn generic_enum_layout(&self, ty: &Ty) -> Option<ValueLayout> {
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        let is_enum = crate::typechecking::ty::is_option_ty(&ty)
+            || crate::typechecking::ty::result_ok_err(&ty).is_some();
+        (is_enum && !crate::typechecking::subst::ftv(&ty).is_empty())
+            .then(|| self.value_layout(&ty))
+    }
+
+    /// Queue the argument conversions for a call whose callee parameters
+    /// (`params`, generic) meet caller arguments of concrete static layout.
+    pub(super) fn queue_generic_arg_convs(&mut self, params: &[Ty], args: &[Output<'_>]) {
+        for (param, arg) in params.iter().zip(args) {
+            let Some(generic) = self.generic_enum_layout(param) else {
+                continue;
+            };
+            let concrete = self.expr_layout(arg);
+            if concrete != generic {
+                self.boundary_arg_convs
+                    .insert((arg.0.start, arg.0.end), (concrete, generic));
+            }
+        }
+    }
+
+    /// Convert the enum value on TOS between two layouts of the same
+    /// `Option` / `Result` type (niche ↔ boxed; niche ↔ niche via boxed).
+    pub(super) fn emit_layout_convert(bytecode: &mut CodeBuf, from: ValueLayout, to: ValueLayout) {
+        if from == to {
+            return;
+        }
+        match from {
+            ValueLayout::NicheOption => Self::emit_niche_option_to_boxed(bytecode),
+            ValueLayout::NicheResult => Self::emit_niche_result_to_boxed(bytecode),
+            ValueLayout::NicheUnitResult => Self::emit_unit_result_niche_to_boxed(bytecode),
+            ValueLayout::Boxed => {}
+        }
+        match to {
+            ValueLayout::NicheOption => Self::emit_boxed_option_to_niche(bytecode),
+            ValueLayout::NicheResult => Self::emit_boxed_result_to_niche(bytecode, false),
+            ValueLayout::NicheUnitResult => Self::emit_boxed_result_to_niche(bytecode, true),
+            ValueLayout::Boxed => {}
+        }
+    }
+
+    /// Parameter types and return type of a (possibly generic) scheme type.
+    pub(super) fn fun_param_and_ret_tys(ty: &Ty) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::new();
+        let mut cur = ty.clone();
+        while let Ty::Fun(p, r) = cur {
+            params.push(*p);
+            cur = *r;
+        }
+        (params, cur)
     }
 
     /// Compile `expr` into [`Self::bytecode`] for an immediate store (`let` / `=`).
@@ -8394,8 +8669,18 @@ impl Compiler {
             fun = ret.as_ref();
             arg_idx += 1;
         }
+        // A nullary fn's type is sealed as `unit -> T`
+        // (`seal_nullary_fun_ty`); a zero-arg call reaches its result there.
+        if arg_tys.is_empty()
+            && let Ty::Fun(param, ret) = fun
+            && matches!(param.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)
+        {
+            fun = ret.as_ref();
+        }
         // Multi-param constraints often mention return-type vars
-        // (`Convert<A, B>` with `A -> B`). Bind those from the call's result type.
+        // (`Convert<A, B>` with `A -> B`). Bind those from the call's result type,
+        // which is also the only place a return-only `T` (`fn make<T: Default>() -> T`)
+        // is known.
         if let Some(ret_ty) = ret_ty {
             Self::bind_scheme_vars(fun, ret_ty, &mut var_to_ty);
         }
@@ -10358,6 +10643,12 @@ impl Compiler {
         if self.is_fn_value_escaped(name) {
             return None;
         }
+        // Trait instance methods are dictionary entries (`CodePtr`), so they
+        // keep the one-word ABI unless a definition site pinned a pair
+        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
+        if is_instance_method_fqn(&self.checker, name) {
+            return None;
+        }
         let lookup = strip_overload_key(name);
         // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
         if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {
@@ -10540,12 +10831,9 @@ impl Compiler {
 
     /// `true` when `expr` is a direct `Construct` of `enum_name` (peeling
     /// `Group`/`Expr`), the fast, alloc-free producer of a `[payload, tag]`
-    /// pair for that exact enum. A payload that itself nests a `Construct`/
-    /// `Instantiate` (e.g. `Result::Err(HttpError::NotFound)`) must not take
-    /// this path, `unbox_enum_context` is a plain counter, so compiling
-    /// that nested value under it would wrongly unbox it into a second
-    /// pair too (same hazard `local_escape::payload_contains_construct`
-    /// already fences off for the frame-local case).
+    /// pair for that exact enum. Its payload may nest any value (another
+    /// `Construct`, a call taking enums): `do_compile` scopes
+    /// [`ReprCtx`] to the construct itself, so the payload stays one word.
     fn expr_is_construct_of(expr: &Output, enum_name: &str) -> bool {
         let mut cur = expr;
         loop {
@@ -10555,38 +10843,10 @@ impl Compiler {
                 _ => break,
             }
         }
-        let Expression::Construct {
-            enum_name: en,
-            fields,
-            ..
-        } = cur.1.as_ref()
-        else {
-            return false;
-        };
-        *en == enum_name && !Self::payload_contains_nested_construct(fields)
-    }
-
-    fn payload_contains_nested_construct(fields: &parser::ast::EnumConstructPayload<'_>) -> bool {
-        use parser::ast::EnumConstructPayload;
-        fn nests(expr: &Output) -> bool {
-            let mut cur = expr;
-            loop {
-                match cur.1.as_ref() {
-                    Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
-                    Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
-                    _ => break,
-                }
-            }
-            matches!(
-                cur.1.as_ref(),
-                Expression::Construct { .. } | Expression::Instantiate(_, _)
-            )
-        }
-        match fields {
-            EnumConstructPayload::Unit => false,
-            EnumConstructPayload::Tuple(args) => args.iter().any(nests),
-            EnumConstructPayload::Record(parts) => parts.iter().any(|p| nests(&p.value)),
-        }
+        matches!(
+            cur.1.as_ref(),
+            Expression::Construct { enum_name: en, .. } if *en == enum_name
+        )
     }
 
     fn expr_arity2_tuple_items<'a>(
@@ -10647,9 +10907,9 @@ impl Compiler {
             let is_fast_call =
                 self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
             if is_fast_call {
-                self.unbox_enum_context += 1;
+                self.repr.unbox_enum_context += 1;
                 self.append_with_existential_pack(bytecode, expr);
-                self.unbox_enum_context -= 1;
+                self.repr.unbox_enum_context -= 1;
                 return;
             }
             if let Some((a, b)) = self.expr_unboxed_enum_slots(expr) {
@@ -10666,18 +10926,18 @@ impl Compiler {
         if let Some(inner) = Self::expr_try_return_src(expr)
             && self.can_flatten_try_pair(inner, enum_name)
         {
-            self.unbox_enum_context += 1;
+            self.repr.unbox_enum_context += 1;
             self.append_with_existential_pack(bytecode, inner);
-            self.unbox_enum_context -= 1;
+            self.repr.unbox_enum_context -= 1;
             return;
         }
         let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
         let is_fast_call = !is_fast_construct
             && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
         if is_fast_construct || is_fast_call {
-            self.unbox_enum_context += 1;
+            self.repr.unbox_enum_context += 1;
             self.append_with_existential_pack(bytecode, expr);
-            self.unbox_enum_context -= 1;
+            self.repr.unbox_enum_context -= 1;
             return;
         }
         if let Some((payload, tag_slot)) = self.expr_unboxed_enum_slots(expr) {
@@ -11182,8 +11442,15 @@ impl Compiler {
 
         let prev_result_mode = self.compiling_result_mode;
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-        self.compiling_result_mode = self.checker.fn_is_result_mode(name);
-        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
+        // Instance methods are recorded under their FQN; the bare name may
+        // belong to a free fn (or another instance).
+        let mode_key = if self.checker.fn_return_ty(&qualified).is_some() {
+            qualified.as_str()
+        } else {
+            name
+        };
+        self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
+        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         let prev_try_fail = self.compiling_try_fail.take();
         self.compiling_two_word_enum = if *is_coro {
@@ -11622,9 +11889,11 @@ impl Compiler {
                 specialization.key.def_id.raw(),
                 subst_ids
             );
-            let (clone_offset, _) = self.bind_function_entry(mono_name);
+            let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
             self.mono_offsets
                 .insert(specialization.key.clone(), clone_offset);
+            self.mono_names
+                .insert(specialization.key.clone(), mono_name.clone());
 
             let prev_fn_vars = std::mem::take(&mut self.context.variables);
             let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
@@ -11647,6 +11916,7 @@ impl Compiler {
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
             self.emit_sidecar_array_pins(args);
+            let clone_entry_sp = self.context.variables.len() as u32;
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
@@ -11656,6 +11926,19 @@ impl Compiler {
             if !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
+            // Its own IL function: a clone left as trailing glue of the source
+            // body has no registered entry, so a CALL to it from another
+            // function was resolved through another body's private label ids.
+            let clone_end = self.bytecode.len();
+            self.record_fn_span(mono_name.clone(), clone_offset, clone_end);
+            let entry = self.fn_entry_labels.get(&mono_name).copied();
+            self.bytecode.record_func_with_sp(
+                mono_name,
+                entry,
+                clone_offset,
+                clone_end,
+                clone_entry_sp,
+            );
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
@@ -11737,6 +12020,16 @@ impl Compiler {
             .mono_plan
             .specialization_for_call(fn_name, &arg_types)?;
         self.mono_offsets.get(&spec.key).copied()
+    }
+
+    /// Entry name of the mono clone a call to `fn_name` with `args` uses
+    /// (same keying as [`Self::mono_call_offset`]).
+    fn mono_call_name(&self, fn_name: &str, args: Option<&Vec<Output<'_>>>) -> Option<String> {
+        let off = self.mono_call_offset(fn_name, args)?;
+        self.mono_offsets
+            .iter()
+            .find(|(_, o)| **o == off)
+            .and_then(|(k, _)| self.mono_names.get(k).cloned())
     }
 
     fn consume_function_signature_output<'compiler>(&mut self, method: &Output<'compiler>) {
@@ -11981,13 +12274,13 @@ impl Compiler {
             return false;
         }
         let rhs_is_match = Self::rhs_is_match_expr(rhs);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if rhs_is_match {
             self.emit_binding_rhs(rhs);
         } else {
             self.append_binding_rhs(bytecode, rhs);
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
         self.expr_depth += 2;
         let slot_b = self.alloc_temp_slot();
         let slot_a = self.alloc_temp_slot();
@@ -12488,11 +12781,11 @@ impl Compiler {
 
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if !self.emit_named_entry_on_module(into_iter_fqn, 1, crate::il::EntryKind::Call) {
             self.missing_call_target(into_iter_fqn, iterable.0.into_range());
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
 
         match counted {
             Some(ForInCounted::Array) => {
@@ -12553,11 +12846,11 @@ impl Compiler {
         bb.bind_label(top_label, self.bytecode.il_mut());
 
         self.bytecode.push_load(it_slot);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if !self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call) {
             self.missing_call_target(next_fqn, iterable.0.into_range());
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
 
         if niche_next {
             Self::push_niche_eq_zero(&mut self.bytecode);
@@ -13832,17 +14125,18 @@ impl Compiler {
 
     fn should_niche_unit_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         common::is_builtin_result_enum(enum_name)
-            && !self.force_heap_result
+            && !self.repr_now().force_heap_result
             && (self.expr_layout(ast).is_niche_unit_result()
-                || (self.force_niche_result && self.return_layout().is_niche_unit_result()))
+                || (self.repr_now().force_niche_result
+                    && self.return_layout().is_niche_unit_result()))
     }
 
     fn should_niche_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         let layout = self.expr_layout(ast);
         common::is_builtin_result_enum(enum_name)
-            && !self.force_heap_result
+            && !self.repr_now().force_heap_result
             && !layout.is_niche_unit_result()
-            && (layout.is_niche_result() || self.force_niche_result)
+            && (layout.is_niche_result() || self.repr_now().force_niche_result)
     }
 
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
@@ -14754,9 +15048,36 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
+        let outer = self.repr;
+        let prev_here = std::mem::replace(&mut self.repr_here, outer);
+        if !Self::forwards_repr(ast) {
+            self.repr = ReprCtx::default();
+        }
         let result = self.do_compile_inner(ast);
+        self.repr = outer;
+        self.repr_here = prev_here;
         self.codegen_depth -= 1;
         result
+    }
+
+    /// Nodes whose value *is* a child's value, so a [`ReprCtx`] request on
+    /// them reaches that child. `Block` forwards to its tail and `Match` to
+    /// its arm bodies only (the `Block` arm of `do_compile_inner`,
+    /// `compile_match_expr`); every other node's operands start clean.
+    fn forwards_repr(ast: &Output<'_>) -> bool {
+        match ast.1.as_ref() {
+            Expression::Group(_) | Expression::Expr(_) | Expression::Block(_) => true,
+            Expression::Fragment(items) => items.len() == 1,
+            Expression::Match { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The [`ReprCtx`] that applies to the node being compiled: what it was
+    /// entered with, plus anything its own lowering raised for a direct emit
+    /// (for-in `next` CALL, `?` on a pair).
+    pub(super) fn repr_now(&self) -> ReprCtx {
+        self.repr_here.union(self.repr)
     }
 
     // Successful `try_emit_*` calls write bytecode in the condition, so the
@@ -14942,9 +15263,9 @@ impl Compiler {
                         // Multi-slot stack array: rewrite slots in place.
                         if let Some((payload, tag_slot)) = self.unboxed_enum_info(name) {
                             let _ = self.next_emit_id();
-                            self.unbox_enum_context += 1;
+                            self.repr.unbox_enum_context += 1;
                             self.append_binding_rhs(bytecode, value);
-                            self.unbox_enum_context -= 1;
+                            self.repr.unbox_enum_context -= 1;
                             bytecode.push_store_pop(tag_slot);
                             bytecode.push_store_pop(payload);
                         } else if let Some((base, n)) = self.unboxed_class_info(name) {
@@ -15360,7 +15681,7 @@ impl Compiler {
             {
                 bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
             } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
-                if self.unbox_enum_context > 0 {
+                if self.repr_now().unboxing() {
                     bytecode.push_load(payload);
                     bytecode.push_load(tag_slot);
                 } else if let Some(inc) = self
@@ -15759,9 +16080,17 @@ impl Compiler {
                 self.context = ctx;
                 let saved_decl_depth = self.escape_decl_depth.clone();
                 // Append each child to self.bytecode (Print/control-flow emit in-place).
-                for child in children {
+                // Only the tail is the block's value; statements start clean.
+                let tail_repr = self.repr;
+                for (i, child) in children.iter().enumerate() {
+                    self.repr = if i + 1 == children.len() {
+                        tail_repr
+                    } else {
+                        ReprCtx::default()
+                    };
                     self.compile_block_stmt(child);
                 }
+                self.repr = tail_repr;
                 self.escape_decl_depth = saved_decl_depth;
 
                 self.context = *self.context.get_prev().clone().unwrap();
@@ -15920,7 +16249,7 @@ impl Compiler {
             } => {
                 let mut start_bc = self.do_compile(start);
                 bytecode.append(&mut start_bc);
-                if self.unbox_enum_context > 0 {
+                if self.repr_now().unboxing() {
                     let mut end_bc = self.do_compile(end);
                     bytecode.append(&mut end_bc);
                 } else {
@@ -16450,7 +16779,8 @@ impl Compiler {
                             let unbox_tys =
                                 self.instance_method_unbox_tys(class, method_name, &arg_tys);
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
-                            self.compile_function_output_with_name(method, fqn, &unbox_tys, 1);
+                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, 1);
+                            self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
                             let _method_wrapper_id = self.checker.id_table().ids()[self.emit_idx];
@@ -16470,7 +16800,13 @@ impl Compiler {
                                     &arg_tys,
                                     &fqn,
                                 );
-                                self.compile_function_output_with_name(body, fqn, &unbox_tys, 1);
+                                self.compile_function_output_with_name(
+                                    body,
+                                    fqn.clone(),
+                                    &unbox_tys,
+                                    1,
+                                );
+                                self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                             } else {
                                 self.consume_function_signature_output(body);
                             }
@@ -17659,9 +17995,9 @@ impl Compiler {
                     && !self.expr_layout(inner).is_niche_result()
                     && let Some(inner_kind) = self.expr_two_word_pair_kind(inner)
                 {
-                    self.unbox_enum_context += 1;
+                    self.repr.unbox_enum_context += 1;
                     let mut inner_bc = self.do_compile(inner);
-                    self.unbox_enum_context -= 1;
+                    self.repr.unbox_enum_context -= 1;
                     self.bytecode.append(&mut inner_bc);
                     self.emit_try_two_word_pair(success_tag, &inner_kind);
                     return bytecode;
@@ -17801,13 +18137,13 @@ impl Compiler {
                 // `lhs` always compiles to its ordinary (boxed / niche)
                 // representation, a two-word call auto-boxes unless
                 // immediately consumed, and `??` never opts into that.
-                let previous_niche_context = self.force_niche_option;
-                self.force_niche_option = niche_lhs;
-                let previous_result_niche = self.force_niche_result;
-                self.force_niche_result = niche_result_lhs || unit_result_lhs;
+                let previous_niche_context = self.repr.force_niche_option;
+                self.repr.force_niche_option = niche_lhs;
+                let previous_result_niche = self.repr.force_niche_result;
+                self.repr.force_niche_result = niche_result_lhs || unit_result_lhs;
                 let mut lhs_bc = self.do_compile(lhs);
-                self.force_niche_result = previous_result_niche;
-                self.force_niche_option = previous_niche_context;
+                self.repr.force_niche_result = previous_result_niche;
+                self.repr.force_niche_option = previous_niche_context;
                 self.bytecode.append(&mut lhs_bc);
 
                 let mut bb = BlockBuilder::new();
@@ -17927,12 +18263,12 @@ impl Compiler {
                 }
 
                 let receiver_is_niche = self.expr_layout(receiver).is_niche_option();
-                let previous_force = self.force_heap_option;
+                let previous_force = self.repr.force_heap_option;
                 if receiver_is_niche {
-                    self.force_heap_option = true;
+                    self.repr.force_heap_option = true;
                 }
                 let mut recv_bc = self.do_compile(receiver);
-                self.force_heap_option = previous_force;
+                self.repr.force_heap_option = previous_force;
                 self.bytecode.append(&mut recv_bc);
                 if receiver_is_niche && !Self::is_option_construct(receiver) {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
@@ -18049,11 +18385,8 @@ impl Compiler {
         self.static_const_values.clear();
         self.current_function_qualified = None;
         self.current_function_table_key = None;
-        self.force_heap_option = false;
-        self.force_niche_option = false;
-        self.force_heap_result = false;
-        self.force_niche_result = false;
-        self.unbox_enum_context = 0;
+        self.repr = ReprCtx::default();
+        self.repr_here = ReprCtx::default();
         self.compiling_two_word_enum = None;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
@@ -18077,6 +18410,7 @@ impl Compiler {
             self.string_indices.clear();
         }
         self.mono_offsets.clear();
+        self.mono_names.clear();
         self.mono_codegen_var_types.clear();
         self.test_cases.clear();
         self.user_main_defined = false;

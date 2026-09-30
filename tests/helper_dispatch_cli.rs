@@ -1,4 +1,4 @@
-//! Integration tests for `coil` helper re-exec (`coil-{fmt,lsp,debug,dissect}`).
+//! Integration tests for `coil` helper re-exec (`coil-{fmt,lsp,debug,dissect,test}`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -51,4 +51,36 @@ fn missing_helper_reports_required_binary() {
     );
 
     let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn test_subcommand_requires_and_forwards_to_coil_test() {
+    let cwd = scratch_dir("test_missing");
+    let isolated = cwd.join(format!("coil{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(coil_bin(), &isolated).expect("copy coil without helpers");
+    let out = Command::new(&isolated)
+        .args(["test", "--fail-fast"])
+        .output()
+        .expect("spawn isolated coil test");
+    assert!(!out.status.success(), "expected failure when coil-test is absent");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("requires `coil-test`"), "stderr={err}");
+    let _ = std::fs::remove_dir_all(&cwd);
+
+    // Beside the real helper, unknown flags reach `coil-test` and are rejected there.
+    let helper = coil_cli::sibling_bin(&coil_bin(), "coil-test");
+    if !helper.is_file() {
+        let status = Command::new("cargo")
+            .args(["build", "-q", "-p", "coil-test"])
+            .status()
+            .expect("spawn cargo build -p coil-test");
+        assert!(status.success() && helper.is_file(), "coil-test missing at {}", helper.display());
+    }
+    let out = Command::new(coil_bin())
+        .args(["test", "--definitely-not-a-flag"])
+        .output()
+        .expect("spawn coil test");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("coil-test: unrecognized flag"), "stderr={err}");
 }

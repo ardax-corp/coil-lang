@@ -249,7 +249,7 @@ impl Compiler {
                 return bytecode;
             }
             if self.compiling_mono_clone
-                && self.try_emit_ground_bound_method(&mut bytecode, name, args.as_ref(), &hint)
+                && self.try_emit_ground_bound_method(&mut bytecode, ast, name, args.as_ref(), &hint)
             {
                 return bytecode;
             }
@@ -266,6 +266,70 @@ impl Compiler {
                 self.messages.push(message);
                 return bytecode;
             }
+        }
+
+        // Ground function-style trait call `method(x, …)`: the typechecker
+        // discharged the instance for the first argument into `call_dicts_at`
+        // (only when no fn / local of that name exists).
+        if let Expression::Identifier(method) = name.1.as_ref()
+            && self.lookup_slot(method).is_none()
+            && !self.functions.contains_key(*method)
+            && let Some((class, inst_args, fqn)) = self
+                .sidecar_dicts(self_id, span.start, span.end)
+                .and_then(|dicts| dicts.first())
+                .and_then(|instance| {
+                    let fqn = instance.method_fqns.get(*method)?.clone();
+                    (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
+                        .then(|| (instance.class.clone(), instance.args.clone(), fqn))
+                })
+        {
+            // Box the positions the instance entry unboxes (the ones the trait
+            // types as a class type parameter). A ground heap object passes
+            // as-is: `UnboxValue` returns a non-box object unchanged, and a
+            // `BoxValue` there would only allocate.
+            let unbox_tys = self.instance_method_unbox_tys(&class, method, &inst_args);
+            let arg_slice = args.as_deref().unwrap_or(&[]);
+            // Operands that may clobber the operand stack (`new C(..)`) are
+            // staged into temps and reloaded above them, so the CALL result
+            // lands where the enclosing expression expects it.
+            let stage = arg_slice
+                .iter()
+                .any(|arg| self.expr_may_clobber_operand_stack(arg));
+            let mut temps = Vec::new();
+            let mut nargs = 0u32;
+            for (i, arg) in arg_slice.iter().enumerate() {
+                self.append_with_existential_pack(&mut bytecode, arg);
+                if unbox_tys.get(i).is_some_and(Option::is_some)
+                    && let Some(ty) = self.codegen_expr_ty(arg)
+                    && crate::typechecking::value_layout::word_kind(&self.checker, &ty)
+                        != common::WORD_POINTER
+                {
+                    Self::emit_box_if_needed(
+                        &mut bytecode,
+                        &Self::show_lookup_ty_for_instance(&ty),
+                    );
+                }
+                if stage {
+                    let tmp = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
+                nargs += 1;
+            }
+            for tmp in &temps {
+                bytecode.push_load(*tmp);
+            }
+            // Only a default body reaches siblings through its trailing
+            // dictionary; a concrete instance method never reads it.
+            if Self::is_default_method_fqn(&class, method, &fqn)
+                && self.emit_instance_dict(&mut bytecode, &class, &inst_args)
+            {
+                nargs += 1;
+            }
+            if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
+                self.missing_call_target(&fqn, span.into_range());
+            }
+            return bytecode;
         }
 
         // Method call: `recv.method(args)`.
@@ -287,7 +351,26 @@ impl Compiler {
                     }
                 });
             if let Some((class, inst_args, fqn)) = ground_trait {
+                // When an operand may clobber the operand stack (`new C(..)`
+                // builds in a temp slot), stage the receiver and each argument
+                // into a temp and reload them above every temp, as inherent
+                // methods do. Pushed in place, the CALL result landed below
+                // the slots the enclosing expression allocated (an `if let`
+                // binding then read a stale slot).
+                let stage = self.expr_may_clobber_operand_stack(recv)
+                    || args.as_ref().is_some_and(|a| {
+                        a.iter().any(|arg| self.expr_may_clobber_operand_stack(arg))
+                    });
+                let mut temps = Vec::new();
+                let mut nargs = 1u32; // receiver
+                // A default body is generic: `Option` / `Result` of a class
+                // type parameter crosses as the boxed enum.
+                let is_default = Self::is_default_method_fqn(&class, method, &fqn);
+                let sig = self.trait_method_boundary_sig(&class, method, &inst_args, is_default);
                 bytecode.append(&mut self.do_compile(recv));
+                if let Some(target) = sig.as_ref().and_then(|s| s.params.first().copied().flatten()) {
+                    Self::emit_layout_convert(&mut bytecode, self.expr_layout(recv), target);
+                }
                 // Box the receiver when the instance method prologue
                 // expects an unbox (same contract as Eq/Ord direct calls).
                 // Prefer `receiver_type` for identifiers/access; fall
@@ -305,18 +388,38 @@ impl Compiler {
                     let box_ty = Self::show_lookup_ty_for_instance(&recv_ty);
                     Self::emit_box_if_needed(&mut bytecode, &box_ty);
                 }
-                let mut nargs = 1u32; // receiver
+                if stage {
+                    let tmp = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
                 if let Some(items) = args {
                     for arg in items {
                         self.append_with_existential_pack(&mut bytecode, arg);
+                        if let Some(target) = sig
+                            .as_ref()
+                            .and_then(|s| s.params.get(nargs as usize).copied().flatten())
+                        {
+                            Self::emit_layout_convert(&mut bytecode, self.expr_layout(arg), target);
+                        }
+                        if stage {
+                            let tmp = self.alloc_temp_slot();
+                            bytecode.push_store_pop(tmp);
+                            temps.push(tmp);
+                        }
                         nargs += 1;
                     }
+                }
+                for tmp in &temps {
+                    bytecode.push_load(*tmp);
                 }
                 if self.emit_instance_dict(&mut bytecode, &class, &inst_args) {
                     nargs += 1; // trailing dictionary
                 }
                 if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
                     self.missing_call_target(&fqn, span.into_range());
+                } else if let Some(from) = sig.and_then(|s| s.ret) {
+                    Self::emit_layout_convert(&mut bytecode, from, self.expr_layout(ast));
                 }
                 return bytecode;
             }
@@ -468,10 +571,31 @@ impl Compiler {
                     self.consume_spread_emit_ids(arg_slice);
                     let (fixed, rest, pack_rest) =
                         self.split_call_args_for_rest(&lookup_name, arg_slice);
+                    // The shared body unboxes only params typed as a bare type
+                    // parameter (`T proto`), not `Val v` / `[T] xs`.
+                    let bare_t_args: Vec<bool> = self
+                        .checker
+                        .env()
+                        .lookup(&lookup_name)
+                        .map(|scheme| {
+                            let mut params = Vec::new();
+                            let mut cur = &scheme.ty;
+                            while let Ty::Fun(p, r) = cur {
+                                params.push(p.as_ref().clone());
+                                cur = r;
+                            }
+                            let skip = params.len().saturating_sub(fixed.len());
+                            params[skip..]
+                                .iter()
+                                .map(|p| matches!(p, Ty::Var(v) if scheme.bounds.contains(v)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let mut arg_temps: Vec<u32> = Vec::new();
-                    for arg in &fixed {
+                    for (i, arg) in fixed.iter().enumerate() {
                         self.append_with_existential_pack(&mut bytecode, arg);
                         if box_generic_args
+                            && bare_t_args.get(i).copied().unwrap_or(true)
                             && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                                 Self::emit_box_if_needed(&mut bytecode, &arg_ty);
                             }
@@ -806,6 +930,7 @@ impl Compiler {
             } else if self.functions.contains_key(&n) || self.fn_entry_labels.contains_key(&n) {
                 let offset = self.functions.get(&n).copied();
                 let mono_offset = self.mono_call_offset(&n, args.as_ref());
+                let mono_name = self.mono_call_name(&n, args.as_ref());
                 let target_offset = mono_offset.or(offset);
                 let lookup_name = strip_overload_key(&n).to_string();
                 let pair_kind = self.two_word_return_kind(&lookup_name);
@@ -938,6 +1063,20 @@ impl Compiler {
                     return bytecode;
                 }
 
+                // Generic boundary: `Option` / `Result` params that mention a
+                // type parameter take the boxed layout, shared body or mono.
+                let generic_sig = if is_generic_src {
+                    self.checker
+                        .env()
+                        .lookup(&lookup_name)
+                        .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty))
+                } else {
+                    None
+                };
+                if let Some((params, _)) = generic_sig.as_ref() {
+                    let (fixed, _, _) = self.split_call_args_for_rest(&lookup_name, arg_slice);
+                    self.queue_generic_arg_convs(params, &fixed);
+                }
                 let value_arity = self.emit_call_args_with_rest(
                     &lookup_name,
                     arg_slice,
@@ -1014,10 +1153,14 @@ impl Compiler {
                         arity,
                         common::HOST_ENUM_LAYOUT_OPTION_NICHE,
                     ) {
-                        if let Some(off) = mono_offset {
-                            bytecode.push(Self::packed_entry_byte_ret(
-                                entry_kind, arity, off as u32, ret_words,
-                            ));
+                        if let Some(mono) = mono_name.as_deref() {
+                            let _ = self.emit_named_entry_ret(
+                                &mut bytecode,
+                                mono,
+                                arity,
+                                entry_kind,
+                                ret_words,
+                            );
                         } else if !self.emit_named_entry_ret(
                             &mut bytecode,
                             &n,
@@ -1028,10 +1171,15 @@ impl Compiler {
                             self.missing_call_target(&n, span.into_range());
                         }
                     }
-                } else if let Some(off) = mono_offset {
-                    bytecode.push(Self::packed_entry_byte_ret(
-                        entry_kind, arity, off as u32, ret_words,
-                    ));
+                } else if let Some(mono) = mono_name.as_deref() {
+                    // Bind through the clone's entry label, like named calls.
+                    let _ = self.emit_named_entry_ret(
+                        &mut bytecode,
+                        mono,
+                        arity,
+                        entry_kind,
+                        ret_words,
+                    );
                 } else if !self.emit_named_entry_ret(
                     &mut bytecode,
                     &n,
@@ -1042,7 +1190,7 @@ impl Compiler {
                     self.missing_call_target(&n, span.into_range());
                 }
                 if let Some(enum_name) = two_word
-                    && self.unbox_enum_context == 0 {
+                    && !self.repr_now().unboxing() {
                         self.emit_box_pair_after_call(&mut bytecode, &enum_name);
                     }
                 // Generic→concrete unbox: only when the return type
@@ -1054,8 +1202,11 @@ impl Compiler {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                     }
-                } else if is_generic && self.expr_layout(ast).is_niche_option() {
-                    Self::emit_boxed_option_to_niche(&mut bytecode);
+                } else if let Some((_, ret)) = generic_sig.as_ref()
+                    && let Some(generic) = self.generic_enum_layout(ret)
+                {
+                    // Shared body and mono clone both build the boxed enum.
+                    Self::emit_layout_convert(&mut bytecode, generic, self.expr_layout(ast));
                 }
             } else if self.fn_entry_labels.contains_key(&n) {
                 // Reserved by phased emit (COI-109) but body not yet bound.
@@ -1199,7 +1350,7 @@ impl Compiler {
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
                 let ok = self.emit_named_entry_ret(dest, name, arity, kind, ret_words);
                 if ok
-                    && self.unbox_enum_context == 0
+                    && !self.repr_now().unboxing()
                     && let Some(enum_name) = two_word
                 {
                     self.emit_box_pair_after_call(dest, &enum_name);
@@ -1270,14 +1421,9 @@ impl Compiler {
             ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            self.bytecode.append(dest);
-            self.bytecode.il_mut().emit_entry_ret_at(
-                kind,
-                arity,
-                label,
-                DebugLoc::unknown(),
-                ret_words,
-            );
+            // Reserved entry (body later): keep the CALL in `dest` so it stays
+            // in order with the enclosing expression's staged operands.
+            dest.emit_root_entry(kind, arity, label, ret_words);
             true
         } else {
             false
@@ -1297,7 +1443,7 @@ impl Compiler {
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
                 let ok = self.emit_named_entry_on_module_ret(name, arity, kind, ret_words);
                 if ok
-                    && self.unbox_enum_context == 0
+                    && !self.repr_now().unboxing()
                     && let Some(enum_name) = two_word
                 {
                     let mut bytecode = std::mem::take(&mut self.bytecode);

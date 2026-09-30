@@ -21,8 +21,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CI: "true"
-  # Default-members: coil, coil-embed, coil-debug, coil-dissect, coil-fmt, coil-lsp
-  COIL_RELEASE_BINS: "coil coil-debug coil-dissect coil-fmt coil-lsp coil-embed"
+  # Default-members: coil, coil-embed, coil-debug, coil-dissect, coil-fmt, coil-lsp, coil-test
+  COIL_RELEASE_BINS: "coil coil-debug coil-dissect coil-fmt coil-lsp coil-test coil-embed"
 
 jobs:
   build:

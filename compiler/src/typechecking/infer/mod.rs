@@ -413,6 +413,9 @@ pub struct Checker {
     /// ground trait calls like `x.into()` can pin the conversion target
     /// before constraint discharge (`let y: T = x.into();`).
     current_expected: Option<Ty>,
+    /// The expected type the node now inside `infer` was entered with; its
+    /// operands see `current_expected` cleared (see `forwards_expected`).
+    expected_here: Option<Ty>,
 
     /// `type Name = T` aliases (substituted at typecheck time).
     ///

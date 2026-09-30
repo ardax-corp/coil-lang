@@ -774,6 +774,60 @@ struct PeelRematPlan {
     /// Argument indices the guard reads (must be re-materializable).
     guard_args: Vec<usize>,
 }
+
+/// How one expression should represent the enum value it builds or loads,
+/// when its consumer needs something other than the value's own layout.
+///
+/// Scoped to a single node: [`Compiler::do_compile`] hands the requested
+/// context to the node it compiles (`repr_here`) and resets it for that
+/// node's operands, so a call argument, payload, or operand never inherits
+/// its parent's request. Only value-forwarding nodes pass it on: `Group` /
+/// `Expr` / one-item `Fragment`, a block's tail, and a match's arm bodies
+/// (not its scrutinee).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ReprCtx {
+    /// Force ground pointer-niche `Option` expressions back to heap enums
+    /// while using legacy pattern lowering or an unknown boundary.
+    pub(super) force_heap_option: bool,
+    /// Force a contextually typed `Option::None` / `Option::Some` onto the
+    /// pointer-niche path when its constructor node has no standalone type.
+    pub(super) force_niche_option: bool,
+    /// Force heap-heap `Result` expressions back to `ObjEnum` for boxed match.
+    pub(super) force_heap_result: bool,
+    /// Force `Result::Ok` / `Result::Err` onto the pointer-niche path when
+    /// the constructor node has no standalone type.
+    pub(super) force_niche_result: bool,
+    /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
+    /// in locals / on the stack instead of `MakeEnum`, and a two-word
+    /// `CALL` leaves its pair unboxed.
+    pub(super) unbox_enum_context: u32,
+}
+
+impl ReprCtx {
+    fn union(self, other: Self) -> Self {
+        Self {
+            force_heap_option: self.force_heap_option || other.force_heap_option,
+            force_niche_option: self.force_niche_option || other.force_niche_option,
+            force_heap_result: self.force_heap_result || other.force_heap_result,
+            force_niche_result: self.force_niche_result || other.force_niche_result,
+            unbox_enum_context: self.unbox_enum_context.max(other.unbox_enum_context),
+        }
+    }
+
+    pub(super) fn unboxing(self) -> bool {
+        self.unbox_enum_context > 0
+    }
+}
+
+/// Target-side layouts at a trait-method call across a generic boundary;
+/// see [`Compiler::trait_method_boundary_sig`].
+pub(super) struct BoundarySig {
+    /// Per parameter: the layout the target reads, when it can differ.
+    pub(super) params: Vec<Option<crate::typechecking::value_layout::ValueLayout>>,
+    /// The layout the target returns, when it can differ.
+    pub(super) ret: Option<crate::typechecking::value_layout::ValueLayout>,
+}
+
 pub struct Compiler {
     namespace: String,
     /// Stack IL during emit; lowered `Vec<Byte>` after [`Self::finalize_bytecode`].
@@ -926,20 +980,27 @@ pub struct Compiler {
     /// explicit `return Result::Ok(…)` (nested Result payload case).
     compiling_result_ok_is_result: bool,
 
-    /// Force ground pointer-niche `Option` expressions back to heap enums
-    /// while using legacy pattern lowering or an unknown boundary.
-    force_heap_option: bool,
-    /// Force a contextually typed `Option::None` / `Option::Some` onto the
-    /// pointer-niche path when its constructor node has no standalone type.
-    force_niche_option: bool,
-    /// Force heap-heap `Result` expressions back to `ObjEnum` for boxed match.
-    force_heap_result: bool,
-    /// Force `Result::Ok` / `Result::Err` onto the pointer-niche path when
-    /// the constructor node has no standalone type.
-    force_niche_result: bool,
-    /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
-    /// in locals / on the stack instead of `MakeEnum`.
-    unbox_enum_context: u32,
+    /// Enum representation requested for the expression being compiled;
+    /// see [`ReprCtx`]. Raise it right before compiling that expression.
+    repr: ReprCtx,
+    /// The [`ReprCtx`] the node now inside [`Compiler::do_compile`] was
+    /// entered with. Its operands see [`ReprCtx::default`] instead.
+    repr_here: ReprCtx,
+    /// Per enclosing `match`: the [`ReprCtx`] its arm bodies compile under.
+    arm_repr: Vec<ReprCtx>,
+    /// Spans of generic-call arguments whose parameter is not a bare type
+    /// parameter: the shared body does not unbox them, so they are not boxed.
+    generic_arg_no_box: HashSet<(usize, usize)>,
+    /// Pending generic-boundary layout conversions for call arguments, keyed
+    /// by argument span: `(from, to)` applied right after the argument is
+    /// compiled (see [`Compiler::generic_enum_layout`]).
+    boundary_arg_convs: HashMap<
+        (usize, usize),
+        (
+            crate::typechecking::value_layout::ValueLayout,
+            crate::typechecking::value_layout::ValueLayout,
+        ),
+    >,
 
     /// Kind when the function whose body is being compiled uses the
     /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
@@ -976,6 +1037,9 @@ pub struct Compiler {
     /// Monomorphization plan for this compile unit plus emitted clone offsets.
     mono_plan: MonoPlan,
     mono_offsets: HashMap<MonoKey, usize>,
+    /// Entry name of each mono clone: calls bind through its entry label
+    /// (a raw offset goes stale when code moves before it).
+    mono_names: HashMap<MonoKey, String>,
     /// Temporary variable-type overrides while emitting a specialized clone.
     mono_codegen_var_types: Vec<HashMap<String, Ty>>,
 
@@ -1122,11 +1186,11 @@ impl Default for Compiler {
             compiling_mono_clone: false,
             compiling_result_mode: false,
             compiling_result_ok_is_result: false,
-            force_heap_option: false,
-            force_niche_option: false,
-            force_heap_result: false,
-            force_niche_result: false,
-            unbox_enum_context: 0,
+            repr: ReprCtx::default(),
+            repr_here: ReprCtx::default(),
+            arm_repr: Vec::new(),
+            generic_arg_no_box: HashSet::new(),
+            boundary_arg_convs: HashMap::new(),
             compiling_two_word_enum: None,
             compiling_try_fail: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
@@ -1138,6 +1202,7 @@ impl Default for Compiler {
             polyfn_sources: HashMap::new(),
             mono_plan: MonoPlan::default(),
             mono_offsets: HashMap::new(),
+            mono_names: HashMap::new(),
             mono_codegen_var_types: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),

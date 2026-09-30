@@ -25,10 +25,8 @@ pub(crate) enum Command {
     Run {
         archive: String,
     },
-    Test {
-        path: Option<String>,
-        fail_fast: bool,
-    },
+    /// Re-exec `coil-test` (every flag is forwarded and parsed there).
+    Test,
     Package {
         filename: String,
         output: String,
@@ -257,21 +255,12 @@ enum RawCommand {
         /// Archive path
         archive: String,
     },
-    /// Compile and run every .hy file under [path] (default: ./tests)
+    /// Compile and run every test under [path] (default: ./tests; re-execs `coil-test`)
+    #[command(disable_help_flag = true)]
     Test {
-        #[command(flatten)]
-        log: LogFlags,
-        #[command(flatten)]
-        opt: OptLevelFlags,
-        #[command(flatten)]
-        grants: HostGrantFlags,
-        #[command(flatten)]
-        roots: RootFlags,
-        /// Stop after the first failed case
-        #[arg(long)]
-        fail_fast: bool,
-        /// Test root (files under `compile_fail/` must be rejected)
-        path: Option<String>,
+        /// Forwarded to `coil-test` (`coil test --help` lists them)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
     },
     /// Build a single-host executable (runner + embedded .hyc)
     Package {
@@ -589,28 +578,15 @@ impl RawCli {
                     Vec::new(),
                 )
             }
-            Some(RawCommand::Test {
-                log,
-                opt,
-                grants,
-                roots,
-                fail_fast,
-                path,
-            }) => {
-                if let Some(p) = &path
-                    && is_reserved(p) {
-                        return Err("test path must be a directory".into());
-                    }
-                cli_from(
-                    Command::Test { path, fail_fast },
-                    log,
-                    false,
-                    opt,
-                    CompileProfileFlags::default(),
-                    grants,
-                    roots.root,
-                )
-            }
+            Some(RawCommand::Test { args: _ }) => cli_from(
+                Command::Test,
+                LogFlags::default(),
+                false,
+                OptLevelFlags::default(),
+                CompileProfileFlags::default(),
+                HostGrantFlags::default(),
+                Vec::new(),
+            ),
             Some(RawCommand::Compile {
                 log,
                 opt,
@@ -1067,35 +1043,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_test() {
-        let cli = parse_args(&args(&["test"])).unwrap();
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                path: None,
-                fail_fast: false,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_test_with_path_and_fail_fast() {
-        let cli = parse_args(&args(&["test", "./tests", "--fail-fast"])).unwrap();
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                path: Some("./tests".into()),
-                fail_fast: true,
-            }
-        );
-        let cli = parse_args(&args(&["test", "--fail-fast"])).unwrap();
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                path: None,
-                fail_fast: true,
-            }
-        );
+    fn parse_test_forwards_every_flag_to_the_helper() {
+        for argv in [
+            &["test"][..],
+            &["test", "./tests", "--fail-fast"],
+            &["test", "--log-lsp", "-O2", "--root", "src", "--allow-exit"],
+            &["test", "--seed", "42", "--help"],
+            // Unknown or misplaced flags are `coil-test`'s to reject.
+            &["test", "-o", "x"],
+        ] {
+            let cli = parse_args(&args(argv)).unwrap();
+            assert_eq!(cli.command, Command::Test, "{argv:?}");
+            assert!(!cli.log_json && !cli.log_lsp, "{argv:?}");
+        }
     }
 
     #[test]
@@ -1103,24 +1063,12 @@ mod tests {
         let cli = parse_args(&args(&["compile", "--log-json", "a.hy"])).unwrap();
         assert!(cli.log_json);
         assert!(matches!(cli.command, Command::Compile { .. }));
-
-        let cli = parse_args(&args(&["test", "--log-lsp"])).unwrap();
-        assert!(cli.log_lsp);
-        assert_eq!(
-            cli.command,
-            Command::Test {
-                path: None,
-                fail_fast: false,
-            }
-        );
     }
 
     #[test]
-    fn parse_rejects_output_on_run_and_test() {
+    fn parse_rejects_output_on_run_and_default() {
         assert!(parse_args(&args(&["run", "a.hyc", "-o", "x"])).is_err());
-        assert!(parse_args(&args(&["test", "-o", "x"])).is_err());
         assert!(parse_args(&args(&["examples/fib.hy", "-o", "x"])).is_err());
-        assert!(parse_args(&args(&["test", "--include-tests"])).is_err());
     }
 
     #[test]
@@ -1175,9 +1123,6 @@ mod tests {
 
     #[test]
     fn parse_rejects_reserved_test_path_names() {
-        assert!(parse_args(&args(&["test", "compile"])).is_err());
-        assert!(parse_args(&args(&["test", "run"])).is_err());
-        assert!(parse_args(&args(&["test", "test"])).is_err());
     }
 
     #[test]
@@ -1207,7 +1152,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_both_log_flags_at_parse_time() {
-        let cli = parse_args(&args(&["test", "--log-json", "--log-lsp"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--log-json", "--log-lsp", "a.hy"])).unwrap();
         assert!(cli.log_json && cli.log_lsp);
 
         let cli = parse_args(&args(&["--include-tests", "examples/fib.hy"])).unwrap();
@@ -1247,7 +1192,6 @@ mod tests {
         ]))
         .unwrap();
         assert!(cli.opt_stats && cli.opt_stats_json);
-        assert!(parse_args(&args(&["test", "--opt-stats"])).is_err());
         assert!(parse_args(&args(&["run", "out.hyc", "--opt-stats-json"])).is_err());
     }
 

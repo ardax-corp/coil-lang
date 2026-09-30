@@ -68,6 +68,13 @@ pub(crate) enum DropOwner {
     Other,
 }
 
+/// Saved bare-name state; see [`Checker::shield_bare_names`].
+pub(super) struct BareNameShield {
+    modes: Vec<(String, bool, bool)>,
+    env: Vec<(String, usize)>,
+    defs: Vec<(DefId, Option<Scheme>)>,
+}
+
 impl Checker {
     pub fn new() -> Self {
         let mut env = Env::new();
@@ -160,6 +167,7 @@ impl Checker {
             for_in_infos_by_span: HashMap::new(),
             typeclass_method_schemes: HashMap::new(),
             current_expected: None,
+            expected_here: None,
             type_aliases: vec![HashMap::new()],
             generic_aliases: HashMap::new(),
             qualified_type_aliases: HashMap::new(),
@@ -1474,8 +1482,19 @@ impl Checker {
         self.existential_method_calls_by_span.clear();
         self.for_in_infos.clear();
         self.for_in_infos_by_span.clear();
-        self.typeclass_method_schemes.clear();
+        // Traits declared in a named module stay registered in `generics`
+        // across files (importers `use` them); keep their method schemes too
+        // so an importer can call and implement them. Entry-file traits and
+        // builtins (re-registered below) are dropped.
+        let generics = &self.generics;
+        self.typeclass_method_schemes.retain(|(class, _), _| {
+            generics.typeclass(class).is_some_and(|def| {
+                !def.defined_module.is_empty()
+                    && def.defined_module != crate::typechecking::generics::BUILTIN_MODULE
+            })
+        });
         self.current_expected = None;
+        self.expected_here = None;
         self.type_aliases.clear();
         self.type_aliases.push(HashMap::new());
         self.generic_aliases.clear();
@@ -2136,13 +2155,53 @@ impl Checker {
         self.maybe_attach_def_id(id, expr);
         self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
 
+        // `current_expected` is the expected type of *this* node: hand it to
+        // the node (`expected_here`) and clear it for its operands, unless
+        // the node's value is its child's (see `forwards_expected`). Rules
+        // that know an operand's type (`let x: T`, `return`, `as`, array
+        // elements) set it right before inferring that operand.
+        let outer = self.current_expected.clone();
+        let prev_here = std::mem::replace(&mut self.expected_here, outer.clone());
+        if !Self::forwards_expected(expr) {
+            self.current_expected = None;
+        }
         let ty = self.infer_inner(expr, Some(id));
+        self.current_expected = outer;
+        self.expected_here = prev_here;
         self.cache.insert(id, ty.clone());
         self.codegen_types_by_span
             .entry((expr.0.start, expr.0.end))
             .or_insert_with(|| ty.clone());
         self.infer_depth -= 1;
         ty
+    }
+
+    /// Nodes whose value is a child's value (or, for arithmetic, whose
+    /// operands share the result's type: `return 1 + 1;` under an expected
+    /// `byte`), so an expected type applies to that child too. A match
+    /// forwards to its arm bodies only; its scrutinee starts clean.
+    fn forwards_expected(expr: &Output) -> bool {
+        matches!(
+            expr.1.as_ref(),
+            Expression::Group(_)
+                | Expression::Expr(_)
+                | Expression::Block(_)
+                | Expression::Match { .. }
+                | Expression::Coalesce(..)
+                | Expression::Add(..)
+                | Expression::Sub(..)
+                | Expression::Mul(..)
+                | Expression::Div(..)
+                | Expression::Mod(..)
+                | Expression::Pow(..)
+                | Expression::Shl(..)
+                | Expression::Shr(..)
+                | Expression::Xor(..)
+                | Expression::BitAnd(..)
+                | Expression::BitOr(..)
+                | Expression::Negate(_)
+                | Expression::Positive(_)
+        ) || matches!(expr.1.as_ref(), Expression::Fragment(items) if items.len() == 1)
     }
 
     /// Register the compiler-owned signatures for the primitive classes.
@@ -2368,7 +2427,7 @@ impl Checker {
                 // Under an expected `byte`, in-range integer literals type as
                 // `byte` so arithmetic like `return 1 + 1;` (expected byte)
                 // unifies without falling back to `int` + post-hoc coerce.
-                if let Some(exp) = self.current_expected.clone() {
+                if let Some(exp) = self.expected_here.clone() {
                     let exp = apply_ty_prune(&self.subst, &exp);
                     if Self::is_byte_ty(&exp) {
                         if (0..=255).contains(n) {
@@ -2387,7 +2446,7 @@ impl Checker {
             Expression::Float(_) => float(),
             Expression::String(s) => {
                 // Expected `byte` / `[byte]` / `[byte; N]`: string lit may type as that byte shape.
-                if let Some(exp) = self.current_expected.clone() {
+                if let Some(exp) = self.expected_here.clone() {
                     let exp = apply_ty_prune(&self.subst, &exp);
                     if Self::is_byte_ty(&exp) {
                         return self.coerce_string_literal_to_byte(s, &range);
@@ -3860,7 +3919,7 @@ impl Checker {
 
     #[inline(never)]
     fn infer_array_literal(&mut self, items: &[Output], range: Range<usize>) -> Ty {
-        let expected_elem = self.current_expected.clone().and_then(|exp| {
+        let expected_elem = self.expected_here.clone().and_then(|exp| {
             let exp = apply_ty_prune(&self.subst, &exp);
             if let Ty::Array { element, .. } = &exp {
                 return Some(element.as_ref().clone());
@@ -3914,7 +3973,7 @@ impl Checker {
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
         if len == 0 {
-            if let Some(exp) = self.current_expected.clone() {
+            if let Some(exp) = self.expected_here.clone() {
                 let exp = apply_ty_prune(&self.subst, &exp);
                 if let Some(vec_elem) = vec_element_ty(&exp) {
                     let _ = unify_with(&self.subst, vec_elem, &element);
@@ -3966,7 +4025,7 @@ impl Checker {
                 .map(|c| c.to_vec())
                 .unwrap_or_default();
             // If exactly one candidate matches current_expected, pick it.
-            let expected = self.current_expected.clone();
+            let expected = self.expected_here.clone();
             let matching: Vec<&OverloadCandidate> = if let Some(ref exp) = expected {
                 // Prune so a solved `Ty::Var` expected type doesn't look
                 // open; unify under `self.subst` (not empty) so existing
@@ -4501,7 +4560,7 @@ impl Checker {
                 id,
                 range.clone(),
             );
-            if let Some(expected) = self.current_expected.clone() {
+            if let Some(expected) = self.expected_here.clone() {
                 self.unify(&result, &expected, &range, "expected type");
             }
             if !constraints.is_empty() {
@@ -5123,6 +5182,40 @@ impl Checker {
                 }
                 return result;
             }
+        }
+
+        // Ground function-style trait call: `method(x, …)` with a concrete
+        // first argument selects its instance like `x.method(…)` (the
+        // discharged instance lands in `call_dicts_at` for codegen). A free fn
+        // or local of the same name wins.
+        if self.lookup_fn_scheme(&ident).is_none()
+            && let Some(first) = arg_tys.first()
+            && let Some((class, scheme)) = self.ground_trait_method_for_receiver(&ident, first)
+        {
+            let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+            let result = self.apply_function(
+                Some(&format!("{}::{}", class, ident)),
+                &fun_ty,
+                &arg_tys,
+                if flat_args.is_empty() {
+                    None
+                } else {
+                    Some(&flat_args)
+                },
+                id,
+                range.clone(),
+            );
+            if !constraints.is_empty() {
+                self.discharge_constraints(id, &constraints, &range);
+                self.pin_assoc_after_discharge(
+                    &class,
+                    &constraints,
+                    Some(&scheme),
+                    &mapping,
+                    &range,
+                );
+            }
+            return apply_ty_prune(&self.subst, &result);
         }
 
         let scheme = self.lookup_fn_scheme(&ident);
@@ -10367,6 +10460,118 @@ impl Checker {
         self.result_mode_ok_is_result.contains(fn_name)
     }
 
+    /// Result-mode flags `note_result_mode_fn` may set for `name` (bare and
+    /// `module::name`), to restore with [`Self::restore_result_modes`].
+    ///
+    /// Trait signatures and instance methods infer as functions under the
+    /// bare method name, which a free fn (or another instance) may own.
+    pub(super) fn snapshot_result_modes<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Vec<(String, bool, bool)> {
+        let mut keys = Vec::new();
+        for name in names {
+            keys.push(name.to_string());
+            if !self.current_module.is_empty() {
+                keys.push(format!("{}::{}", self.current_module, name));
+            }
+        }
+        keys.into_iter()
+            .map(|k| {
+                let mode = self.result_mode_fns.contains(&k);
+                let ok_is_result = self.result_mode_ok_is_result.contains(&k);
+                (k, mode, ok_is_result)
+            })
+            .collect()
+    }
+
+    /// Undo result-mode flags set since [`Self::snapshot_result_modes`].
+    pub(super) fn restore_result_modes(&mut self, saved: Vec<(String, bool, bool)>) {
+        for (key, mode, ok_is_result) in saved {
+            if mode {
+                self.result_mode_fns.insert(key.clone());
+            } else {
+                self.result_mode_fns.remove(&key);
+            }
+            if ok_is_result {
+                self.result_mode_ok_is_result.insert(key);
+            } else {
+                self.result_mode_ok_is_result.remove(&key);
+            }
+        }
+    }
+
+    /// Everything inferring a trait signature or instance method as a
+    /// function records under its bare method name: result-mode flags, the
+    /// env binding, and (when a free fn of that name exists) that fn's DefId
+    /// scheme. The name belongs to the free fn, or to nobody, so a
+    /// function-style call `method(x)` resolves through the trait instead of
+    /// whichever signature was inferred last. Undo with
+    /// [`Self::unshield_bare_names`].
+    pub(super) fn shield_bare_names<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> BareNameShield {
+        let names: Vec<&str> = names.into_iter().collect();
+        let mark = self.env.top().map_or(0, |f| f.len());
+        BareNameShield {
+            modes: self.snapshot_result_modes(names.iter().copied()),
+            env: names.iter().map(|n| (n.to_string(), mark)).collect(),
+            defs: names
+                .iter()
+                .filter_map(|n| self.local_defs.get(*n).copied())
+                .map(|id| (id, self.schemes_by_def.get(&id).cloned()))
+                .collect(),
+        }
+    }
+
+    /// Clear the shielded names' result-mode flags so inference records only
+    /// this method's own mode.
+    pub(super) fn clear_bare_result_modes(&mut self, shield: &BareNameShield) {
+        self.restore_result_modes(
+            shield
+                .modes
+                .iter()
+                .map(|(k, _, _)| (k.clone(), false, false))
+                .collect(),
+        );
+    }
+
+    /// Restore what [`Self::shield_bare_names`] captured.
+    pub(super) fn unshield_bare_names(&mut self, shield: BareNameShield) {
+        self.restore_result_modes(shield.modes);
+        if let Some(top) = self.env.top_mut() {
+            for (name, mark) in &shield.env {
+                top.drop_since(name, *mark);
+            }
+        }
+        for (id, scheme) in shield.defs {
+            match scheme {
+                Some(s) => {
+                    self.schemes_by_def.insert(id, s);
+                }
+                None => {
+                    self.schemes_by_def.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// Codegen compiles an instance method under its FQN
+    /// (`Class__Args__method`) and reads its return layout / result mode by
+    /// that key. Copy what inferring it under the bare `name` just recorded.
+    pub(super) fn record_instance_method_under_fqn(&mut self, name: &str, fqn: &str) {
+        if let Some(scheme) = self.env.lookup(name).cloned() {
+            self.env.insert_top(fqn.to_string(), scheme);
+        }
+        if self.result_mode_fns.contains(name) {
+            self.result_mode_fns.insert(fqn.to_string());
+        }
+        if self.result_mode_ok_is_result.contains(name) {
+            self.result_mode_ok_is_result.insert(fqn.to_string());
+        }
+    }
+
     fn note_result_mode_fn(&mut self, name: &str, ok: &Ty) {
         self.result_mode_fns.insert(name.to_string());
         if !self.current_module.is_empty() {
@@ -15103,6 +15308,29 @@ impl Checker {
                     }
                 }
             }
+            // Arguments past the last specifier: the VM drops them. Infer them
+            // anyway (codegen needs their types) and reject the call.
+            if spec_index < p.len() {
+                for arg in &p[spec_index..] {
+                    let _ = self.infer(arg);
+                }
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "Format string has fewer specifiers than arguments \
+                         (argument #{} has no `%` specifier)",
+                        spec_index + 1
+                    ),
+                    p[spec_index].0.into_range(),
+                );
+                msg.with_help(if s.contains("{}") {
+                    "`{}` is not a format specifier: use `%s`, `%i`, `%f`, `%z` or `%v`"
+                        .to_string()
+                } else {
+                    "add a `%` specifier for it, or remove the argument".to_string()
+                });
+                self.messages.push(msg);
+            }
         } else if let Some(p) = params {
             // No format specifiers: still type-check args (VM consumes them).
             for arg in p {
@@ -16450,7 +16678,9 @@ impl Checker {
             .get(&owner)
             .and_then(|m| m.get(method))
             .map(|(_, s)| s.clone())?;
-        let fun_ty = self.instantiate_ty(&scheme);
+        // Keep the scheme's bounds (`static fn make<T: Tr>`): they are
+        // discharged below so the call site passes their dictionaries.
+        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
 
         // Named-arg / rest reorder when the call uses a tuple payload.
         let arg_tys = match fields {
@@ -16483,7 +16713,12 @@ impl Checker {
             }
         };
 
-        Some(self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range))
+        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range.clone());
+        if !constraints.is_empty() {
+            self.discharge_constraints(call_id, &constraints, &range);
+            self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);
+        }
+        Some(result)
     }
 
     /// True if `name` was declared as `async fn`.
