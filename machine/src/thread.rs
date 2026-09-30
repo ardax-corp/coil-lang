@@ -1079,6 +1079,8 @@ pub struct ThreadSpawnContext {
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
+    /// Parent's C struct layouts (pass-by-value FFI).
+    pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1094,6 +1096,7 @@ impl Clone for ThreadSpawnContext {
             ffi_base_dir: self.ffi_base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
+            struct_layouts: Arc::clone(&self.struct_layouts),
         }
     }
 }

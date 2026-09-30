@@ -1085,6 +1085,11 @@ impl<const S: usize> Machine<S> {
         self
     }
 
+    /// Replace every C struct layout (a reused worker VM takes its job's list).
+    pub fn set_struct_layouts(&mut self, layouts: Vec<CStructLayout>) {
+        self.struct_layouts = layouts;
+    }
+
     pub fn register_struct_layout(&mut self, layout: CStructLayout) -> u32 {
         let id = self.struct_layouts.len() as u32;
         self.struct_layouts.push(layout);
@@ -2250,6 +2255,7 @@ impl<const S: usize> Machine<S> {
             ffi_base_dir: self.base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
+            struct_layouts: std::sync::Arc::new(self.struct_layouts.clone()),
         })
     }
 
