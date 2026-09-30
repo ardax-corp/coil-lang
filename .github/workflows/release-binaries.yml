@@ -117,7 +117,11 @@ jobs:
 
       - name: Build release binaries
         if: runner.os != 'Windows' && matrix.libc != 'musl'
-        run: cargo build --release
+        # Two invocations: a workspace-wide build unifies helper-only `machine`
+        # features (`debugger`, `coverage`) into `coil` / `coil-embed`.
+        run: |
+          cargo build --release -p coil -p coil-embed
+          cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Build release binaries (musl / Alpine)
         if: matrix.libc == 'musl'
@@ -139,7 +143,9 @@ jobs:
               esac
               # Do not set +crt-static here: it forbids proc-macro dylibs
               # (bytecheck_derive / rkyv) on this target (COI-100).
-              cargo build --release
+              # Split so helper-only machine features stay out of coil / coil-embed.
+              cargo build --release -p coil -p coil-embed
+              cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
             '
           mkdir -p target/release
           for b in $COIL_RELEASE_BINS; do
@@ -163,7 +169,9 @@ jobs:
           command -v make
           command -v cmp
           make --version | head -n 1
-          cargo build --release
+          # Split so helper-only machine features stay out of coil / coil-embed.
+          cargo build --release -p coil -p coil-embed
+          cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Stage embed binary and toolkit archive
         shell: bash
