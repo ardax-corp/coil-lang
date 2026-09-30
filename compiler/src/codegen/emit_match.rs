@@ -59,14 +59,41 @@ impl Compiler {
         if arms.is_empty() {
             return false;
         }
-        let Some(ty) = self.codegen_expr_ty(scrutinee) else {
-            return false;
-        };
-        let Some(enum_name) = extract_enum_name(&ty) else {
-            return false;
-        };
-        if !self.checker.is_scalar_enum(&enum_name) {
-            return false;
+        // Integer literal arms (`200 => …`) compare the `int` scrutinee
+        // directly; the typechecker unifies them with `int`. The tag path
+        // below would treat them as a never-matching catch-all.
+        let integer_arms = arms
+            .iter()
+            .any(|arm| matches!(arm.pattern.1, Pattern::Integer(_)));
+        if !integer_arms {
+            let Some(ty) = self.codegen_expr_ty(scrutinee) else {
+                return false;
+            };
+            let Some(enum_name) = extract_enum_name(&ty) else {
+                return false;
+            };
+            if !self.checker.is_scalar_enum(&enum_name) {
+                return false;
+            }
+        }
+
+        // Literal each compare-and-branch arm tests (`None`: binding or
+        // catch-all). Decide before emitting anything so refusing is clean.
+        let mut literals = Vec::with_capacity(arms.len());
+        for arm in arms {
+            literals.push(match &arm.pattern.1 {
+                Pattern::Integer(n) => Some(crate::typechecking::ty::ScalarBacking::Int(*n)),
+                Pattern::Constructor {
+                    enum_name: en,
+                    variant_name,
+                    ..
+                } if !integer_arms => match self.checker.scalar_for(en, variant_name).cloned() {
+                    Some(backing) => Some(backing),
+                    None => return false,
+                },
+                Pattern::Constructor { .. } => return false,
+                _ => None,
+            });
         }
 
         self.bytecode.push_seek(self.context.variables.len() as u32);
@@ -75,10 +102,42 @@ impl Compiler {
 
         let mut bb = BlockBuilder::new();
         let end = bb.fresh_label(self.bytecode.il_mut());
-        for (i, arm) in arms.iter().enumerate() {
+        for (i, (arm, literal)) in arms.iter().zip(literals).enumerate() {
             let is_last = i + 1 == arms.len();
+            // Compare-and-branch arm: `DUP; <literal>; EQ; JMPF miss`. The
+            // last one needs no test: exhaustiveness guarantees it matches.
+            if let Some(backing) = literal {
+                let miss = if is_last {
+                    None
+                } else {
+                    Some(bb.fresh_label(self.bytecode.il_mut()))
+                };
+                if let Some(miss) = miss {
+                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    let mut lit = CodeBuf::new();
+                    self.emit_scalar_backing(&backing, &mut lit);
+                    self.bytecode.append(&mut lit);
+                    self.bytecode.push(Byte::new(Instruction::EQ));
+                    bb.emit_jump_to_hinted(
+                        miss,
+                        BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
+                        self.bytecode.il_mut(),
+                    );
+                }
+                self.bytecode.push_pop();
+                let mut body = self.do_compile(&arm.body);
+                self.bytecode.append(&mut body);
+                if !is_last {
+                    bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                    if let Some(miss) = miss {
+                        bb.bind_label(miss, self.bytecode.il_mut());
+                    }
+                }
+                continue;
+            }
             match &arm.pattern.1 {
-                Pattern::Integer(_) => return false,
+                Pattern::Integer(_) | Pattern::Constructor { .. } => unreachable!("handled above"),
                 Pattern::Wildcard | Pattern::Default => {
                     self.bytecode.push_pop();
                     let mut body = self.do_compile(&arm.body);
@@ -102,42 +161,6 @@ impl Compiler {
                     self.context.match_bindings = saved;
                     if !is_last {
                         bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                    }
-                }
-                Pattern::Constructor {
-                    enum_name: en,
-                    variant_name,
-                    ..
-                } => {
-                    let Some(backing) = self.checker.scalar_for(en, variant_name).cloned() else {
-                        return false;
-                    };
-                    let miss = if is_last {
-                        None
-                    } else {
-                        Some(bb.fresh_label(self.bytecode.il_mut()))
-                    };
-                    if let Some(miss) = miss {
-                        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                        let mut lit = CodeBuf::new();
-                        self.emit_scalar_backing(&backing, &mut lit);
-                        self.bytecode.append(&mut lit);
-                        self.bytecode.push(Byte::new(Instruction::EQ));
-                        bb.emit_jump_to_hinted(
-                            miss,
-                            BbJumpKind::JumpIfFalse,
-                            FuseHint::nofuse_value_under_jmp(),
-                            self.bytecode.il_mut(),
-                        );
-                    }
-                    self.bytecode.push_pop();
-                    let mut body = self.do_compile(&arm.body);
-                    self.bytecode.append(&mut body);
-                    if !is_last {
-                        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                        if let Some(miss) = miss {
-                            bb.bind_label(miss, self.bytecode.il_mut());
-                        }
                     }
                 }
             }

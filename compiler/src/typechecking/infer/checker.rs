@@ -14742,6 +14742,18 @@ impl Checker {
             return;
         }
 
+        // Integer literal arms can never cover every `int`.
+        if matches!(&resolved, Ty::Con(name) if name == "int") {
+            let mut msg = Message::error(
+                ErrorCode::NonExhaustiveMatch,
+                "Non-exhaustive match on `int`: literal arms cannot cover every value".to_string(),
+                pending.match_range.clone(),
+            );
+            msg.with_help("add a `default => ...` arm to cover the remaining values".to_string());
+            self.messages.push(msg);
+            return;
+        }
+
         // Unwrap a Constructor to its parent sum/app. For Ty::Var /
         // Ty::Con, no exhaustiveness check.
         let variants = match &resolved {
