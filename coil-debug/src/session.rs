@@ -54,6 +54,71 @@ struct Breakpoint {
     label: String,
     /// Source path hint for DAP per-file breakpoint replacement.
     source: Option<String>,
+    /// `break <loc> if <cond>`: stop only when it holds.
+    condition: Option<Condition>,
+}
+
+/// `<local | $N> <op> <integer | true | false>`, evaluated on the stopped
+/// frame's slot as an integer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Condition {
+    pub operand: String,
+    pub op: CmpOp,
+    pub value: i64,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Condition {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let usage = || format!("unsupported condition `{text}` (use: <name|$N> <op> <int|true|false>)");
+        let text = text.trim();
+        let (operand, op, rest) = [
+            ("==", CmpOp::Eq),
+            ("!=", CmpOp::Ne),
+            ("<=", CmpOp::Le),
+            (">=", CmpOp::Ge),
+            ("<", CmpOp::Lt),
+            (">", CmpOp::Gt),
+        ]
+        .into_iter()
+        .find_map(|(sym, op)| text.split_once(sym).map(|(l, r)| (l.trim(), op, r.trim())))
+        .ok_or_else(usage)?;
+        if operand.is_empty() {
+            return Err(usage());
+        }
+        let value = match rest {
+            "true" => 1,
+            "false" => 0,
+            n => n.parse::<i64>().map_err(|_| usage())?,
+        };
+        Ok(Self {
+            operand: operand.to_string(),
+            op,
+            value,
+            text: text.to_string(),
+        })
+    }
+
+    fn holds(&self, lhs: i64) -> bool {
+        match self.op {
+            CmpOp::Eq => lhs == self.value,
+            CmpOp::Ne => lhs != self.value,
+            CmpOp::Lt => lhs < self.value,
+            CmpOp::Le => lhs <= self.value,
+            CmpOp::Gt => lhs > self.value,
+            CmpOp::Ge => lhs >= self.value,
+        }
+    }
 }
 
 /// Line → PCs index for one source file (path as stored in ProgramDebug).
@@ -163,6 +228,9 @@ pub struct DebugSession {
     breakpoints: Vec<Breakpoint>,
     next_bp_id: usize,
     started: bool,
+    /// The program panicked: its frames stay for `bt` / `print`, but it
+    /// cannot resume.
+    stopped_at_panic: bool,
     pub base_dir: PathBuf,
 }
 
@@ -238,11 +306,18 @@ impl DebugSession {
             breakpoints: Vec::new(),
             next_bp_id: 1,
             started: false,
+            stopped_at_panic: false,
             base_dir,
         })
     }
+    #[cfg(test)]
     pub fn started(&self) -> bool {
         self.started
+    }
+
+    /// Frames can be inspected: running, or stopped by a panic.
+    pub fn inspectable(&self) -> bool {
+        self.started || self.stopped_at_panic
     }
 
     pub fn panicked(&self) -> bool {
@@ -310,6 +385,7 @@ impl DebugSession {
                 pc,
                 label: format!("{label} (pc {pc})"),
                 source: Some(source.to_string()),
+                condition: None,
             });
             out.push(LineBreakpointResult {
                 line,
@@ -322,26 +398,7 @@ impl DebugSession {
     }
 
     pub fn set_function_breakpoint(&mut self, name: &str) -> Result<BreakpointInfo, String> {
-        let (pcs, label) = self.resolve_break_target(name)?;
-        if pcs.is_empty() {
-            return Err(format!("no code locations for `{name}`"));
-        }
-        let pc = pcs[0];
-        let id = self.next_bp_id;
-        self.next_bp_id += 1;
-        let info = BreakpointInfo {
-            id,
-            pc,
-            label: format!("{label} (pc {pc})"),
-        };
-        self.breakpoints.push(Breakpoint {
-            id,
-            pc,
-            label: info.label.clone(),
-            source: None,
-        });
-        self.sync_vm_breakpoints();
-        Ok(info)
+        self.break_at_if(name, None)
     }
 
     pub fn replace_function_breakpoints(
@@ -360,7 +417,12 @@ impl DebugSession {
             .collect()
     }
 
-    pub fn break_at(&mut self, arg: &str) -> Result<BreakpointInfo, String> {
+    /// `break <arg> [if <condition>]`.
+    pub fn break_at_if(
+        &mut self,
+        arg: &str,
+        condition: Option<Condition>,
+    ) -> Result<BreakpointInfo, String> {
         let (pcs, label) = self.resolve_break_target(arg)?;
         if pcs.is_empty() {
             return Err(format!("no code locations for `{arg}`"));
@@ -368,16 +430,21 @@ impl DebugSession {
         let pc = pcs[0];
         let id = self.next_bp_id;
         self.next_bp_id += 1;
+        let suffix = condition
+            .as_ref()
+            .map(|c| format!(" if {}", c.text))
+            .unwrap_or_default();
         let info = BreakpointInfo {
             id,
             pc,
-            label: format!("{label} (pc {pc})"),
+            label: format!("{label} (pc {pc}){suffix}"),
         };
         self.breakpoints.push(Breakpoint {
             id,
             pc,
             label: info.label.clone(),
             source: None,
+            condition,
         });
         self.sync_vm_breakpoints();
         Ok(info)
@@ -408,13 +475,15 @@ impl DebugSession {
                 dbg.add_breakpoint(entry_pc);
             }
         self.started = true;
-        let reason = self.run_from(self.machine.debug_ip());
+        self.stopped_at_panic = false;
+        let reason = self.run_checked(self.machine.debug_ip());
         if stop_on_entry && !already_bp
             && let Some(dbg) = self.machine.debug_controller_mut() {
                 dbg.remove_breakpoint(entry_pc);
             }
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
+            self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
         reason
     }
@@ -424,9 +493,10 @@ impl DebugSession {
             return Err("not started".into());
         }
         self.prepare_resume();
-        let reason = self.run_from(self.machine.debug_ip());
+        let reason = self.run_checked(self.machine.debug_ip());
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
+            self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
         Ok(reason)
     }
@@ -445,6 +515,7 @@ impl DebugSession {
         let reason = self.run_from(ip);
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
+            self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
         Ok(reason)
     }
@@ -475,6 +546,7 @@ impl DebugSession {
         let reason = self.run_from(ip);
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
+            self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
         Ok(reason)
     }
@@ -488,6 +560,16 @@ impl DebugSession {
         // scopes/variables can pass it straight to `locals_for_frame`.
         (0..depth)
             .rev()
+            // The bootstrap frame (prologue `CALL main` at pc 0..3) is VM
+            // plumbing: hide it under user frames (at a stop-on-entry it is
+            // the only frame and stays).
+            .filter(|&frame_idx| {
+                let ip = self.machine.debug_frame_ip(frame_idx).unwrap_or(0);
+                let bootstrap = frame_idx == 0
+                    && ip < 3
+                    && symbol_at_pc(&self.artifacts.functions, ip).is_none();
+                !(bootstrap && depth > 1)
+            })
             .map(|frame_idx| {
                 let ip = self.machine.debug_frame_ip(frame_idx).unwrap_or(0);
                 let name = symbol_at_pc(&self.artifacts.functions, ip)
@@ -680,6 +762,7 @@ impl DebugSession {
         let reason = self.run_from(ip);
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
+            self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
         Ok(reason)
     }
@@ -692,6 +775,48 @@ impl DebugSession {
             self.static_slots,
             start_ip,
         )
+    }
+
+    /// [`Self::run_from`], resuming past conditional breakpoints whose
+    /// condition does not hold.
+    fn run_checked(&mut self, start_ip: usize) -> StopReason {
+        let mut ip = start_ip;
+        loop {
+            let reason = self.run_from(ip);
+            if let StopReason::Breakpoint { pc } = reason
+                && self.condition_fails_at(pc)
+            {
+                self.prepare_resume();
+                ip = self.machine.debug_ip();
+                continue;
+            }
+            return reason;
+        }
+    }
+
+    /// True when the breakpoint at `pc` has a condition that is false now.
+    /// An operand that cannot be read stops (fail open: the user looks).
+    fn condition_fails_at(&self, pc: usize) -> bool {
+        let Some(cond) = self
+            .breakpoints
+            .iter()
+            .find(|b| b.pc == pc)
+            .and_then(|b| b.condition.as_ref())
+        else {
+            return false;
+        };
+        let depth = self.machine.debug_frame_depth();
+        if depth == 0 {
+            return false;
+        }
+        let slot = match cond.operand.strip_prefix('$') {
+            Some(n) => n.parse().ok(),
+            None => resolve_local_slot(self, &cond.operand).ok(),
+        };
+        match slot.and_then(|slot| self.machine.debug_slot(depth - 1, slot)) {
+            Some(v) => !cond.holds(v.as_int()),
+            None => false,
+        }
     }
 
     fn prepare_resume(&mut self) {
@@ -1231,5 +1356,18 @@ fn main() {
         grants.allow_attach = true;
         compile_entry(path.to_str().unwrap(), grants).expect("granted attach");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn condition_parse_forms() {
+        let c = Condition::parse("n >= 3").unwrap();
+        assert_eq!((c.operand.as_str(), c.op, c.value), ("n", CmpOp::Ge, 3));
+        let c = Condition::parse("$2 == true").unwrap();
+        assert_eq!((c.operand.as_str(), c.op, c.value), ("$2", CmpOp::Eq, 1));
+        let c = Condition::parse("x != -1").unwrap();
+        assert_eq!((c.op, c.value), (CmpOp::Ne, -1));
+        assert!(Condition::parse("n").is_err());
+        assert!(Condition::parse("== 3").is_err());
+        assert!(Condition::parse("n == abc").is_err());
     }
 }

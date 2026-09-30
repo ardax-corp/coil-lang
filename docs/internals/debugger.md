@@ -23,7 +23,7 @@ coil-debug examples/fib.hy -x cmds.txt --batch
 |------|--------|
 | (none) | Interactive `(coil) ` REPL on stdin |
 | `-x <script>` | Run commands from a file (`#` comments; one command per line) |
-| `--batch` | Non-interactive; exit after script (or stdin if no `-x`); non-zero on panic / script error |
+| `--batch` | Non-interactive; run the whole script (or stdin if no `-x`). A failing command is reported and the script goes on, like `gdb -batch`; the exit status is non-zero if any command failed or the program panicked |
 | `--dap` | Debug Adapter Protocol over **stdio** (see below); no positional `.hy` |
 | `--allow-attach` / `--allow-exit` / `--allow-exec` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (not a grant) |
@@ -57,8 +57,10 @@ are not shipped in this repository.
 | `ffiSearchPath` | Optional string array of FFI lookup dirs |
 
 **Supported (v1):** breakpoints (line + function), continue, step in/over/out,
-stack trace, locals, `stopOnEntry`, host grants. **Not supported:** attach,
-evaluate, conditional breakpoints, multi-thread.
+stack trace, locals, `stopOnEntry`, host grants. A panic is a `stopped` event
+with reason `exception` and the stack intact; the next resume sends `exited`
+(code 1) and `terminated`. **Not supported:** attach, evaluate, conditional
+breakpoints over DAP (REPL only), multi-thread.
 
 `stopOnEntry` starts the VM and pauses at PC 0 (prologue). `stackTrace` /
 `stepIn` work from that stop. A previous fake pause (no `start`) left those
@@ -74,7 +76,7 @@ paths stored at compile time.
 
 | Command | Action |
 |---------|--------|
-| `break` / `b` `<fn\|file:line\|line>` | Set breakpoint (function FQN or source line) |
+| `break` / `b` `<fn\|file:line\|line> [if <name\|$N> <op> <value>]` | Set breakpoint (function FQN or source line). With `if`, stop only when the condition holds: `op` is `==` `!=` `<` `<=` `>` `>=`, `value` an integer or `true` / `false`, compared with the local's slot as an integer |
 | `delete` / `d` `[n]` | Clear one / all breakpoints |
 | `info break` / `info registers` / `info locals` | List breakpoints, IP/SP/depth, or named locals |
 | `run` / `r` | Start or restart from prologue |
@@ -84,12 +86,16 @@ paths stored at compile time.
 | `next` / `n` | Until line changes at ≤ current frame depth; same `stepi` fallback when the PC has no line |
 | `finish` / `fin` | Until current frame returns |
 | `print` / `p` `<name\|$N>` | Format local by name or slot index |
-| `bt` | Call stack with symbol + `file:line` when **exactly** known |
+| `bt` | Call stack, gdb order (`#0` is the innermost frame), with symbol + `file:line`. The VM bootstrap frame is hidden |
 | `list` / `l` | Source around the current stop (nearest loc in this function, else `fn` decl) |
 | `disassemble` / `disas` `[fn]` | Bytecode dump |
 | `quit` / `q` | Exit |
 
 ## Notes
+
+- **Panics stop the program for inspection.** The frames stay: `bt`, `print`
+  and `info locals` show the panicking frame. It cannot resume; `run`
+  restarts.
 
 - Locals are available by **name** (`print n`, `info locals`) and by slot (`print $0`).
   Names come from compile-time slot maps (params, `let`s, `self`, match bindings).

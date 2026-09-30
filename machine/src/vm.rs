@@ -964,9 +964,21 @@ impl<const S: usize> Machine<S> {
         best.map(|i| syms[i].name.as_str())
     }
 
+    /// `COIL_BACKTRACE=1`: explicit `panic` also prints the call stack
+    /// (runtime errors always do). Off by default: checksum boards print
+    /// their result with `panic` and compare the exact text.
+    pub(crate) fn explicit_panic_backtrace(&self, panic_insn_ip: usize) -> Option<String> {
+        let wanted = std::env::var("COIL_BACKTRACE").is_ok_and(|v| !v.is_empty() && v != "0");
+        wanted.then(|| self.format_panic_backtrace(panic_insn_ip))
+    }
+
     fn format_panic_backtrace(&self, panic_insn_ip: usize) -> String {
         let mut lines = Vec::new();
-        if let Some(loc) = self.format_panic_location(panic_insn_ip) {
+        // The top frame's line already names the panic site once its saved
+        // ip is the panic instruction.
+        let top_is_panic_site =
+            !self.frames.is_empty() && self.frames.get().tell() == panic_insn_ip;
+        if !top_is_panic_site && let Some(loc) = self.format_panic_location(panic_insn_ip) {
             lines.push(format!("  at {loc}"));
         }
         // Deep recursion repeats one frame line; print each run once.
@@ -979,6 +991,10 @@ impl<const S: usize> Machine<S> {
         };
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
+            // The bootstrap frame (prologue `CALL main`) is not user code.
+            if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
+                continue;
+            }
             let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
             let line = match self.format_panic_location(ip) {
                 Some(loc) => format!("  in {name} at {loc}"),
@@ -997,6 +1013,11 @@ impl<const S: usize> Machine<S> {
 
     /// Abort execution with a VM panic (same path as `Instruction::Panic`).
     fn runtime_panic(&mut self, message: &str, panic_insn_ip: usize) -> bool {
+        // The top frame's saved ip is stale mid-instruction; the backtrace
+        // (and the debugger) read it.
+        if !self.frames.is_empty() {
+            self.frames.get_mut().seek(panic_insn_ip);
+        }
         let loc_suffix = self
             .format_panic_location(panic_insn_ip)
             .map(|loc| format!(" at {loc}"))

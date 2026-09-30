@@ -295,3 +295,61 @@ fn debug_allow_attach_applies() {
     let _ = std::fs::remove_dir_all(&out_cwd);
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+/// Write a program next to the test cwd and debug it.
+fn debug_program(src: &str, script: &str, suffix: &str) -> (std::process::Output, String) {
+    let dir = std::env::temp_dir().join(format!("coil_debug_src_{suffix}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("prog.hy");
+    std::fs::write(&entry, src).expect("write prog");
+    let (out, _cwd) = run_debug_script_on(&entry, script, suffix, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out, stdout)
+}
+
+const PANICS: &str = "fn inner(int n) -> int {\n    if n > 2 {\n        panic \"boom\";\n    }\n    return n;\n}\n\nfn outer(int n) -> int {\n    return inner(n + 1) + 1;\n}\n\nfn main() {\n    let r = outer(5);\n}\n";
+
+/// A panic stops with the frames intact: `bt` (gdb order, #0 innermost,
+/// no bootstrap frame) and locals of the panicking frame still work.
+#[test]
+fn debug_panic_stop_keeps_frames() {
+    let (out, stdout) = debug_program(PANICS, "run\nbt\nprint n\nquit\n", "panic_bt");
+    assert!(!out.status.success(), "a panic exits non-zero, stdout={stdout}");
+    let frames: Vec<&str> = stdout.lines().filter(|l| l.starts_with('#')).collect();
+    assert_eq!(frames.len(), 3, "inner, outer, main: {stdout}");
+    assert!(frames[0].starts_with("#0  inner") && frames[0].contains("prog.hy:3"), "{stdout}");
+    assert!(frames[2].starts_with("#2  main"), "{stdout}");
+    assert!(stdout.contains("n ($0) = 6"), "locals of the panicking frame: {stdout}");
+}
+
+/// `break <loc> if <cond>` only stops when the condition holds.
+#[test]
+fn debug_conditional_breakpoint() {
+    let (_out, stdout) = debug_program(
+        PANICS,
+        "break inner if n == 6\nrun\nprint n\nquit\n",
+        "cond_bp",
+    );
+    assert!(stdout.contains("if n == 6"), "{stdout}");
+    assert!(stdout.contains("Breakpoint 1, inner"), "{stdout}");
+    assert!(stdout.contains("n ($0) = 6"), "{stdout}");
+    let (_out, stdout) =
+        debug_program(PANICS, "break inner if n == 99\nrun\nquit\n", "cond_bp_miss");
+    assert!(!stdout.contains("Breakpoint 1, inner"), "false condition must not stop: {stdout}");
+    assert!(stdout.contains("Program panicked"), "{stdout}");
+}
+
+/// A failing command in a batch script is reported, the script goes on,
+/// and the exit status reports the failure.
+#[test]
+fn debug_batch_continues_after_error() {
+    let (out, stdout) = debug_program(PANICS, "bogus\nbreak outer\nrun\nbt\nquit\n", "batch_go_on");
+    assert!(!out.status.success(), "exit reflects the bad command");
+    assert!(stdout.contains("Breakpoint 1, outer"), "later commands still ran: {stdout}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown command `bogus`"),
+        "error reported"
+    );
+}
+
