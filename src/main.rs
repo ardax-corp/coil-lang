@@ -2,7 +2,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::exit;
 
-use coil_cli::{LoadErr, dispatch_helper, execute_archived_program, try_load_archive};
+use coil_cli::{
+    LoadErr, dispatch_helper, dispatch_helper_as, execute_archived_program, try_load_archive,
+};
 use coil_host::{
     ExecutePipelineArgs, bind_cli_roots, execute_pipeline, ffi_entry_path, pipeline_dload_gate,
 };
@@ -452,6 +454,7 @@ fn main() {
 
     match cli.command {
         Command::Test => dispatch_helper("test"),
+        Command::Mutate => dispatch_helper_as("mutate", "test", &["mutate"]),
         Command::Dissect { .. } => dispatch_helper("dissect"),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
@@ -516,6 +519,7 @@ fn main() {
                     cmd_natives_dump(&mut pipeline, exe.as_deref(), tsv);
                 }
                 Command::Test
+                | Command::Mutate
                 | Command::Dissect { .. }
                 | Command::Debug { .. }
                 | Command::Fmt

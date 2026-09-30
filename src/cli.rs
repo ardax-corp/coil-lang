@@ -27,6 +27,7 @@ pub(crate) enum Command {
     },
     /// Re-exec `coil-test` (every flag is forwarded and parsed there).
     Test,
+    Mutate,
     Package {
         filename: String,
         output: String,
@@ -259,6 +260,13 @@ enum RawCommand {
     #[command(disable_help_flag = true)]
     Test {
         /// Forwarded to `coil-test` (`coil test --help` lists them)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Mutation testing: which small source edits no test notices (re-execs `coil-test mutate`)
+    #[command(disable_help_flag = true)]
+    Mutate {
+        /// Forwarded to `coil-test mutate` (`coil mutate --help` lists them)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
@@ -580,6 +588,15 @@ impl RawCli {
             }
             Some(RawCommand::Test { args: _ }) => cli_from(
                 Command::Test,
+                LogFlags::default(),
+                false,
+                OptLevelFlags::default(),
+                CompileProfileFlags::default(),
+                HostGrantFlags::default(),
+                Vec::new(),
+            ),
+            Some(RawCommand::Mutate { args: _ }) => cli_from(
+                Command::Mutate,
                 LogFlags::default(),
                 false,
                 OptLevelFlags::default(),
@@ -1055,6 +1072,19 @@ mod tests {
             let cli = parse_args(&args(argv)).unwrap();
             assert_eq!(cli.command, Command::Test, "{argv:?}");
             assert!(!cli.log_json && !cli.log_lsp, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn parse_mutate_forwards_every_flag_to_the_helper() {
+        for argv in [
+            &["mutate"][..],
+            &["mutate", "--files", "src/**", "--json", "--help"],
+            &["mutate", "-j", "4", "--operators=arith", "--log-json"],
+        ] {
+            let cli = parse_args(&args(argv)).unwrap();
+            assert_eq!(cli.command, Command::Mutate, "{argv:?}");
+            assert!(!cli.log_json, "{argv:?}");
         }
     }
 

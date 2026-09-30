@@ -83,4 +83,14 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("coil-test: unrecognized flag"), "stderr={err}");
+
+    // `coil mutate` is `coil-test mutate`.
+    let out = Command::new(coil_bin())
+        .args(["mutate", "--operators", "nope"])
+        .output()
+        .expect("spawn coil mutate");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown mutation operator `nope`"), "stderr={err}");
+    assert!(err.contains("coil mutate [OPTIONS]"), "mutate help follows: {err}");
 }

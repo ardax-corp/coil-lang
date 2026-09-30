@@ -389,6 +389,7 @@ dependencies = [
  "compiler",
  "comptime",
  "machine",
+ "parser",
  "reporting",
 ]
 
