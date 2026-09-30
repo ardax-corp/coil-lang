@@ -33,10 +33,12 @@ struct Job {
     decl: MacroDecl,
     provider_file: PathBuf,
     provider_module: String,
-    /// `let` statements building the macro's input.
+    /// `let` statements building the macro's input (`TypeDecl` / `FnDecl`).
     setup: Vec<String>,
-    /// The call's argument list.
-    args: String,
+    /// The local the last setup statement binds.
+    input: String,
+    /// Attribute arguments after the input.
+    extra: Vec<String>,
 }
 
 /// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
@@ -135,14 +137,15 @@ impl Pipeline {
                             continue;
                         }
                         match self.encode_input(file, &module, &p, &decl) {
-                            Ok((setup, args)) => file_jobs.push(Job {
+                            Ok((setup, input, extra)) => file_jobs.push(Job {
                                 file: file.clone(),
                                 pending: p,
                                 decl,
                                 provider_file: provider,
                                 provider_module,
                                 setup,
-                                args,
+                                input,
+                                extra,
                             }),
                             Err(msg) => errors.push(msg),
                         }
@@ -304,7 +307,7 @@ impl Pipeline {
         module: &str,
         p: &PendingMacro,
         decl: &MacroDecl,
-    ) -> Result<(Vec<String>, String), Message> {
+    ) -> Result<(Vec<String>, String, Vec<String>), Message> {
         let cached = self.ast_cache.get(file).expect("pending macros come from a cached file");
         // Includes earlier rounds' generated code (its spans point past the file).
         let report = cached.report_source();
@@ -341,7 +344,7 @@ impl Pipeline {
             ));
         };
         if decl.kind == MacroKind::Derive {
-            return Ok((setup, input));
+            return Ok((setup, input, Vec::new()));
         }
         // Attribute arguments bind to the macro's extra parameters, by name
         // (`key = value`) or in order.
@@ -377,10 +380,10 @@ impl Pipeline {
             }
             values[slot] = Some(encode::arg_value(arg));
         }
-        let mut args = vec![input];
+        let mut extra = Vec::new();
         for (i, v) in values.into_iter().enumerate() {
             match v {
-                Some(v) => args.push(v),
+                Some(v) => extra.push(v),
                 None => {
                     return Err(Message::error(
                         ErrorCode::GenericTypeError,
@@ -393,7 +396,7 @@ impl Pipeline {
                 }
             }
         }
-        Ok((setup, args.join(", ")))
+        Ok((setup, input, extra))
     }
 
     /// Hash of a macro call: the sources of its provider and everything the
@@ -418,7 +421,8 @@ impl Pipeline {
         }
         job.decl.fn_name.hash(&mut h);
         job.setup.hash(&mut h);
-        job.args.hash(&mut h);
+        job.input.hash(&mut h);
+        job.extra.hash(&mut h);
         h.finish()
     }
 
@@ -466,15 +470,37 @@ impl Pipeline {
             ));
             aliases.insert(key, alias);
         }
-        for (i, job) in jobs.iter().enumerate() {
-            let alias = &aliases[&(job.provider_module.clone(), job.decl.fn_name.clone())];
-            text.push_str(&format!("fn __coil_expand_{i}() -> string {{\n"));
+        // One builder per distinct input: every derive on a type (and a
+        // type's macros across rounds) share it.
+        let mut inputs: HashMap<(Vec<String>, String), usize> = HashMap::new();
+        for job in jobs {
+            let key = (job.setup.clone(), job.input.clone());
+            if inputs.contains_key(&key) {
+                continue;
+            }
+            let k = inputs.len();
+            let ty = match job.decl.input {
+                MacroInput::TypeDecl => "TypeDecl",
+                MacroInput::FnDecl => "FnDecl",
+            };
+            text.push_str(&format!("fn __coil_input_{k}() -> {ty} {{\n"));
             for stmt in &job.setup {
                 text.push_str("    ");
                 text.push_str(stmt);
                 text.push('\n');
             }
-            text.push_str(&format!("    return {alias}({}).text;\n}}\n", job.args));
+            text.push_str(&format!("    return {};\n}}\n", job.input));
+            inputs.insert(key, k);
+        }
+        for (i, job) in jobs.iter().enumerate() {
+            let alias = &aliases[&(job.provider_module.clone(), job.decl.fn_name.clone())];
+            let k = inputs[&(job.setup.clone(), job.input.clone())];
+            let mut args = vec![format!("__coil_input_{k}()")];
+            args.extend(job.extra.iter().cloned());
+            text.push_str(&format!(
+                "fn __coil_expand_{i}() -> string {{\n    return {alias}({}).text;\n}}\n",
+                args.join(", ")
+            ));
         }
 
         let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
@@ -484,6 +510,9 @@ impl Pipeline {
         sub.macro_stack = self.macro_stack.clone();
         sub.macro_stack.extend(jobs.iter().map(|j| j.file.clone()));
         sub.auto_par = false;
+        // Macros run briefly; the full optimizer costs far more than it saves.
+        // (`None` changed some macros' results; see limitations.md.)
+        sub.opt_level = crate::OptLevel::Basic;
         for (path, source) in &self.overlays {
             sub.overlays.insert(path.clone(), source.clone());
         }

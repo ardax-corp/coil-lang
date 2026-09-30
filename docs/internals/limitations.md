@@ -35,6 +35,8 @@ See [macros.md](macros.md).
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Outputs are cached in memory by provider sources + input (the LSP and `coil test` reuse them); a fresh `coil` process compiles the providing modules once more. | — |
+| Macro compile cost | Each compile that uses derives compiles the `macro` / `derive` modules into an expansion program (~1–2 s per file in a debug build, e.g. `coil test`; outputs are cached per process). Compiling the prelude expansion program once per process is the follow-up. | — |
+| `-O none` expansion | Compiling the expansion program at `-O none` changed some built-in derives' results (string comparisons on model fields); it compiles at `-O basic`. Not reduced to a standalone repro yet. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
 | `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
 
