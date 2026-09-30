@@ -17,6 +17,8 @@ pub struct FnSym {
     pub entry_pc: u32,
     /// User-facing locals/params `(name, slot)`, sorted by slot.
     pub locals: Vec<(String, u32)>,
+    /// Scoped, typed debug variables with location lists.
+    pub vars: Vec<crate::debug_vars::DebugVar>,
 }
 
 /// Pre-opt IL snapshot taken after finalize splices, before `lower_in_place`.
@@ -49,6 +51,9 @@ pub struct DissectArtifacts {
     pub functions: Vec<FnSym>,
     pub il: Option<IlSnapshot>,
     pub debug: ProgramDebug,
+    /// Class fields and enum variants for rendering heap values.
+    pub classes: crate::debug_vars::DebugClassTable,
+    pub enums: crate::debug_vars::DebugEnumTable,
 }
 
 impl DissectArtifacts {
@@ -718,15 +723,19 @@ mod tests {
                     name: "a".into(),
                     entry_pc: 0,
                     locals: vec![("x".into(), 0)],
+                    vars: Vec::new(),
                 },
                 FnSym {
                     name: "b".into(),
                     entry_pc: 2,
                     locals: vec![],
+                    vars: Vec::new(),
                 },
             ],
             il: None,
             debug: ProgramDebug::default(),
+            classes: Default::default(),
+            enums: Default::default(),
         };
         let ranges = arts.function_ranges();
         assert_eq!(ranges.len(), 2);

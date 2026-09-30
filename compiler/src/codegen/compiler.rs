@@ -48,6 +48,45 @@ fn apply_debug_slot_remaps(
     }
 }
 
+/// Names a statement binds at its top level (`let x`, `let (a, b)`,
+/// `for x in`, `for (k, v) in`), as slices of the source.
+fn collect_binding_names<'a>(stmt: &'a Output<'_>, out: &mut Vec<&'a str>) {
+    fn pattern<'a>(p: &'a parser::ast::LetPattern<'_>, out: &mut Vec<&'a str>) {
+        use parser::ast::LetPattern;
+        match p {
+            LetPattern::Wildcard => {}
+            LetPattern::Binding { name } => out.push(name),
+            LetPattern::Tuple(items) => items.iter().for_each(|i| pattern(i, out)),
+            LetPattern::Record(fields) => fields.iter().for_each(|f| pattern(&f.pattern, out)),
+        }
+    }
+    let mut node = stmt;
+    while let Expression::Statement(inner) | Expression::ExprStatement(inner) | Expression::Expr(inner) =
+        node.1.as_ref()
+    {
+        node = inner;
+    }
+    match node.1.as_ref() {
+        Expression::Fragment(items) => {
+            if let Some(Expression::Variable(name, _)) = items.first().map(|i| i.1.as_ref()) {
+                out.push(name);
+            }
+        }
+        Expression::LetDestructure { pattern: p, .. } => pattern(p, out),
+        Expression::Loop { identifier, pattern: p, .. } => {
+            if let Some(id) = identifier
+                && let Expression::Identifier(name) = id.1.as_ref()
+            {
+                out.push(name);
+            }
+            if let Some(p) = p {
+                pattern(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Lowered form of a [`ParCombine`](crate::typechecking::ParCombine): how to
 /// fold joined arm results once they are on the stack.
 enum ParCombinePlan {
@@ -144,6 +183,20 @@ impl Compiler {
     /// Operand-stack capacity recommended by recursion-depth analysis.
     pub fn operand_stack_slots(&self) -> u32 {
         self.operand_stack_slots
+    }
+
+    /// Source text of the module about to compile (names in its AST are
+    /// slices of it). Used for exact name spans in debug info.
+    pub fn set_source_text(&mut self, text: &str) {
+        self.source_base = (text.as_ptr() as usize, text.len());
+    }
+
+    /// Byte span of `name` when it is a slice of the current source.
+    fn span_of_source_str(&self, name: &str) -> Option<(u32, u32)> {
+        let (base, len) = self.source_base;
+        let ptr = name.as_ptr() as usize;
+        (ptr >= base && ptr + name.len() <= base + len && !name.is_empty())
+            .then(|| ((ptr - base) as u32, (ptr - base + name.len()) as u32))
     }
 
     pub fn set_source_file(&mut self, path: impl Into<std::path::PathBuf>) {
@@ -3285,9 +3338,320 @@ impl Compiler {
             return;
         };
         self.fn_debug_locals
-            .entry(key)
+            .entry(key.clone())
             .or_default()
             .insert(display.to_string(), slot);
+        let file = self.intern_source_file();
+        let name_span = self.span_of_source_str(name);
+        let scope_end = self.debug_scope_ends.last().copied().unwrap_or(u32::MAX);
+        let ty = self
+            .checker
+            .codegen_var_type(name)
+            .map(|t| crate::debug_vars::DebugTy::from_ty(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t)))
+            .unwrap_or(crate::debug_vars::DebugTy::Other("?".into()));
+        self.fn_debug_vars
+            .entry(key)
+            .or_default()
+            .push(crate::debug_vars::DebugVar {
+                name: display.to_string(),
+                file,
+                scope: (self.debug_stmt_start, scope_end),
+                ty,
+                loc: crate::debug_vars::DebugVarLoc::Slot(slot),
+                def_sites: Vec::new(),
+                is_param: false,
+                name_span,
+                ranges: Vec::new(),
+                validated: false,
+                comp_ranges: Vec::new(),
+            });
+    }
+
+    /// A parameter (or `self`): visible in the whole body, set at entry.
+    fn record_debug_param(&mut self, name: &str, slot: u32) {
+        self.record_debug_local(name, slot);
+        if let Some(var) = self.last_debug_var_mut(name) {
+            var.is_param = true;
+        }
+    }
+
+    fn last_debug_var_mut(&mut self, name: &str) -> Option<&mut crate::debug_vars::DebugVar> {
+        let key = self.current_function_table_key.clone()?;
+        self.fn_debug_vars
+            .get_mut(&key)?
+            .iter_mut()
+            .rev()
+            .find(|v| v.name == name)
+    }
+
+    /// Enter a source scope ending at `end`; returns the saved statement start.
+    fn debug_scope_enter(&mut self, start: u32, end: u32) -> u32 {
+        self.debug_scope_ends.push(end);
+        std::mem::replace(&mut self.debug_stmt_start, start)
+    }
+
+    fn debug_scope_exit(&mut self, saved_stmt_start: u32) {
+        self.debug_scope_ends.pop();
+        self.debug_stmt_start = saved_stmt_start;
+    }
+
+    /// After a block statement: tag the stores that define a named local
+    /// with the local's name span (its def site, which passes keep), and
+    /// refine the local's type and layout-aware location.
+    fn tag_statement_defs(&mut self, il_start: usize, stmt: &Output<'_>) {
+        let mut node = stmt;
+        while let Expression::Statement(inner)
+        | Expression::ExprStatement(inner)
+        | Expression::Expr(inner) = node.1.as_ref()
+        {
+            node = inner;
+        }
+        let (name, value): (&str, Option<&Output<'_>>) = match node.1.as_ref() {
+            Expression::Fragment(items) => match items.first().map(|i| i.1.as_ref()) {
+                Some(Expression::Variable(name, _)) => (*name, items.get(1)),
+                _ => return,
+            },
+            Expression::Assignment(target, _)
+            | Expression::CompoundAssign(target, _, _)
+            | Expression::Adjust { target, .. } => match unwrap_expr_output(target).1.as_ref() {
+                Expression::Identifier(name) => (*name, None),
+                _ => return,
+            },
+            _ => return,
+        };
+        let is_let = value.is_some();
+        let mut component_slots: Option<Vec<u32>> = None;
+        if is_let {
+            let ty = value.and_then(|v| self.codegen_expr_ty(v));
+            let layout = self.debug_layout_of(name);
+            if let Some(var) = self.last_debug_var_mut(name) {
+                if let Some(ty) = ty {
+                    var.ty = crate::debug_vars::DebugTy::from_ty(&ty);
+                }
+                if let Some(layout) = layout {
+                    var.loc = layout;
+                    component_slots = Some(var.component_slots());
+                }
+            }
+        }
+        let Some(site) = self.span_of_source_str(name) else {
+            return;
+        };
+        // A split layout: every store to component `i`'s slot in the
+        // statement defines that component; tag it with the component's own
+        // site so it stays identified wherever a pass moves it.
+        if let Some(slots) = component_slots {
+            let file = self.intern_source_file();
+            let ops = self.bytecode.il_mut().ops_mut();
+            let from = il_start.min(ops.len());
+            let mut tagged = false;
+            for op in &mut ops[from..] {
+                let written = match op {
+                    IlOp::StorePop { slot, .. } => Some(*slot),
+                    IlOp::Byte { byte, .. }
+                        if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
+                            && byte.load_store_count() == 1 =>
+                    {
+                        Some(byte.load_store_slot_at(0))
+                    }
+                    _ => None,
+                };
+                if let Some(i) = written.and_then(|w| slots.iter().position(|&s| s == w)) {
+                    let (start, end) = crate::debug_vars::DebugVar::component_site(site, i);
+                    op.set_loc(DebugLoc {
+                        file,
+                        start_byte: start,
+                        end_byte: end.max(start + 1),
+                    });
+                    tagged = true;
+                }
+            }
+            if tagged && let Some(var) = self.last_debug_var_mut(name) {
+                var.def_sites.push(site);
+            }
+            return;
+        }
+        if is_let {
+            // Plain `let`: [`Self::tag_new_bindings`] tags it by its slot.
+            return;
+        }
+        let Some(slot) = self.lookup_slot(name) else {
+            return;
+        };
+        let file = self.intern_source_file();
+        let loc = DebugLoc {
+            file,
+            start_byte: site.0,
+            end_byte: site.1.max(site.0 + 1),
+        };
+        // The last store to the local's slot in this statement defines it.
+        let ops = self.bytecode.il_mut().ops_mut();
+        let from = il_start.min(ops.len());
+        let Some(store) = ops[from..].iter_mut().rev().find(|op| match op {
+            IlOp::StorePop { slot: s, .. } => *s == slot,
+            IlOp::Byte { byte, .. } => {
+                matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
+                    && (0..byte.load_store_count()).any(|i| byte.load_store_slot_at(i) == slot)
+            }
+            _ => false,
+        }) else {
+            return;
+        };
+        store.set_loc(loc);
+        let stmt_start = stmt.0.start as u32;
+        if let Some(var) = self.debug_var_for_def(name, is_let, stmt_start) {
+            var.def_sites.push((loc.start_byte, loc.end_byte));
+        }
+    }
+
+    fn debug_var_count(&self) -> usize {
+        self.current_function_table_key
+            .as_ref()
+            .and_then(|k| self.fn_debug_vars.get(k))
+            .map_or(0, Vec::len)
+    }
+
+    /// Bindings a statement declared (`let`, `for` variables, destructured
+    /// names): every store to a binding's slot in the statement defines it,
+    /// so tag those stores with the binding's name span.
+    fn tag_new_bindings(&mut self, il_start: usize, vars_before: usize, stmt: &Output<'_>) {
+        let Some(key) = self.current_function_table_key.clone() else {
+            return;
+        };
+        let file = self.intern_source_file();
+        // Codegen often records bindings from owned copies of the name; take
+        // the name token span from the statement's own AST instead.
+        let mut names: Vec<&str> = Vec::new();
+        collect_binding_names(stmt, &mut names);
+        let spans: Vec<(String, (u32, u32))> = names
+            .into_iter()
+            .filter_map(|n| self.span_of_source_str(n).map(|sp| (n.to_string(), sp)))
+            .collect();
+        if let Some(vars) = self.fn_debug_vars.get_mut(&key) {
+            for v in vars.iter_mut().skip(vars_before) {
+                if v.name_span.is_none()
+                    && let Some((_, sp)) = spans.iter().find(|(n, _)| *n == v.name)
+                {
+                    v.name_span = Some(*sp);
+                }
+            }
+        }
+        let Some(vars) = self.fn_debug_vars.get(&key) else {
+            return;
+        };
+        let pending: Vec<(usize, u32, (u32, u32))> = vars
+            .iter()
+            .enumerate()
+            .skip(vars_before)
+            .filter_map(|(i, v)| match (&v.loc, v.name_span) {
+                (crate::debug_vars::DebugVarLoc::Slot(slot), Some(span))
+                    if v.def_sites.is_empty() && !v.is_param =>
+                {
+                    Some((i, *slot, span))
+                }
+                _ => None,
+            })
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let ops = self.bytecode.il_mut().ops_mut();
+        let from = il_start.min(ops.len());
+        let mut tagged = vec![false; pending.len()];
+        for op in &mut ops[from..] {
+            for (k, &(_, slot, span)) in pending.iter().enumerate() {
+                let writes = match op {
+                    IlOp::StorePop { slot: s, .. } => *s == slot,
+                    IlOp::Byte { byte, .. } => {
+                        matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
+                            && byte.load_store_count() == 1
+                            && byte.load_store_slot_at(0) == slot
+                    }
+                    _ => false,
+                };
+                if writes {
+                    op.set_loc(DebugLoc {
+                        file,
+                        start_byte: span.0,
+                        end_byte: span.1.max(span.0 + 1),
+                    });
+                    tagged[k] = true;
+                }
+            }
+        }
+        let vars = self.fn_debug_vars.get_mut(&key).expect("checked above");
+        for (k, (i, _, span)) in pending.into_iter().enumerate() {
+            if tagged[k] {
+                vars[i].def_sites.push(span);
+            }
+        }
+    }
+
+    /// The variable a `let` (the newest `name`) or an assignment at
+    /// `stmt_start` (the innermost `name` in scope there) defines.
+    fn debug_var_for_def(
+        &mut self,
+        name: &str,
+        is_let: bool,
+        stmt_start: u32,
+    ) -> Option<&mut crate::debug_vars::DebugVar> {
+        if is_let {
+            return self.last_debug_var_mut(name);
+        }
+        let key = self.current_function_table_key.clone()?;
+        self.fn_debug_vars
+            .get_mut(&key)?
+            .iter_mut()
+            .filter(|v| v.name == name && v.scope.0 <= stmt_start && stmt_start < v.scope.1)
+            .max_by_key(|v| v.scope.0)
+    }
+
+    /// Split layouts codegen chose for `name` (Q1 array slots, Q2 class
+    /// fields, two-slot enum).
+    fn debug_layout_of(&self, name: &str) -> Option<crate::debug_vars::DebugVarLoc> {
+        use crate::debug_vars::{DebugTy, DebugVarLoc};
+        if let Some((base, n)) = self.stack_array_info(name) {
+            let elem = self
+                .checker
+                .codegen_var_type(name)
+                .and_then(|t| match crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t) {
+                    crate::typechecking::Ty::Array { element, .. } => Some(DebugTy::from_ty(&element)),
+                    _ => None,
+                })
+                .unwrap_or(DebugTy::Other("?".into()));
+            return Some(DebugVarLoc::Elems {
+                slots: (base..base + n as u32).collect(),
+                elem,
+            });
+        }
+        if let (Some((base, n)), Some(class)) =
+            (self.unboxed_class_info(name), self.unboxed_class_type_name(name))
+        {
+            let fields = self
+                .checker
+                .class_fields(class)
+                .unwrap_or_default()
+                .into_iter()
+                .take(n)
+                .enumerate()
+                .map(|(i, (f, t))| (f, base + i as u32, DebugTy::from_ty(&t)))
+                .collect();
+            return Some(DebugVarLoc::Fields {
+                class: class.to_string(),
+                fields,
+            });
+        }
+        if let (Some((payload, tag)), Some(kind)) =
+            (self.unboxed_enum_info(name), self.unboxed_enum_kind(name))
+        {
+            return Some(DebugVarLoc::Pair {
+                enum_name: kind.to_string(),
+                payload,
+                tag,
+                payload_ty: DebugTy::Other("?".into()),
+            });
+        }
+        None
     }
 
     /// Look up the slot for a name used in an arm body. First
@@ -3592,7 +3956,12 @@ impl Compiler {
         }
         self.stmt_depth = depth;
         let il_start = self.bytecode.il_mut().ops_mut().len();
+        let saved_stmt_start = std::mem::replace(&mut self.debug_stmt_start, child.0.start as u32);
+        let vars_before = self.debug_var_count();
         self.compile_block_stmt_at(child, depth);
+        self.tag_statement_defs(il_start, child);
+        self.tag_new_bindings(il_start, vars_before, child);
+        self.debug_stmt_start = saved_stmt_start;
         self.stmt_depth = depth - 1;
         self.fill_statement_locs(il_start, child.0);
     }
@@ -14799,9 +15168,10 @@ impl Compiler {
             self.context.unboxed_class_locals.clear();
             self.context.unboxed_class_box.clear();
             self.expr_depth = 0;
+            let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
             if self.compiling_method {
                 let slot = self.context.variables.intern("self".to_string()) as u32;
-                self.record_debug_local("self", slot);
+                self.record_debug_param("self", slot);
             }
 
             let prev_result_mode = self.compiling_result_mode;
@@ -14857,6 +15227,7 @@ impl Compiler {
                 self.emit_fallthrough_return(name, body.0);
             }
             self.emit_shared_try_fail_epilogue();
+            self.debug_scope_exit(saved_debug_scope);
 
             self.fn_defers = prev_fn_defers;
             self.compiling_result_mode = prev_result_mode;
@@ -15352,6 +15723,7 @@ impl Compiler {
                 }
             }
             Expression::Block(children) => {
+                let saved_debug_scope = self.debug_scope_enter(self.debug_stmt_start, span.end as u32);
                 // Isolate PolyFn in blocks: restore after so inner `let f = …` cannot poison outer ObjFn.
                 let saved_polyfn_vars = self.polyfn_vars.clone();
                 let saved_polyfn_sources = self.polyfn_sources.clone();
@@ -15369,6 +15741,7 @@ impl Compiler {
                 self.pop_const_env();
                 self.polyfn_vars = saved_polyfn_vars;
                 self.polyfn_sources = saved_polyfn_sources;
+                self.debug_scope_exit(saved_debug_scope);
             }
             Expression::Function { .. } => {
                 self.compile_function_decl_into(span, ast);
@@ -15964,10 +16337,10 @@ impl Compiler {
             Expression::Argument { ty, name: n, .. } => {
                 if let Some(kind) = self.argument_unboxed_range_kind(ast) {
                     let (start, _) = self.alloc_unboxed_enum_slots(n, &kind);
-                    self.record_debug_local(n, start);
+                    self.record_debug_param(n, start);
                 } else {
                     let slot = self.context.variables.intern(n.to_string()) as u32;
-                    self.record_debug_local(n, slot);
+                    self.record_debug_param(n, slot);
                 }
                 if ty
                     .as_ref()
@@ -17660,6 +18033,7 @@ impl Compiler {
             self.fn_inline_spans.clear();
             self.fn_defining_module.clear();
             self.fn_debug_locals.clear();
+            self.fn_debug_vars.clear();
         }
         // `use` aliases are per-module; leftovers from a prior
         // `compile_module` would otherwise redirect bare names.
@@ -18079,6 +18453,11 @@ impl Compiler {
         self.stack_map_drafts = lowered.stack_map_drafts.clone();
         self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
         apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
+        for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
+            if let Some(remap) = lowered.debug_slot_remaps.get(fn_name) {
+                vars.iter_mut().for_each(|v| v.loc.remap(remap));
+            }
+        }
         self.stack_maps = crate::mir::bind_drafts(
             &lowered.stack_map_drafts,
             self.bytecode.as_slice(),
@@ -18151,11 +18530,57 @@ impl Compiler {
                     name: name.clone(),
                     entry_pc: pc as u32,
                     locals,
+                    vars: self.fn_debug_vars.get(name).cloned().unwrap_or_default(),
                 }
             })
             .collect();
         syms.sort_by_key(|s| s.entry_pc);
+        // Location lists over each body's final bytecode.
+        let bytecode = self.bytecode.as_slice();
+        let ends: Vec<u32> = syms
+            .iter()
+            .map(|s| s.entry_pc)
+            .chain(std::iter::once(bytecode.len() as u32))
+            .collect();
+        for sym in &mut syms {
+            let end = ends
+                .iter()
+                .copied()
+                .find(|&e| e > sym.entry_pc)
+                .unwrap_or(bytecode.len() as u32);
+            crate::debug_vars::location_lists(
+                bytecode,
+                self.constants(),
+                &self.debug_locs,
+                sym.entry_pc as usize,
+                end as usize,
+                &mut sym.vars,
+            );
+        }
         syms
+    }
+
+    /// Class field and enum variant tables for rendering heap values.
+    pub fn debug_type_tables(
+        &self,
+    ) -> (crate::debug_vars::DebugClassTable, crate::debug_vars::DebugEnumTable) {
+        let classes = self
+            .checker
+            .class_names()
+            .into_iter()
+            .filter_map(|c| {
+                let fields = self.checker.class_fields(&c)?;
+                Some((
+                    c,
+                    fields
+                        .into_iter()
+                        .map(|(f, t)| (f, crate::debug_vars::DebugTy::from_ty(&t)))
+                        .collect(),
+                ))
+            })
+            .collect();
+        let enums = self.checker.enum_variant_names();
+        (classes, enums)
     }
 
     pub fn compile<'compiler>(

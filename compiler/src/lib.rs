@@ -3,6 +3,7 @@ mod attrs;
 mod block_builder;
 pub(crate) mod escape;
 mod const_fold;
+pub mod debug_vars;
 #[cfg(any(test, feature = "dissect"))]
 mod dissect;
 // `il::tell` is exercised by `tests/cursor_model.rs`, which diffs bytecode
