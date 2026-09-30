@@ -362,6 +362,23 @@ impl<'s> Formatter<'s> {
         self.type_ctx = was;
     }
 
+    /// An expression in a slot that holds a whole expression (initializer,
+    /// return value, argument, element): outer parens are redundant.
+    fn fmt_value(&mut self, value: &Output<'_>) {
+        self.fmt_output(strip_groups(value));
+    }
+
+    /// `if` / `while` / `match` heads: outer parens are redundant unless the
+    /// inner expression is a `{` record, which would read as the body.
+    fn fmt_condition(&mut self, cond: &Output<'_>) {
+        let inner = strip_groups(cond);
+        if matches!(inner.1.as_ref(), Expression::Dict(_)) {
+            self.fmt_output(cond);
+        } else {
+            self.fmt_output(inner);
+        }
+    }
+
     fn fmt_output(&mut self, output: &Output<'_>) {
         self.fmt_expression(output.1.as_ref());
     }
@@ -393,7 +410,7 @@ impl<'s> Formatter<'s> {
                 if i > 0 {
                     f.push_str(", ");
                 }
-                f.fmt_output(item);
+                f.fmt_value(item);
             }
             if single_item_trailing && items.len() == 1 {
                 f.push_str(",");
@@ -422,7 +439,7 @@ impl<'s> Formatter<'s> {
                 if i > 0 {
                     self.push_str(", ");
                 }
-                self.fmt_output(item);
+                self.fmt_value(item);
             }
             if single_item_trailing && items.len() == 1 {
                 self.push_str(",");
@@ -437,7 +454,7 @@ impl<'s> Formatter<'s> {
         self.with_indent(|f| {
             for item in items {
                 f.body_item(item.0, |f| {
-                    f.fmt_output(item);
+                    f.fmt_value(item);
                     f.push_str(",");
                 });
             }
@@ -617,14 +634,21 @@ impl<'s> Formatter<'s> {
             }
 
             Expression::Expr(inner) | Expression::ImplicitReturn(inner) => self.fmt_output(inner),
+            // Parens around an atom never change the parse.
+            Expression::Group(g) if is_atom(strip_groups(g).1.as_ref()) => {
+                self.fmt_output(strip_groups(g))
+            }
             Expression::Group(g) => {
                 self.push_str("(");
                 self.fmt_output(g);
                 self.push_str(")");
             }
             Expression::ExprStatement(e) => {
-                self.fmt_output(e);
-                self.push_str(";");
+                self.fmt_value(e);
+                // A statement `match` ends at its `}`; no `;`.
+                if !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. }) {
+                    self.push_str(";");
+                }
             }
             Expression::Statement(s) => self.fmt_statement_line(s),
 
@@ -636,7 +660,7 @@ impl<'s> Formatter<'s> {
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {
                     self.push_str("if ");
-                    self.fmt_output(c);
+                    self.fmt_condition(c);
                     self.push_str(" ");
                 } else {
                     self.push_str("else ");
@@ -648,7 +672,7 @@ impl<'s> Formatter<'s> {
                 self.push_str("return");
                 if !is_bare_return(e.1.as_ref()) {
                     self.push_str(" ");
-                    self.fmt_output(e);
+                    self.fmt_value(e);
                 }
             }
             Expression::Raise(inner) => {
@@ -773,7 +797,7 @@ impl<'s> Formatter<'s> {
             Expression::Assignment(lhs, rhs) => {
                 self.fmt_output(lhs);
                 self.push_str(" = ");
-                self.fmt_output(rhs);
+                self.fmt_value(rhs);
             }
 
             // `[T; N]` in a type position shares the value array node.
@@ -900,7 +924,7 @@ impl<'s> Formatter<'s> {
                 self.push_str("let ");
                 self.fmt_let_pattern(pattern);
                 self.push_str(" = ");
-                self.fmt_output(rhs);
+                self.fmt_value(rhs);
             }
             Expression::StaticDecl {
                 is_const,
@@ -919,7 +943,7 @@ impl<'s> Formatter<'s> {
                     self.fmt_type(t);
                 }
                 self.push_str(" = ");
-                self.fmt_output(init);
+                self.fmt_value(init);
                 self.push_str(";");
             }
 
@@ -951,19 +975,19 @@ impl<'s> Formatter<'s> {
                     self.push_str("for ");
                     self.fmt_output(ident);
                     self.push_str(" in ");
-                    self.fmt_output(iterable);
+                    self.fmt_condition(iterable);
                     self.push_str(" ");
                     self.fmt_block_or_inline(body);
                 } else if let Some(pat) = pattern {
                     self.push_str("for ");
                     self.fmt_let_pattern(pat);
                     self.push_str(" in ");
-                    self.fmt_output(iterable);
+                    self.fmt_condition(iterable);
                     self.push_str(" ");
                     self.fmt_block_or_inline(body);
                 } else {
                     self.push_str("while ");
-                    self.fmt_output(iterable);
+                    self.fmt_condition(iterable);
                     self.push_str(" ");
                     self.fmt_block_or_inline(body);
                 }
@@ -977,7 +1001,7 @@ impl<'s> Formatter<'s> {
                 self.push_str("if let ");
                 self.fmt_pattern(&then_arm.pattern);
                 self.push_str(" = ");
-                self.fmt_output(scrutinee);
+                self.fmt_condition(scrutinee);
                 self.push_str(" ");
                 self.fmt_block_or_inline(&then_arm.body);
                 if !matches!(else_arm.body.1.as_ref(), Expression::Block(items) if items.is_empty())
@@ -1000,14 +1024,14 @@ impl<'s> Formatter<'s> {
                 self.push_str("while let ");
                 self.fmt_pattern(&then_arm.pattern);
                 self.push_str(" = ");
-                self.fmt_output(scrutinee);
+                self.fmt_condition(scrutinee);
                 self.push_str(" ");
                 self.fmt_block_or_inline(&then_arm.body);
             }
 
             Expression::Match { scrutinee, arms } => {
                 self.push_str("match ");
-                self.fmt_output(scrutinee);
+                self.fmt_condition(scrutinee);
                 self.push_str(" {");
                 self.newline();
                 let spans: Vec<SimpleSpan> = arms
@@ -1015,14 +1039,12 @@ impl<'s> Formatter<'s> {
                     .map(|arm| SimpleSpan::from(arm.pattern.0.start..self.node_end(&arm.body)))
                     .collect();
                 self.with_indent(|f| {
-                    for (i, (arm, span)) in arms.iter().zip(&spans).enumerate() {
+                    for (arm, span) in arms.iter().zip(&spans) {
                         f.body_item(*span, |f| {
                             f.fmt_pattern(&arm.pattern);
                             f.push_str(" => ");
                             f.fmt_match_arm_body(&arm.body);
-                            if i + 1 < arms.len() {
-                                f.push_str(",");
-                            }
+                            f.push_str(",");
                         });
                     }
                     f.body_close(spans.last().copied(), b'}');
@@ -1199,7 +1221,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_type(ty);
                 if let Some(i) = init {
                     self.push_str(" = ");
-                    self.fmt_output(i);
+                    self.fmt_value(i);
                 }
             }
             Expression::Method(visibility, func) => {
@@ -1543,12 +1565,12 @@ impl<'s> Formatter<'s> {
             if i == 0 {
                 self.push_str("if ");
                 if let Some(c) = cond {
-                    self.fmt_output(c);
+                    self.fmt_condition(c);
                     self.push_str(" ");
                 }
             } else if cond.is_some() {
                 self.push_str("else if ");
-                self.fmt_output(cond.as_ref().unwrap());
+                self.fmt_condition(cond.as_ref().unwrap());
                 self.push_str(" ");
             } else {
                 self.push_str("else ");
@@ -1571,7 +1593,7 @@ impl<'s> Formatter<'s> {
                 }
                 if let Some(val) = items.get(1) {
                     self.push_str(" = ");
-                    self.fmt_output(val);
+                    self.fmt_value(val);
                 }
             }
             Expression::Constant(name, ty) => {
@@ -1583,7 +1605,7 @@ impl<'s> Formatter<'s> {
                 }
                 if let Some(val) = items.get(1) {
                     self.push_str(" = ");
-                    self.fmt_output(val);
+                    self.fmt_value(val);
                 }
             }
             // Brace-group `use path::{a, b}` parses as Fragment([Use, Use, …]).
@@ -2238,6 +2260,38 @@ fn is_bare_return(expr: &Expression<'_>) -> bool {
     }
 }
 
+/// `output` without any enclosing parens. `(e)` parses as
+/// `Group(Fragment([e]))`; the parser's [`Expression::Expr`] wrapper is
+/// transparent too.
+fn strip_groups<'a, 'e>(mut output: &'a Output<'e>) -> &'a Output<'e> {
+    loop {
+        match output.1.as_ref() {
+            Expression::Group(inner) | Expression::Expr(inner) => output = inner,
+            Expression::Fragment(items) if items.len() == 1 => output = &items[0],
+            _ => return output,
+        }
+    }
+}
+
+/// Operands whose parens are always redundant. Numeric literals are left
+/// out: `(1).f()` must not become `1.f()`, which reads as a float.
+fn is_atom(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr,
+        Expression::Identifier(_)
+            | Expression::String(_)
+            | Expression::Bool(_)
+            | Expression::Call { .. }
+            | Expression::Access(..)
+            | Expression::Index(..)
+            | Expression::QualifiedAccess { .. }
+            | Expression::Group(_)
+            | Expression::List(_)
+            | Expression::Array(_)
+            | Expression::Tuple(_)
+    )
+}
+
 fn stmt_needs_semicolon(expr: &Expression<'_>) -> bool {
     !matches!(
         expr,
@@ -2730,5 +2784,33 @@ fn main() { return; }
     #[test]
     fn empty_block_is_compact() {
         stable("fn g() {}\n");
+    }
+
+    #[test]
+    fn statement_match_drops_semicolon_and_every_arm_has_a_comma() {
+        let src = "fn f(int d) {\n    match d {\n        1 => {},\n        default => {}\n    };\n}\n";
+        assert_eq!(
+            format_source(src).unwrap(),
+            "fn f(int d) {\n    match d {\n        1 => {},\n        default => {},\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn value_match_keeps_its_semicolon() {
+        stable("fn f(int d) -> int {\n    return match d {\n        default => 1,\n    };\n}\n");
+    }
+
+    #[test]
+    fn redundant_parens_are_removed() {
+        let src = "fn main() {\n    let w = ((1 + 2));\n    let a = (x);\n    if (a > 1) {\n        return;\n    }\n    f((2 * 2 + 3), (y).z);\n    return (a);\n}\n";
+        assert_eq!(
+            format_source(src).unwrap(),
+            "fn main() {\n    let w = 1 + 2;\n    let a = x;\n    if a > 1 {\n        return;\n    }\n    f(2 * 2 + 3, y.z);\n    return a;\n}\n"
+        );
+    }
+
+    #[test]
+    fn meaningful_parens_are_kept() {
+        stable("fn main() {\n    let z = (1 + 2) * 3;\n    let n = (1).to_string();\n    let t = (1, 2);\n    let u = (1,);\n}\n");
     }
 }

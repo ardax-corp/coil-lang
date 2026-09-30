@@ -47,6 +47,18 @@ enum Precedence {
     Primary,
 }
 
+/// The `match` of a `match … { … }` statement written without `;` (its
+/// `ExprStatement` has exactly the match's span; the `;` form extends past it).
+fn bare_statement_match<'a, 'p>(stmt: &'a Output<'p>) -> Option<&'a Output<'p>> {
+    let Expression::Statement(inner) = stmt.1.as_ref() else {
+        return None;
+    };
+    let Expression::ExprStatement(m) = inner.1.as_ref() else {
+        return None;
+    };
+    (matches!(m.1.as_ref(), Expression::Match { .. }) && inner.0 == m.0).then_some(m)
+}
+
 /// Whitespace and comments between tokens.
 ///
 /// `// …` line comments and `/* … */` block comments (nestable) are trivia:
@@ -812,6 +824,16 @@ impl<'pratt> Pratt<'pratt> {
             .then(expr.or_not())
             .delimited_by(op!("{"), op!("}"))
             .map_with(|(mut statements, trailing), e| {
+                // `{ …; match x { … } }`: a final `match` with no `;` is the
+                // body's value, as in any value block.
+                if trailing.is_none()
+                    && let Some(tail) = statements.last().and_then(bare_statement_match)
+                {
+                    let tail = tail.clone();
+                    statements.pop();
+                    statements.push(tail);
+                    return (e.span(), Box::new(Expression::Block(statements)));
+                }
                 statements.extend(trailing);
                 (e.span(), Box::new(Expression::Block(statements)))
             })
@@ -1597,6 +1619,15 @@ impl<'pratt> Pratt<'pratt> {
                 // `defer { … }` before `expr_statement` so `defer` is not
                 // parsed as a bare identifier call / expression.
                 self.defer(stmt.clone()),
+                // A `match` at statement start ends at its `}` like `if`, so
+                // it needs no `;`. `.` / `?` continue an expression
+                // (`match x { … }.len();`) and `match … {};` is an ordinary
+                // `expr_statement`. The statement keeps the match's own span:
+                // `brace_body` uses that to turn a trailing one into the
+                // body's value.
+                self.match_expr(expr.clone(), stmt.clone())
+                    .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
+                    .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
                 self.expr_statement(expr.clone()),
                 self.orphan_doc_comment(),
             ))
@@ -2940,6 +2971,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(
                 self.arm(expr.clone(), stmt)
                     .separated_by(op!(','))
+                    .at_least(1)
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(op!('{'), op!('}')),
