@@ -871,10 +871,8 @@ impl<'s> Formatter<'s> {
             Expression::QualifiedAccess { owner, member } => {
                 self.push_str(owner);
                 self.push_str("::");
+                // `m::f()` parses as `Call`, which prints its own parens.
                 self.push_str(member);
-                if self.empty_parens_after(member) {
-                    self.push_str("()");
-                }
             }
             Expression::Member(inner) => self.fmt_output(inner),
 

@@ -160,6 +160,16 @@ pub struct Pratt<'pratt> {
     _data: PhantomData<&'pratt ()>,
 }
 
+/// Join `a`, `b`, `C` into `a::b::C` for a `'src` AST borrow. One segment
+/// borrows it directly; longer paths leak the joined string (as the
+/// multi-segment `Construct` head always has).
+fn join_path_segments<'a>(mut segments: Vec<&'a str>) -> &'a str {
+    if segments.len() == 1 {
+        return segments.pop().unwrap_or_default();
+    }
+    Box::leak(segments.join("::").into_boxed_str())
+}
+
 fn first_duplicate_name<'a, I>(names: I) -> Option<&'a str>
 where
     I: IntoIterator<Item = &'a str>,
@@ -316,10 +326,17 @@ impl<'pratt> Pratt<'pratt> {
                 Some(args) => (e.span(), Box::new(Expression::TypeApp { name, args })),
                 None => (e.span(), Box::new(Expression::Type(name))),
             });
+        // `Owner::Name` (associated type) or a module path `a::b::Name`;
+        // the checker picks which from what `Owner` names.
         let projection_type = text::ident()
             .padded_by(trivia())
-            .then_ignore(op!("::"))
-            .then(text::ident().padded_by(trivia()))
+            .separated_by(op!("::"))
+            .at_least(2)
+            .collect::<Vec<_>>()
+            .map(|mut segments| {
+                let name = segments.pop().unwrap_or_default();
+                (join_path_segments(segments), name)
+            })
             .then(
                 type_ann
                     .clone()
@@ -514,7 +531,7 @@ impl<'pratt> Pratt<'pratt> {
                     .map_with(|state, e| (e.span(), Box::new(Expression::Bool(state == "true"))))
                     .labelled("boolean"),
                 keyword!("new")
-                    .ignore_then(text::ident())
+                    .ignore_then(self.item_path())
                     .map_with(|class, e| {
                         let class_output = (e.span(), Box::new(Expression::Identifier(class)));
                         (
@@ -2340,6 +2357,18 @@ impl<'pratt> Pratt<'pratt> {
             .labelled("static declaration")
     }
 
+    /// `Name` or a module-qualified `a::b::Name` (`new` heads).
+    fn item_path(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, &'pratt str, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        text::ident()
+            .separated_by(just("::").padded_by(trivia()))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(join_path_segments)
+    }
+
     /// `ClassName::member` — static field access (not enum constructor).
     fn qualified_access(
         &self,
@@ -2403,7 +2432,7 @@ impl<'pratt> Pratt<'pratt> {
     {
         keyword!("readonly")
             .ignore_then(keyword!("new"))
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(self.params(expr))
             .map_with(|(class, args), e| {
                 let class_output = (e.span(), Box::new(Expression::Identifier(class)));
@@ -2642,7 +2671,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         keyword!("new")
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(self.params(expr))
             .map_with(|(class, args), e| {
                 let class_output = (e.span(), Box::new(Expression::Identifier(class)));
@@ -3006,18 +3035,15 @@ impl<'pratt> Pratt<'pratt> {
             .map_with(|(segments, fields), e| {
                 let mut segments = segments;
                 let variant_name = segments.pop().unwrap();
-                let enum_name = if segments.len() == 1 {
-                    segments.pop().unwrap()
-                } else {
-                    // Multi-segment path: leak joined `::` string for `'pratt` AST borrow.
-                    let joined = segments.join("::");
-                    Box::leak(joined.into_boxed_str()) as &str
-                };
+                // Last owner segment: `json` in `json::parse`, `Point` in
+                // `geo::Point::origin`.
+                let owner_leaf = *segments.last().unwrap();
+                let enum_name = join_path_segments(segments);
                 // `module::fn(...)` when both sides look like module/fn paths
-                // (`string::format`). PascalCase owners stay Construct
-                // (`Point::new`); PascalCase members stay Construct
-                // (`ffi::types::Int`, `Option::Some`).
-                if enum_name
+                // (`string::format`, `a::b::parse`). PascalCase owners stay
+                // Construct (`Point::new`, `geo::Point::origin`); PascalCase
+                // members stay Construct (`ffi::types::Int`, `Option::Some`).
+                if owner_leaf
                     .chars()
                     .next()
                     .is_some_and(|ch| ch.is_ascii_lowercase())
@@ -3041,7 +3067,12 @@ impl<'pratt> Pratt<'pratt> {
                                 args: Some(args),
                             }),
                         ),
-                        Some(EnumConstructPayload::Unit) | None => name,
+                        // `m::f()`: empty parens are still a call.
+                        Some(EnumConstructPayload::Unit) => (
+                            e.span(),
+                            Box::new(Expression::Call { name, args: None }),
+                        ),
+                        None => name,
                         Some(EnumConstructPayload::Record(_)) => (
                             e.span(),
                             Box::new(Expression::QualifiedAccess {
@@ -3194,10 +3225,16 @@ impl<'pratt> Pratt<'pratt> {
                 .or_not()
                 .map(|opt| opt.unwrap_or(PatternPayload::Unit));
 
+            // `Enum::Variant` or module-qualified `a::b::Enum::Variant`.
             let constructor = text::ident()
                 .padded_by(trivia())
-                .then_ignore(just("::").padded_by(trivia()))
-                .then(text::ident().padded_by(trivia()))
+                .separated_by(just("::").padded_by(trivia()))
+                .at_least(2)
+                .collect::<Vec<_>>()
+                .map(|mut segments| {
+                    let variant_name = segments.pop().unwrap_or_default();
+                    (join_path_segments(segments), variant_name)
+                })
                 .then(payload_choice)
                 .map_with(|((enum_name, variant_name), payload), e| {
                     (
