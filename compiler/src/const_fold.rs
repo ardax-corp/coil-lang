@@ -52,8 +52,19 @@ pub fn eval_expr<'a>(
                 _ => None,
             }
         }
-        Expression::Add(lhs, rhs) => eval_string_add(lhs, rhs, env)
-            .or_else(|| eval_binop(lhs, rhs, env, |a, b| a + b, |a, b| a + b)),
+        // Each operand is evaluated once: trying string concat and then the
+        // numeric op re-evaluated both sides, doubling the work per level of
+        // a left-nested `a + b + c + …` chain.
+        Expression::Add(lhs, rhs) => {
+            let a = eval_expr(lhs, env)?;
+            let b = eval_expr(rhs, env)?;
+            match (a, b) {
+                (ConstValue::Str(x), ConstValue::Str(y)) => Some(ConstValue::Str(format!("{x}{y}"))),
+                (ConstValue::Int(x), ConstValue::Int(y)) => Some(ConstValue::Int(x + y)),
+                (ConstValue::Float(x), ConstValue::Float(y)) => Some(ConstValue::Float(x + y)),
+                _ => None,
+            }
+        }
         Expression::Sub(lhs, rhs) => eval_binop(lhs, rhs, env, |a, b| a - b, |a, b| a - b),
         Expression::Mul(lhs, rhs) => eval_binop(lhs, rhs, env, |a, b| a * b, |a, b| a * b),
         Expression::Div(lhs, rhs) => {
@@ -691,6 +702,20 @@ mod tests {
             SimpleSpan::from(0..1),
             Box::new(Expression::Identifier(name)),
         )
+    }
+
+    /// A long left-nested `"s" + x + "s" + x …` chain with an unknown operand
+    /// must not re-evaluate operands (it was exponential in the chain length).
+    #[test]
+    fn long_add_chain_with_unknown_operand_is_linear() {
+        let mut e: Output<'static> = (SimpleSpan::from(0..1), Box::new(Expression::String("s")));
+        for i in 0..200 {
+            let rhs = if i % 2 == 0 { id_expr("x") } else { (SimpleSpan::from(0..1), Box::new(Expression::String("s"))) };
+            e = (SimpleSpan::from(0..1), Box::new(Expression::Add(e, rhs)));
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(eval_expr(&e, &HashMap::new()), None);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     fn float_expr(n: f64) -> Output<'static> {
