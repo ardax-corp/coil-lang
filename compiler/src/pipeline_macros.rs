@@ -140,6 +140,26 @@ impl Pipeline {
         self.discover_all();
     }
 
+    /// Entry-file source after every built-in and user macro expanded, as
+    /// `coil fmt` would print it (`coil dissect --expand`). `None` when the
+    /// file cannot be read or parsed (diagnostics are emitted).
+    pub fn expanded_source(&mut self, file: &str) -> Option<String> {
+        let entry = PathBuf::from(file);
+        self.reset_session();
+        self.sync_host_caps();
+        self.entry_file = Some(entry.clone());
+        self.enqueue_file(entry.clone());
+        self.discover_all();
+        self.expand_user_macros();
+        let cached = self.ast_cache.get(&entry)?;
+        if let Some(err) = cached.parse_error().cloned() {
+            let src = cached.source().to_string();
+            self.emit_message(&entry, &src, &err);
+            return None;
+        }
+        cached.ast().map(|ast| parser::format_program(&ast.1))
+    }
+
     /// Module path of `file` in this session (`""` for the entry file).
     pub(super) fn namespace_for(&self, file: &Path) -> String {
         if self.entry_file.as_deref() == Some(file) {

@@ -2440,6 +2440,31 @@ fn code_actions(
             _ => {}
         }
     }
+    // Refactor: on an attribute line, replace the file with its macro
+    // expansion (what `coil dissect --expand` prints).
+    if let Some(cursor) = position_to_byte(&text, range.start) {
+        let line_start = text[..cursor].rfind('\n').map_or(0, |i| i + 1);
+        let on_attr = text[line_start..].trim_start().starts_with("#[");
+        if on_attr && let Some(index) = state.project_index.as_mut() {
+            index.apply_open_file(path.clone(), text.clone());
+            let expanded = index
+                .pipeline_mut()
+                .expanded_source(path.to_str().unwrap_or_default());
+            // The session was reset: re-check on the next request.
+            state.last_entry = None;
+            if let Some(expanded) = expanded.filter(|e| *e != text) {
+                actions.push(edit_action(
+                    "Expand macros in this file".into(),
+                    vec![TextEdit {
+                        range: byte_range(&text, &(0..text.len())),
+                        new_text: expanded,
+                    }],
+                    None,
+                    lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                ));
+            }
+        }
+    }
     // Refactor: spell out the inferred type of the `let` under the cursor.
     if let (Some(cursor), Ok(ast)) = (position_to_byte(&text, range.start), Pratt::default().parse(&text)) {
         if state.project_index.is_some() && state.last_entry.as_ref() != Some(&path) {

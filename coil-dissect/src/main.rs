@@ -27,7 +27,7 @@ fn print_help() {
     eprintln!(
         "Usage:\n\
          \x20 coil-dissect [--log-json | --log-lsp] [--root DIR]... [--entry FILE] <file.hy>\n\
-         \x20              [--fn <pat>] [--il] [--il-post] [--mir] [--ast] [--no-source] [-O LEVEL]\n\
+         \x20              [--fn <pat>] [--il] [--il-post] [--mir] [--ast] [--expand] [--no-source] [-O LEVEL]\n\
          \x20              [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
          \x20              [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
          \n\
@@ -40,6 +40,7 @@ fn print_help() {
          \x20 -O, --opt-level L  none/0, basic/1, standard/2, aggressive/3, size/s, debug/g\n\
          \x20 --opt-stats        Print IL optimization counters (stderr); --opt-stats-json as JSON\n\
          \x20 --ast              Also print the entry-file AST\n\
+         \x20 --expand           Print the entry file after macro expansion (no bytecode)\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
          \x20 --entry FILE       Entry `.hy` (instead of the positional file); a `.hyc`\n\
          \x20                    archive dumps its bytecode instead of compiling\n\
@@ -60,6 +61,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
     let mut log_lsp = false;
     let mut show_il = false;
     let mut show_ast = false;
+    let mut show_expand = false;
     let mut fn_pat: Option<String> = None;
     let mut filename: Option<String> = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
@@ -102,6 +104,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             }
             s if s.starts_with("-O") && s.len() > 2 => opt_level = parse_level(&s[2..])?,
             "--ast" => show_ast = true,
+            "--expand" => show_expand = true,
             "--allow-attach" => grants.allow_attach = true,
             "--allow-exit" => grants.allow_exit = true,
             "--allow-exec" => grants.allow_exec = true,
@@ -182,6 +185,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             fn_pat,
             show_il,
             show_ast,
+            show_expand,
             extra_roots,
             grants,
             show_mir,

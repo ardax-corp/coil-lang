@@ -339,6 +339,9 @@ enum RawCommand {
         /// Also print the entry-file AST
         #[arg(long)]
         ast: bool,
+        /// Print the entry file after macro expansion (no bytecode)
+        #[arg(long)]
+        expand: bool,
         /// Entry `.hy` file, or a compiled `.hyc` archive (bytecode only)
         file: Option<String>,
     },
@@ -715,6 +718,7 @@ impl RawCli {
                 mir: _,
                 no_source: _,
                 ast,
+                expand: _,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;

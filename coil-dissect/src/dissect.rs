@@ -18,6 +18,8 @@ pub struct DissectArgs {
     pub fn_pat: Option<String>,
     pub show_il: bool,
     pub show_ast: bool,
+    /// Print the entry file after macro expansion and exit.
+    pub show_expand: bool,
     pub extra_roots: Vec<std::path::PathBuf>,
     pub grants: HostGrants,
     pub show_mir: bool,
@@ -80,12 +82,25 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     }
 
     let from_archive = args.filename.ends_with(".hyc");
-    if from_archive && (args.show_il || args.show_il_post || args.show_mir || args.show_ast) {
+    if from_archive
+        && (args.show_il || args.show_il_post || args.show_mir || args.show_ast || args.show_expand)
+    {
         fail_and_exit(
             &mut pipeline,
             ErrorCode::InvalidCliFlags,
-            "--il / --mir / --ast need a `.hy` source, not a `.hyc` archive",
+            "--il / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
         );
+    }
+    if args.show_expand {
+        let text = pipeline.expanded_source(&args.filename);
+        let _ = pipeline.finish_reporting();
+        match text {
+            Some(text) => {
+                print!("{text}");
+                exit(0);
+            }
+            None => exit(1),
+        }
     }
     if args.show_mir {
         compiler::start_mir_capture();
