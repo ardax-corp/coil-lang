@@ -487,7 +487,8 @@ pub struct Machine<const S: usize> {
     /// Fail-closed `dload` integrity (lock hash or trusted).
     dload_gate: crate::ffi::DloadGate,
     /// Registered C struct layouts for pass-by-value FFI.
-    struct_layouts: Vec<CStructLayout>,
+    /// Shared with spawned jobs (a refcount per spawn, not a copy).
+    struct_layouts: Arc<Vec<CStructLayout>>,
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
     ffi_closures: Vec<crate::ffi::OwnedClosure>,
     /// Bytecode/constants for nested `call_function` / callbacks.
@@ -617,7 +618,7 @@ impl<const S: usize> Machine<S> {
             base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: crate::ffi::DloadGate::deny_all(),
-            struct_layouts: Vec::new(),
+            struct_layouts: Arc::default(),
             ffi_closures: Vec::new(),
             program_code: Arc::new(Vec::new()),
             program_constants: Arc::new(Vec::new()),
@@ -1142,9 +1143,14 @@ impl<const S: usize> Machine<S> {
         self
     }
 
+    /// Replace every C struct layout (a reused worker VM takes its job's list).
+    pub fn set_struct_layouts(&mut self, layouts: Arc<Vec<CStructLayout>>) {
+        self.struct_layouts = layouts;
+    }
+
     pub fn register_struct_layout(&mut self, layout: CStructLayout) -> u32 {
         let id = self.struct_layouts.len() as u32;
-        self.struct_layouts.push(layout);
+        Arc::make_mut(&mut self.struct_layouts).push(layout);
         id
     }
 
@@ -2307,6 +2313,7 @@ impl<const S: usize> Machine<S> {
             ffi_base_dir: self.base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
+            struct_layouts: Arc::clone(&self.struct_layouts),
         })
     }
 
@@ -2779,6 +2786,10 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.userland_libraries.clear();
         self.ffi_closures.clear();
+        // Drop PCs belong to the job's program: a reused worker may load a
+        // different one next, where the same `type_id` names another type.
+        self.finalizer_by_type.clear();
+        self.finalizer_pcs.clear();
         self.gc_in_progress = false;
         self.gc_deferred = false;
         if self.heap.is_borrowed() {

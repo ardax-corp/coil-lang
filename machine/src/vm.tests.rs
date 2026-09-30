@@ -5404,6 +5404,18 @@
         assert_eq!(s, "closed");
     }
 
+    /// A reused reactor VM may load another program next: its drop PCs must
+    /// not survive the job (the same `type_id` names another type there).
+    #[test]
+    fn reset_isolate_heap_forgets_program_finalizers() {
+        let mut vm = Machine::<256>::default();
+        vm.register_finalizer_for_test(7, 42);
+        assert!(!vm.finalizer_by_type.is_empty());
+        vm.reset_isolate_heap();
+        assert!(vm.finalizer_by_type.is_empty());
+        assert!(vm.finalizer_pcs.is_empty());
+    }
+
     /// A payload enum stamped by `TagEnumType` is finalized at teardown.
     #[test]
     fn teardown_runs_tagged_enum_finalizer() {

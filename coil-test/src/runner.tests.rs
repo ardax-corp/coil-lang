@@ -16,6 +16,8 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         root: root.to_path_buf(),
         fail_fast,
         order: Order::Sorted,
+        jobs: 2,
+        show_output: false,
         opt_level: OptLevel::Standard,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),
@@ -116,8 +118,15 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
     )
     .unwrap();
 
-    let SuiteResult { passed, failed, .. } =
-        run_test_suite(ReportConfig::default(), &options(&root, true)).expect("suite runs");
+    let SuiteResult { passed, failed, .. } = run_test_suite(
+        ReportConfig::default(),
+        // `--jobs 1` stops at once; in parallel, files already started finish.
+        &TestOptions {
+            jobs: 1,
+            ..options(&root, true)
+        },
+    )
+    .expect("suite runs");
     assert_eq!(failed, 1, "a_ok should fail (unexpected compile success)");
     assert_eq!(passed, 0, "fail-fast must not reach z_bad");
 
@@ -127,50 +136,100 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
 /// Fresh VM per case: soft-fail / panic in earlier cases must not skip later ones.
 #[test]
 fn harness_isolates_cases_and_continues_after_failures() {
-    let src = r#"
+    let root = unique_tmp("isolates_cases");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("cases.hy"),
+        r#"
 test("soft fail") {
-assert(false)?;
+    assert(false)?;
 }
 test("panics") {
-panic "boom";
+    panic "boom";
 }
 test("still runs") {
-assert(true)?;
+    assert(true)?;
 }
-"#;
-    let mut pipeline = Pipeline::new();
-    pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("multi-case harness source should compile");
-    let cases = pipeline.test_cases().to_vec();
-    assert_eq!(cases.len(), 3, "expected three test(\"…\") cases");
-    assert_eq!(cases[0].0, "soft fail");
-    assert_eq!(cases[1].0, "panics");
-    assert_eq!(cases[2].0, "still runs");
-
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    for (name, offset) in &cases {
-        if run_test_case(
-            &pipeline,
-            &bytecode,
-            &constants,
-            pipeline.strings(),
-            None,
-            name,
-            *offset,
-        ) {
-            passed += 1;
-        } else {
-            failed += 1;
-        }
+"#,
+    )
+    .unwrap();
+    for jobs in [1, 3] {
+        let opts = TestOptions {
+            jobs,
+            ..options(&root, false)
+        };
+        let SuiteResult { passed, failed, .. } =
+            run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+        assert_eq!(
+            failed, 2,
+            "soft-fail + panic should each count as failures (jobs={jobs})"
+        );
+        assert_eq!(
+            passed, 1,
+            "later case must still run after earlier failures (jobs={jobs})"
+        );
     }
-    assert_eq!(failed, 2, "soft-fail + panic should each count as failures");
-    assert_eq!(
-        passed, 1,
-        "later case must still run after earlier failures"
-    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Statics are initialized per case, and a case's writes do not leak into the next.
+#[test]
+fn every_case_gets_fresh_static_init() {
+    let root = unique_tmp("fresh_statics");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut src = String::from("static let seen: Vec<int> = Vec::new();\n");
+    for i in 0..8 {
+        src.push_str(&format!(
+            "test(\"push {i}\") {{\n    assert(seen.len() == 0, \"saw a previous case's write\")?;\n    seen.push({i});\n}}\n"
+        ));
+    }
+    std::fs::write(root.join("statics.hy"), src).unwrap();
+    let opts = TestOptions {
+        order: Order::Shuffled(9),
+        jobs: 1,
+        ..options(&root, false)
+    };
+    let SuiteResult { passed, failed, .. } =
+        run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+    assert_eq!((passed, failed), (8, 0));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A case that spawns a thread joins it on the same reactor its job runs on.
+#[test]
+fn cases_can_spawn_threads_on_the_harness_reactor() {
+    let root = unique_tmp("spawn_in_case");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("spawn.hy"),
+        r#"
+use thread::{join, spawn, ThreadError};
+fn work() -> int {
+    return 41 + 1;
+}
+fn spawned() -> Result<int, ThreadError> {
+    let t = spawn(work)?;
+    return Result::Ok(join(t)?);
+}
+test("spawn and join") {
+    let v = match spawned() {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+    assert(v == 42)?;
+}
+"#,
+    )
+    .unwrap();
+    for jobs in [1, 2] {
+        let opts = TestOptions {
+            jobs,
+            ..options(&root, false)
+        };
+        let r = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+        assert_eq!((r.passed, r.failed), (1, 0), "jobs={jobs}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

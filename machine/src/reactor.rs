@@ -55,6 +55,34 @@ pub struct Job {
     pub dload_gate: DloadGate,
     /// C1 shared-heap steal (None = isolate + PortableValue).
     pub epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// C struct layouts for pass-by-value FFI (ids are indices, so the
+    /// worker VM takes the parent's list as is).
+    pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// Harness case (`coil-test`): run static init first, then report
+    /// pass / fail instead of a spawn result.
+    pub test: Option<TestJob>,
+}
+
+/// A `test("…")` case (or a case-less file's `main`) run as a reactor job.
+pub struct TestJob {
+    /// Start of the static-init prologue. The job's program must have the
+    /// prologue's final `JMP main` patched to `HALT` (as
+    /// [`Machine::halt_first_jump_to`] does); `None` when there is no prologue.
+    pub init_ip: Option<u32>,
+    /// `true`: pass means "returned `Result::Ok`" (a `test` case).
+    /// `false`: pass means "did not panic" (a file's `main`).
+    pub expect_ok_result: bool,
+    /// Filled once the job finishes, before its join state completes.
+    pub report: Arc<Mutex<Option<TestReport>>>,
+}
+
+/// Outcome of a [`TestJob`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestReport {
+    pub passed: bool,
+    /// Why it failed when it returned `Err(reason)` (a panic's message is in
+    /// the job's print buffer instead).
+    pub reason: Option<String>,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -530,6 +558,8 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         ffi_search_paths,
         dload_gate,
         epoch,
+        struct_layouts,
+        test,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -566,11 +596,15 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.constants),
             Arc::clone(&program.strings),
         );
+        vm.set_struct_layouts(struct_layouts);
         if !shared {
             vm.init_static_slots(program.static_slot_count);
         }
 
         let _guard = HostStateGuard::enter(vm);
+        if let Some(test) = &test {
+            return Ok(run_test_job(vm, entry, test));
+        }
         let mut child_args = Vec::with_capacity(args.len());
         for a in args {
             child_args.push(spawn_arg_to_value(vm.heap_mut(), a)?);
@@ -606,6 +640,137 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     }
 }
 
+/// A submitted [`TestJob`]; [`Self::wait`] blocks (help-stealing) until it ends.
+pub struct TestHandle {
+    reactor: Arc<Reactor>,
+    state: Arc<JoinState>,
+    report: Arc<Mutex<Option<TestReport>>>,
+}
+
+impl TestHandle {
+    /// Block until the case finishes. A Rust panic inside the VM (an ICE) is
+    /// a failed case, not a harness abort.
+    pub fn wait(self) -> TestReport {
+        let joined = self.reactor.wait_join(&self.state);
+        let report = self
+            .report
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match (joined, report) {
+            (Ok(_), Some(report)) => report,
+            _ => TestReport {
+                passed: false,
+                reason: None,
+            },
+        }
+    }
+}
+
+impl Reactor {
+    /// Queue a harness case built from a root VM's spawn context. `print`
+    /// captures the case's output (prints and panic messages).
+    pub fn submit_test(
+        self: &Arc<Self>,
+        ctx: crate::thread::ThreadSpawnContext,
+        case: TestCase,
+        print: Arc<Mutex<Vec<u8>>>,
+    ) -> TestHandle {
+        let (job, state, report) = self.test_job(ctx, case, print);
+        self.submit(job);
+        TestHandle {
+            reactor: Arc::clone(self),
+            state,
+            report,
+        }
+    }
+
+    /// Run a harness case on this thread (no pool worker), through the same
+    /// job path as [`Self::submit_test`]. Cases that spawn threads still use
+    /// this reactor's pool.
+    pub fn run_test_here(
+        self: &Arc<Self>,
+        ctx: crate::thread::ThreadSpawnContext,
+        case: TestCase,
+        print: Arc<Mutex<Vec<u8>>>,
+    ) -> TestReport {
+        let (job, state, report) = self.test_job(ctx, case, print);
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        let program = Arc::clone(&job.program);
+        with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+        TestHandle {
+            reactor: Arc::clone(self),
+            state,
+            report,
+        }
+        .wait()
+    }
+
+    fn test_job(
+        self: &Arc<Self>,
+        ctx: crate::thread::ThreadSpawnContext,
+        case: TestCase,
+        print: Arc<Mutex<Vec<u8>>>,
+    ) -> (Job, Arc<JoinState>, Arc<Mutex<Option<TestReport>>>) {
+        let state = Arc::new(JoinState::new());
+        let report = Arc::new(Mutex::new(None));
+        let mut job = job_from_spawn_context(ctx, case.entry, Vec::new(), Arc::clone(&state));
+        job.reactor = Arc::clone(self);
+        job.shared_print = Some(print);
+        job.test = Some(TestJob {
+            init_ip: case.init_ip,
+            expect_ok_result: case.expect_ok_result,
+            report: Arc::clone(&report),
+        });
+        (job, state, report)
+    }
+}
+
+/// Where a harness case starts and what counts as passing.
+#[derive(Debug, Clone, Copy)]
+pub struct TestCase {
+    /// Function to call (a `test("…")` body, or `main`).
+    pub entry: u32,
+    /// See [`TestJob::init_ip`].
+    pub init_ip: Option<u32>,
+    /// See [`TestJob::expect_ok_result`].
+    pub expect_ok_result: bool,
+}
+
+/// Static init, then the case; the report is stored before the join completes.
+fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
+    if let Some(ip) = test.init_ip {
+        vm.run_from(ip as usize);
+    }
+    let report = if vm.panicked() {
+        TestReport {
+            passed: false,
+            reason: None,
+        }
+    } else {
+        let ret = vm.call_function(entry, &[]);
+        if vm.panicked() {
+            TestReport {
+                passed: false,
+                reason: None,
+            }
+        } else if !test.expect_ok_result || vm.result_is_ok(ret) {
+            TestReport {
+                passed: true,
+                reason: None,
+            }
+        } else {
+            TestReport {
+                passed: false,
+                reason: vm.result_err_text(ret),
+            }
+        }
+    };
+    let passed = report.passed;
+    *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+    PortableValue::Immediate(u64::from(passed))
+}
+
 /// Build a [`Job`] from spawn context + decoded args.
 pub fn job_from_spawn_context(
     ctx: ThreadSpawnContext,
@@ -627,6 +792,8 @@ pub fn job_from_spawn_context(
         ffi_search_paths: ctx.ffi_search_paths,
         dload_gate: ctx.dload_gate,
         epoch: None,
+        struct_layouts: ctx.struct_layouts,
+        test: None,
     }
 }
 
@@ -670,6 +837,8 @@ mod tests {
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
             epoch: None,
+            struct_layouts: Arc::default(),
+            test: None,
         };
         reactor.submit(job);
         state
@@ -679,6 +848,49 @@ mod tests {
     fn worker_count_zero_stays_lazy() {
         let r = Reactor::new(0);
         assert_eq!(r.worker_count(), 0);
+    }
+
+    fn test_ctx(reactor: &Arc<Reactor>, imm: i32) -> crate::thread::ThreadSpawnContext {
+        crate::thread::ThreadSpawnContext {
+            program: const_return_program(imm),
+            natives: Natives::new(),
+            shared_print: None,
+            live_threads: crate::thread::new_live_thread_registry(),
+            worker_cap: crate::thread::WorkerCap::from_count(1),
+            reactor: Arc::clone(reactor),
+            io_reactor: crate::io_reactor::IoReactor::new(),
+            ffi_base_dir: None,
+            ffi_search_paths: Vec::new(),
+            dload_gate: DloadGate::deny_all(),
+            struct_layouts: Arc::default(),
+        }
+    }
+
+    /// A `main`-style case passes when it returns without panicking, on a pool
+    /// worker and inline alike.
+    #[test]
+    fn test_jobs_report_on_pool_and_inline() {
+        let reactor = Reactor::new(2);
+        let case = TestCase {
+            entry: 0,
+            init_ip: None,
+            expect_ok_result: false,
+        };
+        let pooled = reactor.submit_test(test_ctx(&reactor, 3), case, Arc::default());
+        let inline = reactor.run_test_here(test_ctx(&reactor, 4), case, Arc::default());
+        let expect = TestReport {
+            passed: true,
+            reason: None,
+        };
+        assert_eq!(pooled.wait(), expect);
+        assert_eq!(inline, expect);
+        // A bare integer is not a `Result::Ok`: a `test` case would fail.
+        let strict = TestCase {
+            expect_ok_result: true,
+            ..case
+        };
+        assert!(!reactor.run_test_here(test_ctx(&reactor, 5), strict, Arc::default()).passed);
+        reactor.shutdown();
     }
 
     #[test]
@@ -831,6 +1043,8 @@ mod tests {
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
             epoch: None,
+            struct_layouts: Arc::default(),
+            test: None,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(

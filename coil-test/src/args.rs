@@ -33,6 +33,8 @@ pub fn print_help() {
          \x20 --seed N           Shuffle files and cases with seed N (decimal or 0x hex;\n\
          \x20                    default: random, or $COIL_TEST_SEED; printed in the header)\n\
          \x20 --no-shuffle       Run files in sorted path order and cases in source order\n\
+         \x20 -j, --jobs N       Run cases on N reactor workers (default: available CPUs)\n\
+         \x20 --show-output      Also print passing cases' output (failures always show it)\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
@@ -54,6 +56,8 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut fail_fast = false;
     let mut seed: Option<u64> = None;
     let mut no_shuffle = false;
+    let mut jobs: Option<usize> = None;
+    let mut show_output = false;
     let mut path: Option<String> = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut grants = HostGrants::deny_all();
@@ -80,6 +84,14 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--log-lsp" => log_lsp = true,
             "--fail-fast" => fail_fast = true,
             "--no-shuffle" => no_shuffle = true,
+            "--show-output" => show_output = true,
+            "-j" | "--jobs" => {
+                i += 1;
+                jobs = Some(parse_jobs(&value(i, "N", a)?)?);
+            }
+            s if s.starts_with("--jobs=") => {
+                jobs = Some(parse_jobs(s.trim_start_matches("--jobs="))?);
+            }
             "--seed" => {
                 i += 1;
                 seed = Some(parse_seed(&value(i, "N", a)?)?);
@@ -143,11 +155,27 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
             fail_fast,
             order,
+            jobs: jobs.unwrap_or_else(default_jobs),
+            show_output,
             opt_level,
             grants,
             extra_roots,
         },
     ))
+}
+
+fn parse_jobs(text: &str) -> Result<usize, String> {
+    match text.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "invalid --jobs `{text}` (expected a count of at least 1)"
+        )),
+    }
+}
+
+/// One reactor worker per available CPU.
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 /// `--no-shuffle` > `--seed` > `$COIL_TEST_SEED` > a fresh random seed.
@@ -243,6 +271,21 @@ mod tests {
         assert!(parse_args(&argv(&["--seed", "1", "--no-shuffle"])).is_err());
         assert!(parse_args(&argv(&["--seed", "nope"])).is_err());
         assert!(parse_args(&argv(&["--seed"])).is_err());
+    }
+
+    #[test]
+    fn jobs_and_show_output_flags() {
+        let (_, o) = run(&["-j", "3", "--show-output"]);
+        assert_eq!(o.jobs, 3);
+        assert!(o.show_output);
+        let (_, o) = run(&["--jobs=1"]);
+        assert_eq!(o.jobs, 1);
+        assert!(!o.show_output);
+        let (_, o) = run(&[]);
+        assert!(o.jobs >= 1);
+        for bad in [&["--jobs", "0"][..], &["-j", "x"], &["--jobs"]] {
+            assert!(parse_args(&argv(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
