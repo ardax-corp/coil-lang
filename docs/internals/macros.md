@@ -138,20 +138,27 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    the expansion program imports, so it is never compiled into the user's
    program). Nothing found: "Cannot derive unknown or non-derivable trait" /
    "Unknown attribute". A module using its own macro is a staging error.
-3. **Encode** each call's input as coil source (`macros::encode`). Every object
-   is bound to its own `let`, so no constructor is nested in another's
-   arguments.
-4. **Compile** one expansion program (`<coil>/expand.hy`: `use` of each
-   provider function under an alias, one `fn __coil_expand_i() -> string` per
-   call) in a sub-`Pipeline` with the same roots. The sub-pipeline expands its
-   own modules' macros the same way. Files already being expanded by an
-   enclosing pipeline are on `macro_stack`, and reaching one again is reported as
-   an expansion cycle.
-5. **Run** every entry through the `MacroHost` (below). Outputs are cached for
-   the life of the process, keyed by the sources of the provider and its
-   dependencies plus the macro and its encoded input
-   (`Pipeline::job_key`), so the LSP does not recompile providers on every
-   keystroke.
+3. **Encode** each call's input as one string (`macros::encode::Wire`):
+   length-prefixed fields (`<len>:<bytes>`, lists as a count then their
+   items) in the order the model's constructors take them, then the
+   attribute arguments in parameter order. `macro::Reader` (`r.type_decl()`,
+   `r.fn_decl()`, `r.str()`, `r.int()`, `r.bool()`) decodes it in the VM.
+   Attribute-macro parameters are `string`, `int` or `bool`.
+4. **Compile** the expansion program for the round's provider modules
+   (`<coil>/expand.hy`: `use` of every macro function each provider declares,
+   under an alias, and one `fn __coil_run_i(string input) -> string` wrapper
+   per macro that decodes the input and calls it). It depends only on the
+   providers, so it is compiled once per provider set and process
+   (`COMPILED`, keyed by the provider modules and the sources of the
+   providers and their dependencies; parallel `coil test` workers wait for
+   one compile, and failures are not cached). The compile runs in a
+   sub-`Pipeline` with the same roots, which expands its own modules' macros
+   the same way. Files already being expanded by an enclosing pipeline are on
+   `macro_stack`, and reaching one again is reported as an expansion cycle.
+5. **Run** every call through the `MacroHost` (below) with its input.
+   Outputs are cached for the life of the process too, keyed by the provider
+   sources, the macro and its input (`Pipeline::job_key`), so the LSP does not
+   rerun macros on every keystroke.
 6. **Splice.** `CachedAst::parse_generated` parses each output padded with
    spaces, so its spans sit after the end of the file (and of earlier
    snippets). Spans never collide with the file's own or with the synthetic
@@ -212,5 +219,6 @@ byte); serializers belong in format packages as user derives.
   constraints.
 - Function-style `name!(…)` macros and `comptime` (stages 3–4 of the macro
   design) are not started.
-- The expansion cache is in memory only: a fresh process compiles the
-  providers once more.
+- Compiled expansion programs and outputs are cached in memory only: a fresh
+  process compiles each provider set once more (an on-disk cache needs a
+  location policy for user projects).
