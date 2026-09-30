@@ -288,8 +288,16 @@ impl Compiler {
             // as-is: `UnboxValue` returns a non-box object unchanged, and a
             // `BoxValue` there would only allocate.
             let unbox_tys = self.instance_method_unbox_tys(&class, method, &inst_args);
+            let arg_slice = args.as_deref().unwrap_or(&[]);
+            // Operands that may clobber the operand stack (`new C(..)`) are
+            // staged into temps and reloaded above them, so the CALL result
+            // lands where the enclosing expression expects it.
+            let stage = arg_slice
+                .iter()
+                .any(|arg| self.expr_may_clobber_operand_stack(arg));
+            let mut temps = Vec::new();
             let mut nargs = 0u32;
-            for (i, arg) in args.as_deref().unwrap_or(&[]).iter().enumerate() {
+            for (i, arg) in arg_slice.iter().enumerate() {
                 self.append_with_existential_pack(&mut bytecode, arg);
                 if unbox_tys.get(i).is_some_and(Option::is_some)
                     && let Some(ty) = self.codegen_expr_ty(arg)
@@ -301,7 +309,15 @@ impl Compiler {
                         &Self::show_lookup_ty_for_instance(&ty),
                     );
                 }
+                if stage {
+                    let tmp = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
                 nargs += 1;
+            }
+            for tmp in &temps {
+                bytecode.push_load(*tmp);
             }
             // Only a default body reaches siblings through its trailing
             // dictionary; a concrete instance method never reads it.

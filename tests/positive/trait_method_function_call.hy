@@ -81,3 +81,24 @@ test("free fn declared after wins over the trait method") {
     assert(late(5) == 15)?;
     assert(new Config(1).late() == 201)?;
 }
+
+trait Mk<T> {
+    fn mk(T proto, Node n) -> Result<T, string> {}
+}
+
+impl Mk for Config {
+    pub fn mk(Config proto, Node n) -> Result<Config, string> {
+        return Result::Ok(new Config(n.i));
+    }
+}
+
+fn mk_if_let() -> int {
+    if let Result::Ok(c) = mk(new Config(0), new Node(7)) {
+        return 1000 + c.port;
+    }
+    return -1;
+}
+
+test("function-style call with new operands in if let") {
+    assert(mk_if_let() == 1007)?;
+}
