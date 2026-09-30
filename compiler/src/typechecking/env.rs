@@ -66,6 +66,17 @@ impl Frame {
         self.bindings.is_empty()
     }
 
+    /// Drop bindings of `name` inserted at or after index `mark` (see
+    /// [`Self::len`]), exposing whatever `name` was bound to before.
+    pub fn drop_since(&mut self, name: &str, mark: usize) {
+        let mut i = 0;
+        self.bindings.retain(|(n, _)| {
+            let keep = i < mark || n != name;
+            i += 1;
+            keep
+        });
+    }
+
     /// Look up `name` in this frame only (no parent walk).
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings

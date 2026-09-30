@@ -68,6 +68,13 @@ pub(crate) enum DropOwner {
     Other,
 }
 
+/// Saved bare-name state; see [`Checker::shield_bare_names`].
+pub(super) struct BareNameShield {
+    modes: Vec<(String, bool, bool)>,
+    env: Vec<(String, usize)>,
+    defs: Vec<(DefId, Option<Scheme>)>,
+}
+
 impl Checker {
     pub fn new() -> Self {
         let mut env = Env::new();
@@ -5158,6 +5165,40 @@ impl Checker {
                 }
                 return result;
             }
+        }
+
+        // Ground function-style trait call: `method(x, …)` with a concrete
+        // first argument selects its instance like `x.method(…)` (the
+        // discharged instance lands in `call_dicts_at` for codegen). A free fn
+        // or local of the same name wins.
+        if self.lookup_fn_scheme(&ident).is_none()
+            && let Some(first) = arg_tys.first()
+            && let Some((class, scheme)) = self.ground_trait_method_for_receiver(&ident, first)
+        {
+            let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+            let result = self.apply_function(
+                Some(&format!("{}::{}", class, ident)),
+                &fun_ty,
+                &arg_tys,
+                if flat_args.is_empty() {
+                    None
+                } else {
+                    Some(&flat_args)
+                },
+                id,
+                range.clone(),
+            );
+            if !constraints.is_empty() {
+                self.discharge_constraints(id, &constraints, &range);
+                self.pin_assoc_after_discharge(
+                    &class,
+                    &constraints,
+                    Some(&scheme),
+                    &mapping,
+                    &range,
+                );
+            }
+            return apply_ty_prune(&self.subst, &result);
         }
 
         let scheme = self.lookup_fn_scheme(&ident);
@@ -10342,6 +10383,62 @@ impl Checker {
                 self.result_mode_ok_is_result.insert(key);
             } else {
                 self.result_mode_ok_is_result.remove(&key);
+            }
+        }
+    }
+
+    /// Everything inferring a trait signature or instance method as a
+    /// function records under its bare method name: result-mode flags, the
+    /// env binding, and (when a free fn of that name exists) that fn's DefId
+    /// scheme. The name belongs to the free fn, or to nobody, so a
+    /// function-style call `method(x)` resolves through the trait instead of
+    /// whichever signature was inferred last. Undo with
+    /// [`Self::unshield_bare_names`].
+    pub(super) fn shield_bare_names<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> BareNameShield {
+        let names: Vec<&str> = names.into_iter().collect();
+        let mark = self.env.top().map_or(0, |f| f.len());
+        BareNameShield {
+            modes: self.snapshot_result_modes(names.iter().copied()),
+            env: names.iter().map(|n| (n.to_string(), mark)).collect(),
+            defs: names
+                .iter()
+                .filter_map(|n| self.local_defs.get(*n).copied())
+                .map(|id| (id, self.schemes_by_def.get(&id).cloned()))
+                .collect(),
+        }
+    }
+
+    /// Clear the shielded names' result-mode flags so inference records only
+    /// this method's own mode.
+    pub(super) fn clear_bare_result_modes(&mut self, shield: &BareNameShield) {
+        self.restore_result_modes(
+            shield
+                .modes
+                .iter()
+                .map(|(k, _, _)| (k.clone(), false, false))
+                .collect(),
+        );
+    }
+
+    /// Restore what [`Self::shield_bare_names`] captured.
+    pub(super) fn unshield_bare_names(&mut self, shield: BareNameShield) {
+        self.restore_result_modes(shield.modes);
+        if let Some(top) = self.env.top_mut() {
+            for (name, mark) in &shield.env {
+                top.drop_since(name, *mark);
+            }
+        }
+        for (id, scheme) in shield.defs {
+            match scheme {
+                Some(s) => {
+                    self.schemes_by_def.insert(id, s);
+                }
+                None => {
+                    self.schemes_by_def.remove(&id);
+                }
             }
         }
     }
