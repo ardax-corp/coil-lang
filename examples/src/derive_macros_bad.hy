@@ -1,6 +1,6 @@
 // Misbehaving macros for tests/compile_fail/macro_*.hy.
 use macro::{TypeDecl, Code, raw};
-use env::{var};
+use env::var;
 
 /// Never returns: stopped by the compile-time step budget.
 derive Spin(TypeDecl t) -> Code {

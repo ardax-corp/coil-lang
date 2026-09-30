@@ -116,3 +116,9 @@ fn format_round_trips_derive_and_quote() {
     let out = crate::format_source(src).expect("format");
     assert_eq!(out, src);
 }
+
+#[test]
+fn format_keeps_method_attributes_before_pub() {
+    let src = "impl C {\n    #[twice]\n    pub fn get() -> int {\n        return 1;\n    }\n}\n";
+    assert_eq!(crate::format_source(src).expect("format"), src);
+}

@@ -1320,11 +1320,15 @@ impl<'s> Formatter<'s> {
                 }
             }
             Expression::Method(visibility, func) => {
-                if let Expression::Function { docs, .. } = func.1.as_ref() {
+                // Docs and attributes go before `pub`: `#[a]\npub fn f()`.
+                let mut bare = func.clone();
+                if let Expression::Function { docs, attrs, .. } = bare.1.as_mut() {
                     self.fmt_docs(docs);
+                    self.fmt_member_attrs(attrs);
+                    attrs.clear();
                 }
                 self.fmt_visibility(*visibility);
-                self.fmt_function(func, false);
+                self.fmt_function(&bare, false);
             }
             Expression::Implementation {
                 what,
