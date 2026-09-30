@@ -2474,6 +2474,13 @@ fn push_default_display_impls<'a>(
     }
 }
 
+/// Last `::` segment of a path (`json::Serialize` -> `Serialize`).
+fn path_leaf(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+/// A hand-written `impl class for ty_name` in `decls`. Module-qualified
+/// heads (`impl json::Serialize for m::Point`) match on their last segment.
 fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
     decls.iter().any(|d| {
         matches!(
@@ -2482,9 +2489,11 @@ fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
                 class: c,
                 args,
                 ..
-            } if *c == class
-                && args.first().is_some_and(|a| {
-                    matches!(a.1.as_ref(), Expression::Type(n) | Expression::Identifier(n) if *n == ty_name)
+            } if path_leaf(c) == path_leaf(class)
+                && args.first().is_some_and(|a| match a.1.as_ref() {
+                    Expression::Type(n) | Expression::Identifier(n) => *n == ty_name,
+                    Expression::TypeProjection { name, .. } => *name == ty_name,
+                    _ => false,
                 })
         )
     })
