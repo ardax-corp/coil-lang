@@ -459,6 +459,10 @@ fn resolve_dense_index_object_in(
 /// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
 const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
 
+/// Panic when [`Machine::set_step_budget`]'s budget runs out.
+pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
+    "step budget exhausted: execution exceeded its back-edge / call limit";
+
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
 
@@ -576,6 +580,13 @@ pub struct Machine<const S: usize> {
     call_hot_depth: usize,
     /// Stack end the current window was reserved up to (`<= capacity`).
     call_window_end: usize,
+    /// Step budget fuel: charged once per taken back-edge (jump target `<=`
+    /// the jump's PC) and per call; zero means exhausted. `u64::MAX` when no
+    /// budget is set (2^64 charges cannot happen), so the hot path is one
+    /// decrement and one never-taken branch either way.
+    fuel: u64,
+    /// Set once the budget ran out (see [`Self::step_budget_exhausted`]).
+    step_budget_hit: bool,
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -650,7 +661,53 @@ impl<const S: usize> Machine<S> {
             unary_bases: dispatch::UnaryBaseTable::default(),
             call_hot_depth: 0,
             call_window_end: 0,
+            fuel: u64::MAX,
+            step_budget_hit: false,
         }
+    }
+
+    /// Limit execution to `budget` steps, where a step is a taken loop
+    /// back-edge (a jump whose target PC is at or before the jump) or a call
+    /// (`CALL`, `TailCall`, `CallIndirect`, closure / polymorphic calls, and
+    /// [`Self::call_function`] re-entry). Running out is a VM panic
+    /// ([`Self::panicked`] and [`Self::step_budget_exhausted`] become true).
+    /// `None` (the default) removes the limit. The budget spans every run on
+    /// this machine until set again; spawned worker machines never inherit it.
+    pub fn set_step_budget(&mut self, budget: Option<u64>) {
+        // `budget` charges succeed; the next one reaches zero.
+        self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
+        self.step_budget_hit = false;
+    }
+
+    /// True once the budget from [`Self::set_step_budget`] ran out.
+    pub fn step_budget_exhausted(&self) -> bool {
+        self.step_budget_hit
+    }
+
+    /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc`.
+    /// Returns `false` (stop), like [`Self::runtime_panic`]. Leaves one unit
+    /// so any later charge (host re-entry after the panic) stops again.
+    #[cold]
+    #[inline(never)]
+    fn step_budget_out(&mut self, pc: usize) -> bool {
+        self.fuel = 1;
+        if self.step_budget_hit {
+            self.panicked = true;
+            return false;
+        }
+        self.step_budget_hit = true;
+        self.runtime_panic(STEP_BUDGET_EXHAUSTED, pc)
+    }
+
+    /// Panic reported by a dense streak: the streak stops with fuel at zero
+    /// only when it ran out of step budget.
+    #[cold]
+    #[inline(never)]
+    fn hot_streak_panic(&mut self, msg: &'static str, pc: usize) -> bool {
+        if self.fuel == 0 {
+            return self.step_budget_out(pc);
+        }
+        self.runtime_panic(msg, pc)
     }
 
     /// Current operand-stack capacity (slots).
@@ -3170,6 +3227,11 @@ impl<const S: usize> Machine<S> {
             )
         };
         self.bind_frame_reserve(code, constants);
+        self.fuel = self.fuel.wrapping_sub(1);
+        if unlikely(self.fuel == 0) {
+            self.step_budget_out(offset as usize);
+            return Value::default();
+        }
         if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(args.len()) {
             self.runtime_panic(STACK_OVERFLOW, offset as usize);
             return Value::default();
@@ -3324,15 +3386,36 @@ impl<const S: usize> Machine<S> {
                         frame_pins: &mut self.frame_pins,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
+                        fuel: &mut self.fuel,
                         stack_cap,
                     },
                 ) {
-                    return self.runtime_panic(msg, ip.saturating_sub(1));
+                    return self.hot_streak_panic(msg, ip.saturating_sub(1));
                 }
                 if unlikely(!self.frame_pins.is_empty()) {
                     self.return_bookkeeping = true;
                 }
             };
+        }
+
+        // Charge one step: `$back` is `true` for a call, or `target < ip`
+        // (`ip` is past the jump word) for a jump. Branch-free decrement;
+        // the zero check is the only branch.
+        macro_rules! charge_step {
+            ($back:expr) => {
+                self.fuel = self.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.fuel == 0) {
+                    return self.step_budget_out(ip.saturating_sub(1));
+                }
+            };
+        }
+        // Jump to `$target`, charging a back-edge.
+        macro_rules! jump {
+            ($target:expr) => {{
+                let target: usize = $target;
+                charge_step!(target < ip);
+                set_jump_target(&mut ip, target, code);
+            }};
         }
 
         while ip < code_len {
@@ -3382,18 +3465,18 @@ impl<const S: usize> Machine<S> {
                     dispatch::load(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::JMP => {
-                    set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
+                    jump!(opcode.operand_u32() as usize);
                     then_hot_streak!();
                 }
                 Instruction::JMPF => {
                     if !self.stack.pop().as_bool() {
-                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
+                        jump!(opcode.operand_u32() as usize);
                     }
                     then_hot_streak!();
                 }
                 Instruction::JMPT => {
                     if self.stack.pop().as_bool() {
-                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
+                        jump!(opcode.operand_u32() as usize);
                     }
                     then_hot_streak!();
                 }
@@ -3446,6 +3529,7 @@ impl<const S: usize> Machine<S> {
                             }
                         };
                     }
+                    charge_step!(true);
                     if likely(target != 0) {
                         open_frame!(ip);
                         sp = callee_sp;
@@ -3457,6 +3541,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::TailCall => {
                     let (arity, target) = opcode.call_parts();
+                    charge_step!(true);
                     promise!(self.stack.tell() >= arity);
                     let callee_sp = self.frames.get().get();
                     let src = self.stack.tell() - arity;
@@ -3511,7 +3596,7 @@ impl<const S: usize> Machine<S> {
                         &self.heap,
                         matches!(*bc, Instruction::CmpJmpt),
                     ) {
-                        set_jump_target(&mut ip, target, code);
+                        jump!(target);
                     }
                     then_hot_streak!();
                 }
@@ -3526,7 +3611,7 @@ impl<const S: usize> Machine<S> {
                         stack_cap,
                         matches!(*bc, Instruction::BinSlotImmJmpt),
                     ) {
-                        set_jump_target(&mut ip, target, code);
+                        jump!(target);
                     }
                 }
                 Instruction::LogNotJmpf | Instruction::LogNotJmpt => {
@@ -3536,7 +3621,7 @@ impl<const S: usize> Machine<S> {
                         constants,
                         matches!(*bc, Instruction::LogNotJmpt),
                     ) {
-                        set_jump_target(&mut ip, target, code);
+                        jump!(target);
                     }
                     then_hot_streak!();
                 }
@@ -3551,7 +3636,7 @@ impl<const S: usize> Machine<S> {
                         stack_cap,
                         matches!(*bc, Instruction::BinSlotSlotJmpt),
                     ) {
-                        set_jump_target(&mut ip, target, code);
+                        jump!(target);
                     }
                     then_hot_streak!();
                 }
@@ -3651,7 +3736,7 @@ impl<const S: usize> Machine<S> {
                         &self.heap,
                         stack_cap,
                     ) {
-                        set_jump_target(&mut ip, target, code);
+                        jump!(target);
                     }
                     then_hot_streak!();
                 }
@@ -3704,7 +3789,7 @@ impl<const S: usize> Machine<S> {
                             &self.heap,
                             stack_cap,
                         ) {
-                            set_jump_target(&mut ip, target, code);
+                            jump!(target);
                         }
                     }
                     then_hot_streak!();

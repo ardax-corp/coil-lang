@@ -5861,3 +5861,91 @@
         };
         assert!(run());
     }
+
+    /// `slot0 = 0; do { slot0 += 1 } while slot0 < n; push slot0`: `n - 1`
+    /// taken back-edges (`JMPT` to PC 3), no calls.
+    fn counted_loop(n: i32) -> Vec<Byte> {
+        vec![
+            Byte::new(Instruction::Seek).with_operand_u32(1),
+            const_int(0),
+            store_pop(0),
+            // PC 3: loop head.
+            load(0),
+            const_int(1),
+            Byte::new(Instruction::ADD),
+            store_pop(0),
+            load(0),
+            const_int(n as i64),
+            Byte::new(Instruction::LE),
+            Byte::new(Instruction::JMPT).with_operand_u32(3),
+            load(0),
+            Byte::new(Instruction::HALT),
+        ]
+    }
+
+    fn run_with_budget(code: &[Byte], budget: Option<u64>) -> (Machine<64>, String) {
+        let mut vm = Machine::<64>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.set_step_budget(budget);
+        vm.run_with_pool(code, &[], &[], 0);
+        let _ = vm.restore_output();
+        let out = String::from_utf8(take_test_output(buf)).expect("UTF-8 output");
+        (vm, out)
+    }
+
+    #[test]
+    fn step_budget_stops_infinite_back_edge_loop() {
+        // Self-jump (dense streak path) and a loop through non-hot ops
+        // (giant match path).
+        let self_jump = [Byte::new(Instruction::JMP).with_operand_u32(0)];
+        let giant = [
+            const_int(1),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::JMP).with_operand_u32(0),
+        ];
+        for code in [&self_jump[..], &giant[..]] {
+            let (vm, out) = run_with_budget(code, Some(10_000));
+            assert!(vm.panicked(), "budget must stop the loop");
+            assert!(vm.step_budget_exhausted());
+            assert!(out.contains("step budget exhausted"), "message: {out}");
+        }
+    }
+
+    #[test]
+    fn step_budget_stops_infinite_tail_recursion() {
+        let code = [
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::TailCall).with_call_packed(0, 2),
+        ];
+        let (vm, _) = run_with_budget(&code, Some(10_000));
+        assert!(vm.panicked());
+        assert!(vm.step_budget_exhausted());
+    }
+
+    #[test]
+    fn step_budget_finite_loop_completes_within_budget() {
+        let code = counted_loop(1000);
+        // 999 taken back-edges: exactly enough, then one short.
+        let (mut vm, _) = run_with_budget(&code, Some(999));
+        assert!(!vm.panicked());
+        assert!(!vm.step_budget_exhausted());
+        assert_eq!(vm.pop().as_int(), 1000);
+
+        let (vm, _) = run_with_budget(&code, Some(998));
+        assert!(vm.panicked());
+        assert!(vm.step_budget_exhausted());
+    }
+
+    #[test]
+    fn step_budget_none_runs_unaffected() {
+        let code = counted_loop(100_000);
+        let mut vm = Machine::<64>::default();
+        vm.set_step_budget(Some(1));
+        vm.set_step_budget(None);
+        vm.run_with_pool(&code, &[], &[], 0);
+        assert!(!vm.panicked());
+        assert!(!vm.step_budget_exhausted());
+        assert_eq!(vm.pop().as_int(), 100_000);
+    }

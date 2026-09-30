@@ -3073,6 +3073,7 @@ fn record_construct_duplicate_field_emits_diagnostic_if_parse_bypassed() {
         type_params: vec![],
         variants: vec![node(Expression::EnumVariant {
             docs: vec![],
+            attrs: vec![],
             name: "Foo",
             payload: EnumVariantPayload::Record(vec![
                 RecordFieldDecl {
@@ -3129,6 +3130,7 @@ fn record_pattern_duplicate_field_emits_diagnostic_if_parse_bypassed() {
         type_params: vec![],
         variants: vec![node(Expression::EnumVariant {
             docs: vec![],
+            attrs: vec![],
             name: "P",
             payload: EnumVariantPayload::Record(vec![
                 RecordFieldDecl {
@@ -8471,4 +8473,82 @@ fn fixed_array_in_let_still_requires_static_length() {
         .map(|t| apply_ty_prune(c.subst(), t))
         .expect("xs");
     assert_eq!(ty, array_fixed(int(), 3));
+}
+
+#[test]
+fn module_qualified_type_paths_resolve_without_use() {
+    let mut c = Checker::new();
+    let parser = Pratt::default();
+
+    c.set_current_module("geo");
+    let ast = parser
+        .parse("class Point { pub x: int, } class Cell<T> { pub v: T, } type Meters = int;")
+        .expect("parse geo");
+    let _ = c.check_program(&ast);
+    assert!(c.take_messages().is_empty());
+
+    c.set_current_module("");
+    let importer = r#"
+fn origin(geo::Point p) -> geo::Cell<int> {
+    let m: geo::Meters = p.x;
+    return new geo::Cell(m);
+}
+"#;
+    let ast = parser.parse(importer).expect("parse importer");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.is_empty(),
+        "qualified type paths should resolve: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+
+    let ast = parser
+        .parse("fn bad(geo::Nope p) -> int { return 0; }")
+        .expect("parse bad");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.iter()
+            .any(|m| m.message().contains("Cannot find type `Nope` in module `geo`")),
+        "expected unknown-item error, got: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn impl_head_accepts_module_qualified_trait_name() {
+    let mut c = Checker::new();
+    let parser = Pratt::default();
+
+    c.set_current_module("rank");
+    let ast = parser
+        .parse("trait Rank<T> { fn rank(T x) -> int {} }")
+        .expect("parse rank");
+    let _ = c.check_program(&ast);
+    assert!(c.take_messages().is_empty());
+
+    c.set_current_module("");
+    let importer = r#"
+class Card { pub v: int, }
+impl rank::Rank for Card {
+    pub fn rank(Card c) -> int {
+        return c.v;
+    }
+}
+"#;
+    let ast = parser.parse(importer).expect("parse importer");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.is_empty(),
+        "qualified trait impl head should resolve: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+    assert!(
+        c.generics
+            .find_instance("Rank", &[Ty::Con("Card".into())])
+            .is_some(),
+        "expected a Rank instance for Card"
+    );
 }

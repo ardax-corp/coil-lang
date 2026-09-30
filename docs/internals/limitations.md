@@ -19,7 +19,21 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 | Let-polymorphism / Algorithm W | **Decided (explicit generics only):** `Env::generalize` is test-only; production `let` is `Scheme::mono`. Polymorphic values are `fn f<T>` / `class C<T>` (and trait bounds), not inferred at `let`. Headers no longer claim Algorithm W. | — |
 | Member visibility | **Implemented:** checker rejects private field/method access outside the owner's `impl` (`E0128`). `pub` members are visible everywhere. Top-level `fn` stays universally exportable (no module-level `pub` in this cut). `fn drop` stays private for inlining but remains callable as a lifecycle hook. | — |
 | Duplicate record fields | **Implemented:** parser rejects duplicate names in record literals, constructors, patterns, and enum variant field decls (`E0208`). Typechecker keeps the same check if parse is bypassed. | [COI-76](https://linear.app/ardax/issue/COI-76) |
+| Module-qualified paths | **Implemented:** a compiled module's items resolve by path without a `use` of the item: types (`m::T`, `a::b::T<int>`, aliases; in params, returns, `let`, fields, generic args, `impl Trait for m::T`), calls (`m::f(…)`, `m::C::f(…)`), `new m::C(…)`, enum constructors and patterns (`m::E::V(…)`), and the trait of an `impl m::Trait for T` head. Trait / type-param owners keep associated-type projection. The module must be in the compile (some `use` reaches it). Not yet: a function **value** by path (`let f = m::f`), virtual-module types by path (`io::IoError`). | — |
 | Binding patterns | **Implemented:** `for` reuses `LetPattern` (`for (k, v) in d`, `for _`, records). `if let P = e` / `while let P = e` reuse match `Pattern` (including `else` / `else if let`). C-style `for (;;)` stays a parse error. | [COI-371](https://linear.app/ardax/issue/COI-371) |
+
+## Macros (medium)
+
+See [macros.md](macros.md).
+
+| Issue | Detail | Linear |
+|-------|--------|--------|
+| Derives on generic types | **Refused** (user and built-in): `impl<T: Show> Show for Box<T>` does not parse and `InstanceDef` has no constraints. Write the `impl` by hand. | — |
+| Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
+| `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
+| Expansion cache is per process | Outputs are cached in memory by provider sources + input (the LSP and `coil test` reuse them); a fresh `coil` process compiles the providing modules once more. | — |
+| Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
+| `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
 
 ## Lambdas / captures
 

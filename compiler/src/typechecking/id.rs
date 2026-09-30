@@ -140,12 +140,38 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             visit(ret);
         }
 
+        Expression::Quote { parts, .. } => {
+
+            for part in parts {
+
+                if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+
+                    visit(e);
+
+                }
+
+            }
+
+        }
+
         Expression::AttrDecl {
             docs: _,
             args,
             returns,
             body,
             ..
+        }
+
+        | Expression::DeriveDecl {
+
+            args,
+
+            returns,
+
+            body,
+
+            ..
+
         } => {
             visit(args);
             if let Some(ret) = returns {

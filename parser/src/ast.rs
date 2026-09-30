@@ -147,6 +147,51 @@ pub enum AttrLit<'expr> {
     Bool(bool),
 }
 
+/// Syntactic category a `quote` template parses as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuoteKind {
+    /// `quote items { … }` — top-level declarations.
+    Items,
+    /// `quote expr { … }` — one expression.
+    Expr,
+    /// `quote stmts { … }` — statements inside a block.
+    Stmts,
+    /// `quote type { … }` — one type annotation.
+    Type,
+}
+
+impl QuoteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Items => "items",
+            Self::Expr => "expr",
+            Self::Stmts => "stmts",
+            Self::Type => "type",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "items" => Some(Self::Items),
+            "expr" => Some(Self::Expr),
+            "stmts" => Some(Self::Stmts),
+            "type" => Some(Self::Type),
+            _ => None,
+        }
+    }
+}
+
+/// One piece of a `quote` template.
+#[derive(Clone, PartialEq, Debug)]
+pub enum QuotePart<'expr> {
+    /// Template text, copied verbatim.
+    Lit(&'expr str),
+    /// `${expr}` — splice one fragment.
+    Splice(Output<'expr>),
+    /// `$(expr) sep *` — splice every fragment of a list, `sep` between them.
+    Repeat { list: Output<'expr>, sep: &'expr str },
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Expression<'expr> {
     Noop(Output<'expr>),
@@ -185,6 +230,24 @@ pub enum Expression<'expr> {
         returns: Option<Output<'expr>>,
         where_constraints: Vec<WhereConstraint<'expr>>,
         body: Output<'expr>,
+    },
+    /// Derive macro: `derive Name(TypeDecl t) -> Items attrs(h, …) { body }`.
+    ///
+    /// Runs at compile time on a `#[derive(Name)]` declaration; `helpers`
+    /// are the field / variant attributes it owns (`#[h(...)]`).
+    DeriveDecl {
+        /// Leading `///` doc lines (without the `///` prefix).
+        docs: Vec<&'expr str>,
+        name: &'expr str,
+        args: Output<'expr>,
+        returns: Option<Output<'expr>>,
+        helpers: Vec<&'expr str>,
+        body: Output<'expr>,
+    },
+    /// `quote items|expr|stmts|type { template }` — coil source as a value.
+    Quote {
+        kind: QuoteKind,
+        parts: Vec<QuotePart<'expr>>,
     },
     Identifier(&'expr str),
     Type(&'expr str),
@@ -419,6 +482,8 @@ pub enum Expression<'expr> {
     Field {
         /// Leading `///` doc lines (without the `///` prefix).
         docs: Vec<&'expr str>,
+        /// `#[helper(...)]` attributes owned by a derive macro.
+        attrs: Vec<Attribute<'expr>>,
         visibility: Visibility,
         modifier: FieldModifier,
         name: Output<'expr>,
@@ -468,6 +533,8 @@ pub enum Expression<'expr> {
     EnumVariant {
         /// Leading `///` doc lines (without the `///` prefix).
         docs: Vec<&'expr str>,
+        /// `#[helper(...)]` attributes owned by a derive macro.
+        attrs: Vec<Attribute<'expr>>,
         name: &'expr str,
         payload: EnumVariantPayload<'expr>,
         /// Optional `= lit` scalar discriminant (`Ok = 200`).
@@ -745,7 +812,8 @@ pub fn item_docs<'expr>(expr: &'expr Expression<'expr>) -> Option<&'expr [&'expr
         | Expression::EnumDecl { docs, .. }
         | Expression::EnumVariant { docs, .. }
         | Expression::TypeClass { docs, .. }
-        | Expression::AttrDecl { docs, .. } => docs.as_slice(),
+        | Expression::AttrDecl { docs, .. }
+        | Expression::DeriveDecl { docs, .. } => docs.as_slice(),
         Expression::Method(_, inner) => return item_docs(inner.1.as_ref()),
         _ => return None,
     };
@@ -1108,6 +1176,34 @@ impl<'a> Display for Expression<'a> {
             }
             Self::Spread(inner) => write!(f, "...{}", inner.1),
             Self::TypeFnSig { params, ret } => write!(f, "fn{} -> {}", params.1, ret.1),
+            Self::DeriveDecl {
+                docs,
+                name,
+                args,
+                returns,
+                helpers,
+                body,
+            } => {
+                write!(f, "{}derive {}{}", fmt_docs(docs), name, args.1)?;
+                if let Some(ret) = returns {
+                    write!(f, " -> {}", ret.1)?;
+                }
+                if !helpers.is_empty() {
+                    write!(f, " attrs({})", helpers.join(", "))?;
+                }
+                write!(f, " {}", body.1)
+            }
+            Self::Quote { kind, parts } => {
+                write!(f, "quote {} {{", kind.as_str())?;
+                for part in parts {
+                    match part {
+                        QuotePart::Lit(text) => write!(f, "{text}")?,
+                        QuotePart::Splice(e) => write!(f, "${{{}}}", e.1)?,
+                        QuotePart::Repeat { list, sep } => write!(f, "$({}){sep}*", list.1)?,
+                    }
+                }
+                write!(f, "}}")
+            }
             Self::AttrDecl {
                 docs,
                 name,
@@ -1271,6 +1367,7 @@ impl<'a> Display for Expression<'a> {
             }
             Self::EnumVariant {
                 docs,
+                attrs: _,
                 name,
                 payload,
                 discriminant,
@@ -1542,6 +1639,7 @@ impl<'a> Display for Expression<'a> {
             }
             Self::Field {
                 docs,
+                attrs: _,
                 visibility,
                 modifier,
                 name,
@@ -1642,6 +1740,21 @@ impl<'expr> Expression<'expr> {
                     f(r);
                 }
                 f(body);
+            }
+            E::DeriveDecl { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                f(body);
+            }
+            E::Quote { parts, .. } => {
+                for part in parts {
+                    match part {
+                        QuotePart::Lit(_) => {}
+                        QuotePart::Splice(e) | QuotePart::Repeat { list: e, .. } => f(e),
+                    }
+                }
             }
             E::TypeApp { args, .. } | E::TypeProjection { args, .. } => args.iter().for_each(f),
             E::TypeFun(a, b)
@@ -1800,6 +1913,245 @@ impl<'expr> Expression<'expr> {
             E::Match { scrutinee, arms } => {
                 f(scrutinee);
                 arms.iter().for_each(|arm| f(&arm.body));
+            }
+            E::Lambda { args, body, .. } => {
+                f(args);
+                f(body);
+            }
+        }
+    }
+
+    /// Mutable twin of [`Self::for_each_child`] (same children, same order).
+    pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Output<'expr>)) {
+        use Expression as E;
+        match self {
+            E::Integer(_)
+            | E::Float(_)
+            | E::String(_)
+            | E::Bool(_)
+            | E::Identifier(_)
+            | E::Type(_)
+            | E::Default(_)
+            | E::QualifiedAccess { .. }
+            | E::Use { .. }
+            | E::Break
+            | E::Continue
+            | E::AssocTypeDecl { .. } => {}
+            E::Noop(a)
+            | E::Module(_, a)
+            | E::Spread(a)
+            | E::Return(a)
+            | E::ImplicitReturn(a)
+            | E::Raise(a)
+            | E::Panic(a)
+            | E::Yield(a)
+            | E::YieldFrom(a)
+            | E::Try(a)
+            | E::TypeOf(a)
+            | E::OptionalAccess(a, _)
+            | E::Negate(a)
+            | E::Not(a)
+            | E::LogicalNot(a)
+            | E::Positive(a)
+            | E::Expr(a)
+            | E::Group(a)
+            | E::ExprStatement(a)
+            | E::Statement(a)
+            | E::Readonly(a)
+            | E::Dload(a)
+            | E::Done(a)
+            | E::NamedArg(_, a)
+            | E::Method(_, a)
+            | E::Member(a)
+            | E::Access(a, _) => f(a),
+            E::Argument { ty, .. } => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+            }
+            E::TypeFnSig { params, ret } => {
+                f(params);
+                f(ret);
+            }
+            E::AttrDecl { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                f(body);
+            }
+            E::DeriveDecl { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                f(body);
+            }
+            E::Quote { parts, .. } => {
+                for part in parts {
+                    match part {
+                        QuotePart::Lit(_) => {}
+                        QuotePart::Splice(e) | QuotePart::Repeat { list: e, .. } => f(e),
+                    }
+                }
+            }
+            E::TypeApp { args, .. } | E::TypeProjection { args, .. } => args.iter_mut().for_each(f),
+            E::TypeFun(a, b)
+            | E::Coalesce(a, b)
+            | E::Cast(a, b)
+            | E::Add(a, b)
+            | E::Sub(a, b)
+            | E::Mul(a, b)
+            | E::Div(a, b)
+            | E::Mod(a, b)
+            | E::Pow(a, b)
+            | E::Shl(a, b)
+            | E::Shr(a, b)
+            | E::Xor(a, b)
+            | E::And(a, b)
+            | E::BitAnd(a, b)
+            | E::Or(a, b)
+            | E::BitOr(a, b)
+            | E::Eq(a, b)
+            | E::Neq(a, b)
+            | E::Leq(a, b)
+            | E::Geq(a, b)
+            | E::Le(a, b)
+            | E::Gt(a, b)
+            | E::Assignment(a, b)
+            | E::CompoundAssign(a, _, b) => {
+                f(a);
+                f(b);
+            }
+            E::Resume(a, b) | E::Index(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            E::Adjust { target, .. } => f(target),
+            E::Range { start, end, .. } => {
+                f(start);
+                f(end);
+            }
+            E::List(items)
+            | E::Array(items)
+            | E::Fragment(items)
+            | E::Block(items)
+            | E::Program(items)
+            | E::Tuple(items)
+            | E::Declare(items)
+            | E::Invoke(items)
+            | E::If(items) => items.iter_mut().for_each(f),
+            E::Defer { body, .. } => f(body),
+            E::Dict(fields) => fields.iter_mut().for_each(|field| f(&mut field.value)),
+            E::StaticDecl { ty, init, .. } => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+                f(init);
+            }
+            E::ExternBlock { declarations, .. } => {
+                for decl in declarations {
+                    f(&mut decl.args);
+                    if let Some(r) = &mut decl.returns {
+                        f(r);
+                    }
+                }
+            }
+            E::Function { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                if let Some(body) = body {
+                    f(body);
+                }
+            }
+            E::Branch(cond, body) => {
+                if let Some(cond) = cond {
+                    f(cond);
+                }
+                f(body);
+            }
+            E::Call { name, args } | E::Instantiate(name, args) => {
+                f(name);
+                if let Some(args) = args {
+                    args.iter_mut().for_each(f);
+                }
+            }
+            E::Loop { identifier, iterable, body, .. } => {
+                if let Some(id) = identifier {
+                    f(id);
+                }
+                f(iterable);
+                f(body);
+            }
+            E::IfLet { scrutinee, then_arm, else_arm } => {
+                f(scrutinee);
+                f(&mut then_arm.body);
+                f(&mut else_arm.body);
+            }
+            E::WhileLet { scrutinee, then_arm, on_miss } => {
+                f(scrutinee);
+                f(&mut then_arm.body);
+                f(&mut on_miss.body);
+            }
+            E::Variable(_, ty) => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+            }
+            E::Constant(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            E::LetDestructure { rhs, .. } => f(rhs),
+            E::Class { fields, .. } => fields.iter_mut().for_each(f),
+            E::Implementation { methods, .. }
+            | E::TypeClass { methods, .. } => methods.iter_mut().for_each(f),
+            E::TypeClassImpl { args, methods, .. } => {
+                args.iter_mut().for_each(&mut *f);
+                methods.iter_mut().for_each(f);
+            }
+            E::Field { name, ty, init, .. } => {
+                f(name);
+                f(ty);
+                if let Some(init) = init {
+                    f(init);
+                }
+            }
+            E::TypeAlias { ty, .. } | E::Forall { ty, .. } | E::AssocTypeDef { ty, .. } => f(ty),
+            E::TestCase { name, body } => {
+                f(name);
+                f(body);
+            }
+            E::EnumDecl { variants, .. } => variants.iter_mut().for_each(f),
+            E::ExternStruct(decl) => decl.fields.iter_mut().for_each(|(_, ty)| f(ty)),
+            E::EnumVariant { payload, discriminant, .. } => {
+                match payload {
+                    EnumVariantPayload::Unit => {}
+                    EnumVariantPayload::Tuple(items) => items.iter_mut().for_each(&mut *f),
+                    EnumVariantPayload::Record(fields) => {
+                        fields.iter_mut().for_each(|field| f(&mut field.value))
+                    }
+                }
+                if let Some(d) = discriminant {
+                    f(d);
+                }
+            }
+            E::Construct { fields, .. } => match fields {
+                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Tuple(items) => items.iter_mut().for_each(f),
+                EnumConstructPayload::Record(fields) => {
+                    fields.iter_mut().for_each(|field| f(&mut field.value))
+                }
+            },
+            E::Match { scrutinee, arms } => {
+                f(scrutinee);
+                arms.iter_mut().for_each(|arm| f(&mut arm.body));
             }
             E::Lambda { args, body, .. } => {
                 f(args);

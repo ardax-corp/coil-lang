@@ -16,6 +16,8 @@ use parser::{
 };
 use reporting::{ErrorCode, Message};
 
+use crate::macros::{MacroDecl, MacroKind, PendingMacro};
+
 type PatternOut<'a> = (SimpleSpan, Pattern<'a>);
 
 fn span_pat<'a>(span: SimpleSpan, pattern: Pattern<'a>) -> PatternOut<'a> {
@@ -60,16 +62,29 @@ pub struct ExpandResult {
     pub messages: Vec<Message>,
     /// Class name → decorated constructor function name.
     pub decorated_class_ctors: HashMap<String, String>,
+    /// `derive` / macro `attr` items this file declares (lowered to functions).
+    pub macro_decls: Vec<MacroDecl>,
+    /// Uses of derives / attributes that are not built in: user macros the
+    /// pipeline resolves through `use`, or errors if nothing provides them.
+    pub pending: Vec<PendingMacro>,
 }
 
 /// Expand every supported attribute on a program AST.
+#[cfg(test)]
 pub fn expand_program(ast: &mut Output<'_>) -> ExpandResult {
+    expand_program_in(ast, "")
+}
+
+/// [`expand_program`] for a file of module `module` (lowers macro items first).
+pub fn expand_program_in(ast: &mut Output<'_>, module: &str) -> ExpandResult {
+    let lowered = crate::macros::lower::lower_program(ast, module);
     let Expression::Program(children) = ast.1.as_mut() else {
         return ExpandResult::default();
     };
     let mut user_attrs = HashSet::new();
     let mut attr_extra_names: HashMap<String, Vec<String>> = HashMap::new();
-    let mut messages = Vec::new();
+    let mut messages = lowered.messages;
+    let mut pending = Vec::new();
     collect_and_desugar_attr_decls(
         children,
         &mut user_attrs,
@@ -84,11 +99,72 @@ pub fn expand_program(ast: &mut Output<'_>) -> ExpandResult {
         &attr_extra_names,
         &attr_bodies,
         &mut decorated_class_ctors,
+        &mut pending,
     ));
     ExpandResult {
         messages,
         decorated_class_ctors,
+        macro_decls: lowered.decls,
+        pending,
     }
+}
+
+/// Diagnostic for a pending macro nothing in scope provides.
+pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
+    match p.kind {
+        MacroKind::Derive => {
+            let mut msg = Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Cannot derive unknown or non-derivable trait `{}`", p.name),
+                p.range.clone(),
+            );
+            msg.with_help(format!(
+                "derivable traits are: {}; or import a `derive {}` with `use`",
+                DERIVABLE.join(", "),
+                p.name
+            ));
+            msg
+        }
+        MacroKind::Attr => Message::error(
+            ErrorCode::GenericTypeError,
+            format!("Unknown attribute `{}`", p.name),
+            p.range.clone(),
+        ),
+    }
+}
+
+/// True for a derive the compiler synthesizes itself.
+pub fn is_builtin_derive(name: &str) -> bool {
+    DERIVABLE.contains(&name)
+}
+
+fn pending_attr(name: &str, args: &AttrArgs<'_>, target: SimpleSpan, owner: Option<&str>) -> PendingMacro {
+    PendingMacro {
+        kind: MacroKind::Attr,
+        name: name.to_string(),
+        target,
+        owner: owner.map(str::to_string),
+        args: crate::macros::encode::attr_args(args),
+        range: target.into_range(),
+        member_attrs: Vec::new(),
+    }
+}
+
+/// Field / variant attribute names on a class or enum (owned by derives).
+fn member_attr_names(members: &[Output<'_>]) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in members {
+        let attrs = match m.1.as_ref() {
+            Expression::Field { attrs, .. } | Expression::EnumVariant { attrs, .. } => attrs,
+            _ => continue,
+        };
+        for a in attrs {
+            if !out.iter().any(|n: &String| n == a.name) {
+                out.push(a.name.to_string());
+            }
+        }
+    }
+    out
 }
 
 fn derive_traits_from_attrs<'a>(attrs: &[Attribute<'a>]) -> Vec<&'a str> {
@@ -110,14 +186,18 @@ fn is_known_attr(name: &str, user_attrs: &HashSet<String>) -> bool {
     KNOWN_ATTRS.contains(&name) || user_attrs.contains(name)
 }
 
-fn validate_attrs(
-    attrs: &[Attribute<'_>],
+/// Check built-in attribute placement. Returns the attributes that are
+/// neither built in nor legacy `attr` decorators: user attribute macros,
+/// resolved (or reported) by the pipeline.
+fn validate_attrs<'x, 'a>(
+    attrs: &'x [Attribute<'a>],
     target: &str,
     user_attrs: &HashSet<String>,
     messages: &mut Vec<Message>,
     span: SimpleSpan,
     is_ffi: bool,
-) {
+) -> Vec<&'x Attribute<'a>> {
+    let mut unknown = Vec::new();
     for attr in attrs {
         if user_attrs.contains(attr.name) && is_ffi {
             messages.push(Message::error(
@@ -151,13 +231,10 @@ fn validate_attrs(
             ));
         }
         if !is_known_attr(attr.name, user_attrs) {
-            messages.push(Message::error(
-                ErrorCode::GenericTypeError,
-                format!("Unknown attribute `{}`", attr.name),
-                span.into_range(),
-            ));
+            unknown.push(attr);
         }
     }
+    unknown
 }
 
 fn collect_and_desugar_attr_decls(
@@ -774,8 +851,21 @@ fn collect_free_idents<'a>(
                 collect_free_idents(t, bound, free);
             }
         }
+        Expression::Quote { parts, .. } => {
+            for part in parts {
+                if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                    collect_free_idents(e, bound, free);
+                }
+            }
+        }
         Expression::AttrDecl {
             docs: _,
+            args,
+            returns,
+            body,
+            ..
+        }
+        | Expression::DeriveDecl {
             args,
             returns,
             body,
@@ -1023,6 +1113,8 @@ fn rewrite_expr_inline<'a>(
     let span = expr.0;
     let rw = |e: &Output<'a>| rewrite_expr_inline(e, target, subs, decoratee_args);
     match expr.1.as_ref() {
+        // Macro items never appear inside a legacy `attr` body.
+        Expression::DeriveDecl { .. } | Expression::Quote { .. } => expr.clone(),
         Expression::Call { name, args } => {
             if let Expression::Identifier(callee) = name.1.as_ref()
                 && *callee == "target"
@@ -1425,6 +1517,7 @@ fn rewrite_expr_inline<'a>(
         Expression::Module(path, child) => at(span, Expression::Module(path.clone(), rw(child))),
         Expression::Field {
             docs,
+            attrs,
             visibility,
             modifier,
             name,
@@ -1434,6 +1527,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::Field {
                 docs: docs.clone(),
+                attrs: attrs.clone(),
                 visibility: *visibility,
                 modifier: *modifier,
                 name: rw(name),
@@ -1512,6 +1606,7 @@ fn rewrite_expr_inline<'a>(
         ),
         Expression::EnumVariant {
             docs,
+            attrs,
             name,
             payload,
             discriminant,
@@ -1519,6 +1614,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::EnumVariant {
                 docs: docs.clone(),
+                attrs: attrs.clone(),
                 name,
                 payload: rewrite_enum_variant_payload(payload, target, subs, decoratee_args),
                 discriminant: discriminant
@@ -1860,7 +1956,7 @@ fn disc_lit_kind(expr: &Expression<'_>) -> Option<&'static str> {
 }
 
 /// Backing type when every case is a unit `= lit` (inferred or `#[repr]`).
-fn scalar_backing_ty_name<'a>(
+pub(crate) fn scalar_backing_ty_name<'a>(
     attrs: &[Attribute<'a>],
     variants: &[Output<'a>],
 ) -> Option<&'a str> {
@@ -1911,6 +2007,7 @@ fn expand_decls<'a>(
     attr_extra_names: &HashMap<String, Vec<String>>,
     attr_bodies: &HashMap<String, Output<'a>>,
     decorated_class_ctors: &mut HashMap<String, String>,
+    pending: &mut Vec<PendingMacro>,
 ) -> Vec<Message> {
     let mut messages = Vec::new();
     let mut i = 0;
@@ -1930,14 +2027,16 @@ fn expand_decls<'a>(
         } = decls[i].1.as_mut()
         {
             let is_ffi_sig = body.is_none();
-            validate_attrs(
+            for a in validate_attrs(
                 attrs,
                 "function",
                 user_attrs,
                 &mut messages,
                 span,
                 is_ffi_sig,
-            );
+            ) {
+                pending.push(pending_attr(a.name, &a.args, span, None));
+            }
             if body.is_some() {
                 let mut crossing: Vec<String> = Vec::new();
                 for attr in user_attrs_on(attrs, user_attrs) {
@@ -1994,15 +2093,19 @@ fn expand_decls<'a>(
         }
 
         // Expand user attrs on impl methods.
-        if let Expression::Implementation { methods, .. } = decls[i].1.as_mut() {
+        if let Expression::Implementation { methods, owner, .. } = decls[i].1.as_mut() {
+            let owner: &str = owner;
             for method in methods.iter_mut() {
+                let method_span = method.0;
                 if let Expression::Method(_, func_out) = method.1.as_mut()
                     && let Expression::Function {
                         docs: _,
                         attrs, args, body, ..
                     } = func_out.1.as_mut()
                     {
-                        validate_attrs(attrs, "function", user_attrs, &mut messages, span, false);
+                        for a in validate_attrs(attrs, "function", user_attrs, &mut messages, span, false) {
+                            pending.push(pending_attr(a.name, &a.args, method_span, Some(owner)));
+                        }
                         if body.is_some() {
                             expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                                 attr_bodies,
@@ -2043,7 +2146,9 @@ fn expand_decls<'a>(
                 attrs,
                 variants,
             } => {
-                validate_attrs(attrs, "enum", user_attrs, &mut messages, span, false);
+                for a in validate_attrs(attrs, "enum", user_attrs, &mut messages, span, false) {
+                    pending.push(pending_attr(a.name, &a.args, span, None));
+                }
                 let derives = derive_traits_from_attrs(attrs);
                 let scalar_backing = scalar_backing_ty_name(attrs, variants);
                 Some(Job::Enum {
@@ -2062,7 +2167,9 @@ fn expand_decls<'a>(
                 attrs,
                 fields,
             } => {
-                validate_attrs(attrs, "class", user_attrs, &mut messages, span, false);
+                for a in validate_attrs(attrs, "class", user_attrs, &mut messages, span, false) {
+                    pending.push(pending_attr(a.name, &a.args, span, None));
+                }
                 let derives = derive_traits_from_attrs(attrs);
                 Some(Job::Class {
                     name,
@@ -2141,6 +2248,7 @@ fn expand_decls<'a>(
                 scalar_backing,
                 decls,
                 messages: &mut messages,
+                pending,
             })),
             Some(Job::Class {
                 name,
@@ -2155,9 +2263,41 @@ fn expand_decls<'a>(
                 &fields,
                 decls,
                 &mut messages,
+                pending,
             )),
             None => None,
         };
+
+        // `#[helper(...)]` on fields / variants belongs to a user derive.
+        if let Expression::EnumDecl { variants: members, .. }
+        | Expression::Class { fields: members, .. } = decls[i].1.as_ref()
+        {
+            let member_attrs = member_attr_names(members);
+            if !member_attrs.is_empty() {
+                let mut owned = false;
+                for p in pending
+                    .iter_mut()
+                    .filter(|p| p.kind == MacroKind::Derive && p.target == span)
+                {
+                    p.member_attrs = member_attrs.clone();
+                    owned = true;
+                }
+                if !owned {
+                    for name in &member_attrs {
+                        let mut msg = Message::error(
+                            ErrorCode::GenericTypeError,
+                            format!("Unknown attribute `{name}`"),
+                            span.into_range(),
+                        );
+                        msg.with_help(
+                            "field and variant attributes belong to a derive macro (`derive D(TypeDecl t) -> Code attrs(name)`)"
+                                .to_string(),
+                        );
+                        messages.push(msg);
+                    }
+                }
+            }
+        }
 
         if let Some(impls) = synthesized {
             if let Expression::EnumDecl { attrs, .. } | Expression::Class { attrs, .. } =
@@ -2195,6 +2335,7 @@ struct ExpandEnumArgs<'args, 'a> {
     scalar_backing: Option<&'a str>,
     decls: &'args [Output<'a>],
     messages: &'args mut Vec<Message>,
+    pending: &'args mut Vec<PendingMacro>,
 }
 
 fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
@@ -2208,6 +2349,7 @@ fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
         scalar_backing,
         decls,
         messages,
+        pending,
     } = args;
 
     if generic {
@@ -2226,8 +2368,8 @@ fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
 
     let mut out = Vec::new();
     for &trait_name in derives {
-        if let Some(msg) = check_derivable(trait_name, span) {
-            messages.push(msg);
+        if !is_builtin_derive(trait_name) {
+            pending.push(pending_derive(trait_name, span));
             continue;
         }
         match (trait_name, scalar_backing) {
@@ -2252,6 +2394,7 @@ fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expand_class<'a>(
     span: SimpleSpan,
     name: &'a str,
@@ -2260,6 +2403,7 @@ fn expand_class<'a>(
     field_names: &[&'a str],
     decls: &[Output<'a>],
     messages: &mut Vec<Message>,
+    pending: &mut Vec<PendingMacro>,
 ) -> Vec<Output<'a>> {
     if generic {
         if !derives.is_empty() {
@@ -2277,8 +2421,8 @@ fn expand_class<'a>(
 
     let mut out = Vec::new();
     for &trait_name in derives {
-        if let Some(msg) = check_derivable(trait_name, span) {
-            messages.push(msg);
+        if !is_builtin_derive(trait_name) {
+            pending.push(pending_derive(trait_name, span));
             continue;
         }
         match trait_name {
@@ -2330,6 +2474,13 @@ fn push_default_display_impls<'a>(
     }
 }
 
+/// Last `::` segment of a path (`json::Serialize` -> `Serialize`).
+fn path_leaf(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+/// A hand-written `impl class for ty_name` in `decls`. Module-qualified
+/// heads (`impl json::Serialize for m::Point`) match on their last segment.
 fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
     decls.iter().any(|d| {
         matches!(
@@ -2338,9 +2489,11 @@ fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
                 class: c,
                 args,
                 ..
-            } if *c == class
-                && args.first().is_some_and(|a| {
-                    matches!(a.1.as_ref(), Expression::Type(n) | Expression::Identifier(n) if *n == ty_name)
+            } if path_leaf(c) == path_leaf(class)
+                && args.first().is_some_and(|a| match a.1.as_ref() {
+                    Expression::Type(n) | Expression::Identifier(n) => *n == ty_name,
+                    Expression::TypeProjection { name, .. } => *name == ty_name,
+                    _ => false,
                 })
         )
     })
@@ -2372,20 +2525,15 @@ fn synth_string_type_name<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
     typeclass_impl(span, "String", name, vec![m])
 }
 
-fn check_derivable(trait_name: &str, span: SimpleSpan) -> Option<Message> {
-    if DERIVABLE.contains(&trait_name) {
-        None
-    } else {
-        let mut msg = Message::error(
-            ErrorCode::GenericTypeError,
-            format!(
-                "Cannot derive unknown or non-derivable trait `{}`",
-                trait_name
-            ),
-            span.into_range(),
-        );
-        msg.with_help(format!("derivable traits are: {}", DERIVABLE.join(", ")));
-        Some(msg)
+fn pending_derive(trait_name: &str, span: SimpleSpan) -> PendingMacro {
+    PendingMacro {
+        kind: MacroKind::Derive,
+        name: trait_name.to_string(),
+        target: span,
+        owner: None,
+        args: Vec::new(),
+        range: span.into_range(),
+        member_attrs: Vec::new(),
     }
 }
 
@@ -2406,7 +2554,7 @@ fn class_field_names<'a>(fields: &[Output<'a>]) -> Vec<&'a str> {
 }
 
 
-fn leak(s: String) -> &'static str {
+pub(crate) fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
@@ -2449,7 +2597,7 @@ fn clone_attr_static(attr: &Attribute<'_>) -> Attribute<'static> {
 /// lowering) collide and pick up the declaration's `unit` type. Unique
 /// micro-spans keep the ID/infer caches aligned; expand diagnostics still
 /// use the real header span from `expand_decls`.
-fn fresh_span() -> SimpleSpan {
+pub(crate) fn fresh_span() -> SimpleSpan {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0x4000_0000);
     let start = NEXT.fetch_add(1, Ordering::Relaxed);

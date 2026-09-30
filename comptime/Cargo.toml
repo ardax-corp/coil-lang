@@ -1,0 +1,12 @@
+[package]
+name = "comptime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { path = "../common" }
+compiler = { path = "../compiler", default-features = false }
+machine = { path = "../machine", default-features = false }
+
+[dev-dependencies]
+reporting = { path = "../reporting" }

@@ -134,6 +134,9 @@ impl Compiler {
     /// Record `#[derive]` constructor aliases from attribute expansion.
     pub(crate) fn apply_expand_result(&mut self, module: &str, expand: crate::attrs::ExpandResult) {
         self.messages.extend(expand.messages);
+        // User macros the pipeline did not resolve (or no pipeline ran).
+        self.messages
+            .extend(expand.pending.iter().map(crate::attrs::unresolved_macro_message));
         for (k, v) in expand.decorated_class_ctors {
             let key = if module.is_empty() {
                 k
@@ -155,7 +158,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'a>>),
     ) {
-        let expand = crate::attrs::expand_program(ast);
+        let expand = crate::attrs::expand_program_in(ast, module);
         self.apply_expand_result(module, expand);
         self.typecheck_module(module, ast);
     }
@@ -3349,6 +3352,7 @@ impl Compiler {
                     args,
                     methods,
                 } => {
+                    let class = self.checker.impl_trait_key(class);
                     let arg_tys: Vec<Ty> = args
                         .iter()
                         .map(|arg| self.codegen_instance_head_ty(arg))
@@ -13220,6 +13224,15 @@ impl Compiler {
                     "string" => Ty::Con("string".into()),
                     "bool" => Ty::Con("bool".into()),
                     "void" | "unit" => Ty::Con("unit".into()),
+                    // Same class key the checker's instance head uses, so an
+                    // imported class names `Trait__module::Class__method`.
+                    _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
+                        Ty::Con(
+                            self.checker
+                                .resolve_class_key(name)
+                                .unwrap_or_else(|| name.to_string()),
+                        )
+                    }
                     _ => Ty::Con(name.to_string()),
                 }
             }
@@ -13229,6 +13242,20 @@ impl Compiler {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con(name.to_string()),
                 };
+                let arg_tys: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.codegen_instance_head_ty(a))
+                    .collect();
+                Ty::App(Box::new(head), arg_tys)
+            }
+            // `impl Trait for module::Type`: the checker keys it by FQN.
+            Expression::TypeProjection { owner, name, args }
+                if self.checker.is_known_module(owner) =>
+            {
+                let head = Ty::Con(format!("{owner}::{name}"));
+                if args.is_empty() {
+                    return head;
+                }
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .map(|a| self.codegen_instance_head_ty(a))
@@ -16723,6 +16750,7 @@ impl Compiler {
                 args,
                 methods,
             } => {
+                let class = self.checker.impl_trait_key(class);
                 // Instance heads from AST shape, not span cache (avoids `Container__unit__first`).
                 let arg_tys: Vec<Ty> = args
                     .iter()

@@ -422,3 +422,34 @@ fn incremental_edits_are_applied_and_rechecked() {
         "expected a type mismatch, got {last:?} (buffer {formatted:?})"
     );
 }
+
+#[test]
+fn code_action_expands_macros_and_diagnostics_see_generated_code() {
+    let provider = "use macro::{TypeDecl, Code};\n\nderive Answer(TypeDecl t) -> Code {\n    return quote items {\n        impl ${t.name} {\n            pub static fn answer() -> int {\n                return 42;\n            }\n        }\n    };\n}\n";
+    let main_text = "use gen::{Answer};\n\n#[derive(Answer)]\nclass C {\n    pub x: int,\n}\n\nfn main() {\n    let _ = C::answer();\n}\n";
+    let dir = project(
+        "action-expand",
+        &[("src/main.hy", main_text), ("src/gen.hy", provider)],
+    );
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, main_text);
+    // The generated `answer()` typechecks: no diagnostics on main.
+    client.request("coil/sync", Value::Null);
+    let diagnostics = client
+        .notifications
+        .iter()
+        .rev()
+        .find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == main)
+        .map(|n| n["params"]["diagnostics"].clone())
+        .unwrap_or(json!([]));
+    assert_eq!(diagnostics, json!([]), "{diagnostics}");
+    let actions = code_actions(&mut client, &main, position_of(main_text, "#[derive", 0));
+    let expand = actions
+        .iter()
+        .find(|a| a["title"] == "Expand macros in this file")
+        .unwrap_or_else(|| panic!("no expand action in {actions:?}"));
+    let expanded = apply_action(main_text, &main, expand);
+    assert!(expanded.contains("pub static fn answer() -> int"), "{expanded}");
+    assert!(!expanded.contains("#[derive(Answer)]"), "{expanded}");
+}

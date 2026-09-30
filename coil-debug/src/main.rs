@@ -160,6 +160,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
 }
 
 fn main() {
+    comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
         Ok(Parsed::Dap {

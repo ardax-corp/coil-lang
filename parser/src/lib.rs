@@ -5,8 +5,8 @@
 use ast::{
     AdjustOp, AssignOp, AttrArgs, AttrLit, Attribute, EnumConstructPayload, EnumVariantPayload,
     Expression, FieldModifier, LetFieldPattern, LetPattern, MatchArm, Output, Pattern,
-    PatternField, PatternOutput, PatternPayload, RecordFieldDecl, RecordFieldValue, TypeParam,
-    Visibility,
+    PatternField, PatternOutput, PatternPayload, QuoteKind, QuotePart, RecordFieldDecl,
+    RecordFieldValue, TypeParam, Visibility,
 };
 use std::{
     collections::HashSet,
@@ -158,6 +158,16 @@ pub use fmt::{format_program, format_range, format_source};
 #[derive(Default)]
 pub struct Pratt<'pratt> {
     _data: PhantomData<&'pratt ()>,
+}
+
+/// Join `a`, `b`, `C` into `a::b::C` for a `'src` AST borrow. One segment
+/// borrows it directly; longer paths leak the joined string (as the
+/// multi-segment `Construct` head always has).
+fn join_path_segments(mut segments: Vec<&str>) -> &str {
+    if segments.len() == 1 {
+        return segments.pop().unwrap_or_default();
+    }
+    Box::leak(segments.join("::").into_boxed_str())
 }
 
 fn first_duplicate_name<'a, I>(names: I) -> Option<&'a str>
@@ -316,10 +326,17 @@ impl<'pratt> Pratt<'pratt> {
                 Some(args) => (e.span(), Box::new(Expression::TypeApp { name, args })),
                 None => (e.span(), Box::new(Expression::Type(name))),
             });
+        // `Owner::Name` (associated type) or a module path `a::b::Name`;
+        // the checker picks which from what `Owner` names.
         let projection_type = text::ident()
             .padded_by(trivia())
-            .then_ignore(op!("::"))
-            .then(text::ident().padded_by(trivia()))
+            .separated_by(op!("::"))
+            .at_least(2)
+            .collect::<Vec<_>>()
+            .map(|mut segments| {
+                let name = segments.pop().unwrap_or_default();
+                (join_path_segments(segments), name)
+            })
             .then(
                 type_ann
                     .clone()
@@ -514,7 +531,7 @@ impl<'pratt> Pratt<'pratt> {
                     .map_with(|state, e| (e.span(), Box::new(Expression::Bool(state == "true"))))
                     .labelled("boolean"),
                 keyword!("new")
-                    .ignore_then(text::ident())
+                    .ignore_then(self.item_path())
                     .map_with(|class, e| {
                         let class_output = (e.span(), Box::new(Expression::Identifier(class)));
                         (
@@ -523,6 +540,8 @@ impl<'pratt> Pratt<'pratt> {
                         )
                     })
                     .labelled("new"),
+                // Contextual `quote kind { … }`; `quote(x)` stays a call.
+                self.quote_atom(expr.clone()),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
@@ -1120,6 +1139,120 @@ impl<'pratt> Pratt<'pratt> {
             )
     }
 
+    /// `derive Name(TypeDecl t) -> Items attrs(helper, …) { body }`
+    ///
+    /// `derive` and `attrs` are contextual words, so neither is reserved as
+    /// an identifier elsewhere.
+    fn derive_decl(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let helpers = text::ident()
+            .filter(|w: &&str| *w == "attrs")
+            .padded_by(trivia())
+            .ignore_then(
+                text::ident()
+                    .padded_by(trivia())
+                    .separated_by(op!(','))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(op!("("), op!(")")),
+            )
+            .or_not()
+            .map(Option::unwrap_or_default);
+        self.docs_prefix()
+            .then(
+                text::ident()
+                    .filter(|w: &&str| *w == "derive")
+                    .padded_by(trivia())
+                    .ignore_then(text::ident().padded_by(trivia()))
+                    .then(self.arg_list_typed(self.type_annotation()))
+                    .then(op!("->").ignore_then(self.type_annotation()).or_not())
+                    .then(helpers)
+                    .then(self.block(self.statement())),
+            )
+            .map_with(|(docs, ((((name, args), returns), helpers), body)), e| {
+                (
+                    e.span(),
+                    Box::new(Expression::DeriveDecl {
+                        docs,
+                        name,
+                        args,
+                        returns,
+                        helpers,
+                        body,
+                    }),
+                )
+            })
+            .labelled("derive declaration")
+    }
+
+    /// `quote items|expr|stmts|type { template }`.
+    ///
+    /// The template is kept as text with `${expr}` / `$(expr) sep *` holes.
+    /// Braces must balance; holes inside string literals are plain text.
+    fn quote_atom<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let parts = recursive(|body| {
+            let splice = just("${")
+                .ignore_then(expr.clone().padded_by(trivia()))
+                .then_ignore(just('}'))
+                .map(|e| vec![QuotePart::Splice(e)]);
+            let sep = none_of("*{}$() \t\r\n").repeated().at_most(2).to_slice();
+            let repeat = just("$(")
+                .ignore_then(expr.clone().padded_by(trivia()))
+                .then_ignore(just(')'))
+                .then(sep)
+                .then_ignore(just('*'))
+                .map(|(list, sep)| vec![QuotePart::Repeat { list, sep }]);
+            let string_lit = just('"')
+                .then(self.string_lit_body())
+                .then(just('"'))
+                .to_slice()
+                .map(|t| vec![QuotePart::Lit(t)]);
+            let nested = just('{')
+                .to_slice()
+                .then(body)
+                .then(just('}').to_slice())
+                .map(|((open, inner), close): ((&str, Vec<QuotePart>), &str)| {
+                    let mut v = vec![QuotePart::Lit(open)];
+                    v.extend(inner);
+                    v.push(QuotePart::Lit(close));
+                    v
+                });
+            let text = none_of("{}$\"")
+                .repeated()
+                .at_least(1)
+                .to_slice()
+                .map(|t| vec![QuotePart::Lit(t)]);
+            let dollar = just('$').to_slice().map(|t| vec![QuotePart::Lit(t)]);
+            choice((splice, repeat, string_lit, nested, text, dollar))
+                .repeated()
+                .collect::<Vec<Vec<QuotePart>>>()
+                .map(|chunks| chunks.into_iter().flatten().collect::<Vec<_>>())
+        });
+        text::ident()
+            .filter(|w: &&str| *w == "quote")
+            .padded_by(trivia())
+            .ignore_then(text::ident().try_map(|k: &str, span| {
+                QuoteKind::from_name(k).ok_or_else(|| {
+                    Rich::custom(span, "quote kind must be `items`, `expr`, `stmts` or `type`")
+                })
+            }))
+            .then_ignore(trivia())
+            .then(parts.delimited_by(just('{'), just('}')))
+            .then_ignore(trivia())
+            .map_with(|(kind, parts), e| (e.span(), Box::new(Expression::Quote { kind, parts })))
+            .labelled("quote")
+    }
+
     fn func<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1659,6 +1792,7 @@ impl<'pratt> Pratt<'pratt> {
             self.impl_block(stmt.clone()),
             self.test_case(stmt.clone()),
             self.attr_decl(),
+            self.derive_decl(),
             self.func(stmt.clone()),
             self.type_alias(),
             self.use_(),
@@ -2156,6 +2290,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.docs_prefix()
+            .then(self.attr_list())
             .then(keyword!("pub").or_not())
             .then(
                 choice((
@@ -2168,7 +2303,7 @@ impl<'pratt> Pratt<'pratt> {
             .then_ignore(op!(":").labelled("':' before field type"))
             .then(self.type_annotation().labelled("field type"))
             .then(op!("=").ignore_then(self.expr()).or_not())
-            .map_with(|(((((docs, vis), modifier), name), ty), init), e| {
+            .map_with(|((((((docs, attrs), vis), modifier), name), ty), init), e| {
                 let visibility = if vis.is_some() {
                     Visibility::Public
                 } else {
@@ -2180,6 +2315,7 @@ impl<'pratt> Pratt<'pratt> {
                     e.span(),
                     Box::new(Expression::Field {
                         docs,
+                        attrs,
                         visibility,
                         modifier,
                         name: name_output,
@@ -2219,6 +2355,18 @@ impl<'pratt> Pratt<'pratt> {
                 )
             })
             .labelled("static declaration")
+    }
+
+    /// `Name` or a module-qualified `a::b::Name` (`new` heads).
+    fn item_path(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, &'pratt str, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        text::ident()
+            .separated_by(just("::").padded_by(trivia()))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(join_path_segments)
     }
 
     /// `ClassName::member` — static field access (not enum constructor).
@@ -2284,7 +2432,7 @@ impl<'pratt> Pratt<'pratt> {
     {
         keyword!("readonly")
             .ignore_then(keyword!("new"))
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(self.params(expr))
             .map_with(|(class, args), e| {
                 let class_output = (e.span(), Box::new(Expression::Identifier(class)));
@@ -2401,8 +2549,9 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
             .map(|opt| opt.unwrap_or_default());
 
+        // Trait name may be module-qualified: `impl json::Serialize for T`.
         keyword!("impl")
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(opt_bracket_args)
             .then_ignore(keyword!("for"))
             .then(self.type_annotation().padded_by(trivia()))
@@ -2523,7 +2672,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         keyword!("new")
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(self.params(expr))
             .map_with(|(class, args), e| {
                 let class_output = (e.span(), Box::new(Expression::Identifier(class)));
@@ -2887,18 +3036,15 @@ impl<'pratt> Pratt<'pratt> {
             .map_with(|(segments, fields), e| {
                 let mut segments = segments;
                 let variant_name = segments.pop().unwrap();
-                let enum_name = if segments.len() == 1 {
-                    segments.pop().unwrap()
-                } else {
-                    // Multi-segment path: leak joined `::` string for `'pratt` AST borrow.
-                    let joined = segments.join("::");
-                    Box::leak(joined.into_boxed_str()) as &str
-                };
+                // Last owner segment: `json` in `json::parse`, `Point` in
+                // `geo::Point::origin`.
+                let owner_leaf = *segments.last().unwrap();
+                let enum_name = join_path_segments(segments);
                 // `module::fn(...)` when both sides look like module/fn paths
-                // (`string::format`). PascalCase owners stay Construct
-                // (`Point::new`); PascalCase members stay Construct
-                // (`ffi::types::Int`, `Option::Some`).
-                if enum_name
+                // (`string::format`, `a::b::parse`). PascalCase owners stay
+                // Construct (`Point::new`, `geo::Point::origin`); PascalCase
+                // members stay Construct (`ffi::types::Int`, `Option::Some`).
+                if owner_leaf
                     .chars()
                     .next()
                     .is_some_and(|ch| ch.is_ascii_lowercase())
@@ -2922,7 +3068,12 @@ impl<'pratt> Pratt<'pratt> {
                                 args: Some(args),
                             }),
                         ),
-                        Some(EnumConstructPayload::Unit) | None => name,
+                        // `m::f()`: empty parens are still a call.
+                        Some(EnumConstructPayload::Unit) => (
+                            e.span(),
+                            Box::new(Expression::Call { name, args: None }),
+                        ),
+                        None => name,
                         Some(EnumConstructPayload::Record(_)) => (
                             e.span(),
                             Box::new(Expression::QualifiedAccess {
@@ -3075,10 +3226,16 @@ impl<'pratt> Pratt<'pratt> {
                 .or_not()
                 .map(|opt| opt.unwrap_or(PatternPayload::Unit));
 
+            // `Enum::Variant` or module-qualified `a::b::Enum::Variant`.
             let constructor = text::ident()
                 .padded_by(trivia())
-                .then_ignore(just("::").padded_by(trivia()))
-                .then(text::ident().padded_by(trivia()))
+                .separated_by(just("::").padded_by(trivia()))
+                .at_least(2)
+                .collect::<Vec<_>>()
+                .map(|mut segments| {
+                    let variant_name = segments.pop().unwrap_or_default();
+                    (join_path_segments(segments), variant_name)
+                })
                 .then(payload_choice)
                 .map_with(|((enum_name, variant_name), payload), e| {
                     (
@@ -3214,10 +3371,11 @@ impl<'pratt> Pratt<'pratt> {
         let discriminant = op!("=").ignore_then(scalar_lit).or_not();
 
         self.docs_prefix()
+            .then(self.attr_list())
             .then(text::ident().padded_by(trivia()))
             .then(payload_choice)
             .then(discriminant)
-            .validate(|(((docs, name), payload), discriminant), e, emitter| {
+            .validate(|((((docs, attrs), name), payload), discriminant), e, emitter| {
                 if discriminant.is_some() && !matches!(payload, EnumVariantPayload::Unit) {
                     emitter.emit(Rich::custom(
                         e.span(),
@@ -3228,6 +3386,7 @@ impl<'pratt> Pratt<'pratt> {
                     e.span(),
                     Box::new(Expression::EnumVariant {
                         docs,
+                        attrs,
                         name,
                         payload,
                         discriminant,
@@ -3327,6 +3486,7 @@ const EXPRESSION_LABELS: &[&str] = &[
     "return",
     "qualified access",
     "named argument",
+    "quote",
 ];
 
 /// What the parser wanted, in words: `;`, a structural production
@@ -3508,3 +3668,6 @@ mod tests_generics;
 #[cfg(test)]
 #[path = "tests/tests_lambdas.rs"]
 mod tests_lambdas;
+#[cfg(test)]
+#[path = "tests/tests_macros.rs"]
+mod tests_macros;

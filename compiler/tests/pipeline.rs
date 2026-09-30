@@ -10120,7 +10120,7 @@ fn language_default_features_are_empty() {
             "{label} default features must be []"
         );
         assert!(
-            !toml.contains("time = "),
+            !toml.lines().any(|l| l.trim_start().starts_with("time = ")),
             "{label} must not declare a time cargo feature"
         );
         assert!(

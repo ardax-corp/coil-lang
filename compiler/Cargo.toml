@@ -16,6 +16,7 @@ parser = { path = "../parser" }
 reporting = { path = "../reporting" }
 rkyv = "0.8.12"
 serde = { version = "1", features = ["derive"] }
+stacker = "0.1.25"
 machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
 
 [dev-dependencies]

@@ -258,7 +258,20 @@ impl SymbolIndex {
                     visit_output(index, file, ret);
                 }
                 Expression::TypeApp { args, .. } => visit_outputs(index, file, args),
+                Expression::Quote { parts, .. } => {
+                    for part in parts {
+                        if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                            visit_output(index, file, e);
+                        }
+                    }
+                }
                 Expression::AttrDecl {
+                    args,
+                    returns,
+                    body,
+                    ..
+                }
+                | Expression::DeriveDecl {
                     args,
                     returns,
                     body,
