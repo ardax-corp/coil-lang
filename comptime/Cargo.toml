@@ -7,3 +7,6 @@ edition = "2024"
 common = { path = "../common" }
 compiler = { path = "../compiler", default-features = false }
 machine = { path = "../machine", default-features = false }
+
+[dev-dependencies]
+reporting = { path = "../reporting" }

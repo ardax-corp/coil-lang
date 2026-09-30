@@ -79,3 +79,38 @@ derive Tagged(TypeDecl t) -> Code {
         }
     };
 }
+
+/// Keep a class and add `describe()`: `#[with_describe(prefix = "P")]`.
+attr with_describe(TypeDecl t, string prefix) -> Code {
+    return quote items {
+        ${raw(t.source)}
+        impl ${t.name} {
+            pub fn describe() -> string {
+                return ${lit(prefix + ":" + t.name.str())};
+            }
+        }
+    };
+}
+
+/// On a method: keep it and add `<name>_twice()` returning it summed twice.
+attr twice(FnDecl f) -> Code {
+    let twice = ident(f.name.str() + "_twice");
+    return quote items {
+        pub ${raw(f.source)}
+        pub fn ${twice}() -> int {
+            return self.${f.name}() + self.${f.name}();
+        }
+    };
+}
+
+/// A user derive may implement a prelude trait; it replaces the compiler's
+/// default type-name `Show`.
+derive Loud(TypeDecl t) -> Code {
+    return quote items {
+        impl Show for ${t.name} {
+            pub fn show(${t.name} self) -> string {
+                return ${lit("LOUD " + t.name.str())};
+            }
+        }
+    };
+}

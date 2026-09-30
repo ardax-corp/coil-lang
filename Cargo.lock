@@ -405,6 +405,7 @@ dependencies = [
  "common",
  "compiler",
  "machine",
+ "reporting",
 ]
 
 [[package]]

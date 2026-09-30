@@ -1,5 +1,5 @@
 // User derive / attribute macros from `examples/src/derive_macros.hy`.
-use derive_macros::{FieldNames, VariantName, Tagged, add_after};
+use derive_macros::{FieldNames, VariantName, Tagged, Loud, add_after};
 
 #[derive(FieldNames, Tagged)]
 class Config {
@@ -44,4 +44,14 @@ test("attribute macro replaces the function") {
 test("generated code names provider items by path") {
     let t = Config::tag();
     assert(t.label == "tag:Config")?;
+}
+
+#[derive(Loud)]
+class Quiet {
+    pub x: int,
+}
+
+test("user derive of a prelude trait replaces the default Show") {
+    let q = new Quiet(1);
+    assert(q.show() == "LOUD Quiet")?;
 }
