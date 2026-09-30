@@ -91,6 +91,47 @@ worker count and the number of compile threads.
   to precise maps once that is fixed.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 
+## Coverage
+
+`coil test --coverage` reports line coverage of the project's own sources and
+writes an lcov tracefile (default `target/coverage/lcov.info`,
+`--coverage-out FILE`); `--coverage-per-test FILE` also writes which lines each
+test case hit (JSON: `{"tests":[{"file","name","lines":{"src/a.hy":[3,4]}}]}`).
+
+```text
+test result: ok. 721 passed; 0 failed; 721 total
+
+ 57.1%      4/7      src/mathx.hy
+ 57.1%      4/7      total
+coverage: lcov written to target/coverage/lcov.info
+```
+
+- **VM.** `machine` feature `coverage` (only `coil-test` enables it) adds a
+  hit counter per PC, filled at the main dispatch while a job asks for it;
+  dense streaks are off while counting, as under the debugger. Test jobs
+  (`TestJob::coverage`) return the counts in `TestReport::hits`. Threads a case
+  spawns run on other VMs and are not counted. Off, the counter is one
+  predictable branch per instruction in `coil-test` only.
+- **Lines.** Each PC's `DebugLoc` start gives its line (a statement's first
+  line). A line is coverable when some instruction carries it; counts are
+  summed over every test program that contains it.
+- **What counts.** Sources under the current directory, outside `.deps/`.
+  Test case bodies are left out unless the line also has code elsewhere, so
+  a helper inlined into a test still counts.
+- **Never-called code.** A coverage compile sets
+  `Pipeline::set_keep_fns_in`: every function compiled from a project file is
+  a tree-shake root, so an unused function is emitted and reports as uncovered
+  instead of vanishing. Generic functions never instantiated have no code and
+  do not appear.
+- **Opt level.** Coverage runs at the tests' `-O` (default Standard). In
+  coverage compiles, tiny-inlined callee bytes keep the callee's source line
+  (debug info only; the bytecode is identical). Other rewrites (self-unroll,
+  MIR / dense) can still move a few lines: on the repo suite -O2 reports 8 of
+  1326 lines uncovered that `-Og` covers.
+- **Release builds** build `coil` / `coil-embed` in their own cargo invocation:
+  a workspace-wide build unifies helper-only `machine` features (`debugger`,
+  `coverage`) into every binary.
+
 ## Compile
 
 Each file compiles in memory with `Pipeline::set_include_tests(true)` at the
@@ -101,9 +142,10 @@ serialized to `.hyc`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `-O`, `--root`, host grants, `--log-*`) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `-O`, `--root`, host grants, `--log-*`) |
 | `coil-test/src/order.rs` | seeded file / case order |
 | `machine/src/reactor.rs` | `TestJob`, `submit_test` / `run_test_here`, `TestHandle` |
+| `coil-test/src/coverage.rs` | PC → line maps, summing, lcov / summary / per-test JSON |
 | `coil-test/src/runner.rs` | discovery, per-file compile, per-case VM, summary |
 | `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
 
