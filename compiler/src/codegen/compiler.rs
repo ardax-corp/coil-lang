@@ -101,6 +101,14 @@ enum ParCombinePlan {
     Enum { tag: u16, arity: u16 },
 }
 
+/// Resolved instance entry for a direct static trait method call.
+struct TraitStaticTarget<'a> {
+    class: &'a str,
+    inst_args: &'a [Ty],
+    fqn: &'a str,
+    method: &'a str,
+}
+
 impl Compiler {
     /// Expose inferred state to language tooling after a module is checked.
     pub fn checker(&self) -> &crate::typechecking::Checker {
@@ -550,6 +558,166 @@ impl Compiler {
         }
     }
 
+    /// Lower `Owner::m(args)` for a static trait method. Under an open bound
+    /// the call goes through the dictionary slot (`CallIndirect`, no
+    /// receiver); in a mono clone or at a concrete owner it is a direct
+    /// `CALL` to the instance entry, plus the instance dictionary when the
+    /// target is the trait's default body.
+    fn emit_trait_static_call<'compiler>(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        owner: &str,
+        method: &str,
+        fields: &parser::ast::EnumConstructPayload<'compiler>,
+        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+    ) -> bool {
+        use parser::ast::EnumConstructPayload;
+        let arg_nodes: Vec<&Output> = match fields {
+            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Tuple(args) => args.iter().collect(),
+            EnumConstructPayload::Record(parts) => parts.iter().map(|p| &p.value).collect(),
+        };
+        let id = self.node_id_of(ast);
+        let (start, end) = (ast.0.start, ast.0.end);
+        if let Some(hint) = self.bound_method_hint(id, start, end) {
+            let dict_name = format!("__dict{}", hint.dict_index);
+            if let Some(dict_slot) = self.lookup_slot(&dict_name) {
+                for arg in &arg_nodes {
+                    self.append_with_existential_pack(bytecode, arg);
+                }
+                // Hidden trailing dictionary argument, then the code pointer.
+                bytecode.push_load(dict_slot);
+                bytecode.push_load(dict_slot);
+                bytecode.push_const(hint.method_slot as i32);
+                bytecode.push_index();
+                bytecode.push(
+                    Byte::new(Instruction::CallIndirect).with_operand_u32(hint.arity as u32 + 1),
+                );
+                return true;
+            }
+            if self.compiling_mono_clone {
+                // `T::m(..)` in a clone: `T` is concrete here, so call its
+                // instance directly (the class parameter may be return-only,
+                // which the argument-typed lookup below cannot see).
+                if let Some(concrete) = self.mono_type_param_ty(owner) {
+                    let lookup = vec![Self::show_lookup_ty_for_instance(&concrete)];
+                    let found = self
+                        .checker
+                        .generics()
+                        .find_instance_relaxed(&hint.class, &lookup)
+                        .map(|inst| (inst.class.clone(), inst.args.clone(), inst.method_fqns.get(method).cloned()));
+                    if let Some((class, inst_args, Some(fqn))) = found
+                        && (self.functions.contains_key(&fqn)
+                            || self.fn_entry_labels.contains_key(&fqn))
+                    {
+                        let target = TraitStaticTarget {
+                            class: &class,
+                            inst_args: &inst_args,
+                            fqn: &fqn,
+                            method,
+                        };
+                        self.emit_trait_static_direct(bytecode, target, &arg_nodes, ast);
+                        return true;
+                    }
+                }
+                if self.try_emit_ground_bound_method_nodes(bytecode, ast, method, &arg_nodes, &hint) {
+                    return true;
+                }
+            }
+            if !self.compiling_mono_clone {
+                let mut message = Message::error(
+                    ErrorCode::UnknownFunction,
+                    "Missing trait dictionary".to_string(),
+                    start..end,
+                );
+                message.push(DiagLabel::new(
+                    format!("dictionary slot `{}` is not available", dict_name),
+                    start..end,
+                ));
+                self.messages.push(message);
+                return true;
+            }
+        }
+        let Some((class, inst_args, fqn)) = self
+            .sidecar_dicts(id, start, end)
+            .and_then(|dicts| dicts.first())
+            .and_then(|instance| {
+                let fqn = instance.method_fqns.get(method)?.clone();
+                (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
+                    .then(|| (instance.class.clone(), instance.args.clone(), fqn))
+            })
+        else {
+            return false;
+        };
+        let target = TraitStaticTarget {
+            class: &class,
+            inst_args: &inst_args,
+            fqn: &fqn,
+            method,
+        };
+        self.emit_trait_static_direct(bytecode, target, &arg_nodes, ast);
+        true
+    }
+
+    /// Direct `CALL` of a static trait method's instance entry.
+    fn emit_trait_static_direct<'compiler>(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        target: TraitStaticTarget<'_>,
+        arg_nodes: &[&Output<'compiler>],
+        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+    ) {
+        let TraitStaticTarget {
+            class,
+            inst_args,
+            fqn,
+            method,
+        } = target;
+        let (start, end) = (ast.0.start, ast.0.end);
+        let is_default = Self::is_default_method_fqn(class, method, fqn);
+        let sig = self.trait_method_boundary_sig(class, method, inst_args, is_default);
+        let unbox_tys = self.instance_method_unbox_tys(class, method, inst_args);
+        // Operands that may clobber the operand stack (`new C(..)`) are staged
+        // into temps and reloaded above them (see the function-style path).
+        let stage = arg_nodes
+            .iter()
+            .any(|arg| self.expr_may_clobber_operand_stack(arg));
+        let mut temps = Vec::new();
+        let mut nargs = 0u32;
+        for (i, arg) in arg_nodes.iter().enumerate() {
+            self.append_with_existential_pack(bytecode, arg);
+            if unbox_tys.get(i).is_some_and(Option::is_some)
+                && let Some(ty) = self.codegen_expr_ty(arg)
+                && crate::typechecking::value_layout::word_kind(&self.checker, &ty)
+                    != common::WORD_POINTER
+            {
+                Self::emit_box_if_needed(bytecode, &Self::show_lookup_ty_for_instance(&ty));
+            }
+            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(i).copied().flatten()) {
+                Self::emit_layout_convert(bytecode, self.expr_layout(arg), target);
+            }
+            if stage {
+                let tmp = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp);
+                temps.push(tmp);
+            }
+            nargs += 1;
+        }
+        for tmp in &temps {
+            bytecode.push_load(*tmp);
+        }
+        if is_default && self.emit_instance_dict(bytecode, class, inst_args) {
+            nargs += 1;
+        }
+        if !self.emit_direct_fn_call(bytecode, fqn, nargs) {
+            self.missing_call_target(fqn, start..end);
+            return;
+        }
+        if let Some(from) = sig.and_then(|s| s.ret) {
+            Self::emit_layout_convert(bytecode, from, self.expr_layout(ast));
+        }
+    }
+
     fn emit_scalar_backing(
         &mut self,
         backing: &crate::typechecking::ty::ScalarBacking,
@@ -614,6 +782,12 @@ impl Compiler {
                 // `Vec<Node>::new()` → the pointer-element constructor.
                 let target = self.pointer_vec_ctor(&fqn, ast).unwrap_or(fqn);
                 let _ = self.emit_direct_fn_call(&mut bytecode, &target, arity);
+                return bytecode;
+            }
+            // `Owner::m(..)` / `T::m(..)` for a `static fn` declared in a
+            // trait (#524): the typechecker recorded a bound-method hint
+            // (dictionary dispatch) or the concrete instance (direct CALL).
+            if self.emit_trait_static_call(&mut bytecode, enum_name, variant_name, fields, ast) {
                 return bytecode;
             }
             match fields {
@@ -5026,7 +5200,10 @@ impl Compiler {
                 ..
             } if self.checker.tag_for(enum_name, variant_name).is_none() && {
                 let fqn = self.class_member_fqn(enum_name, variant_name);
-                self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)
+                self.functions.contains_key(&fqn)
+                    || self.fn_entry_labels.contains_key(&fqn)
+                    // `Owner::m(..)` static trait method (#524).
+                    || self.checker.static_slot_index(&fqn).is_none()
             } =>
             {
                 true
@@ -6026,8 +6203,13 @@ impl Compiler {
     fn ctor_unbox_ty(&self, rhs_node: &Output<'_>) -> Option<Ty> {
         match rhs_node.1.as_ref() {
             Expression::Construct {
-                enum_name, fields, ..
+                enum_name,
+                variant_name,
+                fields,
             } => {
+                // `Owner::m(..)` (static method) shares the surface; only a
+                // real variant builds `[payload, tag]` in the frame.
+                self.checker.tag_for(enum_name, variant_name)?;
                 let arity = match fields {
                     parser::ast::EnumConstructPayload::Unit => 0,
                     parser::ast::EnumConstructPayload::Tuple(args) => args.len(),
@@ -6394,7 +6576,6 @@ impl Compiler {
         args: Option<&Vec<Output>>,
         hint: &crate::typechecking::infer::BoundMethodCall,
     ) -> bool {
-        use crate::typechecking::subst::apply_ty_prune;
         let method = match name.1.as_ref() {
             Expression::Identifier(n) => *n,
             Expression::Access(_, m) => *m,
@@ -6412,8 +6593,23 @@ impl Compiler {
                 arg_nodes.push(arg);
             }
         }
+        self.try_emit_ground_bound_method_nodes(bytecode, call, method, &arg_nodes, hint)
+    }
+
+    /// Mono-clone lowering of a bound method call: the instance is looked up
+    /// from the ground argument types (or, for a static method whose class
+    /// parameter is return-only, the call's result type) and called directly.
+    fn try_emit_ground_bound_method_nodes(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        call: &Output,
+        method: &str,
+        arg_nodes: &[&Output],
+        hint: &crate::typechecking::infer::BoundMethodCall,
+    ) -> bool {
+        use crate::typechecking::subst::apply_ty_prune;
         let mut arg_tys = Vec::with_capacity(arg_nodes.len());
-        for node in &arg_nodes {
+        for node in arg_nodes {
             let Some(ty) = self.codegen_expr_ty(node) else {
                 return false;
             };
@@ -8424,6 +8620,35 @@ impl Compiler {
             }
             (Ty::App(h1, a1), Ty::Constructor { owner, .. }) => {
                 Self::bind_scheme_vars(&Ty::App(h1.clone(), a1.clone()), owner.as_ref(), map);
+            }
+            // `Result<T, E>` / `Option<T>` in a scheme against the call's
+            // result: bind through the payloads (a return-only `T`, #524).
+            (
+                Ty::Sum {
+                    name: n1,
+                    variants: v1,
+                },
+                Ty::Sum {
+                    name: n2,
+                    variants: v2,
+                },
+            ) if n1 == n2 && v1.len() == v2.len() => {
+                use crate::typechecking::ty::EnumVariantPayloadTy as P;
+                for ((_, p1), (_, p2)) in v1.iter().zip(v2.iter()) {
+                    match (p1, p2) {
+                        (P::Tuple(a), P::Tuple(b)) if a.len() == b.len() => {
+                            for (p, c) in a.iter().zip(b.iter()) {
+                                Self::bind_scheme_vars(p, c, map);
+                            }
+                        }
+                        (P::Record(a), P::Record(b)) if a.len() == b.len() => {
+                            for ((_, p), (_, c)) in a.iter().zip(b.iter()) {
+                                Self::bind_scheme_vars(p, c, map);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
                 Self::bind_scheme_vars(a1, a2, map);
@@ -10926,7 +11151,7 @@ impl Compiler {
     /// pair for that exact enum. Its payload may nest any value (another
     /// `Construct`, a call taking enums): `do_compile` scopes
     /// [`ReprCtx`] to the construct itself, so the payload stays one word.
-    fn expr_is_construct_of(expr: &Output, enum_name: &str) -> bool {
+    fn expr_is_construct_of(&self, expr: &Output, enum_name: &str) -> bool {
         let mut cur = expr;
         loop {
             match cur.1.as_ref() {
@@ -10935,9 +11160,11 @@ impl Compiler {
                 _ => break,
             }
         }
+        // A static method call (`Mode::default()`) is not a variant.
         matches!(
             cur.1.as_ref(),
-            Expression::Construct { enum_name: en, .. } if *en == enum_name
+            Expression::Construct { enum_name: en, variant_name, .. }
+                if *en == enum_name && self.checker.tag_for(en, variant_name).is_some()
         )
     }
 
@@ -11023,7 +11250,7 @@ impl Compiler {
             self.repr.unbox_enum_context -= 1;
             return;
         }
-        let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
+        let is_fast_construct = self.expr_is_construct_of(expr, enum_name);
         let is_fast_call = !is_fast_construct
             && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
         if is_fast_construct || is_fast_call {
@@ -11967,6 +12194,7 @@ impl Compiler {
             if overrides.is_empty() {
                 continue;
             }
+            let type_param_tys = self.mono_type_param_tys_for(type_params, &specialization.key);
 
             let subst_ids = specialization
                 .key
@@ -12003,6 +12231,7 @@ impl Compiler {
             self.current_function_qualified = Some(qualified.to_string());
             self.current_function_table_key = Some(qualified.to_string());
             self.mono_codegen_var_types.push(overrides);
+            self.mono_type_param_tys.push(type_param_tys);
 
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             let mut a = self.do_compile(args);
@@ -12034,6 +12263,7 @@ impl Compiler {
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
+            self.mono_type_param_tys.pop();
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
@@ -12047,10 +12277,10 @@ impl Compiler {
         }
     }
 
-    fn mono_overrides_for_args<'compiler>(
+    /// Type parameter name → concrete type for one specialization key.
+    fn mono_type_param_tys_for(
         &self,
-        type_params: &[parser::ast::TypeParam<'compiler>],
-        args: &Output<'compiler>,
+        type_params: &[parser::ast::TypeParam<'_>],
         key: &MonoKey,
     ) -> HashMap<String, Ty> {
         let mut type_param_tys = HashMap::new();
@@ -12058,9 +12288,27 @@ impl Compiler {
             if let Some(&ty_id) = key.subst.get(idx)
                 && let Some(ty) = self.mono_plan.intern.get(ty_id)
             {
-                type_param_tys.insert(tp.name, ty.clone());
+                type_param_tys.insert(tp.name.to_string(), ty.clone());
             }
         }
+        type_param_tys
+    }
+
+    /// Concrete type of type parameter `name` in the mono clone being compiled.
+    fn mono_type_param_ty(&self, name: &str) -> Option<Ty> {
+        self.mono_type_param_tys
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).cloned())
+    }
+
+    fn mono_overrides_for_args<'compiler>(
+        &self,
+        type_params: &[parser::ast::TypeParam<'compiler>],
+        args: &Output<'compiler>,
+        key: &MonoKey,
+    ) -> HashMap<String, Ty> {
+        let type_param_tys = self.mono_type_param_tys_for(type_params, key);
 
         let mut overrides = HashMap::new();
         if let Expression::Fragment(children) = args.1.as_ref() {
@@ -12071,7 +12319,7 @@ impl Compiler {
                     && let Some(ty) = ty
                     && let Expression::Type(tp_name) | Expression::Identifier(tp_name) =
                         ty.1.as_ref()
-                    && let Some(concrete) = type_param_tys.get(tp_name)
+                    && let Some(concrete) = type_param_tys.get(*tp_name)
                 {
                     // Rest formals are packed arrays at runtime (`MakeArray`).
                     let ty = if *is_rest {

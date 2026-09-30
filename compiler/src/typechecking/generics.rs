@@ -26,6 +26,9 @@ pub struct TypeClassMethodDef {
     /// `true` when the class body contains a default implementation
     /// (a `Function` with a non-empty body).
     pub has_default: bool,
+    /// `true` for `static fn` methods: no `Self`-typed receiver; called as
+    /// `Owner::name(..)` or `T::name(..)` under a bound.
+    pub is_static: bool,
 }
 
 /// The shape of a typeclass: its name, type parameters, and methods.
@@ -447,6 +450,7 @@ impl Generics {
                     methods: vec![TypeClassMethodDef {
                         name: method.into(),
                         has_default: false,
+                        is_static: false,
                     }],
                 },
             );
@@ -484,6 +488,7 @@ impl Generics {
                     methods: vec![TypeClassMethodDef {
                         name: method.into(),
                         has_default: false,
+                        is_static: false,
                     }],
                 },
             );
@@ -519,10 +524,12 @@ impl Generics {
                     TypeClassMethodDef {
                         name: "eq".into(),
                         has_default: false,
+                        is_static: false,
                     },
                     TypeClassMethodDef {
                         name: "ne".into(),
                         has_default: false,
+                        is_static: false,
                     },
                 ],
             },
@@ -540,6 +547,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "show".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -558,6 +566,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "len".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -572,9 +581,11 @@ impl Generics {
                 param_kinds: vec![Kind::Type],
                 superclasses: vec![],
                 assoc_types: vec![],
+                // `static fn default() -> T`: called as `T::default()`.
                 methods: vec![TypeClassMethodDef {
                     name: "default".into(),
                     has_default: false,
+                    is_static: true,
                 }],
             },
         );
@@ -590,6 +601,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "hash".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -617,6 +629,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "to_string".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -650,6 +663,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "into".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -666,6 +680,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "read".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -681,6 +696,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "write".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -924,6 +940,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "next".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -942,6 +959,7 @@ impl Generics {
                 methods: vec![TypeClassMethodDef {
                     name: "into_iter".into(),
                     has_default: false,
+                    is_static: false,
                 }],
             },
         );
@@ -968,6 +986,7 @@ mod tests {
         TypeClassMethodDef {
             name: name.to_string(),
             has_default,
+            is_static: false,
         }
     }
 

@@ -1,7 +1,7 @@
 // A bound on a type parameter that appears only in the return type gets
 // its dictionary from the call's result type, also for a nullary fn.
-// (One `Default` instance: choosing among several by the expected type is
-// #524.)
+// (Several `Default` instances chosen by the annotation: see
+// `derive_default_static.hy`.)
 
 #[derive(Default)]
 class Q {

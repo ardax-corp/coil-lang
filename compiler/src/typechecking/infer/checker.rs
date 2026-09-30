@@ -2791,7 +2791,20 @@ impl Checker {
                         Some("use `raise err;` — `raise` already early-returns `Err`".to_string()),
                     );
                 }
+                // `f()?` under an expected `E` expects `Result<E, err>` of
+                // the inner call (the fn's error type in result mode), so a
+                // return-only bound can be chosen by the annotation (#524).
+                let prev_expected = self.current_expected.take();
+                if let Some(exp) = self.expected_here.clone() {
+                    let err = self
+                        .fn_result_mode
+                        .as_ref()
+                        .map(|(_, err)| err.clone())
+                        .unwrap_or_else(|| Ty::Var(self.counter.fresh()));
+                    self.current_expected = Some(result_ty(exp, err));
+                }
                 let inner_ty = self.infer(inner);
+                self.current_expected = prev_expected;
                 let resolved = apply_ty_prune(&self.subst, &inner_ty);
                 if let Some((ok, err)) = result_ok_err(&resolved) {
                     let _ = self.ensure_result_mode(&err, &range);
@@ -4637,6 +4650,17 @@ impl Checker {
                 ) {
                     return ty;
                 }
+                if let Some(ty) = self.try_infer_trait_static_call(
+                    owner,
+                    member,
+                    &parser::ast::EnumConstructPayload::Tuple(
+                        args.as_deref().unwrap_or(&[]).to_vec(),
+                    ),
+                    range.clone(),
+                    id,
+                ) {
+                    return ty;
+                }
                 if self.has_method(owner, member) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
@@ -4935,6 +4959,7 @@ impl Checker {
                         range.clone(),
                     );
                     if !fresh_constraints.is_empty() {
+                        self.bind_call_result_to_expected(&result);
                         self.discharge_constraints(id, &fresh_constraints, &range);
                         if let Some(scheme) = original_scheme.as_ref() {
                             self.pin_assoc_after_discharge(
@@ -5012,6 +5037,7 @@ impl Checker {
                 )
             };
             if !fresh_constraints.is_empty() {
+                self.bind_call_result_to_expected(&result);
                 self.discharge_constraints(id, &fresh_constraints, &range);
                 if let Some(scheme) = original_scheme.as_ref() {
                     self.pin_assoc_after_discharge(
@@ -5061,6 +5087,7 @@ impl Checker {
                 range.clone(),
             );
             if !fresh_constraints.is_empty() {
+                self.bind_call_result_to_expected(&result);
                 self.discharge_constraints(id, &fresh_constraints, &range);
                 if let Some(scheme) = original_scheme.as_ref() {
                     self.pin_assoc_after_discharge(
@@ -5151,6 +5178,7 @@ impl Checker {
                     range.clone(),
                 );
                 if !constraints.is_empty() {
+                    self.bind_call_result_to_expected(&result);
                     self.discharge_constraints(id, &constraints, &range);
                     self.pin_assoc_after_discharge(
                         &class,
@@ -5244,6 +5272,7 @@ impl Checker {
         );
         // Discharge instantiated trait constraints (or propagate if caller shares the bound).
         if !fresh_constraints.is_empty() {
+            self.bind_call_result_to_expected(&result);
             self.discharge_constraints(id, &fresh_constraints, &range);
             if let Some(scheme) = original_scheme.as_ref() {
                 self.pin_assoc_after_discharge(
@@ -5295,6 +5324,39 @@ impl Checker {
         self.call_site_dicts_by_span
             .get(&(start, end))
             .map(Vec::as_slice)
+    }
+
+    /// Bidirectional step for return-type-directed instances (#524): before
+    /// a call's bounds are discharged, bind its still-open result type to
+    /// the expected type of the call node (`let x: T = f()`, `return f()`,
+    /// `f()?`, an argument with a known parameter type). Only a successful
+    /// unification is committed; otherwise the binding site reports its own
+    /// mismatch as before.
+    fn bind_call_result_to_expected(&mut self, result: &Ty) {
+        let Some(expected) = self.expected_here.clone() else {
+            return;
+        };
+        let resolved = apply_ty_prune(&self.subst, result);
+        if !Self::ty_mentions_var(&resolved) {
+            return;
+        }
+        if let Ok(s) = unify_with(&self.subst, &resolved, &expected) {
+            self.subst = compose(&s, &self.subst);
+        }
+    }
+
+    fn ty_mentions_var(ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(_) => true,
+            Ty::Fun(a, b) => Self::ty_mentions_var(a) || Self::ty_mentions_var(b),
+            Ty::App(h, args) => Self::ty_mentions_var(h) || args.iter().any(Self::ty_mentions_var),
+            Ty::Tuple(items) => items.iter().any(Self::ty_mentions_var),
+            Ty::List(inner) | Ty::Readonly(inner) => Self::ty_mentions_var(inner),
+            Ty::Array { element, .. } => Self::ty_mentions_var(element),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_mentions_var(t)),
+            Ty::Constructor { owner, .. } => Self::ty_mentions_var(owner),
+            _ => false,
+        }
     }
 
     fn record_call_site_dict(
@@ -11755,6 +11817,7 @@ impl Checker {
             self.cache.insert(call_id, fun.clone());
         }
         if !fresh_constraints.is_empty() {
+            self.bind_call_result_to_expected(&fun);
             self.discharge_constraints(id, &fresh_constraints, range);
             self.pin_assoc_after_discharge(
                 "",
@@ -14277,6 +14340,15 @@ impl Checker {
                 ) {
                     return ty;
                 }
+                if let Some(ty) = self.try_infer_trait_static_call(
+                    enum_name,
+                    variant_name,
+                    fields,
+                    range.clone(),
+                    call_id,
+                ) {
+                    return ty;
+                }
                 if self.has_method(enum_name, variant_name) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
@@ -14303,6 +14375,16 @@ impl Checker {
         let tag = match tags.get(&variant_str) {
             Some(t) => *t,
             None => {
+                // `MyEnum::from_val(v)`: a static trait method on an enum.
+                if let Some(ty) = self.try_infer_trait_static_call(
+                    enum_name,
+                    variant_name,
+                    fields,
+                    range.clone(),
+                    call_id,
+                ) {
+                    return ty;
+                }
                 return self.error(
                     ErrorCode::UnknownVariant,
                     format!(
@@ -16699,6 +16781,208 @@ impl Checker {
             self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);
         }
         Some(result)
+    }
+
+    /// Concrete owner of `Owner::method(..)` for a static trait method: a
+    /// class, an enum or a primitive. Generic heads (`Box<T>`) are not
+    /// callable this way yet (#550).
+    fn static_call_owner_ty(&mut self, owner: &str, range: &Range<usize>) -> Option<Ty> {
+        if let Some(key) = self.resolve_class_key(owner) {
+            return Some(Ty::Con(key));
+        }
+        use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING};
+        if self.resolve_enum_key(owner).is_some()
+            || matches!(owner, INT | FLOAT | STRING | BOOL | BYTE)
+        {
+            return Some(self.parse_type_name_str_with_range(owner, Some(range.clone())));
+        }
+        None
+    }
+
+    /// Type `Owner::method(args)` for a `static fn` declared in a trait.
+    ///
+    /// `Owner` is a type parameter in scope (`T::from_val(v)`, dispatched
+    /// through its bound's dictionary and recorded as a receiver-less
+    /// [`BoundMethodCall`]) or a concrete type with an instance
+    /// (`Point::from_val(v)`, a direct call recorded in `call_site_dicts`).
+    /// `None` when no trait in scope declares `method` for that owner, so
+    /// the caller keeps its enum / inherent diagnostics.
+    fn try_infer_trait_static_call(
+        &mut self,
+        owner: &str,
+        method: &str,
+        fields: &parser::ast::EnumConstructPayload<'_>,
+        range: Range<usize>,
+        call_id: Option<NodeId>,
+    ) -> Option<Ty> {
+        use parser::ast::EnumConstructPayload;
+        let param_var = self
+            .type_params_in_scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(owner).copied());
+        let bound = if let Some(var) = param_var {
+            let candidates = self.bound_method_candidates(method, Some(var));
+            if candidates.is_empty() {
+                return Some(self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("no bound on `{}` declares a method `{}`", owner, method),
+                    range,
+                    Some(format!(
+                        "add a bound whose trait declares `static fn {}` (`{}: Trait`)",
+                        method, owner
+                    )),
+                ));
+            }
+            let Some((dict_index, dict_class, class, method_slot, scheme)) =
+                self.select_bound_method(candidates, method, &range)
+            else {
+                return Some(Ty::Var(self.counter.fresh()));
+            };
+            self.bind_matching_abstract_constraints(Some(var), &dict_class);
+            Some((dict_index, class, method_slot, scheme, Ty::Var(var)))
+        } else {
+            None
+        };
+        let (class, scheme, owner_ty, bound_call) = match bound {
+            Some((dict_index, class, method_slot, scheme, owner_ty)) => {
+                (class, scheme, owner_ty, Some((dict_index, method_slot)))
+            }
+            None => {
+                let owner_ty = self.static_call_owner_ty(owner, &range)?;
+                let lookup = std::slice::from_ref(&owner_ty);
+                let mut matches: Vec<(String, Scheme)> = Vec::new();
+                for (cname, cdef) in &self.generics.typeclasses {
+                    if cdef.type_params.len() != 1
+                        || !cdef.methods.iter().any(|m| m.name == method)
+                        || self.generics.find_instance(cname, lookup).is_none()
+                    {
+                        continue;
+                    }
+                    if let Some(scheme) = self
+                        .typeclass_method_schemes
+                        .get(&(cname.clone(), method.to_string()))
+                    {
+                        matches.push((cname.clone(), scheme.clone()));
+                    }
+                }
+                matches.sort_by(|a, b| a.0.cmp(&b.0));
+                if matches.len() > 1 {
+                    let traits = matches
+                        .iter()
+                        .map(|(c, _)| format!("`{}`", c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Some(self.error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "ambiguous static method `{}::{}`: declared by {}",
+                            owner, method, traits
+                        ),
+                        range,
+                    ));
+                }
+                let (class, scheme) = matches.pop()?;
+                (class, scheme, owner_ty, None)
+            }
+        };
+        let is_static = self
+            .generics
+            .typeclass(&class)
+            .and_then(|cdef| cdef.methods.iter().find(|m| m.name == method))
+            .is_some_and(|m| m.is_static);
+        if !is_static {
+            for a in Self::construct_payload_exprs(fields) {
+                let _ = self.infer(a);
+            }
+            return Some(self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "`{}::{}` is an instance method of trait `{}`; call it on a value (`obj.{}(...)`)",
+                    owner, method, class, method
+                ),
+                range,
+                Some(format!(
+                    "or declare `static fn {}` in trait `{}` to call it as `{}::{}`",
+                    method, class, owner, method
+                )),
+            ));
+        }
+        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+        // The scheme's class parameter appears only in the result (or not at
+        // all): pin it to the owner so the constraint discharges against the
+        // owner's instance (or the active bound) instead of the first
+        // instance that happens to unify.
+        if let Some(param) = constraints
+            .iter()
+            .find(|c| c.class == class)
+            .and_then(|c| c.args.first().cloned())
+        {
+            self.unify(&param, &owner_ty, &range, "static trait method owner");
+        }
+        let arg_tys: Vec<Ty> = match fields {
+            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Tuple(args) => {
+                args.iter().map(|a| self.infer_call_arg(a)).collect()
+            }
+            EnumConstructPayload::Record(parts) => {
+                for p in parts {
+                    let _ = self.infer(&p.value);
+                }
+                return Some(self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "static method `{}::{}` is called with parentheses, not a record literal",
+                        owner, method
+                    ),
+                    range,
+                    Some(format!("write `{}::{}(...)` with positional arguments", owner, method)),
+                ));
+            }
+        };
+        if let Some((dict_index, method_slot)) = bound_call {
+            let hint = BoundMethodCall {
+                dict_index,
+                method_slot,
+                arity: arg_tys.len(),
+                has_receiver: false,
+                class: class.clone(),
+            };
+            if let Some(call_id) = call_id {
+                self.bound_method_calls.insert(call_id, hint.clone());
+            }
+            self.bound_method_calls_by_span
+                .insert((range.start, range.end), hint);
+        }
+        let arg_exprs: Option<&[Output]> = match fields {
+            EnumConstructPayload::Tuple(args) => Some(args.as_slice()),
+            _ => None,
+        };
+        let result = self.apply_function(
+            Some(&format!("{}::{}", class, method)),
+            &fun_ty,
+            &arg_tys,
+            arg_exprs,
+            call_id,
+            range.clone(),
+        );
+        if !constraints.is_empty() {
+            self.bind_call_result_to_expected(&result);
+            self.discharge_constraints(call_id, &constraints, &range);
+            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, &range);
+        }
+        Some(result)
+    }
+
+    fn construct_payload_exprs<'a>(
+        fields: &'a parser::ast::EnumConstructPayload<'a>,
+    ) -> Vec<&'a Output<'a>> {
+        use parser::ast::EnumConstructPayload;
+        match fields {
+            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Tuple(args) => args.iter().collect(),
+            EnumConstructPayload::Record(parts) => parts.iter().map(|p| &p.value).collect(),
+        }
     }
 
     /// True if `name` was declared as `async fn`.

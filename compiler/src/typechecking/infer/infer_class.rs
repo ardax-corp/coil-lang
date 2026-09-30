@@ -52,6 +52,7 @@ impl Checker {
                     docs: _,
                     name: mname,
                     body,
+                    is_static,
                     ..
                 } => {
                     let has_default = body.as_ref().is_some_and(
@@ -60,6 +61,7 @@ impl Checker {
                     Some(TypeClassMethodDef {
                         name: mname.to_string(),
                         has_default,
+                        is_static: *is_static,
                     })
                 }
                 _ => None,
@@ -512,6 +514,7 @@ impl Checker {
                             where_constraints,
                             body,
                             is_coro,
+                            is_static,
                             ..
                         } => Some((
                             *name,
@@ -521,6 +524,7 @@ impl Checker {
                             where_constraints.as_slice(),
                             body,
                             *is_coro,
+                            *is_static,
                         )),
                         Expression::Method(_, body) => match body.1.as_ref() {
                             Expression::Function {
@@ -532,6 +536,7 @@ impl Checker {
                                 where_constraints,
                                 body,
                                 is_coro,
+                                is_static,
                                 ..
                             } => Some((
                                 *name,
@@ -541,14 +546,37 @@ impl Checker {
                                 where_constraints.as_slice(),
                                 body,
                                 *is_coro,
+                                *is_static,
                             )),
                             _ => None,
                         },
                         _ => None,
                     };
-                    if let Some((mname, mparams, margs, returns, where_cs, body, is_coro)) =
+                    if let Some((mname, mparams, margs, returns, where_cs, body, is_coro, is_static)) =
                         maybe_fn
                     {
+                        // Static-ness must match the trait declaration: a
+                        // `static fn` is called as `Owner::m(..)`, an
+                        // instance method on a value.
+                        if let Some(decl) = class_def
+                            .as_ref()
+                            .and_then(|cdef| cdef.methods.iter().find(|d| d.name == mname))
+                            && decl.is_static != is_static
+                        {
+                            let (want, have) = if decl.is_static {
+                                ("static", "an instance method")
+                            } else {
+                                ("an instance method", "static")
+                            };
+                            self.messages.push(Message::error(
+                                ErrorCode::GenericTypeError,
+                                format!(
+                                    "method `{}` in instance of `{}` must be {} (the trait declares it {}), but it is {}",
+                                    mname, class, want, want, have
+                                ),
+                                m.0.into_range(),
+                            ));
+                        }
                         let fqn = format!(
                             "{}__{}__{}",
                             class,

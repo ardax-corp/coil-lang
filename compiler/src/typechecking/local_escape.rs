@@ -85,7 +85,7 @@ fn visit_nested_scopes(checker: &mut Checker, ast: &Output<'_>) {
 fn analyze_scope(checker: &mut Checker, ast: &Output<'_>) {
     let mut cands: HashMap<String, Candidate> = HashMap::new();
     collect_candidates(checker, ast, &mut cands);
-    if cands.is_empty() && !has_direct_match_construct(ast) {
+    if cands.is_empty() && !has_direct_match_construct(checker, ast) {
         mark_direct_match_constructs(checker, ast);
         return;
     }
@@ -110,7 +110,9 @@ fn collect_candidates(checker: &Checker, ast: &Output<'_>, cands: &mut HashMap<S
         Expression::Fragment(items) if items.len() == 2 => {
             if let Some(name) = binder_name(&items[0]) {
                 let rhs = peel(&items[1]);
-                if is_in_frame_ctor(rhs) && candidate_is_unbox(checker, &items[0], &items[1], rhs) {
+                if is_in_frame_ctor(checker, rhs)
+                    && candidate_is_unbox(checker, &items[0], &items[1], rhs)
+                {
                     let ids = (nid(checker, &items[0]), nid(checker, rhs));
                     if let (Some(binder), Some(rhs_id)) = ids {
                         let is_class = instantiate_is_unbox(checker, rhs)
@@ -186,7 +188,7 @@ fn scan_uses(
             } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
                     let r = peel(rhs);
-                    if nested_fn || !is_in_frame_ctor(r) {
+                    if nested_fn || !is_in_frame_ctor(_checker, r) {
                         escaped.insert((*n).to_string());
                     }
                     if let Expression::Identifier(src) = r.1.as_ref()
@@ -378,7 +380,7 @@ fn mark_direct_match_constructs(checker: &mut Checker, ast: &Output<'_>) {
         | Expression::TestCase { body, .. } => mark_direct_match_constructs(checker, body),
         Expression::Match { scrutinee, arms } => {
             let s = peel(scrutinee);
-            if is_in_frame_ctor(s) && candidate_is_unbox(checker, s, scrutinee, s) {
+            if is_in_frame_ctor(checker, s) && candidate_is_unbox(checker, s, scrutinee, s) {
                 if let Some(id) = nid(checker, scrutinee) {
                     checker.frame_local.insert(id);
                 }
@@ -397,18 +399,18 @@ fn mark_direct_match_constructs(checker: &mut Checker, ast: &Output<'_>) {
     }
 }
 
-fn has_direct_match_construct(ast: &Output<'_>) -> bool {
+fn has_direct_match_construct(checker: &Checker, ast: &Output<'_>) -> bool {
     match ast.1.as_ref() {
-        Expression::Match { scrutinee, .. } => is_in_frame_ctor(peel(scrutinee)),
+        Expression::Match { scrutinee, .. } => is_in_frame_ctor(checker, peel(scrutinee)),
         Expression::Function {
             body: Some(body), ..
         }
         | Expression::Lambda { body, .. }
-        | Expression::TestCase { body, .. } => has_direct_match_construct(body),
+        | Expression::TestCase { body, .. } => has_direct_match_construct(checker, body),
         _ => {
             let mut found = false;
             walk_children(ast, &mut |child| {
-                if has_direct_match_construct(child) {
+                if has_direct_match_construct(checker, child) {
                     found = true;
                 }
             });
@@ -453,10 +455,18 @@ fn poison_idents(
     }
 }
 
-fn is_in_frame_ctor(ast: &Output<'_>) -> bool {
+fn is_in_frame_ctor(checker: &Checker, ast: &Output<'_>) -> bool {
     let peeled = peel(ast);
     match peeled.1.as_ref() {
-        Expression::Construct { fields, .. } => !payload_contains_construct(fields),
+        // `Owner::m(..)` (a static method) shares the surface; it is a call.
+        Expression::Construct {
+            enum_name,
+            variant_name,
+            fields,
+        } => {
+            checker.tag_for(enum_name, variant_name).is_some()
+                && !payload_contains_construct(fields)
+        }
         Expression::Instantiate(_, args) => args.as_ref().is_none_or(|a| {
             a.iter().all(|e| {
                 !matches!(
@@ -504,11 +514,17 @@ fn candidate_is_unbox(
 
 fn construct_is_unbox(checker: &Checker, ast: &Output<'_>) -> bool {
     let Expression::Construct {
-        enum_name, fields, ..
+        enum_name,
+        variant_name,
+        fields,
     } = peel(ast).1.as_ref()
     else {
         return false;
     };
+    // `Owner::m(..)` (a static method) is a call, not an in-frame variant.
+    if checker.tag_for(enum_name, variant_name).is_none() {
+        return false;
+    }
     let arity = match fields {
         EnumConstructPayload::Unit => 0,
         EnumConstructPayload::Tuple(args) => args.len(),

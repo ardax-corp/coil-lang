@@ -1,8 +1,8 @@
-# Static and return-type-dispatched trait methods (plan)
+# Static and return-type-dispatched trait methods
 
-GitHub: [#524](https://github.com/ardax-corp/coil-lang/issues/524). Status: **plan**, not implemented.
+GitHub: [#524](https://github.com/ardax-corp/coil-lang/issues/524). Status: **implemented**.
 
-This is the last piece typed decode needs in coil-json, coil-toml and coil-msgpack. A trait method whose `Self` type appears only in its **return type** has to be callable. Examples are constructors such as `FromVal::from_val(Val) -> T`, `Default::default() -> T` and `Deserialize::deserialize(Vec<byte>) -> T`. The target is:
+A trait method whose `Self` type appears only in its **return type** is callable. Examples are constructors such as `FromVal::from_val(Val) -> T` and `Default::default() -> T`. This is what typed decode needs in coil-json, coil-toml and coil-msgpack:
 
 ```hy
 trait FromVal<T> {
@@ -20,63 +20,40 @@ fn decode_as<T: FromVal>(Val v) -> Result<T, DecodeError> {
 let cfg: Config = decode_as(v)?;                  // T chosen by the expected type
 ```
 
-## Where things stand
+Runnable example: `examples/static_trait_method.hy`. Tests: `tests/positive/static_trait_methods.hy`, `tests/positive/derive_default_static.hy`, `tests/compile_fail/trait_static_*.hy`, `tests/compile_fail/trait_instance_method_as_static.hy`.
 
-These were found with the #520–#524 repros on `main`. Line references are approximate.
+## Surface (one spelling)
 
-| # | Piece | Today |
-|---|-------|-------|
-| 1 | Trait declaration | The parser accepts `static fn` in a `trait` body. `infer_fn.rs` rejects it with E0119 ("`static fn` is only allowed inside an `impl` block"). `TypeClassMethodDef` has no `is_static`. |
-| 2 | Method lookup | `typeclass_method_schemes[(class, method)]`. The ground path (`ground_trait_method_for_receiver`) picks the instance by **unifying the first parameter** with the receiver. The bound path (`bound_method_candidates`) keys on the receiver's type var. A method with no `T`-typed first parameter can't be selected by either. |
-| 3 | `Owner::m(..)` | Parses as `Construct` / `QualifiedAccess`. `try_infer_static_method_call` only knows **inherent** statics (`is_static_method`). Otherwise the owner is looked up as an enum: "Cannot find enum `Point`" / "`T`". |
-| 4 | Instance resolution | Eager, at the call (`resolve_instance`, around `checker.rs:8960`). An open type var is unified with every matching instance. With one instance it is **silently picked**, which pins `T` before any annotation is seen. With two or more you get "Ambiguous instance for `Default<t64>`". The `let x: T = …` annotation only unifies with the call's result *after* the call has been inferred. |
-| 5 | Call-site dictionaries | `emit_call_site_dicts` binds scheme vars from argument types, then from the call's result type. That is enough for a return-only `T` once the checker knows it. A nullary call lost the result type (fixed in #535). |
-| 6 | Dictionary ABI | One tuple of `CodePtr`s per bound, in `flattened_methods` order. A bound call does `LOAD dict; CONST slot; Index; CallIndirect`. `BoundMethodCall { has_receiver: false }` already exists for UFCS under a bound, so static methods fit the ABI unchanged. |
-| 7 | Monomorphization | Specializations are keyed by **argument** ground types (`specialization_for_call`), so a return-only `T` never monomorphizes. The shared body plus dictionary is correct, just not specialized. |
-| 8 | Derives | `#[derive(Default)]` fills **every** field with `0` (`synth_default_class`), so a `string` field fails to typecheck. The `Serialize` / `Deserialize` derives are byte-cast placeholders. |
+- **Declaration:** `static fn name(params) -> R {}` in a `trait` body, the same spelling as an inherent static. An instance implements it with `pub static fn`. Static-ness must match the declaration (error: "method `m` in instance of `Tr` must be static … but it is an instance method", and the converse).
+- **Calls:** `Owner::name(args)`, where `Owner` is either
+  - a concrete type with an instance (`Config::from_val(v)`, `int::from_val(v)`, `Dir::from_val(v)`), or
+  - a type parameter in scope whose bound declares `name` (`T::from_val(v)`).
+- **No bare `from_val(v)`** for static trait methods outside a trait's own default body (there the class constraint is active and the sibling call is the existing UFCS bound call). Nothing else selects an instance except the expected type, and a second spelling for the same call goes against the "one spelling per construct" rule.
+- An instance method called as `Owner::m(..)` is an error that points at `obj.m(..)`; a static method called on a value is an ordinary unknown-method error.
 
-## Design
+## Typechecking
 
-### Surface (one spelling)
+- `TypeClassMethodDef::is_static` records the declaration; `infer_typeclass_impl` checks static-ness per method.
+- `Owner::m(args)` parses as `Construct` (or as `Call` with a `QualifiedAccess` name for primitive owners such as `int::m`). Both paths reach `try_infer_trait_static_call` after the enum-variant, static-field and inherent-static lookups miss:
+  - **Type parameter in scope:** `bound_method_candidates(m, Some(var))` selects the bound, the scheme's class parameter is unified with the parameter's variable, and a `BoundMethodCall { has_receiver: false, .. }` is recorded (the existing UFCS-under-a-bound shape).
+  - **Concrete owner:** every single-parameter trait that declares `m` and has an instance for the owner is a candidate; more than one is an ambiguity error. The scheme's class parameter is unified with the owner type before discharge, so the constraint resolves to the owner's instance, not to the first instance that unifies.
+- **Return-type-directed resolution** (`bind_call_result_to_expected`): before a call's bounds are discharged, a still-open result type is trial-unified with the node's expected type (`expected_here`: `let x: T = f()`, `return f()`, an argument with a known parameter type). `f()?` sets the inner call's expectation to `Result<E, err>` (the fn's error type in result mode). Only a successful unification is committed; the binding site still reports its own mismatch. This applies to generic fn calls, UFCS bound calls and static calls.
+- With one matching instance and no expectation the instance is still picked (the choice is forced). With several and no expectation the existing "Ambiguous instance" error stands (`tests/compile_fail/trait_static_uninferable.hy`).
 
-- **Declaration:** `static fn name(params) -> R {}` in a `trait` body, which is the same spelling as an inherent static. An instance implements it with `pub static fn`. Static-ness must match the declaration (a new error, "instance method `m` must be `static`").
-- **Calls:** `Owner::name(args)`, where `Owner` is either:
-  - a concrete type with an instance (`Config::from_val(v)`), or
-  - a type parameter in scope whose bounds provide `name` (`T::from_val(v)`).
-- **No bare `from_val(v)`** for static trait methods. Nothing selects an instance except the expected type, and a second spelling for the same call goes against the "one spelling per construct" rule. The expected type still matters for a *generic function* that returns `T` (`let cfg: Config = decode_as(v)`); see below.
+## Codegen
 
-### Typechecking
+- **Concrete `Owner::m(args)`:** the discharged instance is in `call_site_dicts`; `emit_trait_static_call` emits the arguments (boxed / layout-converted per `trait_method_boundary_sig`, staged when an operand may clobber the operand stack) and a direct `CALL` to the instance FQN, plus the instance dictionary only when the target is the trait's default body.
+- **`T::m(args)` in a shared body:** dictionary slot, `Index`, `CallIndirect` with the trailing dictionary (no receiver).
+- **`T::m(args)` in a mono clone:** `mono_type_param_tys` maps `T` to its concrete type, so the clone calls that instance directly. The argument-typed lookup cannot see a return-only `T`.
+- **Generic function returning `T`:** `emit_call_site_dicts` binds scheme variables from the call's result type; `bind_scheme_vars` also matches `Result<T, E>` / `Option<T>` sums structurally.
+- A `Construct`-shaped static call is a call, not a variant: `ctor_unbox_ty`, `expr_is_construct_of`, `expr_may_clobber_operand_stack` and `local_escape::is_in_frame_ctor` check `tag_for` first.
 
-1. **Trait declarations** record `is_static` per method, and the scheme has no receiver. Instances check that static-ness matches.
-2. **`Owner::m(args)`:** extend `try_infer_static_method_call`:
-   - `Owner` is a class or type with an instance of a trait that has a static `m`: instantiate the method scheme with the class parameter set to `Owner`, then discharge. That records the instance in `call_site_dicts`, which codegen already uses.
-   - `Owner` is a type parameter in scope: resolve through the bound and record a `BoundMethodCall { has_receiver: false, method_slot, dict_index }`.
-   - Anything else keeps today's enum / inherent paths.
-3. **Return-type-directed resolution** fixes row 4 and is the core change:
-   - **Bidirectional step.** When a call's result type contains a bound's open var and the node has an expected type (`expected_here`, see #531), unify the result with the expected type *before* discharging. This covers `let x: T = f()`, `return f()`, `f()?` in a `Result` fn, and arguments with a known parameter type.
-   - **Deferred bounds.** A bound whose args are still open after that step is not resolved eagerly. It goes on a per-function pending list and is retried after each statement. At the end of the function, anything left is an error ("cannot infer `T` for `Default<T>`; annotate the binding"). This removes the silent single-instance pick, which is a behavior change for any code that relies on it. Audit it with `coil test`, the vm-wire suites and the package repos before landing.
+## Library
 
-### Codegen
+- `Default::default` is a static trait method. `#[derive(Default)]` generates `static fn default()`; each class field takes its type's default (`0`, `0.0`, `false`, `""`, otherwise `Ty::default()`), and an enum takes its first variant with defaulted payloads.
+- The placeholder `Serialize` / `Deserialize` derives were removed earlier; a prelude `Encode` / `Decode` pair is a separate plan that builds on this one.
 
-- **Concrete `Owner::m(args)`:** a direct `CALL` to the instance FQN (`FromVal__Config__from_val`), with no receiver. Pass a dictionary only when the target is a default body (as the bound-call path does today).
-- **`T::m(args)` under a bound:** the existing `BoundMethodCall` lowering (dictionary slot, `CallIndirect`, `has_receiver: false`).
-- **Generic function returning `T`:** already handled by `emit_call_site_dicts` once the checker binds `T` (#535). Optional later work: add the result type to the mono key for return-only params.
-- **Layouts:** static methods returning `Result<T, E>` / `Option<T>` cross the generic boundary in boxed layout. #528 adds the adapter thunks and conversions, and they apply unchanged.
+## Not done
 
-### Library follow-ups
-
-- **`#[derive(Default)]`:** per field, `T::default()` for the field's declared type. Primitives can use literals (`0`, `0.0`, `false`, `""`) so they don't need a dictionary. That fixes the `string` field case in row 8.
-- **Built-ins:** `Default::default` and `Deserialize::deserialize` become static trait methods.
-- **Replacing the placeholder `Serialize` / `Deserialize` derives** with a prelude `Encode` / `Decode` pair is a separate plan. It builds on this one.
-
-## Delivery (one PR each)
-
-1. `static fn` in traits plus concrete `Owner::m(..)`: typecheck and codegen. Tests: concrete call, default static body, missing / mismatched static.
-2. `T::m(..)` under a bound (shared body and mono), including `Result<T, E>` returns (depends on #528).
-3. Bidirectional plus deferred bound resolution, and the error for an uninferable `T`. Tests: two `Default` instances chosen by annotation, `return f()`, `f()?`, and the error case. Audit existing single-instance inference.
-4. `#[derive(Default)]` per field; `Default` / `Deserialize` as static trait methods. Docs: coil-website traits page, `limitations.md`.
-
-## Open questions
-
-- Should a bare call `from_val(v)` be accepted when exactly one instance exists? This plan says no, for one spelling and no silent picks.
-- Should there be defaulting rules (for example, an integer literal defaulting to `int`) for otherwise-uninferable `T`? This plan says no; it's an error with a help note.
+- Generic owners (`Box<int>::from_val(v)`) wait on generic trait instances (#550 / #551).
+- Specialization keys are still argument types, so a generic call whose `T` is return-only uses the shared body plus dictionary (correct, not specialized).

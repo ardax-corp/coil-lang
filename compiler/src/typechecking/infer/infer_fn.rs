@@ -52,7 +52,9 @@ impl Checker {
             body,
             range,
         } = args;
-        if is_static {
+        // `static fn` is a trait method without a `Self`-typed receiver when
+        // it appears in a `trait` body (called as `Owner::m(..)`).
+        if is_static && self.current_typeclass.is_none() {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
                 "`static fn` is only allowed inside an `impl` block".to_string(),

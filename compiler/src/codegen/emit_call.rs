@@ -63,6 +63,24 @@ impl Compiler {
             };
             return self.compile_construct_expr(&en, &vn, &fields, ast);
         }
+        // `int::from_val(v)` parses as a call with a qualified name; a static
+        // trait method there lowers like the Construct form (#524).
+        if let Expression::QualifiedAccess { owner, member } = name.1.as_ref()
+            && self.checker.tag_for(owner, member).is_none()
+            && {
+                let fqn = self.class_member_fqn(owner, member);
+                !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn)
+            }
+        {
+            let fields = match args {
+                None => parser::ast::EnumConstructPayload::Unit,
+                Some(a) if a.is_empty() => parser::ast::EnumConstructPayload::Unit,
+                Some(a) => parser::ast::EnumConstructPayload::Tuple(a.clone()),
+            };
+            if self.emit_trait_static_call(&mut bytecode, owner, member, &fields, ast) {
+                return bytecode;
+            }
+        }
 
         if let Expression::Identifier(fname) = name.1.as_ref() {
             if let Some(kind) = self.string_builtin_for_call(fname) {
