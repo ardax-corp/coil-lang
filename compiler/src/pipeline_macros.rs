@@ -562,7 +562,7 @@ impl Pipeline {
         let line = g.text[..local.min(g.text.len())].matches('\n').count();
         let line_text = g.text.lines().nth(line).unwrap_or("").trim();
         let mut out = Message::new(
-            msg.kind().clone(),
+            *msg.kind(),
             msg.message().to_string(),
             g.site.clone(),
         );
@@ -662,10 +662,12 @@ fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, g
     });
 }
 
+/// Per derived type: helpers its derives own, attributes its members use, site.
+type MemberAttrs = (Vec<String>, Vec<String>, std::ops::Range<usize>);
+
 /// Every field / variant attribute must be a helper of one of the type's derives.
 fn check_member_attrs(jobs: &[Job]) -> Vec<Message> {
-    let mut by_target: HashMap<parser::SimpleSpan, (Vec<String>, Vec<String>, std::ops::Range<usize>)> =
-        HashMap::new();
+    let mut by_target: HashMap<parser::SimpleSpan, MemberAttrs> = HashMap::new();
     for job in jobs.iter().filter(|j| j.decl.kind == MacroKind::Derive) {
         let entry = by_target
             .entry(job.pending.target)

@@ -55,7 +55,7 @@ pub fn lower_program(ast: &mut Output<'_>, module: &str) -> Lowered {
             own_items: &own_items,
             module,
         };
-        lower_quotes(child, &names, &mut uses_quote, &mut uses_join, &mut out.messages);
+        lower_quotes(child, &names, &mut uses_quote, &mut uses_join);
     }
     if module != MACRO_MODULE && (uses_quote || !out.decls.is_empty()) {
         let mut needed = vec!["Code"];
@@ -386,16 +386,10 @@ fn rewrite_names(text: &str, names: &Names<'_>) -> String {
     out
 }
 
-fn lower_quotes(
-    node: &mut Output<'_>,
-    names: &Names<'_>,
-    uses_quote: &mut bool,
-    uses_join: &mut bool,
-    messages: &mut Vec<Message>,
-) {
+fn lower_quotes(node: &mut Output<'_>, names: &Names<'_>, uses_quote: &mut bool, uses_join: &mut bool) {
     // Holes first: a hole may itself contain a quote.
     node.1
-        .for_each_child_mut(&mut |c| lower_quotes(c, names, uses_quote, uses_join, messages));
+        .for_each_child_mut(&mut |c| lower_quotes(c, names, uses_quote, uses_join));
     let span = node.0;
     let Expression::Quote { parts, .. } = node.1.as_mut() else {
         return;
