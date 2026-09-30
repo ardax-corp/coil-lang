@@ -10387,6 +10387,12 @@ impl Compiler {
         if self.is_fn_value_escaped(name) {
             return None;
         }
+        // Trait instance methods are dictionary entries (`CodePtr`), so they
+        // keep the one-word ABI unless a definition site pinned a pair
+        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
+        if is_instance_method_fqn(&self.checker, name) {
+            return None;
+        }
         let lookup = strip_overload_key(name);
         // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
         if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {

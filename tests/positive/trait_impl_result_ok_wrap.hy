@@ -94,3 +94,43 @@ test("free fn sharing a trait method name keeps its own return") {
     assert(mk(3) == 30)?;
     assert(mk_x(5) == 5)?;
 }
+
+trait Parse<T> {
+    fn parse(T proto, int n) -> Result<T, string> {}
+
+    fn parse_or(T proto, int n, int d) -> int {
+        return match proto.parse(n) {
+            Result::Ok(_) => n,
+            Result::Err(_) => d,
+        };
+    }
+}
+
+// `Result<int, string>` is a two-word return shape; an instance method stays
+// one word so its dictionary entry can take its address.
+impl Parse for int {
+    pub fn parse(int proto, int n) -> Result<int, string> {
+        if n < 0 {
+            return Result::Err("neg");
+        }
+        return n * 2;
+    }
+}
+
+fn parse_ground(int n) -> int {
+    let r = match 0.parse(n) {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+    return r;
+}
+
+test("int instance: implicit Ok on a two-word Result shape") {
+    assert(parse_ground(4) == 8)?;
+    assert(parse_ground(-4) == -1)?;
+}
+
+test("int instance: default body through the dictionary") {
+    assert(0.parse_or(4, 9) == 4)?;
+    assert(0.parse_or(-4, 9) == 9)?;
+}
