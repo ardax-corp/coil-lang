@@ -6273,10 +6273,17 @@ impl Compiler {
         if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
             return false;
         }
+        // Box exactly the positions the trait signature types as a class
+        // type parameter: the concrete entry's prologue unboxes those (see
+        // `instance_method_unbox_tys`), and a default body takes them boxed
+        // (dictionary ABI). Other params (`int k`, `Val v`) pass as-is.
+        let unbox_tys = self.instance_method_unbox_tys(&instance.class, method, &lookup);
         let mut temps = Vec::with_capacity(arg_nodes.len());
-        for (node, ty) in arg_nodes.iter().zip(arg_tys.iter()) {
+        for (i, (node, ty)) in arg_nodes.iter().zip(arg_tys.iter()).enumerate() {
             bytecode.append(&mut self.do_compile(node));
-            Self::emit_box_if_needed(bytecode, ty);
+            if unbox_tys.get(i).is_some_and(Option::is_some) {
+                Self::emit_box_if_needed(bytecode, ty);
+            }
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
             temps.push(tmp);
