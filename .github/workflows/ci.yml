@@ -222,7 +222,9 @@ jobs:
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
           ulimit -v 65536
-          ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          # One job: every extra thread reserves a glibc malloc arena (64 MiB
+          # of address space), which alone exceeds the cap.
+          ./target/debug/coil test -j 1 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
         if: matrix.features.id == 'default'
