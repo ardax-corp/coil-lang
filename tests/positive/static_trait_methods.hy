@@ -2,10 +2,24 @@
 // at a concrete owner (class, primitive, enum) or `T::m(..)` under a bound
 // (#524). A return-only `T` is chosen by the expected type.
 
-class Val { pub i: int, pub s: string, }
-class Point { pub x: int, pub name: string, }
-enum Dir { Up, Down }
-enum DecodeError { Bad }
+class Val {
+    pub i: int,
+    pub s: string,
+}
+
+class Point {
+    pub x: int,
+    pub name: string,
+}
+
+enum Dir {
+    Up,
+    Down,
+}
+
+enum DecodeError {
+    Bad,
+}
 
 trait FromVal<T> {
     static fn from_val(Val v) -> T {}
@@ -17,16 +31,22 @@ trait FromVal<T> {
 }
 
 impl FromVal for Point {
-    pub static fn from_val(Val v) -> Point { return new Point(v.i, v.s); }
+    pub static fn from_val(Val v) -> Point {
+        return new Point(v.i, v.s);
+    }
 }
 
 impl FromVal for int {
-    pub static fn from_val(Val v) -> int { return v.i * 2; }
+    pub static fn from_val(Val v) -> int {
+        return v.i * 2;
+    }
 }
 
 impl FromVal for Dir {
     pub static fn from_val(Val v) -> Dir {
-        if v.i == 0 { return Dir::Up; }
+        if v.i == 0 {
+            return Dir::Up;
+        }
         return Dir::Down;
     }
 }
@@ -37,7 +57,9 @@ trait TryFromVal<T> {
 
 impl TryFromVal for Point {
     pub static fn try_from_val(Val v) -> Result<Point, DecodeError> {
-        if v.i < 0 { return Result::Err(DecodeError::Bad); }
+        if v.i < 0 {
+            return Result::Err(DecodeError::Bad);
+        }
         return Result::Ok(new Point(v.i, v.s));
     }
 }
@@ -78,7 +100,10 @@ fn decode_twice(Val v) -> Result<int, DecodeError> {
 }
 
 fn is_up(Dir d) -> bool {
-    let r = match d { Dir::Up => true, Dir::Down => false };
+    let r = match d {
+        Dir::Up => true,
+        Dir::Down => false,
+    };
     return r;
 }
 

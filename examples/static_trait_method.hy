@@ -8,23 +8,35 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-class Val { pub i: int, }
-class Point { pub x: int, }
+class Val {
+    pub i: int,
+}
+
+class Point {
+    pub x: int,
+}
 
 trait FromVal<T> {
     static fn from_val(Val v) -> T {}
 }
 
 impl FromVal for Point {
-    pub static fn from_val(Val v) -> Point { return new Point(v.i); }
+    pub static fn from_val(Val v) -> Point {
+        return new Point(v.i);
+    }
 }
 
 impl FromVal for int {
-    pub static fn from_val(Val v) -> int { return v.i * 2; }
+    pub static fn from_val(Val v) -> int {
+        return v.i * 2;
+    }
 }
 
 #[derive(Default)]
-class Config { pub port: int, pub name: string, }
+class Config {
+    pub port: int,
+    pub name: string,
+}
 
 fn decode<T: FromVal>(Val v) -> T {
     return T::from_val(v);

@@ -3,26 +3,46 @@
 // instance is chosen by the annotation when several exist (#524).
 
 #[derive(Default)]
-class Inner { pub n: int, pub label: string, }
+class Inner {
+    pub n: int,
+    pub label: string,
+}
 
 #[derive(Default)]
-class Q { pub x: int, pub f: float, pub ok: bool, pub name: string, pub inner: Inner, }
+class Q {
+    pub x: int,
+    pub f: float,
+    pub ok: bool,
+    pub name: string,
+    pub inner: Inner,
+}
 
 #[derive(Default)]
-class R { pub y: int, }
+class R {
+    pub y: int,
+}
 
 #[derive(Default)]
-enum Shape { Circle(int, float), Square(int) }
+enum Shape {
+    Circle(int, float),
+    Square(int),
+}
 
 #[derive(Default)]
-enum Mode { Fast, Slow }
+enum Mode {
+    Fast,
+    Slow,
+}
 
 fn make<T: Default>() -> T {
     return T::default();
 }
 
 fn is_circle(Shape s) -> bool {
-    let r = match s { Shape::Circle(_, _) => true, Shape::Square(_) => false };
+    let r = match s {
+        Shape::Circle(_, _) => true,
+        Shape::Square(_) => false,
+    };
     return r;
 }
 
@@ -49,6 +69,9 @@ test("enum default: first variant with defaulted payload") {
 
 test("enum default: unit variant") {
     let m = Mode::default();
-    let fast = match m { Mode::Fast => true, Mode::Slow => false };
+    let fast = match m {
+        Mode::Fast => true,
+        Mode::Slow => false,
+    };
     assert(fast)?;
 }
