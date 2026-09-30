@@ -283,14 +283,18 @@ impl Compiler {
                         .then(|| (instance.class.clone(), instance.args.clone(), fqn))
                 })
         {
-            // Box exactly the positions the instance entry unboxes (the ones
-            // the trait types as a class type parameter).
+            // Box the positions the instance entry unboxes (the ones the trait
+            // types as a class type parameter). A ground heap object passes
+            // as-is: `UnboxValue` returns a non-box object unchanged, and a
+            // `BoxValue` there would only allocate.
             let unbox_tys = self.instance_method_unbox_tys(&class, method, &inst_args);
             let mut nargs = 0u32;
             for (i, arg) in args.as_deref().unwrap_or(&[]).iter().enumerate() {
                 self.append_with_existential_pack(&mut bytecode, arg);
                 if unbox_tys.get(i).is_some_and(Option::is_some)
                     && let Some(ty) = self.codegen_expr_ty(arg)
+                    && crate::typechecking::value_layout::word_kind(&self.checker, &ty)
+                        != common::WORD_POINTER
                 {
                     Self::emit_box_if_needed(
                         &mut bytecode,
@@ -299,8 +303,12 @@ impl Compiler {
                 }
                 nargs += 1;
             }
-            if self.emit_instance_dict(&mut bytecode, &class, &inst_args) {
-                nargs += 1; // trailing dictionary
+            // Only a default body reaches siblings through its trailing
+            // dictionary; a concrete instance method never reads it.
+            if Self::is_default_method_fqn(&class, method, &fqn)
+                && self.emit_instance_dict(&mut bytecode, &class, &inst_args)
+            {
+                nargs += 1;
             }
             if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
                 self.missing_call_target(&fqn, span.into_range());
