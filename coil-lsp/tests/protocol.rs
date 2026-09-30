@@ -387,3 +387,38 @@ fn code_action_adds_inferred_type_annotation() {
     assert_eq!(actions[0]["title"], "Add type annotation `: int`");
     assert_eq!(apply_action(text, &main, &actions[0]), text.replace("total =", "total: int ="));
 }
+
+#[test]
+fn incremental_edits_are_applied_and_rechecked() {
+    let text = "fn main() {\n    let a: int = 1;\n    let _ = a;\n}\n";
+    let dir = project("incremental", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    // `1` → `"one"`, one keystroke-sized change after another.
+    let at = |character: u32| json!({ "line": 1, "character": character });
+    let edits = [
+        (at(17), at(18), "\""),
+        (at(18), at(18), "one"),
+        (at(21), at(21), "\""),
+    ];
+    for (version, (start, end, new_text)) in edits.into_iter().enumerate() {
+        client.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": main, "version": version + 2 },
+                "contentChanges": [{ "range": { "start": start, "end": end }, "text": new_text }],
+            }),
+        );
+    }
+    let response = client.request(
+        "textDocument/formatting",
+        json!({ "textDocument": { "uri": main }, "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    let formatted = response["result"][0]["newText"].as_str().map(str::to_owned);
+    let last = client.diagnostics_for(&main).pop().expect("diagnostics after edits");
+    assert!(
+        last.iter().any(|m| m.contains("int") && m.contains("string")),
+        "expected a type mismatch, got {last:?} (buffer {formatted:?})"
+    );
+}

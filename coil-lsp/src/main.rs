@@ -2,7 +2,7 @@
 #![allow(deprecated)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -59,6 +59,9 @@ struct ServerState {
     dirty_uris: HashSet<String>,
     /// Entry of `last_typecheck`; the project checker holds its span types.
     last_entry: Option<PathBuf>,
+    /// Edited documents whose re-analysis waits until the queued edits
+    /// behind them are applied (one typecheck per burst of keystrokes).
+    pending_analysis: Vec<Uri>,
 }
 
 fn main() {
@@ -73,7 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (request_id, initialize_params) = connection.initialize_start()?;
     let _params: InitializeParams = serde_json::from_value(initialize_params)?;
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
@@ -159,13 +162,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let index = ProjectIndex::with_roots(root_uri.clone(), lsp_module_roots(&root_uri));
         state.project_index = Some(index);
     }
-    for message in &connection.receiver {
+    // Messages read ahead of the one being handled: cancellations and
+    // edits behind a slow request apply before it runs.
+    let mut queue: VecDeque<Message> = VecDeque::new();
+    let mut cancelled: HashSet<RequestId> = HashSet::new();
+    loop {
+        if queue.is_empty() {
+            flush_pending_analysis(&connection, &mut state)?;
+            match connection.receiver.recv() {
+                Ok(message) => queue.push_back(message),
+                Err(_) => break,
+            }
+        }
+        while let Ok(message) = connection.receiver.try_recv() {
+            queue.push_back(message);
+        }
+        cancelled.extend(take_cancellations(&mut queue));
+        let Some(message) = queue.pop_front() else {
+            continue;
+        };
         match message {
             Message::Request(request) => {
+                if cancelled.remove(&request.id) {
+                    send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::RequestCanceled,
+                        format!("`{}` was cancelled", request.method),
+                    )?;
+                    continue;
+                }
                 if request.method == "shutdown" {
                     send_response(&connection, request.id, Value::Null)?;
                     continue;
                 }
+                flush_pending_analysis(&connection, &mut state)?;
                 match handle_request(&mut state, &request) {
                     Ok(Some(value)) => send_response(&connection, request.id, value)?,
                     // Every request needs a reply; silence hangs the client.
@@ -186,6 +217,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Message::Notification(notification) => {
                 if notification.method == "exit" {
                     break;
+                }
+                if notification.method != "textDocument/didChange" {
+                    flush_pending_analysis(&connection, &mut state)?;
                 }
                 // A bad notification must not take the server down.
                 if let Err(error) = handle_notification(&connection, &mut state, &notification) {
@@ -511,21 +545,15 @@ fn handle_notification(
         "textDocument/didChange" => {
             let params: lsp_types::DidChangeTextDocumentParams =
                 serde_json::from_value(notification.params.clone())?;
-            if let Some(document) = state.documents.get_mut(&params.text_document.uri) {
-                if let Some(change) = params.content_changes.into_iter().next() {
-                    document.text = change.text;
-                    document.version = params.text_document.version;
-                    let offset = document.text.len().saturating_sub(1);
-                    if let Some(good) =
-                        analyze_for_completions_at(&document.text, Some(offset))
-                    {
-                        document.last_good = Some(good);
-                    }
+            let uri = params.text_document.uri;
+            if let Some(document) = state.documents.get_mut(&uri) {
+                for change in params.content_changes {
+                    apply_change(&mut document.text, change);
                 }
-                if let Some(path) = uri_path(&params.text_document.uri) {
-                    refresh_project(state, &path);
+                document.version = params.text_document.version;
+                if !state.pending_analysis.contains(&uri) {
+                    state.pending_analysis.push(uri);
                 }
-                publish_diagnostics(connection, state, &params.text_document.uri)?;
             }
         }
         "textDocument/didSave" => {
@@ -554,6 +582,61 @@ fn handle_notification(
                 )))?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Apply one `didChange` content change: a ranged splice, or the whole text.
+fn apply_change(text: &mut String, change: lsp_types::TextDocumentContentChangeEvent) {
+    match change.range.and_then(|range| lsp_range_to_byte_range(text, range)) {
+        Some(range) => text.replace_range(range, &change.text),
+        None => *text = change.text,
+    }
+}
+
+/// Remove `$/cancelRequest` notifications from `queue`; return the ids of
+/// the queued requests they cancel (cancels for requests already answered
+/// are dropped).
+fn take_cancellations(queue: &mut VecDeque<Message>) -> Vec<RequestId> {
+    let mut ids = Vec::new();
+    queue.retain(|message| {
+        let Message::Notification(notification) = message else {
+            return true;
+        };
+        if notification.method != "$/cancelRequest" {
+            return true;
+        }
+        if let Ok(params) = serde_json::from_value::<lsp_types::CancelParams>(notification.params.clone()) {
+            ids.push(match params.id {
+                lsp_types::NumberOrString::Number(n) => RequestId::from(n),
+                lsp_types::NumberOrString::String(s) => RequestId::from(s),
+            });
+        }
+        false
+    });
+    ids.retain(|id| {
+        queue
+            .iter()
+            .any(|message| matches!(message, Message::Request(request) if &request.id == id))
+    });
+    ids
+}
+
+/// Re-analyze documents edited since the last flush: completion metadata,
+/// the project typecheck, and diagnostics.
+fn flush_pending_analysis(connection: &Connection, state: &mut ServerState) -> Result<(), Box<dyn std::error::Error>> {
+    for uri in std::mem::take(&mut state.pending_analysis) {
+        let Some(document) = state.documents.get_mut(&uri) else {
+            continue;
+        };
+        let offset = document.text.len().saturating_sub(1);
+        if let Some(good) = analyze_for_completions_at(&document.text, Some(offset)) {
+            document.last_good = Some(good);
+        }
+        if let Some(path) = uri_path(&uri) {
+            refresh_project(state, &path);
+        }
+        publish_diagnostics(connection, state, &uri)?;
     }
     Ok(())
 }
@@ -3966,6 +4049,43 @@ fn semantic_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranged_changes_splice_in_order() {
+        let mut text = "fn main() {\n    let a = 1;\n}\n".to_string();
+        let change = |range: Option<((u32, u32), (u32, u32))>, new: &str| {
+            lsp_types::TextDocumentContentChangeEvent {
+                range: range.map(|((sl, sc), (el, ec))| LspRange {
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
+                }),
+                range_length: None,
+                text: new.to_string(),
+            }
+        };
+        apply_change(&mut text, change(Some(((1, 12), (1, 13))), "42"));
+        apply_change(&mut text, change(Some(((1, 8), (1, 9))), "answer"));
+        apply_change(&mut text, change(Some(((2, 1), (2, 1))), "\n// end"));
+        assert_eq!(text, "fn main() {\n    let answer = 42;\n}\n// end\n");
+        apply_change(&mut text, change(None, "fn main() {}\n"));
+        assert_eq!(text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn cancellations_only_hit_queued_requests() {
+        let cancel = |id: i32| {
+            Message::Notification(Notification::new(
+                "$/cancelRequest".into(),
+                lsp_types::CancelParams {
+                    id: lsp_types::NumberOrString::Number(id),
+                },
+            ))
+        };
+        let hover = |id: i32| Message::Request(Request::new(RequestId::from(id), "textDocument/hover".into(), Value::Null));
+        let mut queue = VecDeque::from([hover(1), cancel(1), cancel(7), hover(2)]);
+        assert_eq!(take_cancellations(&mut queue), [RequestId::from(1)]);
+        assert_eq!(queue.len(), 2, "cancel notifications are consumed");
+    }
 
     #[test]
     fn add_use_edit_joins_or_appends() {
