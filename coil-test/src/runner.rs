@@ -13,6 +13,7 @@ use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::{Machine, wire_thread_program};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
+use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
 use crate::order::{Order, format_seed};
 
 /// What to run and how to compile it.
@@ -28,6 +29,8 @@ pub struct TestOptions {
     pub jobs: usize,
     /// Also print passing cases' captured output (`--show-output`).
     pub show_output: bool,
+    /// Line coverage (`--coverage`); `None` = off.
+    pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
@@ -86,11 +89,21 @@ fn compile_fail_rejected<T, E>(compiled: &std::thread::Result<Result<T, E>>) -> 
 }
 
 /// Counts plus the order files were started in.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SuiteResult {
     pub passed: usize,
     pub failed: usize,
     pub files_run: Vec<PathBuf>,
+    /// Summed line coverage when `--coverage` was on.
+    pub coverage: Option<Coverage>,
+}
+
+/// What every file of one run shares.
+struct Run<'a> {
+    config: &'a ReportConfig,
+    options: &'a TestOptions,
+    reactor: &'a Arc<Reactor>,
+    coverage: Option<&'a Mutex<Coverage>>,
 }
 
 /// A case's verdict, or the handle to wait on for it.
@@ -116,6 +129,8 @@ struct PendingFile {
     /// the verdict is its cases'.
     verdict: Option<(bool, Option<String>)>,
     cases: Vec<PendingCase>,
+    /// PC → source line map for recording this program's coverage.
+    lines: Option<ProgramLines>,
 }
 
 impl PendingFile {
@@ -125,6 +140,7 @@ impl PendingFile {
             diagnostics,
             verdict: Some((ok, message)),
             cases: Vec::new(),
+            lines: None,
         }
     }
 }
@@ -153,10 +169,10 @@ impl Captured {
 }
 
 /// Wait for a file's cases, print its report, and return `(passed, failed)`.
-fn finish_file(file: PendingFile, format: ReportFormat, show_output: bool) -> (usize, usize) {
+fn finish_file(run: &Run<'_>, file: PendingFile) -> (usize, usize) {
     let diagnostics = file.diagnostics.take();
     if !diagnostics.is_empty() {
-        let _ = writer_for(format).write_all(&diagnostics);
+        let _ = writer_for(run.config.format).write_all(&diagnostics);
     }
     let (mut passed, mut failed) = (0, 0);
     if let Some((ok, message)) = file.verdict {
@@ -170,12 +186,24 @@ fn finish_file(file: PendingFile, format: ReportFormat, show_output: bool) -> (u
         }
     }
     for case in file.cases {
-        let TestReport { passed: ok, reason } = match case.state {
+        let TestReport {
+            passed: ok,
+            reason,
+            hits,
+        } = match case.state {
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
         };
+        if let (Some(cov), Some(lines), Some(hits)) = (run.coverage, &file.lines, hits) {
+            cov.lock().unwrap_or_else(|e| e.into_inner()).record(
+                lines,
+                &hits,
+                &file.display,
+                &case.name,
+            );
+        }
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
-        if !ok || show_output {
+        if !ok || run.options.show_output {
             print_captured(&output);
         }
         if ok {
@@ -229,13 +257,8 @@ enum Dispatch {
 }
 
 /// Compile one file, then decide it or start its cases.
-fn start_file(
-    config: &ReportConfig,
-    options: &TestOptions,
-    reactor: &Arc<Reactor>,
-    dispatch: Dispatch,
-    path: &Path,
-) -> PendingFile {
+fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
+    let (config, options, reactor) = (run.config, run.options, run.reactor);
     let display = path.display().to_string();
     let expect_compile_fail = is_compile_fail(path);
     let diagnostics = Captured::default();
@@ -258,6 +281,10 @@ fn start_file(
         }
     }
     bind_cli_roots(&mut pipeline, roots);
+    if let Some(cov) = &options.coverage {
+        // Keep never-called project functions so they report as uncovered.
+        pipeline.set_keep_fns_in(Some(project_filter(canonical(&cov.project_root))));
+    }
 
     // catch_unwind isolates a compiler ICE from aborting the whole
     // harness under panic=unwind. Release builds use panic=abort, so
@@ -321,6 +348,13 @@ fn start_file(
         let setup = pipeline.prologue_jmp_target();
         (setup != main && halt_first_jump_in(&mut code, setup as usize, main)).then_some(setup)
     });
+    let lines = run.coverage.map(|cov| {
+        let debug = pipeline.program_debug();
+        let tests = test_fn_ranges(&debug, cases.iter().map(|(_, entry)| *entry));
+        cov.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register_program(&debug, &tests)
+    });
     let ctx = {
         let mut root = Machine::<256>::default();
         wire_pipeline_vm(&pipeline, &mut root, Some(path));
@@ -361,6 +395,7 @@ fn start_file(
                 entry,
                 init_ip,
                 expect_ok_result,
+                coverage: run.coverage.is_some(),
             };
             let output = Arc::new(Mutex::new(Vec::new()));
             let print = Arc::clone(&output);
@@ -382,6 +417,7 @@ fn start_file(
         diagnostics,
         verdict: None,
         cases,
+        lines,
     }
 }
 
@@ -400,31 +436,39 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
     );
 
     let reactor = Reactor::new(jobs);
-    let result = if jobs == 1 {
-        run_serial(&config, options, &reactor, &files)
+    let coverage = options.coverage.as_ref().map(|c| {
+        Mutex::new(Coverage::new(
+            canonical(&c.project_root),
+            c.per_test_out.is_some(),
+        ))
+    });
+    let run = Run {
+        config: &config,
+        options,
+        reactor: &reactor,
+        coverage: coverage.as_ref(),
+    };
+    let mut result = if jobs == 1 {
+        run_serial(&run, &files)
     } else {
-        run_parallel(&config, options, &reactor, &files, jobs)
+        run_parallel(&run, &files, jobs)
     };
     reactor.shutdown();
+    result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
     Ok(result)
 }
 
 /// `--jobs 1`: compile and run each file on this thread, one at a time. No
 /// pool worker starts unless a case spawns threads.
-fn run_serial(
-    config: &ReportConfig,
-    options: &TestOptions,
-    reactor: &Arc<Reactor>,
-    files: &[PathBuf],
-) -> SuiteResult {
+fn run_serial(run: &Run<'_>, files: &[PathBuf]) -> SuiteResult {
     let mut result = SuiteResult::default();
     for path in files {
         result.files_run.push(path.clone());
-        let file = start_file(config, options, reactor, Dispatch::Inline, path);
-        let (passed, failed) = finish_file(file, config.format, options.show_output);
+        let file = start_file(run, Dispatch::Inline, path);
+        let (passed, failed) = finish_file(run, file);
         result.passed += passed;
         result.failed += failed;
-        if failed != 0 && options.fail_fast {
+        if failed != 0 && run.options.fail_fast {
             break;
         }
     }
@@ -433,13 +477,7 @@ fn run_serial(
 
 /// Compile threads claim files in order and queue their cases on the pool;
 /// this thread reports files in order, helping run cases while it waits.
-fn run_parallel(
-    config: &ReportConfig,
-    options: &TestOptions,
-    reactor: &Arc<Reactor>,
-    files: &[PathBuf],
-    jobs: usize,
-) -> SuiteResult {
+fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
     use std::sync::Condvar;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -477,8 +515,7 @@ fn run_parallel(
                             p.0 += 1;
                             p.0 - 1
                         };
-                        let file =
-                            start_file(config, options, reactor, Dispatch::Pool, &files[index]);
+                        let file = start_file(run, Dispatch::Pool, &files[index]);
                         if tx.send((index, file)).is_err() {
                             return;
                         }
@@ -494,11 +531,11 @@ fn run_parallel(
             ready.insert(index, file);
             while let Some(file) = ready.remove(&next) {
                 result.files_run.push(files[next].clone());
-                let (passed, failed) = finish_file(file, config.format, options.show_output);
+                let (passed, failed) = finish_file(run, file);
                 result.passed += passed;
                 result.failed += failed;
                 next += 1;
-                if failed != 0 && options.fail_fast {
+                if failed != 0 && run.options.fail_fast {
                     // Files already claimed still finish and are reported.
                     stop.store(true, Ordering::SeqCst);
                 }
@@ -510,9 +547,26 @@ fn run_parallel(
     result
 }
 
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Write `text` to `path`, creating parent directories.
+fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)
+}
+
 /// `coil test` entry: run the suite, print the summary, exit non-zero on failure.
 pub fn cmd_test(config: ReportConfig, options: TestOptions) {
-    let SuiteResult { passed, failed, .. } = match run_test_suite(config.clone(), &options) {
+    let SuiteResult {
+        passed,
+        failed,
+        coverage,
+        ..
+    } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
         Err(msg) => {
             let format = config.format;
@@ -529,6 +583,20 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) {
         if failed == 0 { "ok" } else { "FAILED" },
         passed + failed
     );
+    if let (Some(cov), Some(out)) = (&coverage, &options.coverage) {
+        eprintln!();
+        eprint!("{}", cov.summary());
+        if let Err(e) = write_file(&out.lcov_out, &cov.lcov()) {
+            eprintln!("coverage: cannot write `{}`: {e}", out.lcov_out.display());
+        } else {
+            eprintln!("coverage: lcov written to {}", out.lcov_out.display());
+        }
+        if let (Some(path), Some(json)) = (&out.per_test_out, cov.per_test_json()) {
+            if let Err(e) = write_file(path, &json) {
+                eprintln!("coverage: cannot write `{}`: {e}", path.display());
+            }
+        }
+    }
 
     if failed != 0 {
         if let Order::Shuffled(seed) = options.order {

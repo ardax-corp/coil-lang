@@ -16,7 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 common = { path = "../common" }
 compiler = { path = "../compiler", default-features = false }
-machine = { path = "../machine", default-features = false }
+machine = { path = "../machine", default-features = false, features = ["coverage"] }
 reporting = { path = "../reporting" }
 coil-host = { path = "../coil-host" }
 
