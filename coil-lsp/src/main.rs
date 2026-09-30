@@ -1134,6 +1134,7 @@ fn workspace_symbols(state: &ServerState, query: &str) -> Vec<SymbolInformation>
                 compiler::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
                 compiler::SymbolKind::Namespace => lsp_types::SymbolKind::NAMESPACE,
                 compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
+                compiler::SymbolKind::Macro => lsp_types::SymbolKind::MACRO,
             },
             tags: None,
             deprecated: None,
@@ -1283,10 +1284,10 @@ fn symbol_for(source: &str, item: &Output<'_>) -> Option<DocumentSymbol> {
         Expression::TypeAlias { name, .. } => (*name, lsp_types::SymbolKind::TYPE_PARAMETER),
         Expression::EnumDecl { name, .. } => (*name, lsp_types::SymbolKind::ENUM),
         Expression::StaticDecl { name, .. } => (*name, lsp_types::SymbolKind::VARIABLE),
-        Expression::AttrDecl { name, .. } | Expression::DeriveDecl { name, .. } => {
-            (*name, lsp_types::SymbolKind::METHOD)
+        Expression::AttrDecl { name, .. } => (*name, lsp_types::SymbolKind::METHOD),
+        Expression::DeriveDecl { name, .. } | Expression::FnMacroDecl { name, .. } => {
+            (*name, lsp_types::SymbolKind::MACRO)
         }
-        Expression::FnMacroDecl { name, .. } => (*name, lsp_types::SymbolKind::FUNCTION),
         Expression::Use { name, alias, .. } => (
             alias.as_deref().unwrap_or(name),
             lsp_types::SymbolKind::NAMESPACE,
@@ -3806,6 +3807,7 @@ fn merge_spanned_tokens(mut tokens: Vec<SpannedToken>) -> Vec<SpannedToken> {
 fn symbol_kind_to_token_type(kind: SymbolKind) -> u32 {
     match kind {
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
+        SymbolKind::Macro => TOKEN_MACRO,
         SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias => TOKEN_TYPE,
         SymbolKind::Namespace => TOKEN_NAMESPACE,
         SymbolKind::Variable => TOKEN_VARIABLE,
@@ -3826,6 +3828,7 @@ fn definition_token_type(checker: &Checker, definition: &compiler::SymbolDef) ->
             symbol_kind_to_token_type(definition.kind)
         }
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
+        SymbolKind::Macro => TOKEN_MACRO,
         SymbolKind::Variable => checker
             .codegen_var_type(&definition.name)
             .map(semantic_token_type_for_ty)
@@ -4531,8 +4534,8 @@ derive Answer(TypeDecl t) -> Code { return quote items {}; }
             .iter()
             .map(|s| (s.name.as_str(), s.kind))
             .collect();
-        assert_eq!(by_name.get("twice"), Some(&lsp_types::SymbolKind::FUNCTION));
-        assert_eq!(by_name.get("Answer"), Some(&lsp_types::SymbolKind::METHOD));
+        assert_eq!(by_name.get("twice"), Some(&lsp_types::SymbolKind::MACRO));
+        assert_eq!(by_name.get("Answer"), Some(&lsp_types::SymbolKind::MACRO));
     }
 
     #[test]
@@ -4678,9 +4681,19 @@ fn main() {
         let comment = token_at_byte(source, &tokens, 0).expect("block comment");
         assert_eq!(comment.token_type, TOKEN_COMMENT);
         assert!(comment.length as usize >= "/* outer /* inner */ still */".len());
-        let slash_in_string = source.find("//not").expect("string");
-        let inside = token_at_byte(source, &tokens, slash_in_string).expect("string token");
+        let string_start = source.find("\"a\\").expect("string start");
+        let inside = token_at_byte(source, &tokens, string_start).expect("string token");
         assert_eq!(inside.token_type, TOKEN_STRING);
+    }
+
+    #[test]
+    fn semantic_tokens_four_slashes_are_line_comments_not_docs() {
+        let source = "//// banner\nfn main() { return; }\n";
+        let tokens = semantic_tokens(source, None, None);
+        let banner = token_at_byte(source, &tokens, 0).expect("////");
+        assert_eq!(banner.token_type, TOKEN_COMMENT);
+        let kw = token_types_at_word(source, &tokens, "fn");
+        assert_eq!(kw, vec![TOKEN_KEYWORD]);
     }
 
     #[test]
@@ -4692,6 +4705,9 @@ fn main() {
         assert_eq!(kw, vec![TOKEN_KEYWORD]);
         let quote = token_types_at_word(source, &tokens, "quote");
         assert_eq!(quote, vec![TOKEN_KEYWORD]);
+        let decl = source.find("twice").expect("decl");
+        let at_decl = token_at_byte(source, &tokens, decl).expect("macro name");
+        assert_eq!(at_decl.token_type, TOKEN_MACRO);
         let call = source.rfind("twice").expect("call");
         let at_call = token_at_byte(source, &tokens, call).expect("twice!");
         assert_eq!(at_call.token_type, TOKEN_MACRO);
