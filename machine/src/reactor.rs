@@ -596,7 +596,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.constants),
             Arc::clone(&program.strings),
         );
-        vm.set_struct_layouts(struct_layouts.as_ref().clone());
+        vm.set_struct_layouts(struct_layouts);
         if !shared {
             vm.init_static_slots(program.static_slot_count);
         }
