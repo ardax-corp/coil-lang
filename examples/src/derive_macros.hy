@@ -115,3 +115,24 @@ derive Loud(TypeDecl t) -> Code {
         }
     };
 }
+
+/// A provider trait implemented by generated code for the user's type.
+trait Summary<T> {
+    fn summary(T self) -> string {}
+}
+
+/// `impl Summary for T`: `summary()` lists `name=value` for each field. The
+/// trait and the derive share the name `Summary` (separate namespaces).
+derive Summary(TypeDecl t) -> Code {
+    let parts: Vec<Code> = Vec::new();
+    for f in t.fields() {
+        parts.push(quote expr { ${lit(" " + f.name.str() + "=")} + self.${f.name}.show() });
+    }
+    return quote items {
+        impl Summary for ${t.name} {
+            pub fn summary(${t.name} self) -> string {
+                return ${lit(t.name.str())} + $(parts)+*;
+            }
+        }
+    };
+}

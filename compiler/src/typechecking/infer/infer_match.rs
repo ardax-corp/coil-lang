@@ -17,7 +17,10 @@ impl Checker {
         arms: &[&MatchArm],
         range: Range<usize>,
     ) -> Ty {
+        // The match's expected type is its arms'; the scrutinee is an operand.
+        let arm_expected = self.current_expected.take();
         let scrutinee_ty = self.infer(scrutinee);
+        self.current_expected = arm_expected;
         let resolved_scrutinee = apply_ty_prune(&self.subst, &scrutinee_ty);
 
         // Set up current_match_lhs for `Expression::Default`

@@ -1,0 +1,29 @@
+[package]
+name = "coil-test"
+version = "0.1.0"
+edition = "2024"
+
+# `coil test` re-execs this binary. Test-only VM mechanisms (coverage, step
+# budget, …) are enabled here and never in `coil` / `coil-embed`.
+
+[[bin]]
+name = "coil-test"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+common = { path = "../common" }
+compiler = { path = "../compiler", default-features = false }
+machine = { path = "../machine", default-features = false }
+reporting = { path = "../reporting" }
+coil-host = { path = "../coil-host" }
+comptime = { path = "../comptime" }
+
+[features]
+default = []
+# Collect at every allocation safepoint (GC soundness testing only).
+gc-stress = ["machine/gc-stress"]
+# Print GC census numbers after each mark.
+gc-stats = ["machine/gc-stats"]

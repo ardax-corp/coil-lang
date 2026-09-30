@@ -1115,8 +1115,8 @@ fn raise_producer_into_dead_peel_floor(ops: &mut Vec<IlOp>, entry_tell: u32) {
         }
         let live = analyze_slot_liveness(ops, &blocks);
 
-        let mut chosen: Option<(usize, usize, usize, u32, u32)> = None;
-        // (def_idx, first_copy, high_copy, mid, high)
+        let mut chosen: Option<(usize, usize, usize, u32, u32, usize)> = None;
+        // (def_idx, first_copy, high_copy, mid, high, rewrite_end)
         let mut i = 0;
         while i + 1 < ops.len() {
             let (
@@ -1215,53 +1215,34 @@ fn raise_producer_into_dead_peel_floor(ops: &mut Vec<IlOp>, entry_tell: u32) {
                 i += 1;
                 continue;
             }
-            // After rewriting mid→high through the rest of the function for this
-            // def, mid must not be needed under a different reaching def. Require
-            // no later STORE of mid before we finish rewriting (fail closed on
-            // another def of mid).
-            for (t, op) in ops.iter().enumerate().skip(i + 2) {
-                let (_u, defs, opaque) = op_slot_use_def(op);
-                if opaque {
-                    // Residual forms: only OK if mid is not live there.
-                    if live.live_before.get(t).is_some_and(|s| s.contains(&mid)) {
-                        ok = false;
-                    }
-                    break;
-                }
-                if defs.contains(&mid) {
-                    break; // new def; stop rewrite range
-                }
-            }
-            if !ok {
+            // mid→high is renamed from the def to `rewrite_end`, which must be
+            // exactly the def's web: every use reached only by this def, none
+            // left behind. Fail closed unless the range ends at a redefinition
+            // of mid, a terminator, or a point where mid is dead.
+            let Some(end) = peel_rewrite_end(ops, def_idx, mid, &live) else {
                 i += 1;
                 continue;
-            }
+            };
+
             let mut probe = ops[def_idx].clone();
             if !rewrite_slot_def(&mut probe, mid, if mid == 0 { 1 } else { 0 }) {
                 i += 1;
                 continue;
             }
 
-            chosen = Some((def_idx, first_copy, i, mid, high));
+            chosen = Some((def_idx, first_copy, i, mid, high, end));
             break;
         }
 
-        let Some((def_idx, first_copy, high_copy, mid, high)) = chosen else {
+        let Some((def_idx, first_copy, high_copy, mid, high, rewrite_end)) = chosen else {
             return;
         };
 
         if !rewrite_slot_def(&mut ops[def_idx], mid, high) {
             return;
         }
-        // Rewrite uses of mid → high until the next def of mid.
-        for op in ops.iter_mut().skip(def_idx + 1) {
-            let (_u, defs, opaque) = op_slot_use_def(op);
-            if opaque {
-                break;
-            }
-            if defs.contains(&mid) {
-                break;
-            }
+        // Rewrite uses of mid → high through the def's straight-line web.
+        for op in &mut ops[def_idx + 1..rewrite_end] {
             rewrite_slot_uses(op, mid, high);
         }
         // Drop peel alias copies [first_copy, high_copy+1].
@@ -1272,6 +1253,43 @@ fn raise_producer_into_dead_peel_floor(ops: &mut Vec<IlOp>, entry_tell: u32) {
             idx -= 2;
         }
     }
+}
+
+/// Exclusive end of the straight-line range after the `mid` def at `def_idx`
+/// whose uses of `mid` can be renamed with the def, or `None` when the def's
+/// value may still be read past it.
+///
+/// The range stops at a `Label` (another def may reach below: a loop header
+/// or join) or a jump (a use may sit at its target). Stopping there is only
+/// sound when `mid` is dead at that point. A redefinition of `mid` ends the
+/// web; a terminator ends it after reading its uses.
+fn peel_rewrite_end(
+    ops: &[IlOp],
+    def_idx: usize,
+    mid: u32,
+    live: &crate::il::analysis::SlotLiveness,
+) -> Option<usize> {
+    for (t, op) in ops.iter().enumerate().skip(def_idx + 1) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) {
+            let dead = live.live_before.get(t).is_some_and(|s| !s.contains(&mid));
+            return dead.then_some(t);
+        }
+        let (_u, defs, opaque) = op_slot_use_def(op);
+        if opaque {
+            // Residual forms: only OK if mid is not live there.
+            let dead = live.live_before.get(t).is_some_and(|s| !s.contains(&mid));
+            return dead.then_some(t);
+        }
+        if op.is_terminator() {
+            return Some(t + 1);
+        }
+        if defs.contains(&mid) {
+            // Include it: a read-modify-write still reads this def (only its
+            // uses are renamed).
+            return Some(t + 1);
+        }
+    }
+    Some(ops.len())
 }
 
 /// Drop `LOAD a; STORE b` when `b` is unused afterward and either the cursor
@@ -2960,6 +2978,81 @@ mod tests {
                 (IlOp::Load { slot: 3, .. }, IlOp::StorePop { slot: 5, .. })
             )),
             "latch shuffle must remain when t is live-out"
+        );
+    }
+
+    /// `fn rsum(Range<int> r) -> int { let s = 0; for x in r { s = s + x; } return s; }`
+    /// after canon: Range param = slots 0/1; `s` = 2; dead start copy 3;
+    /// end copy 4 (aliased to 1 by transfer); `x` = 5.
+    #[test]
+    fn peel_floor_raise_keeps_loop_carried_slot_whole() {
+        let l = |n| IlOp::Label(crate::il::op::Label(n));
+        let load = |slot| IlOp::Load { slot, loc: loc() };
+        let store = |slot| IlOp::StorePop { slot, loc: loc() };
+        let bin = |op| IlOp::Bin { op, loc: loc() };
+        let jump = |kind, n| IlOp::Jump {
+            kind,
+            target: crate::il::op::Label(n),
+            loc: loc(),
+            hint: Default::default(),
+        };
+        let mut ops = vec![
+            IlOp::Const { imm: 0, loc: loc() },
+            store(2),
+            load(0),
+            store(3),
+            load(1),
+            store(4),
+            load(0),
+            store(5),
+            l(1),
+            load(4),
+            load(5),
+            bin(common::Instruction::GT),
+            jump(IlJumpKind::JumpIfFalse, 2),
+            load(2),
+            load(5),
+            bin(common::Instruction::ADD),
+            store(2),
+            load(5),
+            IlOp::Const { imm: 1, loc: loc() },
+            bin(common::Instruction::ADD),
+            store(5),
+            jump(IlJumpKind::Unconditional, 1),
+            l(2),
+            load(2),
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 1,
+            },
+        ];
+        slot_promote(&mut ops, 2);
+        // `s`: its init store, the loop's read and write, and the return
+        // read must all name one slot (the loop header joins two defs).
+        let init = match ops[1] {
+            IlOp::StorePop { slot, .. } => slot,
+            _ => panic!("init store of s moved"),
+        };
+        let add = ops
+            .iter()
+            .position(|op| matches!(op, IlOp::Bin { op: common::Instruction::ADD, .. }))
+            .expect("loop add");
+        let body_read = match ops[add - 2] {
+            IlOp::Load { slot, .. } => slot,
+            _ => panic!("s read before add"),
+        };
+        let body_write = match ops[add + 1] {
+            IlOp::StorePop { slot, .. } => slot,
+            _ => panic!("s write after add"),
+        };
+        let ret_read = match ops[ops.len() - 2] {
+            IlOp::Load { slot, .. } => slot,
+            _ => panic!("s read before return"),
+        };
+        assert_eq!(
+            (init, body_read, body_write, ret_read),
+            (init, init, init, init),
+            "loop-carried s split across slots"
         );
     }
 }

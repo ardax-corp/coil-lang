@@ -263,6 +263,24 @@ enum VOp {
     },
 }
 
+/// Values a vector op splats (loop invariants read as a scalar register).
+fn vop_splats(op: &VOp, out: &mut Vec<ValueId>) {
+    match op {
+        VOp::Splat { v, .. } => out.push(*v),
+        VOp::Iota | VOp::Load { .. } => {}
+        VOp::Bin { lhs, rhs, .. } => {
+            vop_splats(lhs, out);
+            vop_splats(rhs, out);
+        }
+        VOp::Neg { src, .. } | VOp::CastI2F(src) => vop_splats(src, out),
+        VOp::Fma { a, b, c, .. } => {
+            vop_splats(a, out);
+            vop_splats(b, out);
+            vop_splats(c, out);
+        }
+    }
+}
+
 fn match_store_loop(func: &MirFunc) -> Option<StoreLoop> {
     let loops = natural_loops(func);
     if loops.len() != 1 {
@@ -728,6 +746,7 @@ fn append_store_loop(args: AppendStoreLoopArgs<'_>) -> Option<()> {
         out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.n,
         regs,
         scratch,
@@ -739,6 +758,7 @@ fn append_store_loop(args: AppendStoreLoopArgs<'_>) -> Option<()> {
         out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.init,
         regs,
         scratch,
@@ -746,6 +766,26 @@ fn append_store_loop(args: AppendStoreLoopArgs<'_>) -> Option<()> {
         loc,
         seen: &mut emitted_header,
     })?;
+    // Invariants the vector ops splat must hold their value before the
+    // vector loop, also when they are computed in the loop body.
+    let mut splats = Vec::new();
+    for st in &spec.stores {
+        vop_splats(&st.value, &mut splats);
+    }
+    for v in splats {
+        emit_header_invariant(EmitHeaderInvariantArgs {
+            out,
+            func,
+            header: spec.header,
+            body: spec.body,
+            v,
+            regs,
+            scratch,
+            pool,
+            loc,
+            seen: &mut emitted_header,
+        })?;
+    }
     emit_iv_init(out, func, spec.init, i_slot, regs, pool, loc)?;
     out.push(IlOp::byte(
         Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
@@ -885,6 +925,7 @@ fn append_reduce_loop(args: AppendReduceLoopArgs<'_>) -> Option<()> {
         out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.n,
         regs,
         scratch,
@@ -896,6 +937,7 @@ fn append_reduce_loop(args: AppendReduceLoopArgs<'_>) -> Option<()> {
         out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.iv_init,
         regs,
         scratch,
@@ -903,6 +945,24 @@ fn append_reduce_loop(args: AppendReduceLoopArgs<'_>) -> Option<()> {
         loc,
         seen: &mut emitted_header,
     })?;
+    // Invariants the vector ops splat must hold their value before the
+    // vector loop, also when they are computed in the loop body.
+    let mut splats = Vec::new();
+    vop_splats(&spec.term, &mut splats);
+    for v in splats {
+        emit_header_invariant(EmitHeaderInvariantArgs {
+            out,
+            func,
+            header: spec.header,
+            body: spec.body,
+            v,
+            regs,
+            scratch,
+            pool,
+            loc,
+            seen: &mut emitted_header,
+        })?;
+    }
     emit_iv_init(out, func, spec.iv_init, i_slot, regs, pool, loc)?;
     let init_slot = *regs.get(spec.acc_init.index())?;
     if acc_slot != init_slot {
@@ -1074,6 +1134,7 @@ fn emit_vectorized(
         out: &mut out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.n,
         regs: &regs,
         scratch,
@@ -1085,6 +1146,7 @@ fn emit_vectorized(
         out: &mut out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.init,
         regs: &regs,
         scratch,
@@ -1092,6 +1154,26 @@ fn emit_vectorized(
         loc,
         seen: &mut emitted_header,
     })?;
+    // Invariants the vector ops splat must hold their value before the
+    // vector loop, also when they are computed in the loop body.
+    let mut splats = Vec::new();
+    for st in &spec.stores {
+        vop_splats(&st.value, &mut splats);
+    }
+    for v in splats {
+        emit_header_invariant(EmitHeaderInvariantArgs {
+            out: &mut out,
+            func,
+            header: spec.header,
+            body: spec.body,
+            v,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            seen: &mut emitted_header,
+        })?;
+    }
 
     emit_iv_init(&mut out, func, spec.init, i_slot, &regs, pool, loc)?;
     // `i + 8 <= n`  <=>  `i <= n - 8`. Works for a non-zero start; `n & -8`
@@ -1353,6 +1435,7 @@ fn emit_reduced(
         out: &mut out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.n,
         regs: &regs,
         scratch,
@@ -1364,6 +1447,7 @@ fn emit_reduced(
         out: &mut out,
         func,
         header: spec.header,
+        body: spec.body,
         v: spec.iv_init,
         regs: &regs,
         scratch,
@@ -1371,6 +1455,24 @@ fn emit_reduced(
         loc,
         seen: &mut emitted_header,
     })?;
+    // Invariants the vector ops splat must hold their value before the
+    // vector loop, also when they are computed in the loop body.
+    let mut splats = Vec::new();
+    vop_splats(&spec.term, &mut splats);
+    for v in splats {
+        emit_header_invariant(EmitHeaderInvariantArgs {
+            out: &mut out,
+            func,
+            header: spec.header,
+            body: spec.body,
+            v,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            seen: &mut emitted_header,
+        })?;
+    }
 
     emit_iv_init(&mut out, func, spec.iv_init, i_slot, &regs, pool, loc)?;
     let init_slot = regs[spec.acc_init.index()];
@@ -1799,6 +1901,9 @@ struct EmitHeaderInvariantArgs<'args> {
     out: &'args mut Vec<IlOp>,
     func: &'args MirFunc,
     header: BlockId,
+    /// The loop body: invariants a vector op splats may be computed there
+    /// (no LICM at `-O0` / `-O1`), not only in the header.
+    body: BlockId,
     v: ValueId,
     regs: &'args [u8],
     scratch: u8,
@@ -1812,6 +1917,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
         out,
         func,
         header,
+        body,
         v,
         regs,
         scratch,
@@ -1820,7 +1926,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
         seen,
     } = args;
 
-    if !seen.insert(v) || defined_in(func, v) != Some(header) {
+    if !seen.insert(v) || !matches!(defined_in(func, v), Some(b) if b == header || b == body) {
         return Some(());
     }
     let inst = def(func, v)?;
@@ -1833,6 +1939,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
                 out,
                 func,
                 header,
+                body,
                 v: *lhs,
                 regs,
                 scratch,
@@ -1844,6 +1951,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
                 out,
                 func,
                 header,
+                body,
                 v: *rhs,
                 regs,
                 scratch,
@@ -1857,6 +1965,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
                 out,
                 func,
                 header,
+                body,
                 v: *src,
                 regs,
                 scratch,
@@ -1870,6 +1979,7 @@ fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
                 out,
                 func,
                 header,
+                body,
                 v: *array,
                 regs,
                 scratch,

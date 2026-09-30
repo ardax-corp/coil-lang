@@ -6467,15 +6467,19 @@ fn bounded_generic_add_ground_call_uses_specialized_clone() {
             .map(|b| b.bytecode())
             .collect::<Vec<_>>()
     );
+    // The clone is its own function, so it may also take the dense tier.
     let has_specialized_add = bc.iter().any(|b| {
         matches!(
             b.bytecode(),
-            Instruction::ADD | Instruction::BinSlotSlot | Instruction::BinReturn
+            Instruction::ADD
+                | Instruction::BinSlotSlot
+                | Instruction::BinReturn
+                | Instruction::DenseBin
         )
     });
     assert!(
         has_specialized_add,
-        "specialized add clone should contain int ADD/fused equivalent; opcodes: {:?}",
+        "specialized add clone should contain int ADD/fused/dense equivalent; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }

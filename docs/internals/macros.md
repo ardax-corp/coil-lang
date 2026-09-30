@@ -84,11 +84,10 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 | helpers | `lit(string)` (string literal), `lit_int`, `raw(text)`, `ident(name)`, `join(Vec<Code>, sep)`, `concat` |
 
 Everything in the model is a class with inherent methods; there are no enum
-payloads, traits or type aliases. Cross-module trait impls
-([coil-lang#522](https://github.com/ardax-corp/coil-lang/issues/522)), cross-module
-aliases and enum payloads of module classes did not resolve when this was
-written. Once they do, `impl Splice for string` can let `${"text"}` splice a
-literal directly.
+payloads, traits or type aliases: cross-module aliases and enum payloads of
+module classes did not resolve when this was written. A `Splice` trait
+(`impl Splice for string`) could later let `${"text"}` splice a literal
+directly.
 
 ## Quote
 
@@ -208,9 +207,9 @@ byte); serializers belong in format packages as user derives.
 - Derives on generic types are refused, as for built-ins:
   `impl<T: Show> Show for Box<T>` does not parse, and instances carry no
   constraints.
-- Package traits implemented by generated code for a user's type need #522.
-  Until it is fixed, the tests use traits declared in the using module
-  (`tests/positive/derive_macro_basic.hy`).
+- Generated code names a provider trait by path (`impl derive_macros::Summary
+  for Point`, `tests/positive/derive_macro_package_trait.hy`), so it relies on
+  qualified `impl` heads, which user code has no reason to write.
 - Function-style `name!(…)` macros and `comptime` (stages 3–4 of the macro
   design) are not started.
 - The expansion cache is in memory only: a fresh process compiles the

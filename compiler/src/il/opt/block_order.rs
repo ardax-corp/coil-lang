@@ -93,7 +93,7 @@ fn fallthrough_flags(ops: &[IlOp], blocks: &[(usize, usize)]) -> Vec<bool> {
             if s >= e {
                 return false;
             }
-            can_fall_through(&ops[e - 1])
+            ops[e - 1].can_fall_through()
         })
         .collect()
 }
@@ -144,16 +144,6 @@ fn targeted_by_uncond(ops: &[IlOp], start: usize, end: usize) -> bool {
     false
 }
 
-fn can_fall_through(op: &IlOp) -> bool {
-    !op.is_terminator()
-        && !matches!(
-            op,
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                ..
-            }
-        )
-}
 
 
 #[cfg(test)]

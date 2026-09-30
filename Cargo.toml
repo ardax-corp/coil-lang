@@ -8,6 +8,8 @@ members = [
     "reporting",
     "coil-cli",
     "coil-embed",
+    "coil-host",
+    "coil-test",
     "coil-debug",
     "coil-dissect",
     "coil-fmt",
@@ -17,7 +19,7 @@ members = [
 ]
 # Plain `cargo build` / `cargo test` at the repo root builds all CLI binaries
 # (coil + helpers), not only the root package.
-default-members = [".", "coil-embed", "coil-debug", "coil-dissect", "coil-fmt", "coil-lsp"]
+default-members = [".", "coil-embed", "coil-debug", "coil-dissect", "coil-fmt", "coil-lsp", "coil-test"]
 
 [package]
 name = "coil"
@@ -32,6 +34,7 @@ compiler = { path = "compiler", default-features = false }
 reporting = { path = "reporting" }
 coil-cli = { path = "coil-cli", default-features = false }
 comptime = { path = "comptime" }
+coil-host = { path = "coil-host" }
 clap = { version = "4.5", features = ["derive"] }
 rkyv = "0.8.12"
 sha2 = "0.10"

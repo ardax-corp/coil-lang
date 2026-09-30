@@ -11,6 +11,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 locals / C2 param+returned Range / C2b heap-field + user `Iterator::next` + dict + coro) |
 | [Q9 format / string](q9-format-string.md) | I4 reopen: SSA + LIR reconstruct of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; R2 bytes HostInvoke; R3 maps; R4 unicode leftover |
+| [Static trait methods](static-trait-methods.md) | Plan (#524): `static fn` in traits, `Owner::m` / `T::m` calls, return-type-directed bound resolution, proper `#[derive(Default)]` |
 | [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
 | [Denser MIR leftovers](mir-dense-leftovers.md) | Post A0–C3 kick list (D0 `nsieve` keep; D1 class maps; D2 dense field; D3 boxed multi-payload match; Q9 `main` fuse) |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
@@ -34,6 +35,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
+| [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, per-case VMs, test-only features |
 | [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.hy` |
 | [LSP](lsp.md) | `coil lsp` — language server |
 | [Test health report](test-health-report.md) | Historical flaky/broken-test notes |

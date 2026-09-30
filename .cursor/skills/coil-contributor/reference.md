@@ -31,6 +31,7 @@
 - Match: threaded layout, `JumpIfMatch`, nested records use `UnpackAt` (slot-based).
 - Enum fields: `LoadField` (index); typed class fields: `LoadField` / `SetField` with slot operand; dict fields: `GetField`/`SetField` (interned names).
 - **Return layout:** `typechecking::return_layout::two_word_return_enum` classifies two-slot returns on *direct* `CALL`/`RETURN` (`Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums as `[payload, tag]`; arity-2 immediate products as `[a, b]`). `CALL` bit 31 / `RETURN` operand `2`. Niches stay one word. See [limitations.md](docs/internals/limitations.md) COI-92.
+- **Repr requests (`ReprCtx`):** a consumer that wants one expression as a `[payload, tag]` pair or forced niche/heap raises `self.repr` (`unbox_enum_context`, `force_*`) right before compiling it. `do_compile` hands that to the node (`repr_here`, read via `repr_now()`) and resets it for the node's operands. Only `Group` / `Expr` / one-item `Fragment`, a block's tail, and match arm bodies (not the scrutinee) forward it. Never read the raw `self.repr.*` fields to decide a node's own layout.
 - **HostInvoke enum bits `[17:16]`:** `0` boxed `ObjEnum`, `1` Option pointer-niche / `Result<(), E>` (heap `E`), `2` heap-heap Result. Pack once via `machine::host_enum`.
 
 ## VM / values

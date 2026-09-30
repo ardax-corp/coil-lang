@@ -3843,3 +3843,121 @@
         invert_branch_over_jump(&mut ops);
         assert_eq!(ops.len(), before, "non-adjacent false target must refuse");
     }
+
+    /// `cond; JMPT arm_b; <arm_a…>; JMP join; arm_b: LOAD 1; ArrayLen; join: RETURN`.
+    /// Arm B reaches the join by fall-through with a value no pass may sink.
+    fn fall_through_non_producer_join(arm_a: Vec<IlOp>) -> Vec<IlOp> {
+        let mut ops = vec![
+            IlOp::Load {
+                slot: 0,
+                loc: common::DebugLoc::unknown(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                target: Label(1),
+                loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
+            },
+        ];
+        ops.extend(arm_a);
+        ops.extend([
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Load {
+                slot: 1,
+                loc: common::DebugLoc::unknown(),
+            },
+            IlOp::byte(Byte::new(Instruction::ArrayLen)),
+            IlOp::Label(Label(0)),
+            IlOp::Return {
+                loc: common::DebugLoc::unknown(),
+                ret_words: 1,
+            },
+        ]);
+        ops
+    }
+
+    #[test]
+    fn return_convoy_refuses_fall_through_without_producer() {
+        // `match r { Ok(_) => 1, Err(e) => e.len() }`: sinking the Ok arm's
+        // CONST into the join made the Err arm return 1.
+        let mut ops = fall_through_non_producer_join(vec![IlOp::byte(
+            Byte::new(Instruction::CONST).with_const_inline(1),
+        )]);
+        let before = ops.clone();
+        return_convoy(&mut ops);
+        assert!(ops == before, "fall-through arm must keep its own value");
+    }
+
+    #[test]
+    fn bin_join_convoy_refuses_fall_through_without_tail() {
+        let mut ops = fall_through_non_producer_join(vec![
+            IlOp::Load {
+                slot: 0,
+                loc: common::DebugLoc::unknown(),
+            },
+            IlOp::Load {
+                slot: 1,
+                loc: common::DebugLoc::unknown(),
+            },
+            IlOp::byte(Byte::new(Instruction::ADD)),
+        ]);
+        let before = ops.clone();
+        bin_join_convoy(&mut ops);
+        assert!(ops == before, "fall-through arm must keep its own value");
+    }
+
+    #[test]
+    fn multi_op_join_convoy_refuses_fall_through_without_suffix() {
+        let mut ops = fall_through_non_producer_join(load_const_add_suffix());
+        let before = ops.clone();
+        multi_op_join_convoy(&mut ops);
+        assert!(ops == before, "fall-through arm must keep its own value");
+    }
+
+    #[test]
+    fn multi_op_join_convoy_refuses_fall_through_that_replaces_pred_value() {
+        // `…; S; cond; JMPF join; POP; CONST 5; join: RETURN` is SP-balanced,
+        // but the not-taken edge returns 5, not S: S must not sink.
+        let suf = load_const_add_suffix();
+        let cond = IlOp::Const {
+            imm: 1,
+            loc: common::DebugLoc::unknown(),
+        };
+        let jmpf = IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(0),
+            loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
+        };
+        let mut ops = Vec::new();
+        ops.extend(suf.clone());
+        ops.push(cond.clone());
+        ops.push(jmpf.clone());
+        ops.push(IlOp::Pop {
+            loc: common::DebugLoc::unknown(),
+        });
+        ops.extend(suf);
+        ops.push(cond);
+        ops.push(jmpf);
+        ops.push(IlOp::Pop {
+            loc: common::DebugLoc::unknown(),
+        });
+        ops.push(IlOp::Const {
+            imm: 5,
+            loc: common::DebugLoc::unknown(),
+        });
+        ops.push(IlOp::Label(Label(0)));
+        ops.push(IlOp::Return {
+            loc: common::DebugLoc::unknown(),
+            ret_words: 1,
+        });
+        let before = ops.clone();
+        multi_op_join_convoy(&mut ops);
+        assert!(ops == before, "fall-through arm must keep its own value");
+    }

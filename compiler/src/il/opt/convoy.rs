@@ -104,6 +104,71 @@ enum JoinKind {
     NonReturn,
 }
 
+/// `(pops, pushes)` for ops that may sit between a conditional pred and its
+/// join without touching the value the pred leaves (push-only work, or work
+/// that consumes only what it pushed itself). `None` = not provably inert.
+fn inert_fall_op_effect(op: &IlOp) -> Option<(i32, i32)> {
+    match op {
+        IlOp::Load { .. }
+        | IlOp::Const { .. }
+        | IlOp::ConstPool { .. }
+        | IlOp::String { .. }
+        | IlOp::Dup { .. }
+        | IlOp::BinSlotImm { .. }
+        | IlOp::BinSlotSlot { .. } => Some((0, 1)),
+        IlOp::StorePop { .. } | IlOp::Pop { .. } => Some((1, 0)),
+        IlOp::Bin { .. } => Some((2, 1)),
+        _ => None,
+    }
+}
+
+/// Control reaches the label cluster `[cluster_start, cluster_end]` by
+/// fall-through without the tail its jump preds carry. That edge is a join
+/// predecessor too, so sinking the preds' tail into the join would be
+/// unsound (the fall-through value is replaced).
+///
+/// Not a problem when the fall-through is the not-taken edge of a
+/// conditional pred into the same cluster, reached through ops that leave
+/// that pred's value alone (checked as a pred already).
+fn falls_into(ops: &[IlOp], cluster_start: usize, cluster_end: usize) -> bool {
+    let cluster = label_cluster_ids(ops, cluster_start, cluster_end);
+    let mut i = cluster_start;
+    while i > 0 {
+        let op = &ops[i - 1];
+        if let IlOp::Jump { target, .. } = op
+            && cluster.contains(target)
+        {
+            break;
+        }
+        if !op.can_fall_through() {
+            // Nothing falls in (any ops after it are unreachable: no label).
+            return false;
+        }
+        if inert_fall_op_effect(op).is_none() {
+            return true;
+        }
+        i -= 1;
+    }
+    if i == 0 {
+        // Straight-line entry code falls into the join.
+        return cluster_start > 0;
+    }
+    // `ops[i..cluster_start]` runs after the pred's not-taken edge: it must
+    // never consume the value below it and must end balanced.
+    let mut depth = 0i32;
+    for op in &ops[i..cluster_start] {
+        let Some((pops, pushes)) = inert_fall_op_effect(op) else {
+            return true;
+        };
+        depth -= pops;
+        if depth < 0 {
+            return true;
+        }
+        depth += pushes;
+    }
+    depth != 0
+}
+
 /// Find `[cluster_start, cluster_end]` of Labels immediately before a plain RETURN at `r`.
 fn return_label_cluster(ops: &[IlOp], r: usize) -> Option<(usize, usize)> {
     if !ops[r].is_plain_return() {
@@ -287,6 +352,12 @@ pub(super) fn bin_join_convoy(ops: &mut Vec<IlOp>) {
             jump_preds.push((j, *kind));
         }
         if !ok || jump_preds.is_empty() {
+            r += 1;
+            continue;
+        }
+
+        // A fall-through edge without the tail would lose it at the join.
+        if fall.is_none() && falls_into(ops, cluster_start, cluster_end) {
             r += 1;
             continue;
         }
@@ -647,6 +718,10 @@ pub(crate) fn multi_op_join_convoy(ops: &mut Vec<IlOp>) {
         let mut chosen: Option<Vec<IlOp>> = None;
         'len: for len in (2..=MULTI_OP_SUFFIX_MAX).rev() {
             let fall = suffix_before(ops, cluster_start, len);
+            // A fall-through edge must carry the suffix too.
+            if fall.is_none() && falls_into(ops, cluster_start, cluster_end) {
+                continue;
+            }
             let (template, template_start) = if let Some(f) = fall {
                 (f, cluster_start - len)
             } else {
@@ -944,6 +1019,13 @@ pub(super) fn return_convoy(ops: &mut Vec<IlOp>) {
             jump_preds.push((j, *kind));
         }
         if !ok || jump_preds.is_empty() {
+            r += 1;
+            continue;
+        }
+
+        // A fall-through edge without the producer (e.g. a match arm ending
+        // in `ArrayLen`) would return the sunk constant instead of its value.
+        if fall.is_none() && falls_into(ops, cluster_start, cluster_end) {
             r += 1;
             continue;
         }
