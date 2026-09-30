@@ -1038,7 +1038,7 @@ impl Compiler {
                     self.missing_call_target(&n, span.into_range());
                 }
                 if let Some(enum_name) = two_word
-                    && self.unbox_enum_context == 0 {
+                    && !self.repr_now().unboxing() {
                         self.emit_box_pair_after_call(&mut bytecode, &enum_name);
                     }
                 // Generic→concrete unbox: only when the return type
@@ -1195,7 +1195,7 @@ impl Compiler {
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
                 let ok = self.emit_named_entry_ret(dest, name, arity, kind, ret_words);
                 if ok
-                    && self.unbox_enum_context == 0
+                    && !self.repr_now().unboxing()
                     && let Some(enum_name) = two_word
                 {
                     self.emit_box_pair_after_call(dest, &enum_name);
@@ -1293,7 +1293,7 @@ impl Compiler {
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
                 let ok = self.emit_named_entry_on_module_ret(name, arity, kind, ret_words);
                 if ok
-                    && self.unbox_enum_context == 0
+                    && !self.repr_now().unboxing()
                     && let Some(enum_name) = two_word
                 {
                     let mut bytecode = std::mem::take(&mut self.bytecode);

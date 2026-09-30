@@ -11,7 +11,13 @@ impl Compiler {
     ) -> CodeBuf {
         let statement = std::mem::take(&mut self.statement_match_pending);
         self.arm_discard.push(statement);
+        // The match's value is its arms' value: they take the requested
+        // representation. The scrutinee is an operand and starts clean.
+        let outer = std::mem::take(&mut self.repr);
+        self.arm_repr.push(outer);
         let out = self.compile_match_expr_inner(scrutinee, arms);
+        self.arm_repr.pop();
+        self.repr = outer;
         self.arm_discard.pop();
         out
     }
@@ -20,9 +26,19 @@ impl Compiler {
     /// arm's value (if it pushes one) is popped here, so every arm leaves the
     /// stack as it found it.
     fn emit_arm_body(&mut self, body: &Output<'_>) {
-        let mut bc = self.do_compile(body);
+        let mut bc = self.compile_arm_body(body);
         self.bytecode.append(&mut bc);
         self.discard_arm_value(body);
+    }
+
+    /// `do_compile` an arm body under the enclosing match's [`ReprCtx`],
+    /// not whatever the scrutinee lowering set.
+    fn compile_arm_body(&mut self, body: &Output<'_>) -> CodeBuf {
+        let arm = self.arm_repr.last().copied().unwrap_or_default();
+        let prev = std::mem::replace(&mut self.repr, arm);
+        let bc = self.do_compile(body);
+        self.repr = prev;
+        bc
     }
 
     /// POP the arm value in a statement match (see [`Self::emit_arm_body`]).
@@ -50,30 +66,30 @@ impl Compiler {
 
             // Existing pattern lowering requires an ObjEnum. Force direct
             // constructors onto the boxed path before entering it.
-            let previous = self.force_heap_option;
-            self.force_heap_option = true;
+            let previous = self.repr.force_heap_option;
+            self.repr.force_heap_option = true;
             let result = self.compile_match_expr_boxed(scrutinee, arms);
-            self.force_heap_option = previous;
+            self.repr.force_heap_option = previous;
             return result;
         }
         if self.expr_layout(scrutinee).is_niche_unit_result() {
             if self.try_compile_unit_result_niche_match(scrutinee, arms) {
                 return CodeBuf::new();
             }
-            let previous = self.force_heap_result;
-            self.force_heap_result = true;
+            let previous = self.repr.force_heap_result;
+            self.repr.force_heap_result = true;
             let result = self.compile_match_expr_boxed(scrutinee, arms);
-            self.force_heap_result = previous;
+            self.repr.force_heap_result = previous;
             return result;
         }
         if self.expr_layout(scrutinee).is_niche_result() {
             if self.try_compile_niche_result_match(scrutinee, arms) {
                 return CodeBuf::new();
             }
-            let previous = self.force_heap_result;
-            self.force_heap_result = true;
+            let previous = self.repr.force_heap_result;
+            self.repr.force_heap_result = true;
             let result = self.compile_match_expr_boxed(scrutinee, arms);
-            self.force_heap_result = previous;
+            self.repr.force_heap_result = previous;
             return result;
         }
         self.compile_match_expr_boxed(scrutinee, arms)
@@ -305,9 +321,9 @@ impl Compiler {
         }
 
         self.bytecode.push_seek(self.context.variables.len() as u32);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         let mut scrutinee_bc = self.do_compile(scrutinee);
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
         self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
@@ -435,10 +451,10 @@ impl Compiler {
         };
 
         self.bytecode.push_seek(self.context.variables.len() as u32);
-        let previous_niche_context = self.force_niche_option;
-        self.force_niche_option = true;
+        let previous_niche_context = self.repr.force_niche_option;
+        self.repr.force_niche_option = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
-        self.force_niche_option = previous_niche_context;
+        self.repr.force_niche_option = previous_niche_context;
         self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
@@ -544,10 +560,10 @@ impl Compiler {
         };
 
         self.bytecode.push_seek(self.context.variables.len() as u32);
-        let previous_niche_context = self.force_niche_result;
-        self.force_niche_result = true;
+        let previous_niche_context = self.repr.force_niche_result;
+        self.repr.force_niche_result = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
-        self.force_niche_result = previous_niche_context;
+        self.repr.force_niche_result = previous_niche_context;
         self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
@@ -648,10 +664,10 @@ impl Compiler {
         };
 
         self.bytecode.push_seek(self.context.variables.len() as u32);
-        let previous_niche_context = self.force_niche_result;
-        self.force_niche_result = true;
+        let previous_niche_context = self.repr.force_niche_result;
+        self.repr.force_niche_result = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
-        self.force_niche_result = previous_niche_context;
+        self.repr.force_niche_result = previous_niche_context;
         self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
@@ -761,19 +777,19 @@ impl Compiler {
             // (e.g. `match try_recv(rx)` after print→write_all).
             let mut scrutinee_bc = self.do_compile(scrutinee);
             self.bytecode.append(&mut scrutinee_bc);
-            if self.force_heap_option
+            if self.repr.force_heap_option
                 && self.expr_layout(scrutinee).is_niche_option()
                 && !Self::is_option_construct(scrutinee)
             {
                 Self::emit_niche_option_to_boxed(&mut self.bytecode);
             }
-            if self.force_heap_result
+            if self.repr.force_heap_result
                 && self.expr_layout(scrutinee).is_niche_unit_result()
                 && !Self::is_result_construct(scrutinee)
             {
                 Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
             }
-            if self.force_heap_result
+            if self.repr.force_heap_result
                 && self.expr_layout(scrutinee).is_niche_result()
                 && !Self::is_result_construct(scrutinee)
             {
@@ -1041,8 +1057,12 @@ impl Compiler {
                 if !Self::match_arm_body_is_identity_binding(&arm.pattern.1, &arm.body) {
                     if self.match_tail_call {
                         let mut arm_bc = CodeBuf::new();
-                        if !self.try_emit_tail_call_expr(&arm.body, &mut arm_bc) {
-                            arm_bc = self.do_compile(&arm.body);
+                        // Tail-call arguments are operands: no inherited repr.
+                        let prev = std::mem::take(&mut self.repr);
+                        let tail = self.try_emit_tail_call_expr(&arm.body, &mut arm_bc);
+                        self.repr = prev;
+                        if !tail {
+                            arm_bc = self.compile_arm_body(&arm.body);
                         }
                         self.bytecode.append(&mut arm_bc);
                     } else {

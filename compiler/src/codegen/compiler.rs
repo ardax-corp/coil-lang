@@ -570,13 +570,13 @@ impl Compiler {
         // `Option::None` in that CALL's arguments shifts the frame so
         // `Stream.fd()` sees the host string (InvalidInput).
         let niche_option = common::is_builtin_option_enum(enum_name)
-            && !self.force_heap_option
+            && !self.repr_now().force_heap_option
             && (self.expr_layout(ast).is_niche_option()
-                || self.force_niche_option);
+                || self.repr_now().force_niche_option);
         let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
         let niche_result = self.should_niche_result_construct(enum_name, ast);
 
-        if self.unbox_enum_context > 0 && !niche_option && !niche_unit_result && !niche_result {
+        if self.repr_now().unboxing() && !niche_option && !niche_unit_result && !niche_result {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
                     bytecode.push_const(0);
@@ -612,11 +612,11 @@ impl Compiler {
         }
 
         if common::is_builtin_option_enum(enum_name)
-            && !self.force_heap_option
+            && !self.repr_now().force_heap_option
             && self.expr_layout(ast).is_niche_option()
             || (common::is_builtin_option_enum(enum_name)
-                && !self.force_heap_option
-                && self.force_niche_option)
+                && !self.repr_now().force_heap_option
+                && self.repr_now().force_niche_option)
         {
             match (variant_name, fields) {
                 ("None", EnumConstructPayload::Unit) => {
@@ -5665,9 +5665,9 @@ impl Compiler {
                 .as_deref()
                 .is_some_and(crate::typechecking::return_layout::is_range_kind) =>
             {
-                self.unbox_enum_context += 1;
+                self.repr.unbox_enum_context += 1;
                 self.append_with_existential_pack(bytecode, expr);
-                self.unbox_enum_context -= 1;
+                self.repr.unbox_enum_context -= 1;
             }
             _ => {
                 self.append_with_existential_pack(bytecode, expr);
@@ -5790,13 +5790,13 @@ impl Compiler {
         enum_name: &str,
     ) -> bool {
         let _ = self.next_emit_id();
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if rhs_is_match {
             self.emit_binding_rhs(rhs);
         } else {
             self.append_binding_rhs(bytecode, rhs);
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
         let (payload, tag) = self.alloc_unboxed_enum_slots(name, enum_name);
         if rhs_is_match {
             self.bytecode.push_store_pop(tag);
@@ -10536,12 +10536,9 @@ impl Compiler {
 
     /// `true` when `expr` is a direct `Construct` of `enum_name` (peeling
     /// `Group`/`Expr`), the fast, alloc-free producer of a `[payload, tag]`
-    /// pair for that exact enum. A payload that itself nests a `Construct`/
-    /// `Instantiate` (e.g. `Result::Err(HttpError::NotFound)`) must not take
-    /// this path, `unbox_enum_context` is a plain counter, so compiling
-    /// that nested value under it would wrongly unbox it into a second
-    /// pair too (same hazard `local_escape::payload_contains_construct`
-    /// already fences off for the frame-local case).
+    /// pair for that exact enum. Its payload may nest any value (another
+    /// `Construct`, a call taking enums): `do_compile` scopes
+    /// [`ReprCtx`] to the construct itself, so the payload stays one word.
     fn expr_is_construct_of(expr: &Output, enum_name: &str) -> bool {
         let mut cur = expr;
         loop {
@@ -10551,38 +10548,10 @@ impl Compiler {
                 _ => break,
             }
         }
-        let Expression::Construct {
-            enum_name: en,
-            fields,
-            ..
-        } = cur.1.as_ref()
-        else {
-            return false;
-        };
-        *en == enum_name && !Self::payload_contains_nested_construct(fields)
-    }
-
-    fn payload_contains_nested_construct(fields: &parser::ast::EnumConstructPayload<'_>) -> bool {
-        use parser::ast::EnumConstructPayload;
-        fn nests(expr: &Output) -> bool {
-            let mut cur = expr;
-            loop {
-                match cur.1.as_ref() {
-                    Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
-                    Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
-                    _ => break,
-                }
-            }
-            matches!(
-                cur.1.as_ref(),
-                Expression::Construct { .. } | Expression::Instantiate(_, _)
-            )
-        }
-        match fields {
-            EnumConstructPayload::Unit => false,
-            EnumConstructPayload::Tuple(args) => args.iter().any(nests),
-            EnumConstructPayload::Record(parts) => parts.iter().any(|p| nests(&p.value)),
-        }
+        matches!(
+            cur.1.as_ref(),
+            Expression::Construct { enum_name: en, .. } if *en == enum_name
+        )
     }
 
     fn expr_arity2_tuple_items<'a>(
@@ -10643,9 +10612,9 @@ impl Compiler {
             let is_fast_call =
                 self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
             if is_fast_call {
-                self.unbox_enum_context += 1;
+                self.repr.unbox_enum_context += 1;
                 self.append_with_existential_pack(bytecode, expr);
-                self.unbox_enum_context -= 1;
+                self.repr.unbox_enum_context -= 1;
                 return;
             }
             if let Some((a, b)) = self.expr_unboxed_enum_slots(expr) {
@@ -10662,18 +10631,18 @@ impl Compiler {
         if let Some(inner) = Self::expr_try_return_src(expr)
             && self.can_flatten_try_pair(inner, enum_name)
         {
-            self.unbox_enum_context += 1;
+            self.repr.unbox_enum_context += 1;
             self.append_with_existential_pack(bytecode, inner);
-            self.unbox_enum_context -= 1;
+            self.repr.unbox_enum_context -= 1;
             return;
         }
         let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
         let is_fast_call = !is_fast_construct
             && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
         if is_fast_construct || is_fast_call {
-            self.unbox_enum_context += 1;
+            self.repr.unbox_enum_context += 1;
             self.append_with_existential_pack(bytecode, expr);
-            self.unbox_enum_context -= 1;
+            self.repr.unbox_enum_context -= 1;
             return;
         }
         if let Some((payload, tag_slot)) = self.expr_unboxed_enum_slots(expr) {
@@ -11977,13 +11946,13 @@ impl Compiler {
             return false;
         }
         let rhs_is_match = Self::rhs_is_match_expr(rhs);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if rhs_is_match {
             self.emit_binding_rhs(rhs);
         } else {
             self.append_binding_rhs(bytecode, rhs);
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
         self.expr_depth += 2;
         let slot_b = self.alloc_temp_slot();
         let slot_a = self.alloc_temp_slot();
@@ -12484,11 +12453,11 @@ impl Compiler {
 
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if !self.emit_named_entry_on_module(into_iter_fqn, 1, crate::il::EntryKind::Call) {
             self.missing_call_target(into_iter_fqn, iterable.0.into_range());
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
 
         match counted {
             Some(ForInCounted::Array) => {
@@ -12549,11 +12518,11 @@ impl Compiler {
         bb.bind_label(top_label, self.bytecode.il_mut());
 
         self.bytecode.push_load(it_slot);
-        self.unbox_enum_context += 1;
+        self.repr.unbox_enum_context += 1;
         if !self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call) {
             self.missing_call_target(next_fqn, iterable.0.into_range());
         }
-        self.unbox_enum_context -= 1;
+        self.repr.unbox_enum_context -= 1;
 
         if niche_next {
             Self::push_niche_eq_zero(&mut self.bytecode);
@@ -13805,17 +13774,18 @@ impl Compiler {
 
     fn should_niche_unit_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         common::is_builtin_result_enum(enum_name)
-            && !self.force_heap_result
+            && !self.repr_now().force_heap_result
             && (self.expr_layout(ast).is_niche_unit_result()
-                || (self.force_niche_result && self.return_layout().is_niche_unit_result()))
+                || (self.repr_now().force_niche_result
+                    && self.return_layout().is_niche_unit_result()))
     }
 
     fn should_niche_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         let layout = self.expr_layout(ast);
         common::is_builtin_result_enum(enum_name)
-            && !self.force_heap_result
+            && !self.repr_now().force_heap_result
             && !layout.is_niche_unit_result()
-            && (layout.is_niche_result() || self.force_niche_result)
+            && (layout.is_niche_result() || self.repr_now().force_niche_result)
     }
 
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
@@ -14727,9 +14697,36 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
+        let outer = self.repr;
+        let prev_here = std::mem::replace(&mut self.repr_here, outer);
+        if !Self::forwards_repr(ast) {
+            self.repr = ReprCtx::default();
+        }
         let result = self.do_compile_inner(ast);
+        self.repr = outer;
+        self.repr_here = prev_here;
         self.codegen_depth -= 1;
         result
+    }
+
+    /// Nodes whose value *is* a child's value, so a [`ReprCtx`] request on
+    /// them reaches that child. `Block` forwards to its tail and `Match` to
+    /// its arm bodies only (the `Block` arm of `do_compile_inner`,
+    /// `compile_match_expr`); every other node's operands start clean.
+    fn forwards_repr(ast: &Output<'_>) -> bool {
+        match ast.1.as_ref() {
+            Expression::Group(_) | Expression::Expr(_) | Expression::Block(_) => true,
+            Expression::Fragment(items) => items.len() == 1,
+            Expression::Match { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The [`ReprCtx`] that applies to the node being compiled: what it was
+    /// entered with, plus anything its own lowering raised for a direct emit
+    /// (for-in `next` CALL, `?` on a pair).
+    pub(super) fn repr_now(&self) -> ReprCtx {
+        self.repr_here.union(self.repr)
     }
 
     // Successful `try_emit_*` calls write bytecode in the condition, so the
@@ -14915,9 +14912,9 @@ impl Compiler {
                         // Multi-slot stack array: rewrite slots in place.
                         if let Some((payload, tag_slot)) = self.unboxed_enum_info(name) {
                             let _ = self.next_emit_id();
-                            self.unbox_enum_context += 1;
+                            self.repr.unbox_enum_context += 1;
                             self.append_binding_rhs(bytecode, value);
-                            self.unbox_enum_context -= 1;
+                            self.repr.unbox_enum_context -= 1;
                             bytecode.push_store_pop(tag_slot);
                             bytecode.push_store_pop(payload);
                         } else if let Some((base, n)) = self.unboxed_class_info(name) {
@@ -15333,7 +15330,7 @@ impl Compiler {
             {
                 bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
             } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
-                if self.unbox_enum_context > 0 {
+                if self.repr_now().unboxing() {
                     bytecode.push_load(payload);
                     bytecode.push_load(tag_slot);
                 } else if let Some(inc) = self
@@ -15732,9 +15729,17 @@ impl Compiler {
                 self.context = ctx;
                 let saved_decl_depth = self.escape_decl_depth.clone();
                 // Append each child to self.bytecode (Print/control-flow emit in-place).
-                for child in children {
+                // Only the tail is the block's value; statements start clean.
+                let tail_repr = self.repr;
+                for (i, child) in children.iter().enumerate() {
+                    self.repr = if i + 1 == children.len() {
+                        tail_repr
+                    } else {
+                        ReprCtx::default()
+                    };
                     self.compile_block_stmt(child);
                 }
+                self.repr = tail_repr;
                 self.escape_decl_depth = saved_decl_depth;
 
                 self.context = *self.context.get_prev().clone().unwrap();
@@ -15893,7 +15898,7 @@ impl Compiler {
             } => {
                 let mut start_bc = self.do_compile(start);
                 bytecode.append(&mut start_bc);
-                if self.unbox_enum_context > 0 {
+                if self.repr_now().unboxing() {
                     let mut end_bc = self.do_compile(end);
                     bytecode.append(&mut end_bc);
                 } else {
@@ -17631,9 +17636,9 @@ impl Compiler {
                     && !self.expr_layout(inner).is_niche_result()
                     && let Some(inner_kind) = self.expr_two_word_pair_kind(inner)
                 {
-                    self.unbox_enum_context += 1;
+                    self.repr.unbox_enum_context += 1;
                     let mut inner_bc = self.do_compile(inner);
-                    self.unbox_enum_context -= 1;
+                    self.repr.unbox_enum_context -= 1;
                     self.bytecode.append(&mut inner_bc);
                     self.emit_try_two_word_pair(success_tag, &inner_kind);
                     return bytecode;
@@ -17773,13 +17778,13 @@ impl Compiler {
                 // `lhs` always compiles to its ordinary (boxed / niche)
                 // representation, a two-word call auto-boxes unless
                 // immediately consumed, and `??` never opts into that.
-                let previous_niche_context = self.force_niche_option;
-                self.force_niche_option = niche_lhs;
-                let previous_result_niche = self.force_niche_result;
-                self.force_niche_result = niche_result_lhs || unit_result_lhs;
+                let previous_niche_context = self.repr.force_niche_option;
+                self.repr.force_niche_option = niche_lhs;
+                let previous_result_niche = self.repr.force_niche_result;
+                self.repr.force_niche_result = niche_result_lhs || unit_result_lhs;
                 let mut lhs_bc = self.do_compile(lhs);
-                self.force_niche_result = previous_result_niche;
-                self.force_niche_option = previous_niche_context;
+                self.repr.force_niche_result = previous_result_niche;
+                self.repr.force_niche_option = previous_niche_context;
                 self.bytecode.append(&mut lhs_bc);
 
                 let mut bb = BlockBuilder::new();
@@ -17899,12 +17904,12 @@ impl Compiler {
                 }
 
                 let receiver_is_niche = self.expr_layout(receiver).is_niche_option();
-                let previous_force = self.force_heap_option;
+                let previous_force = self.repr.force_heap_option;
                 if receiver_is_niche {
-                    self.force_heap_option = true;
+                    self.repr.force_heap_option = true;
                 }
                 let mut recv_bc = self.do_compile(receiver);
-                self.force_heap_option = previous_force;
+                self.repr.force_heap_option = previous_force;
                 self.bytecode.append(&mut recv_bc);
                 if receiver_is_niche && !Self::is_option_construct(receiver) {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
@@ -18021,11 +18026,8 @@ impl Compiler {
         self.static_const_values.clear();
         self.current_function_qualified = None;
         self.current_function_table_key = None;
-        self.force_heap_option = false;
-        self.force_niche_option = false;
-        self.force_heap_result = false;
-        self.force_niche_result = false;
-        self.unbox_enum_context = 0;
+        self.repr = ReprCtx::default();
+        self.repr_here = ReprCtx::default();
         self.compiling_two_word_enum = None;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
