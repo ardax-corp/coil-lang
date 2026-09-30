@@ -17,6 +17,7 @@ pub enum SymbolKind {
     TypeAlias,
     Namespace,
     Method,
+    Macro,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,10 +85,10 @@ impl SymbolIndex {
                 Expression::EnumDecl { name, .. } => (*name, SymbolKind::Enum),
                 Expression::TypeAlias { name, .. } => (*name, SymbolKind::TypeAlias),
                 Expression::StaticDecl { name, .. } => (*name, SymbolKind::Variable),
-                Expression::AttrDecl { name, .. } | Expression::DeriveDecl { name, .. } => {
-                    (*name, SymbolKind::Method)
+                Expression::AttrDecl { name, .. } => (*name, SymbolKind::Method),
+                Expression::DeriveDecl { name, .. } | Expression::FnMacroDecl { name, .. } => {
+                    (*name, SymbolKind::Macro)
                 }
-                Expression::FnMacroDecl { name, .. } => (*name, SymbolKind::Function),
                 Expression::Use { name, alias, .. } => {
                     (alias.as_deref().unwrap_or(name), SymbolKind::Namespace)
                 }
@@ -547,12 +548,12 @@ fn main() {
         let idx = index(source);
         let twice = idx.definitions("twice");
         assert_eq!(twice.len(), 1);
-        assert_eq!(twice[0].kind, SymbolKind::Function);
+        assert_eq!(twice[0].kind, SymbolKind::Macro);
         assert_eq!(&source[twice[0].name_range.clone()], "twice");
 
         let answer = idx.definitions("Answer");
         assert_eq!(answer.len(), 1);
-        assert_eq!(answer[0].kind, SymbolKind::Method);
+        assert_eq!(answer[0].kind, SymbolKind::Macro);
 
         let refs = idx.references("twice");
         assert!(
