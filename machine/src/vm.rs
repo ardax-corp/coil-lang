@@ -1770,10 +1770,60 @@ impl<const S: usize> Machine<S> {
             let addr = v.heap_addr();
             #[cfg(feature = "gc-stress")]
             if kind == crate::memory::RootKind::Precise {
-                assert!(
-                    addr == 0 || heap.find_object_by_addr(addr).is_some(),
-                    "gc-stress: must-pointer frame slot at stack word {idx} holds a non-object"
-                );
+                let mut frame = 0;
+                for (i, f) in self.frames.iter().enumerate() {
+                    if f.get() <= idx {
+                        frame = i;
+                    }
+                }
+                let base = self.frames.iter().nth(frame).map_or(0, |f| f.get());
+                let pc = if frame + 1 == self.frames.len() {
+                    self.gc_top_ip
+                } else {
+                    self.frames.iter().nth(frame).map(|f| f.tell())
+                };
+                let fn_name = pc
+                    .and_then(|pc| {
+                        self.program_debug
+                            .fn_symbols
+                            .iter()
+                            .filter(|s| s.entry_pc as usize <= pc)
+                            .max_by_key(|s| s.entry_pc)
+                    })
+                    .map_or("?", |s| s.name.as_str());
+                let loc = pc
+                    .and_then(|pc| self.program_debug.debug_locs.get(pc))
+                    .map_or(String::from("?"), |l| format!("{l:?}"));
+                if !(addr == 0 || heap.find_object_by_addr(addr).is_some()) {
+                    let n = self.frames.len();
+                    let hi = if frame + 1 < n {
+                        self.frames.iter().nth(frame + 1).map_or(0, |f| f.get())
+                    } else {
+                        self.stack.as_slice().len()
+                    };
+                    let row: Vec<String> = self
+                        .trusted_precise_slots(frame, base, hi)
+                        .map(|s| {
+                            s.iter()
+                                .map(|&w| {
+                                    format!(
+                                        "{}{}",
+                                        common::precise_slot_index(w),
+                                        if common::precise_slot_must(w) { "!" } else { "" }
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let words: Vec<String> = (base..(base + 12).min(self.stack.capacity()))
+                        .map(|i| format!("{:#x}", self.stack[i].raw() as u64))
+                        .collect();
+                    panic!(
+                        "gc-stress: must-pointer frame slot at stack word {idx} (frame {frame} base {base} hi {hi}, slot {}, pc {pc:?} in `{fn_name}` at {loc}) holds a non-object {:#x}; row {row:?}; words {words:?}",
+                        idx.saturating_sub(base),
+                        v.raw() as u64
+                    );
+                }
             }
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
                 visit(addr, kind);

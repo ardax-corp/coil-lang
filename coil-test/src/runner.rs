@@ -6,12 +6,14 @@ use std::process::exit;
 
 use std::sync::{Arc, Mutex};
 
-use coil_host::{ExecutePipelineArgs, bind_cli_roots, execute_pipeline, wire_pipeline_vm};
+use coil_host::{
+    ExecutePipelineArgs, bind_cli_roots, execute_pipeline, wire_pipeline_threads, wire_pipeline_vm,
+};
 use common::{Byte, Instruction, ProgramDebug};
 use compiler::{HostGrants, OptLevel, Pipeline};
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
-use machine::{Machine, wire_thread_program};
+use machine::Machine;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
@@ -421,19 +423,9 @@ pub(crate) fn compile_test_file(
     let ctx = {
         let mut root = Machine::<256>::default();
         wire_pipeline_vm(&pipeline, &mut root, Some(path));
-        // No precise frame / class / static word maps: cases scan
-        // conservatively, as the harness always has. With the maps, `collect()`
-        // can free a live `Result::Err(obj)` payload (same under `coil <file>`);
-        // switch to `wire_pipeline_threads` once that GC bug is fixed.
-        wire_thread_program(
-            &mut root,
-            &code,
-            &constants,
-            &strings,
-            pipeline.static_slot_count(),
-            debug.clone(),
-            pipeline.operand_stack_slots(),
-        );
+        // The same precise frame / class / static word maps as `coil <file>`,
+        // so a case's `collect()` exercises production GC roots (#555).
+        wire_pipeline_threads(&pipeline, &mut root, &code, &constants, &strings);
         root.set_program_debug(debug.clone());
         root.set_reactor(Arc::clone(reactor));
         root.thread_spawn_context()

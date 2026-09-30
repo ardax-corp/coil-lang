@@ -5350,6 +5350,56 @@ impl Checker {
         }
     }
 
+    /// The instance's type parameters replaced by fresh variables.
+    fn freshen_instance_args(&mut self, args: &[Ty]) -> Vec<Ty> {
+        let mut vars = Vec::new();
+        for a in args {
+            Self::collect_ty_vars(a, &mut vars);
+        }
+        if vars.is_empty() {
+            return args.to_vec();
+        }
+        let mut fresh = Subst::empty();
+        for v in vars {
+            fresh.insert(v, Ty::Var(self.counter.fresh()));
+        }
+        args.iter().map(|a| apply_ty(&fresh, a)).collect()
+    }
+
+    fn collect_ty_vars(ty: &Ty, out: &mut Vec<TyVarId>) {
+        match ty {
+            Ty::Var(v) => {
+                if !out.contains(v) {
+                    out.push(*v);
+                }
+            }
+            Ty::Fun(a, b) => {
+                Self::collect_ty_vars(a, out);
+                Self::collect_ty_vars(b, out);
+            }
+            Ty::App(h, args) => {
+                Self::collect_ty_vars(h, out);
+                for a in args {
+                    Self::collect_ty_vars(a, out);
+                }
+            }
+            Ty::Tuple(items) => {
+                for i in items {
+                    Self::collect_ty_vars(i, out);
+                }
+            }
+            Ty::List(inner) | Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
+            Ty::Array { element, .. } => Self::collect_ty_vars(element, out),
+            Ty::Record { fields } => {
+                for (_, t) in fields {
+                    Self::collect_ty_vars(t, out);
+                }
+            }
+            Ty::Constructor { owner, .. } => Self::collect_ty_vars(owner, out),
+            _ => {}
+        }
+    }
+
     fn ty_mentions_var(ty: &Ty) -> bool {
         match ty {
             Ty::Var(_) => true,
@@ -5796,7 +5846,11 @@ impl Checker {
                 return boolean();
             }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
-        if let Ty::Var(var) = apply_ty_prune(&self.subst, &unified) {
+        let pruned = apply_ty_prune(&self.subst, &unified);
+        if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
+            self.check_ground_ordering_operands(&pruned, class, method, &range);
+        }
+        if let Ty::Var(var) = pruned {
             if self.user_dict_index(var, class).is_none() {
                 self.bind_matching_abstract_constraints(Some(var), class);
             }
@@ -5958,6 +6012,9 @@ impl Checker {
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
         let pruned = apply_ty_prune(&self.subst, &result);
+        if !matches!(&pruned, Ty::Var(_)) {
+            self.check_ground_arith_operands(&pruned, op, &range);
+        }
         if let Ty::Var(v) = &pruned {
             let (class, method) = match op {
                 "+" => ("Add", "add"),
@@ -6005,6 +6062,107 @@ impl Checker {
             }
         }
         result
+    }
+
+    /// Instance-lookup shape of a ground operand type (`Sum` enums by name,
+    /// `readonly` stripped).
+    fn operand_instance_lookup_ty(ty: &Ty) -> Ty {
+        match ty {
+            Ty::Readonly(inner) => Self::operand_instance_lookup_ty(inner),
+            Ty::Sum { name, .. } => Ty::Con(name.clone()),
+            Ty::Constructor { owner, .. } => Self::operand_instance_lookup_ty(owner),
+            other => other.clone(),
+        }
+    }
+
+    fn is_numeric_operand_ty(ty: &Ty) -> bool {
+        use crate::typechecking::ty::{BYTE, FLOAT, INT};
+        matches!(ty, Ty::Con(n) if n == INT || n == FLOAT || n == BYTE)
+    }
+
+    /// Ground operands of an arithmetic / bitwise operator must be numeric
+    /// (`int` / `float` / `byte`), `string` for `+`, or carry an instance of
+    /// the operator's trait (`impl Sub for Vec2`). The VM would otherwise
+    /// operate on the raw words (a string pointer minus a string pointer),
+    /// which is a bogus value that can crash later (#554).
+    fn check_ground_arith_operands(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
+            return;
+        }
+        let trait_name = match op {
+            "+" => Some("Add"),
+            "-" => Some("Sub"),
+            "*" => Some("Mul"),
+            "/" => Some("Div"),
+            _ => None,
+        };
+        if let Some(class) = trait_name
+            && self
+                .generics
+                .find_instance(class, std::slice::from_ref(&lookup))
+                .is_some()
+        {
+            return;
+        }
+        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let help = match (op, trait_name) {
+            ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
+            (_, Some(class)) => format!(
+                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
+            ),
+            ("%" | "**", None) => format!("`{op}` takes `int` / `float` / `byte` operands"),
+            _ => format!("`{op}` takes `int` / `byte` operands"),
+        };
+        self.messages.push({
+            let mut m = Message::error(
+                ErrorCode::TypeMismatch,
+                format!("cannot apply `{op}` to operands of type `{pretty}`"),
+                range.clone(),
+            );
+            m.with_help(help);
+            m
+        });
+    }
+
+    /// Ground operands of `<` / `<=` / `>` / `>=` must be numeric or carry an
+    /// instance of the comparison's trait (`#[derive(Ord)]`, `impl Lt for …`).
+    fn check_ground_ordering_operands(
+        &mut self,
+        ty: &Ty,
+        class: &str,
+        method: &str,
+        range: &Range<usize>,
+    ) {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
+            return;
+        }
+        if self
+            .generics
+            .find_instance(class, std::slice::from_ref(&lookup))
+            .is_some()
+        {
+            return;
+        }
+        let op = match method {
+            "lt" => "<",
+            "le" => "<=",
+            "gt" => ">",
+            _ => ">=",
+        };
+        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        self.messages.push({
+            let mut m = Message::error(
+                ErrorCode::TypeMismatch,
+                format!("cannot compare operands of type `{pretty}` with `{op}`"),
+                range.clone(),
+            );
+            m.with_help(format!(
+                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+            ));
+            m
+        });
     }
 
     /// Element-wise / broadcast arithmetic on homogeneous tuples and arrays.
@@ -9130,7 +9288,18 @@ impl Checker {
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
-            for (have, need) in inst.args.iter().zip(wanted_lookup.iter()) {
+            // A generic instance (`Show for Box<T>`) is instantiated fresh
+            // per goal: its own parameters must never be bound globally, or
+            // the first `Box<int>` would turn it into `Show for Box<int>`.
+            let inst_args = self.freshen_instance_args(&inst.args);
+            for (have, need) in inst_args.iter().zip(wanted_lookup.iter()) {
+                // An open goal argument cannot choose a generic instance
+                // (`Show<β>` against `Show for Box<T>` would pin `β`).
+                if matches!(apply_ty_prune(&local, need), Ty::Var(_)) && Self::ty_mentions_var(have)
+                {
+                    ok = false;
+                    break;
+                }
                 // Bind open vars in `need` to the concrete instance arg.
                 match unify_with(&local, need, have) {
                     Ok(s) => local = s,
@@ -9739,13 +9908,18 @@ impl Checker {
     }
 
     /// Canonical name for a bare type constructor used as an instance head.
+    ///
+    /// The same built-in spellings as a type annotation
+    /// (`parse_type_name_str_with_range`): `void` is the unit type, `Unit`
+    /// is a user type (#546).
     fn canonical_ctor_name(name: &str) -> String {
         match name.to_ascii_lowercase().as_str() {
             "int" => "int".into(),
             "float" => "float".into(),
             "string" => "string".into(),
             "bool" => "bool".into(),
-            "void" | "unit" => "unit".into(),
+            "byte" => "byte".into(),
+            "void" => "unit".into(),
             "option" => common::BUILTIN_OPTION_ENUM.into(),
             "result" => common::BUILTIN_RESULT_ENUM.into(),
             _ => name.to_string(),
@@ -12719,7 +12893,15 @@ impl Checker {
                 continue;
             };
             let class = self.impl_trait_key(class);
-            let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
+            let head_params: Vec<(String, TyVarId)> = Self::instance_head_param_names(args)
+                .into_iter()
+                .map(|n| (n.to_string(), self.counter.fresh()))
+                .collect();
+            let param_map: HashMap<String, TyVarId> = head_params.iter().cloned().collect();
+            let arg_tys: Vec<Ty> = args
+                .iter()
+                .map(|a| self.ast_instance_head_ty_with(a, &param_map))
+                .collect();
             if self
                 .generics
                 .find_overlapping_instance(class, &arg_tys)
@@ -12728,11 +12910,7 @@ impl Checker {
                 continue;
             }
             let mut method_fqns = HashMap::new();
-            let args_pretty: String = arg_tys
-                .iter()
-                .map(|t| format!("{t}"))
-                .collect::<Vec<_>>()
-                .join("_");
+            let args_pretty = Self::instance_head_fqn_part(&arg_tys, &head_params);
             let mut assoc_tys: HashMap<String, AssocTypeValue> = HashMap::new();
             for m in methods {
                 match m.1.as_ref() {
@@ -12784,19 +12962,44 @@ impl Checker {
     }
 
     /// Shape-only instance head for the trait-impl pre-pass (no ID consumption).
+    /// Built-in spellings follow [`Self::canonical_ctor_name`].
     fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
+        self.ast_instance_head_ty_with(arg, &HashMap::new())
+    }
+
+    /// Type parameters of an instance head: the bare single uppercase letters
+    /// among the `for` type's arguments (`impl Show for Box<T>` → `["T"]`),
+    /// the rule inherent `impl Cell<T>` uses. `Box<int>` stays concrete.
+    pub fn instance_head_param_names<'a>(args: &[Output<'a>]) -> Vec<&'a str> {
+        let Some(head) = args.first() else {
+            return Vec::new();
+        };
+        let Expression::TypeApp { args: head_args, .. } = head.1.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<&'a str> = Vec::new();
+        for a in head_args {
+            if let Expression::Type(n) | Expression::Identifier(n) = a.1.as_ref()
+                && n.len() == 1
+                && n.as_bytes()[0].is_ascii_uppercase()
+                && !out.contains(n)
+            {
+                out.push(n);
+            }
+        }
+        out
+    }
+
+    /// [`Self::ast_instance_head_ty`] with the head's own type parameters
+    /// mapped to variables (`Box<T>` → `Box<'a>`), so a generic instance
+    /// unifies with every `Box<_>` goal (#550).
+    fn ast_instance_head_ty_with(&self, arg: &Output, params: &HashMap<String, TyVarId>) -> Ty {
         match arg.1.as_ref() {
             Expression::Type(name) | Expression::Identifier(name) => {
-                match name.to_ascii_lowercase().as_str() {
-                    "int" => int(),
-                    "float" => float(),
-                    "string" => string(),
-                    "bool" => boolean(),
-                    "void" | "unit" => unit_ty(),
-                    "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
-                    "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
-                    _ => Ty::Con((*name).to_string()),
+                if let Some(&var) = params.get(*name) {
+                    return Ty::Var(var);
                 }
+                Ty::Con(Self::canonical_ctor_name(name))
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {
@@ -12804,7 +13007,10 @@ impl Checker {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con((*name).to_string()),
                 };
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
+                let arg_tys: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.ast_instance_head_ty_with(a, params))
+                    .collect();
                 Ty::App(Box::new(head), arg_tys)
             }
             // `impl Trait for module::Type` (module-qualified head).
@@ -12813,11 +13019,29 @@ impl Checker {
                 if args.is_empty() {
                     return head;
                 }
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
+                let arg_tys: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.ast_instance_head_ty_with(a, params))
+                    .collect();
                 Ty::App(Box::new(head), arg_tys)
             }
             _ => Ty::Con("unknown".into()),
         }
+    }
+
+    /// Codegen FQN part of an instance head: the parsed head with its type
+    /// parameters shown by name (`Box<T>`), so the checker, the pre-pass and
+    /// codegen (`codegen_instance_head_ty`) agree.
+    pub fn instance_head_fqn_part(arg_tys: &[Ty], params: &[(String, TyVarId)]) -> String {
+        let mut named = Subst::empty();
+        for (name, var) in params {
+            named.insert(*var, Ty::Con(name.clone()));
+        }
+        arg_tys
+            .iter()
+            .map(|t| apply_ty(&named, t).to_string())
+            .collect::<Vec<_>>()
+            .join("_")
     }
 
     fn stub_inherent_impl_methods(

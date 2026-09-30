@@ -28,14 +28,12 @@ See [macros.md](macros.md).
 
 | Issue | Detail | Linear |
 |-------|--------|--------|
-| Derives on generic types | **Refused** (user and built-in): `impl<T: Show> Show for Box<T>` does not parse and `InstanceDef` has no constraints. Write the `impl` by hand. | — |
-| Derived `==` on an empty class | `new Unit() == new Unit()` is false (the derived `eq` is `true`, but `==` does not reach it for a field-less class). | — |
+| Derives on generic types | **Refused** (user and built-in). An unbounded instance can be written by hand (`impl Show for Box<T>`, #550); bounds on the instance's parameters (`impl Show for Box<T: Show>`) are #551 and derives on generic types #552. | — |
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Compiled expansion programs (one per provider set) and macro outputs are cached in memory; a fresh `coil` process compiles each provider set once more (~1–2 s in a debug build for the built-in derives). | — |
 | Attribute-macro parameters | Parameters after the `FnDecl` / `TypeDecl` are `string`, `int` or `bool` (the input is decoded in the VM); other types are an error at the use site. | — |
 | Function-style macro arguments | `name!(…)` arguments are expressions as written (source text + coarse kind); a macro cannot take a type, a block or tokens. The name is bare: `m::name!(…)` does not parse. | — |
-| `-O none` expansion | Compiling the expansion program at `-O none` changed some built-in derives' results (string comparisons on model fields); it compiles at `-O basic`. Not reduced to a standalone repro yet. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
 
 ## Lambdas / captures
@@ -54,7 +52,6 @@ Lambdas and `defer` isolate the env (`take_and_isolate`). File-level imports and
 |-------|--------|--------|
 | `Option` field moves | **Decided (copy-on-match):** `match` copies the scrutinee / field pointer; nested `match` on the same `Option` field is valid. Outer pattern bindings stay in scope (codegen merges `match_bindings`). Was a nested-match lookup hole, not a true move. | [COI-77](https://linear.app/ardax/issue/COI-77) |
 | User trait calls | **Decided (dictionaries for generic bodies only):** ground Show/Length/Hash/user-trait methods with a static entry emit `CALL`. Operators on ground numeric/eq/ord types still lower to opcodes. Shared generic bodies keep dictionary passing. Spec: [types.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/types.md#call-site-dispatch). | [COI-78](https://linear.app/ardax/issue/COI-78) |
-| Arithmetic on non-numeric operands (blocking) | `-`, `*`, `/`, `%` (and `<` on `bool`) are not type-checked against the operand type: `"a" - "b"`, `[1] - [2]`, `true < false` compile. The VM then does integer arithmetic on the operands' raw words, so a pointer result can crash later (`coil mutate` on coil-stdlib hits SIGSEGV from string `+` → `-` mutants; debug builds can also panic on overflow). Workaround: none needed in correct code; `coil mutate` runs each mutant in its own process and counts such a crash as a kill. | — |
 | GC drop storing `self` | **Decided (allow-once):** storing `self` from `fn drop()` can keep the cell alive after the sweep (post-drop re-mark). Drop still runs at most once (`finalized`, including explicit `obj.drop()`). Defined footgun, not a pin API — use `gc::root` / `Weak`. Spec: [gc.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/gc.md). | [COI-79](https://linear.app/ardax/issue/COI-79) |
 
 ## IL optimizations (low)

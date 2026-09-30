@@ -6258,3 +6258,80 @@ fn niche_result_match_with_field_loads_maps() {
     let draft = super::stackmap::try_build_draft(&ops, "niche_match", 1, &[], &[]);
     assert!(draft.is_some_and(|d| !d.sites.is_empty()), "niche Result match must map");
 }
+
+/// #548: a `Br` whose false edge carries phi moves and whose taken block is
+/// the layout successor. The false-edge moves are emitted between the
+/// branch and the taken block, so the taken path must jump over them.
+#[test]
+fn br_taken_path_jumps_over_false_edge_phi_moves() {
+    let loc = loc();
+    // b = a; if cond { a = a + 1; } return a + b;
+    // `b` keeps the pre-branch `a` live past the join, so the join's phi
+    // cannot share its register and the false edge needs a move.
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Load { slot: 1, loc },
+        IlOp::StorePop { slot: 2, loc },
+        IlOp::Load { slot: 0, loc },
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(1),
+            loc,
+            hint: Default::default(),
+        },
+        IlOp::Load { slot: 1, loc },
+        IlOp::Const { imm: 1, loc },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc,
+        },
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Label(Label(1)),
+        IlOp::Load { slot: 1, loc },
+        IlOp::Load { slot: 2, loc },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc,
+        },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let mut hints = LowerHints::new("br_phi");
+    hints.slot_ty.insert(0, MirTy::I64);
+    hints.slot_ty.insert(1, MirTy::I64);
+    hints.param_count = 2;
+    let f = try_lower_numeric(&ops, &hints).expect("lower br + phi");
+    f.verify().unwrap();
+    let br = f
+        .blocks
+        .iter()
+        .find_map(|b| match &b.term {
+            Some(Terminator::Br { taken, .. }) => Some((b.id, *taken)),
+            _ => None,
+        })
+        .expect("a Br terminator");
+    assert!(
+        super::emit::is_fallthrough(&f, br.0, br.1),
+        "the taken block must be the layout successor for this shape"
+    );
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("emit br + phi");
+    let jf = lir
+        .iter()
+        .position(|op| matches!(op, IlOp::Jump { kind: IlJumpKind::JumpIfFalse, .. }))
+        .expect("JumpIfFalse");
+    let IlOp::Jump { target: f_lab, .. } = &lir[jf] else {
+        unreachable!()
+    };
+    let f_pos = lir
+        .iter()
+        .position(|op| matches!(op, IlOp::Label(l) if l == f_lab))
+        .expect("false-edge label");
+    assert!(f_pos > jf, "false-edge moves follow the branch");
+    assert!(
+        lir[jf + 1..f_pos].iter().any(|op| matches!(
+            op,
+            IlOp::Jump { kind: IlJumpKind::Unconditional, .. }
+        )),
+        "taken path must jump over the false-edge moves"
+    );
+}

@@ -244,7 +244,10 @@ fn ord_impl(TypeDecl t, string trait_name, string method, string op, string scal
     let a = "__ord_" + method + "_a_" + t.name.str();
     let b = "__ord_" + method + "_b_" + t.name.str();
     let body = "";
-    if t.repr != "" {
+    // A numeric backing orders by value; a string backing has no ordering
+    // (strings are not ordered), so `#[repr(string)]` enums order by
+    // declaration like any other enum.
+    if t.repr != "" && t.repr != "string" {
         let al = "__ord_" + method + "_al_" + t.name.str();
         let bl = "__ord_" + method + "_bl_" + t.name.str();
         body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b

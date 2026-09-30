@@ -88,10 +88,9 @@ worker count and the number of compile threads.
   started still finish and are reported.
 - **Leak smoke** runs `-j 1`: under `ulimit -v 65536` every extra thread's
   glibc malloc arena (64 MiB of address space) alone exceeds the cap.
-- **GC mode.** Cases scan conservatively (no precise frame / class / static
-  word maps), as the harness always has. With the maps, `collect()` can free a
-  live `Result::Err(obj)` payload (reproduces under `coil <file>` too); switch
-  to precise maps once that is fixed.
+- **GC mode.** Cases run with the same precise frame / class / static word
+  maps as `coil <file>` (`wire_pipeline_threads`), so a `collect()` in a test
+  exercises production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 
 ## Coverage
