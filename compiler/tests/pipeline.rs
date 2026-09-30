@@ -400,6 +400,7 @@ fn main() {
 }
 
 fn test_pipeline() -> Pipeline {
+    comptime::install();
     let mut p = Pipeline::new();
     p.bind_workspace_language_roots();
     p

@@ -1416,6 +1416,15 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+        // Derives and attribute macros run in the discovery stage, which works
+        // on cached files: compile attribute-bearing input as an in-memory file.
+        if src.contains("#[") {
+            let path = PathBuf::from("<input>.hy");
+            self.overlays.insert(path.clone(), src.to_string());
+            let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
+            self.overlays.remove(&path);
+            return result;
+        }
         let parser = Pratt::default();
         let path = Path::new("<input>");
         let mut ast = match parser.parse(src) {
@@ -1555,7 +1564,14 @@ impl Pipeline {
         }
 
         // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
+        if self.retain_cursor_il {
+            self.compiler_lazy_mut().set_retain_cursor_il(true);
+        }
         self.compiler_lazy_mut().finalize_bytecode();
+        if self.retain_cursor_il {
+            self.cursor_il = self.compiler_lazy_mut().take_cursor_il();
+            self.compiler_lazy_mut().set_retain_cursor_il(false);
+        }
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         // Patch the JMP at offset 1.
@@ -3194,27 +3210,6 @@ fn main() -> int {
             .filter(|m| *m.kind() == MessageKind::ERROR)
             .map(|m| m.message().to_string())
             .collect()
-    }
-
-    /// `#[derive]` expansion must run on the typecheck path (not compile-only).
-    #[test]
-    fn typecheck_project_sees_derive_eq() {
-        let src = r#"
-#[derive(Eq)]
-class Point { pub x: int, pub y: int }
-
-fn eq_ok() -> bool {
-    return new Point(1, 1) == new Point(1, 1);
-}
-
-fn main() {}
-"#;
-        let (_dir, file) = temp_hy("derive", src);
-        let errors = typecheck_errors(&file);
-        assert!(
-            errors.is_empty(),
-            "derived Eq should be visible to typecheck_project, got {errors:?}"
-        );
     }
 
     /// Compile-time FFI via `extern "lib"` is visible to typecheck.

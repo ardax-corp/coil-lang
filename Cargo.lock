@@ -388,6 +388,7 @@ name = "compiler"
 version = "0.1.0"
 dependencies = [
  "common",
+ "comptime",
  "libc",
  "machine",
  "parser",
