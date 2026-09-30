@@ -26,6 +26,7 @@ fn derive_expansion_matches_golden() {
     if std::env::var_os("COIL_BLESS").is_some() {
         std::fs::write(&golden, &text).unwrap();
     }
-    let want = std::fs::read_to_string(&golden).expect("golden file");
+    // A Windows checkout may turn the golden file's newlines into CRLF.
+    let want = std::fs::read_to_string(&golden).expect("golden file").replace("\r\n", "\n");
     assert_eq!(text, want, "expansion changed; bless with COIL_BLESS=1 if intended");
 }
