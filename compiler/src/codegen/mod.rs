@@ -1025,6 +1025,13 @@ pub struct Compiler {
     /// are stripped before typecheck/codegen. Set true for `coil test`
     /// or `compile --include-tests`.
     include_tests: bool,
+    /// Coverage compiles: functions whose body lies in a source file this
+    /// accepts are tree-shake roots, so never-called code is still emitted
+    /// (and reported uncovered) instead of dropped.
+    keep_fns_in: Option<crate::KeepFnFilter>,
+    /// Function name → index into `source_file_list` of the file it was
+    /// compiled from (tracked only while `keep_fns_in` is set).
+    fn_source_files: HashMap<String, u32>,
 
     /// Local variable names that hold an `ObjPolyFn` heap pointer
     /// (i.e. `let f = some_generic_fn;`). When these are invoked via
@@ -1198,6 +1205,8 @@ impl Default for Compiler {
             test_cases: Vec::new(),
             user_main_defined: false,
             include_tests: false,
+            keep_fns_in: None,
+            fn_source_files: HashMap::new(),
             polyfn_vars: HashSet::new(),
             polyfn_sources: HashMap::new(),
             mono_plan: MonoPlan::default(),

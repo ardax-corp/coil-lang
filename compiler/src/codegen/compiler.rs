@@ -383,6 +383,28 @@ impl Compiler {
         self.include_tests
     }
 
+    /// See [`crate::Pipeline::set_keep_fns_in`].
+    pub fn set_keep_fns_in(&mut self, filter: Option<crate::KeepFnFilter>) {
+        self.keep_fns_in = filter;
+    }
+
+    /// Names of emitted functions compiled from a source file `keep` accepts.
+    fn fns_defined_in(&self, keep: &crate::KeepFnFilter) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .functions
+            .keys()
+            .filter(|name| {
+                self.fn_source_files
+                    .get(*name)
+                    .and_then(|&file| self.source_file_list.get(file as usize))
+                    .is_some_and(|file| keep(file))
+            })
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Disable automatic fork-join of pure recursive calls and counted loops.
     pub fn set_auto_par(&mut self, on: bool) {
         self.auto_par = on;
@@ -1852,18 +1874,35 @@ impl Compiler {
             return true;
         }
         let slice = self.bytecode.code_slice_bytes(start, end);
+        // Coverage compiles keep the callee's source lines on inlined code (the
+        // bytes are the same; only debug info differs). Otherwise the call
+        // site's statement location is stamped on them later.
+        let callee_locs: Vec<DebugLoc> = if self.keep_fns_in.is_some() {
+            self.bytecode
+                .code_slice_ops(start, end)
+                .iter()
+                .filter(|op| op.as_plain_byte().is_some())
+                .map(IlOp::loc)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mark = bytecode.ops().len();
         if slice.len() == 1
             && let Some(expanded) = Self::expand_fused_return_for_inline(&slice[0], &temps)
         {
             bytecode.push(expanded);
+            Self::stamp_inlined_locs(bytecode, mark, callee_locs.first().copied());
             crate::il::opt::note_function_inlined();
             return true;
         }
         if slice.len() == 1 && Self::expand_bin_return_for_inline(&slice[0], &temps, bytecode) {
+            Self::stamp_inlined_locs(bytecode, mark, callee_locs.first().copied());
             crate::il::opt::note_function_inlined();
             return true;
         }
-        for byte in &slice {
+        for (k, byte) in slice.iter().enumerate() {
+            let mark = bytecode.ops().len();
             if matches!(byte.bytecode(), Instruction::RETURN) {
                 break;
             }
@@ -1897,9 +1936,22 @@ impl Compiler {
             } else {
                 bytecode.push(*byte);
             }
+            Self::stamp_inlined_locs(bytecode, mark, callee_locs.get(k).copied());
         }
         crate::il::opt::note_function_inlined();
         true
+    }
+
+    /// Give ops pushed since `from` the callee location `loc` (coverage builds).
+    fn stamp_inlined_locs(bytecode: &mut CodeBuf, from: usize, loc: Option<DebugLoc>) {
+        let Some(loc) = loc.filter(|l| l.is_known()) else {
+            return;
+        };
+        for op in bytecode.il_mut().ops_mut().iter_mut().skip(from) {
+            if !op.loc().is_known() && !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
+                op.set_loc(loc);
+            }
+        }
     }
 
     /// One-level self-unroll: peel callee body once at a self-`CALL` site.
@@ -3288,6 +3340,10 @@ impl Compiler {
             self.bytecode.bind_fresh_entry()
         };
         self.functions.insert(name.clone(), offset);
+        if self.keep_fns_in.is_some() {
+            let file = self.intern_source_file();
+            self.fn_source_files.insert(name.clone(), file);
+        }
         self.fn_entry_labels.insert(name, label);
         (offset, label)
     }
@@ -18631,7 +18687,10 @@ impl Compiler {
         // fns) before IL opts / lower. Skip when there is no `main` so snippet
         // / unit-test compiles keep their bodies.
         if self.functions.contains_key("main") {
-            let roots = vec!["main".to_string()];
+            let mut roots = vec!["main".to_string()];
+            if let Some(keep) = &self.keep_fns_in {
+                roots.extend(self.fns_defined_in(keep));
+            }
             let (_dropped, shrinks) = crate::il::prune_unused_functions(
                 &mut self.bytecode,
                 crate::il::TreeshakeInput {
