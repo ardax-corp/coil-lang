@@ -29,6 +29,13 @@
         }
       }
     },
+    "block_comment": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "/\\*[^*]*\\*+([^/*][^*]*\\*+)*/"
+      }
+    },
     "doc_comment": {
       "type": "TOKEN",
       "content": {
@@ -4680,6 +4687,10 @@
     {
       "type": "SYMBOL",
       "name": "comment"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "block_comment"
     }
   ],
   "conflicts": [
