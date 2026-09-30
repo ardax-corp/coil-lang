@@ -1489,12 +1489,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
             })?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
-            } else {
-                let f_lab = Label(*next_label);
-                *next_label += 1;
+            } else if f_moves.is_empty() {
+                // Only the taken edge moves: branch straight to `not_taken`.
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
-                    target: f_lab,
+                    target: block_lab[not_taken.index()],
                     loc,
                     hint: Default::default(),
                 });
@@ -1509,16 +1508,40 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                         hint: Default::default(),
                     });
                 }
-                out.push(IlOp::Label(f_lab));
-                for (d, s) in f_moves {
+            } else {
+                // The false edge's moves sit between this block and the next
+                // emitted one, so the taken path always jumps over them, even
+                // when `taken` is the layout successor (#548: the true path
+                // fell into the false edge's moves and reached `not_taken`).
+                let f_lab = Label(*next_label);
+                *next_label += 1;
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: f_lab,
+                    loc,
+                    hint: Default::default(),
+                });
+                for (d, s) in t_moves {
                     push_move(out, d, s, loc);
                 }
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
-                    target: block_lab[not_taken.index()],
+                    target: block_lab[taken.index()],
                     loc,
                     hint: Default::default(),
                 });
+                out.push(IlOp::Label(f_lab));
+                for (d, s) in f_moves {
+                    push_move(out, d, s, loc);
+                }
+                if !is_fallthrough(func, block.id, *not_taken) {
+                    out.push(IlOp::Jump {
+                        kind: IlJumpKind::Unconditional,
+                        target: block_lab[not_taken.index()],
+                        loc,
+                        hint: Default::default(),
+                    });
+                }
             }
         }
         Terminator::Return { lo, hi } => {
