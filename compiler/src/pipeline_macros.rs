@@ -31,12 +31,17 @@ struct Job {
     file: PathBuf,
     pending: PendingMacro,
     decl: MacroDecl,
+    provider_file: PathBuf,
     provider_module: String,
     /// `let` statements building the macro's input.
     setup: Vec<String>,
     /// The call's argument list.
     args: String,
 }
+
+/// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
+/// editor re-checks on every keystroke, and providers rarely change.
+static EXPANSION_CACHE: std::sync::Mutex<Option<HashMap<u64, String>>> = std::sync::Mutex::new(None);
 
 /// Name of the pseudo entry file of an expansion program.
 fn expansion_entry_path() -> PathBuf {
@@ -102,6 +107,7 @@ impl Pipeline {
                                 file: file.clone(),
                                 pending: p,
                                 decl,
+                                provider_file: provider,
                                 provider_module,
                                 setup,
                                 args,
@@ -334,8 +340,54 @@ impl Pipeline {
         Ok((setup, args.join(", ")))
     }
 
+    /// Hash of a macro call: the sources of its provider and everything the
+    /// provider uses, the macro and its input.
+    fn job_key(&self, job: &Job) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut closure = vec![job.provider_file.clone()];
+        let mut i = 0;
+        while i < closure.len() {
+            for dep in self.module_deps.get(&closure[i]).into_iter().flatten() {
+                if !closure.contains(dep) {
+                    closure.push(dep.clone());
+                }
+            }
+            i += 1;
+        }
+        closure.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for file in &closure {
+            file.hash(&mut h);
+            self.ast_cache.get(file).map(|c| c.source()).hash(&mut h);
+        }
+        job.decl.fn_name.hash(&mut h);
+        job.setup.hash(&mut h);
+        job.args.hash(&mut h);
+        h.finish()
+    }
+
     /// Compile the expansion program and run every job. One result per job.
     fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
+        let keys: Vec<u64> = jobs.iter().map(|j| self.job_key(j)).collect();
+        if let Some(cached) = EXPANSION_CACHE.lock().ok().and_then(|c| {
+            let c = c.as_ref()?;
+            keys.iter().map(|k| c.get(k).cloned()).collect::<Option<Vec<_>>>()
+        }) {
+            return cached.into_iter().map(Ok).collect();
+        }
+        let results = self.compile_and_run(jobs);
+        if let Ok(mut cache) = EXPANSION_CACHE.lock() {
+            let cache = cache.get_or_insert_with(HashMap::new);
+            for (key, result) in keys.iter().zip(&results) {
+                if let Ok(text) = result {
+                    cache.insert(*key, text.clone());
+                }
+            }
+        }
+        results
+    }
+
+    fn compile_and_run(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let Some(host) = self.macro_host.clone() else {
             return jobs
                 .iter()

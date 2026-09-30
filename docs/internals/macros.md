@@ -138,7 +138,11 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    own modules' macros the same way. Files already being expanded by an
    enclosing pipeline are on `macro_stack`, and reaching one again is reported as
    an expansion cycle.
-5. **Run** every entry through the `MacroHost` (below).
+5. **Run** every entry through the `MacroHost` (below). Outputs are cached for
+   the life of the process, keyed by the sources of the provider and its
+   dependencies plus the macro and its encoded input
+   (`Pipeline::job_key`), so the LSP does not recompile providers on every
+   keystroke.
 6. **Splice.** `CachedAst::parse_generated` parses each output padded with
    spaces, so its spans sit after the end of the file (and of earlier
    snippets). Spans never collide with the file's own or with the synthetic
@@ -185,5 +189,5 @@ Module statics of providers are not initialised (the expansion program has no
   (`tests/positive/derive_macro_basic.hy`).
 - Function-style `name!(…)` macros and `comptime` (stages 3–4 of the macro
   design) are not started.
-- Results are not cached across compiles: each compile of a file that uses
-  user macros compiles its providers once more.
+- The expansion cache is in memory only: a fresh process compiles the
+  providers once more.

@@ -32,7 +32,7 @@ See [macros.md](macros.md).
 | Package traits in generated code | A derive that implements its own package's trait for the user's type (`impl json::ToJson for Config`) needs cross-module trait impls, [coil-lang#522](https://github.com/ardax-corp/coil-lang/issues/522). Traits in the using module and prelude traits work. | — |
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
-| No cross-compile cache | A compile that uses user macros compiles the providing modules once more (in memory). | — |
+| Expansion cache is per process | Outputs are cached in memory by provider sources + input (the LSP and `coil test` reuse them); a fresh `coil` process compiles the providing modules once more. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
 | `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
 
