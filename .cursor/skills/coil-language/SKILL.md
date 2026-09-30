@@ -71,7 +71,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
 | FFI | `extern "c" { fn …; }` or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
 | Attributes | `#[derive(Show, Eq, Ord, Hash, String, Default, Send, Sensitive)]` (composes with `#[repr(int)]` on scalar enums), user derives and attribute macros (below); tests are `test("desc") { … }` only |
-| Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }` and `attr name(FnDecl f, int by) -> Code { … }` run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
+| Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }`, `attr name(FnDecl f, int by) -> Code { … }` and `macro name(Expr a, Vec<Expr> rest) -> Code { … }` (used as `name!(…)` in expression, statement or item position) run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Expr, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
 | Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime) |
 
 Named call-site args: positional prefix then `f(name: v)`. Rest: trailing `T... xs`. Spread: `f(...pack)`.
