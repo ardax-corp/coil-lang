@@ -17,7 +17,10 @@ use common::{
     unlikely,
 };
 
-use super::{FramePins, prefetch_code, resolve_dense_index_object_in, set_jump_target};
+use super::{
+    FramePins, STEP_BUDGET_EXHAUSTED, prefetch_code, resolve_dense_index_object_in,
+    set_jump_target,
+};
 use crate::{Frame, Heap, Object, Stack};
 
 struct HotExtra<'a> {
@@ -42,7 +45,22 @@ struct HotCtx<'a, 'e> {
     heap: &'a mut Heap,
     stack_cap: usize,
     panic_msg: Option<&'static str>,
+    /// Step budget fuel (`Machine::fuel`), local for the streak.
+    fuel: u64,
     extra: &'e mut HotExtra<'a>,
+}
+
+/// Jump to `target`, charging the step budget on a back-edge (`target <
+/// ctx.ip`, which is past the jump word). At zero fuel, stop the streak
+/// with [`STEP_BUDGET_EXHAUSTED`] instead of jumping.
+#[inline(always)]
+fn hot_jump(ctx: &mut HotCtx<'_, '_>, target: usize) {
+    ctx.fuel = ctx.fuel.wrapping_sub((target < ctx.ip) as u64);
+    if unlikely(ctx.fuel == 0) {
+        ctx.panic_msg = Some(STEP_BUDGET_EXHAUSTED);
+        return;
+    }
+    set_jump_target(&mut ctx.ip, target, ctx.code);
 }
 
 
@@ -752,7 +770,7 @@ impl UnaryBaseTable {
 
 fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
     if let Some(target) = target {
-        set_jump_target(&mut ctx.ip, target, ctx.code);
+        hot_jump(ctx, target);
     }
 }
 
@@ -769,7 +787,7 @@ fn apply_trailing_jmp(ctx: &mut HotCtx<'_, '_>) {
         return;
     }
     ctx.ip += 1;
-    set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+    hot_jump(ctx, next.operand_u32() as usize);
 }
 
 /// Same as [`apply_trailing_jmp`] with `unlikely` so unpaired `DenseBin`
@@ -783,7 +801,7 @@ fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
     let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
     if unlikely(*next.bytecode() as u8 == Instruction::JMP as u8) {
         ctx.ip += 1;
-        set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+        hot_jump(ctx, next.operand_u32() as usize);
     }
 }
 
@@ -925,16 +943,16 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         }
         Instruction::DenseUnary => dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::JMP => {
-            set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
+            hot_jump(ctx, opcode.operand_u32() as usize);
         }
         Instruction::JMPF => {
             if !ctx.stack.pop().as_bool() {
-                set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
+                hot_jump(ctx, opcode.operand_u32() as usize);
             }
         }
         Instruction::JMPT => {
             if ctx.stack.pop().as_bool() {
-                set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
+                hot_jump(ctx, opcode.operand_u32() as usize);
             }
         }
         Instruction::BinSlotSlotJmpf => apply_jump(
@@ -1066,6 +1084,7 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
     pub frame_pins: &'a mut Vec<FramePins>,
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
+    pub fuel: &'a mut u64,
     pub stack_cap: usize,
 }
 
@@ -1090,6 +1109,7 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
         frame_pins,
         dense_obj_addr,
         dense_obj,
+        fuel,
         stack_cap,
     } = args;
     if *ip >= code.len() {
@@ -1115,11 +1135,13 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
         heap,
         stack_cap,
         panic_msg: None,
+        fuel: *fuel,
         extra: &mut extra,
     };
     execute_dense(&mut ctx);
     *ip = ctx.ip;
     *sp = ctx.sp;
+    *fuel = ctx.fuel;
     ctx.panic_msg
 }
 
