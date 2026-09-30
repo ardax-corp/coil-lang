@@ -264,3 +264,34 @@ fn member_goto_definition_finds_method_and_field() {
     );
     assert_eq!(response["result"][0]["range"]["start"], position_of(CLASS_SOURCE, "x: int", 0));
 }
+
+#[test]
+fn inlay_hints_show_let_types_and_parameter_names() {
+    let text = "fn area(int width, int height) -> int {\n    return width * height;\n}\n\nfn main() {\n    let height = 3;\n    let a = area(2, height);\n    let _ = a;\n}\n";
+    let dir = project("inlay", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let response = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": main },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 9, "character": 0 } },
+        }),
+    );
+    let hints: Vec<(Value, &str)> = response["result"]
+        .as_array()
+        .expect("hint list")
+        .iter()
+        .map(|hint| (hint["position"].clone(), hint["label"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        hints,
+        [
+            (position_of(text, "height = 3", 6), ": int"),
+            (position_of(text, "a = area", 1), ": int"),
+            // `height` passed as `height` needs no hint.
+            (position_of(text, "2, height", 0), "width:"),
+        ]
+    );
+}

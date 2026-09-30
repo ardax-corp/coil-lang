@@ -99,6 +99,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
         })),
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
         semantic_tokens_provider: Some(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -297,6 +298,11 @@ fn handle_request(
                 .map(|document| selection_ranges(&document.text, &params.positions))
                 .unwrap_or_default();
             Some(serde_json::to_value(ranges)?)
+        }
+        "textDocument/inlayHint" => {
+            let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
+            let hints = inlay_hints(state, &params.text_document.uri, params.range).unwrap_or_default();
+            Some(serde_json::to_value(hints)?)
         }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
@@ -2121,6 +2127,134 @@ fn member_access_at(text: &str, offset: usize) -> Option<(Vec<String>, String, R
 /// Class name inside a type's display text (`util::Point`, `Box<int>`).
 fn class_of_type_text(text: &str) -> String {
     text.split('<').next().unwrap_or(text).trim().to_string()
+}
+
+/// Inlay hints inside `range`: the inferred type after an unannotated
+/// `let` name, and parameter names before positional call arguments.
+fn inlay_hints(state: &mut ServerState, uri: &Uri, range: LspRange) -> Option<Vec<lsp_types::InlayHint>> {
+    let path = uri_path(uri)?;
+    let text = state.documents.get(uri)?.text.clone();
+    let window = lsp_range_to_byte_range(&text, range).unwrap_or(0..text.len());
+    let ast = Pratt::default().parse(&text).ok()?;
+    if state.project_index.is_some() && state.last_entry.as_ref() != Some(&path) {
+        refresh_project(state, &path);
+    }
+    // Parameter names of free functions declared here or in the project.
+    let mut sources = vec![text.clone()];
+    if let Some(index) = &state.project_index {
+        for indexed in index.indexed_paths() {
+            if indexed != &path
+                && let Some(source) = index.source_for(indexed)
+            {
+                sources.push(source.to_owned());
+            }
+        }
+    }
+    let mut params_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut params_of = |name: &str| {
+        params_cache
+            .entry(name.to_owned())
+            .or_insert_with(|| sources.iter().find_map(|source| function_parameter_list(source, name)))
+            .clone()
+    };
+    let checker = state.project_index.as_ref().map(|index| index.checker());
+    let mut hints = Vec::new();
+    let in_window = |at: usize| window.start <= at && at <= window.end;
+    visit_nodes(&ast, &mut |node| match node.1.as_ref() {
+        Expression::Fragment(items) => {
+            let Some((head_span, head)) = items.first() else {
+                return;
+            };
+            let Expression::Variable(name, None) = head.as_ref() else {
+                return;
+            };
+            let Some((value_span, value)) = items.get(1) else {
+                return;
+            };
+            // `new C(…)` already names its type.
+            if name.starts_with('_') || matches!(value.as_ref(), Expression::Instantiate(..)) {
+                return;
+            }
+            let Some(checker) = checker else {
+                return;
+            };
+            let Some(name_start) = text[head_span.start..head_span.end]
+                .find(name)
+                .map(|i| head_span.start + i)
+            else {
+                return;
+            };
+            let name_end = name_start + name.len();
+            if !in_window(name_end) {
+                return;
+            }
+            let Some(ty) = checker.lookup_for_codegen_span(value_span.start, value_span.end) else {
+                return;
+            };
+            let label = format_ty_for_diag(checker.subst(), &ty);
+            if label.is_empty() || label == "never" {
+                return;
+            }
+            hints.push(lsp_types::InlayHint {
+                position: byte_position(&text, name_end),
+                label: lsp_types::InlayHintLabel::String(format!(": {label}")),
+                kind: Some(lsp_types::InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: None,
+                data: None,
+            });
+        }
+        Expression::Call {
+            name,
+            args: Some(args),
+        } => {
+            let Expression::Identifier(callee) = name.1.as_ref() else {
+                return;
+            };
+            let Some(parameters) = params_of(callee) else {
+                return;
+            };
+            for (arg, parameter) in args.iter().zip(&parameters) {
+                if !in_window(arg.0.start) || matches!(arg.1.as_ref(), Expression::NamedArg(..)) {
+                    continue;
+                }
+                // `f(count)` for parameter `count` says it already.
+                if matches!(arg.1.as_ref(), Expression::Identifier(id) if id == parameter) {
+                    continue;
+                }
+                hints.push(lsp_types::InlayHint {
+                    position: byte_position(&text, arg.0.start),
+                    label: lsp_types::InlayHintLabel::String(format!("{parameter}:")),
+                    kind: Some(lsp_types::InlayHintKind::PARAMETER),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: Some(true),
+                    data: None,
+                });
+            }
+        }
+        _ => {}
+    });
+    hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
+    Some(hints)
+}
+
+/// Parameter names of the first `fn name` declared in `source`.
+fn function_parameter_list(source: &str, name: &str) -> Option<Vec<String>> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_none()
+            && let Expression::Function { name: fn_name, args, .. } = node.1.as_ref()
+            && *fn_name == name
+        {
+            found = Some(function_parameter_names(args));
+        }
+    });
+    found
 }
 
 /// A receiver member for completion: name, type text, is a method.
