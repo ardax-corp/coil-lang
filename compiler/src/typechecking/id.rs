@@ -140,6 +140,12 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             visit(ret);
         }
 
+        Expression::MacroCall { args, .. } => {
+            for a in args {
+                visit(a);
+            }
+        }
+
         Expression::Quote { parts, .. } => {
 
             for part in parts {
@@ -162,6 +168,12 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             ..
         }
 
+        | Expression::FnMacroDecl {
+            args,
+            returns,
+            body,
+            ..
+        }
         | Expression::DeriveDecl {
 
             args,

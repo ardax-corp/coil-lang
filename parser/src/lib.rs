@@ -510,6 +510,9 @@ impl<'pratt> Pratt<'pratt> {
                 // application. MUST be tried before `qualified_access`
                 // so multi-segment paths (`ffi::types::Int`) and enum
                 // unit/tuple/record shapes win over static field access.
+                // `name!(…)` before `construct` / `ident`, which would take
+                // the name and stop at `!`.
+                self.macro_call(expr.clone()),
                 self.construct(expr.clone()),
                 self.qualified_access(),
                 self.readonly_instantiate(expr.clone()),
@@ -1187,6 +1190,67 @@ impl<'pratt> Pratt<'pratt> {
             .labelled("derive declaration")
     }
 
+    /// `macro name(Expr a, …) -> Code { body }`
+    ///
+    /// `macro` is a contextual word (`use macro::{…}` is unaffected): a
+    /// declaration needs a name and a parameter list after it.
+    fn fn_macro_decl(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        self.docs_prefix()
+            .then(
+                text::ident()
+                    .filter(|w: &&str| *w == "macro")
+                    .padded_by(trivia())
+                    .ignore_then(text::ident().padded_by(trivia()))
+                    .then(self.arg_list_typed(self.type_annotation()))
+                    .then(op!("->").ignore_then(self.type_annotation()).or_not())
+                    .then(self.block(self.statement())),
+            )
+            .map_with(|(docs, (((name, args), returns), body)), e| {
+                (
+                    e.span(),
+                    Box::new(Expression::FnMacroDecl {
+                        docs,
+                        name,
+                        args,
+                        returns,
+                        body,
+                    }),
+                )
+            })
+            .labelled("macro declaration")
+    }
+
+    /// `name!(args)`: a function-style macro use. `!` must be directly
+    /// followed by `(`, so `a != b` and `!x` are unaffected.
+    fn macro_call<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        trivia()
+            .ignore_then(text::ident())
+            .then_ignore(just("!(").rewind())
+            .then_ignore(just('!'))
+            .then(self.params(expr))
+            .then_ignore(trivia())
+            .map_with(|(name, args), e| {
+                (
+                    e.span(),
+                    Box::new(Expression::MacroCall {
+                        name,
+                        args: args.unwrap_or_default(),
+                    }),
+                )
+            })
+    }
+
     /// `quote items|expr|stmts|type { template }`.
     ///
     /// The template is kept as text with `${expr}` / `$(expr) sep *` holes.
@@ -1793,6 +1857,7 @@ impl<'pratt> Pratt<'pratt> {
             self.test_case(stmt.clone()),
             self.attr_decl(),
             self.derive_decl(),
+            self.fn_macro_decl(),
             self.func(stmt.clone()),
             self.type_alias(),
             self.use_(),

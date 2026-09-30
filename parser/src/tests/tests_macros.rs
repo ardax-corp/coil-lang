@@ -141,3 +141,53 @@ fn format_parenthesizes_by_precedence() {
     assert_eq!(out(&sub_right).trim(), "a - (b - c)");
     assert_eq!(out(&mul_of_add).trim(), "(a + b) * c");
 }
+
+fn find_macro_calls<'a>(e: &'a Output<'a>, out: &mut Vec<(&'a str, usize)>) {
+    if let Expression::MacroCall { name, args } = e.1.as_ref() {
+        out.push((name, args.len()));
+    }
+    e.1.for_each_child(&mut |c| find_macro_calls(c, out));
+}
+
+#[test]
+fn fn_macro_decl_parses_and_macro_stays_a_module_name() {
+    let items = parse_program(
+        "use macro::{Expr, Code};\n/// Doc.\nmacro twice(Expr e, Vec<Expr> rest) -> Code { return quote expr { ${e} * 2 }; }",
+    );
+    assert_eq!(items.len(), 2);
+    let Expression::FnMacroDecl { docs, name, returns, .. } = items[1].1.as_ref() else {
+        panic!("expected FnMacroDecl, got {:?}", items[1].1);
+    };
+    assert_eq!(*name, "twice");
+    assert_eq!(docs, &vec!["Doc."]);
+    assert!(returns.is_some());
+}
+
+#[test]
+fn macro_call_parses_in_expression_statement_and_item_position() {
+    let items = parse_program(
+        "consts!(A, B);\nfn main() {\n    let x = twice!(1 + 2) + f(3);\n    log!();\n    if a != b && !c { y!(v.w, g(1)); }\n}",
+    );
+    let mut calls = Vec::new();
+    for item in &items {
+        find_macro_calls(item, &mut calls);
+    }
+    assert_eq!(calls, vec![("consts", 2), ("twice", 1), ("log", 0), ("y", 2)]);
+}
+
+#[test]
+fn bang_needs_paren_right_after_it() {
+    // `a !(b)` is not a macro call (and not an expression either).
+    assert!(Pratt::default().parse("fn f() { let x = a !(b); }").is_err());
+    let items = parse_program("fn f() { let x = a!=(b); }");
+    let mut calls = Vec::new();
+    find_macro_calls(&items[0], &mut calls);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn format_round_trips_fn_macro_and_call() {
+    let src = "macro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n\nfn main() {\n    let x = twice!(1 + 2, [a, b]);\n    log!();\n}\n";
+    let out = crate::format_source(src).expect("format");
+    assert_eq!(out, src);
+}

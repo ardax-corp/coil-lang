@@ -1224,6 +1224,31 @@ impl<'s> Formatter<'s> {
                 self.fmt_block_or_inline(body);
             }
 
+            Expression::FnMacroDecl {
+                docs,
+                name,
+                args,
+                returns,
+                body,
+            } => {
+                self.fmt_docs(docs);
+                self.push_str("macro ");
+                self.push_str(name);
+                self.fmt_paren_arg_list(args);
+                if let Some(ret) = returns {
+                    self.push_str(" -> ");
+                    self.fmt_type(ret);
+                }
+                self.push_str(" ");
+                self.fmt_block_or_inline(body);
+            }
+
+            Expression::MacroCall { name, args } => {
+                self.push_str(name);
+                self.push_str("!");
+                self.fmt_delimited_outputs("(", ")", args, false);
+            }
+
             // Template text is coil source the user laid out by hand: keep it
             // verbatim and only format the spliced expressions.
             Expression::Quote { kind, parts } => {

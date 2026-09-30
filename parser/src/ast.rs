@@ -244,6 +244,24 @@ pub enum Expression<'expr> {
         helpers: Vec<&'expr str>,
         body: Output<'expr>,
     },
+    /// Function-style macro: `macro name(Expr a, Vec<Expr> rest) -> Code { body }`.
+    ///
+    /// Runs at compile time on each `name!(…)`; its arguments arrive as
+    /// `Expr` (source text + coarse kind).
+    FnMacroDecl {
+        /// Leading `///` doc lines (without the `///` prefix).
+        docs: Vec<&'expr str>,
+        name: &'expr str,
+        args: Output<'expr>,
+        returns: Option<Output<'expr>>,
+        body: Output<'expr>,
+    },
+    /// Function-style macro use `name!(args)`, replaced by the macro's output
+    /// before typechecking. Each argument parses as an ordinary expression.
+    MacroCall {
+        name: &'expr str,
+        args: Vec<Output<'expr>>,
+    },
     /// `quote items|expr|stmts|type { template }` — coil source as a value.
     Quote {
         kind: QuoteKind,
@@ -813,7 +831,8 @@ pub fn item_docs<'expr>(expr: &'expr Expression<'expr>) -> Option<&'expr [&'expr
         | Expression::EnumVariant { docs, .. }
         | Expression::TypeClass { docs, .. }
         | Expression::AttrDecl { docs, .. }
-        | Expression::DeriveDecl { docs, .. } => docs.as_slice(),
+        | Expression::DeriveDecl { docs, .. }
+        | Expression::FnMacroDecl { docs, .. } => docs.as_slice(),
         Expression::Method(_, inner) => return item_docs(inner.1.as_ref()),
         _ => return None,
     };
@@ -1193,6 +1212,25 @@ impl<'a> Display for Expression<'a> {
                 }
                 write!(f, " {}", body.1)
             }
+            Self::FnMacroDecl {
+                docs,
+                name,
+                args,
+                returns,
+                body,
+            } => {
+                write!(f, "{}macro {}{}", fmt_docs(docs), name, args.1)?;
+                if let Some(ret) = returns {
+                    write!(f, " -> {}", ret.1)?;
+                }
+                write!(f, " {}", body.1)
+            }
+            Self::MacroCall { name, args } => write!(
+                f,
+                "{}!({})",
+                name,
+                args.iter().map(|a| a.1.to_string()).collect::<Vec<_>>().join(", ")
+            ),
             Self::Quote { kind, parts } => {
                 write!(f, "quote {} {{", kind.as_str())?;
                 for part in parts {
@@ -1741,7 +1779,7 @@ impl<'expr> Expression<'expr> {
                 }
                 f(body);
             }
-            E::DeriveDecl { args, returns, body, .. } => {
+            E::DeriveDecl { args, returns, body, .. } | E::FnMacroDecl { args, returns, body, .. } => {
                 f(args);
                 if let Some(r) = returns {
                     f(r);
@@ -1756,7 +1794,9 @@ impl<'expr> Expression<'expr> {
                     }
                 }
             }
-            E::TypeApp { args, .. } | E::TypeProjection { args, .. } => args.iter().for_each(f),
+            E::TypeApp { args, .. } | E::TypeProjection { args, .. } | E::MacroCall { args, .. } => {
+                args.iter().for_each(f)
+            }
             E::TypeFun(a, b)
             | E::Coalesce(a, b)
             | E::Cast(a, b)
@@ -1980,7 +2020,7 @@ impl<'expr> Expression<'expr> {
                 }
                 f(body);
             }
-            E::DeriveDecl { args, returns, body, .. } => {
+            E::DeriveDecl { args, returns, body, .. } | E::FnMacroDecl { args, returns, body, .. } => {
                 f(args);
                 if let Some(r) = returns {
                     f(r);
@@ -1995,7 +2035,9 @@ impl<'expr> Expression<'expr> {
                     }
                 }
             }
-            E::TypeApp { args, .. } | E::TypeProjection { args, .. } => args.iter_mut().for_each(f),
+            E::TypeApp { args, .. } | E::TypeProjection { args, .. } | E::MacroCall { args, .. } => {
+                args.iter_mut().for_each(f)
+            }
             E::TypeFun(a, b)
             | E::Coalesce(a, b)
             | E::Cast(a, b)
