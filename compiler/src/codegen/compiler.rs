@@ -134,6 +134,9 @@ impl Compiler {
     /// Record `#[derive]` constructor aliases from attribute expansion.
     pub(crate) fn apply_expand_result(&mut self, module: &str, expand: crate::attrs::ExpandResult) {
         self.messages.extend(expand.messages);
+        // User macros the pipeline did not resolve (or no pipeline ran).
+        self.messages
+            .extend(expand.pending.iter().map(crate::attrs::unresolved_macro_message));
         for (k, v) in expand.decorated_class_ctors {
             let key = if module.is_empty() {
                 k
@@ -155,7 +158,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'a>>),
     ) {
-        let expand = crate::attrs::expand_program(ast);
+        let expand = crate::attrs::expand_program_in(ast, module);
         self.apply_expand_result(module, expand);
         self.typecheck_module(module, ast);
     }

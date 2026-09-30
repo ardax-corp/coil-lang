@@ -18,6 +18,7 @@ pub use mir::{start_mir_capture, take_mir_capture};
 mod host_grants;
 mod local_scopes;
 mod lockfile;
+pub mod macros;
 mod manifest;
 mod monomorphize;
 mod pipeline;
