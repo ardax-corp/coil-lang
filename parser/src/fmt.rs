@@ -1389,6 +1389,7 @@ impl<'s> Formatter<'s> {
             Expression::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } => {
                 self.push_str("impl ");
@@ -1400,7 +1401,15 @@ impl<'s> Formatter<'s> {
                         self.type_ctx = was;
                     }
                     self.push_str(" for ");
-                    self.fmt_type(for_ty);
+                    if type_params.is_empty() {
+                        self.fmt_type(for_ty);
+                    } else if let Expression::TypeApp { name, .. } = for_ty.1.as_ref() {
+                        // `Box<T: Show>`: the head name with its bounded params.
+                        self.push_str(name);
+                        self.fmt_type_params(type_params);
+                    } else {
+                        self.fmt_type(for_ty);
+                    }
                 }
                 self.fmt_braced_items(methods);
             }

@@ -3263,10 +3263,11 @@ impl Checker {
             Expression::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } => {
                 let class = self.impl_trait_key(class);
-                self.infer_typeclass_impl(class, args, methods, range)
+                self.infer_typeclass_impl(class, args, type_params, methods, range)
             }
 
             Expression::AssocTypeDecl { .. } => unit_ty(),
@@ -12887,17 +12888,32 @@ impl Checker {
             let Expression::TypeClassImpl {
                 class,
                 args,
+                type_params,
                 methods,
             } = stmt.1.as_ref()
             else {
                 continue;
             };
             let class = self.impl_trait_key(class);
-            let head_params: Vec<(String, TyVarId)> = Self::instance_head_param_names(args)
+            let head_params: Vec<(String, TyVarId)> = Self::instance_head_params(args, type_params)
                 .into_iter()
                 .map(|n| (n.to_string(), self.counter.fresh()))
                 .collect();
             let param_map: HashMap<String, TyVarId> = head_params.iter().cloned().collect();
+            // Bounds on the head's parameters are the instance's context
+            // (`impl Show for Box<T: Show>` needs `Show<T>`).
+            let context: Vec<Constraint> = type_params
+                .iter()
+                .flat_map(|tp| {
+                    let var = param_map.get(tp.name).copied();
+                    tp.bounds.iter().filter_map(move |b| {
+                        var.map(|v| Constraint {
+                            class: (*b).to_string(),
+                            args: vec![Ty::Var(v)],
+                        })
+                    })
+                })
+                .collect();
             let arg_tys: Vec<Ty> = args
                 .iter()
                 .map(|a| self.ast_instance_head_ty_with(a, &param_map))
@@ -12955,6 +12971,7 @@ impl Checker {
                 args: arg_tys,
                 method_fqns,
                 assoc_tys,
+                context,
             });
         }
         self.next_id_idx = saved_idx;
@@ -12965,6 +12982,19 @@ impl Checker {
     /// Built-in spellings follow [`Self::canonical_ctor_name`].
     fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
         self.ast_instance_head_ty_with(arg, &HashMap::new())
+    }
+
+    /// Type parameters of an instance head: the head's own bounded list when
+    /// written (`impl Show for Box<T: Show>`), else the bare single uppercase
+    /// letters among the `for` type's arguments (`impl Show for Box<T>`).
+    pub fn instance_head_params<'a>(
+        args: &[Output<'a>],
+        type_params: &[parser::ast::TypeParam<'a>],
+    ) -> Vec<&'a str> {
+        if !type_params.is_empty() {
+            return type_params.iter().map(|tp| tp.name).collect();
+        }
+        Self::instance_head_param_names(args)
     }
 
     /// Type parameters of an instance head: the bare single uppercase letters

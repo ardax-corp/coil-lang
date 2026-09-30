@@ -3568,6 +3568,7 @@ impl Compiler {
                     class,
                     args,
                     methods,
+                    ..
                 } => {
                     let class = self.checker.impl_trait_key(class);
                     let arg_tys: Vec<Ty> = args
@@ -17053,6 +17054,7 @@ impl Compiler {
                 class,
                 args,
                 methods,
+                ..
             } => {
                 let class = self.checker.impl_trait_key(class);
                 // Instance heads from AST shape, not span cache (avoids `Container__unit__first`).

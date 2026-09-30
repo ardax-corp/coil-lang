@@ -769,6 +769,7 @@ fn typeclass_impl<'a>(
         Expression::TypeClassImpl {
             class,
             args: vec![ty_name(span, self_ty)],
+            type_params: Vec::new(),
             methods,
         },
     )

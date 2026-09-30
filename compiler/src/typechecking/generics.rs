@@ -7,7 +7,7 @@
 
 use super::kind::Kind;
 use super::subst::Subst;
-use super::ty::{Ty, TyVarId};
+use super::ty::{Constraint, Ty, TyVarId};
 use super::unify::unify_with;
 use super::virtual_modules::{GC_MODULE, PRELUDE_MATH_MODULE, PRELUDE_MODULE, PRELUDE_OPS_MODULE};
 use std::collections::{HashMap, HashSet};
@@ -205,6 +205,10 @@ pub struct InstanceDef {
     pub method_fqns: HashMap<String, String>,
     /// Associated type name → RHS template with its own binders.
     pub assoc_tys: HashMap<String, AssocTypeValue>,
+    /// Bounds on a generic head's parameters (`impl Show for Box<T: Show>`
+    /// → `[Show<'a>]`, over the variables in `args`). Empty for concrete
+    /// and unbounded instances.
+    pub context: Vec<Constraint>,
 }
 
 //  Generics registry
@@ -731,6 +735,7 @@ impl Generics {
                     args: vec![ty.clone()],
                     method_fqns: make_fqns(class, ty_str, &[method]),
                     assoc_tys: HashMap::new(),
+                    context: Vec::new(),
                 });
             }
             // Num / Ord instances: no own methods; dict emission pulls
@@ -743,6 +748,7 @@ impl Generics {
                     args: vec![ty.clone()],
                     method_fqns: HashMap::new(),
                     assoc_tys: HashMap::new(),
+                    context: Vec::new(),
                 });
             }
         }
@@ -754,6 +760,7 @@ impl Generics {
             args: vec![int()],
             method_fqns: make_fqns("Eq", "int", &["eq", "ne"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Show".into(),
@@ -762,6 +769,7 @@ impl Generics {
             args: vec![int()],
             method_fqns: make_fqns("Show", "int", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Eq".into(),
@@ -770,6 +778,7 @@ impl Generics {
             args: vec![float()],
             method_fqns: make_fqns("Eq", "float", &["eq", "ne"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Show".into(),
@@ -778,6 +787,7 @@ impl Generics {
             args: vec![float()],
             method_fqns: make_fqns("Show", "float", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         self.instances.push(InstanceDef {
@@ -787,6 +797,7 @@ impl Generics {
             args: vec![string()],
             method_fqns: make_fqns("Eq", "string", &["eq", "ne"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Show".into(),
@@ -795,6 +806,7 @@ impl Generics {
             args: vec![string()],
             method_fqns: make_fqns("Show", "string", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Length".into(),
@@ -803,6 +815,7 @@ impl Generics {
             args: vec![string()],
             method_fqns: make_fqns("Length", "string", &["len"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         self.instances.push(InstanceDef {
@@ -812,6 +825,7 @@ impl Generics {
             args: vec![boolean()],
             method_fqns: make_fqns("Eq", "bool", &["eq", "ne"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Show".into(),
@@ -820,6 +834,7 @@ impl Generics {
             args: vec![boolean()],
             method_fqns: make_fqns("Show", "bool", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         self.instances.push(InstanceDef {
@@ -829,6 +844,7 @@ impl Generics {
             args: vec![unit()],
             method_fqns: make_fqns("Show", "unit", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         for (ty, ty_str) in [
@@ -846,6 +862,7 @@ impl Generics {
                 args: vec![ty],
                 method_fqns: make_fqns("Hash", ty_str, &["hash"]),
                 assoc_tys: HashMap::new(),
+                context: Vec::new(),
             });
         }
 
@@ -856,6 +873,7 @@ impl Generics {
             args: vec![super::ty::byte()],
             method_fqns: make_fqns("Eq", "byte", &["eq", "ne"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Show".into(),
@@ -864,6 +882,7 @@ impl Generics {
             args: vec![super::ty::byte()],
             method_fqns: make_fqns("Show", "byte", &["show"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
             self.instances.push(InstanceDef {
@@ -873,6 +892,7 @@ impl Generics {
                 args: vec![super::ty::byte()],
                 method_fqns: make_fqns(class, "byte", &[method]),
                 assoc_tys: HashMap::new(),
+                context: Vec::new(),
             });
         }
         self.instances.push(InstanceDef {
@@ -882,6 +902,7 @@ impl Generics {
             args: vec![super::ty::byte()],
             method_fqns: HashMap::new(),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         let into_pairs: [(&str, Ty, &str, Ty); 6] = [
@@ -905,6 +926,7 @@ impl Generics {
                 args: vec![from_ty.clone(), to_ty.clone()],
                 method_fqns,
                 assoc_tys: HashMap::new(),
+                context: Vec::new(),
             });
         }
 
@@ -915,6 +937,7 @@ impl Generics {
             args: vec![super::ty::stream_ty()],
             method_fqns: make_fqns("Read", "Stream", &["read"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
         self.instances.push(InstanceDef {
             class: "Write".into(),
@@ -923,6 +946,7 @@ impl Generics {
             args: vec![super::ty::stream_ty()],
             method_fqns: make_fqns("Write", "Stream", &["write"]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         // Carrier as first type param (same shape as Collect). Builtin
@@ -1057,6 +1081,7 @@ mod tests {
             args: vec![int()],
             method_fqns: HashMap::new(),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         assert!(generics.has_overlapping_instance("Num", &[int()]));
@@ -1075,6 +1100,7 @@ mod tests {
             args: vec![option_app_ty(int())],
             method_fqns: HashMap::new(),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         assert!(
@@ -1155,6 +1181,7 @@ mod tests {
                 "Convert__int_int__cast".to_string(),
             )]),
             assoc_tys: HashMap::new(),
+            context: Vec::new(),
         });
 
         assert!(generics.find_instance("Convert", &[int(), int()]).is_some());
