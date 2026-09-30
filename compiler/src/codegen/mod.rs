@@ -1049,6 +1049,13 @@ pub struct Compiler {
     /// Type parameter name → concrete type of the mono clone being
     /// compiled (`T::from_val(v)` selects `T`'s instance directly).
     mono_type_param_tys: Vec<HashMap<String, Ty>>,
+    /// Set while compiling a bounded generic instance's method: the index of
+    /// the first context dictionary in `__dict0` and how many there are.
+    /// The method prologue unpacks them into `__dict1..` (#551).
+    pending_instance_ctx: Option<(usize, usize)>,
+    /// Checker type variable → concrete type, per mono clone being compiled
+    /// (the source function's type parameters), for open dictionary goals.
+    mono_var_tys: Vec<HashMap<crate::typechecking::ty::TyVarId, Ty>>,
 
     /// Project-relative path of the module currently being codegen'd.
     current_source_file: Option<std::path::PathBuf>,
@@ -1213,6 +1220,8 @@ impl Default for Compiler {
             mono_names: HashMap::new(),
             mono_codegen_var_types: Vec::new(),
             mono_type_param_tys: Vec::new(),
+            pending_instance_ctx: None,
+            mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
