@@ -3324,10 +3324,39 @@ impl Checker {
                 self.forall_type(params, |checker| checker.infer(ty))
             }
 
-            // Expanded before typechecking. One left here failed to expand,
-            // and the macro stage reported why (unresolved, failed, no host):
-            // stay quiet and let the rest of the program check.
+            // Unexpanded `name!(…)`, `quote`, `derive`, `macro` (editor / failed expansion).
             Expression::MacroCall { .. } => Ty::Var(self.counter.fresh()),
+            Expression::Quote { parts, .. } => {
+                for part in parts {
+                    match part {
+                        parser::ast::QuotePart::Lit(_) => {}
+                        parser::ast::QuotePart::Splice(e)
+                        | parser::ast::QuotePart::Repeat { list: e, .. } => {
+                            let _ = self.infer(e);
+                        }
+                    }
+                }
+                Ty::Var(self.counter.fresh())
+            }
+            Expression::DeriveDecl {
+                args,
+                returns,
+                body,
+                ..
+            }
+            | Expression::FnMacroDecl {
+                args,
+                returns,
+                body,
+                ..
+            } => {
+                let _ = self.infer(args);
+                if let Some(ret) = returns {
+                    let _ = self.infer(ret);
+                }
+                let _ = self.infer(body);
+                unit_ty()
+            }
 
             // `unreachable!` because the match above is exhaustive over every
             #[allow(unreachable_patterns)]
