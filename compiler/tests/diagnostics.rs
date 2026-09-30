@@ -1461,14 +1461,29 @@ fn test_attr_on_enum_reports_diagnostic() {
     );
 }
 
+/// The runtime `target(...args)` decorator form was replaced by attribute macros.
 #[test]
-fn user_attr_on_ffi_fn_reports_diagnostic() {
+fn legacy_attr_decorator_form_is_rejected() {
     let msgs = compile_messages(
         r#"
 attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
     return target(...args);
 }
-#[log(message = "x")]
+fn main() {}
+"#,
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("must take a `FnDecl` or `TypeDecl` as its first parameter")),
+        "expected legacy attr rejection, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn user_attr_on_ffi_fn_reports_diagnostic() {
+    let msgs = compile_messages(
+        r#"
 #[ffi(lib = "c")]
 fn strlen(string s) -> int { return 0; }
 fn main() {}
@@ -1500,23 +1515,6 @@ fn main() {
 }
 
 #[test]
-fn attr_missing_trailing_rest_reports_diagnostic() {
-    let msgs = compile_messages(
-        r#"
-attr bad<T>(fn(...args) -> T target, string message) -> T {
-    return target(...args);
-}
-fn main() {}
-"#,
-    );
-    assert!(
-        msgs.iter().any(|m| m.contains("bare `...args`")),
-        "expected missing tuple-rest diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
 fn spread_dynamic_array_reports_diagnostic() {
     let msgs = check_messages(
         r#"
@@ -1531,65 +1529,6 @@ fn main() {
         msgs.iter()
             .any(|m| m.message().contains("cannot spread dynamic-length array")),
         "expected dynamic-array spread diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
-fn attr_missing_extra_argument_reports_diagnostic() {
-    let msgs = compile_messages(
-        r#"
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    return target(...args);
-}
-#[log]
-fn do_thing() -> int { return 1; }
-fn main() {}
-"#,
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("Missing argument `message` for `#[log(...)]`")),
-        "expected missing attr-extra diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
-fn attr_unknown_key_reports_diagnostic() {
-    let msgs = compile_messages(
-        r#"
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    return target(...args);
-}
-#[log(foo = "x")]
-fn do_thing() -> int { return 1; }
-fn main() {}
-"#,
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("Unknown key `foo` in `#[log(...)]`")),
-        "expected unknown attr-key diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
-fn attr_too_few_params_reports_diagnostic() {
-    let msgs = compile_messages(
-        r#"
-attr bad<T>(fn(...args) -> T target) -> T {
-    return target(...args);
-}
-fn main() {}
-"#,
-    );
-    assert!(
-        msgs.iter().any(|m| {
-            m.contains("Attribute declaration requires at least `target` and trailing `...args`")
-        }),
-        "expected attr-too-few-params diagnostic, got: {:?}",
         msgs
     );
 }

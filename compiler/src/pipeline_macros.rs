@@ -33,15 +33,20 @@ struct Job {
     decl: MacroDecl,
     provider_file: PathBuf,
     provider_module: String,
-    /// `let` statements building the macro's input.
+    /// `let` statements building the macro's input (`TypeDecl` / `FnDecl`).
     setup: Vec<String>,
-    /// The call's argument list.
-    args: String,
+    /// The local the last setup statement binds.
+    input: String,
+    /// Attribute arguments after the input.
+    extra: Vec<String>,
 }
 
 /// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
 /// editor re-checks on every keystroke, and providers rarely change.
 static EXPANSION_CACHE: std::sync::Mutex<Option<HashMap<u64, String>>> = std::sync::Mutex::new(None);
+
+/// Rounds of macros-in-generated-code before giving up.
+const MAX_ROUNDS: usize = 16;
 
 /// Name of the pseudo entry file of an expansion program.
 fn expansion_entry_path() -> PathBuf {
@@ -49,10 +54,39 @@ fn expansion_entry_path() -> PathBuf {
 }
 
 impl Pipeline {
-    /// Resolve, run and splice every pending user macro in the discovered
-    /// files. Newly referenced modules are discovered; expansions nested in
-    /// generated code are rejected.
+    /// Resolve, run and splice every pending macro in the discovered files,
+    /// round after round: macros in generated code (stacked attributes,
+    /// derives on a generated type) run in the next round. Newly referenced
+    /// modules are discovered.
     pub(super) fn expand_user_macros(&mut self) {
+        for _ in 0..MAX_ROUNDS {
+            if !self.expand_macro_round() {
+                return;
+            }
+        }
+        // Still pending: report instead of looping forever.
+        for file in self.processed.clone() {
+            let Some(cached) = self.ast_cache.get_mut(&file) else { continue };
+            let stuck = cached.take_pending_macros();
+            let msgs: Vec<Message> = stuck
+                .iter()
+                .map(|p| {
+                    Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "macro expansion did not finish after {MAX_ROUNDS} rounds (`{}` keeps generating macro uses)",
+                            p.name
+                        ),
+                        p.range.clone(),
+                    )
+                })
+                .collect();
+            cached.push_expand_messages(msgs);
+        }
+    }
+
+    /// One expansion round. False when nothing was pending.
+    fn expand_macro_round(&mut self) -> bool {
         let files: Vec<PathBuf> = self
             .processed
             .iter()
@@ -64,7 +98,7 @@ impl Pipeline {
             .cloned()
             .collect();
         if files.is_empty() {
-            return;
+            return false;
         }
         let mut jobs: Vec<Job> = Vec::new();
         for file in &files {
@@ -103,14 +137,15 @@ impl Pipeline {
                             continue;
                         }
                         match self.encode_input(file, &module, &p, &decl) {
-                            Ok((setup, args)) => file_jobs.push(Job {
+                            Ok((setup, input, extra)) => file_jobs.push(Job {
                                 file: file.clone(),
                                 pending: p,
                                 decl,
                                 provider_file: provider,
                                 provider_module,
                                 setup,
-                                args,
+                                input,
+                                extra,
                             }),
                             Err(msg) => errors.push(msg),
                         }
@@ -126,7 +161,7 @@ impl Pipeline {
             jobs.extend(file_jobs);
         }
         if jobs.is_empty() {
-            return;
+            return false;
         }
         let results = self.run_expansions(&jobs);
         for (job, result) in jobs.iter().zip(results) {
@@ -144,6 +179,7 @@ impl Pipeline {
         }
         // Generated code may `use` modules nothing else imported.
         self.discover_all();
+        true
     }
 
     /// Entry-file source after every built-in and user macro expanded, as
@@ -171,8 +207,8 @@ impl Pipeline {
         if self.entry_file.as_deref() == Some(file) {
             return String::new();
         }
-        if file == crate::macros::macro_module_path() {
-            return crate::macros::MACRO_MODULE.to_string();
+        if let Some(module) = crate::macros::embedded_module(file) {
+            return module.to_string();
         }
         super::namespace_of_in_roots(&self.roots, &self.project_root, file).unwrap_or_else(|| {
             file.file_stem()
@@ -226,6 +262,25 @@ impl Pipeline {
                 found.push((candidate, decl));
             }
         }
+        // Built-in derives come from the embedded `derive` module. It is not
+        // compiled into the user's program: only the expansion program
+        // imports it.
+        if found.is_empty()
+            && p.kind == MacroKind::Derive
+            && crate::macros::PRELUDE_DERIVES.contains(&p.name.as_str())
+        {
+            found.push((
+                crate::macros::derive_module_path(),
+                MacroDecl {
+                    kind: MacroKind::Derive,
+                    name: p.name.clone(),
+                    fn_name: crate::macros::derive_fn_name(&p.name),
+                    helpers: Vec::new(),
+                    input: MacroInput::TypeDecl,
+                    params: Vec::new(),
+                },
+            ));
+        }
         match found.len() {
             0 => Err(None),
             1 => {
@@ -252,9 +307,11 @@ impl Pipeline {
         module: &str,
         p: &PendingMacro,
         decl: &MacroDecl,
-    ) -> Result<(Vec<String>, String), Message> {
+    ) -> Result<(Vec<String>, String, Vec<String>), Message> {
         let cached = self.ast_cache.get(file).expect("pending macros come from a cached file");
-        let source = cached.source();
+        // Includes earlier rounds' generated code (its spans point past the file).
+        let report = cached.report_source();
+        let source = report.as_str();
         let ast = cached.ast().expect("parsed");
         let Some(node) = find_target(ast, p) else {
             return Err(Message::error(
@@ -270,7 +327,9 @@ impl Pipeline {
         let mut hoist = encode::Hoist::default();
         let input = match decl.input {
             MacroInput::TypeDecl => encode::type_decl(&mut hoist, node, source, module, &strip),
-            MacroInput::FnDecl => encode::fn_decl(&mut hoist, node, source, p.owner.as_deref(), &strip),
+            MacroInput::FnDecl => {
+                encode::fn_decl(&mut hoist, node, source, p.owner.as_deref(), method_is_pub(ast, p), &strip)
+            }
         };
         let setup = hoist.statements().to_vec();
         let Some(input) = input else {
@@ -285,7 +344,7 @@ impl Pipeline {
             ));
         };
         if decl.kind == MacroKind::Derive {
-            return Ok((setup, input));
+            return Ok((setup, input, Vec::new()));
         }
         // Attribute arguments bind to the macro's extra parameters, by name
         // (`key = value`) or in order.
@@ -321,10 +380,10 @@ impl Pipeline {
             }
             values[slot] = Some(encode::arg_value(arg));
         }
-        let mut args = vec![input];
+        let mut extra = Vec::new();
         for (i, v) in values.into_iter().enumerate() {
             match v {
-                Some(v) => args.push(v),
+                Some(v) => extra.push(v),
                 None => {
                     return Err(Message::error(
                         ErrorCode::GenericTypeError,
@@ -337,7 +396,7 @@ impl Pipeline {
                 }
             }
         }
-        Ok((setup, args.join(", ")))
+        Ok((setup, input, extra))
     }
 
     /// Hash of a macro call: the sources of its provider and everything the
@@ -362,7 +421,8 @@ impl Pipeline {
         }
         job.decl.fn_name.hash(&mut h);
         job.setup.hash(&mut h);
-        job.args.hash(&mut h);
+        job.input.hash(&mut h);
+        job.extra.hash(&mut h);
         h.finish()
     }
 
@@ -410,15 +470,37 @@ impl Pipeline {
             ));
             aliases.insert(key, alias);
         }
-        for (i, job) in jobs.iter().enumerate() {
-            let alias = &aliases[&(job.provider_module.clone(), job.decl.fn_name.clone())];
-            text.push_str(&format!("fn __coil_expand_{i}() -> string {{\n"));
+        // One builder per distinct input: every derive on a type (and a
+        // type's macros across rounds) share it.
+        let mut inputs: HashMap<(Vec<String>, String), usize> = HashMap::new();
+        for job in jobs {
+            let key = (job.setup.clone(), job.input.clone());
+            if inputs.contains_key(&key) {
+                continue;
+            }
+            let k = inputs.len();
+            let ty = match job.decl.input {
+                MacroInput::TypeDecl => "TypeDecl",
+                MacroInput::FnDecl => "FnDecl",
+            };
+            text.push_str(&format!("fn __coil_input_{k}() -> {ty} {{\n"));
             for stmt in &job.setup {
                 text.push_str("    ");
                 text.push_str(stmt);
                 text.push('\n');
             }
-            text.push_str(&format!("    return {alias}({}).text;\n}}\n", job.args));
+            text.push_str(&format!("    return {};\n}}\n", job.input));
+            inputs.insert(key, k);
+        }
+        for (i, job) in jobs.iter().enumerate() {
+            let alias = &aliases[&(job.provider_module.clone(), job.decl.fn_name.clone())];
+            let k = inputs[&(job.setup.clone(), job.input.clone())];
+            let mut args = vec![format!("__coil_input_{k}()")];
+            args.extend(job.extra.iter().cloned());
+            text.push_str(&format!(
+                "fn __coil_expand_{i}() -> string {{\n    return {alias}({}).text;\n}}\n",
+                args.join(", ")
+            ));
         }
 
         let mut providers: Vec<&str> = jobs.iter().map(|j| j.provider_module.as_str()).collect();
@@ -480,18 +562,16 @@ impl Pipeline {
         // Built-in attributes in generated code expand as usual.
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
-        for nested in &expand.pending {
-            messages.push(Message::error(
-                ErrorCode::GenericTypeError,
-                format!(
-                    "{} `{}` generated a use of `{}`; user macros cannot be applied in generated code",
-                    job.decl.kind.describe(),
-                    job.decl.name,
-                    nested.name
-                ),
-                job.pending.range.clone(),
-            ));
-        }
+        // Macros in the output run next round; they report at this site.
+        let nested: Vec<PendingMacro> = expand
+            .pending
+            .into_iter()
+            .map(|mut p| {
+                p.range = job.pending.range.clone();
+                p
+            })
+            .collect();
+        cached.push_pending_macros(nested);
         let Expression::Program(mut items) = *generated.1 else {
             return messages;
         };
@@ -534,11 +614,14 @@ impl Pipeline {
                     .iter()
                     .position(|c| c.0 == job.pending.target)
                     .expect("target still present");
-                let n = items.len();
+                // After this type's earlier derive outputs, so impls keep
+                // the order the derives are listed in.
+                let done = self.derived_items.entry(job.pending.target).or_insert(0);
+                let start = at + 1 + *done;
+                *done += items.len();
                 for (k, item) in items.into_iter().enumerate() {
-                    children.insert(at + 1 + k, item);
+                    children.insert(start + k, item);
                 }
-                let _ = n;
             }
             (None, MacroKind::Attr) => {
                 let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
@@ -608,6 +691,19 @@ fn top_level_uses(ast: &Output<'_>) -> Vec<(Vec<String>, String, Option<String>)
     let mut out = Vec::new();
     walk(ast, &mut out);
     out
+}
+
+/// True when a pending attribute macro sits on a `pub` method.
+fn method_is_pub(ast: &Output<'_>, p: &PendingMacro) -> bool {
+    let (Expression::Program(children), Some(owner)) = (ast.1.as_ref(), &p.owner) else {
+        return false;
+    };
+    children.iter().any(|c| match c.1.as_ref() {
+        Expression::Implementation { owner: o, methods, .. } if *o == owner.as_str() => methods
+            .iter()
+            .any(|m| m.0 == p.target && matches!(m.1.as_ref(), Expression::Method(parser::ast::Visibility::Public, _))),
+        _ => false,
+    })
 }
 
 /// The declaration a pending macro applies to.
@@ -733,6 +829,9 @@ impl SubProgram {
         sub.macro_host = Some(self.host.clone());
         sub.macro_stack = self.macro_stack;
         sub.auto_par = false;
+        // Macros run briefly; the full optimizer costs far more than it saves.
+        // (`None` changed some macros' results; see limitations.md.)
+        sub.opt_level = crate::OptLevel::Basic;
         sub.overlays = self.overlays;
         let entry = expansion_entry_path();
         sub.overlays.insert(entry.clone(), self.text);

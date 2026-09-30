@@ -2426,32 +2426,6 @@ fn break_and_continue_outside_loop_emit_diagnostics() {
     );
 }
 
-#[test]
-fn missing_decorated_ctor_emits_codegen_error() {
-    let mut ast = Pratt::default()
-        .parse("class C { x: int }\nfn main() { let _c = new C(1); }")
-        .expect("parse failed");
-    let mut compiler = Compiler::default();
-    compiler
-        .decorated_class_ctors
-        .insert("C".into(), "C__ctor".into());
-    compiler.compile("", &mut ast);
-    let rendered = compiler
-        .get_messages()
-        .iter()
-        .map(|m| format!("{:?}", m))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        compiler
-            .get_messages()
-            .iter()
-            .any(|m| m.code() == Some(ErrorCode::CodegenError)
-                && m.message().contains("Decorated constructor")),
-        "expected CodegenError for missing decorated ctor, got {rendered}"
-    );
-}
-
 /// Codegen test 6 : the loop's JMP back-edge
 /// TARGETS the start of the loop, not the prologue. If
 /// the BlockBuilder's `bind_label` for `top_label` were

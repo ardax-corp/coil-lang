@@ -2634,33 +2634,6 @@ fn access_field_ambiguous_across_variants_emits_narrow_with_match() {
 }
 
 #[test]
-fn access_tuple_field_after_match_narrows_shared_index() {
-    // Derive Show walks `recv.0` via AST Access. Multiple tuple
-    // variants share index `"0"`; match refinement must make this
-    // typecheck (and `%v` must resolve Show).
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-#[derive(Show, Eq)]
-enum Box { S(string), B(bool) }
-fn main() {
-    write(stdout(), to_bytes(format("%v,", Box::S("x"))));
-    write(stdout(), to_bytes(format("%z", Box::S("x") == Box::S("x"))));
-}
-"#;
-    let mut ast = Pratt::default().parse(src).expect("parse");
-    let _ = crate::attrs::expand_program(&mut ast);
-    let mut c = Checker::new();
-    let _ = c.check_program(&ast);
-    let msgs = c.take_messages();
-    assert!(
-        msgs.is_empty(),
-        "expected derived Show/Eq with shared tuple indices to typecheck, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
 fn access_field_via_function_parameter_resolves() {
     // Field access on a function parameter whose type is
     // annotated with the bare enum name `Point` ,  the
@@ -8313,30 +8286,6 @@ fn scalar_enum_plus_int() {
                    let n: int = Status::Ok + 1;";
     let (mut c, _) = check(src);
     assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
-}
-
-#[test]
-fn scalar_enum_derive_eq_show_hash_ord_typechecks() {
-    let src = r#"
-#[repr(int)]
-#[derive(Show, Eq, Ord, Hash)]
-enum Status { Ok = 200, NotFound = 404 }
-fn hash_key<T: Hash>(T k) -> int { return k.hash(); }
-let _eq = Status::Ok == Status::Ok;
-let _lt = Status::Ok < Status::NotFound;
-let _h = hash_key(Status::Ok);
-let _s = Status::Ok.show();
-"#;
-    let mut ast = Pratt::default().parse(src).expect("parse");
-    let _ = crate::attrs::expand_program(&mut ast);
-    let mut c = Checker::new();
-    let _ = c.check_program(&ast);
-    let msgs = c.take_messages();
-    assert!(
-        msgs.is_empty(),
-        "expected scalar derive Show/Eq/Ord/Hash to typecheck, got: {:?}",
-        msgs
-    );
 }
 
 #[test]

@@ -131,25 +131,12 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
     }
 
-    /// Record `#[derive]` constructor aliases from attribute expansion.
-    pub(crate) fn apply_expand_result(&mut self, module: &str, expand: crate::attrs::ExpandResult) {
+    /// Take attribute-expansion diagnostics (and any macro left unresolved).
+    pub(crate) fn apply_expand_result(&mut self, expand: crate::attrs::ExpandResult) {
         self.messages.extend(expand.messages);
         // User macros the pipeline did not resolve (or no pipeline ran).
         self.messages
             .extend(expand.pending.iter().map(crate::attrs::unresolved_macro_message));
-        for (k, v) in expand.decorated_class_ctors {
-            let key = if module.is_empty() {
-                k
-            } else {
-                format!("{module}::{k}")
-            };
-            let ctor_fn = if module.is_empty() {
-                v
-            } else {
-                format!("{module}::{v}")
-            };
-            self.decorated_class_ctors.insert(key, ctor_fn);
-        }
     }
 
     /// Expand `#[derive]` then typecheck. Does not parse or emit.
@@ -159,7 +146,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'a>>),
     ) {
         let expand = crate::attrs::expand_program_in(ast, module);
-        self.apply_expand_result(module, expand);
+        self.apply_expand_result(expand);
         self.typecheck_module(module, ast);
     }
 
@@ -5691,14 +5678,6 @@ impl Compiler {
             let Some(cname) = Checker::class_name_of_ty(&ty) else {
                 return false;
             };
-            if self.decorated_class_ctors.contains_key(cname)
-                || self
-                    .checker
-                    .resolve_class_key(cname)
-                    .is_some_and(|k| self.decorated_class_ctors.contains_key(&k))
-            {
-                return false;
-            }
             let n = self
                 .context
                 .classes
@@ -12926,14 +12905,6 @@ impl Compiler {
         let Expression::Identifier(class_name) = class.1.as_ref() else {
             return false;
         };
-        if self.decorated_class_ctors.contains_key(*class_name)
-            || self
-                .checker
-                .resolve_class_key(class_name)
-                .is_some_and(|k| self.decorated_class_ctors.contains_key(&k))
-        {
-            return false;
-        }
         if self.checker.class_has_drop(class_name) {
             return false;
         }
@@ -16483,54 +16454,28 @@ impl Compiler {
             Expression::Instantiate(class, args) => {
                 let name = self.resolve_variable_checked(class);
                 let name = self.resolve_class_ident(&name);
-                let ctor_name = self
-                    .decorated_class_ctors
-                    .get(&name)
-                    .filter(|ctor| self.active_fn_name.as_deref() != Some(ctor.as_str()))
-                    .cloned();
-                if let Some(ctor) = ctor_name {
-                    let arg_slice = args.as_deref().unwrap_or(&[]);
-                    if self.functions.contains_key(ctor.as_str())
-                        || self.fn_entry_labels.contains_key(ctor.as_str())
-                    {
-                        let arity =
-                            self.emit_call_args_with_rest(&ctor, arg_slice, &mut bytecode, false);
-                        if !self.emit_direct_fn_call(&mut bytecode, &ctor, arity) {
-                            self.missing_call_target(&ctor, class.0.into_range());
-                        }
-                    } else {
-                        self.messages.push(Message::error(
-                            ErrorCode::CodegenError,
-                            format!(
-                                "Decorated constructor `{ctor}` for class `{name}` was not found"
-                            ),
-                            class.0.into_range(),
-                        ));
+                let fields = self.context.classes.get(&name).cloned().unwrap_or_default();
+                let type_id = self.checker.class_type_id(&name);
+                let nfields = fields.len() as u32;
+                bytecode.push(
+                    Byte::new(Instruction::InitTyped)
+                        .with_operand_u32(common::pack_init_typed(type_id, nfields)),
+                );
+                // SetField is value, target. StorePop stashes instance at tmp
+                // with cursor past it (already TOS). Do not LOAD tmp after:
+                // a second copy sits between lower values and breaks HostInvoke.
+                let tmp_inst = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp_inst);
+                if let Some(arg_list) = args {
+                    for (i, (arg, _)) in arg_list.iter().zip(fields.iter()).enumerate() {
+                        bytecode.append(&mut self.do_compile(arg));
+                        bytecode.push_load(tmp_inst);
+                        bytecode.push_set_field_slot(i as u32);
+                        bytecode.push_pop();
                     }
-                } else {
-                    let fields = self.context.classes.get(&name).cloned().unwrap_or_default();
-                    let type_id = self.checker.class_type_id(&name);
-                    let nfields = fields.len() as u32;
-                    bytecode.push(
-                        Byte::new(Instruction::InitTyped)
-                            .with_operand_u32(common::pack_init_typed(type_id, nfields)),
-                    );
-                    // SetField is value, target. StorePop stashes instance at tmp
-                    // with cursor past it (already TOS). Do not LOAD tmp after:
-                    // a second copy sits between lower values and breaks HostInvoke.
-                    let tmp_inst = self.alloc_temp_slot();
-                    bytecode.push_store_pop(tmp_inst);
-                    if let Some(arg_list) = args {
-                        for (i, (arg, _)) in arg_list.iter().zip(fields.iter()).enumerate() {
-                            bytecode.append(&mut self.do_compile(arg));
-                            bytecode.push_load(tmp_inst);
-                            bytecode.push_set_field_slot(i as u32);
-                            bytecode.push_pop();
-                        }
-                    }
-                    // Ctor staging may seek past tmp; restore so tmp is expression result.
-                    bytecode.push_seek(tmp_inst + 1);
                 }
+                // Ctor staging may seek past tmp; restore so tmp is expression result.
+                bytecode.push_seek(tmp_inst + 1);
             }
             Expression::Adjust { op, prefix, target } => {
                 self.emit_adjust(&mut bytecode, target, *op, *prefix);

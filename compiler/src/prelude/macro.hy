@@ -22,6 +22,52 @@ impl Code {
     }
 }
 
+/// Join fragments with `sep` (the lowering of `$(xs) sep *`).
+fn join(Vec<Code> xs, string sep) -> string {
+    let out = "";
+    let i = 0;
+    while i < len(xs) {
+        if i > 0 {
+            out += sep;
+        }
+        out += xs[i].text;
+        i += 1;
+    }
+    return out;
+}
+
+/// A string literal: `lit("a\"b")` splices as `"a\"b"`.
+fn lit(string s) -> Code {
+    let out: Vec<byte> = Vec::new();
+    out.push(34 as byte);
+    for b in to_bytes(s) {
+        if b == 34 as byte || b == 92 as byte {
+            out.push(92 as byte);
+        }
+        out.push(b);
+    }
+    out.push(34 as byte);
+    return match from_bytes(out) {
+        Result::Ok(text) => new Code(text),
+        Result::Err(_) => new Code("\"\""),
+    };
+}
+
+/// An integer literal.
+fn lit_int(int n) -> Code {
+    return new Code(format("%i", n));
+}
+
+/// Raw source, spliced as is.
+fn raw(string text) -> Code {
+    return new Code(text);
+}
+
+/// Combine several generated item lists.
+fn concat(Vec<Code> parts) -> Code {
+    return new Code(join(parts, "\n"));
+}
+
 /// A name as written in source.
 class Ident {
     pub name: string,
@@ -35,6 +81,11 @@ impl Ident {
     pub fn src() -> string {
         return self.name;
     }
+}
+
+/// A name, for splicing generated identifiers: `${ident("to_" + n)}`.
+fn ident(string name) -> Ident {
+    return new Ident(name);
 }
 
 /// A type annotation as written (not resolved): `Vec<int>`, `json::Value`.
@@ -81,6 +132,31 @@ class Attr {
 }
 
 impl Attr {
+    /// The attribute as written: `#[name(key = "v", 2)]`.
+    pub fn src() -> string {
+        if len(self.args) == 0 {
+            return "#[" + self.name + "]";
+        }
+        let out = "#[" + self.name + "(";
+        let i = 0;
+        while i < len(self.args) {
+            let a = self.args[i];
+            if i > 0 {
+                out += ", ";
+            }
+            if a.key != "" {
+                out += a.key + " = ";
+            }
+            if a.kind == "string" {
+                out += lit(a.value).text;
+            } else {
+                out += a.value;
+            }
+            i += 1;
+        }
+        return out + ")]";
+    }
+
     /// True when the attribute has an argument named `key`, or a bare `key`.
     pub fn has(string key) -> bool {
         for a in self.args {
@@ -251,6 +327,8 @@ class FnDecl {
     pub attrs: Vec<Attr>,
     /// Owning class for an `impl` method, else `""`.
     pub owner: string,
+    /// `pub` (methods; top-level functions are always visible).
+    pub is_pub: bool,
     pub is_static: bool,
     pub is_coro: bool,
     pub docs: Vec<string>,
@@ -283,6 +361,35 @@ impl FnDecl {
         return out;
     }
 
+    /// The function under another name, with its remaining attributes:
+    /// `#[other] pub fn name(T a) -> R { body }`.
+    pub fn with_name(string name) -> string {
+        let out = "";
+        for a in self.attrs {
+            out += a.src() + "\n";
+        }
+        if self.is_pub {
+            out += "pub ";
+        }
+        if self.is_coro {
+            out += "async ";
+        }
+        if self.is_static {
+            out += "static ";
+        }
+        return out + "fn " + self.signature(name) + " " + self.body;
+    }
+
+    /// A call of `name` with this function's arguments (`self.name(a, b)`
+    /// for an instance method).
+    pub fn call(string name) -> string {
+        let prefix = "";
+        if self.owner != "" && !self.is_static {
+            prefix = "self.";
+        }
+        return prefix + name + "(" + self.arg_names() + ")";
+    }
+
     /// `a, b`: the parameter names, for forwarding a call.
     pub fn arg_names() -> string {
         let out = "";
@@ -296,55 +403,4 @@ impl FnDecl {
         }
         return out;
     }
-}
-
-/// Join fragments with `sep` (the lowering of `$(xs) sep *`).
-fn join(Vec<Code> xs, string sep) -> string {
-    let out = "";
-    let i = 0;
-    while i < len(xs) {
-        if i > 0 {
-            out += sep;
-        }
-        out += xs[i].text;
-        i += 1;
-    }
-    return out;
-}
-
-/// A string literal: `lit("a\"b")` splices as `"a\"b"`.
-fn lit(string s) -> Code {
-    let out: Vec<byte> = Vec::new();
-    out.push(34 as byte);
-    for b in to_bytes(s) {
-        if b == 34 as byte || b == 92 as byte {
-            out.push(92 as byte);
-        }
-        out.push(b);
-    }
-    out.push(34 as byte);
-    return match from_bytes(out) {
-        Result::Ok(text) => new Code(text),
-        Result::Err(_) => new Code("\"\""),
-    };
-}
-
-/// An integer literal.
-fn lit_int(int n) -> Code {
-    return new Code(format("%i", n));
-}
-
-/// Raw source, spliced as is.
-fn raw(string text) -> Code {
-    return new Code(text);
-}
-
-/// A name, for splicing generated identifiers: `${ident("to_" + n)}`.
-fn ident(string name) -> Ident {
-    return new Ident(name);
-}
-
-/// Combine several generated item lists.
-fn concat(Vec<Code> parts) -> Code {
-    return new Code(join(parts, "\n"));
 }

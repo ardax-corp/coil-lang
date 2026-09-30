@@ -2363,28 +2363,8 @@ impl Checker {
                 ),
             );
         }
-        // Serialize / Deserialize / Default / Hash / String
+        // Default / Hash / String
         {
-            use crate::typechecking::ty::byte;
-            let var = self.counter.fresh();
-            let bytes = vec_app_ty(byte());
-            self.typeclass_method_schemes.insert(
-                ("Serialize".to_string(), "serialize".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Serialize", var)],
-                    Ty::Fun(Box::new(Ty::Var(var)), Box::new(bytes.clone())),
-                ),
-            );
-            let var = self.counter.fresh();
-            self.typeclass_method_schemes.insert(
-                ("Deserialize".to_string(), "deserialize".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Deserialize", var)],
-                    Ty::Fun(Box::new(bytes), Box::new(Ty::Var(var))),
-                ),
-            );
             let var = self.counter.fresh();
             self.typeclass_method_schemes.insert(
                 ("Default".to_string(), "default".to_string()),
@@ -16848,8 +16828,6 @@ impl Checker {
                 | "Length"
                 | "Hash"
                 | "Default"
-                | "Serialize"
-                | "Deserialize"
                 | "Send"
                 | "String"
                 | "Sensitive"

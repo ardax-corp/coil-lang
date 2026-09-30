@@ -2,8 +2,7 @@
 //!
 //! - `derive Name(TypeDecl t) -> Code { … }` → `fn __derive_Name(TypeDecl t) -> Code { … }`
 //! - `attr name(FnDecl f, string msg) -> Code { … }` → `fn __attr_name(…)`
-//!   (an `attr` whose first parameter is not `FnDecl` / `TypeDecl` is a
-//!   legacy runtime decorator and is left for `attrs::expand_program`)
+//!   (the first parameter must be `FnDecl` or `TypeDecl`)
 //! - `quote kind { text ${e} $(xs) sep * }` →
 //!   `new Code("text" + e.src() + join(xs, "sep"))`
 //!
@@ -153,8 +152,23 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
             let input = match params.first() {
                 Some((_, ty, _)) if is_model_type(ty, "FnDecl") => MacroInput::FnDecl,
                 Some((_, ty, _)) if is_model_type(ty, "TypeDecl") => MacroInput::TypeDecl,
-                // Legacy `target(...args)` decorator.
-                _ => return,
+                _ => {
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "attribute macro `{name}` must take a `FnDecl` or `TypeDecl` as its first parameter"
+                        ),
+                        span.into_range(),
+                    );
+                    msg.with_help(
+                        "runtime `target(...args)` decorators were replaced by attribute macros: \
+                         `attr name(FnDecl f, …) -> Code { … }` returns the code that replaces the item"
+                            .to_string(),
+                    );
+                    out.messages.push(msg);
+                    *item.1 = Expression::Fragment(Vec::new());
+                    return;
+                }
             };
             if params.iter().skip(1).any(|(_, _, rest)| *rest) {
                 out.messages.push(Message::error(

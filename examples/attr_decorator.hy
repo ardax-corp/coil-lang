@@ -1,16 +1,11 @@
+// Attribute macros (`examples/src/attr_demo.hy`) wrapping a function.
+// Stacked macros apply outermost first: `log` wraps `measure` wraps the body.
+//
+// Output: enterdo_thinghi42
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
-
-attr log<T>(fn(... args) -> T target, string message, ... args) -> T {
-    write_all(stdout(), to_bytes(format("%s", message)));
-    return target(...args);
-}
-
-attr measure<T>(fn(... args) -> T target, string metric, ... args) -> T {
-    write_all(stdout(), to_bytes(format("%s", metric)));
-    return target(...args);
-}
+use attr_demo::{log, measure};
 
 #[log(message = "enter")]
 #[measure(metric = "do_thing")]

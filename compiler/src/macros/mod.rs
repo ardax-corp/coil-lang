@@ -26,20 +26,64 @@ pub const MACRO_MODULE: &str = "macro";
 /// Source of the embedded `macro` module.
 pub const MACRO_SOURCE: &str = include_str!("../prelude/macro.hy");
 
+/// Module path of the built-in derives (`Show`, `Eq`, …), always in scope.
+/// Not under `prelude::`, which is the compiler's virtual module.
+pub const DERIVE_MODULE: &str = "derive";
+
+/// Source of the built-in derives.
+pub const DERIVE_SOURCE: &str = include_str!("../prelude/derive.hy");
+
+/// Derives [`DERIVE_MODULE`] declares: usable without a `use`.
+pub const PRELUDE_DERIVES: &[&str] = &[
+    "Show",
+    "Eq",
+    "Ord",
+    "Default",
+    "Hash",
+    "String",
+    "Send",
+    "Sensitive",
+];
+
 /// Pseudo path the embedded `macro` module is compiled from.
 pub fn macro_module_path() -> PathBuf {
     PathBuf::from("<coil>/macro.hy")
 }
 
-/// Embedded source for a pseudo path from [`macro_module_path`].
+/// Pseudo path of the built-in derive module.
+pub fn derive_module_path() -> PathBuf {
+    PathBuf::from("<coil>/derive.hy")
+}
+
+/// Embedded source for a pseudo path.
 pub fn embedded_source(path: &Path) -> Option<&'static str> {
-    (path == macro_module_path()).then_some(MACRO_SOURCE)
+    if path == macro_module_path() {
+        Some(MACRO_SOURCE)
+    } else if path == derive_module_path() {
+        Some(DERIVE_SOURCE)
+    } else {
+        None
+    }
+}
+
+/// Module path of an embedded pseudo path.
+pub fn embedded_module(path: &Path) -> Option<&'static str> {
+    if path == macro_module_path() {
+        Some(MACRO_MODULE)
+    } else if path == derive_module_path() {
+        Some(DERIVE_MODULE)
+    } else {
+        None
+    }
 }
 
 /// Embedded module a `use path::name` refers to, if any.
 pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static str)> {
     let head = path.first().map(String::as_str).unwrap_or(name);
-    (head == MACRO_MODULE).then(|| (macro_module_path(), MACRO_MODULE))
+    if head == MACRO_MODULE {
+        return Some((macro_module_path(), MACRO_MODULE));
+    }
+    (head == DERIVE_MODULE).then(|| (derive_module_path(), DERIVE_MODULE))
 }
 
 /// Function a `derive Name` is lowered to.

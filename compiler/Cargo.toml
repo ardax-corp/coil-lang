@@ -21,6 +21,8 @@ machine = { path = "../machine", optional = true, default-features = false, feat
 
 [dev-dependencies]
 machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
+# Integration tests run user and built-in derive macros on the VM.
+comptime = { path = "../comptime" }
 proptest = "1"
 libc = "0.2"
 serde_json = "1"
