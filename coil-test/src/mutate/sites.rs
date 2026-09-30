@@ -173,15 +173,16 @@ impl Walk<'_> {
         if end > self.source.len() || start > end {
             return;
         }
-        match expr.as_ref() {
+        let skip = match expr.as_ref() {
             // Test code is not a mutation target.
-            Expression::TestCase { .. } => return,
+            Expression::TestCase { .. } => true,
             Expression::Function { attrs, .. } => {
-                if attrs.iter().any(|a| a.name == "test") || self.fn_suppressed(start) {
-                    return;
-                }
+                attrs.iter().any(|a| a.name == "test") || self.fn_suppressed(start)
             }
-            _ => {}
+            _ => false,
+        };
+        if skip {
+            return;
         }
         // The outermost `fn` bounds the coverage search for its sites.
         let saved = (self.scope_line, self.in_fn);
