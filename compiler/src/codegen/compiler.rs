@@ -5343,58 +5343,6 @@ impl Compiler {
         args.len() as u32
     }
 
-    /// Push the items of a tuple / array literal in order for `MakeTuple` /
-    /// `MakeArray`. A later item that may clobber the operand stack (a nested
-    /// `new` leaves its inner temps above the previous item) would bury or
-    /// overwrite the earlier items, so stage every item into a temp and
-    /// reload them, as [`Self::emit_call_args_stage_all`] does for CALL args.
-    /// A flat `new C(a, b)` leaves no temp above its result, so the next
-    /// item's temps start right at the cursor; only a nested producer (a
-    /// `new`, CALL or `match` in the arguments) leaves one behind.
-    fn emit_literal_items(&mut self, items: &[Output<'_>], bytecode: &mut CodeBuf) {
-        let settled = |c: &Output<'_>| {
-            if !self.expr_may_clobber_operand_stack(c) {
-                return true;
-            }
-            let Expression::Instantiate(_, args) = unwrap_expr_output(c).1.as_ref() else {
-                return false;
-            };
-            args.iter()
-                .flatten()
-                .all(|a| !self.expr_may_clobber_operand_stack(a))
-        };
-        let stage = items.len() >= 2
-            && items[1..]
-                .iter()
-                .any(|c| self.expr_may_clobber_operand_stack(c))
-            && !items.iter().all(settled);
-        if !stage {
-            for c in items {
-                bytecode.append(&mut self.do_compile(c));
-            }
-            return;
-        }
-        let mut temps = Vec::with_capacity(items.len());
-        for c in items {
-            let tmp = if self.arg_emits_on_self_bytecode(c) {
-                let mut staged = self.do_compile(c);
-                self.bytecode.append(&mut staged);
-                let tmp = self.alloc_temp_slot();
-                self.bytecode.push_store_pop(tmp);
-                tmp
-            } else {
-                bytecode.append(&mut self.do_compile(c));
-                let tmp = self.alloc_temp_slot();
-                bytecode.push_store_pop(tmp);
-                tmp
-            };
-            temps.push(tmp);
-        }
-        for tmp in temps {
-            bytecode.push_load(tmp);
-        }
-    }
-
     /// Compile `arg` onto [`Self::bytecode`] and `StorePop` into a fresh temp.
     fn stage_call_arg_to_temp(&mut self, arg: &Output<'_>, box_generic: bool, tmp_out: &mut u32) {
         let mut staged = CodeBuf::new();
@@ -16291,13 +16239,19 @@ impl Compiler {
                 self.bytecode.push(Byte::new(Instruction::DoneCoro));
             }
             Expression::Tuple(items) => {
-                self.emit_literal_items(items, &mut bytecode);
+                for c in items {
+                    let mut bc = self.do_compile(c);
+                    bytecode.append(&mut bc);
+                }
                 let arity = items.len() as u32;
                 let kinds = self.word_kinds_of(items.iter());
                 bytecode.push_make_tuple_kinds(arity, kinds);
             }
             Expression::Array(items) => {
-                self.emit_literal_items(items, &mut bytecode);
+                for c in items {
+                    let mut bc = self.do_compile(c);
+                    bytecode.append(&mut bc);
+                }
                 let arity = items.len() as u32;
                 let elem_kind = self.array_literal_elem_kind(ast);
                 bytecode.push_make_array_kind(arity, elem_kind);
