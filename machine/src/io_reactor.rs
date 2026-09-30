@@ -152,21 +152,43 @@ impl IoReactor {
     }
 
     /// Cancel a waiter (e.g. stream closed); safe if already ready.
+    ///
+    /// Also forgets it in `ready`: a cancelled token left there keeps
+    /// [`Self::wait_any`] returning at once, so `wait_ready` stops blocking.
     pub fn cancel_wait(&self, token: WaitToken) {
         self.inner
             .waits
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&token);
+        self.inner
+            .ready
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|t| *t != token);
     }
 
     /// Drop every async waiter on this handle (stream close).
     pub fn cancel_waits_for(&self, handle: WaitHandle) {
+        let mut gone = Vec::new();
         self.inner
             .waits
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, w| w.handle != handle);
+            .retain(|t, w| {
+                let keep = w.handle != handle;
+                if !keep {
+                    gone.push(*t);
+                }
+                keep
+            });
+        if !gone.is_empty() {
+            self.inner
+                .ready
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|t| !gone.contains(t));
+        }
         self.inner.cvar.notify_all();
     }
 
@@ -212,6 +234,8 @@ impl IoReactor {
                 Some(end) => {
                     let now = Instant::now();
                     if now >= end {
+                        // `cancel_wait` takes `ready` too.
+                        drop(ready);
                         self.cancel_wait(token);
                         return Err(IoErrorTag::TimedOut);
                     }
@@ -660,6 +684,37 @@ mod tests {
         assert_eq!(err2, IoErrorTag::Other);
         drop(r);
         drop(w);
+    }
+
+    /// A waiter that became ready and was then cancelled (its coroutine
+    /// finished or re-awaited) must not make later `wait_any` calls return
+    /// at once.
+    #[test]
+    fn cancelled_ready_waiter_does_not_wake_wait_any() {
+        for by_handle in [false, true] {
+            let (r, mut w) = tcp_pair();
+            let io = IoReactor::new();
+            let tok = io.register_wait(wait_of(&r), Interest::Readable);
+            w.write_all(b"z").expect("write");
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while io.poll_once(Some(Duration::from_millis(10))) == 0 {
+                assert!(Instant::now() < deadline, "socket never became readable");
+            }
+            if by_handle {
+                io.cancel_waits_for(wait_of(&r));
+            } else {
+                io.cancel_wait(tok);
+            }
+            let (r2, w2) = tcp_pair();
+            let tok2 = io.register_wait(wait_of(&r2), Interest::Readable);
+            assert_eq!(
+                io.wait_any(Some(Duration::from_millis(30))),
+                0,
+                "a stale ready token must not end the wait (by_handle={by_handle})"
+            );
+            io.cancel_wait(tok2);
+            drop((r, w, r2, w2));
+        }
     }
 
     #[test]
