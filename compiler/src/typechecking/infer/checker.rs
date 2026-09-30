@@ -10295,6 +10295,62 @@ impl Checker {
         self.result_mode_ok_is_result.contains(fn_name)
     }
 
+    /// Result-mode flags `note_result_mode_fn` may set for `name` (bare and
+    /// `module::name`), to restore with [`Self::restore_result_modes`].
+    ///
+    /// Trait signatures and instance methods infer as functions under the
+    /// bare method name, which a free fn (or another instance) may own.
+    pub(super) fn snapshot_result_modes<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Vec<(String, bool, bool)> {
+        let mut keys = Vec::new();
+        for name in names {
+            keys.push(name.to_string());
+            if !self.current_module.is_empty() {
+                keys.push(format!("{}::{}", self.current_module, name));
+            }
+        }
+        keys.into_iter()
+            .map(|k| {
+                let mode = self.result_mode_fns.contains(&k);
+                let ok_is_result = self.result_mode_ok_is_result.contains(&k);
+                (k, mode, ok_is_result)
+            })
+            .collect()
+    }
+
+    /// Undo result-mode flags set since [`Self::snapshot_result_modes`].
+    pub(super) fn restore_result_modes(&mut self, saved: Vec<(String, bool, bool)>) {
+        for (key, mode, ok_is_result) in saved {
+            if mode {
+                self.result_mode_fns.insert(key.clone());
+            } else {
+                self.result_mode_fns.remove(&key);
+            }
+            if ok_is_result {
+                self.result_mode_ok_is_result.insert(key);
+            } else {
+                self.result_mode_ok_is_result.remove(&key);
+            }
+        }
+    }
+
+    /// Codegen compiles an instance method under its FQN
+    /// (`Class__Args__method`) and reads its return layout / result mode by
+    /// that key. Copy what inferring it under the bare `name` just recorded.
+    pub(super) fn record_instance_method_under_fqn(&mut self, name: &str, fqn: &str) {
+        if let Some(scheme) = self.env.lookup(name).cloned() {
+            self.env.insert_top(fqn.to_string(), scheme);
+        }
+        if self.result_mode_fns.contains(name) {
+            self.result_mode_fns.insert(fqn.to_string());
+        }
+        if self.result_mode_ok_is_result.contains(name) {
+            self.result_mode_ok_is_result.insert(fqn.to_string());
+        }
+    }
+
     fn note_result_mode_fn(&mut self, name: &str, ok: &Ty) {
         self.result_mode_fns.insert(name.to_string());
         if !self.current_module.is_empty() {

@@ -10387,6 +10387,12 @@ impl Compiler {
         if self.is_fn_value_escaped(name) {
             return None;
         }
+        // Trait instance methods are dictionary entries (`CodePtr`), so they
+        // keep the one-word ABI unless a definition site pinned a pair
+        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
+        if is_instance_method_fqn(&self.checker, name) {
+            return None;
+        }
         let lookup = strip_overload_key(name);
         // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
         if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {
@@ -11180,8 +11186,15 @@ impl Compiler {
 
         let prev_result_mode = self.compiling_result_mode;
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-        self.compiling_result_mode = self.checker.fn_is_result_mode(name);
-        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
+        // Instance methods are recorded under their FQN; the bare name may
+        // belong to a free fn (or another instance).
+        let mode_key = if self.checker.fn_return_ty(&qualified).is_some() {
+            qualified.as_str()
+        } else {
+            name
+        };
+        self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
+        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         let prev_try_fail = self.compiling_try_fail.take();
         self.compiling_two_word_enum = if *is_coro {

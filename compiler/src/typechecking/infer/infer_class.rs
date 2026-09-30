@@ -219,9 +219,22 @@ impl Checker {
         // sibling method through the same dictionary.
         let active_len = self.active_constraints.len();
         self.active_constraints.extend(class_constraints);
+        // Signatures infer as functions under the bare method name; they must
+        // not leave that name in result mode for a free fn that shares it.
+        let saved_modes = self.snapshot_result_modes(methods.iter().filter_map(|m| {
+            match m.1.as_ref() {
+                Expression::Function { name, .. } => Some(*name),
+                Expression::Method(_, body) => match body.1.as_ref() {
+                    Expression::Function { name, .. } => Some(*name),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }));
         for m in methods {
             let _ = self.infer(m);
         }
+        self.restore_result_modes(saved_modes);
         self.active_constraints.truncate(active_len);
         self.type_params_in_scope.pop();
         self.current_typeclass = None;
@@ -548,6 +561,13 @@ impl Checker {
                         );
                         method_names.push(mname.to_string());
                         method_fqns.insert(mname.to_string(), fqn.clone());
+                        // Inferred under the bare name, which another instance
+                        // or a free fn may share: clear it, keep this method's
+                        // flags under its FQN, then restore.
+                        let saved_modes = self.snapshot_result_modes([mname]);
+                        self.restore_result_modes(
+                            saved_modes.iter().map(|(k, _, _)| (k.clone(), false, false)).collect(),
+                        );
                         self.infer_function(super::infer_fn::InferFunctionArgs {
                             name: mname,
                             type_params: mparams,
@@ -561,6 +581,8 @@ impl Checker {
                             method_owner: None,
                             is_static_method: false,
                         });
+                        self.record_instance_method_under_fqn(mname, &fqn);
+                        self.restore_result_modes(saved_modes);
                     } else {
                         let _ = self.infer(m);
                     }
