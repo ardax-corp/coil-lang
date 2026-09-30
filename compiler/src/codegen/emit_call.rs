@@ -249,7 +249,7 @@ impl Compiler {
                 return bytecode;
             }
             if self.compiling_mono_clone
-                && self.try_emit_ground_bound_method(&mut bytecode, name, args.as_ref(), &hint)
+                && self.try_emit_ground_bound_method(&mut bytecode, ast, name, args.as_ref(), &hint)
             {
                 return bytecode;
             }
@@ -363,7 +363,14 @@ impl Compiler {
                     });
                 let mut temps = Vec::new();
                 let mut nargs = 1u32; // receiver
+                // A default body is generic: `Option` / `Result` of a class
+                // type parameter crosses as the boxed enum.
+                let is_default = Self::is_default_method_fqn(&class, method, &fqn);
+                let sig = self.trait_method_boundary_sig(&class, method, &inst_args, is_default);
                 bytecode.append(&mut self.do_compile(recv));
+                if let Some(target) = sig.as_ref().and_then(|s| s.params.first().copied().flatten()) {
+                    Self::emit_layout_convert(&mut bytecode, self.expr_layout(recv), target);
+                }
                 // Box the receiver when the instance method prologue
                 // expects an unbox (same contract as Eq/Ord direct calls).
                 // Prefer `receiver_type` for identifiers/access; fall
@@ -389,6 +396,12 @@ impl Compiler {
                 if let Some(items) = args {
                     for arg in items {
                         self.append_with_existential_pack(&mut bytecode, arg);
+                        if let Some(target) = sig
+                            .as_ref()
+                            .and_then(|s| s.params.get(nargs as usize).copied().flatten())
+                        {
+                            Self::emit_layout_convert(&mut bytecode, self.expr_layout(arg), target);
+                        }
                         if stage {
                             let tmp = self.alloc_temp_slot();
                             bytecode.push_store_pop(tmp);
@@ -405,6 +418,8 @@ impl Compiler {
                 }
                 if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
                     self.missing_call_target(&fqn, span.into_range());
+                } else if let Some(from) = sig.and_then(|s| s.ret) {
+                    Self::emit_layout_convert(&mut bytecode, from, self.expr_layout(ast));
                 }
                 return bytecode;
             }
@@ -1023,6 +1038,20 @@ impl Compiler {
                     return bytecode;
                 }
 
+                // Generic boundary: `Option` / `Result` params that mention a
+                // type parameter take the boxed layout, shared body or mono.
+                let generic_sig = if is_generic_src {
+                    self.checker
+                        .env()
+                        .lookup(&lookup_name)
+                        .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty))
+                } else {
+                    None
+                };
+                if let Some((params, _)) = generic_sig.as_ref() {
+                    let (fixed, _, _) = self.split_call_args_for_rest(&lookup_name, arg_slice);
+                    self.queue_generic_arg_convs(params, &fixed);
+                }
                 let value_arity = self.emit_call_args_with_rest(
                     &lookup_name,
                     arg_slice,
@@ -1148,8 +1177,11 @@ impl Compiler {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                     }
-                } else if is_generic && self.expr_layout(ast).is_niche_option() {
-                    Self::emit_boxed_option_to_niche(&mut bytecode);
+                } else if let Some((_, ret)) = generic_sig.as_ref()
+                    && let Some(generic) = self.generic_enum_layout(ret)
+                {
+                    // Shared body and mono clone both build the boxed enum.
+                    Self::emit_layout_convert(&mut bytecode, generic, self.expr_layout(ast));
                 }
             } else if self.fn_entry_labels.contains_key(&n) {
                 // Reserved by phased emit (COI-109) but body not yet bound.

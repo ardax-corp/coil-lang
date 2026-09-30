@@ -4586,6 +4586,35 @@ impl Compiler {
         bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
+        // The shared generic body unboxes only its bare `T` params; any other
+        // fixed argument (`Node n`, `[T] xs`, `Result<T, E> r`) passes as-is.
+        let mut no_box = Vec::new();
+        if box_generic && let Some(scheme) = self.checker.env().lookup(fn_name) {
+            let bounds = scheme.bounds.clone();
+            let (params, _) = Self::fun_param_and_ret_tys(&scheme.ty);
+            let (fixed, _, _) = self.split_call_args_for_rest(fn_name, args);
+            for (param, arg) in params.iter().zip(fixed.iter()) {
+                let bare_t = matches!(param, Ty::Var(v) if bounds.contains(v));
+                let span = (arg.0.start, arg.0.end);
+                if !bare_t && self.generic_arg_no_box.insert(span) {
+                    no_box.push(span);
+                }
+            }
+        }
+        let n = self.emit_call_args_with_rest_inner(fn_name, args, bytecode, box_generic);
+        for span in no_box {
+            self.generic_arg_no_box.remove(&span);
+        }
+        n
+    }
+
+    fn emit_call_args_with_rest_inner(
+        &mut self,
+        fn_name: &str,
+        args: &[Output<'_>],
+        bytecode: &mut CodeBuf,
+        box_generic: bool,
+    ) -> u32 {
         self.consume_spread_emit_ids(args);
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
 
@@ -4636,6 +4665,7 @@ impl Compiler {
         for arg in &fixed {
             self.append_with_existential_pack(bytecode, arg);
             if box_generic
+                && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                 && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                     self.emit_generic_arg_box(bytecode, &arg_ty);
                 }
@@ -5109,6 +5139,7 @@ impl Compiler {
             }
             self.append_with_existential_pack(bytecode, arg);
             if box_generic
+                && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                 && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                     self.emit_generic_arg_box(bytecode, &arg_ty);
                 }
@@ -5127,6 +5158,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5156,6 +5188,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5193,6 +5226,7 @@ impl Compiler {
             } else {
                 self.append_with_existential_pack(bytecode, arg);
                 if box_generic
+                    && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
                     && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                         self.emit_generic_arg_box(bytecode, &arg_ty);
                     }
@@ -5207,6 +5241,7 @@ impl Compiler {
         self.append_with_existential_pack(&mut staged, arg);
         self.bytecode.append(&mut staged);
         if box_generic
+            && !self.generic_arg_no_box.contains(&(arg.0.start, arg.0.end))
             && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                 let mut box_bc = CodeBuf::new();
                 self.emit_generic_arg_box(&mut box_bc, &arg_ty);
@@ -6197,6 +6232,7 @@ impl Compiler {
     fn try_emit_ground_bound_method(
         &mut self,
         bytecode: &mut CodeBuf,
+        call: &Output,
         name: &Output,
         args: Option<&Vec<Output>>,
         hint: &crate::typechecking::infer::BoundMethodCall,
@@ -6279,10 +6315,15 @@ impl Compiler {
         // (dictionary ABI). Other params (`int k`, `Val v`) pass as-is.
         let unbox_tys = self.instance_method_unbox_tys(&instance.class, method, &lookup);
         let mut temps = Vec::with_capacity(arg_nodes.len());
+        let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
+        let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
         for (i, (node, ty)) in arg_nodes.iter().zip(arg_tys.iter()).enumerate() {
             bytecode.append(&mut self.do_compile(node));
             if unbox_tys.get(i).is_some_and(Option::is_some) {
                 Self::emit_box_if_needed(bytecode, ty);
+            }
+            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(i).copied().flatten()) {
+                Self::emit_layout_convert(bytecode, self.expr_layout(node), target);
             }
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
@@ -6292,12 +6333,85 @@ impl Compiler {
             bytecode.push_load(*tmp);
         }
         let mut arity = temps.len() as u32;
-        if Self::is_default_method_fqn(&instance.class, method, &fqn)
-            && self.emit_instance_dict(bytecode, &instance.class, &lookup)
-        {
+        if is_default && self.emit_instance_dict(bytecode, &instance.class, &lookup) {
             arity += 1;
         }
-        self.emit_direct_fn_call(bytecode, &fqn, arity)
+        if !self.emit_direct_fn_call(bytecode, &fqn, arity) {
+            return false;
+        }
+        if let Some(from) = sig.and_then(|s| s.ret) {
+            Self::emit_layout_convert(bytecode, from, self.expr_layout(call));
+        }
+        true
+    }
+
+    /// Target-side layouts of a trait method's `Option` / `Result` params and
+    /// return that mention a class type parameter (others are `None`: both
+    /// sides already agree). A concrete instance method uses the layout of
+    /// its instance types (possibly a niche); a default body is generic and
+    /// takes / builds the boxed enum.
+    pub(super) fn trait_method_boundary_sig(
+        &self,
+        class: &str,
+        method: &str,
+        instance_args: &[Ty],
+        is_default: bool,
+    ) -> Option<BoundarySig> {
+        let scheme = self.checker.typeclass_method_scheme(class, method)?;
+        let mut inst = crate::typechecking::subst::Subst::empty();
+        for (bound, ty) in scheme.bounds.iter().zip(instance_args) {
+            inst.insert(*bound, ty.clone());
+        }
+        let layout_of = |ty: &Ty| -> Option<ValueLayout> {
+            let generic = self.generic_enum_layout(ty)?;
+            Some(if is_default {
+                generic
+            } else {
+                self.value_layout(&crate::typechecking::subst::apply_ty(&inst, ty))
+            })
+        };
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let sig = BoundarySig {
+            params: params.iter().map(layout_of).collect(),
+            ret: layout_of(&ret),
+        };
+        (sig.ret.is_some() || sig.params.iter().any(Option::is_some)).then_some(sig)
+    }
+
+    fn dict_adapter_name(fqn: &str) -> String {
+        format!("{fqn}$dict")
+    }
+
+    /// Dictionary entry for a concrete instance method whose trait signature
+    /// has `Option` / `Result` params or return over a class type parameter:
+    /// callers through a dictionary (shared generic bodies, existentials)
+    /// pass and expect the boxed enum, while the method uses its instance
+    /// types' layout (possibly a niche). Converts on the way in and out; the
+    /// method's own prologue still unboxes bare `T` params.
+    fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
+        let Some(sig) = self.trait_method_boundary_sig(class, method, inst_args, false) else {
+            return;
+        };
+        let adapter = Self::dict_adapter_name(fqn);
+        if self.functions.contains_key(&adapter) {
+            return;
+        }
+        self.bind_function_entry(adapter);
+        let nparams = sig.params.len() as u32;
+        for (slot, target) in sig.params.iter().enumerate() {
+            self.bytecode.push_load(slot as u32);
+            if let Some(target) = target {
+                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, *target);
+            }
+        }
+        self.bytecode.push_load(nparams); // trailing dictionary
+        if !self.emit_named_entry_on_module(fqn, nparams + 1, crate::il::EntryKind::Call) {
+            self.missing_call_target(fqn, 0..0);
+        }
+        if let Some(from) = sig.ret {
+            Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
+        }
+        self.bytecode.push_return();
     }
 
     /// Default trait bodies reach siblings through their trailing dictionary;
@@ -8233,7 +8347,13 @@ impl Compiler {
                     self.missing_call_target(&name, instance.range.clone());
                     return false;
                 }
-                fqns.push(name);
+                // Dictionary calls use the generic signature's layouts.
+                let adapter = Self::dict_adapter_name(&name);
+                if self.functions.contains_key(&adapter) {
+                    fqns.push(adapter);
+                } else {
+                    fqns.push(name);
+                }
             }
             (fqns, instance.range.clone())
         };
@@ -8260,10 +8380,74 @@ impl Compiler {
 
     fn append_with_existential_pack(&mut self, bytecode: &mut CodeBuf, expr: &Output) {
         let pack = self.existential_pack_hint(self.node_id_of(expr), expr);
+        let conv = self.boundary_arg_convs.remove(&(expr.0.start, expr.0.end));
         bytecode.append(&mut self.do_compile(expr));
         if let Some(pack) = pack {
             self.emit_existential_pack_recipe(bytecode, &pack);
         }
+        if let Some((from, to)) = conv {
+            Self::emit_layout_convert(bytecode, from, to);
+        }
+    }
+
+    /// Layout generic code gives a value of static type `ty` when `ty` is an
+    /// `Option` / `Result` whose type still mentions a type parameter. Such a
+    /// value is always a boxed `ObjEnum` on the generic side, while concrete
+    /// code may use a pointer niche (COI-92) for the same type once `T` is
+    /// known. `None` for fully concrete types and for a bare `T` (that
+    /// boundary is `BoxValue` / `UnboxValue`).
+    pub(super) fn generic_enum_layout(&self, ty: &Ty) -> Option<ValueLayout> {
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        let is_enum = crate::typechecking::ty::is_option_ty(&ty)
+            || crate::typechecking::ty::result_ok_err(&ty).is_some();
+        (is_enum && !crate::typechecking::subst::ftv(&ty).is_empty())
+            .then(|| self.value_layout(&ty))
+    }
+
+    /// Queue the argument conversions for a call whose callee parameters
+    /// (`params`, generic) meet caller arguments of concrete static layout.
+    pub(super) fn queue_generic_arg_convs(&mut self, params: &[Ty], args: &[Output<'_>]) {
+        for (param, arg) in params.iter().zip(args) {
+            let Some(generic) = self.generic_enum_layout(param) else {
+                continue;
+            };
+            let concrete = self.expr_layout(arg);
+            if concrete != generic {
+                self.boundary_arg_convs
+                    .insert((arg.0.start, arg.0.end), (concrete, generic));
+            }
+        }
+    }
+
+    /// Convert the enum value on TOS between two layouts of the same
+    /// `Option` / `Result` type (niche ↔ boxed; niche ↔ niche via boxed).
+    pub(super) fn emit_layout_convert(bytecode: &mut CodeBuf, from: ValueLayout, to: ValueLayout) {
+        if from == to {
+            return;
+        }
+        match from {
+            ValueLayout::NicheOption => Self::emit_niche_option_to_boxed(bytecode),
+            ValueLayout::NicheResult => Self::emit_niche_result_to_boxed(bytecode),
+            ValueLayout::NicheUnitResult => Self::emit_unit_result_niche_to_boxed(bytecode),
+            ValueLayout::Boxed => {}
+        }
+        match to {
+            ValueLayout::NicheOption => Self::emit_boxed_option_to_niche(bytecode),
+            ValueLayout::NicheResult => Self::emit_boxed_result_to_niche(bytecode, false),
+            ValueLayout::NicheUnitResult => Self::emit_boxed_result_to_niche(bytecode, true),
+            ValueLayout::Boxed => {}
+        }
+    }
+
+    /// Parameter types and return type of a (possibly generic) scheme type.
+    pub(super) fn fun_param_and_ret_tys(ty: &Ty) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::new();
+        let mut cur = ty.clone();
+        while let Ty::Fun(p, r) = cur {
+            params.push(*p);
+            cur = *r;
+        }
+        (params, cur)
     }
 
     /// Compile `expr` into [`Self::bytecode`] for an immediate store (`let` / `=`).
@@ -16506,7 +16690,8 @@ impl Compiler {
                             let unbox_tys =
                                 self.instance_method_unbox_tys(class, method_name, &arg_tys);
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
-                            self.compile_function_output_with_name(method, fqn, &unbox_tys, 1);
+                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, 1);
+                            self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
                             let _method_wrapper_id = self.checker.id_table().ids()[self.emit_idx];
@@ -16526,7 +16711,13 @@ impl Compiler {
                                     &arg_tys,
                                     &fqn,
                                 );
-                                self.compile_function_output_with_name(body, fqn, &unbox_tys, 1);
+                                self.compile_function_output_with_name(
+                                    body,
+                                    fqn.clone(),
+                                    &unbox_tys,
+                                    1,
+                                );
+                                self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                             } else {
                                 self.consume_function_signature_output(body);
                             }
