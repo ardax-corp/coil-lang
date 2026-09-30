@@ -863,8 +863,21 @@ where
             f(params);
             f(ret);
         }
+        Expression::Quote { parts, .. } => {
+            for part in parts {
+                if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                    f(e);
+                }
+            }
+        }
         Expression::AttrDecl {
             docs: _,
+            args,
+            returns,
+            body,
+            ..
+        }
+        | Expression::DeriveDecl {
             args,
             returns,
             body,

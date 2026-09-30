@@ -11,6 +11,17 @@ impl<const S: usize> Machine<S> {
         let mut ip = *ip_out;
         let mut sp = *sp_out;
         let bc = opcode.bytecode();
+        // Step budget charge, as `charge_step!` in `execute`.
+        macro_rules! charge_step {
+            ($back:expr) => {
+                self.fuel = self.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.fuel == 0) {
+                    *ip_out = ip;
+                    *sp_out = sp;
+                    return dispatch::RestFlow::Done(self.step_budget_out(ip.saturating_sub(1)));
+                }
+            };
+        }
         match bc {
                 Instruction::POP => {
                     self.stack.pop();
@@ -604,6 +615,7 @@ impl<const S: usize> Machine<S> {
                         Value::from(unsafe { *constants.get_unchecked(float_idx) }).as_float();
                     let taken = crate::fused::eval_f64_cmp(cmp_op, mag, rhs);
                     if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
+                        charge_step!(target < ip);
                         set_jump_target(&mut ip, target, code);
                     }
                 }
@@ -1152,6 +1164,7 @@ impl<const S: usize> Machine<S> {
                             if unlikely(wide) {
                                 self.rearm_call_window();
                             }
+                            charge_step!(target_offset < ip);
                             set_jump_target(&mut ip, target_offset, code);
                         }
                     }
@@ -1350,6 +1363,7 @@ impl<const S: usize> Machine<S> {
                     let packed = opcode.operand_u32();
                     let value_arity = (packed & 0xFFFF) as usize;
                     let app_dict_arity = ((packed >> 16) & 0xFFFF) as usize;
+                    charge_step!(true);
                     promise!(self.stack.tell() > value_arity + app_dict_arity);
                     let raw = self.stack.pop();
 

@@ -170,6 +170,8 @@ impl Checker {
             expected_here: None,
             type_aliases: vec![HashMap::new()],
             generic_aliases: HashMap::new(),
+            qualified_type_aliases: HashMap::new(),
+            qualified_generic_aliases: HashMap::new(),
             const_scopes: vec![HashSet::new()],
             const_fold_env: HashMap::new(),
             static_slots: HashMap::new(),
@@ -1881,6 +1883,12 @@ impl Checker {
         self.polyfn_binding_spans.contains(&(start, end))
     }
 
+    /// A module-level alias of a non-entry module (the program frame plus the
+    /// top scope `check_program` pushes), exported as `module::Name`.
+    fn at_module_alias_scope(&self) -> bool {
+        !self.current_module.is_empty() && self.type_aliases.len() <= 2
+    }
+
     fn register_type_alias(&mut self, name: &str, alias_ty: Ty, range: Range<usize>) {
         if self.type_aliases.is_empty() {
             self.type_aliases.push(HashMap::new());
@@ -1904,6 +1912,10 @@ impl Checker {
             return;
         }
 
+        if self.at_module_alias_scope() {
+            self.qualified_type_aliases
+                .insert(format!("{}::{}", self.current_module, name), alias_ty.clone());
+        }
         self.type_aliases
             .last_mut()
             .expect("type alias scope should exist")
@@ -1936,14 +1948,16 @@ impl Checker {
             self.messages.push(msg);
             return;
         }
-        self.generic_aliases.insert(
-            name.to_string(),
-            GenericAliasDef {
-                params,
-                param_vars,
-                body,
-            },
-        );
+        let def = GenericAliasDef {
+            params,
+            param_vars,
+            body,
+        };
+        if self.at_module_alias_scope() {
+            self.qualified_generic_aliases
+                .insert(format!("{}::{}", self.current_module, name), def.clone());
+        }
+        self.generic_aliases.insert(name.to_string(), def);
         self.generics
             .register_nominal_type(name, &self.current_module);
     }
@@ -3257,7 +3271,10 @@ impl Checker {
                 class,
                 args,
                 methods,
-            } => self.infer_typeclass_impl(class, args, methods, range),
+            } => {
+                let class = self.impl_trait_key(class);
+                self.infer_typeclass_impl(class, args, methods, range)
+            }
 
             Expression::AssocTypeDecl { .. } => unit_ty(),
             Expression::AssocTypeDef { ty, .. } => {
@@ -10204,12 +10221,109 @@ impl Checker {
             return Ty::Var(self.counter.fresh());
         }
 
+        // 4. Module path: `json::Value` / `a::b::Box<int>` names a type of a
+        //    compiled module without a `use` (trait / type-param owners win).
+        if let Some(ty) = self.resolve_module_type_path(owner, assoc, args, range) {
+            return ty;
+        }
+
         self.messages.push(Message::error(
             ErrorCode::GenericTypeError,
             format!("Cannot resolve type projection `{}::{}`", owner, assoc),
             range.clone(),
         ));
         Ty::Var(self.counter.fresh())
+    }
+
+    /// Registry key of the trait an `impl` head names. Traits are keyed by
+    /// bare name, so `impl m::Trait for T` (known module `m`) keys `Trait`.
+    pub fn impl_trait_key<'a>(&self, class: &'a str) -> &'a str {
+        if let Some((module, leaf)) = class.rsplit_once("::")
+            && self.generics.typeclass(class).is_none()
+            && self.is_known_module(module)
+            && self.generics.typeclass(leaf).is_some()
+        {
+            return leaf;
+        }
+        class
+    }
+
+    /// Module namespace this compile has checked (`a`, `a::b`; not the entry).
+    pub fn is_known_module(&self, path: &str) -> bool {
+        !path.is_empty() && self.def_interner.module_id(path).is_some()
+    }
+
+    /// Resolve `module::Name` / `module::Name<args>` in a type annotation to
+    /// the module's class, enum or alias. `None` when `module` is not a known
+    /// module; an unknown item in a known module reports and yields a var.
+    fn resolve_module_type_path(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[Ty],
+        range: &Range<usize>,
+    ) -> Option<Ty> {
+        if !self.is_known_module(module) {
+            return None;
+        }
+        let fqn = format!("{module}::{name}");
+        if args.is_empty()
+            && let Some(ty) = self.qualified_type_aliases.get(&fqn)
+        {
+            return Some(ty.clone());
+        }
+        if let Some(def) = self.qualified_generic_aliases.get(&fqn).cloned() {
+            if def.params.len() != args.len() {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "Type constructor `{}` expects {} type arguments, got {}",
+                        fqn,
+                        def.params.len(),
+                        args.len()
+                    ),
+                    range.clone(),
+                ));
+            }
+            return Some(self.expand_generic_alias(&def, args));
+        }
+        let is_type = self.classes.contains_key(&fqn)
+            || self.enum_tags.contains_key(&fqn)
+            || self.enums.contains_key(&fqn);
+        if !is_type {
+            let mut msg = Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Cannot find type `{name}` in module `{module}`"),
+                range.clone(),
+            );
+            msg.with_help(format!(
+                "`{module}` has no class, enum or type alias named `{name}`"
+            ));
+            self.messages.push(msg);
+            return Some(Ty::Var(self.counter.fresh()));
+        }
+        let expected = self
+            .generics
+            .generic_type_ctors
+            .get(&fqn)
+            .map(|params| params.len())
+            .unwrap_or(0);
+        if args.is_empty() {
+            return Some(Ty::Con(fqn));
+        }
+        if expected != args.len() {
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "Type constructor `{}` expects {} type arguments, got {}",
+                    fqn,
+                    expected,
+                    args.len()
+                ),
+                range.clone(),
+            ));
+        }
+        Some(Ty::App(Box::new(Ty::Con(fqn)), args.to_vec()))
     }
 
     /// After discharging a ground (or unifying) instance, pin any open
@@ -11234,6 +11348,7 @@ impl Checker {
         for field in fields {
             if let Expression::Field {
                 docs: _,
+                attrs: _,
                 visibility: vis,
                 modifier,
                 name: fname,
@@ -12555,6 +12670,7 @@ impl Checker {
             else {
                 continue;
             };
+            let class = self.impl_trait_key(class);
             let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
             if self
                 .generics
@@ -12640,6 +12756,15 @@ impl Checker {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con((*name).to_string()),
                 };
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
+                Ty::App(Box::new(head), arg_tys)
+            }
+            // `impl Trait for module::Type` (module-qualified head).
+            Expression::TypeProjection { owner, name, args } if self.is_known_module(owner) => {
+                let head = Ty::Con(format!("{owner}::{name}"));
+                if args.is_empty() {
+                    return head;
+                }
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
                 Ty::App(Box::new(head), arg_tys)
             }
@@ -13891,8 +14016,21 @@ impl Checker {
                 self.pre_register_enums_walk(params, errors);
                 self.pre_register_enums_walk(ret, errors);
             }
+            Expression::Quote { parts, .. } => {
+                for part in parts {
+                    if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
+                        self.pre_register_enums_walk(e, errors);
+                    }
+                }
+            }
             Expression::AttrDecl {
                 docs: _,
+                args,
+                returns,
+                body,
+                ..
+            }
+            | Expression::DeriveDecl {
                 args,
                 returns,
                 body,

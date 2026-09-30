@@ -8,6 +8,7 @@ name = "coil-lsp"
 path = "src/main.rs"
 
 [dependencies]
+comptime = { path = "../comptime" }
 compiler = { path = "../compiler", default-features = false }
 lsp-server = "0.7"
 lsp-types = "0.97"

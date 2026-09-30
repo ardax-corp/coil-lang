@@ -8,6 +8,7 @@ name = "coil-debug"
 path = "src/main.rs"
 
 [dependencies]
+comptime = { path = "../comptime" }
 common = { path = "../common" }
 machine = { path = "../machine", default-features = false, features = ["debugger"] }
 compiler = { path = "../compiler", default-features = false, features = ["dissect"] }

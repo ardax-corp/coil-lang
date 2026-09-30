@@ -22,6 +22,9 @@ use crate::manifest::{
 };
 use crate::Compiler;
 
+#[path = "pipeline_macros.rs"]
+mod macros;
+
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
@@ -122,6 +125,12 @@ pub struct Pipeline {
     /// Retain post-opt IL across the next [`Self::compile_src`] (cursor_model).
     retain_cursor_il: bool,
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
+    /// Runs user macros at compile time (`coil` wires the VM here).
+    macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
+    /// Files whose macros an enclosing pipeline is expanding (cycle check).
+    macro_stack: Vec<PathBuf>,
+    /// Generated-code spans per file, for moving diagnostics to macro sites.
+    generated_ranges: Vec<macros::GeneratedRange>,
 }
 
 /// Native function declaration registered by the host.
@@ -150,6 +159,11 @@ impl Pipeline {
     pub fn clear_file_text(&mut self, file: &Path) {
         self.ast_cache.remove(file);
         self.overlays.remove(file);
+    }
+
+    /// Install the compile-time host that runs user derive / attribute macros.
+    pub fn set_macro_host(&mut self, host: std::sync::Arc<dyn crate::macros::MacroHost>) {
+        self.macro_host = Some(host);
     }
 
     /// In-memory override for `file`, if the editor (or a test) set one.
@@ -315,6 +329,7 @@ impl Pipeline {
         self.entry_file = Some(file.to_path_buf());
         self.enqueue_file(file.to_path_buf());
         self.discover_all();
+        self.expand_user_macros();
 
         let mut results = Vec::new();
         // Discovery drops files that fail to parse from the worklist; still
@@ -353,7 +368,11 @@ impl Pipeline {
                 results.push((item.file, extra));
                 continue;
             }
-            let messages = self.compiler_lazy_mut().get_messages()[before..].to_vec();
+            let raw = self.compiler_lazy_mut().get_messages()[before..].to_vec();
+            let messages = raw
+                .iter()
+                .map(|m| self.remap_generated(&item.file, m))
+                .collect();
             results.push((item.file, messages));
         }
         results
@@ -683,6 +702,9 @@ impl Pipeline {
             messages_emitted: 0,
             retain_cursor_il: false,
             cursor_il: None,
+            macro_host: crate::macros::default_host(),
+            macro_stack: Vec::new(),
+            generated_ranges: Vec::new(),
         };
         pipeline.register_standard_host_natives();
         pipeline
@@ -699,6 +721,27 @@ impl Pipeline {
         self.messages_emitted = self.compiler_lazy_mut().get_messages().len();
         let file_id = self.sink.register_source(path, source);
         self.sink.emit(Diagnostic::from_message(message, file_id));
+        if self.sink.had_errors() {
+            self.failed = true;
+        }
+    }
+
+    /// [`Self::emit_new_messages`] for `file`, moving diagnostics in
+    /// macro-generated code to the macro's use site.
+    fn emit_new_messages_for(&mut self, file_id: SourceId, file: &Path) {
+        if self.generated_ranges.is_empty() {
+            return self.emit_new_messages(file_id);
+        }
+        let already = self.messages_emitted;
+        let all = self.compiler_lazy().get_messages();
+        let pending: Vec<Message> = all[already..]
+            .iter()
+            .map(|m| self.remap_generated(file, m))
+            .collect();
+        self.messages_emitted = all.len();
+        for msg in &pending {
+            self.sink.emit(Diagnostic::from_message(msg, file_id));
+        }
         if self.sink.had_errors() {
             self.failed = true;
         }
@@ -785,6 +828,12 @@ impl Pipeline {
         let use_range = ast.0.into_range();
         match ast.1.borrow() {
             Expression::Use { path, name, .. } => {
+                // The embedded `macro` model is coil source shipped in the compiler.
+                if let Some((file, _)) = crate::macros::embedded_use(path, name) {
+                    self.record_module_dep(parent_file, &file);
+                    self.enqueue_file(file);
+                    return;
+                }
                 // Compiler virtual modules (`prelude`, `ffi`, …) are not
                 // `.hy` files, skip disk discovery for those paths.
                 {
@@ -981,6 +1030,9 @@ impl Pipeline {
         if let Some(text) = self.overlays.get(file) {
             return Some(text.clone());
         }
+        if let Some(text) = crate::macros::embedded_source(file) {
+            return Some(text.to_string());
+        }
         // Intern the path. Repeated calls with the same
         // path return the same id; new paths extend the
         // interner's storage. The id is a `u32` (Copy),
@@ -1014,6 +1066,7 @@ impl Pipeline {
         self.worklist.clear();
         self.module_deps.clear();
         self.ast_cache.clear();
+        self.generated_ranges.clear();
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
@@ -1073,8 +1126,9 @@ impl Pipeline {
         let Some(source) = self.read_source(file) else {
             return false;
         };
+        let module = self.namespace_for(file);
         let mut cached = crate::ast_cache::CachedAst::parse(source);
-        let _ = cached.expand_if_needed();
+        let _ = cached.expand_in(&module);
         self.ast_cache.insert(file.to_path_buf(), cached);
         true
     }
@@ -1251,10 +1305,10 @@ impl Pipeline {
         let src = self
             .ast_cache
             .get(&file)
-            .map(|c| c.source().to_string())
+            .map(|c| c.report_source())
             .unwrap_or_default();
         let file_id = self.sink.register_source(&file, &src);
-        self.emit_new_messages(file_id);
+        self.emit_new_messages_for(file_id, &file);
         if self.had_errors() {
             self.failed = true;
         }
@@ -1278,6 +1332,7 @@ impl Pipeline {
         // compilation pass can run in dependency
         // order (dependencies first).
         self.discover_all();
+        self.expand_user_macros();
 
         // Compilation pass: topo-sort on `use`/`mod` edges
         // (see `worklist_in_dependency_order`). Discovery's
@@ -1384,6 +1439,7 @@ impl Pipeline {
         // `compile_src_from_file`, without requiring a temp file.
         self.enqueue_uses(path, src, &ast);
         self.discover_all();
+        self.expand_user_macros();
         self.seed_fn_value_escapes(Some(&ast));
         self.emit_discovered_modules();
         if self.failed || self.had_errors() {
@@ -1494,6 +1550,7 @@ impl Pipeline {
 
         // Discovery + dependency-ordered compile (see `compile`).
         self.discover_all();
+        self.expand_user_macros();
         self.compile_discovered_modules();
 
         if self.failed || self.had_errors() {
@@ -1538,6 +1595,7 @@ impl Pipeline {
         self.enqueue_file(entry);
 
         self.discover_all();
+        self.expand_user_macros();
         self.compile_discovered_modules();
 
         if self.failed || self.had_errors() {

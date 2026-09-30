@@ -848,6 +848,63 @@
         assert_eq!(format!("{}", proj.1), "Pointer::Ref<int>");
     }
 
+    /// Module paths in types: `a::b::Box<int>` keeps the owner path joined.
+    #[test]
+    fn module_path_type_projection_parses() {
+        let proj = Pratt::default()
+            .type_annotation()
+            .parse("geo::shapes::Box<int>")
+            .into_result()
+            .expect("module path type parse failed");
+        match proj.1.as_ref() {
+            Expression::TypeProjection { owner, name, args } => {
+                assert_eq!((*owner, *name), ("geo::shapes", "Box"));
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected TypeProjection, got {:?}", other),
+        }
+        assert_eq!(format!("{}", proj.1), "geo::shapes::Box<int>");
+    }
+
+    /// `new a::b::C(…)`, `a::C::f()` and `m::f()` keep their module paths.
+    #[test]
+    fn module_path_expressions_parse() {
+        let parse = |src: &'static str| {
+            let mut out = Pratt::default()
+                .expr()
+                .parse(src)
+                .into_result()
+                .expect("module path expr parse failed");
+            while let Expression::Expr(inner) = out.1.as_ref() {
+                out = inner.clone();
+            }
+            out
+        };
+        let new_expr = parse("new geo::Point(1, 2)");
+        match new_expr.1.as_ref() {
+            Expression::Instantiate(class, Some(args)) => {
+                assert!(matches!(class.1.as_ref(), Expression::Identifier("geo::Point")));
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected Instantiate, got {:?}", other),
+        }
+        let static_call = parse("geo::Point::origin()");
+        assert!(
+            matches!(
+                static_call.1.as_ref(),
+                Expression::Construct { enum_name: "geo::Point", variant_name: "origin", .. }
+            ),
+            "expected Construct, got {:?}",
+            static_call.1
+        );
+        let unit_call = parse("geo::origin()");
+        assert!(
+            matches!(unit_call.1.as_ref(), Expression::Call { args: None, .. }),
+            "expected Call, got {:?}",
+            unit_call.1
+        );
+    }
+
     /// Inherent impl Display: `impl Point { … }`
     #[test]
     fn inherent_impl_display_round_trips() {

@@ -282,3 +282,19 @@ fn dissect_reads_hyc_archive() {
     assert!(stdout.contains("=== bytecode ===") && stdout.contains("HALT"), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn dissect_expand_prints_macro_output() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/positive/attr_macro.hy");
+    let out = coil_dissect(&bin, Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))), &entry)
+        .arg("--expand")
+        .output()
+        .expect("spawn coil dissect --expand");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("pub fn describe() -> string"), "{stdout}");
+    assert!(stdout.contains("pub fn get_twice() -> int"), "{stdout}");
+    assert!(!stdout.contains("#[twice]"), "{stdout}");
+}
