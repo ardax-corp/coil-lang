@@ -228,20 +228,6 @@ fn eval_eq<'a>(
     Some(ConstValue::Bool(a == b))
 }
 
-/// String concatenation when both sides are known strings.
-pub fn eval_string_add<'a>(
-    lhs: &Output<'a>,
-    rhs: &Output<'a>,
-    env: &HashMap<String, ConstValue>,
-) -> Option<ConstValue> {
-    let a = eval_expr(lhs, env)?;
-    let b = eval_expr(rhs, env)?;
-    match (a, b) {
-        (ConstValue::Str(x), ConstValue::Str(y)) => Some(ConstValue::Str(format!("{x}{y}"))),
-        _ => None,
-    }
-}
-
 /// Integer strength-reduction hint: `x * k` when k is a positive power of
 /// two → shift left by `trailing_zeros(k)`.
 pub fn strength_mul_int(k: i64) -> Option<u32> {
