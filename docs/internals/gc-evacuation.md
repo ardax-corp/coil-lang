@@ -69,7 +69,7 @@ These **pin** the object they reach:
 - **Step size:** one step moves at most 64 chunks (4 MiB). A capped plan
   continues at the next collection.
 - **Stress mode:** `gc-stress` builds collect at every allocation and move
-  every movable object each time. CI runs `coil test` that way.
+  every movable object each time. CI runs the language harness (`coil-test`) that way.
 
 ## Numbers (release, `examples/perf`)
 

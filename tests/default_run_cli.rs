@@ -8,6 +8,24 @@ fn coil_bin() -> String {
     std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)")
 }
 
+/// `coil test` re-execs `coil-test`; `cargo test -p coil` alone does not build it.
+fn ensure_coil_test() {
+    let coil = PathBuf::from(coil_bin());
+    let helper = coil_cli::sibling_bin(&coil, "coil-test");
+    if helper.is_file() {
+        return;
+    }
+    let status = Command::new("cargo")
+        .args(["build", "-q", "-p", "coil-test"])
+        .status()
+        .expect("spawn cargo build -p coil-test");
+    assert!(
+        status.success() && helper.is_file(),
+        "coil-test missing at {}",
+        helper.display()
+    );
+}
+
 fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
@@ -258,6 +276,7 @@ fn unrelated_out_hyc_is_not_reported_stale() {
 /// A failing `assert(cond, msg)?` reports its message, not just "failed".
 #[test]
 fn test_failure_reports_assert_message() {
+    ensure_coil_test();
     let bin = coil_bin();
     let cwd = temp_cwd("assert_msg");
     let tests = cwd.join("tests");

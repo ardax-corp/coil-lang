@@ -1,0 +1,15 @@
+[package]
+name = "coil-host"
+version = "0.1.0"
+edition = "2024"
+
+# Pipeline -> Machine host wiring shared by `coil` and `coil-test`.
+# Not linked by `coil-embed` (archives only, no compiler).
+
+[dependencies]
+common = { path = "../common" }
+compiler = { path = "../compiler", default-features = false }
+machine = { path = "../machine", default-features = false }
+
+[features]
+default = []
