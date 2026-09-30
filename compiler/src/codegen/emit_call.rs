@@ -683,7 +683,11 @@ impl Compiler {
                     }
                 }
 
-            let identifier = self.resolve_variable_checked(name);
+            // `module::fn(...)` names the callee by its FQN (no `use` needed).
+            let identifier = match name.1.as_ref() {
+                Expression::QualifiedAccess { owner, member } => format!("{owner}::{member}"),
+                _ => self.resolve_variable_checked(name),
+            };
             let n = self.resolve_free_fn(&identifier);
             // Non-entry modules register `ns::name`, but sibling
             // calls use the bare name. Typecheck inserts bare

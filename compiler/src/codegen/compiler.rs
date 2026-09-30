@@ -12930,6 +12930,15 @@ impl Compiler {
                     "string" => Ty::Con("string".into()),
                     "bool" => Ty::Con("bool".into()),
                     "void" | "unit" => Ty::Con("unit".into()),
+                    // Same class key the checker's instance head uses, so an
+                    // imported class names `Trait__module::Class__method`.
+                    _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
+                        Ty::Con(
+                            self.checker
+                                .resolve_class_key(name)
+                                .unwrap_or_else(|| name.to_string()),
+                        )
+                    }
                     _ => Ty::Con(name.to_string()),
                 }
             }
@@ -12939,6 +12948,20 @@ impl Compiler {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con(name.to_string()),
                 };
+                let arg_tys: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.codegen_instance_head_ty(a))
+                    .collect();
+                Ty::App(Box::new(head), arg_tys)
+            }
+            // `impl Trait for module::Type`: the checker keys it by FQN.
+            Expression::TypeProjection { owner, name, args }
+                if self.checker.is_known_module(owner) =>
+            {
+                let head = Ty::Con(format!("{owner}::{name}"));
+                if args.is_empty() {
+                    return head;
+                }
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .map(|a| self.codegen_instance_head_ty(a))
