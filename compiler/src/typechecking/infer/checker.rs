@@ -4130,6 +4130,15 @@ impl Checker {
 
         let recv_ty = self.infer(recv);
         let resolved = apply_ty_prune(&self.subst, &recv_ty);
+        // `x.len()` on arrays, tuples, records and strings is the structural
+        // `len(x)` (canonical spelling; `Vec` has its own method).
+        if *method == "len"
+            && method_args.is_empty()
+            && Self::is_structural_len_ty(&resolved)
+            && vec_element_ty(strip_readonly(&resolved)).is_none()
+        {
+            return int();
+        }
         if Self::is_static_array_ty(&resolved)
             && crate::escape::is_fixed_array_grow_method(method)
         {

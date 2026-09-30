@@ -11,6 +11,30 @@ impl Compiler {
         self_id: Option<crate::typechecking::id::NodeId>,
         span: &SimpleSpan,
     ) -> CodeBuf {
+        // `x.len()` on a structural type (array, tuple, record, string) is
+        // `len(x)`; the typechecker types it the same way.
+        if let Expression::Access(recv, method) = name.1.as_ref()
+            && *method == "len"
+            && args.as_ref().is_none_or(|a| a.is_empty())
+            && let Some(ty) = self.codegen_expr_ty(recv)
+        {
+            let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &ty);
+            if Checker::is_structural_len_ty_for_codegen(&ty)
+                && crate::typechecking::ty::vec_element_ty(&ty).is_none()
+            {
+                let len_name: Output<'compiler> =
+                    (name.0, Box::new(Expression::Identifier("len")));
+                let call_args = Some(vec![recv.clone()]);
+                let call: Output<'compiler> = (
+                    ast.0,
+                    Box::new(Expression::Call {
+                        name: len_name.clone(),
+                        args: call_args.clone(),
+                    }),
+                );
+                return self.compile_call_expr(&len_name, &call_args, &call, self_id, span);
+            }
+        }
         let mut bytecode = CodeBuf::new();
         // Fold `len(literal)` before trait dispatch so string/tuple
         // lengths become CONST instead of Length thunk + ArrayLen.
