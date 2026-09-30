@@ -527,6 +527,9 @@ pub struct Machine<const S: usize> {
     #[cfg(any(test, feature = "debugger"))]
     /// Set when `execute` pauses for the debugger (alongside `pending_ffi`).
     pending_debug_stop: Option<StopReason>,
+    #[cfg(any(test, feature = "coverage"))]
+    /// Hit count per PC while coverage is on (see [`Self::begin_coverage`]).
+    coverage: Option<Box<Vec<u32>>>,
     /// Shared program image for OS thread workers (`spawn`).
     thread_program: Option<std::sync::Arc<crate::thread::ThreadProgram>>,
     /// Optional shared stdout capture for worker threads.
@@ -627,6 +630,8 @@ impl<const S: usize> Machine<S> {
             debug: None,
             #[cfg(any(test, feature = "debugger"))]
             pending_debug_stop: None,
+            #[cfg(any(test, feature = "coverage"))]
+            coverage: None,
             thread_program: None,
             shared_print: None,
             live_threads: crate::thread::new_live_thread_registry(),
@@ -691,6 +696,30 @@ impl<const S: usize> Machine<S> {
     pub fn set_program_debug(&mut self, debug: ProgramDebug) {
         self.program_debug = debug;
         self.rebuild_pc_line_cache();
+    }
+
+    /// Start counting executed instructions per PC (clears earlier counts).
+    /// Dense streaks are off while counting, so every instruction is seen.
+    #[cfg(any(test, feature = "coverage"))]
+    pub fn begin_coverage(&mut self) {
+        self.coverage = Some(Box::new(vec![0; self.program_code.len()]));
+    }
+
+    #[cfg(any(test, feature = "coverage"))]
+    #[cold]
+    fn note_coverage(&mut self, ip: usize) {
+        if let Some(counts) = self.coverage.as_deref_mut() {
+            if counts.len() <= ip {
+                counts.resize(ip + 1, 0);
+            }
+            counts[ip] = counts[ip].saturating_add(1);
+        }
+    }
+
+    /// Stop counting and return hit counts indexed by PC (`None` if off).
+    #[cfg(any(test, feature = "coverage"))]
+    pub fn take_coverage(&mut self) -> Option<Vec<u32>> {
+        self.coverage.take().map(|c| *c)
     }
 
     /// Attach a debug controller (enables stop checks in `execute`).
@@ -3301,6 +3330,9 @@ impl<const S: usize> Machine<S> {
         let streaks_allowed = self.debug.is_none();
         #[cfg(not(any(test, feature = "debugger")))]
         let streaks_allowed = true;
+        // Coverage counts at the main dispatch only: no streaks past it either.
+        #[cfg(any(test, feature = "coverage"))]
+        let streaks_allowed = streaks_allowed && self.coverage.is_none();
 
         macro_rules! then_hot_streak {
             () => {
@@ -3352,6 +3384,11 @@ impl<const S: usize> Machine<S> {
             let debug_attached = false;
 
             note_dispatch_at(ip, &self.stack, sp);
+
+            #[cfg(any(test, feature = "coverage"))]
+            if unlikely(self.coverage.is_some()) {
+                self.note_coverage(ip);
+            }
 
             // SAFETY: loop condition guarantees `ip < code.len()`.
             promise!(ip < code_len);

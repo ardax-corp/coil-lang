@@ -72,6 +72,8 @@ pub struct TestJob {
     /// `true`: pass means "returned `Result::Ok`" (a `test` case).
     /// `false`: pass means "did not panic" (a file's `main`).
     pub expect_ok_result: bool,
+    /// Count executed instructions (`coverage` feature; ignored without it).
+    pub coverage: bool,
     /// Filled once the job finishes, before its join state completes.
     pub report: Arc<Mutex<Option<TestReport>>>,
 }
@@ -83,6 +85,9 @@ pub struct TestReport {
     /// Why it failed when it returned `Err(reason)` (a panic's message is in
     /// the job's print buffer instead).
     pub reason: Option<String>,
+    /// Hit count per PC (static init + case) when the job asked for coverage.
+    /// Threads the case spawns run on other VMs and are not counted.
+    pub hits: Option<Vec<u32>>,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -662,6 +667,7 @@ impl TestHandle {
             _ => TestReport {
                 passed: false,
                 reason: None,
+                hits: None,
             },
         }
     }
@@ -720,6 +726,7 @@ impl Reactor {
         job.test = Some(TestJob {
             init_ip: case.init_ip,
             expect_ok_result: case.expect_ok_result,
+            coverage: case.coverage,
             report: Arc::clone(&report),
         });
         (job, state, report)
@@ -735,38 +742,40 @@ pub struct TestCase {
     pub init_ip: Option<u32>,
     /// See [`TestJob::expect_ok_result`].
     pub expect_ok_result: bool,
+    /// See [`TestJob::coverage`].
+    pub coverage: bool,
 }
 
 /// Static init, then the case; the report is stored before the join completes.
 fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
+    #[cfg(feature = "coverage")]
+    if test.coverage {
+        vm.begin_coverage();
+    }
     if let Some(ip) = test.init_ip {
         vm.run_from(ip as usize);
     }
-    let report = if vm.panicked() {
-        TestReport {
-            passed: false,
-            reason: None,
-        }
+    let (passed, reason) = if vm.panicked() {
+        (false, None)
     } else {
         let ret = vm.call_function(entry, &[]);
         if vm.panicked() {
-            TestReport {
-                passed: false,
-                reason: None,
-            }
+            (false, None)
         } else if !test.expect_ok_result || vm.result_is_ok(ret) {
-            TestReport {
-                passed: true,
-                reason: None,
-            }
+            (true, None)
         } else {
-            TestReport {
-                passed: false,
-                reason: vm.result_err_text(ret),
-            }
+            (false, vm.result_err_text(ret))
         }
     };
-    let passed = report.passed;
+    #[cfg(feature = "coverage")]
+    let hits = vm.take_coverage();
+    #[cfg(not(feature = "coverage"))]
+    let hits = None;
+    let report = TestReport {
+        passed,
+        reason,
+        hits,
+    };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
 }
@@ -875,12 +884,14 @@ mod tests {
             entry: 0,
             init_ip: None,
             expect_ok_result: false,
+            coverage: false,
         };
         let pooled = reactor.submit_test(test_ctx(&reactor, 3), case, Arc::default());
         let inline = reactor.run_test_here(test_ctx(&reactor, 4), case, Arc::default());
         let expect = TestReport {
             passed: true,
             reason: None,
+            hits: None,
         };
         assert_eq!(pooled.wait(), expect);
         assert_eq!(inline, expect);
@@ -890,6 +901,22 @@ mod tests {
             ..case
         };
         assert!(!reactor.run_test_here(test_ctx(&reactor, 5), strict, Arc::default()).passed);
+        reactor.shutdown();
+    }
+
+    /// With coverage on, both instructions of `CONST; RETURN` are counted once.
+    #[cfg(feature = "coverage")]
+    #[test]
+    fn test_jobs_count_executed_instructions() {
+        let reactor = Reactor::new(1);
+        let case = TestCase {
+            entry: 0,
+            init_ip: None,
+            expect_ok_result: false,
+            coverage: true,
+        };
+        let report = reactor.run_test_here(test_ctx(&reactor, 1), case, Arc::default());
+        assert_eq!(report.hits.as_deref(), Some(&[1, 1][..]));
         reactor.shutdown();
     }
 

@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 default = []
 debugger = []
+# Per-instruction hit counts for `coil-test --coverage`. Never in `coil`.
+coverage = []
 vm_profile = []
 # Collect at every allocation safepoint (GC soundness testing only).
 gc-stress = []
