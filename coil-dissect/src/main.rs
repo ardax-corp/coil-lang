@@ -195,6 +195,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
 }
 
 fn main() {
+    comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
         Ok((config, args)) => cmd_dissect(config, args),

@@ -8,6 +8,7 @@ name = "coil-dissect"
 path = "src/main.rs"
 
 [dependencies]
+comptime = { path = "../comptime" }
 common = { path = "../common" }
 parser = { path = "../parser" }
 compiler = { path = "../compiler", default-features = false, features = ["dissect"] }

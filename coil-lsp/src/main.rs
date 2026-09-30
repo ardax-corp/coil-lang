@@ -65,6 +65,7 @@ struct ServerState {
 }
 
 fn main() {
+    comptime::install();
     if let Err(error) = run() {
         eprintln!("coil-lsp: {error}");
         std::process::exit(1);

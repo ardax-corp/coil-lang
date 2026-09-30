@@ -759,6 +759,7 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, tsv: bool) {
 }
 
 fn main() {
+    comptime::install();
     let raw_args: Vec<String> = std::env::args().collect();
     let cli = match parse_args(&raw_args) {
         Ok(c) => c,

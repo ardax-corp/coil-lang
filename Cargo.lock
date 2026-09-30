@@ -291,6 +291,7 @@ dependencies = [
  "coil-cli",
  "common",
  "compiler",
+ "comptime",
  "criterion",
  "machine",
  "parser",
@@ -315,6 +316,7 @@ dependencies = [
  "coil-cli",
  "common",
  "compiler",
+ "comptime",
  "machine",
  "reporting",
  "serde",
@@ -328,6 +330,7 @@ dependencies = [
  "coil-cli",
  "common",
  "compiler",
+ "comptime",
  "parser",
  "reporting",
 ]
@@ -352,6 +355,7 @@ name = "coil-lsp"
 version = "0.1.0"
 dependencies = [
  "compiler",
+ "comptime",
  "lsp-server",
  "lsp-types",
  "parser",
@@ -392,6 +396,15 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "comptime"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "compiler",
+ "machine",
 ]
 
 [[package]]
