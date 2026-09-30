@@ -3281,6 +3281,7 @@ impl Compiler {
                     args,
                     methods,
                 } => {
+                    let class = self.checker.impl_trait_key(class);
                     let arg_tys: Vec<Ty> = args
                         .iter()
                         .map(|arg| self.codegen_instance_head_ty(arg))
@@ -16420,6 +16421,7 @@ impl Compiler {
                 args,
                 methods,
             } => {
+                let class = self.checker.impl_trait_key(class);
                 // Instance heads from AST shape, not span cache (avoids `Container__unit__first`).
                 let arg_tys: Vec<Ty> = args
                     .iter()

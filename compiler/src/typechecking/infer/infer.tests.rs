@@ -8483,3 +8483,40 @@ fn origin(geo::Point p) -> geo::Cell<int> {
         msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn impl_head_accepts_module_qualified_trait_name() {
+    let mut c = Checker::new();
+    let parser = Pratt::default();
+
+    c.set_current_module("rank");
+    let ast = parser
+        .parse("trait Rank<T> { fn rank(T x) -> int {} }")
+        .expect("parse rank");
+    let _ = c.check_program(&ast);
+    assert!(c.take_messages().is_empty());
+
+    c.set_current_module("");
+    let importer = r#"
+class Card { pub v: int, }
+impl rank::Rank for Card {
+    pub fn rank(Card c) -> int {
+        return c.v;
+    }
+}
+"#;
+    let ast = parser.parse(importer).expect("parse importer");
+    let _ = c.check_program(&ast);
+    let msgs = c.take_messages();
+    assert!(
+        msgs.is_empty(),
+        "qualified trait impl head should resolve: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+    assert!(
+        c.generics
+            .find_instance("Rank", &[Ty::Con("Card".into())])
+            .is_some(),
+        "expected a Rank instance for Card"
+    );
+}

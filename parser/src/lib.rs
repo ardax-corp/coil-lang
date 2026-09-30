@@ -2549,8 +2549,9 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
             .map(|opt| opt.unwrap_or_default());
 
+        // Trait name may be module-qualified: `impl json::Serialize for T`.
         keyword!("impl")
-            .ignore_then(text::ident())
+            .ignore_then(self.item_path())
             .then(opt_bracket_args)
             .then_ignore(keyword!("for"))
             .then(self.type_annotation().padded_by(trivia()))

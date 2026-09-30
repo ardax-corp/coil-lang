@@ -3212,7 +3212,10 @@ impl Checker {
                 class,
                 args,
                 methods,
-            } => self.infer_typeclass_impl(class, args, methods, range),
+            } => {
+                let class = self.impl_trait_key(class);
+                self.infer_typeclass_impl(class, args, methods, range)
+            }
 
             Expression::AssocTypeDecl { .. } => unit_ty(),
             Expression::AssocTypeDef { ty, .. } => {
@@ -10139,6 +10142,19 @@ impl Checker {
         Ty::Var(self.counter.fresh())
     }
 
+    /// Registry key of the trait an `impl` head names. Traits are keyed by
+    /// bare name, so `impl m::Trait for T` (known module `m`) keys `Trait`.
+    pub fn impl_trait_key<'a>(&self, class: &'a str) -> &'a str {
+        if let Some((module, leaf)) = class.rsplit_once("::")
+            && self.generics.typeclass(class).is_none()
+            && self.is_known_module(module)
+            && self.generics.typeclass(leaf).is_some()
+        {
+            return leaf;
+        }
+        class
+    }
+
     /// Module namespace this compile has checked (`a`, `a::b`; not the entry).
     pub fn is_known_module(&self, path: &str) -> bool {
         !path.is_empty() && self.def_interner.module_id(path).is_some()
@@ -12449,6 +12465,7 @@ impl Checker {
             else {
                 continue;
             };
+            let class = self.impl_trait_key(class);
             let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
             if self
                 .generics
