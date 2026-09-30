@@ -4,7 +4,7 @@
 //! A line is *coverable* when some emitted instruction carries it (its
 //! statement's first line); lines with no code are neither covered nor not.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +64,11 @@ pub struct ProgramLines {
 struct FileCov {
     /// Display path (relative to `cwd` when under it).
     path: String,
+    /// Canonical path.
+    abs: PathBuf,
+    /// How programs' debug info spells this file (the compiler's own path
+    /// keys, e.g. for `Pipeline::set_file_text`).
+    spellings: BTreeSet<String>,
     /// Line → hits.
     lines: BTreeMap<u32, u64>,
 }
@@ -102,6 +107,7 @@ impl Coverage {
         }
         let abs = resolve(source, &self.cwd)?;
         if let Some(&i) = self.by_path.get(&abs) {
+            self.files[i].spellings.insert(source.to_string());
             return Some(i);
         }
         let text = std::fs::read(&abs).ok()?;
@@ -119,6 +125,8 @@ impl Coverage {
         let i = self.files.len();
         self.files.push(FileCov {
             path: display,
+            abs: abs.clone(),
+            spellings: BTreeSet::from([source.to_string()]),
             lines: BTreeMap::new(),
         });
         self.by_path.insert(abs, i);
@@ -169,14 +177,15 @@ impl Coverage {
         ProgramLines { lines }
     }
 
-    /// Add one case's hit counts.
+    /// Add one case's hit counts; returns its covered lines per canonical
+    /// source path.
     pub fn record(
         &mut self,
         program: &ProgramLines,
         hits: &[u32],
         test_file: &str,
         test_name: &str,
-    ) {
+    ) -> Vec<(PathBuf, Vec<u32>)> {
         let mut covered: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
         for (pc, &n) in hits.iter().enumerate() {
             if n == 0 {
@@ -187,17 +196,39 @@ impl Coverage {
                 covered.entry(*id).or_default().push(*line);
             }
         }
+        for lines in covered.values_mut() {
+            lines.sort_unstable();
+            lines.dedup();
+        }
+        let by_path = covered
+            .iter()
+            .map(|(id, lines)| (self.files[*id].abs.clone(), lines.clone()))
+            .collect();
         if let Some(per_test) = &mut self.per_test {
-            for lines in covered.values_mut() {
-                lines.sort_unstable();
-                lines.dedup();
-            }
             per_test.push(TestLines {
                 file: test_file.to_string(),
                 name: test_name.to_string(),
                 lines: covered,
             });
         }
+        by_path
+    }
+
+    /// Project sources with coverable lines: `(canonical path, display path,
+    /// line → hits)`, sorted by display path.
+    pub fn files(&self) -> Vec<(&Path, &str, &BTreeMap<u32, u64>)> {
+        self.sorted_files()
+            .into_iter()
+            .map(|f| (f.abs.as_path(), f.path.as_str(), &f.lines))
+            .collect()
+    }
+
+    /// Every spelling programs used for `abs` (see [`FileCov::spellings`]).
+    pub fn spellings(&self, abs: &Path) -> Vec<String> {
+        self.by_path
+            .get(abs)
+            .map(|&i| self.files[i].spellings.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn sorted_files(&self) -> Vec<&FileCov> {
@@ -285,7 +316,7 @@ fn percent(hit: usize, total: usize) -> String {
     }
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

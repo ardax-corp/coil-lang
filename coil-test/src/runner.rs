@@ -7,9 +7,10 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 
 use coil_host::{ExecutePipelineArgs, bind_cli_roots, execute_pipeline, wire_pipeline_vm};
-use common::{Byte, Instruction};
+use common::{Byte, Instruction, ProgramDebug};
 use compiler::{HostGrants, OptLevel, Pipeline};
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
+use machine::thread::ThreadSpawnContext;
 use machine::{Machine, wire_thread_program};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
@@ -37,7 +38,7 @@ pub struct TestOptions {
     pub extra_roots: Vec<PathBuf>,
 }
 
-fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
+pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
     match format {
         ReportFormat::Pretty => Box::new(std::io::stderr()),
         ReportFormat::Sarif | ReportFormat::Lsp => Box::new(std::io::stdout()),
@@ -96,6 +97,21 @@ pub struct SuiteResult {
     pub files_run: Vec<PathBuf>,
     /// Summed line coverage when `--coverage` was on.
     pub coverage: Option<Coverage>,
+    /// Every case's outcome, in report order.
+    pub cases: Vec<CaseOutcome>,
+}
+
+/// One case's verdict, as `coil mutate` needs it from the baseline run.
+#[derive(Debug, Clone)]
+pub struct CaseOutcome {
+    /// Test file, as the runner was given it.
+    pub file: PathBuf,
+    pub name: String,
+    pub passed: bool,
+    /// Step-budget charges (see `Machine::set_step_budget`).
+    pub steps: u64,
+    /// Covered project lines per canonical source path (with `--coverage`).
+    pub covered: Vec<(PathBuf, Vec<u32>)>,
 }
 
 /// What every file of one run shares.
@@ -122,6 +138,7 @@ struct PendingCase {
 /// A file as the runner reports it. Files print in start order, so output
 /// is the same for a given seed whatever `--jobs` is.
 struct PendingFile {
+    path: PathBuf,
     display: String,
     /// Compiler diagnostics, captured so parallel compiles do not interleave.
     diagnostics: Captured,
@@ -134,11 +151,12 @@ struct PendingFile {
 }
 
 impl PendingFile {
-    fn decided(display: String, diagnostics: Captured, ok: bool, message: Option<String>) -> Self {
+    fn decided(path: &Path, diagnostics: Captured, verdict: (bool, Option<String>)) -> Self {
         PendingFile {
-            display,
+            path: path.to_path_buf(),
+            display: path.display().to_string(),
             diagnostics,
-            verdict: Some((ok, message)),
+            verdict: Some(verdict),
             cases: Vec::new(),
             lines: None,
         }
@@ -147,7 +165,7 @@ impl PendingFile {
 
 /// Shared byte buffer usable as a `Pipeline` report sink.
 #[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
 
 impl Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -168,8 +186,9 @@ impl Captured {
     }
 }
 
-/// Wait for a file's cases, print its report, and return `(passed, failed)`.
-fn finish_file(run: &Run<'_>, file: PendingFile) -> (usize, usize) {
+/// Wait for a file's cases, print its report, and add it to `result`.
+/// Returns the file's failed count.
+fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> usize {
     let diagnostics = file.diagnostics.take();
     if !diagnostics.is_empty() {
         let _ = writer_for(run.config.format).write_all(&diagnostics);
@@ -190,19 +209,26 @@ fn finish_file(run: &Run<'_>, file: PendingFile) -> (usize, usize) {
             passed: ok,
             reason,
             hits,
+            steps,
             ..
         } = match case.state {
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
         };
-        if let (Some(cov), Some(lines), Some(hits)) = (run.coverage, &file.lines, hits) {
-            cov.lock().unwrap_or_else(|e| e.into_inner()).record(
-                lines,
-                &hits,
-                &file.display,
-                &case.name,
-            );
-        }
+        let covered = match (run.coverage, &file.lines, hits) {
+            (Some(cov), Some(lines), Some(hits)) => cov
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(lines, &hits, &file.display, &case.name),
+            _ => Vec::new(),
+        };
+        result.cases.push(CaseOutcome {
+            file: file.path.clone(),
+            name: case.name.clone(),
+            passed: ok,
+            steps,
+            covered,
+        });
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
         if !ok || run.options.show_output {
             print_captured(&output);
@@ -223,7 +249,9 @@ fn finish_file(run: &Run<'_>, file: PendingFile) -> (usize, usize) {
     } else {
         eprintln!("FAILED {}", file.display);
     }
-    (passed, failed)
+    result.passed += passed;
+    result.failed += failed;
+    failed
 }
 
 /// Replay a case's prints / panic message on stderr, next to its verdict.
@@ -257,18 +285,57 @@ enum Dispatch {
     Inline,
 }
 
-/// Compile one file, then decide it or start its cases.
-fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
-    let (config, options, reactor) = (run.config, run.options, run.reactor);
+/// A test file compiled and wired, ready to run its cases.
+pub(crate) struct Prepared {
+    pub ctx: ThreadSpawnContext,
+    /// `(name, entry)` in run order. A file without cases runs `main` once
+    /// as a single case named after the file.
+    pub cases: Vec<(String, u32)>,
+    pub init_ip: Option<u32>,
+    /// See [`TestCase::expect_ok_result`].
+    pub expect_ok_result: bool,
+    pub debug: ProgramDebug,
+}
+
+impl Prepared {
+    pub fn case(&self, entry: u32, coverage: bool, step_budget: Option<u64>) -> TestCase {
+        TestCase {
+            entry,
+            init_ip: self.init_ip,
+            expect_ok_result: self.expect_ok_result,
+            coverage,
+            step_budget,
+        }
+    }
+}
+
+/// A test file's compile result.
+pub(crate) enum Compiled {
+    /// The file's verdict is its compile (`compile_fail/`, errors, a file
+    /// without cases or `main` run from the top): `(ok, message)`.
+    Decided(bool, Option<String>),
+    Ready(Box<Prepared>),
+}
+
+/// Compile one test file with `overlays` (path spelling → text) standing in
+/// for sources on disk. Diagnostics go to `diagnostics`; `None` drops them.
+pub(crate) fn compile_test_file(
+    config: &ReportConfig,
+    options: &TestOptions,
+    reactor: &Arc<Reactor>,
+    path: &Path,
+    diagnostics: Option<&Captured>,
+    overlays: &[(PathBuf, String)],
+) -> Compiled {
     let display = path.display().to_string();
     let expect_compile_fail = is_compile_fail(path);
-    let diagnostics = Captured::default();
     // Expected compile rejection: suppress ariadne noise so the harness
     // summary stays readable when many compile_fail files exist.
-    let mut pipeline = if expect_compile_fail {
-        Pipeline::with_reporter(config.clone(), Box::new(std::io::sink()))
-    } else {
-        Pipeline::with_reporter(config.clone(), Box::new(diagnostics.clone()))
+    let mut pipeline = match diagnostics {
+        Some(d) if !expect_compile_fail => {
+            Pipeline::with_reporter(config.clone(), Box::new(d.clone()))
+        }
+        _ => Pipeline::with_reporter(config.clone(), Box::new(std::io::sink())),
     };
     pipeline.set_include_tests(true);
     pipeline.set_opt_level(options.opt_level);
@@ -285,6 +352,9 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
     if let Some(cov) = &options.coverage {
         // Keep never-called project functions so they report as uncovered.
         pipeline.set_keep_fns_in(Some(project_filter(canonical(&cov.project_root))));
+    }
+    for (file, text) in overlays {
+        pipeline.set_file_text(file.clone(), text.clone());
     }
 
     // catch_unwind isolates a compiler ICE from aborting the whole
@@ -306,16 +376,15 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
             _ => (false, Some("compiler panicked")),
         };
         let message = message.map(|why| format!("> Test \"{display}\" failed ({why})"));
-        return PendingFile::decided(display, diagnostics, ok, message);
+        return Compiled::Decided(ok, message);
     }
     let (bytecode, constants) = match compiled {
         Err(_) => {
             let m = format!("> Test \"{display}\" failed (compiler panicked)");
-            return PendingFile::decided(display, diagnostics, false, Some(m));
+            return Compiled::Decided(false, Some(m));
         }
         Ok(Err(_)) => {
-            let m = format!("> Test \"{display}\" failed");
-            return PendingFile::decided(display, diagnostics, false, Some(m));
+            return Compiled::Decided(false, Some(format!("> Test \"{display}\" failed")));
         }
         Ok(Ok(ok)) => ok,
     };
@@ -338,8 +407,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
             })
         }));
         let ok = matches!(result, Ok(false));
-        let m = (!ok).then(|| format!("> Test \"{display}\" failed"));
-        return PendingFile::decided(display, diagnostics, ok, m);
+        return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
     // Stop the static-init prologue before it jumps into `main`; each job
@@ -349,13 +417,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
         let setup = pipeline.prologue_jmp_target();
         (setup != main && halt_first_jump_in(&mut code, setup as usize, main)).then_some(setup)
     });
-    let lines = run.coverage.map(|cov| {
-        let debug = pipeline.program_debug();
-        let tests = test_fn_ranges(&debug, cases.iter().map(|(_, entry)| *entry));
-        cov.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .register_program(&debug, &tests)
-    });
+    let debug = pipeline.program_debug();
     let ctx = {
         let mut root = Machine::<256>::default();
         wire_pipeline_vm(&pipeline, &mut root, Some(path));
@@ -369,53 +431,83 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
             &constants,
             &strings,
             pipeline.static_slot_count(),
-            pipeline.program_debug(),
+            debug.clone(),
             pipeline.operand_stack_slots(),
         );
-        root.set_program_debug(pipeline.program_debug());
+        root.set_program_debug(debug.clone());
         root.set_reactor(Arc::clone(reactor));
         root.thread_spawn_context()
     };
     drop(pipeline);
     let Some(ctx) = ctx else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
-        return PendingFile::decided(display, diagnostics, false, Some(m));
+        return Compiled::Decided(false, Some(m));
     };
 
     // A file without cases runs `main` once as a single opaque case, where
     // only a panic fails (an uncaught `raise` from `main` is an `Err` return).
-    let (targets, expect_ok_result) = if cases.is_empty() {
-        (vec![(display.clone(), main.unwrap_or(0))], false)
+    let (cases, expect_ok_result) = if cases.is_empty() {
+        (vec![(display, main.unwrap_or(0))], false)
     } else {
         (cases, true)
     };
-    let cases = targets
-        .into_iter()
+    Compiled::Ready(Box::new(Prepared {
+        ctx,
+        cases,
+        init_ip,
+        expect_ok_result,
+        debug,
+    }))
+}
+
+/// Compile one file, then decide it or start its cases.
+fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
+    let diagnostics = Captured::default();
+    let compiled = compile_test_file(
+        run.config,
+        run.options,
+        run.reactor,
+        path,
+        Some(&diagnostics),
+        &[],
+    );
+    let prepared = match compiled {
+        Compiled::Decided(ok, message) => {
+            return PendingFile::decided(path, diagnostics, (ok, message));
+        }
+        Compiled::Ready(prepared) => prepared,
+    };
+    let lines = run.coverage.map(|cov| {
+        let tests = test_fn_ranges(
+            &prepared.debug,
+            prepared.cases.iter().map(|(_, entry)| *entry),
+        );
+        cov.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register_program(&prepared.debug, &tests)
+    });
+    let cases = prepared
+        .cases
+        .iter()
         .map(|(name, entry)| {
-            let case = TestCase {
-                entry,
-                init_ip,
-                expect_ok_result,
-                coverage: run.coverage.is_some(),
-                step_budget: None,
-            };
+            let case = prepared.case(*entry, run.coverage.is_some(), None);
             let output = Arc::new(Mutex::new(Vec::new()));
             let print = Arc::clone(&output);
+            let ctx = prepared.ctx.clone();
             let state = match dispatch {
-                Dispatch::Pool => CaseState::Running(reactor.submit_test(ctx.clone(), case, print)),
-                Dispatch::Inline => {
-                    CaseState::Done(reactor.run_test_here(ctx.clone(), case, print))
-                }
+                Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
+                Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
             };
             PendingCase {
-                name,
+                name: name.clone(),
                 state,
                 output,
             }
         })
         .collect();
     PendingFile {
-        display,
+        path: path.to_path_buf(),
+        display: path.display().to_string(),
         diagnostics,
         verdict: None,
         cases,
@@ -467,9 +559,7 @@ fn run_serial(run: &Run<'_>, files: &[PathBuf]) -> SuiteResult {
     for path in files {
         result.files_run.push(path.clone());
         let file = start_file(run, Dispatch::Inline, path);
-        let (passed, failed) = finish_file(run, file);
-        result.passed += passed;
-        result.failed += failed;
+        let failed = finish_file(run, file, &mut result);
         if failed != 0 && run.options.fail_fast {
             break;
         }
@@ -533,9 +623,7 @@ fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
             ready.insert(index, file);
             while let Some(file) = ready.remove(&next) {
                 result.files_run.push(files[next].clone());
-                let (passed, failed) = finish_file(run, file);
-                result.passed += passed;
-                result.failed += failed;
+                let failed = finish_file(run, file, &mut result);
                 next += 1;
                 if failed != 0 && run.options.fail_fast {
                     // Files already claimed still finish and are reported.
@@ -549,12 +637,12 @@ fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
     result
 }
 
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Write `text` to `path`, creating parent directories.
-fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
