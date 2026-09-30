@@ -37,7 +37,6 @@ See [macros.md](macros.md).
 | Macro compile cost | Each compile that uses derives compiles the `macro` / `derive` modules into an expansion program (~1–2 s per file in a debug build, e.g. `coil test`; outputs are cached per process). Compiling the prelude expansion program once per process is the follow-up. | — |
 | `-O none` expansion | Compiling the expansion program at `-O none` changed some built-in derives' results (string comparisons on model fields); it compiles at `-O basic`. Not reduced to a standalone repro yet. | — |
 | Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
-| `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
 
 ## Lambdas / captures
 
