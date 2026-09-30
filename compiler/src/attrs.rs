@@ -275,10 +275,9 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
             for method in methods {
                 if let Expression::Method(_, func_out) = method.1.as_ref()
                     && let Expression::Function { attrs, .. } = func_out.1.as_ref()
+                    && let Some(a) = validate_attrs(attrs, "function", &mut messages, span, false).first()
                 {
-                    if let Some(a) = validate_attrs(attrs, "function", &mut messages, span, false).first() {
-                        pending.push(pending_attr(a.name, &a.args, method.0, Some(owner)));
-                    }
+                    pending.push(pending_attr(a.name, &a.args, method.0, Some(owner)));
                 }
             }
         }
