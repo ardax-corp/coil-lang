@@ -536,9 +536,6 @@ impl Pipeline {
             name: job.decl.name.clone(),
             text: snippet.clone(),
         });
-        // Parentheses in generated text only spelled precedence the tree now
-        // has; `Group` nodes would hide operands from constant folding.
-        strip_groups(&mut generated);
         // Built-in attributes in generated code expand as usual.
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
@@ -657,15 +654,6 @@ impl Pipeline {
         out.with_help(help);
         out
     }
-}
-
-/// Replace every `Group(e)` with `e`.
-fn strip_groups(node: &mut Output<'_>) {
-    while let Expression::Group(inner) = node.1.as_mut() {
-        let inner = std::mem::replace(inner, (node.0, Box::new(Expression::Break)));
-        *node = inner;
-    }
-    node.1.for_each_child_mut(&mut |c| strip_groups(c));
 }
 
 /// `(path, name, alias)` of every top-level `use`.

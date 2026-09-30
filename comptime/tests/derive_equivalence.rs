@@ -66,3 +66,21 @@ fn coil_derives_compile_like_the_rust_ones() {
     differ.retain(|f| !TUPLE_PAYLOAD_FILES.contains(f));
     assert!(differ.is_empty(), "bytecode differs for {differ:?}");
 }
+
+/// Regenerate with `COIL_BLESS=1 cargo test -p comptime --test derive_equivalence`.
+#[test]
+fn derive_expansion_matches_golden() {
+    comptime::install();
+    compiler::set_coil_builtin_derives(true);
+    let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
+    pipeline.bind_workspace_language_roots();
+    let file = repo().join("tests/positive/derive_all_shapes.hy");
+    let text = pipeline.expanded_source(file.to_str().unwrap()).expect("expands");
+    compiler::set_coil_builtin_derives(false);
+    let golden = repo().join("comptime/tests/golden/derive_all_shapes.expanded.hy");
+    if std::env::var_os("COIL_BLESS").is_some() {
+        std::fs::write(&golden, &text).unwrap();
+    }
+    let want = std::fs::read_to_string(&golden).expect("golden file");
+    assert_eq!(text, want, "expansion changed; bless with COIL_BLESS=1 if intended");
+}
