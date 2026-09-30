@@ -343,3 +343,25 @@ fn first_duplicate_name_is_reported_when_repeated_thrice() {
         "foo",
     );
 }
+
+/// Errors name what to write, not the parser's full expected-token set.
+#[test]
+fn missing_semicolon_says_so() {
+    let err = parse_err("fn main() {\n    let x = 1\n}\n");
+    assert_eq!(err.message(), "unexpected `}`, expected `;`");
+    let text = err_text("fn main() {\n    let x = 1\n}\n");
+    assert!(!text.contains("'+'"), "no operator dump: {text}");
+}
+
+#[test]
+fn missing_value_asks_for_an_expression() {
+    let text = err_text("fn main() {\n    let h = ;\n}\n");
+    assert!(text.contains("expected an expression"), "{text}");
+    assert!(!text.contains("done builtin"), "internal labels stay internal: {text}");
+}
+
+#[test]
+fn unclosed_call_names_the_delimiters() {
+    let err = parse_err("fn main() {\n    foo(1, 2;\n}\n");
+    assert_eq!(err.message(), "unexpected `;`, expected `,` or `)`");
+}

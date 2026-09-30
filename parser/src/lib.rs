@@ -3287,24 +3287,97 @@ fn format_parse_error_title(input: &str, err: &Rich<'_, char>) -> String {
     match err.reason() {
         RichReason::Custom(msg) => msg.to_string(),
         RichReason::ExpectedFound { expected, found } => {
-            let expected_label = expected
-                .iter()
-                .find_map(|pat| {
-                    let s = pat.to_string();
-                    // Prefer labelled productions over raw token dumps.
-                    if s.contains(' ') || s.contains('`') || s.starts_with('"') {
-                        Some(s)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| expected.first().map(|p| p.to_string()));
-            match (found.as_ref().map(|c| c.to_string()), expected_label) {
-                (Some(found), Some(exp)) => format!("unexpected `{found}`, expected {exp}"),
+            let expected: Vec<String> = expected.iter().map(|p| p.to_string()).collect();
+            let wanted = describe_expected(&expected);
+            match (found.as_ref().map(|c| found_text(**c)), wanted) {
+                (Some(found), Some(exp)) => format!("unexpected {found}, expected {exp}"),
                 (None, Some(exp)) => format!("unexpected end of input, expected {exp}"),
-                (Some(found), None) => format!("unexpected `{found}`"),
+                (Some(found), None) => format!("unexpected {found}"),
                 (None, None) => "Parse error".to_string(),
             }
+        }
+    }
+}
+
+/// `x` as shown in "unexpected …" (a newline or space is named).
+fn found_text(c: char) -> String {
+    match c {
+        '\n' => "end of line".to_string(),
+        ' ' | '\t' => "whitespace".to_string(),
+        c => format!("`{c}`"),
+    }
+}
+
+/// Labels of expression atoms: together they just mean "an expression".
+const EXPRESSION_LABELS: &[&str] = &[
+    "array",
+    "boolean",
+    "dict",
+    "float",
+    "integer",
+    "lambda",
+    "string",
+    "tuple",
+    "empty tuple",
+    "single-element tuple",
+    "done builtin",
+    "new",
+    "panic",
+    "raise",
+    "return",
+    "qualified access",
+    "named argument",
+];
+
+/// What the parser wanted, in words: `;`, a structural production
+/// (`block { ... }`), "an expression", closing delimiters, keywords. Operator
+/// continuations (`+`, `.`, `as`, …) are omitted: after a complete
+/// expression they are always possible and never the fix.
+fn describe_expected(expected: &[String]) -> Option<String> {
+    let token = |t: &str| expected.iter().any(|e| e == &format!("'{t}'"));
+    let mut parts: Vec<String> = Vec::new();
+    if token(";") {
+        parts.push("`;`".into());
+    }
+    for e in expected {
+        let is_token = e.starts_with('\'');
+        let is_keyword = e.starts_with('"');
+        if is_token || is_keyword || EXPRESSION_LABELS.contains(&e.as_str()) {
+            continue;
+        }
+        if matches!(e.as_str(), "something else" | "end of input" | "any") {
+            continue;
+        }
+        let e = if e == "identifier" { "an identifier".to_string() } else { e.clone() };
+        if !parts.contains(&e) && parts.len() < 3 {
+            parts.push(e);
+        }
+    }
+    if expected.iter().any(|e| EXPRESSION_LABELS.contains(&e.as_str())) {
+        // An identifier is an expression too.
+        parts.retain(|p| p != "an identifier");
+        parts.push("an expression".into());
+    }
+    for d in [",", ")", "]", "}", ":", "=>"] {
+        if token(d) && parts.len() < 4 {
+            parts.push(format!("`{d}`"));
+        }
+    }
+    let keywords: Vec<String> = expected
+        .iter()
+        .filter(|e| e.starts_with('"') && e.len() > 2)
+        .map(|e| format!("`{}`", e.trim_matches('"')))
+        .take(3)
+        .collect();
+    if parts.is_empty() {
+        parts.extend(keywords);
+    }
+    match parts.len() {
+        0 => None,
+        1 => Some(parts.remove(0)),
+        _ => {
+            let last = parts.pop()?;
+            Some(format!("{} or {last}", parts.join(", ")))
         }
     }
 }
@@ -3315,7 +3388,13 @@ fn format_parse_error_label(input: &str, err: &Rich<'_, char>) -> String {
     }
     match err.reason() {
         RichReason::Custom(msg) => msg.to_string(),
-        _ => err.to_string(),
+        RichReason::ExpectedFound { expected, .. } => {
+            let expected: Vec<String> = expected.iter().map(|p| p.to_string()).collect();
+            match describe_expected(&expected) {
+                Some(exp) => format!("expected {exp} here"),
+                None => err.to_string(),
+            }
+        }
     }
 }
 
@@ -3328,6 +3407,12 @@ fn parse_error_help(input: &str, err: &Rich<'_, char>) -> Option<String> {
     match err.reason() {
         RichReason::Custom(msg) if msg.starts_with("Duplicate field `") => {
             Some("record fields must have unique names".to_string())
+        }
+        RichReason::ExpectedFound { expected, found }
+            if expected.iter().any(|p| p.to_string() == "';'")
+                && matches!(found.as_ref().map(|c| **c), Some('}') | Some('\n') | None) =>
+        {
+            Some("end the statement with `;`".to_string())
         }
         RichReason::Custom(msg) if msg.contains("missing a type") || msg.contains("name: Type") => {
             Some(
