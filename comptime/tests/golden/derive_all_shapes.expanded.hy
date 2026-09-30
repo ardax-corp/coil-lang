@@ -60,7 +60,7 @@ impl Ord for Pt {
 }
 
 impl Default for Pt {
-    fn default() -> Pt {
+    static fn default() -> Pt {
         return new Pt(0, 0);
     }
 }
@@ -128,7 +128,7 @@ impl Ord for Unit {
 }
 
 impl Default for Unit {
-    fn default() -> Unit {
+    static fn default() -> Unit {
         return new Unit();
     }
 }
@@ -363,7 +363,7 @@ impl Ord for Sh {
 }
 
 impl Default for Sh {
-    fn default() -> Sh {
+    static fn default() -> Sh {
         return Sh::Dot;
     }
 }
@@ -510,7 +510,7 @@ impl String for Status {
 }
 
 impl Default for Status {
-    fn default() -> Status {
+    static fn default() -> Status {
         return Status::Ok;
     }
 }
