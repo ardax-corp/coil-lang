@@ -28,7 +28,7 @@ See [macros.md](macros.md).
 
 | Issue | Detail | Linear |
 |-------|--------|--------|
-| Derives on generic types | **Refused** (user and built-in): `impl<T: Show> Show for Box<T>` does not parse and `InstanceDef` has no constraints. Write the `impl` by hand. | — |
+| Derives on generic types | **Refused** (user and built-in): a trait cannot be implemented for a generic type at all yet (`impl Show for Box<T: Show>` does not parse, and `InstanceDef` has no context). Plan: [generic-instances.md](generic-instances.md). | — |
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Outputs are cached in memory by provider sources + input (the LSP and `coil test` reuse them); a fresh `coil` process compiles the providing modules once more. | — |
