@@ -1,5 +1,6 @@
-use io::{Stream, IoError};
-use io::net::tcp::{listen};
+use io::Stream;
+use io::IoError;
+use io::net::tcp::listen;
 
 fn big_ok() -> Result<int, IoError> {
     return 94805378185680;
@@ -41,7 +42,7 @@ test("two-word Result int ? into heap Result keeps payload") {
     match take_q(l) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "take_q",
-    };
+    }
 }
 
 test("four two-word Result int ? into heap Result") {
@@ -52,5 +53,5 @@ test("four two-word Result int ? into heap Result") {
     match four_q(l) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "four_q",
-    };
+    }
 }

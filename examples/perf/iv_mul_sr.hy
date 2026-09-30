@@ -1,7 +1,7 @@
 // CPU: force integer IV strength reduction (`i * c` → add recurrence).
 // Odd invariant factor so codegen does not rewrite the mul to SHL.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn iv_mul(int n, int c) -> int {

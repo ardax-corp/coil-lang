@@ -32,7 +32,7 @@ impl Iterator for Counter {
         if c.cur < c.end {
             let v = c.cur;
             c.cur = c.cur + 1;
-            return Option::Some(v,);
+            return Option::Some(v);
         }
         return Option::None;
     }

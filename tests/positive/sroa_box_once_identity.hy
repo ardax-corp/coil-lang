@@ -9,7 +9,7 @@ fn bounce([int; 3] xs) -> [int; 3] {
 }
 
 class Holder {
-    pub a: [int; 3]
+    pub a: [int; 3],
 }
 
 test("two call-arg escapes are the same object") {

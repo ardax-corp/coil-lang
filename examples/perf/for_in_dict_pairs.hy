@@ -1,6 +1,6 @@
 // COI-371: dict for-in via `for (k, v)` — same DictEntries counted latch as `p[1]`.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn dict_sum() -> int {

@@ -1,8 +1,8 @@
 // Hit bench for COI-281 MIR InstCombine: `t * 2.0` → `t + t` on dense SSA.
 // Fuse-IL algebraic does not strength-reduce float `* 2`; identities on
 // binop TOS (`* 1.0`, `+ 0.0`) also fold when they survive the stack window.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn hot(float scale, int n) -> float {

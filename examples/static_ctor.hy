@@ -9,9 +9,10 @@
 //   1  — Counter::fresh().id (count was bumped to 1)
 //   1  — Counter::count after one fresh()
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 class Point {
     pub x: int,
     pub y: int,

@@ -25,7 +25,7 @@ fn empty_arms(Dir d) -> int {
             noop();
         },
         Dir::Right => {},
-    };
+    }
     -xs[0];
     return 7 + xs[1];
 }
@@ -35,7 +35,7 @@ fn mixed_arms(Dir d) -> int {
     match d {
         Dir::Left => noop(),
         Dir::Right => {},
-    };
+    }
     -xs[0];
     return 7 + xs[1];
 }
@@ -48,7 +48,7 @@ fn option_arms(Option<int> o) -> int {
             noop()
         },
         Option::None => {},
-    };
+    }
     -xs[0];
     return 7 + xs[1];
 }
@@ -58,7 +58,7 @@ fn scalar_arms(Level l) -> int {
     match l {
         Level::Low => {},
         Level::High => noop(),
-    };
+    }
     -xs[0];
     return 7 + xs[1];
 }
@@ -71,7 +71,7 @@ fn tail_value_arm(Dir d) -> int {
             noop()
         },
         Dir::Right => {},
-    };
+    }
     -xs[0];
     return 7 + xs[1];
 }

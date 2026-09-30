@@ -7,15 +7,19 @@ fn checked_div(int a, int b) -> Result<int, int> {
 }
 
 test("ok divides") {
-    assert(match checked_div(6, 3) {
-        Result::Ok(q) => q == 2,
-        Result::Err(_) => false,
-    })?;
+    assert(
+        match checked_div(6, 3) {
+            Result::Ok(q) => q == 2,
+            Result::Err(_) => false,
+        },
+    )?;
 }
 
 test("err on zero") {
-    assert(match checked_div(1, 0) {
-        Result::Ok(_) => false,
-        Result::Err(e) => e == -1,
-    })?;
+    assert(
+        match checked_div(1, 0) {
+            Result::Ok(_) => false,
+            Result::Err(e) => e == -1,
+        },
+    )?;
 }

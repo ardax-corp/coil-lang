@@ -1,7 +1,7 @@
 // Memory: 200k live four-field objects (two ints, two refs). Typed fields are
 // raw words stored inside the object, so four fit without a spill `Vec`.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Cell {

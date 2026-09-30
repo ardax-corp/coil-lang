@@ -2,9 +2,9 @@
 // rebuilt each round with churn in between. Statics carry compile-time word
 // kinds, so the registry roots are precise (a moving collector rewrites them)
 // and the scalar counters are no roots at all.
-use gc::{collect};
-use io::{stdout};
-use io::sync::{write_all};
+use gc::collect;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Node {
@@ -13,7 +13,9 @@ class Node {
 }
 
 static let head: Option<Node> = Option::None;
+
 static let nodes: Vec<Node> = Vec::new();
+
 static let total: int = 0;
 
 fn fill(int n) {

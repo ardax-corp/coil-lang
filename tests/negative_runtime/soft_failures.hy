@@ -22,7 +22,7 @@ test("assert false is Err not panic") {
     match r {
         Result::Ok(_) => raise "expected Err from assert(false)",
         Result::Err(_) => assert(true)?,
-    };
+    }
 }
 
 test("assert message preserved") {
@@ -38,7 +38,7 @@ test("raise propagates through ?") {
     match r {
         Result::Ok(_) => raise "expected Err",
         Result::Err(e) => assert(e == "x")?,
-    };
+    }
 }
 
 test("option none coalesce") {
@@ -67,5 +67,5 @@ test("double question mark on nested result") {
     match outer() {
         Result::Ok(_) => raise "expected Err",
         Result::Err(e) => assert(e == "inner")?,
-    };
+    }
 }

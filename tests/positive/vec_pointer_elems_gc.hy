@@ -2,7 +2,7 @@
 // element type carries a pointer element kind (`TagArrayKind`): marking
 // treats the elements as precise references. Collections in between must
 // keep every element (and `None` / `0` holes) intact.
-use gc::{collect};
+use gc::collect;
 
 class Node {
     pub v: int,

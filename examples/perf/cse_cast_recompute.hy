@@ -1,7 +1,7 @@
 // Hit bench for local EarlyCSE: force CastIntToFloat recomputes that
 // ssa_gvn does not number (varying i, first cast stored).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn hot(int n) -> int {

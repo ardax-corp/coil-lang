@@ -1,8 +1,8 @@
 // Local enums built on several paths and matched once: escape analysis
 // turns them into a tag slot plus payload slots, so the loop allocates
 // nothing (unit, one- and two-word variants).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 enum Shape {

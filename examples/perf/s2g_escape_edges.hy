@@ -2,7 +2,7 @@
 // fill(n) last writes n-3, n-2, n-1 when n % 3 == 0; sum = 3n - 6.
 
 class Holder {
-    pub a: [int; 3]
+    pub a: [int; 3],
 }
 
 fn sum3([int; 3] xs) -> int {

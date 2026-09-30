@@ -1,6 +1,6 @@
 // COI-16: inlined Vec::push must not leave the receiver under format / match /
 // `new Class` args (those STORE/Seek on the shared operand/local buffer).
-use string::{format};
+use string::format;
 
 enum LockPackage {
     Git(string, string, string, string, string),
@@ -33,7 +33,7 @@ fn serialize_enum(Vec<LockPackage> packages) -> string {
                 lines.push(format("rev = %s", quote(rev)));
                 lines.push(format("hash = %s", quote(hash)));
             },
-        };
+        }
     }
     let out = "";
     let j = 0;
@@ -95,7 +95,11 @@ test("enum match plus format serialize round-trip") {
     pkgs.push(LockPackage::Git("zeta", "z.git", "v2", "r2", "h2"));
     let text = serialize_enum(pkgs);
     // hdr + 5 fields × 2 packages, each terminated by '\n'
-    assert(len(text) == len("# hdr\nname = 'alpha'\ngit = 'a.git'\ntag = 'v1'\nrev = 'r1'\nhash = 'h1'\nname = 'zeta'\ngit = 'z.git'\ntag = 'v2'\nrev = 'r2'\nhash = 'h2'\n"))?;
+    assert(
+        len(text) == len(
+            "# hdr\nname = 'alpha'\ngit = 'a.git'\ntag = 'v1'\nrev = 'r1'\nhash = 'h1'\nname = 'zeta'\ngit = 'z.git'\ntag = 'v2'\nrev = 'r2'\nhash = 'h2'\n",
+        ),
+    )?;
 }
 
 test("class Vec plus format serialize keeps rows") {

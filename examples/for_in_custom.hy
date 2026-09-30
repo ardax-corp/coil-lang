@@ -3,9 +3,10 @@
 // User-defined IntoIterator + Iterator on a class. `next` mutates the
 // heap instance in place so state advances across resumes.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 class Counter {
     pub cur: int,
     pub end: int,

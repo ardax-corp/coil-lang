@@ -5,9 +5,10 @@
 // Callers that only need `+` can bound `T: Add` instead.
 // See typeclass_dict.hy and polyfn.hy for user dictionaries and PolyFn values.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn add<T: Num>(T a, T b) -> T {
     return a + b;
 }

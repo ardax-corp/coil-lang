@@ -1,6 +1,7 @@
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn sum(int... xs) -> int {
     let n = len(xs);
     let total = 0;

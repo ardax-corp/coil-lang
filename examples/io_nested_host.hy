@@ -1,7 +1,10 @@
 // Nested IO HostInvoke: `read_to_end(open(...))` must pass the stream, not
 // the native id, into MakeTuple (regression for emit_io_host_invoke arg order).
-use io::{close, open, stdout};
-use io::sync::{read_to_end, write_all};
+use io::close;
+use io::open;
+use io::stdout;
+use io::sync::read_to_end;
+use io::sync::write_all;
 
 use string::{format, to_bytes};
 

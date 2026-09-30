@@ -5,13 +5,17 @@
 //
 // Expected output: ok
 
-use io::{close, stdout};
-use io::net::tcp::{connect, listen};
-use io::sync::{accept_wait, read_exact, write_all};
+use io::close;
+use io::stdout;
+use io::net::tcp::connect;
+use io::net::tcp::listen;
+use io::sync::accept_wait;
+use io::sync::read_exact;
+use io::sync::write_all;
 
 use protocol::{encode_frame, payload_eq};
 
-use server::{echo_reply};
+use server::echo_reply;
 
 use client::{client_port, request_body};
 
@@ -87,8 +91,16 @@ fn run_echo() {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%s", match run_echo() {
-        Result::Ok(s) => s,
-        Result::Err(_) => "err",
-    })));
+    write_all(
+        stdout(),
+        to_bytes(
+            format(
+                "%s",
+                match run_echo() {
+                    Result::Ok(s) => s,
+                    Result::Err(_) => "err",
+                },
+            ),
+        ),
+    );
 }

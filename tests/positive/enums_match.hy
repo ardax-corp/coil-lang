@@ -35,7 +35,7 @@ fn area(Shape s) -> int {
     return match s {
         Shape::Nil => 0,
         Shape::Circle(r) => r * r,
-        Shape::Rect { width, height } => width * height,
+        Shape::Rect{ width, height } => width * height,
     };
 }
 
@@ -53,11 +53,11 @@ test("tuple variant payload") {
 test("record variant payload") {
     assert(area(Shape::Nil) == 0)?;
     assert(area(Shape::Circle(5)) == 25)?;
-    assert(area(Shape::Rect { width: 3, height: 4 }) == 12)?;
+    assert(area(Shape::Rect{ width: 3, height: 4 }) == 12)?;
 }
 
 test("shuffled record construct") {
-    let s = Shape::Rect { height: 4, width: 3 };
+    let s = Shape::Rect{ height: 4, width: 3 };
     assert(area(s) == 12)?;
 }
 

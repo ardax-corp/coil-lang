@@ -2,7 +2,7 @@
 // is a precise root the collector may rewrite when its target moves, a scalar
 // static is no root. Collections (and evacuation) in between must keep every
 // static's value intact.
-use gc::{collect};
+use gc::collect;
 
 class Node {
     pub v: int,
@@ -10,8 +10,11 @@ class Node {
 }
 
 static let head: Option<Node> = Option::None;
+
 static let nodes: Vec<Node> = Vec::new();
+
 static let count: int = 0;
+
 static let label: string = "static";
 
 fn fill(int n) {

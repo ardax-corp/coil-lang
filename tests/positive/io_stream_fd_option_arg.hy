@@ -1,8 +1,9 @@
 // `Option::None` in a two-slot Result CALL's arguments must stay a niche 0.
 // Pair-emitting it under `unbox_enum_context` shifts the frame so `Stream.fd`
 // sees a string (InvalidInput). Same shape as tls::client::enable → create_client.
-use io::{Stream, IoError};
-use io::net::tcp::{listen};
+use io::Stream;
+use io::IoError;
+use io::net::tcp::listen;
 
 fn fd_with_opt(Stream s, string host, bool verify, Option<string> ca) -> Result<int, IoError> {
     let fd = s.fd()?;
@@ -43,5 +44,5 @@ test("two-word Result int ? into heap Result Stream") {
     match enable_like(l, Option::None) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "enable_like",
-    };
+    }
 }

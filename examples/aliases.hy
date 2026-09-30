@@ -10,9 +10,10 @@
 //   4
 //   7
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 type Point = (int, int);
 
 fn distance(Point p) -> int {

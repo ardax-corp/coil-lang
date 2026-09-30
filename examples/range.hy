@@ -5,9 +5,10 @@
 // Iteration steps by +1 / +1.0 for int/byte/float.
 // Numeric ranges also collect with `.to_vec()` — see tests/positive/range_to_vec.hy.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn main() {
     // Half-open: 0..5 → 0,1,2,3,4
     for x in 0..5 {

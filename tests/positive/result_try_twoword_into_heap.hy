@@ -14,8 +14,11 @@ fn heap_ok_via_q() -> Result<string, E> {
 }
 
 test("two-word Err ? into heap Result is Err") {
-    assert(match heap_ok_via_q() {
-        Result::Ok(_) => false,
-        Result::Err(_) => true,
-    }, "q")?;
+    assert(
+        match heap_ok_via_q() {
+            Result::Ok(_) => false,
+            Result::Err(_) => true,
+        },
+        "q",
+    )?;
 }

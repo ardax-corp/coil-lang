@@ -2,8 +2,8 @@
 // Constructors are namespaced: `Status::Ok` is not prelude `Result::Ok`.
 // In expression position the value coerces to the backing (`int` here).
 // Show/String of a case is that backing (`Status.Ok` shows as `200`).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 #[repr(int)]

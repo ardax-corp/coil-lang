@@ -1,6 +1,6 @@
 // COI-400: heap-heap niche Result match / newly built buffers
 // (coil-stdlib path join + text replace/to_lower).
-use io::{IoError};
+use io::IoError;
 use string::{from_bytes, to_bytes};
 
 class Path {
@@ -110,5 +110,5 @@ test("host from_bytes of new buffer still Ok") {
         Result::Err(_) => {
             panic "from_bytes";
         },
-    };
+    }
 }

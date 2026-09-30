@@ -5,10 +5,12 @@
 // address as a coil callback requires a separate declare/host
 // trampoline (not automatic in this phase).
 
-use ffi::{declare, dload, invoke};
-use ffi::types::{Ptr};
-use io::{stdout};
-use io::sync::{write_all};
+use ffi::declare;
+use ffi::dload;
+use ffi::invoke;
+use ffi::types::Ptr;
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {

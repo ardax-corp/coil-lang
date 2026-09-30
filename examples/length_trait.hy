@@ -5,8 +5,8 @@
 // 2
 // 42
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Pair {
@@ -27,5 +27,8 @@ fn sized<T: Length>(T x) -> int {
 fn main() {
     write_all(stdout(), to_bytes(format("%i\n", len("foo"))));
     write_all(stdout(), to_bytes(format("%i\n", len(new Pair(1, 2)))));
-    write_all(stdout(), to_bytes(format("%i\n", sized("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))));
+    write_all(
+        stdout(),
+        to_bytes(format("%i\n", sized("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))),
+    );
 }

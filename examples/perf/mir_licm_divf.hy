@@ -1,8 +1,8 @@
 // Hit bench for COI-280 MIR LICM: invariant DIVF each trip of a dense loop.
 // Stack-IL leaves a lone `a / b` (not a ≥2-op float chain) in the body;
 // after specialize, SSA LICM hoists the divide to the preheader.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn hot(float a, float b, int n) -> float {

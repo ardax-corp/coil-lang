@@ -1,8 +1,8 @@
 // Fixed `[T; N]` stack locals + heap `Vec<T>` method sugar.
 // Expected output: 20,3,99,2
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {

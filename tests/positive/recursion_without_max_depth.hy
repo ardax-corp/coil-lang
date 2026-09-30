@@ -66,7 +66,11 @@ test("non-tail mutual recursion") {
 }
 
 test("recursive enum walk") {
-    let t = Tree::Node(1, Tree::Node(2, Tree::Leaf(), Tree::Leaf()), Tree::Node(3, Tree::Leaf(), Tree::Leaf()));
+    let t = Tree::Node(
+        1,
+        Tree::Node(2, Tree::Leaf(), Tree::Leaf()),
+        Tree::Node(3, Tree::Leaf(), Tree::Leaf()),
+    );
     assert(sum_tree(t) == 6)?;
 }
 

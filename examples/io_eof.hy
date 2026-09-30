@@ -1,6 +1,9 @@
 // EOF is Ok(None) from a non-blocking `read` on an empty file.
-use io::{close, open, read, stdout};
-use io::sync::{write_all};
+use io::close;
+use io::open;
+use io::read;
+use io::stdout;
+use io::sync::write_all;
 
 use string::{format, to_bytes};
 
@@ -30,8 +33,16 @@ fn describe(string path) {
 
 fn main() {
     let path = "coil_io_eof_test.bin";
-    write_all(stdout(), to_bytes(format("%s", match describe(path) {
-        Result::Ok(s) => s,
-        Result::Err(_) => "err",
-    })));
+    write_all(
+        stdout(),
+        to_bytes(
+            format(
+                "%s",
+                match describe(path) {
+                    Result::Ok(s) => s,
+                    Result::Err(_) => "err",
+                },
+            ),
+        ),
+    );
 }

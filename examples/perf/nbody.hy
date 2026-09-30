@@ -2,8 +2,8 @@
 // painful under the float lexer (`0.01` / `1.03` do not parse); this is the
 // same numeric-beyond-numeric canary. A later float-loop cut should drop
 // VM-only time vs this baseline.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn eval_a(int i, int j) -> float {

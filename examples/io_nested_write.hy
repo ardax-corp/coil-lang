@@ -1,7 +1,10 @@
 // Nested IO HostInvoke as the first of two args: `write_all(open(...), buf)`.
 // Regression for emit_io_host_invoke when outer arity > 1.
-use io::{close, open, stdout};
-use io::sync::{read_to_end, write_all};
+use io::close;
+use io::open;
+use io::stdout;
+use io::sync::read_to_end;
+use io::sync::write_all;
 
 use string::{format, to_bytes};
 

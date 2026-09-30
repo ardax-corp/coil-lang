@@ -1,8 +1,8 @@
 // Helper-arm IPA hit bench (COI-367 F0): independent pure calls into fib,
 // not self-recursion. Sequential A4: COIL_AUTO_PAR=0.
 // Checksum: fib(32) + fib(31) = 3524578.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn fib(int n) -> int {

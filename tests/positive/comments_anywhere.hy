@@ -12,13 +12,15 @@ enum Shape {
 class Pair {
     // leading field comment
     pub a: int, // trailing field comment
-    /* inline */ pub b: int,
+    /* inline */
+    pub b: int,
 }
 
 impl Pair {
     // leading method comment
     pub fn sum() -> int { // after the brace
-        return self.a /* mid-expression */ + self.b;
+        return self.a + self.b;
+        /* mid-expression */
     }
 }
 
@@ -28,7 +30,8 @@ fn measure(Shape s) -> int {
         Shape::Dot => 0, // trailing arm comment
         Shape::Line(n) => {
             n
-        }, /* after an arm */
+        },
+        /* after an arm */
     };
 }
 
@@ -37,18 +40,30 @@ test("comments between list and record items") {
         1, // one
         // before two
         2,
-        /* three */ 3,
+        /* three */
+        3,
     ];
-    let d = { a: 1, /* between */ b: 2 };
+    let d = {
+        a: 1, /* between */
+        b: 2,
+    };
     assert(xs[0] + xs[1] + xs[2] == 6)?;
     assert(d.a + d.b == 3)?;
 }
 
 test("comments inside calls, classes and matches") {
-    let p = new Pair(/* a */ 2, // then b
-        3);
+    let p = new Pair(
+        /* a */
+        2, // then b
+        3,
+    );
     assert(p.sum() == 5)?;
-    assert(measure(Shape::Line(/* n */ 7)) == 7)?;
+    assert(
+        measure(
+            Shape::Line(7),
+            /* n */
+        ) == 7,
+    )?;
     assert(measure(Shape::Dot) == 0)?;
 }
 

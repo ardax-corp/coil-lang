@@ -1,6 +1,6 @@
 // C2b / Q6 rung 1: heap-field Range as counted cur/end (no GetField).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Holder {

@@ -23,36 +23,46 @@ fn nested_result(int fail) -> Result<Result<int, string>, string> {
 }
 
 test("Option payload keeps its own tag") {
-    assert(match maybe(0, 0) {
-        Result::Ok(inner) => match inner {
-            Option::Some(value) => value == 7,
-            Option::None => false
-},
-        Result::Err(_) => false
-})?;
-    assert(match maybe(0, 1) {
-        Result::Ok(inner) => match inner {
-            Option::Some(_) => false,
-            Option::None => true
-},
-        Result::Err(_) => false
-})?;
-    assert(match maybe(1, 0) {
-        Result::Ok(_) => false,
-        Result::Err(_) => true
-})?;
+    assert(
+        match maybe(0, 0) {
+            Result::Ok(inner) => match inner {
+                Option::Some(value) => value == 7,
+                Option::None => false,
+            },
+            Result::Err(_) => false,
+        },
+    )?;
+    assert(
+        match maybe(0, 1) {
+            Result::Ok(inner) => match inner {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            Result::Err(_) => false,
+        },
+    )?;
+    assert(
+        match maybe(1, 0) {
+            Result::Ok(_) => false,
+            Result::Err(_) => true,
+        },
+    )?;
 }
 
 test("nested Result payload keeps its own tag") {
-    assert(match nested_result(0) {
-        Result::Ok(inner) => match inner {
-            Result::Ok(value) => value == 7,
-            Result::Err(_) => false
-},
-        Result::Err(_) => false
-})?;
-    assert(match nested_result(1) {
-        Result::Ok(_) => false,
-        Result::Err(_) => true
-})?;
+    assert(
+        match nested_result(0) {
+            Result::Ok(inner) => match inner {
+                Result::Ok(value) => value == 7,
+                Result::Err(_) => false,
+            },
+            Result::Err(_) => false,
+        },
+    )?;
+    assert(
+        match nested_result(1) {
+            Result::Ok(_) => false,
+            Result::Err(_) => true,
+        },
+    )?;
 }

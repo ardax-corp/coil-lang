@@ -1,7 +1,8 @@
 // User generic enum — same construct/match machinery as builtin Option.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 enum Box<T> {
     Empty,
     Full(T),

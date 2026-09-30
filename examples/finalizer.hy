@@ -2,10 +2,10 @@
 //
 // Output: closed
 
-use gc::{collect};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
+use gc::collect;
+use io::stdout;
+use io::sync::write_all;
+use string::to_bytes;
 
 static let log: string = "";
 

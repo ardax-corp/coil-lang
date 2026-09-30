@@ -1,6 +1,6 @@
 // Local enums that are only matched become a tag slot plus payload slots
 // (no allocation). Semantics must not change whether or not they do.
-use string::{format};
+use string::format;
 
 enum Shape {
     Circle(int),

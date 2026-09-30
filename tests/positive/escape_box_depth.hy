@@ -4,10 +4,12 @@
 class Tally {
     pub hits: int,
 }
+
 fn bump(Tally t) -> int {
     t.hits = t.hits + 1;
     return 0;
 }
+
 test("escape inside a loop body") {
     let t = new Tally(0);
     let r = 0;
@@ -17,6 +19,7 @@ test("escape inside a loop body") {
     }
     assert(t.hits == 3)?;
 }
+
 test("escape inside one if arm") {
     let t = new Tally(0);
     let r = 1;
@@ -25,6 +28,7 @@ test("escape inside one if arm") {
     }
     assert(t.hits == 1)?;
 }
+
 test("escape inside the untaken if arm") {
     let t = new Tally(5);
     let r = 0;
@@ -34,6 +38,7 @@ test("escape inside the untaken if arm") {
     t.hits = t.hits + 1;
     assert(t.hits == 6)?;
 }
+
 test("escape in a nested loop") {
     let t = new Tally(0);
     let a = 0;
@@ -47,6 +52,7 @@ test("escape in a nested loop") {
     }
     assert(t.hits == 4)?;
 }
+
 test("straight-line escape") {
     let t = new Tally(0);
     bump(t);

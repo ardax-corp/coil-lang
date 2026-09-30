@@ -3,8 +3,8 @@
 // MIR→LIR (COI-270) re-emits the same ABI for the leaf. Heap-payload
 // counterpart: examples/perf/gc_churn.hy.
 // ITERS=20000000 (period-10 checksum 42 * 2e6); release VM-only ~1-3s.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn lookup(int i, int n) -> Option<int> {

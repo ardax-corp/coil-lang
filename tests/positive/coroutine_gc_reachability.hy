@@ -1,7 +1,7 @@
 // Coroutines are traced, not all rooted: a suspended `yield from` parent
 // and its delegate survive collections while reachable, and the delegate's
 // heap locals survive across yields.
-use gc::{collect};
+use gc::collect;
 
 async fn counter() {
     let boxed = [10, 20, 30];

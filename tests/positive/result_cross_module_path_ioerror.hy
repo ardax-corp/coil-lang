@@ -1,6 +1,6 @@
 // COI-404: cross-module Result<Path, IoError> match must take Ok.
 // Caller does not import IoError — that was enough to lose niche layout.
-use coi404_path::{Path};
+use coi404_path::Path;
 
 test("cross-module Path IoError instance clone is Ok") {
     let a = Path::from("a");

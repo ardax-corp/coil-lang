@@ -1,7 +1,7 @@
 use gc::{collect, get, root, unroot, upgrade, weak};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
+use io::stdout;
+use io::sync::write_all;
+use string::to_bytes;
 
 fn ephemeral_weak() {
     let r = root([1, 2, 3]);

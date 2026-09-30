@@ -1,12 +1,13 @@
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
+
+attr log<T>(fn(... args) -> T target, string message, ... args) -> T {
     write_all(stdout(), to_bytes(format("%s", message)));
     return target(...args);
 }
 
-attr measure<T>(fn(...args) -> T target, string metric, ...args) -> T {
+attr measure<T>(fn(... args) -> T target, string metric, ... args) -> T {
     write_all(stdout(), to_bytes(format("%s", metric)));
     return target(...args);
 }

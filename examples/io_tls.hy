@@ -18,9 +18,9 @@
 //   let s = client::enable(tcp, "example.com", { verify: true, ... })?;
 //
 // `use tls` / `use io::net::tls` without coil-tls on roots does not resolve.
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
+use io::stdout;
+use io::sync::write_all;
+use string::to_bytes;
 
 fn main() {
     write_all(stdout(), to_bytes("use-coil-tls"));

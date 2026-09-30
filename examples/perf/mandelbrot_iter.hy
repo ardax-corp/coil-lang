@@ -2,8 +2,8 @@
 // One loop over pixels. The escape test is unchanged, so this is still
 // not a stride-1 vector loop: each pixel's zr/zi depend on the previous
 // iteration, and pixels stop at different counts.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn mandelbrot_iter(int size, int max_iter) -> int {

@@ -1,8 +1,8 @@
 // C1 hit bench: self two-slot Option CALL + match + arith.
 // walk(k) = Some(k). hot(8, iters) sums (i % 8) over iters.
 // 1e6 periods of 0+1+…+7 = 28 → 28000000.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 #[max_depth(16)]

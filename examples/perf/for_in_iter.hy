@@ -1,6 +1,6 @@
 // C2b / Q6 rung 2: user Iterator::next as two-slot Option match + CALL.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 class Counter {

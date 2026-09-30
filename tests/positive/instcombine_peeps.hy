@@ -38,8 +38,10 @@ test("identity result match keeps payload") {
         Result::Ok(v) => v,
         Result::Err(e) => e,
     } == 7)?;
-    assert(match id_result(-3) {
-        Result::Ok(v) => v,
-        Result::Err(e) => e,
-    } == 3)?;
+    assert(
+        match id_result(-3) {
+            Result::Ok(v) => v,
+            Result::Err(e) => e,
+        } == 3,
+    )?;
 }

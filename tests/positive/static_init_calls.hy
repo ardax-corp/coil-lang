@@ -14,11 +14,17 @@ fn fib(int n) -> int {
 }
 
 static let xs: Vec<int> = Vec::new();
+
 static let seeded: Vec<int> = Vec::with_capacity(4);
+
 static let k: int = id(7);
+
 static let f: int = fib(15);
+
 static let fwd: int = later(4);
+
 static let base: int = len(xs) + 3;
+
 static let names: Option<Vec<string>> = Option::Some(Vec::new());
 
 fn later(int n) -> int {

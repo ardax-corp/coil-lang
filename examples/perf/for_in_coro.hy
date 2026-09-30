@@ -1,7 +1,7 @@
 // C2b / Q6 rung 4: coro for-in as ResumeCoro / DoneCoro (MIR dense or LIR).
 // Helper sums yields. `main` stays format. Completion value is skipped.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 async fn gen() {

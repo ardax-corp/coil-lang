@@ -1,7 +1,15 @@
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
-use io::{await_readable, await_writable, close, read, wait_ready, write};
-use io::net::tcp::{accept, connect, listen, local_addr};
-use string::{to_bytes};
+use io::await_readable;
+use io::await_writable;
+use io::close;
+use io::read;
+use io::wait_ready;
+use io::write;
+use io::net::tcp::accept;
+use io::net::tcp::connect;
+use io::net::tcp::listen;
+use io::net::tcp::local_addr;
+use string::to_bytes;
 
 fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     let listener = listen("127.0.0.1", 0)?;
@@ -10,7 +18,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     match await_readable(listener) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "listen wait",
-    };
+    }
     let server = accept(listener)?;
     return Result::Ok((client, server, listener));
 }
@@ -24,9 +32,9 @@ async fn http_read_after_wait(Stream c) -> int {
             match await_readable(c) {
                 Result::Ok(_) => {},
                 Result::Err(_) => panic "await_readable treated Ok as Err",
-            };
+            }
         },
-    };
+    }
     return match read(c, buf) {
         Result::Ok(got) => match got {
             Option::Some(n) => n,
@@ -61,15 +69,15 @@ test("await_readable match Ok after WouldBlock park") {
     match close(c) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close client",
-    };
+    }
     match close(s) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close server",
-    };
+    }
     match close(listener) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close listener",
-    };
+    }
 }
 
 test("await_writable match Ok on connected socket") {
@@ -83,17 +91,17 @@ test("await_writable match Ok on connected socket") {
     match await_writable(c) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "await_writable treated Ok as Err",
-    };
+    }
     match close(c) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close client",
-    };
+    }
     match close(s) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close server",
-    };
+    }
     match close(listener) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close listener",
-    };
+    }
 }

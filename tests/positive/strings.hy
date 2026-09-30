@@ -1,8 +1,9 @@
 // String concat / format. Note: `==` on strings is pointer identity (interned
 // literals compare equal; concat/format results are fresh allocations).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 test("literal string equality") {
     assert("hi" == "hi")?;
     assert("a" != "b")?;

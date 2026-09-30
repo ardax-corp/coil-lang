@@ -1,4 +1,4 @@
-use string::{to_bytes};
+use string::to_bytes;
 
 test("array deep equality") {
     let a = to_bytes("hi");

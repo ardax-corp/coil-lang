@@ -7,8 +7,8 @@
 // Expected output: `1242`
 
 use math::{add, mul};
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {

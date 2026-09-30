@@ -1,7 +1,8 @@
 // examples/tree.hy — recursive enum to verify isorecursive encoding
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 enum Tree {
     Leaf,
     Node(int, Tree, Tree),
@@ -16,7 +17,19 @@ fn sum_tree(Tree t) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", sum_tree(Tree::Node(1,
-                Tree::Node(2, Tree::Leaf(), Tree::Leaf()),
-                Tree::Node(3, Tree::Leaf(), Tree::Leaf()))))));
+    write_all(
+        stdout(),
+        to_bytes(
+            format(
+                "%i",
+                sum_tree(
+                    Tree::Node(
+                        1,
+                        Tree::Node(2, Tree::Leaf(), Tree::Leaf()),
+                        Tree::Node(3, Tree::Leaf(), Tree::Leaf()),
+                    ),
+                ),
+            ),
+        ),
+    );
 }

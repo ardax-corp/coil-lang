@@ -1,38 +1,17 @@
 // Canary: interned string keys, dict increment, intern/hash pressure.
 // A later intern/hash or dict-field cut should drop VM-only time vs this.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {
-    let counts = {
-        a: 0,
-        b: 0,
-        c: 0,
-        d: 0,
-        e: 0,
-        f: 0,
-        g: 0,
-        h: 0,
-    };
-    let words = Vec::from([
-        "alpha",
-        "bravo",
-        "charlie",
-        "delta",
-        "echo",
-        "foxtrot",
-        "golf",
-        "hotel",
-        "india",
-        "juliet",
-        "kilo",
-        "lima",
-        "mike",
-        "november",
-        "oscar",
-        "papa",
-    ]);
+    let counts = { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0 };
+    let words = Vec::from(
+        [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ],
+    );
     let buckets: Vec<int> = Vec::with_capacity(64);
     let b = 0;
     while b < 64 {

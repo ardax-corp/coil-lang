@@ -1,8 +1,8 @@
 // Two-slot Result `?` / bind: helpers RETURN Result<int, int>; the
 // hot path chains `?` without boxing an ObjEnum. ITERS=20000000;
 // period-10 checksum 68 * 2e6 = 136000000. Release VM-only ~1-3s.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn step(int i) -> Result<int, int> {

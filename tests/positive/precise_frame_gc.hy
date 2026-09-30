@@ -1,7 +1,7 @@
 // A heap-free function (`depth`) gets a precise frame map, so collections
 // that run in its callees skip its frame. Heap values held by the callers
 // and callees around it must still survive.
-use gc::{collect};
+use gc::collect;
 
 class Box {
     pub v: int,

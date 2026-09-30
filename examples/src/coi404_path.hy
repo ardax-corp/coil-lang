@@ -1,5 +1,5 @@
 // COI-404: cross-module Result<Path, IoError> (callee registers IoError).
-use io::{IoError};
+use io::IoError;
 
 class Path {
     pub raw: string,

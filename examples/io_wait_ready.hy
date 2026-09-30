@@ -1,7 +1,12 @@
 // Batch two cooperative awaits without wrapping each in block_on.
 // Each await_* inside an async fn yields + registers; wait_ready polls both.
-use io::{stdout, open, close, await_readable, wait_ready};
-use io::sync::{write_all, read_to_end};
+use io::stdout;
+use io::open;
+use io::close;
+use io::await_readable;
+use io::wait_ready;
+use io::sync::write_all;
+use io::sync::read_to_end;
 use string::{format, to_bytes};
 
 async fn slurp(string path) -> Result<int, IoError> {

@@ -1,7 +1,7 @@
 // Canary (gate 1): hot match on boxed Option / Result / 3-variant payload
 // enum. A later match/unbox cut should drop VM-only time vs this baseline.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 enum Phase {

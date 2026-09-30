@@ -1,4 +1,4 @@
-use env::{args};
+use env::args;
 
 test("args ok has argv0") {
     let a = match args() {

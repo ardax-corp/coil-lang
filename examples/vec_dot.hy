@@ -1,9 +1,10 @@
 // Named helpers — `dot` and `cross` on homogeneous vectors.
 // Expected output: 32,001
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn main() {
     let d = dot((1, 2, 3), (4, 5, 6));
     write_all(stdout(), to_bytes(format("%i,", d)));

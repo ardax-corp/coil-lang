@@ -1,7 +1,7 @@
 // Memory: 200k live three- and four-word enum values. Payload words are raw
 // and stored inside the object, so these variants no longer spill a `Vec`.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 enum Shape {

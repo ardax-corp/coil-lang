@@ -1,7 +1,8 @@
 // ?? coalesce on Option and Result (Result Err is swallowed).
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
+
 fn main() {
     let a = Option::None ?? "bar";
     write_all(stdout(), to_bytes(format("%s,", a)));

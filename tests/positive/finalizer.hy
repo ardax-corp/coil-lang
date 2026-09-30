@@ -25,16 +25,27 @@ class WeakResurrect {
 }
 
 static let drops: int = 0;
+
 static let during: int = 0;
+
 static let held: Option<Weak<Handle>> = Option::None;
+
 static let resurrect_drops: int = 0;
+
 static let kept: Option<Resurrect> = Option::None;
+
 static let root_drops: int = 0;
+
 static let kept_root: Option<Root<Rooted>> = Option::None;
+
 static let field_drops: int = 0;
+
 static let bag: Option<Bag> = Option::None;
+
 static let weak_drops: int = 0;
+
 static let kept_weak: Option<WeakResurrect> = Option::None;
+
 static let held_weak: Option<Weak<WeakResurrect>> = Option::None;
 
 impl Handle {
@@ -84,7 +95,7 @@ impl Fielded {
         match bag {
             Option::Some(b) => b.put(self),
             Option::None => {},
-        };
+        }
     }
 }
 

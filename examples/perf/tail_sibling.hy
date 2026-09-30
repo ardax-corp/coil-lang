@@ -1,8 +1,8 @@
 // CPU: force sibling TailCall (even↔odd cycle). Tree recursion is not this shape.
 // Parent emits CALL+RETURN; this rewrite emits TailCall. max_depth lets the
 // parent compile the same source without overflowing analysis.
-use io::{stdout};
-use io::sync::{write_all};
+use io::stdout;
+use io::sync::write_all;
 use string::{format, to_bytes};
 
 #[max_depth(256)]

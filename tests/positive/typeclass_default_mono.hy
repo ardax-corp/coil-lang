@@ -1,7 +1,7 @@
 // A default trait method reached from a monomorphized generic still gets the
 // instance dictionary it uses to call its sibling (`base`).
 trait Tiny<T> {
-    fn base(T x) -> int;
+    fn base(T x) -> int {}
 
     fn next(T x) -> int {
         return base(x) + 1;

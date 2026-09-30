@@ -1,4 +1,4 @@
-use num::{pow};
+use num::pow;
 
 fn approx(float actual, float expected, float epsilon) -> bool {
     let delta = actual - expected;
