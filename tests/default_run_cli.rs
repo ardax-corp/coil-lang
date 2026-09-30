@@ -215,3 +215,68 @@ fn main() {
     );
     cleanup(&cwd);
 }
+
+/// `coil run` takes a `.hyc`; handed a source file it says how to run it.
+#[test]
+fn run_on_source_file_explains_itself() {
+    let bin = coil_bin();
+    let cwd = temp_cwd("run_source");
+    let out = Command::new(&bin)
+        .current_dir(&cwd)
+        .args(["run", fib_entry().to_str().unwrap()])
+        .output()
+        .expect("spawn coil run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("is a source file, not a bytecode archive") && !stderr.contains("corrupt"),
+        "stderr={stderr}"
+    );
+    cleanup(&cwd);
+}
+
+/// An `out.hyc` built from another program is none of this run's business.
+#[test]
+fn unrelated_out_hyc_is_not_reported_stale() {
+    let bin = coil_bin();
+    let cwd = temp_cwd("unrelated_out");
+    let other = cwd.join("other.hy");
+    std::fs::write(&other, "fn main() {\n    let x = 1;\n}\n").unwrap();
+    let st = coil_compile_entry(&bin, &cwd, &other).output().expect("compile other");
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    assert!(cwd.join("out.hyc").exists());
+    // A newer, different program.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let prog = cwd.join("prog.hy");
+    std::fs::write(&prog, "fn main() {\n    let y = 2;\n}\n").unwrap();
+    let out = coil_on_entry(&bin, &cwd, &prog).output().expect("run prog");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("older than sources"), "stderr={stderr}");
+    cleanup(&cwd);
+}
+
+/// A failing `assert(cond, msg)?` reports its message, not just "failed".
+#[test]
+fn test_failure_reports_assert_message() {
+    let bin = coil_bin();
+    let cwd = temp_cwd("assert_msg");
+    let tests = cwd.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(
+        tests.join("a.hy"),
+        "test(\"custom\") {\n    assert(1 == 2, \"one is not two\")?;\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(&bin)
+        .current_dir(&cwd)
+        .args(["test", "tests"])
+        .output()
+        .expect("spawn coil test");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("> Test \"custom\" failed: one is not two"),
+        "stderr={stderr}"
+    );
+    cleanup(&cwd);
+}
