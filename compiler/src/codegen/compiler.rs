@@ -13548,6 +13548,9 @@ impl Compiler {
     fn codegen_instance_head_ty(&self, arg: &Output) -> Ty {
         match arg.1.as_ref() {
             Expression::Type(name) | Expression::Identifier(name) => {
+                // Same built-in spellings as the checker's instance heads
+                // (`canonical_ctor_name`): `void` is unit, `Unit` is a user
+                // type (#546).
                 match name.to_ascii_lowercase().as_str() {
                     "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
@@ -13555,7 +13558,8 @@ impl Compiler {
                     "float" => Ty::Con("float".into()),
                     "string" => Ty::Con("string".into()),
                     "bool" => Ty::Con("bool".into()),
-                    "void" | "unit" => Ty::Con("unit".into()),
+                    "byte" => Ty::Con("byte".into()),
+                    "void" => Ty::Con("unit".into()),
                     // Same class key the checker's instance head uses, so an
                     // imported class names `Trait__module::Class__method`.
                     _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {

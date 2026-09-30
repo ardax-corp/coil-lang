@@ -9734,13 +9734,18 @@ impl Checker {
     }
 
     /// Canonical name for a bare type constructor used as an instance head.
+    ///
+    /// The same built-in spellings as a type annotation
+    /// (`parse_type_name_str_with_range`): `void` is the unit type, `Unit`
+    /// is a user type (#546).
     fn canonical_ctor_name(name: &str) -> String {
         match name.to_ascii_lowercase().as_str() {
             "int" => "int".into(),
             "float" => "float".into(),
             "string" => "string".into(),
             "bool" => "bool".into(),
-            "void" | "unit" => "unit".into(),
+            "byte" => "byte".into(),
+            "void" => "unit".into(),
             "option" => common::BUILTIN_OPTION_ENUM.into(),
             "result" => common::BUILTIN_RESULT_ENUM.into(),
             _ => name.to_string(),
@@ -12779,19 +12784,11 @@ impl Checker {
     }
 
     /// Shape-only instance head for the trait-impl pre-pass (no ID consumption).
+    /// Built-in spellings follow [`Self::canonical_ctor_name`].
     fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
         match arg.1.as_ref() {
             Expression::Type(name) | Expression::Identifier(name) => {
-                match name.to_ascii_lowercase().as_str() {
-                    "int" => int(),
-                    "float" => float(),
-                    "string" => string(),
-                    "bool" => boolean(),
-                    "void" | "unit" => unit_ty(),
-                    "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
-                    "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
-                    _ => Ty::Con((*name).to_string()),
-                }
+                Ty::Con(Self::canonical_ctor_name(name))
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {
