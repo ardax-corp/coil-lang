@@ -428,6 +428,13 @@ pub struct Checker {
     /// `parse_type_app` substitutes concrete args for those vars.
     generic_aliases: HashMap<String, GenericAliasDef>,
 
+    /// Module-level aliases of non-entry modules under `module::Name`, so a
+    /// qualified `module::Name` annotation resolves in any later module.
+    /// Kept across `check_program` (unlike `type_aliases`).
+    qualified_type_aliases: HashMap<String, Ty>,
+    /// Generic counterpart of [`Self::qualified_type_aliases`].
+    qualified_generic_aliases: HashMap<String, GenericAliasDef>,
+
     /// Names declared with `const`, tracked per lexical scope so assignment
     /// diagnostics can distinguish immutable bindings from mutable `let`s.
     const_scopes: Vec<HashSet<String>>,
