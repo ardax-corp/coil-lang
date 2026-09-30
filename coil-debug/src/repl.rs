@@ -258,10 +258,10 @@ fn print_help() {
 
 fn cmd_print(session: &DebugSession, arg: &str) -> Result<(), String> {
     let info = session.read_variable(arg)?;
-    if info.name.starts_with('$') {
-        println!("${} = {}", info.slot, info.value);
-    } else {
-        println!("{} (${}) = {}", info.name, info.slot, info.value);
+    match info.slot {
+        _ if info.name.starts_with('$') => println!("{} = {}", info.name, info.value),
+        Some(slot) => println!("{} (${slot}) = {}", info.name, info.value),
+        None => println!("{} = {}", info.name, info.value),
     }
     Ok(())
 }
@@ -284,7 +284,10 @@ fn cmd_info_locals(session: &DebugSession) -> Result<(), String> {
     }
     println!("Locals of {fn_name}:");
     for loc in locals {
-        println!("  {} (${}) = {}", loc.name, loc.slot, loc.value);
+        match loc.slot {
+            Some(slot) => println!("  {} (${slot}) = {}", loc.name, loc.value),
+            None => println!("  {} = {}", loc.name, loc.value),
+        }
     }
     Ok(())
 }

@@ -353,3 +353,39 @@ fn debug_batch_continues_after_error() {
     );
 }
 
+
+const VARS: &str = "class Point {\n    pub x: int,\n    pub y: int,\n}\n\nfn sum3(int n) -> int {\n    let p = new Point(n, 4);\n    let xs = [1, 2, 3];\n    let total = 0;\n    for x in xs {\n        total = total + x + p.x;\n    }\n    return total + p.y;\n}\n\nfn main() {\n    let r = sum3(5);\n}\n";
+
+/// Locals under full optimization: shown with their real value (followed
+/// into whatever slot or register holds it) or as `<optimized out>`, never a
+/// stale or foreign value. Split layouts render as a struct / array.
+#[test]
+fn debug_locals_are_accurate_under_optimization() {
+    let (_out, stdout) = debug_program(
+        VARS,
+        "break 11\nrun\ninfo locals\nprint p\nprint xs[1]\ncontinue\ninfo locals\ncontinue\ninfo locals\nquit\n",
+        "opt_locals",
+    );
+    let value_of = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&format!("{name} ")))
+            .filter_map(|l| l.split_once(" = ").map(|(_, v)| v.trim().to_string()))
+            .collect()
+    };
+    // The accumulator is live in a register across iterations.
+    assert_eq!(value_of("total"), ["0", "6", "13"], "{stdout}");
+    assert_eq!(value_of("x"), ["1", "2", "3"], "{stdout}");
+    for p in value_of("p") {
+        assert!(p.starts_with("Point {") && p.contains("y: 4"), "p = {p}\n{stdout}");
+        assert!(p.contains("x: 5") || p.contains("x: <optimized out>"), "p = {p}");
+    }
+    for xs in value_of("xs") {
+        let elems: Vec<&str> = xs.trim_matches(['[', ']']).split(", ").collect();
+        for (elem, want) in elems.iter().zip(["1", "2", "3"]) {
+            assert!(*elem == want || *elem == "<optimized out>", "xs = {xs}\n{stdout}");
+        }
+    }
+    let xs1 = value_of("xs[1]");
+    assert!(xs1.iter().all(|v| v == "2" || v == "<optimized out>"), "{stdout}");
+}

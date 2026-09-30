@@ -43,7 +43,8 @@ pub struct StackFrameInfo {
 #[derive(Clone, Debug)]
 pub struct LocalInfo {
     pub name: String,
-    pub slot: usize,
+    /// Frame slot of a single-slot value (`None` for split layouts).
+    pub slot: Option<usize>,
     pub value: String,
 }
 
@@ -600,59 +601,164 @@ impl DebugSession {
         if frame_idx >= depth {
             return Err(format!("frame {frame_idx} out of range"));
         }
-        let ip = self
-            .machine
-            .debug_frame_ip(frame_idx)
-            .ok_or("no frame ip")?;
-        let locals = locals_for_pc(self, ip).unwrap_or(&[]);
-        let mut out = Vec::new();
-        for (name, slot) in locals {
-            let val = self
-                .machine
-                .debug_slot(frame_idx, *slot as usize)
-                .map(|v| self.machine.debug_format_value(v))
-                .unwrap_or_else(|| "<unavailable>".into());
-            out.push(LocalInfo {
-                name: name.clone(),
-                slot: *slot as usize,
-                value: val,
-            });
+        let pc = self.frame_lookup_pc(frame_idx).ok_or("no frame ip")?;
+        let vars = self.visible_vars(pc);
+        if vars.is_empty() {
+            return Ok(self.legacy_locals(frame_idx, pc));
         }
-        Ok(out)
+        let renderer = self.renderer();
+        Ok(vars
+            .into_iter()
+            .map(|var| LocalInfo {
+                name: var.name.clone(),
+                slot: var_slot(var, pc as u32),
+                value: renderer.var(var, frame_idx, pc as u32),
+            })
+            .collect())
     }
 
-    pub fn read_variable(&self, name: &str) -> Result<LocalInfo, String> {
+    /// Name → slot table for functions compiled without debug variables.
+    fn legacy_locals(&self, frame_idx: usize, pc: usize) -> Vec<LocalInfo> {
+        locals_for_pc(self, pc)
+            .unwrap_or(&[])
+            .iter()
+            .map(|(name, slot)| LocalInfo {
+                name: name.clone(),
+                slot: Some(*slot as usize),
+                value: self
+                    .machine
+                    .debug_slot(frame_idx, *slot as usize)
+                    .map(|v| self.machine.debug_format_value(v))
+                    .unwrap_or_else(|| "<unavailable>".into()),
+            })
+            .collect()
+    }
+
+    /// PC used to look up a frame's variables: the stop PC for the top
+    /// frame, the call instruction (return address - 1) for callers.
+    fn frame_lookup_pc(&self, frame_idx: usize) -> Option<usize> {
+        let ip = self.machine.debug_frame_ip(frame_idx)?;
+        let top = self.machine.debug_frame_depth().checked_sub(1)?;
+        Some(if frame_idx == top { ip } else { ip.saturating_sub(1) })
+    }
+
+    /// Source position `(file, byte)` of `pc`, else the nearest located PC
+    /// before it in the same function.
+    fn source_offset(&self, pc: usize) -> Option<(u32, u32)> {
+        let entry = self
+            .artifacts
+            .functions
+            .iter()
+            .filter(|f| f.entry_pc as usize <= pc)
+            .map(|f| f.entry_pc as usize)
+            .max()
+            .unwrap_or(0);
+        let located = |p: usize| {
+            let loc = self.artifacts.debug.debug_locs.get(p)?;
+            loc.is_known().then_some((loc.file, loc.start_byte))
+        };
+        // The prologue (before the first statement) has no location: it
+        // belongs to the start of the body.
+        let end = self
+            .artifacts
+            .functions
+            .iter()
+            .map(|f| f.entry_pc as usize)
+            .filter(|&e| e > pc)
+            .min()
+            .unwrap_or(self.artifacts.debug.debug_locs.len());
+        (entry..=pc).rev().find_map(located).or_else(|| (pc..end).find_map(located))
+    }
+
+    /// Variables in scope at `pc`, innermost binding per name, in
+    /// declaration order.
+    fn visible_vars(&self, pc: usize) -> Vec<&compiler::debug_vars::DebugVar> {
+        let Some(name) = symbol_at_pc(&self.artifacts.functions, pc) else {
+            return Vec::new();
+        };
+        let Some(sym) = self.artifacts.functions.iter().find(|s| s.name == name) else {
+            return Vec::new();
+        };
+        let Some((file, offset)) = self.source_offset(pc) else {
+            return Vec::new();
+        };
+        let mut best: std::collections::HashMap<&str, &compiler::debug_vars::DebugVar> =
+            std::collections::HashMap::new();
+        for var in sym.vars.iter().filter(|v| v.in_scope(file, offset)) {
+            best.entry(var.name.as_str())
+                .and_modify(|cur| {
+                    if var.scope.0 >= cur.scope.0 {
+                        *cur = var;
+                    }
+                })
+                .or_insert(var);
+        }
+        let mut vars: Vec<_> = best.into_values().collect();
+        vars.sort_by_key(|v| (v.scope.0, v.name.clone()));
+        vars
+    }
+
+    fn renderer(&self) -> crate::render::Renderer<'_> {
+        crate::render::Renderer {
+            machine: &self.machine,
+            classes: &self.artifacts.classes,
+            enums: &self.artifacts.enums,
+        }
+    }
+
+    /// `print` argument: `$N` (raw slot), a variable, or a path through
+    /// fields and indices (`p.x`, `xs[2]`, `a.b[1].c`).
+    pub fn read_variable(&self, expr: &str) -> Result<LocalInfo, String> {
         let depth = self.machine.debug_frame_depth();
         if depth == 0 {
             return Err("no active frame".into());
         }
         let frame = depth - 1;
-        let slot = if let Some(n) = name.strip_prefix('$') {
-            n.parse()
-                .map_err(|_| format!("invalid slot `{name}` (usage: $N)"))?
+        let pc = self.frame_lookup_pc(frame).ok_or("no frame ip")?;
+        if let Some(n) = expr.strip_prefix('$') {
+            let slot: usize = n
+                .parse()
+                .map_err(|_| format!("invalid slot `{expr}` (usage: $N)"))?;
+            let val = self
+                .machine
+                .debug_slot(frame, slot)
+                .ok_or_else(|| format!("slot ${slot} out of range"))?;
+            return Ok(LocalInfo {
+                name: expr.to_string(),
+                slot: Some(slot),
+                value: self.machine.debug_format_value(val),
+            });
+        }
+        let (base, path) = split_path(expr)?;
+        let vars = self.visible_vars(pc);
+        if vars.is_empty() {
+            let slot = resolve_local_slot(self, base)?;
+            let val = self
+                .machine
+                .debug_slot(frame, slot)
+                .ok_or_else(|| format!("slot ${slot} out of range"))?;
+            return Ok(LocalInfo {
+                name: base.to_string(),
+                slot: Some(slot),
+                value: self.machine.debug_format_value(val),
+            });
+        }
+        let var = vars
+            .iter()
+            .find(|v| v.name == base)
+            .or_else(|| vars.iter().find(|v| v.name.eq_ignore_ascii_case(base)))
+            .copied()
+            .ok_or_else(|| format!("no local `{base}` in current frame (try `info locals` or `print $N`)"))?;
+        let renderer = self.renderer();
+        let value = if path.is_empty() {
+            renderer.var(var, frame, pc as u32)
         } else {
-            resolve_local_slot(self, name)?
+            crate::render::eval_path(&renderer, var, frame, pc as u32, &path)?
         };
-        let val = self
-            .machine
-            .debug_slot(frame, slot)
-            .ok_or_else(|| format!("slot ${slot} out of range"))?;
-        let label = locals_for_pc(self, self.machine.debug_ip())
-            .and_then(|locals| {
-                locals
-                    .iter()
-                    .find(|(_, s)| *s as usize == slot)
-                    .map(|(n, _)| n.clone())
-            })
-            .unwrap_or_default();
         Ok(LocalInfo {
-            name: if label.is_empty() {
-                format!("${slot}")
-            } else {
-                label
-            },
-            slot,
-            value: self.machine.debug_format_value(val),
+            name: expr.to_string(),
+            slot: var_slot(var, pc as u32),
+            value,
         })
     }
 
@@ -910,6 +1016,56 @@ impl DebugSession {
         let name = matched[0].name.clone();
         Ok((pcs, name))
     }
+}
+
+/// Slot shown next to a variable: where its value is now (single-slot
+/// variables), else its first component slot.
+fn var_slot(var: &compiler::debug_vars::DebugVar, pc: u32) -> Option<usize> {
+    use compiler::debug_vars::DebugVarLoc;
+    match &var.loc {
+        DebugVarLoc::Slot(home) => Some(var.slot_at(pc).unwrap_or(*home) as usize),
+        _ => None,
+    }
+}
+
+/// One step of a `print` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathStep {
+    Field(String),
+    Index(usize),
+}
+
+/// `a.b[1]` → (`a`, [Field(b), Index(1)]).
+fn split_path(expr: &str) -> Result<(&str, Vec<PathStep>), String> {
+    let expr = expr.trim();
+    let base_end = expr.find(['.', '[']).unwrap_or(expr.len());
+    let base = &expr[..base_end];
+    if base.is_empty() {
+        return Err(format!("bad expression `{expr}`"));
+    }
+    let mut steps = Vec::new();
+    let mut rest = &expr[base_end..];
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('.') {
+            let end = r.find(['.', '[']).unwrap_or(r.len());
+            if end == 0 {
+                return Err(format!("bad expression `{expr}`"));
+            }
+            steps.push(PathStep::Field(r[..end].to_string()));
+            rest = &r[end..];
+        } else if let Some(r) = rest.strip_prefix('[') {
+            let close = r.find(']').ok_or_else(|| format!("missing `]` in `{expr}`"))?;
+            let index = r[..close]
+                .trim()
+                .parse()
+                .map_err(|_| format!("index must be a non-negative integer in `{expr}`"))?;
+            steps.push(PathStep::Index(index));
+            rest = &r[close + 1..];
+        } else {
+            return Err(format!("bad expression `{expr}`"));
+        }
+    }
+    Ok((base, steps))
 }
 
 pub fn symbol_at_pc(functions: &[FnSym], pc: usize) -> Option<&str> {
