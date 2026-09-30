@@ -160,6 +160,7 @@ impl Checker {
             for_in_infos_by_span: HashMap::new(),
             typeclass_method_schemes: HashMap::new(),
             current_expected: None,
+            expected_here: None,
             type_aliases: vec![HashMap::new()],
             generic_aliases: HashMap::new(),
             const_scopes: vec![HashSet::new()],
@@ -1474,6 +1475,7 @@ impl Checker {
         self.for_in_infos_by_span.clear();
         self.typeclass_method_schemes.clear();
         self.current_expected = None;
+        self.expected_here = None;
         self.type_aliases.clear();
         self.type_aliases.push(HashMap::new());
         self.generic_aliases.clear();
@@ -2122,13 +2124,53 @@ impl Checker {
         self.maybe_attach_def_id(id, expr);
         self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
 
+        // `current_expected` is the expected type of *this* node: hand it to
+        // the node (`expected_here`) and clear it for its operands, unless
+        // the node's value is its child's (see `forwards_expected`). Rules
+        // that know an operand's type (`let x: T`, `return`, `as`, array
+        // elements) set it right before inferring that operand.
+        let outer = self.current_expected.clone();
+        let prev_here = std::mem::replace(&mut self.expected_here, outer.clone());
+        if !Self::forwards_expected(expr) {
+            self.current_expected = None;
+        }
         let ty = self.infer_inner(expr, Some(id));
+        self.current_expected = outer;
+        self.expected_here = prev_here;
         self.cache.insert(id, ty.clone());
         self.codegen_types_by_span
             .entry((expr.0.start, expr.0.end))
             .or_insert_with(|| ty.clone());
         self.infer_depth -= 1;
         ty
+    }
+
+    /// Nodes whose value is a child's value (or, for arithmetic, whose
+    /// operands share the result's type: `return 1 + 1;` under an expected
+    /// `byte`), so an expected type applies to that child too. A match
+    /// forwards to its arm bodies only; its scrutinee starts clean.
+    fn forwards_expected(expr: &Output) -> bool {
+        matches!(
+            expr.1.as_ref(),
+            Expression::Group(_)
+                | Expression::Expr(_)
+                | Expression::Block(_)
+                | Expression::Match { .. }
+                | Expression::Coalesce(..)
+                | Expression::Add(..)
+                | Expression::Sub(..)
+                | Expression::Mul(..)
+                | Expression::Div(..)
+                | Expression::Mod(..)
+                | Expression::Pow(..)
+                | Expression::Shl(..)
+                | Expression::Shr(..)
+                | Expression::Xor(..)
+                | Expression::BitAnd(..)
+                | Expression::BitOr(..)
+                | Expression::Negate(_)
+                | Expression::Positive(_)
+        ) || matches!(expr.1.as_ref(), Expression::Fragment(items) if items.len() == 1)
     }
 
     /// Register the compiler-owned signatures for the primitive classes.
@@ -2354,7 +2396,7 @@ impl Checker {
                 // Under an expected `byte`, in-range integer literals type as
                 // `byte` so arithmetic like `return 1 + 1;` (expected byte)
                 // unifies without falling back to `int` + post-hoc coerce.
-                if let Some(exp) = self.current_expected.clone() {
+                if let Some(exp) = self.expected_here.clone() {
                     let exp = apply_ty_prune(&self.subst, &exp);
                     if Self::is_byte_ty(&exp) {
                         if (0..=255).contains(n) {
@@ -2373,7 +2415,7 @@ impl Checker {
             Expression::Float(_) => float(),
             Expression::String(s) => {
                 // Expected `byte` / `[byte]` / `[byte; N]`: string lit may type as that byte shape.
-                if let Some(exp) = self.current_expected.clone() {
+                if let Some(exp) = self.expected_here.clone() {
                     let exp = apply_ty_prune(&self.subst, &exp);
                     if Self::is_byte_ty(&exp) {
                         return self.coerce_string_literal_to_byte(s, &range);
@@ -3843,7 +3885,7 @@ impl Checker {
 
     #[inline(never)]
     fn infer_array_literal(&mut self, items: &[Output], range: Range<usize>) -> Ty {
-        let expected_elem = self.current_expected.clone().and_then(|exp| {
+        let expected_elem = self.expected_here.clone().and_then(|exp| {
             let exp = apply_ty_prune(&self.subst, &exp);
             if let Ty::Array { element, .. } = &exp {
                 return Some(element.as_ref().clone());
@@ -3897,7 +3939,7 @@ impl Checker {
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
         if len == 0 {
-            if let Some(exp) = self.current_expected.clone() {
+            if let Some(exp) = self.expected_here.clone() {
                 let exp = apply_ty_prune(&self.subst, &exp);
                 if let Some(vec_elem) = vec_element_ty(&exp) {
                     let _ = unify_with(&self.subst, vec_elem, &element);
@@ -3949,7 +3991,7 @@ impl Checker {
                 .map(|c| c.to_vec())
                 .unwrap_or_default();
             // If exactly one candidate matches current_expected, pick it.
-            let expected = self.current_expected.clone();
+            let expected = self.expected_here.clone();
             let matching: Vec<&OverloadCandidate> = if let Some(ref exp) = expected {
                 // Prune so a solved `Ty::Var` expected type doesn't look
                 // open; unify under `self.subst` (not empty) so existing
@@ -4484,7 +4526,7 @@ impl Checker {
                 id,
                 range.clone(),
             );
-            if let Some(expected) = self.current_expected.clone() {
+            if let Some(expected) = self.expected_here.clone() {
                 self.unify(&result, &expected, &range, "expected type");
             }
             if !constraints.is_empty() {
