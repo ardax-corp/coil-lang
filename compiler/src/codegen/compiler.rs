@@ -5769,6 +5769,11 @@ impl Compiler {
             || crate::typechecking::ty::is_result_ty(&ty)
             || self.ty_is_frame_enum(&ty)
         {
+            // Niche layouts are one word: their constructors never emit
+            // `[payload, tag]`, so a two-slot bind would pop past the value.
+            if two_word_rhs.is_none() && self.value_layout(&ty) != ValueLayout::Boxed {
+                return false;
+            }
             let kind = two_word_rhs
                 .or_else(|| extract_enum_name(&ty))
                 .unwrap_or_else(|| "Enum".to_string());
