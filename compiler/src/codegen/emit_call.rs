@@ -287,6 +287,18 @@ impl Compiler {
                     }
                 });
             if let Some((class, inst_args, fqn)) = ground_trait {
+                // When an operand may clobber the operand stack (`new C(..)`
+                // builds in a temp slot), stage the receiver and each argument
+                // into a temp and reload them above every temp, as inherent
+                // methods do. Pushed in place, the CALL result landed below
+                // the slots the enclosing expression allocated (an `if let`
+                // binding then read a stale slot).
+                let stage = self.expr_may_clobber_operand_stack(recv)
+                    || args.as_ref().is_some_and(|a| {
+                        a.iter().any(|arg| self.expr_may_clobber_operand_stack(arg))
+                    });
+                let mut temps = Vec::new();
+                let mut nargs = 1u32; // receiver
                 bytecode.append(&mut self.do_compile(recv));
                 // Box the receiver when the instance method prologue
                 // expects an unbox (same contract as Eq/Ord direct calls).
@@ -305,12 +317,24 @@ impl Compiler {
                     let box_ty = Self::show_lookup_ty_for_instance(&recv_ty);
                     Self::emit_box_if_needed(&mut bytecode, &box_ty);
                 }
-                let mut nargs = 1u32; // receiver
+                if stage {
+                    let tmp = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
                 if let Some(items) = args {
                     for arg in items {
                         self.append_with_existential_pack(&mut bytecode, arg);
+                        if stage {
+                            let tmp = self.alloc_temp_slot();
+                            bytecode.push_store_pop(tmp);
+                            temps.push(tmp);
+                        }
                         nargs += 1;
                     }
+                }
+                for tmp in &temps {
+                    bytecode.push_load(*tmp);
                 }
                 if self.emit_instance_dict(&mut bytecode, &class, &inst_args) {
                     nargs += 1; // trailing dictionary
