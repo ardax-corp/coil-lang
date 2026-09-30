@@ -32,24 +32,6 @@
     }
 
     #[test]
-    fn derive_deserialize_emits_deserialize_method() {
-        let (_exp, decls) = expand_src("#[derive(Deserialize)] enum E { A, B(int) } fn main() {}");
-        assert!(
-            impl_method_names(&decls, "Deserialize").contains(&"deserialize".to_string()),
-            "expected Deserialize::deserialize impl"
-        );
-    }
-
-    #[test]
-    fn derive_serialize_class_emits_serialize_method() {
-        let (_exp, decls) = expand_src("#[derive(Serialize)] class P { pub x: int } fn main() {}");
-        assert!(
-            impl_method_names(&decls, "Serialize").contains(&"serialize".to_string()),
-            "expected Serialize::serialize on class"
-        );
-    }
-
-    #[test]
     fn default_show_string_use_type_name_when_no_derive() {
         let (_exp, decls) = expand_src("class Point { pub x: int, pub y: int } fn main() {}");
         assert!(

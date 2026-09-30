@@ -594,36 +594,6 @@ impl Generics {
             },
         );
         self.typeclasses.insert(
-            "Serialize".into(),
-            TypeClassDef {
-                name: "Serialize".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "serialize".into(),
-                    has_default: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
-            "Deserialize".into(),
-            TypeClassDef {
-                name: "Deserialize".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "deserialize".into(),
-                    has_default: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
             "Send".into(),
             TypeClassDef {
                 name: "Send".into(),
@@ -1128,8 +1098,6 @@ mod tests {
         for name in [
             "Default",
             "Hash",
-            "Serialize",
-            "Deserialize",
             "Send",
             "String",
             "Sensitive",

@@ -1,8 +1,11 @@
 //! Attribute expansion (`#[derive(...)]`, user `attr`, etc.).
-    //!
-//! Runs before the ID pre-walk and typechecking: expands `#[derive]` into
-//! synthetic `TypeClassImpl` siblings. Compile-time FFI is `extern "lib" { fn …; }`
-//! only — `#[ffi]` is rejected.
+//!
+//! Runs before the ID pre-walk and typechecking. Every `#[derive(X)]` — the
+//! built-ins included, which live in `compiler/src/prelude/derive.hy` — and
+//! every attribute macro is recorded as a pending macro for the pipeline to
+//! run ([`crate::macros`]); this pass adds the type-name `Show` / `String`
+//! defaults and checks attribute placement. Compile-time FFI is
+//! `extern "lib" { fn …; }` only — `#[ffi]` is rejected.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,39 +13,13 @@ use parser::{
     SimpleSpan,
     ast::{
         AttrArgs, AttrLit, Attribute, EnumConstructPayload, EnumVariantPayload, Expression,
-        ExternFunction, ExternStructDecl, LetPattern, MatchArm, Output, Pattern, PatternField,
-        PatternPayload, RecordFieldDecl, RecordFieldValue, Visibility,
+        ExternFunction, ExternStructDecl, LetPattern, MatchArm, Output, RecordFieldDecl,
+        RecordFieldValue, Visibility,
     },
 };
 use reporting::{ErrorCode, Message};
 
 use crate::macros::{MacroDecl, MacroKind, PendingMacro};
-
-type PatternOut<'a> = (SimpleSpan, Pattern<'a>);
-
-fn span_pat<'a>(span: SimpleSpan, pattern: Pattern<'a>) -> PatternOut<'a> {
-    (span, pattern)
-}
-
-fn wildcard_tuple<'a>(span: SimpleSpan, arity: usize) -> PatternPayload<'a> {
-    PatternPayload::Tuple(vec![(span, Pattern::Wildcard); arity])
-}
-
-fn record_wildcard_fields<'a>(span: SimpleSpan, fields: &[&'a str]) -> PatternPayload<'a> {
-    PatternPayload::Record(
-        fields
-            .iter()
-            .map(|fname| PatternField {
-                name: fname,
-                pattern: span_pat(span, Pattern::Wildcard),
-            })
-            .collect(),
-    )
-}
-
-/// Derives still synthesized in Rust. `Show`, `Eq`, `Ord`, … are coil derive
-/// macros in `compiler/src/prelude/derive.hy`.
-const DERIVABLE: &[&str] = &["Serialize", "Deserialize"];
 
 const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr"];
 
@@ -110,12 +87,7 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
             );
             msg.with_help(format!(
                 "built-in derives are: {}; or import a `derive {}` with `use`",
-                crate::macros::PRELUDE_DERIVES
-                    .iter()
-                    .chain(DERIVABLE)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                crate::macros::PRELUDE_DERIVES.join(", "),
                 p.name
             ));
             msg
@@ -126,11 +98,6 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
             p.range.clone(),
         ),
     }
-}
-
-/// True for a derive the compiler synthesizes itself.
-pub fn is_builtin_derive(name: &str) -> bool {
-    DERIVABLE.contains(&name)
 }
 
 fn pending_attr(name: &str, args: &AttrArgs<'_>, target: SimpleSpan, owner: Option<&str>) -> PendingMacro {
@@ -1893,39 +1860,6 @@ fn synthesize_class_ctor<'a>(
     )
 }
 
-/// Shape info needed to synthesize derive methods (no borrow of the decl AST).
-#[derive(Clone)]
-enum VariantShape<'a> {
-    Unit,
-    Tuple(usize),
-    Record(Vec<&'a str>),
-}
-
-#[derive(Clone)]
-struct VariantMeta<'a> {
-    name: &'a str,
-    shape: VariantShape<'a>,
-}
-
-fn variant_metas<'a>(variants: &[Output<'a>]) -> Vec<VariantMeta<'a>> {
-    variants
-        .iter()
-        .filter_map(|v| match v.1.as_ref() {
-            Expression::EnumVariant { docs: _, name, payload, .. } => Some(VariantMeta {
-                name,
-                shape: match payload {
-                    EnumVariantPayload::Unit => VariantShape::Unit,
-                    EnumVariantPayload::Tuple(parts) => VariantShape::Tuple(parts.len()),
-                    EnumVariantPayload::Record(fields) => {
-                        VariantShape::Record(fields.iter().map(|f| f.name).collect())
-                    }
-                },
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
 fn unwrap_disc_expr<'e, 'a>(expr: &'a Expression<'e>) -> &'a Expression<'e> {
     match expr {
         Expression::Expr(e) | Expression::Group(e) | Expression::Positive(e) => {
@@ -2117,21 +2051,13 @@ fn expand_decls<'a>(
             }
         }
 
-        enum Job<'a> {
-            Enum {
-                name: &'a str,
-                generic: bool,
-                derives: Vec<&'a str>,
-                variants: Vec<VariantMeta<'a>>,
-                variant_nodes: Vec<Output<'a>>,
-                scalar_backing: Option<&'a str>,
-            },
-            Class {
-                name: &'a str,
-                generic: bool,
-                derives: Vec<&'a str>,
-                fields: Vec<&'a str>,
-            },
+        /// A class or enum whose derives to record.
+        struct Job<'a> {
+            kind: &'static str,
+            name: &'a str,
+            generic: bool,
+            derives: Vec<&'a str>,
+            scalar_backing: Option<&'a str>,
         }
         let job = match decls[i].1.as_ref() {
             Expression::EnumDecl {
@@ -2144,15 +2070,12 @@ fn expand_decls<'a>(
                 for a in validate_attrs(attrs, "enum", user_attrs, &mut messages, span, false) {
                     pending.push(pending_attr(a.name, &a.args, span, None));
                 }
-                let derives = derive_traits_from_attrs(attrs);
-                let scalar_backing = scalar_backing_ty_name(attrs, variants);
-                Some(Job::Enum {
+                Some(Job {
+                    kind: "enum",
                     name,
                     generic: !type_params.is_empty(),
-                    derives,
-                    variants: variant_metas(variants),
-                    variant_nodes: variants.clone(),
-                    scalar_backing,
+                    derives: derive_traits_from_attrs(attrs),
+                    scalar_backing: scalar_backing_ty_name(attrs, variants),
                 })
             }
             Expression::Class {
@@ -2160,17 +2083,17 @@ fn expand_decls<'a>(
                 name,
                 type_params,
                 attrs,
-                fields,
+                ..
             } => {
                 for a in validate_attrs(attrs, "class", user_attrs, &mut messages, span, false) {
                     pending.push(pending_attr(a.name, &a.args, span, None));
                 }
-                let derives = derive_traits_from_attrs(attrs);
-                Some(Job::Class {
+                Some(Job {
+                    kind: "class",
                     name,
                     generic: !type_params.is_empty(),
-                    derives,
-                    fields: class_field_names(fields),
+                    derives: derive_traits_from_attrs(attrs),
+                    scalar_backing: None,
                 })
             }
             _ => None,
@@ -2225,43 +2148,19 @@ fn expand_decls<'a>(
                 ctor_insert = Some(ctor);
             }
 
-        let synthesized = match job {
-            Some(Job::Enum {
-                name,
-                generic,
-                derives,
-                variants,
-                variant_nodes,
-                scalar_backing,
-            }) => Some(expand_enum(ExpandEnumArgs {
+        let synthesized = job.map(|job| {
+            expand_derives(ExpandDerivesArgs {
                 span,
-                name,
-                generic,
-                derives: &derives,
-                variants: &variants,
-                _variant_nodes: &variant_nodes,
-                scalar_backing,
+                kind: job.kind,
+                name: job.name,
+                generic: job.generic,
+                derives: &job.derives,
+                scalar_backing: job.scalar_backing,
                 decls,
                 messages: &mut messages,
                 pending,
-            })),
-            Some(Job::Class {
-                name,
-                generic,
-                derives,
-                fields,
-            }) => Some(expand_class(
-                span,
-                name,
-                generic,
-                &derives,
-                &fields,
-                decls,
-                &mut messages,
-                pending,
-            )),
-            None => None,
-        };
+            })
+        });
 
         // `#[helper(...)]` on fields / variants belongs to a user derive.
         if let Expression::EnumDecl { variants: members, .. }
@@ -2320,101 +2219,48 @@ fn expand_decls<'a>(
     messages
 }
 
-struct ExpandEnumArgs<'args, 'a> {
+struct ExpandDerivesArgs<'args, 'a> {
     span: SimpleSpan,
+    kind: &'static str,
     name: &'a str,
     generic: bool,
     derives: &'args [&'a str],
-    variants: &'args [VariantMeta<'a>],
-    _variant_nodes: &'args [Output<'a>],
     scalar_backing: Option<&'a str>,
     decls: &'args [Output<'a>],
     messages: &'args mut Vec<Message>,
     pending: &'args mut Vec<PendingMacro>,
 }
 
-fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
-    let ExpandEnumArgs {
+/// Record a class / enum's derives as derive macros to run (built-ins live in
+/// `compiler/src/prelude/derive.hy`) and add the type-name `Show` / `String`
+/// defaults the derives and explicit impls leave uncovered.
+fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
+    let ExpandDerivesArgs {
         span,
+        kind,
         name,
         generic,
         derives,
-        variants,
-        _variant_nodes,
         scalar_backing,
         decls,
         messages,
         pending,
     } = args;
-
     if generic {
         if !derives.is_empty() {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
-                format!(
-                    "Cannot derive traits for generic enum `{}`; write an explicit `impl`",
-                    name
-                ),
+                format!("Cannot derive traits for generic {kind} `{name}`; write an explicit `impl`"),
                 span.into_range(),
             ));
         }
         return Vec::new();
     }
-
-    let mut out = Vec::new();
     for &trait_name in derives {
-        if !is_builtin_derive(trait_name) {
-            pending.push(pending_derive(trait_name, span));
-            continue;
-        }
-        match trait_name {
-            "Serialize" => out.push(synth_serialize_enum(span, name, variants)),
-            "Deserialize" => out.push(synth_deserialize_enum(span, name, variants)),
-            _ => unreachable!(),
-        }
+        pending.push(pending_derive(trait_name, span));
     }
+    let mut out = Vec::new();
     push_default_display_impls(span, name, derives, decls, scalar_backing, &mut out);
-    out
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand_class<'a>(
-    span: SimpleSpan,
-    name: &'a str,
-    generic: bool,
-    derives: &[&'a str],
-    field_names: &[&'a str],
-    decls: &[Output<'a>],
-    messages: &mut Vec<Message>,
-    pending: &mut Vec<PendingMacro>,
-) -> Vec<Output<'a>> {
-    if generic {
-        if !derives.is_empty() {
-            messages.push(Message::error(
-                ErrorCode::GenericTypeError,
-                format!(
-                    "Cannot derive traits for generic class `{}`; write an explicit `impl`",
-                    name
-                ),
-                span.into_range(),
-            ));
-        }
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    for &trait_name in derives {
-        if !is_builtin_derive(trait_name) {
-            pending.push(pending_derive(trait_name, span));
-            continue;
-        }
-        match trait_name {
-            "Serialize" => out.push(synth_serialize_class(span, name, field_names)),
-            "Deserialize" => out.push(synth_deserialize_class(span, name, field_names)),
-            _ => unreachable!(),
-        }
-    }
-    push_default_display_impls(span, name, derives, decls, None, &mut out);
     out
 }
 
@@ -2513,22 +2359,6 @@ fn pending_derive(trait_name: &str, span: SimpleSpan) -> PendingMacro {
     }
 }
 
-fn class_field_names<'a>(fields: &[Output<'a>]) -> Vec<&'a str> {
-    fields
-        .iter()
-        .filter_map(|f| match f.1.as_ref() {
-            Expression::Field {
-                docs: _,
-                name: name_expr, ..
-            } => match name_expr.1.as_ref() {
-                Expression::Identifier(n) => Some(*n),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
 
 pub(crate) fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
@@ -2613,28 +2443,6 @@ fn ty_ret<'a>(span: SimpleSpan, ret: &'a str) -> Output<'a> {
         );
     }
     ty_name(span, ret)
-}
-
-fn vec_new_call<'a>(span: SimpleSpan) -> Output<'a> {
-    at(
-        span,
-        Expression::Construct {
-            enum_name: "Vec",
-            variant_name: "new",
-            fields: EnumConstructPayload::Unit,
-        },
-    )
-}
-
-fn vec_from_array<'a>(span: SimpleSpan, elems: Vec<Output<'a>>) -> Output<'a> {
-    at(
-        span,
-        Expression::Construct {
-            enum_name: "Vec",
-            variant_name: "from",
-            fields: EnumConstructPayload::Tuple(vec![at(span, Expression::Array(elems))]),
-        },
-    )
 }
 
 fn ident<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
@@ -2786,248 +2594,7 @@ fn synth_string_scalar_enum<'a>(
 }
 
 
-fn ord_wildcard_pattern<'a>(
-    span: SimpleSpan,
-    enum_name: &'a str,
-    vname: &'a str,
-    shape: &VariantShape<'a>,
-) -> PatternOut<'a> {
-    span_pat(
-        span,
-        match shape {
-            VariantShape::Unit => Pattern::Constructor {
-                enum_name,
-                variant_name: vname,
-                payload: PatternPayload::Unit,
-            },
-            VariantShape::Tuple(arity) => Pattern::Constructor {
-                enum_name,
-                variant_name: vname,
-                payload: wildcard_tuple(span, *arity),
-            },
-            VariantShape::Record(fields) => Pattern::Constructor {
-                enum_name,
-                variant_name: vname,
-                payload: record_wildcard_fields(span, fields),
-            },
-        },
-    )
-}
 
-
-
-fn as_byte<'a>(span: SimpleSpan, expr: Output<'a>) -> Output<'a> {
-    at(span, Expression::Cast(expr, ty_name(span, "byte")))
-}
-
-fn as_int<'a>(span: SimpleSpan, expr: Output<'a>) -> Output<'a> {
-    at(span, Expression::Cast(expr, ty_name(span, "int")))
-}
-
-fn serialize_variant_body<'a>(
-    span: SimpleSpan,
-    tag: usize,
-    shape: &VariantShape<'a>,
-    recv: &'a str,
-) -> Output<'a> {
-    let mut elems = vec![as_byte(span, at(span, Expression::Integer(tag as i64)))];
-    match shape {
-        VariantShape::Unit => {}
-        VariantShape::Tuple(arity) => {
-            for i in 0..*arity {
-                let fname = leak(i.to_string());
-                let field = at(span, Expression::Access(ident(span, recv), fname));
-                elems.push(as_byte(span, field));
-            }
-        }
-        VariantShape::Record(fields) => {
-            for &fname in fields {
-                let field = at(span, Expression::Access(ident(span, recv), fname));
-                elems.push(as_byte(span, field));
-            }
-        }
-    }
-    vec_from_array(span, elems)
-}
-
-fn synth_serialize_enum<'a>(
-    span: SimpleSpan,
-    enum_name: &'a str,
-    variants: &[VariantMeta<'a>],
-) -> Output<'a> {
-    let p = leak(format!("__ser_{enum_name}"));
-    let mut arms = Vec::new();
-    for (tag, v) in variants.iter().enumerate() {
-        let body = serialize_variant_body(span, tag, &v.shape, p);
-        arms.push(MatchArm {
-            pattern: ord_wildcard_pattern(span, enum_name, v.name, &v.shape),
-            body,
-        });
-    }
-    arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Default),
-        body: vec_new_call(span),
-    });
-    let match_expr = at(
-        span,
-        Expression::Match {
-            scrutinee: ident(span, p),
-            arms,
-        },
-    );
-    let m = method_fn(
-        span,
-        "serialize",
-        vec![arg(span, enum_name, p)],
-        "Vec<byte>",
-        block_return(span, match_expr),
-    );
-    typeclass_impl(span, "Serialize", enum_name, vec![m])
-}
-
-fn data_at<'a>(span: SimpleSpan, data: &Output<'a>, index: usize) -> Output<'a> {
-    at(
-        span,
-        Expression::Index(
-            data.clone(),
-            Some(at(span, Expression::Integer(index as i64))),
-        ),
-    )
-}
-
-fn deserialize_variant_value<'a>(
-    span: SimpleSpan,
-    enum_name: &'a str,
-    v: &VariantMeta<'a>,
-    data: &Output<'a>,
-    base_index: usize,
-) -> Output<'a> {
-    match &v.shape {
-        VariantShape::Unit => at(
-            span,
-            Expression::Construct {
-                enum_name,
-                variant_name: v.name,
-                fields: EnumConstructPayload::Unit,
-            },
-        ),
-        VariantShape::Tuple(arity) => {
-            let items = (0..*arity)
-                .map(|i| as_int(span, data_at(span, data, base_index + i)))
-                .collect();
-            at(
-                span,
-                Expression::Construct {
-                    enum_name,
-                    variant_name: v.name,
-                    fields: EnumConstructPayload::Tuple(items),
-                },
-            )
-        }
-        VariantShape::Record(fields) => {
-            let records = fields
-                .iter()
-                .enumerate()
-                .map(|(i, fname)| RecordFieldValue {
-                    name: fname,
-                    value: as_int(span, data_at(span, data, base_index + i)),
-                })
-                .collect();
-            at(
-                span,
-                Expression::Construct {
-                    enum_name,
-                    variant_name: v.name,
-                    fields: EnumConstructPayload::Record(records),
-                },
-            )
-        }
-    }
-}
-
-fn if_tag_equals<'a>(
-    span: SimpleSpan,
-    data: &Output<'a>,
-    tag: usize,
-    body: Output<'a>,
-) -> Output<'a> {
-    let cond = at(
-        span,
-        Expression::Eq(
-            as_int(span, data_at(span, data, 0)),
-            at(span, Expression::Integer(tag as i64)),
-        ),
-    );
-    at(span, Expression::Branch(Some(cond), body))
-}
-
-fn synth_deserialize_enum<'a>(
-    span: SimpleSpan,
-    enum_name: &'a str,
-    variants: &[VariantMeta<'a>],
-) -> Output<'a> {
-    let data = leak(format!("__de_{enum_name}"));
-    let panic_msg = leak(format!("deserialize: invalid tag for `{enum_name}`"));
-    let err_body = at(span, Expression::Panic(str_lit(span, panic_msg)));
-    let mut branches: Vec<Output<'a>> = variants
-        .iter()
-        .enumerate()
-        .map(|(tag, v)| {
-            if_tag_equals(
-                span,
-                &ident(span, data),
-                tag,
-                deserialize_variant_value(span, enum_name, v, &ident(span, data), 1),
-            )
-        })
-        .collect();
-    branches.push(at(span, Expression::Branch(None, err_body)));
-    let body = block_return(span, at(span, Expression::If(branches)));
-    let m = method_fn(
-        span,
-        "deserialize",
-        vec![arg(span, "Vec<byte>", data)],
-        enum_name,
-        body,
-    );
-    typeclass_impl(span, "Deserialize", enum_name, vec![m])
-}
-
-fn synth_serialize_class<'a>(span: SimpleSpan, name: &'a str, fields: &[&'a str]) -> Output<'a> {
-    let p = leak(format!("__ser_{name}"));
-    let mut elems = Vec::new();
-    for f in fields {
-        let field = at(span, Expression::Access(ident(span, p), f));
-        elems.push(as_byte(span, field));
-    }
-    let arr = vec_from_array(span, elems);
-    let m = method_fn(
-        span,
-        "serialize",
-        vec![arg(span, name, p)],
-        "Vec<byte>",
-        block_return(span, arr),
-    );
-    typeclass_impl(span, "Serialize", name, vec![m])
-}
-
-fn synth_deserialize_class<'a>(span: SimpleSpan, name: &'a str, fields: &[&'a str]) -> Output<'a> {
-    let data = leak(format!("__de_{name}"));
-    let args: Vec<Output<'a>> = fields
-        .iter()
-        .enumerate()
-        .map(|(i, _)| as_int(span, data_at(span, &ident(span, data), i)))
-        .collect();
-    let value = at(span, Expression::Instantiate(ident(span, name), Some(args)));
-    let m = method_fn(
-        span,
-        "deserialize",
-        vec![arg(span, "Vec<byte>", data)],
-        name,
-        block_return(span, value),
-    );
-    typeclass_impl(span, "Deserialize", name, vec![m])
-}
 
 
 #[cfg(test)]
