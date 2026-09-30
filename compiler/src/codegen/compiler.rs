@@ -5197,6 +5197,10 @@ impl Compiler {
             Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
                 self.expr_may_clobber_operand_stack(v)
             }
+            // `(a == b)` parses as `Group(Fragment([Eq]))`.
+            Expression::Fragment(items) if items.len() == 1 => {
+                self.expr_may_clobber_operand_stack(&items[0])
+            }
             Expression::Call { .. } | Expression::Match { .. } => true,
             // `new Class(...)` StorePops the instance then Seek(tmp+1), which
             // clears any live operand left under the constructor (e.g. the
@@ -5255,7 +5259,28 @@ impl Compiler {
             | Expression::Leq(a, b)
             | Expression::Gt(a, b)
             | Expression::Geq(a, b) => {
-                self.expr_may_clobber_operand_stack(a) || self.expr_may_clobber_operand_stack(b)
+                // An operator on a class / enum with an instance (`Eq for
+                // Point`) is a CALL that stages its operands in temp slots,
+                // which can overwrite a live operand (the left side of `&&`).
+                let instance_op = match expr.1.as_ref() {
+                    Expression::Eq(..) => Some(("Eq", "eq")),
+                    Expression::Neq(..) => Some(("Eq", "ne")),
+                    Expression::Le(..) => Some(("Lt", "lt")),
+                    Expression::Leq(..) => Some(("Le", "le")),
+                    Expression::Gt(..) => Some(("Gt", "gt")),
+                    Expression::Geq(..) => Some(("Ge", "ge")),
+                    Expression::Add(..) => Some(("Add", "add")),
+                    Expression::Sub(..) => Some(("Sub", "sub")),
+                    Expression::Mul(..) => Some(("Mul", "mul")),
+                    Expression::Div(..) => Some(("Div", "div")),
+                    _ => None,
+                };
+                instance_op
+                    .is_some_and(|(class, method)| {
+                        self.concrete_operator_target(a, b, class, method).is_some()
+                    })
+                    || self.expr_may_clobber_operand_stack(a)
+                    || self.expr_may_clobber_operand_stack(b)
             }
             Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
                 self.expr_may_clobber_operand_stack(recv)
@@ -7547,20 +7572,19 @@ impl Compiler {
     ///
     /// Primitive `int`/`float`/`string`/`bool` keep the hardwired opcode
     /// path (caller falls through when this returns `false`).
-    fn emit_concrete_operator_call(
-        &mut self,
-        bytecode: &mut CodeBuf,
+    /// The instance method a binary operator on `lhs` / `rhs` lowers to, and
+    /// the instance lookup type: nominal user classes / enums with an
+    /// instance of `class` (`Eq for Point`). `None` keeps the plain opcode.
+    fn concrete_operator_target(
+        &self,
         lhs: &Output,
         rhs: &Output,
         class: &str,
         method: &str,
-    ) -> bool {
-        let arg_ty = self
+    ) -> Option<(Ty, String)> {
+        let ty = self
             .codegen_expr_ty(lhs)
-            .or_else(|| self.codegen_expr_ty(rhs));
-        let Some(ty) = arg_ty else {
-            return false;
-        };
+            .or_else(|| self.codegen_expr_ty(rhs))?;
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &ty);
         let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
@@ -7572,32 +7596,40 @@ impl Compiler {
             },
             _ => None,
         };
-        let Some(name) = nominal else {
-            return false;
-        };
+        let name = nominal?;
         if matches!(
             name,
             "int" | "float" | "string" | "bool" | "unit" | "Option" | "Result"
         ) {
-            return false;
+            return None;
         }
         if self.checker.enum_variants(name).is_none() && !self.checker.is_class(name) {
-            return false;
+            return None;
         }
-        let Some(instance) = self
+        let fqn = self
             .checker
             .generics()
-            .find_instance_relaxed(class, std::slice::from_ref(&lookup_ty))
-            .cloned()
-        else {
-            return false;
-        };
-        let Some(fqn) = instance.method_fqns.get(method).cloned() else {
-            return false;
-        };
+            .find_instance_relaxed(class, std::slice::from_ref(&lookup_ty))?
+            .method_fqns
+            .get(method)
+            .cloned()?;
         if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
-            return false;
+            return None;
         }
+        Some((lookup_ty, fqn))
+    }
+
+    fn emit_concrete_operator_call(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        lhs: &Output,
+        rhs: &Output,
+        class: &str,
+        method: &str,
+    ) -> bool {
+        let Some((lookup_ty, fqn)) = self.concrete_operator_target(lhs, rhs, class, method) else {
+            return false;
+        };
         // Dictionary ABI: box value args at the call site (UnboxValue on a raw
         // pointer yields Value::default()). Stash each boxed arg before the
         // other operand: Instantiate StorePop would steal a pending boxed arg.
