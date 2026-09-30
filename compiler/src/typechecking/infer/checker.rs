@@ -16202,6 +16202,41 @@ impl Checker {
             .map(|n| n.to_string())
     }
 
+    /// Instance members of `class` for completion: `(name, type, is_method,
+    /// is_public)`. Fields first in declaration order, then non-static
+    /// methods by name.
+    pub fn class_members(&self, class: &str) -> Vec<(String, Ty, bool, bool)> {
+        let mut out: Vec<(String, Ty, bool, bool)> = self
+            .classes
+            .get(class)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(vis, name, ty)| {
+                        (name.clone(), ty.clone(), false, matches!(vis, Visibility::Public))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let statics = self.static_methods.get(class);
+        let mut methods: Vec<(String, Ty, bool, bool)> = self
+            .methods
+            .get(class)
+            .map(|m| {
+                m.iter()
+                    .filter(|(name, _)| !statics.is_some_and(|s| s.contains(*name)))
+                    .filter(|(name, _)| name.as_str() != "drop")
+                    .map(|(name, (vis, scheme))| {
+                        (name.clone(), scheme.ty.clone(), true, matches!(vis, Visibility::Public))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        methods.sort_by(|a, b| a.0.cmp(&b.0));
+        out.extend(methods);
+        out
+    }
+
     /// True if `ty` is a registered class instance (`Con` or `App`).
     pub fn ty_is_class(&self, ty: &Ty) -> bool {
         Self::class_name_of_ty(ty).is_some_and(|n| self.is_class(n))
