@@ -1920,4 +1920,243 @@ impl<'expr> Expression<'expr> {
             }
         }
     }
+
+    /// Mutable twin of [`Self::for_each_child`] (same children, same order).
+    pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Output<'expr>)) {
+        use Expression as E;
+        match self {
+            E::Integer(_)
+            | E::Float(_)
+            | E::String(_)
+            | E::Bool(_)
+            | E::Identifier(_)
+            | E::Type(_)
+            | E::Default(_)
+            | E::QualifiedAccess { .. }
+            | E::Use { .. }
+            | E::Break
+            | E::Continue
+            | E::AssocTypeDecl { .. } => {}
+            E::Noop(a)
+            | E::Module(_, a)
+            | E::Spread(a)
+            | E::Return(a)
+            | E::ImplicitReturn(a)
+            | E::Raise(a)
+            | E::Panic(a)
+            | E::Yield(a)
+            | E::YieldFrom(a)
+            | E::Try(a)
+            | E::TypeOf(a)
+            | E::OptionalAccess(a, _)
+            | E::Negate(a)
+            | E::Not(a)
+            | E::LogicalNot(a)
+            | E::Positive(a)
+            | E::Expr(a)
+            | E::Group(a)
+            | E::ExprStatement(a)
+            | E::Statement(a)
+            | E::Readonly(a)
+            | E::Dload(a)
+            | E::Done(a)
+            | E::NamedArg(_, a)
+            | E::Method(_, a)
+            | E::Member(a)
+            | E::Access(a, _) => f(a),
+            E::Argument { ty, .. } => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+            }
+            E::TypeFnSig { params, ret } => {
+                f(params);
+                f(ret);
+            }
+            E::AttrDecl { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                f(body);
+            }
+            E::DeriveDecl { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                f(body);
+            }
+            E::Quote { parts, .. } => {
+                for part in parts {
+                    match part {
+                        QuotePart::Lit(_) => {}
+                        QuotePart::Splice(e) | QuotePart::Repeat { list: e, .. } => f(e),
+                    }
+                }
+            }
+            E::TypeApp { args, .. } | E::TypeProjection { args, .. } => args.iter_mut().for_each(f),
+            E::TypeFun(a, b)
+            | E::Coalesce(a, b)
+            | E::Cast(a, b)
+            | E::Add(a, b)
+            | E::Sub(a, b)
+            | E::Mul(a, b)
+            | E::Div(a, b)
+            | E::Mod(a, b)
+            | E::Pow(a, b)
+            | E::Shl(a, b)
+            | E::Shr(a, b)
+            | E::Xor(a, b)
+            | E::And(a, b)
+            | E::BitAnd(a, b)
+            | E::Or(a, b)
+            | E::BitOr(a, b)
+            | E::Eq(a, b)
+            | E::Neq(a, b)
+            | E::Leq(a, b)
+            | E::Geq(a, b)
+            | E::Le(a, b)
+            | E::Gt(a, b)
+            | E::Assignment(a, b)
+            | E::CompoundAssign(a, _, b) => {
+                f(a);
+                f(b);
+            }
+            E::Resume(a, b) | E::Index(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            E::Adjust { target, .. } => f(target),
+            E::Range { start, end, .. } => {
+                f(start);
+                f(end);
+            }
+            E::List(items)
+            | E::Array(items)
+            | E::Fragment(items)
+            | E::Block(items)
+            | E::Program(items)
+            | E::Tuple(items)
+            | E::Declare(items)
+            | E::Invoke(items)
+            | E::If(items) => items.iter_mut().for_each(f),
+            E::Defer { body, .. } => f(body),
+            E::Dict(fields) => fields.iter_mut().for_each(|field| f(&mut field.value)),
+            E::StaticDecl { ty, init, .. } => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+                f(init);
+            }
+            E::ExternBlock { declarations, .. } => {
+                for decl in declarations {
+                    f(&mut decl.args);
+                    if let Some(r) = &mut decl.returns {
+                        f(r);
+                    }
+                }
+            }
+            E::Function { args, returns, body, .. } => {
+                f(args);
+                if let Some(r) = returns {
+                    f(r);
+                }
+                if let Some(body) = body {
+                    f(body);
+                }
+            }
+            E::Branch(cond, body) => {
+                if let Some(cond) = cond {
+                    f(cond);
+                }
+                f(body);
+            }
+            E::Call { name, args } | E::Instantiate(name, args) => {
+                f(name);
+                if let Some(args) = args {
+                    args.iter_mut().for_each(f);
+                }
+            }
+            E::Loop { identifier, iterable, body, .. } => {
+                if let Some(id) = identifier {
+                    f(id);
+                }
+                f(iterable);
+                f(body);
+            }
+            E::IfLet { scrutinee, then_arm, else_arm } => {
+                f(scrutinee);
+                f(&mut then_arm.body);
+                f(&mut else_arm.body);
+            }
+            E::WhileLet { scrutinee, then_arm, on_miss } => {
+                f(scrutinee);
+                f(&mut then_arm.body);
+                f(&mut on_miss.body);
+            }
+            E::Variable(_, ty) => {
+                if let Some(ty) = ty {
+                    f(ty);
+                }
+            }
+            E::Constant(a, b) => {
+                f(a);
+                if let Some(b) = b {
+                    f(b);
+                }
+            }
+            E::LetDestructure { rhs, .. } => f(rhs),
+            E::Class { fields, .. } => fields.iter_mut().for_each(f),
+            E::Implementation { methods, .. }
+            | E::TypeClass { methods, .. } => methods.iter_mut().for_each(f),
+            E::TypeClassImpl { args, methods, .. } => {
+                args.iter_mut().for_each(&mut *f);
+                methods.iter_mut().for_each(f);
+            }
+            E::Field { name, ty, init, .. } => {
+                f(name);
+                f(ty);
+                if let Some(init) = init {
+                    f(init);
+                }
+            }
+            E::TypeAlias { ty, .. } | E::Forall { ty, .. } | E::AssocTypeDef { ty, .. } => f(ty),
+            E::TestCase { name, body } => {
+                f(name);
+                f(body);
+            }
+            E::EnumDecl { variants, .. } => variants.iter_mut().for_each(f),
+            E::ExternStruct(decl) => decl.fields.iter_mut().for_each(|(_, ty)| f(ty)),
+            E::EnumVariant { payload, discriminant, .. } => {
+                match payload {
+                    EnumVariantPayload::Unit => {}
+                    EnumVariantPayload::Tuple(items) => items.iter_mut().for_each(&mut *f),
+                    EnumVariantPayload::Record(fields) => {
+                        fields.iter_mut().for_each(|field| f(&mut field.value))
+                    }
+                }
+                if let Some(d) = discriminant {
+                    f(d);
+                }
+            }
+            E::Construct { fields, .. } => match fields {
+                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Tuple(items) => items.iter_mut().for_each(f),
+                EnumConstructPayload::Record(fields) => {
+                    fields.iter_mut().for_each(|field| f(&mut field.value))
+                }
+            },
+            E::Match { scrutinee, arms } => {
+                f(scrutinee);
+                arms.iter_mut().for_each(|arm| f(&mut arm.body));
+            }
+            E::Lambda { args, body, .. } => {
+                f(args);
+                f(body);
+            }
+        }
+    }
 }
