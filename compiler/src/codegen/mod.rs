@@ -591,7 +591,11 @@ fn collect_pattern_binding_types(
 
 /// True when `ty` is a poly-enum schema placeholder for `enum_name`
 /// (type-param `Con("T")` / `Con("E")` / …) or an open `Ty::Var`.
+/// A declared payload type that mentions the enum's own type parameters
+/// anywhere (`T`, and nested `Tree<T>` / `(T, int)`), so it does not describe
+/// a particular instantiation: the binding's use sites keep the checker's type.
 fn is_open_schema_ty(checker: &Checker, enum_name: &str, ty: &Ty) -> bool {
+    let open = |t: &Ty| is_open_schema_ty(checker, enum_name, t);
     match ty {
         Ty::Var(_) => true,
         Ty::Con(name) => checker
@@ -599,6 +603,12 @@ fn is_open_schema_ty(checker: &Checker, enum_name: &str, ty: &Ty) -> bool {
             .generic_type_ctors
             .get(enum_name)
             .is_some_and(|params| params.iter().any(|p| p == name)),
+        Ty::App(head, args) => open(head) || args.iter().any(open),
+        Ty::Fun(a, b) => open(a) || open(b),
+        Ty::Tuple(items) => items.iter().any(open),
+        Ty::List(inner) | Ty::Readonly(inner) => open(inner),
+        Ty::Array { element, .. } => open(element),
+        Ty::Record { fields } => fields.iter().any(|(_, t)| open(t)),
         _ => false,
     }
 }

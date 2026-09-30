@@ -28,7 +28,6 @@ See [macros.md](macros.md).
 
 | Issue | Detail | Linear |
 |-------|--------|--------|
-| Derives on generic types | **Refused** (user and built-in). Instances for generic types can be written by hand, unbounded (`impl Show for Box<T>`, #550) or bounded (`impl Show for Box<T: Show>`, #551); derives on generic types are #552. | — |
 | Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
 | `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
 | Expansion cache is per process | Compiled expansion programs (one per provider set) and macro outputs are cached in memory; a fresh `coil` process compiles each provider set once more (~1–2 s in a debug build for the built-in derives). | — |

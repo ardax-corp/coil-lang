@@ -35,9 +35,11 @@ derive VariantName(TypeDecl t) -> Code {
         }
         arms.push(quote stmts { ${raw(pat)} => ${lit(v.name.str())}, });
     }
+    // `self_type()` is `E` or `E<T>`: the instance needs no bound, since
+    // the payloads are never read.
     return quote items {
-        impl Named for ${t.name} {
-            pub fn variant_name(${t.name} self) -> string {
+        impl Named for ${t.self_type()} {
+            pub fn variant_name(${t.self_type()} self) -> string {
                 return match self {
                     $(arms)*
                 };
@@ -128,9 +130,11 @@ derive Summary(TypeDecl t) -> Code {
     for f in t.fields() {
         parts.push(quote expr { ${lit(" " + f.name.str() + "=")} + self.${f.name}.show() });
     }
+    // Every field is shown, so a generic type's parameters need `Show`:
+    // `impl_head("Show")` is `T` or `T<A: Show, …>`.
     return quote items {
-        impl Summary for ${t.name} {
-            pub fn summary(${t.name} self) -> string {
+        impl Summary for ${t.impl_head("Show")} {
+            pub fn summary(${t.self_type()} self) -> string {
                 return ${lit(t.name.str())} + $(parts)+*;
             }
         }

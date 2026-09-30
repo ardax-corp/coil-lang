@@ -19,6 +19,13 @@ enum Shape {
     Circle(int),
 }
 
+// A user derive on a generic enum (`impl Named for Maybe<T>`).
+#[derive(VariantName)]
+enum Maybe<T> {
+    Nothing,
+    Just(T),
+}
+
 #[add_after(by = 10)]
 fn triple(int x) -> int {
     return x * 3;
@@ -35,6 +42,9 @@ test("derive over enum variants") {
     assert(Shape::Dot.variant_name() == "Dot")?;
     assert(Shape::Circle(2).variant_name() == "Circle")?;
     assert(Shape::Dot == Shape::Dot)?;
+    let n: Maybe<int> = Maybe::Nothing;
+    assert(n.variant_name() == "Nothing")?;
+    assert(Maybe::Just("s").variant_name() == "Just")?;
 }
 
 test("attribute macro replaces the function") {

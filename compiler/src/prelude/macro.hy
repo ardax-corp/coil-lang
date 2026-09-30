@@ -326,6 +326,44 @@ impl TypeDecl {
         return self.kind == "class";
     }
 
+    /// The type as written in a signature: `Name`, or `Name<T, U>` for a
+    /// generic type.
+    pub fn self_type() -> Code {
+        if len(self.generics) == 0 {
+            return new Code(self.name.str());
+        }
+        let out = self.name.str() + "<";
+        let i = 0;
+        while i < len(self.generics) {
+            if i > 0 {
+                out += ", ";
+            }
+            out += self.generics[i].str();
+            i += 1;
+        }
+        return new Code(out + ">");
+    }
+
+    /// Head of an `impl Trait for …` for this type: `Name`, or for a generic
+    /// type `Name<T: bound, U: bound>`, every type parameter bounded by
+    /// `bound` (`"Show"`, `"Ord + Eq"`). Write `impl ${trait} for
+    /// ${t.impl_head("Show")}` so a derive covers generic types too.
+    pub fn impl_head(string bound) -> Code {
+        if len(self.generics) == 0 {
+            return new Code(self.name.str());
+        }
+        let out = self.name.str() + "<";
+        let i = 0;
+        while i < len(self.generics) {
+            if i > 0 {
+                out += ", ";
+            }
+            out += self.generics[i].str() + ": " + bound;
+            i += 1;
+        }
+        return new Code(out + ">");
+    }
+
     pub fn is_enum() -> bool {
         return self.kind == "enum";
     }
