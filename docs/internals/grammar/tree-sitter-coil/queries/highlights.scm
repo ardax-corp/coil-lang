@@ -59,6 +59,8 @@
   name: (identifier) @function)
 (attr_declaration
   name: (identifier) @function)
+((identifier) @keyword
+  (#any-of? @keyword "derive" "macro" "quote" "attrs"))
 (call_expression
   function: (identifier) @function)
 (class_declaration

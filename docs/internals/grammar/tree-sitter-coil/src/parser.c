@@ -4135,6 +4135,7 @@ static bool ts_lex(TSLexer *lexer, TSStateId state) {
       END_STATE();
     case 180:
       ACCEPT_TOKEN(sym_doc_comment);
+      if (lookahead == '/') ADVANCE(178);
       if (lookahead != 0 &&
           lookahead != '\n') ADVANCE(180);
       END_STATE();
