@@ -16,10 +16,13 @@ coil-test --help         # same flags as `coil test --help`
 
 ## Why a separate binary
 
-Test-only VM mechanisms (coverage maps, a lower step budget, per-test output
-capture) are Cargo features on `machine`. Only `coil-test` enables them, so
+Test-only VM mechanisms (coverage maps, per-test output capture) are Cargo
+features on `machine`. Only `coil-test` enables them, so
 `coil` and `coil-embed` never compile them: no runtime flags or `Option`
 checks in the plain VM. `coil-test` also forwards `gc-stress` / `gc-stats`.
+The step budget (`Machine::set_step_budget`) is not one of them: the VM has
+it anyway (it also bounds compile-time evaluation); a test job sets it per case
+(`TestCase::step_budget`) and reports `steps` / `timed_out`.
 
 Host wiring (`Pipeline` → `Machine`: FFI paths, dload gate, thread program)
 lives in the `coil-host` crate, shared by `coil` and `coil-test`.
@@ -132,6 +135,85 @@ coverage: lcov written to target/coverage/lcov.info
   a workspace-wide build unifies helper-only `machine` features (`debugger`,
   `coverage`) into every binary.
 
+## Mutation testing
+
+`coil mutate` (re-execs `coil-test mutate`) changes project sources one small
+edit at a time and checks that some test notices. It reuses the runner: same
+test root, `-O`, `--root`, grants, `--seed`, `-j`.
+
+```text
+$ coil mutate --root src
+mutate: baseline run
+running 1 file (seed 0x…, 4 jobs)
+ok   tests/clamp.hy
+
+mutate: 8 mutants in 1 file (4 covered, 4 jobs)
+killed      src/mathx.hy:2  `x < lo` → `!(x < lo)`  [cond]  (tests/clamp.hy: clamps low)
+survived    src/mathx.hy:2  `<` → `<=`  [boundary]
+…
+no coverage src/mathx.hy:12  `*` → `/`  [arith]
+
+mutation score: 50.0% (2 killed, 0 timed out, 2 survived; 0 unviable, 4 without coverage)
+```
+
+1. **Baseline.** Run the suite once with line coverage, keeping each case's
+   covered lines and step count (`TestReport::steps`). Any failure stops
+   here: mutants need a green suite.
+2. **Enumerate.** Parse each covered project source (not under the test
+   root unless `--files` selects it) and list sites
+   (`coil-test/src/mutate/sites.rs`). Test code (`test("…")`, `#[test] fn`)
+   is never mutated.
+
+   | Operator | Change |
+   |----------|--------|
+   | `boundary` | `<` ↔ `<=`, `>` ↔ `>=` |
+   | `negate` | `==` ↔ `!=` |
+   | `arith` | `+` ↔ `-`, `*` ↔ `/`, `%` → `*` |
+   | `logic` | `&&` ↔ `\|\|` |
+   | `cond` | `if c` / `while c` → `!(c)` |
+   | `bool` | `true` ↔ `false` |
+   | `int` | `0` ↔ `1`, `n` → `n + 1` |
+
+   Operator sites are found as the only operator token between the operand
+   spans. `// coil:no-mutate` on a line skips its sites; on (or just above)
+   a `fn` header it skips the function.
+3. **Coverage.** A site maps to the nearest coverable line at or above it in
+   the same outermost `fn` (a statement's code carries its first line). No
+   case hits that line → `no coverage`, nothing runs.
+4. **Build + run.** The patched text is an in-memory overlay
+   (`Pipeline::set_file_text`, keyed by every spelling of the path: debug
+   info keeps it as resolved, reads join it onto the current directory).
+   Only test files with a covering case are recompiled, and only covering
+   cases run, each with a step budget of `--timeout-factor` (10) × its
+   baseline steps + 10 000. First failure → `killed`; budget exhausted →
+   `timeout` (a kill); compile error → `unviable` (not scored).
+   Before any mutant, each target file is compiled once with a broken
+   overlay: if that still compiles, the overlay is not reaching the compiler
+   and the run stops instead of reporting every mutant as survived.
+5. **Isolation.** Each mutant runs in a child `coil-test __mutant-worker`
+   (same flags; the job on stdin, the verdict on stdout), `-j` at a time.
+   A mutant can crash the VM (see the arithmetic row in
+   [limitations](limitations.md)) or block outside the step budget (threads,
+   host waits): a crash counts as `killed`, and `--wall-timeout` (60 s) kills
+   a stuck worker as `timeout`.
+
+Score = (killed + timeout) / (killed + timeout + survived). Results print in
+source order whatever `-j` is.
+
+| Flag | Effect |
+|------|--------|
+| `--files GLOB` | only sources whose path (relative to the current directory) matches (`*`, `**`, `?`; repeatable) |
+| `--operators LIST` | subset of the operators above, comma-separated |
+| `--timeout-factor N` | step budget multiplier |
+| `--wall-timeout S` | per-mutant worker time limit |
+| `--min-score P` | exit 1 below P percent |
+| `--json` | `{"score":…,"mutants":[{"file","line","operator","from","to","status","killed_by"}]}` on stdout |
+
+On coil-stdlib (~2k mutants) a release `coil mutate -j 4` takes about five
+minutes. Not yet: `--since REV` (changed lines only), statement deletion and
+body replacement operators, dependency sources (`--include-deps`), and
+compiling all of a file's mutants into one program (mutant schemata).
+
 ## Compile
 
 Each file compiles in memory with `Pipeline::set_include_tests(true)` at the
@@ -142,11 +224,12 @@ serialized to `.hyc`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `-O`, `--root`, host grants, `--log-*`) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
 | `coil-test/src/order.rs` | seeded file / case order |
-| `machine/src/reactor.rs` | `TestJob`, `submit_test` / `run_test_here`, `TestHandle` |
+| `machine/src/reactor.rs` | `TestJob` (incl. `step_budget`), `submit_test` / `run_test_here`, `TestHandle` |
 | `coil-test/src/coverage.rs` | PC → line maps, summing, lcov / summary / per-test JSON |
 | `coil-test/src/runner.rs` | discovery, per-file compile, per-case VM, summary |
+| `coil-test/src/mutate/` | `coil mutate`: sites, baseline / plan / report (`mod.rs`), per-mutant job and worker process (`job.rs`) |
 | `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
 
 Plan for parallel runs, coverage and mutation testing: the *coil-test:

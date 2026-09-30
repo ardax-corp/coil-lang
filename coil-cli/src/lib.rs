@@ -288,6 +288,12 @@ pub fn sibling_bin(exe: &Path, name: &str) -> PathBuf {
 ///
 /// Argv for the helper is `env::args().skip(2)` (drops program name + subcommand).
 pub fn dispatch_helper(sub: &str) -> ! {
+    dispatch_helper_as(sub, sub, &[])
+}
+
+/// `coil {sub}` served by `coil-{helper}`: re-exec it with `leading` before
+/// the forwarded args (`coil mutate …` → `coil-test mutate …`).
+pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -295,7 +301,7 @@ pub fn dispatch_helper(sub: &str) -> ! {
             exit(1);
         }
     };
-    let helper_name = format!("coil-{sub}");
+    let helper_name = format!("coil-{helper}");
     let helper = sibling_bin(&exe, &helper_name);
     if !helper.is_file() {
         eprintln!(
@@ -305,7 +311,11 @@ pub fn dispatch_helper(sub: &str) -> ! {
         );
         exit(1);
     }
-    let args: Vec<String> = std::env::args().skip(2).collect();
+    let args: Vec<String> = leading
+        .iter()
+        .map(|a| (*a).to_string())
+        .chain(std::env::args().skip(2))
+        .collect();
     let status = Command::new(&helper).args(&args).status();
     match status {
         Ok(s) => exit(s.code().unwrap_or(1)),

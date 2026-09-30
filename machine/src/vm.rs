@@ -590,6 +590,9 @@ pub struct Machine<const S: usize> {
     fuel: u64,
     /// Set once the budget ran out (see [`Self::step_budget_exhausted`]).
     step_budget_hit: bool,
+    /// `fuel` as [`Self::set_step_budget`] last set it (see
+    /// [`Self::steps_charged`]).
+    fuel_start: u64,
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -668,6 +671,7 @@ impl<const S: usize> Machine<S> {
             call_window_end: 0,
             fuel: u64::MAX,
             step_budget_hit: false,
+            fuel_start: u64::MAX,
         }
     }
 
@@ -681,7 +685,14 @@ impl<const S: usize> Machine<S> {
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
         // `budget` charges succeed; the next one reaches zero.
         self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
+        self.fuel_start = self.fuel;
         self.step_budget_hit = false;
+    }
+
+    /// Steps charged since [`Self::set_step_budget`] was last called (with or
+    /// without a limit), capped at the budget when it ran out.
+    pub fn steps_charged(&self) -> u64 {
+        self.fuel_start - self.fuel.min(self.fuel_start)
     }
 
     /// True once the budget from [`Self::set_step_budget`] ran out.

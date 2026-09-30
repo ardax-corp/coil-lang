@@ -6,6 +6,9 @@ use compiler::{HostGrants, OptLevel};
 use reporting::ReportConfig;
 
 use crate::coverage::{CoverageOptions, DEFAULT_LCOV_OUT};
+use crate::mutate::MutateOptions;
+use crate::mutate::job::Isolation;
+use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
 use crate::runner::TestOptions;
 
@@ -18,6 +21,150 @@ pub const SEED_ENV: &str = "COIL_TEST_SEED";
 pub enum Parsed {
     Help,
     Run(ReportConfig, Box<TestOptions>),
+    MutateHelp,
+    Mutate(ReportConfig, Box<MutateOptions>),
+}
+
+/// First argument that selects mutation testing (`coil mutate` passes it).
+pub const MUTATE: &str = "mutate";
+
+/// Default `--timeout-factor`.
+pub const DEFAULT_TIMEOUT_FACTOR: u64 = 10;
+
+/// Default `--wall-timeout` (seconds per mutant).
+pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
+
+pub fn print_mutate_help() {
+    eprintln!(
+        "Mutation testing: change project sources one small edit at a time and\n\
+         check that some test fails (default test root: ./tests)\n\
+         \n\
+         Usage:\n\
+         \x20 coil mutate [OPTIONS] [PATH]\n\
+         \n\
+         Runs the suite once with coverage (it must pass), then each mutant against\n\
+         only the cases that cover its line. Sources under the test root are not\n\
+         mutated unless --files selects them. `// coil:no-mutate` on a line (or on /\n\
+         above a `fn` header) skips it.\n\
+         \n\
+         Options:\n\
+         \x20 --files GLOB       Only mutate sources matching GLOB (relative path; `*`,\n\
+         \x20                    `**`, `?`; repeatable)\n\
+         \x20 --operators LIST   Comma-separated subset of: boundary, negate, arith,\n\
+         \x20                    logic, cond, bool, int (default: all)\n\
+         \x20 --timeout-factor N Step budget per case = N x its baseline steps (default 10)\n\
+         \x20 --wall-timeout S   Kill a mutant's worker process after S seconds (default 60)\n\
+         \x20 --min-score P      Exit 1 when the mutation score is below P percent\n\
+         \x20 --json             Print a JSON report on stdout\n\
+         \x20 --seed N, --no-shuffle, -j N, -O L, --root DIR, --allow-*, --log-*\n\
+         \x20                    As for `coil test`\n\
+         \x20 -h, --help         Show this help"
+    );
+}
+
+/// Split `coil mutate` flags from the shared test flags.
+fn parse_mutate(args: &[String]) -> Result<Parsed, String> {
+    let mut files = Vec::new();
+    let mut operators: Option<Vec<Operator>> = None;
+    let mut timeout_factor = DEFAULT_TIMEOUT_FACTOR;
+    let mut json = false;
+    let mut min_score = None;
+    let mut wall = DEFAULT_WALL_TIMEOUT;
+    let mut rest = vec![args[0].clone()];
+    let mut i = 2usize;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (a, None),
+        };
+        let mut value = |what: &str| -> Result<String, String> {
+            if let Some(v) = inline.clone() {
+                return Ok(v);
+            }
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("missing {what} after {flag}"))
+        };
+        match flag {
+            "-h" | "--help" => return Ok(Parsed::MutateHelp),
+            "--files" => files.push(value("GLOB")?),
+            "--operators" => {
+                let list = value("LIST")?;
+                let mut ops = Vec::new();
+                for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    ops.push(Operator::parse(name).ok_or_else(|| {
+                        format!("unknown mutation operator `{name}` (see `coil mutate --help`)")
+                    })?);
+                }
+                operators = Some(ops);
+            }
+            "--timeout-factor" => {
+                let v = value("N")?;
+                timeout_factor = match v.trim().parse::<u64>() {
+                    Ok(n) if n >= 1 => n,
+                    _ => {
+                        return Err(format!(
+                            "invalid --timeout-factor `{v}` (expected at least 1)"
+                        ));
+                    }
+                };
+            }
+            "--wall-timeout" => {
+                let v = value("S")?;
+                wall = match v.trim().parse::<u64>() {
+                    Ok(n) if n >= 1 => n,
+                    _ => {
+                        return Err(format!(
+                            "invalid --wall-timeout `{v}` (expected seconds >= 1)"
+                        ));
+                    }
+                };
+            }
+            "--min-score" => {
+                let v = value("P")?;
+                min_score = Some(
+                    v.trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|p| (0.0..=100.0).contains(p))
+                        .ok_or_else(|| format!("invalid --min-score `{v}` (expected 0..=100)"))?,
+                );
+            }
+            "--json" => json = true,
+            "--fail-fast"
+            | "--show-output"
+            | "--coverage"
+            | "--coverage-out"
+            | "--coverage-per-test" => {
+                return Err(format!("`{flag}` is not a `coil mutate` flag"));
+            }
+            _ => rest.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    match parse_args(&rest)? {
+        Parsed::Run(config, test) => Ok(Parsed::Mutate(
+            config,
+            Box::new(MutateOptions {
+                test: *test,
+                files,
+                operators: operators.unwrap_or_else(|| Operator::ALL.to_vec()),
+                timeout_factor,
+                json,
+                min_score,
+                project_root: std::env::current_dir().unwrap_or_default(),
+                // Each mutant in a child `coil-test`, with the same flags.
+                isolation: Isolation::Child {
+                    exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("coil-test")),
+                    args: args[2..].to_vec(),
+                    wall: std::time::Duration::from_secs(wall),
+                },
+            }),
+        )),
+        _ => Ok(Parsed::MutateHelp),
+    }
 }
 
 pub fn print_help() {
@@ -53,8 +200,12 @@ pub fn print_help() {
     );
 }
 
-/// Parse argv (including argv0).
+/// Parse argv (including argv0). A first argument of [`MUTATE`] selects
+/// `coil mutate`.
 pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
+    if args.get(1).map(String::as_str) == Some(MUTATE) {
+        return parse_mutate(args);
+    }
     let mut log_json = false;
     let mut log_lsp = false;
     let mut fail_fast = false;
@@ -244,7 +395,7 @@ mod tests {
     fn run(parts: &[&str]) -> (ReportConfig, TestOptions) {
         match parse_args(&argv(parts)).expect("parses") {
             Parsed::Run(config, options) => (config, *options),
-            Parsed::Help => panic!("unexpected help"),
+            _ => panic!("expected a test run"),
         }
     }
 
@@ -398,5 +549,75 @@ mod tests {
             Ok(Parsed::Help)
         ));
         assert!(matches!(parse_args(&argv(&["-h"])), Ok(Parsed::Help)));
+    }
+
+    fn mutate(parts: &[&str]) -> MutateOptions {
+        let mut all = vec![MUTATE];
+        all.extend_from_slice(parts);
+        match parse_args(&argv(&all)).expect("parses") {
+            Parsed::Mutate(_, options) => *options,
+            _ => panic!("expected mutate"),
+        }
+    }
+
+    #[test]
+    fn mutate_splits_its_flags_from_test_flags() {
+        let m = mutate(&[
+            "--files",
+            "src/**",
+            "--operators=arith, bool",
+            "--seed",
+            "7",
+            "-j",
+            "2",
+            "--timeout-factor",
+            "4",
+            "--min-score=80",
+            "--json",
+            "spec",
+        ]);
+        assert_eq!(m.files, ["src/**"]);
+        assert_eq!(m.operators, [Operator::Arith, Operator::Bool]);
+        assert_eq!(m.timeout_factor, 4);
+        assert_eq!(m.min_score, Some(80.0));
+        assert!(m.json);
+        assert_eq!(m.test.order, Order::Shuffled(7));
+        assert_eq!(m.test.jobs, 2);
+        assert_eq!(m.test.root, PathBuf::from("spec"));
+        assert!(m.test.coverage.is_none());
+        match &m.isolation {
+            Isolation::Child { args, wall, .. } => {
+                assert_eq!(args.len(), 12, "every flag is forwarded to the worker");
+                assert_eq!(*wall, std::time::Duration::from_secs(DEFAULT_WALL_TIMEOUT));
+            }
+            Isolation::InProcess => panic!("the CLI isolates mutants"),
+        }
+
+        let d = mutate(&[]);
+        assert_eq!(d.operators, Operator::ALL);
+        assert_eq!(d.timeout_factor, DEFAULT_TIMEOUT_FACTOR);
+        assert_eq!(d.test.root, PathBuf::from(TESTS_DIR));
+    }
+
+    #[test]
+    fn mutate_rejects_bad_values_and_test_only_flags() {
+        for bad in [
+            &["--operators", "swap"][..],
+            &["--timeout-factor", "0"],
+            &["--wall-timeout", "0"],
+            &["--min-score", "120"],
+            &["--files"],
+            &["--coverage"],
+            &["--fail-fast"],
+            &["--bogus"],
+        ] {
+            let mut all = vec![MUTATE];
+            all.extend_from_slice(bad);
+            assert!(parse_args(&argv(&all)).is_err(), "{bad:?}");
+        }
+        assert!(matches!(
+            parse_args(&argv(&[MUTATE, "--json", "--help"])),
+            Ok(Parsed::MutateHelp)
+        ));
     }
 }

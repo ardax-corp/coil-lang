@@ -74,6 +74,9 @@ pub struct TestJob {
     pub expect_ok_result: bool,
     /// Count executed instructions (`coverage` feature; ignored without it).
     pub coverage: bool,
+    /// Step budget for static init + case ([`Machine::set_step_budget`]);
+    /// `None` = unlimited. Threads the case spawns are not limited.
+    pub step_budget: Option<u64>,
     /// Filled once the job finishes, before its join state completes.
     pub report: Arc<Mutex<Option<TestReport>>>,
 }
@@ -88,6 +91,10 @@ pub struct TestReport {
     /// Hit count per PC (static init + case) when the job asked for coverage.
     /// Threads the case spawns run on other VMs and are not counted.
     pub hits: Option<Vec<u32>>,
+    /// Steps charged (static init + case; see [`Machine::set_step_budget`]).
+    pub steps: u64,
+    /// The case ran out of [`TestJob::step_budget`] (and so failed).
+    pub timed_out: bool,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -668,6 +675,8 @@ impl TestHandle {
                 passed: false,
                 reason: None,
                 hits: None,
+                steps: 0,
+                timed_out: false,
             },
         }
     }
@@ -727,6 +736,7 @@ impl Reactor {
             init_ip: case.init_ip,
             expect_ok_result: case.expect_ok_result,
             coverage: case.coverage,
+            step_budget: case.step_budget,
             report: Arc::clone(&report),
         });
         (job, state, report)
@@ -744,6 +754,8 @@ pub struct TestCase {
     pub expect_ok_result: bool,
     /// See [`TestJob::coverage`].
     pub coverage: bool,
+    /// See [`TestJob::step_budget`].
+    pub step_budget: Option<u64>,
 }
 
 /// Static init, then the case; the report is stored before the join completes.
@@ -752,6 +764,7 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
     if test.coverage {
         vm.begin_coverage();
     }
+    vm.set_step_budget(test.step_budget);
     if let Some(ip) = test.init_ip {
         vm.run_from(ip as usize);
     }
@@ -771,10 +784,15 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
     let hits = vm.take_coverage();
     #[cfg(not(feature = "coverage"))]
     let hits = None;
+    let (steps, timed_out) = (vm.steps_charged(), vm.step_budget_exhausted());
+    // The worker VM runs other jobs next.
+    vm.set_step_budget(None);
     let report = TestReport {
         passed,
         reason,
         hits,
+        steps,
+        timed_out,
     };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
@@ -860,8 +878,15 @@ mod tests {
     }
 
     fn test_ctx(reactor: &Arc<Reactor>, imm: i32) -> crate::thread::ThreadSpawnContext {
+        program_ctx(reactor, const_return_program(imm))
+    }
+
+    fn program_ctx(
+        reactor: &Arc<Reactor>,
+        program: Arc<ThreadProgram>,
+    ) -> crate::thread::ThreadSpawnContext {
         crate::thread::ThreadSpawnContext {
-            program: const_return_program(imm),
+            program,
             natives: Natives::new(),
             shared_print: None,
             live_threads: crate::thread::new_live_thread_registry(),
@@ -885,6 +910,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            step_budget: None,
         };
         let pooled = reactor.submit_test(test_ctx(&reactor, 3), case, Arc::default());
         let inline = reactor.run_test_here(test_ctx(&reactor, 4), case, Arc::default());
@@ -892,6 +918,8 @@ mod tests {
             passed: true,
             reason: None,
             hits: None,
+            steps: 1,
+            timed_out: false,
         };
         assert_eq!(pooled.wait(), expect);
         assert_eq!(inline, expect);
@@ -901,6 +929,35 @@ mod tests {
             ..case
         };
         assert!(!reactor.run_test_here(test_ctx(&reactor, 5), strict, Arc::default()).passed);
+        reactor.shutdown();
+    }
+
+    /// A case that never returns fails once its step budget runs out, and
+    /// the worker VM runs the next job without a budget.
+    #[test]
+    fn test_jobs_time_out_on_step_budget() {
+        let reactor = Reactor::new(1);
+        let spin = Arc::new(ThreadProgram {
+            code: Arc::new(vec![Byte::new(Instruction::JMP).with_value_u32(0)]),
+            ..(*const_return_program(0)).clone()
+        });
+        let case = TestCase {
+            entry: 0,
+            init_ip: None,
+            expect_ok_result: false,
+            coverage: false,
+            step_budget: Some(50),
+        };
+        let report = reactor.run_test_here(program_ctx(&reactor, spin), case, Arc::default());
+        assert!(!report.passed);
+        assert!(report.timed_out);
+        assert_eq!(report.steps, 50);
+        let unlimited = TestCase {
+            step_budget: None,
+            ..case
+        };
+        let next = reactor.run_test_here(test_ctx(&reactor, 2), unlimited, Arc::default());
+        assert!(next.passed && !next.timed_out);
         reactor.shutdown();
     }
 
@@ -914,6 +971,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: true,
+            step_budget: None,
         };
         let report = reactor.run_test_here(test_ctx(&reactor, 1), case, Arc::default());
         assert_eq!(report.hits.as_deref(), Some(&[1, 1][..]));
