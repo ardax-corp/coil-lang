@@ -8,19 +8,30 @@ The server is deliberately synchronous and uses `lsp-server` with
 `lsp-types`. It keeps open documents in memory and does not write editor
 buffers to disk.
 
+Before handling a message the main loop reads ahead everything already
+queued. `$/cancelRequest` for a queued request answers it with
+`RequestCanceled` instead of running it. Edits apply at once, but the
+re-analysis (typecheck + diagnostics) runs once the queue holds no more
+work, or before the next request or non-edit notification. A burst of
+keystrokes costs one typecheck.
+
 ## Supported
 
 These requests are implemented and covered by `coil-lsp` scenario tests:
 
 | Capability | Behavior |
 |---|---|
-| Full-document sync | `didOpen` / `didChange` / `didClose`; published parse and type diagnostics |
+| Incremental sync | `didOpen` / `didChange` (ranged UTF-16 splices, or whole text) / `didClose`; published parse and type diagnostics |
 | Per-file diagnostics | Every file in the project typecheck gets its own list (an imported file's parse error lands on that file; its importers skip cascade errors until it parses). Files that become clean are cleared. Nothing is rendered to stderr |
 | Protocol | Unsupported requests get `MethodNotFound`; malformed params get `InvalidParams`. A failing notification is logged, never fatal |
 | Project overlays | Unsaved buffers overlay disk via `Pipeline::set_file_text`; `ProjectIndex` is refreshed on each change |
 | Multi-file navigation | Goto-definition uses the use-graph `ProjectIndex` and can land in **unopened** imported `.hy` files |
 | Hover | Types from the project checker (cross-file, `let x = e` shows the type of `e`, `let x: T` shows `T`), `///` docs including at the definition site in another file, parameter docs, virtual-module stubs. Unparsable buffers fall back to the single-file / last-good path |
 | Completion | Keywords, decls, inferred types, function snippets, mid-edit sanitize / last-good fallback; `Enum.Case` after `.`; virtual exports after `::` |
+| Member completion | `recv.` / `recv.pre` / `self.field.` list the receiver class's fields, then methods (`Checker::class_members`). The receiver is typed from a copy of the buffer with the half-typed access removed; `self` is the enclosing `impl` owner |
+| Member goto-definition | `p.method` / `p.field` jump to the `impl` method or class field of the receiver's class, in open buffers or indexed project files |
+| Inlay hints | `: T` after unannotated `let` names (not `_…` or `new C(…)`), `param:` before positional arguments to free functions (skipped when the argument is that same name) |
+| Code actions | Quick fixes: import an unknown name (E0100 / E0101 / E0110) from each workspace module that declares it, joining an existing `use m::{…}`; add `default => {},` to a non-exhaustive statement `match` (E0209). Refactor: add the inferred `: T` to the `let` under the cursor |
 | Signature help | Declaration-based `name(T a, U b) -> R` for local and imported `fn`s and methods; nesting / string aware active parameter; virtual names from the completion index |
 | Format | Whole-document `coil fmt` |
 | Range format | Reformats **overlapping top-level items** only (not a token-precise rustfmt range) |
@@ -56,11 +67,12 @@ Leave these for a later LSP pass unless they block daily editing:
 - `textDocument/typeDefinition` is advertised but shares the definition
   handler (Coil has no separate type-def table).
 - Cross-project references that are not on the current use-graph.
-- Implementation / trait-item navigation and field completion from inferred
-  receiver types.
+- Trait-item navigation; member completion on non-class receivers
+  (strings, arrays, enums).
+- The default-arm quick fix skips value `match`es (a value arm needs an
+  expression the fix cannot choose).
 - `coil.toml` `[module].roots` (compiler language path ignores it; pass
   `--root` on CLI).
-- Incremental (`TextDocumentSyncKind::INCREMENTAL`) edits.
 - Semantic token modifiers (`declaration`, `readonly`, …).
 
 The reporting crate exposes byte-to-LSP UTF-16 position conversion so other

@@ -2,7 +2,7 @@
 #![allow(deprecated)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -59,6 +59,9 @@ struct ServerState {
     dirty_uris: HashSet<String>,
     /// Entry of `last_typecheck`; the project checker holds its span types.
     last_entry: Option<PathBuf>,
+    /// Edited documents whose re-analysis waits until the queued edits
+    /// behind them are applied (one typecheck per burst of keystrokes).
+    pending_analysis: Vec<Uri>,
 }
 
 fn main() {
@@ -73,7 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (request_id, initialize_params) = connection.initialize_start()?;
     let _params: InitializeParams = serde_json::from_value(initialize_params)?;
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
@@ -99,6 +102,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
         })),
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
+            lsp_types::CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    lsp_types::CodeActionKind::QUICKFIX,
+                    lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                ]),
+                ..lsp_types::CodeActionOptions::default()
+            },
+        )),
         semantic_tokens_provider: Some(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -149,13 +162,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let index = ProjectIndex::with_roots(root_uri.clone(), lsp_module_roots(&root_uri));
         state.project_index = Some(index);
     }
-    for message in &connection.receiver {
+    // Messages read ahead of the one being handled: cancellations and
+    // edits behind a slow request apply before it runs.
+    let mut queue: VecDeque<Message> = VecDeque::new();
+    let mut cancelled: HashSet<RequestId> = HashSet::new();
+    loop {
+        if queue.is_empty() {
+            flush_pending_analysis(&connection, &mut state)?;
+            match connection.receiver.recv() {
+                Ok(message) => queue.push_back(message),
+                Err(_) => break,
+            }
+        }
+        while let Ok(message) = connection.receiver.try_recv() {
+            queue.push_back(message);
+        }
+        cancelled.extend(take_cancellations(&mut queue));
+        let Some(message) = queue.pop_front() else {
+            continue;
+        };
         match message {
             Message::Request(request) => {
+                if cancelled.remove(&request.id) {
+                    send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::RequestCanceled,
+                        format!("`{}` was cancelled", request.method),
+                    )?;
+                    continue;
+                }
                 if request.method == "shutdown" {
                     send_response(&connection, request.id, Value::Null)?;
                     continue;
                 }
+                flush_pending_analysis(&connection, &mut state)?;
                 match handle_request(&mut state, &request) {
                     Ok(Some(value)) => send_response(&connection, request.id, value)?,
                     // Every request needs a reply; silence hangs the client.
@@ -176,6 +217,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Message::Notification(notification) => {
                 if notification.method == "exit" {
                     break;
+                }
+                if notification.method != "textDocument/didChange" {
+                    flush_pending_analysis(&connection, &mut state)?;
                 }
                 // A bad notification must not take the server down.
                 if let Err(error) = handle_notification(&connection, &mut state, &notification) {
@@ -298,6 +342,22 @@ fn handle_request(
                 .unwrap_or_default();
             Some(serde_json::to_value(ranges)?)
         }
+        "textDocument/codeAction" => {
+            let params: lsp_types::CodeActionParams = serde_json::from_value(request.params.clone())?;
+            let actions = code_actions(
+                state,
+                &params.text_document.uri,
+                params.range,
+                &params.context.diagnostics,
+            )
+            .unwrap_or_default();
+            Some(serde_json::to_value(actions)?)
+        }
+        "textDocument/inlayHint" => {
+            let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
+            let hints = inlay_hints(state, &params.text_document.uri, params.range).unwrap_or_default();
+            Some(serde_json::to_value(hints)?)
+        }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
             let hover = project_hover(
@@ -317,13 +377,17 @@ fn handle_request(
         }
         "textDocument/completion" => {
             let params: CompletionParams = serde_json::from_value(request.params.clone())?;
-            let items = state
-                .documents
-                .get(&params.text_document_position.text_document.uri)
-                .map(|document| {
-                    completions(document, params.text_document_position.position)
-                })
-                .unwrap_or_default();
+            let uri = &params.text_document_position.text_document.uri;
+            let position = params.text_document_position.position;
+            // `recv.` / `recv.pre`: the receiver's fields and methods.
+            let items = match member_completions(state, uri, position) {
+                Some(items) => items,
+                None => state
+                    .documents
+                    .get(uri)
+                    .map(|document| completions(document, position))
+                    .unwrap_or_default(),
+            };
             Some(serde_json::to_value(items)?)
         }
         "textDocument/signatureHelp" => {
@@ -360,6 +424,13 @@ fn handle_request(
         }
         "textDocument/definition" | "textDocument/typeDefinition" => {
             let params: GotoDefinitionParams = serde_json::from_value(request.params.clone())?;
+            if let Some(location) = member_definition(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            ) {
+                return Ok(Some(serde_json::to_value(vec![location])?));
+            }
             let locations = goto_definitions(
                 state,
                 &params.text_document_position_params.text_document.uri,
@@ -474,21 +545,15 @@ fn handle_notification(
         "textDocument/didChange" => {
             let params: lsp_types::DidChangeTextDocumentParams =
                 serde_json::from_value(notification.params.clone())?;
-            if let Some(document) = state.documents.get_mut(&params.text_document.uri) {
-                if let Some(change) = params.content_changes.into_iter().next() {
-                    document.text = change.text;
-                    document.version = params.text_document.version;
-                    let offset = document.text.len().saturating_sub(1);
-                    if let Some(good) =
-                        analyze_for_completions_at(&document.text, Some(offset))
-                    {
-                        document.last_good = Some(good);
-                    }
+            let uri = params.text_document.uri;
+            if let Some(document) = state.documents.get_mut(&uri) {
+                for change in params.content_changes {
+                    apply_change(&mut document.text, change);
                 }
-                if let Some(path) = uri_path(&params.text_document.uri) {
-                    refresh_project(state, &path);
+                document.version = params.text_document.version;
+                if !state.pending_analysis.contains(&uri) {
+                    state.pending_analysis.push(uri);
                 }
-                publish_diagnostics(connection, state, &params.text_document.uri)?;
             }
         }
         "textDocument/didSave" => {
@@ -517,6 +582,61 @@ fn handle_notification(
                 )))?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Apply one `didChange` content change: a ranged splice, or the whole text.
+fn apply_change(text: &mut String, change: lsp_types::TextDocumentContentChangeEvent) {
+    match change.range.and_then(|range| lsp_range_to_byte_range(text, range)) {
+        Some(range) => text.replace_range(range, &change.text),
+        None => *text = change.text,
+    }
+}
+
+/// Remove `$/cancelRequest` notifications from `queue`; return the ids of
+/// the queued requests they cancel (cancels for requests already answered
+/// are dropped).
+fn take_cancellations(queue: &mut VecDeque<Message>) -> Vec<RequestId> {
+    let mut ids = Vec::new();
+    queue.retain(|message| {
+        let Message::Notification(notification) = message else {
+            return true;
+        };
+        if notification.method != "$/cancelRequest" {
+            return true;
+        }
+        if let Ok(params) = serde_json::from_value::<lsp_types::CancelParams>(notification.params.clone()) {
+            ids.push(match params.id {
+                lsp_types::NumberOrString::Number(n) => RequestId::from(n),
+                lsp_types::NumberOrString::String(s) => RequestId::from(s),
+            });
+        }
+        false
+    });
+    ids.retain(|id| {
+        queue
+            .iter()
+            .any(|message| matches!(message, Message::Request(request) if &request.id == id))
+    });
+    ids
+}
+
+/// Re-analyze documents edited since the last flush: completion metadata,
+/// the project typecheck, and diagnostics.
+fn flush_pending_analysis(connection: &Connection, state: &mut ServerState) -> Result<(), Box<dyn std::error::Error>> {
+    for uri in std::mem::take(&mut state.pending_analysis) {
+        let Some(document) = state.documents.get_mut(&uri) else {
+            continue;
+        };
+        let offset = document.text.len().saturating_sub(1);
+        if let Some(good) = analyze_for_completions_at(&document.text, Some(offset)) {
+            document.last_good = Some(good);
+        }
+        if let Some(path) = uri_path(&uri) {
+            refresh_project(state, &path);
+        }
+        publish_diagnostics(connection, state, &uri)?;
     }
     Ok(())
 }
@@ -2070,6 +2190,615 @@ fn collect_nodes_containing<'a, 'e>(node: &'a Output<'e>, offset: usize, out: &m
         .for_each_child(&mut |child| collect_nodes_containing(child, offset, out));
 }
 
+/// `recv.` / `recv.pre` ending at `offset`: receiver path segments
+/// (`self.items` → `["self", "items"]`), the typed member prefix, and the
+/// byte range of `.pre`.
+fn member_access_at(text: &str, offset: usize) -> Option<(Vec<String>, String, Range<usize>)> {
+    let bytes = text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = offset.min(bytes.len());
+    let prefix_end = i;
+    while i > 0 && is_ident(bytes[i - 1]) {
+        i -= 1;
+    }
+    let prefix = text[i..prefix_end].to_string();
+    if i == 0 || bytes[i - 1] != b'.' {
+        return None;
+    }
+    let dot = i - 1;
+    let mut segments = Vec::new();
+    let mut end = dot;
+    loop {
+        let mut start = end;
+        while start > 0 && is_ident(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start == end || bytes[start].is_ascii_digit() {
+            return None;
+        }
+        segments.push(text[start..end].to_string());
+        if start > 0 && bytes[start - 1] == b'.' {
+            end = start - 1;
+        } else {
+            break;
+        }
+    }
+    segments.reverse();
+    Some((segments, prefix, dot..prefix_end))
+}
+
+/// Class name inside a type's display text (`util::Point`, `Box<int>`).
+fn class_of_type_text(text: &str) -> String {
+    text.split('<').next().unwrap_or(text).trim().to_string()
+}
+
+/// Inlay hints inside `range`: the inferred type after an unannotated
+/// `let` name, and parameter names before positional call arguments.
+fn inlay_hints(state: &mut ServerState, uri: &Uri, range: LspRange) -> Option<Vec<lsp_types::InlayHint>> {
+    let path = uri_path(uri)?;
+    let text = state.documents.get(uri)?.text.clone();
+    let window = lsp_range_to_byte_range(&text, range).unwrap_or(0..text.len());
+    let ast = Pratt::default().parse(&text).ok()?;
+    if state.project_index.is_some() && state.last_entry.as_ref() != Some(&path) {
+        refresh_project(state, &path);
+    }
+    // Parameter names of free functions declared here or in the project.
+    let mut sources = vec![text.clone()];
+    if let Some(index) = &state.project_index {
+        for indexed in index.indexed_paths() {
+            if indexed != &path
+                && let Some(source) = index.source_for(indexed)
+            {
+                sources.push(source.to_owned());
+            }
+        }
+    }
+    let mut params_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut params_of = |name: &str| {
+        params_cache
+            .entry(name.to_owned())
+            .or_insert_with(|| sources.iter().find_map(|source| function_parameter_list(source, name)))
+            .clone()
+    };
+    let checker = state.project_index.as_ref().map(|index| index.checker());
+    let mut hints = Vec::new();
+    let in_window = |at: usize| window.start <= at && at <= window.end;
+    if let Some(checker) = checker {
+        for (name_end, label) in let_type_hints(&ast, &text, checker) {
+            if in_window(name_end) {
+                hints.push(lsp_types::InlayHint {
+                    position: byte_position(&text, name_end),
+                    label: lsp_types::InlayHintLabel::String(format!(": {label}")),
+                    kind: Some(lsp_types::InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: None,
+                    data: None,
+                });
+            }
+        }
+    }
+    visit_nodes(&ast, &mut |node| {
+        let Expression::Call {
+            name,
+            args: Some(args),
+        } = node.1.as_ref()
+        else {
+            return;
+        };
+        let Expression::Identifier(callee) = name.1.as_ref() else {
+            return;
+        };
+        let Some(parameters) = params_of(callee) else {
+            return;
+        };
+        for (arg, parameter) in args.iter().zip(&parameters) {
+            if !in_window(arg.0.start) || matches!(arg.1.as_ref(), Expression::NamedArg(..)) {
+                continue;
+            }
+            // `f(count)` for parameter `count` says it already.
+            if matches!(arg.1.as_ref(), Expression::Identifier(id) if id == parameter) {
+                continue;
+            }
+            hints.push(lsp_types::InlayHint {
+                position: byte_position(&text, arg.0.start),
+                label: lsp_types::InlayHintLabel::String(format!("{parameter}:")),
+                kind: Some(lsp_types::InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    });
+    hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
+    Some(hints)
+}
+
+/// `(name end, type text)` for every unannotated `let name = value` whose
+/// value has a checked type. Skips `_` names and `new C(…)`, which names
+/// its type already.
+fn let_type_hints(ast: &Output<'_>, text: &str, checker: &Checker) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    visit_nodes(ast, &mut |node| {
+        let Expression::Fragment(items) = node.1.as_ref() else {
+            return;
+        };
+        let (Some((head_span, head)), Some((value_span, value))) = (items.first(), items.get(1)) else {
+            return;
+        };
+        let Expression::Variable(name, None) = head.as_ref() else {
+            return;
+        };
+        if name.starts_with('_') || matches!(value.as_ref(), Expression::Instantiate(..)) {
+            return;
+        }
+        let Some(name_start) = text
+            .get(head_span.start..head_span.end)
+            .and_then(|head| head.find(name))
+            .map(|i| head_span.start + i)
+        else {
+            return;
+        };
+        let Some(ty) = checker.lookup_for_codegen_span(value_span.start, value_span.end) else {
+            return;
+        };
+        let label = format_ty_for_diag(checker.subst(), &ty);
+        if !label.is_empty() && label != "never" {
+            out.push((name_start + name.len(), label));
+        }
+    });
+    out
+}
+
+/// Quick fixes for `diagnostics` and refactors at `range`.
+fn code_actions(
+    state: &mut ServerState,
+    uri: &Uri,
+    range: LspRange,
+    diagnostics: &[Diagnostic],
+) -> Option<Vec<lsp_types::CodeActionOrCommand>> {
+    let path = uri_path(uri)?;
+    let text = state.documents.get(uri)?.text.clone();
+    let mut actions = Vec::new();
+    let edit_action = |title: String, edits: Vec<TextEdit>, diagnostic: Option<&Diagnostic>, kind| {
+        lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
+            title,
+            kind: Some(kind),
+            diagnostics: diagnostic.map(|d| vec![d.clone()]),
+            edit: Some(lsp_types::WorkspaceEdit {
+                changes: Some(HashMap::from([(uri.clone(), edits)])),
+                ..lsp_types::WorkspaceEdit::default()
+            }),
+            is_preferred: diagnostic.map(|_| true),
+            ..lsp_types::CodeAction::default()
+        })
+    };
+    for diagnostic in diagnostics {
+        let code = match &diagnostic.code {
+            Some(lsp_types::NumberOrString::String(code)) => code.as_str(),
+            _ => continue,
+        };
+        let Some(start) = position_to_byte(&text, diagnostic.range.start) else {
+            continue;
+        };
+        match code {
+            // Unknown value / function / type: import it from the module
+            // that declares it.
+            "E0100" | "E0101" | "E0110" => {
+                let Some(word) = word_range(&text, start) else {
+                    continue;
+                };
+                let name = &text[word];
+                for module in modules_declaring(state, &path, name) {
+                    let edit = add_use_edit(&text, &module, name);
+                    actions.push(edit_action(
+                        format!("Import `{name}` from `{module}`"),
+                        vec![edit],
+                        Some(diagnostic),
+                        lsp_types::CodeActionKind::QUICKFIX,
+                    ));
+                }
+            }
+            // Non-exhaustive statement `match`: add an empty catch-all.
+            "E0209" => {
+                let Some(end) = position_to_byte(&text, diagnostic.range.end) else {
+                    continue;
+                };
+                let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+                let prefix = &text[line_start..start];
+                // A value `match` needs a value arm; only fix statements.
+                if !prefix.trim().is_empty() {
+                    continue;
+                }
+                let Some(close) = text[start..end].rfind('}').map(|i| start + i) else {
+                    continue;
+                };
+                let close_line = text[..close].rfind('\n').map_or(0, |i| i + 1);
+                let insert = if text[close_line..close].trim().is_empty() {
+                    // `}` on its own line: new arm line above it.
+                    TextEdit {
+                        range: byte_range(&text, &(close_line..close_line)),
+                        new_text: format!("{prefix}    default => {{}},\n"),
+                    }
+                } else {
+                    TextEdit {
+                        range: byte_range(&text, &(close..close)),
+                        new_text: " default => {}, ".into(),
+                    }
+                };
+                actions.push(edit_action(
+                    "Add `default =>` arm".into(),
+                    vec![insert],
+                    Some(diagnostic),
+                    lsp_types::CodeActionKind::QUICKFIX,
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Refactor: spell out the inferred type of the `let` under the cursor.
+    if let (Some(cursor), Ok(ast)) = (position_to_byte(&text, range.start), Pratt::default().parse(&text)) {
+        if state.project_index.is_some() && state.last_entry.as_ref() != Some(&path) {
+            refresh_project(state, &path);
+        }
+        if let Some(checker) = state.project_index.as_ref().map(|index| index.checker()) {
+            let word = word_range(&text, cursor);
+            for (name_end, label) in let_type_hints(&ast, &text, checker) {
+                if word.as_ref().is_some_and(|w| w.end == name_end) {
+                    actions.push(edit_action(
+                        format!("Add type annotation `: {label}`"),
+                        vec![TextEdit {
+                            range: byte_range(&text, &(name_end..name_end)),
+                            new_text: format!(": {label}"),
+                        }],
+                        None,
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                    ));
+                }
+            }
+        }
+    }
+    Some(actions)
+}
+
+/// Module paths (`util`, `geo::shapes`) of workspace files that declare a
+/// top-level `name`, as `use` would spell them from `from`.
+fn modules_declaring(state: &ServerState, from: &Path, name: &str) -> Vec<String> {
+    let Some(root) = &state.workspace_root else {
+        return Vec::new();
+    };
+    let module_roots: Vec<PathBuf> = lsp_module_roots(root)
+        .into_iter()
+        .map(|r| if r.is_absolute() { r } else { root.join(r) })
+        .collect();
+    let mut files = Vec::new();
+    for module_root in &module_roots {
+        collect_hy_files(module_root, &mut files);
+    }
+    let mut modules: Vec<String> = Vec::new();
+    for file in files {
+        if file == from {
+            continue;
+        }
+        let source = state
+            .documents
+            .iter()
+            .find(|(u, _)| uri_path(u).as_deref() == Some(file.as_path()))
+            .map(|(_, d)| d.text.clone())
+            .or_else(|| std::fs::read_to_string(&file).ok());
+        let Some(source) = source else {
+            continue;
+        };
+        if !document_symbols(&source)
+            .iter()
+            .any(|symbol| symbol.name == name && symbol.kind != lsp_types::SymbolKind::NAMESPACE)
+        {
+            continue;
+        }
+        // Shortest spelling across the module roots.
+        let module = module_roots
+            .iter()
+            .filter_map(|module_root| file.strip_prefix(module_root).ok())
+            .map(|rel| {
+                rel.with_extension("")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .min_by_key(|module| module.len());
+        if let Some(module) = module
+            && !modules.contains(&module)
+        {
+            modules.push(module);
+        }
+    }
+    modules.sort();
+    modules
+}
+
+/// `.hy` files under `dir`, skipping hidden directories and `target`.
+fn collect_hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let hidden = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') || n == "target");
+        if path.is_dir() && !hidden {
+            collect_hy_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "hy") && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Edit importing `name` from `module`: joins an existing
+/// `use module::{…};`, else adds a line after the last `use`.
+fn add_use_edit(text: &str, module: &str, name: &str) -> TextEdit {
+    let path: Vec<&str> = module.split("::").collect();
+    let items = match Pratt::default().parse(text) {
+        Ok((_, root)) => match root.as_ref() {
+            Expression::Program(items) => items.clone(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut last_use_end = None;
+    for (span, item) in &items {
+        let Expression::Use { path: use_path, .. } = item.as_ref() else {
+            continue;
+        };
+        // The node span can run past the `;`; the statement ends there.
+        let end = text[span.start..]
+            .find(';')
+            .map_or(span.end, |i| span.start + i + 1);
+        last_use_end = Some(end);
+        let statement = &text[span.start..end];
+        if use_path.iter().map(String::as_str).eq(path.iter().copied())
+            && let (Some(_), Some(close)) = (statement.find('{'), statement.rfind('}'))
+        {
+            let at = span.start + close;
+            let before = text[..at].trim_end();
+            let sep = if before.ends_with(',') { " " } else { ", " };
+            return TextEdit {
+                range: byte_range(text, &(before.len()..before.len())),
+                new_text: format!("{sep}{name}"),
+            };
+        }
+    }
+    match last_use_end {
+        Some(end) => {
+            let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
+            TextEdit {
+                range: byte_range(text, &(line_end..line_end)),
+                new_text: format!("\nuse {module}::{{{name}}};"),
+            }
+        }
+        None => TextEdit {
+            range: byte_range(text, &(0..0)),
+            new_text: format!("use {module}::{{{name}}};\n\n"),
+        },
+    }
+}
+
+/// Parameter names of the first `fn name` declared in `source`.
+fn function_parameter_list(source: &str, name: &str) -> Option<Vec<String>> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_none()
+            && let Expression::Function { name: fn_name, args, .. } = node.1.as_ref()
+            && *fn_name == name
+        {
+            found = Some(function_parameter_names(args));
+        }
+    });
+    found
+}
+
+/// A receiver member for completion: name, type text, is a method.
+type MemberInfo = (String, String, bool);
+
+/// Class of `segments` whose `.member` sits at `access` in `uri`'s buffer,
+/// with its members. Typechecks a copy with the access removed (`p.su` →
+/// `p;`) so a half-typed member still types its receiver, then restores
+/// the project.
+fn receiver_class(
+    state: &mut ServerState,
+    uri: &Uri,
+    segments: &[String],
+    access: Range<usize>,
+) -> Option<(String, Vec<MemberInfo>)> {
+    let text = state.documents.get(uri)?.text.clone();
+    let path = uri_path(uri)?;
+    // The receiver's first identifier starts `segments.join(".").len()` before the dot.
+    let chain_len = segments.join(".").len();
+    let base_start = access.start.checked_sub(chain_len)?;
+    let base_range = base_start..base_start + segments[0].len();
+    // Blank the access when the statement goes on (`self.x;` → `self  ;`),
+    // else end it (`p.su⏎}` → `p;⏎}`).
+    let rest = &text[access.end..];
+    let continues = rest.trim_start().starts_with([';', ')', ',', ']']);
+    let filler = if continues {
+        " ".repeat(access.len())
+    } else {
+        ";".to_string()
+    };
+    let repaired = format!("{}{filler}{rest}", &text[..access.start]);
+    let ast = Pratt::default().parse(&repaired).ok()?;
+    let index = state.project_index.as_mut()?;
+    index.apply_open_file(path.clone(), repaired.clone());
+    let _ = index.typecheck_entry(&path);
+    let checker = index.checker();
+    let found = (|| {
+        // `self` has no typed node: it is the enclosing `impl`'s owner.
+        let mut ty = if segments[0] == "self" {
+            let mut owner = None;
+            visit_nodes(&ast, &mut |node| {
+                if let Expression::Implementation { owner: o, .. } = node.1.as_ref()
+                    && (node.0.start..node.0.end).contains(&base_range.start)
+                {
+                    owner = Some(o.to_string());
+                }
+            });
+            owner?
+        } else {
+            hover_type(
+                &ast,
+                Some(checker),
+                &repaired,
+                &segments[0],
+                base_range.start,
+                &base_range,
+            )?
+        };
+        for field in &segments[1..] {
+            let members = members_of(checker, &class_of_type_text(&ty));
+            let (_, field_ty, _, _) = members.into_iter().find(|m| &m.0 == field && !m.2)?;
+            ty = format_ty_for_diag(checker.subst(), &field_ty);
+        }
+        let class = class_of_type_text(&ty);
+        let members: Vec<MemberInfo> = members_of(checker, &class)
+            .into_iter()
+            .map(|(name, ty, is_method, _)| {
+                (name, format_ty_for_diag(checker.subst(), &ty), is_method)
+            })
+            .collect();
+        (!members.is_empty()).then_some((class, members))
+    })();
+    // Back to the real buffer (and its diagnostics / span tables).
+    refresh_project(state, &path);
+    found
+}
+
+/// Members of `class`, trying the bare name when the key is qualified.
+fn members_of(checker: &Checker, class: &str) -> Vec<(String, compiler::Ty, bool, bool)> {
+    let members = checker.class_members(class);
+    if !members.is_empty() {
+        return members;
+    }
+    class
+        .rsplit("::")
+        .next()
+        .map(|bare| checker.class_members(bare))
+        .unwrap_or_default()
+}
+
+/// Completion items for `recv.pre`: the receiver class's fields and methods.
+fn member_completions(
+    state: &mut ServerState,
+    uri: &Uri,
+    position: Position,
+) -> Option<Vec<CompletionItem>> {
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let (segments, prefix, access) = member_access_at(&text, offset)?;
+    let (_, members) = receiver_class(state, uri, &segments, access)?;
+    let items = members
+        .into_iter()
+        .filter(|(name, ..)| name.starts_with(&prefix))
+        .map(|(name, detail, is_method)| CompletionItem {
+            label: name.clone(),
+            kind: Some(if is_method {
+                CompletionItemKind::METHOD
+            } else {
+                CompletionItemKind::FIELD
+            }),
+            detail: Some(detail),
+            insert_text: Some(if is_method { format!("{name}($0)") } else { name }),
+            insert_text_format: is_method.then_some(InsertTextFormat::SNIPPET),
+            ..CompletionItem::default()
+        })
+        .collect();
+    Some(items)
+}
+
+/// Go to the declaration of the member under the cursor (`p.sum`, `p.x`).
+fn member_definition(state: &mut ServerState, uri: &Uri, position: Position) -> Option<Location> {
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let word = word_range(&text, offset)?;
+    let member = text[word.clone()].to_string();
+    let (segments, _, access) = member_access_at(&text, word.end)?;
+    let (class, _) = receiver_class(state, uri, &segments, access)?;
+    let bare = class.rsplit("::").next().unwrap_or(&class).to_string();
+    // Search open buffers, then indexed project files, for the declaration.
+    let mut sources: Vec<(Uri, String)> = state
+        .documents
+        .iter()
+        .map(|(u, d)| (u.clone(), d.text.clone()))
+        .collect();
+    if let Some(index) = &state.project_index {
+        for path in index.indexed_paths() {
+            if let (Some(u), Some(src)) = (path_to_uri(path), index.source_for(path))
+                && !sources.iter().any(|(existing, _)| existing == &u)
+            {
+                sources.push((u, src.to_string()));
+            }
+        }
+    }
+    for (u, src) in sources {
+        if let Some(range) = member_decl_range(&src, &bare, &member) {
+            return Some(Location {
+                uri: u,
+                range: byte_range(&src, &range),
+            });
+        }
+    }
+    None
+}
+
+/// Name span of field `member` in `class Owner` or method `member` in an
+/// `impl Owner` block of `source`.
+fn member_decl_range(source: &str, owner: &str, member: &str) -> Option<Range<usize>> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let offset_of = |name: &str| {
+        let base = source.as_ptr() as usize;
+        let ptr = name.as_ptr() as usize;
+        (ptr >= base && ptr + name.len() <= base + source.len()).then(|| ptr - base)
+    };
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        match node.1.as_ref() {
+            Expression::Class { name, fields, .. } if *name == owner => {
+                for (_, field) in fields {
+                    if let Expression::Field { name: fname, .. } = field.as_ref()
+                        && let Expression::Identifier(f) = fname.1.as_ref()
+                        && *f == member
+                    {
+                        found = offset_of(f).map(|o| o..o + f.len());
+                    }
+                }
+            }
+            Expression::Implementation { owner: o, methods, .. } if *o == owner => {
+                for method in methods {
+                    let mut m = method;
+                    if let Expression::Method(_, inner) = m.1.as_ref() {
+                        m = inner;
+                    }
+                    if let Expression::Function { name, .. } = m.1.as_ref()
+                        && *name == member
+                    {
+                        found = offset_of(name).map(|o| o..o + name.len());
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    found
+}
+
 fn hover(document: &Document, position: Position) -> Option<Hover> {
     let offset = position_to_byte(&document.text, position)?;
     let range = word_range(&document.text, offset)?;
@@ -3320,6 +4049,59 @@ fn semantic_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranged_changes_splice_in_order() {
+        let mut text = "fn main() {\n    let a = 1;\n}\n".to_string();
+        let change = |range: Option<((u32, u32), (u32, u32))>, new: &str| {
+            lsp_types::TextDocumentContentChangeEvent {
+                range: range.map(|((sl, sc), (el, ec))| LspRange {
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
+                }),
+                range_length: None,
+                text: new.to_string(),
+            }
+        };
+        apply_change(&mut text, change(Some(((1, 12), (1, 13))), "42"));
+        apply_change(&mut text, change(Some(((1, 8), (1, 9))), "answer"));
+        apply_change(&mut text, change(Some(((2, 1), (2, 1))), "\n// end"));
+        assert_eq!(text, "fn main() {\n    let answer = 42;\n}\n// end\n");
+        apply_change(&mut text, change(None, "fn main() {}\n"));
+        assert_eq!(text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn cancellations_only_hit_queued_requests() {
+        let cancel = |id: i32| {
+            Message::Notification(Notification::new(
+                "$/cancelRequest".into(),
+                lsp_types::CancelParams {
+                    id: lsp_types::NumberOrString::Number(id),
+                },
+            ))
+        };
+        let hover = |id: i32| Message::Request(Request::new(RequestId::from(id), "textDocument/hover".into(), Value::Null));
+        let mut queue = VecDeque::from([hover(1), cancel(1), cancel(7), hover(2)]);
+        assert_eq!(take_cancellations(&mut queue), [RequestId::from(1)]);
+        assert_eq!(queue.len(), 2, "cancel notifications are consumed");
+    }
+
+    #[test]
+    fn add_use_edit_joins_or_appends() {
+        let joined = "use geo::{area};\n\nfn main() {}\n";
+        let edit = add_use_edit(joined, "geo", "helper");
+        assert_eq!(edit.new_text, ", helper");
+        assert_eq!(edit.range.start, byte_position(joined, "use geo::{area".len()));
+
+        let appended = "use util::{other};\n\nfn main() {}\n";
+        let edit = add_use_edit(appended, "geo::shapes", "helper");
+        assert_eq!(edit.new_text, "\nuse geo::shapes::{helper};");
+        assert_eq!(edit.range.start, byte_position(appended, "use util::{other};".len()));
+
+        let edit = add_use_edit("fn main() {}\n", "geo", "helper");
+        assert_eq!(edit.new_text, "use geo::{helper};\n\n");
+    }
 
     #[test]
     fn positions_use_utf16_columns() {

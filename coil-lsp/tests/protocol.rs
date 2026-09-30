@@ -191,3 +191,234 @@ fn imported_parse_error_is_reported_on_that_file() {
         assert!(messages.is_empty(), "cascade in main.hy: {messages:?}");
     }
 }
+
+fn open(client: &mut Client, uri: &str, text: &str) {
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "coil", "version": 1, "text": text } }),
+    );
+}
+
+/// LSP position of the first `needle` in `text`, plus `delta` bytes.
+fn position_of(text: &str, needle: &str, delta: usize) -> Value {
+    let offset = text.find(needle).expect("needle") + delta;
+    let line = text[..offset].matches('\n').count();
+    let column = offset - text[..offset].rfind('\n').map_or(0, |i| i + 1);
+    json!({ "line": line, "character": column })
+}
+
+#[test]
+fn member_completion_lists_fields_and_methods() {
+    let text = CLASS_SOURCE.replace("let _ = p.get();", "let _ = p.g");
+    let dir = project("member-completion", &[("src/main.hy", &text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, &text);
+    let response = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": main }, "position": position_of(&text, "p.g", 3) }),
+    );
+    let labels: Vec<&str> = response["result"]
+        .as_array()
+        .expect("completion list")
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["get"]);
+
+    let empty = CLASS_SOURCE.replace("let _ = p.get();", "let _ = p.");
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": main, "version": 2 }, "contentChanges": [{ "text": empty }] }),
+    );
+    let response = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": main }, "position": position_of(&empty, "p.", 2) }),
+    );
+    let labels: Vec<&str> = response["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["x", "get"]);
+}
+
+#[test]
+fn member_goto_definition_finds_method_and_field() {
+    let dir = project("member-goto", &[("src/main.hy", CLASS_SOURCE)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, CLASS_SOURCE);
+    let response = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": main }, "position": position_of(CLASS_SOURCE, "p.get", 3) }),
+    );
+    assert_eq!(
+        response["result"][0]["range"]["start"],
+        position_of(CLASS_SOURCE, "get() -> int", 0)
+    );
+    let response = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": main }, "position": position_of(CLASS_SOURCE, "self.x", 5) }),
+    );
+    assert_eq!(response["result"][0]["range"]["start"], position_of(CLASS_SOURCE, "x: int", 0));
+}
+
+#[test]
+fn inlay_hints_show_let_types_and_parameter_names() {
+    let text = "fn area(int width, int height) -> int {\n    return width * height;\n}\n\nfn main() {\n    let height = 3;\n    let a = area(2, height);\n    let _ = a;\n}\n";
+    let dir = project("inlay", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let response = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": main },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 9, "character": 0 } },
+        }),
+    );
+    let hints: Vec<(Value, &str)> = response["result"]
+        .as_array()
+        .expect("hint list")
+        .iter()
+        .map(|hint| (hint["position"].clone(), hint["label"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        hints,
+        [
+            (position_of(text, "height = 3", 6), ": int"),
+            (position_of(text, "a = area", 1), ": int"),
+            // `height` passed as `height` needs no hint.
+            (position_of(text, "2, height", 0), "width:"),
+        ]
+    );
+}
+
+/// Code actions at `position` for the diagnostics last published on `uri`.
+fn code_actions(client: &mut Client, uri: &str, position: Value) -> Vec<Value> {
+    // Any round-trip collects the diagnostics published so far.
+    client.request("coil/sync", Value::Null);
+    let diagnostics = client
+        .notifications
+        .iter()
+        .rev()
+        .find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == uri)
+        .map(|n| n["params"]["diagnostics"].clone())
+        .unwrap_or(json!([]));
+    let response = client.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": position, "end": position },
+            "context": { "diagnostics": diagnostics },
+        }),
+    );
+    response["result"].as_array().expect("action list").clone()
+}
+
+/// The single edit of `action` on `uri`, applied to `text`.
+fn apply_action(text: &str, uri: &str, action: &Value) -> String {
+    let edits = action["edit"]["changes"][uri].as_array().expect("edits");
+    assert_eq!(edits.len(), 1);
+    let edit = &edits[0];
+    let offset = |p: &Value| {
+        let line = p["line"].as_u64().unwrap() as usize;
+        let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+        start + p["character"].as_u64().unwrap() as usize
+    };
+    let (start, end) = (offset(&edit["range"]["start"]), offset(&edit["range"]["end"]));
+    format!("{}{}{}", &text[..start], edit["newText"].as_str().unwrap(), &text[end..])
+}
+
+#[test]
+fn code_action_imports_unknown_function() {
+    let main_text = "use util::{other};\n\nfn main() {\n    let _ = helper(1) + other();\n}\n";
+    let dir = project(
+        "action-import",
+        &[
+            ("src/main.hy", main_text),
+            ("src/util.hy", "fn other() -> int {\n    return 2;\n}\n"),
+            ("src/geo.hy", "fn helper(int a) -> int {\n    return a;\n}\n"),
+        ],
+    );
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, main_text);
+    let actions = code_actions(&mut client, &main, position_of(main_text, "helper", 0));
+    let import = actions
+        .iter()
+        .find(|a| a["title"] == "Import `helper` from `geo`")
+        .unwrap_or_else(|| panic!("no import action in {actions:?}"));
+    assert_eq!(
+        apply_action(main_text, &main, import),
+        main_text.replace("{other};", "{other};\nuse geo::{helper};")
+    );
+}
+
+#[test]
+fn code_action_adds_default_arm_to_statement_match() {
+    let text = "enum Color {\n    Red,\n    Green,\n}\n\nfn main() {\n    let c = Color::Red;\n    match c {\n        Color::Red => {},\n    };\n}\n";
+    let dir = project("action-default", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let actions = code_actions(&mut client, &main, position_of(text, "match c", 0));
+    let fix = actions
+        .iter()
+        .find(|a| a["title"] == "Add `default =>` arm")
+        .unwrap_or_else(|| panic!("no default-arm action in {actions:?}"));
+    assert_eq!(
+        apply_action(text, &main, fix),
+        text.replace("{},\n    }", "{},\n        default => {},\n    }")
+    );
+}
+
+#[test]
+fn code_action_adds_inferred_type_annotation() {
+    let text = "fn main() {\n    let total = 1 + 2;\n    let _ = total;\n}\n";
+    let dir = project("action-annotate", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    let actions = code_actions(&mut client, &main, position_of(text, "total =", 2));
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(actions[0]["title"], "Add type annotation `: int`");
+    assert_eq!(apply_action(text, &main, &actions[0]), text.replace("total =", "total: int ="));
+}
+
+#[test]
+fn incremental_edits_are_applied_and_rechecked() {
+    let text = "fn main() {\n    let a: int = 1;\n    let _ = a;\n}\n";
+    let dir = project("incremental", &[("src/main.hy", text)]);
+    let main = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main, text);
+    // `1` → `"one"`, one keystroke-sized change after another.
+    let at = |character: u32| json!({ "line": 1, "character": character });
+    let edits = [
+        (at(17), at(18), "\""),
+        (at(18), at(18), "one"),
+        (at(21), at(21), "\""),
+    ];
+    for (version, (start, end, new_text)) in edits.into_iter().enumerate() {
+        client.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": main, "version": version + 2 },
+                "contentChanges": [{ "range": { "start": start, "end": end }, "text": new_text }],
+            }),
+        );
+    }
+    let response = client.request(
+        "textDocument/formatting",
+        json!({ "textDocument": { "uri": main }, "options": { "tabSize": 4, "insertSpaces": true } }),
+    );
+    let formatted = response["result"][0]["newText"].as_str().map(str::to_owned);
+    let last = client.diagnostics_for(&main).pop().expect("diagnostics after edits");
+    assert!(
+        last.iter().any(|m| m.contains("int") && m.contains("string")),
+        "expected a type mismatch, got {last:?} (buffer {formatted:?})"
+    );
+}
