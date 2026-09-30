@@ -8390,8 +8390,18 @@ impl Compiler {
             fun = ret.as_ref();
             arg_idx += 1;
         }
+        // A nullary fn's type is sealed as `unit -> T`
+        // (`seal_nullary_fun_ty`); a zero-arg call reaches its result there.
+        if arg_tys.is_empty()
+            && let Ty::Fun(param, ret) = fun
+            && matches!(param.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)
+        {
+            fun = ret.as_ref();
+        }
         // Multi-param constraints often mention return-type vars
-        // (`Convert<A, B>` with `A -> B`). Bind those from the call's result type.
+        // (`Convert<A, B>` with `A -> B`). Bind those from the call's result type,
+        // which is also the only place a return-only `T` (`fn make<T: Default>() -> T`)
+        // is known.
         if let Some(ret_ty) = ret_ty {
             Self::bind_scheme_vars(fun, ret_ty, &mut var_to_ty);
         }
