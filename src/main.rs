@@ -480,12 +480,22 @@ fn run_test_case(
                 }
             }
             let ret = machine.call_function(offset, &[]);
-            !machine.panicked() && machine.result_is_ok(ret)
+            let ok = !machine.panicked() && machine.result_is_ok(ret);
+            let reason = if ok || machine.panicked() {
+                None
+            } else {
+                machine.result_err_text(ret)
+            };
+            (ok, reason)
         }));
     match result {
-        Ok(ok) => {
+        Ok((ok, reason)) => {
             if !ok {
-                eprintln!("> Test \"{name}\" failed");
+                match reason {
+                    // `assert(cond, "message")?` returns `Err("message")`.
+                    Some(reason) => eprintln!("> Test \"{name}\" failed: {reason}"),
+                    None => eprintln!("> Test \"{name}\" failed"),
+                }
             }
             ok
         }
