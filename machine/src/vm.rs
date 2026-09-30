@@ -2722,6 +2722,10 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.userland_libraries.clear();
         self.ffi_closures.clear();
+        // Drop PCs belong to the job's program: a reused worker may load a
+        // different one next, where the same `type_id` names another type.
+        self.finalizer_by_type.clear();
+        self.finalizer_pcs.clear();
         self.gc_in_progress = false;
         self.gc_deferred = false;
         if self.heap.is_borrowed() {
