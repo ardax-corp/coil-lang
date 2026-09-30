@@ -64,9 +64,11 @@ evaluate, conditional breakpoints, multi-thread.
 `stepIn` work from that stop. A previous fake pause (no `start`) left those
 empty — that is fixed.
 
-Line breakpoints follow the same `debug_locs` coverage limits as the REPL (see
-[debug-info.md](debug-info.md)); unmapped lines return `verified: false`. Function
-breakpoints (`setFunctionBreakpoints`) are more reliable when line info is sparse.
+Every statement carries a debug location (see [debug-info.md](debug-info.md)),
+so any line with code verifies; lines without code (signatures, braces, blank
+lines, code the optimizer removed) return `verified: false`. Source paths are
+matched canonically, so the absolute paths DAP clients send resolve against the
+paths stored at compile time.
 
 ## Commands
 
@@ -92,11 +94,10 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
 - Locals are available by **name** (`print n`, `info locals`) and by slot (`print $0`).
   Names come from compile-time slot maps (params, `let`s, `self`, match bindings).
   Shadowing keeps the innermost binding; synthetic `__pad*` / `__dict*` slots are omitted.
-- **Line breakpoints are sparse.** Many codegen sites still emit unknown
-  `debug_locs`. `break 12` / DAP `setBreakpoints` on an unmapped line fails
-  (`verified: false` / REPL `no code locations`). Prefer function breakpoints.
-  `list` may snap to a nearby known loc **in the same function**; `bt` / DAP
-  stack lines stay exact (unknown → no path / line 0).
+- **Line breakpoints** work on any line with code: every op a statement emits
+  carries that statement's span unless a nested statement gave it a narrower
+  one. `break 12` on a line without code (or code the optimizer merged away)
+  fails with `no code locations`. `bt` / DAP stack frames show `file:line`.
 - Function breakpoints use live compile symbols (same FQN rules as `coil dissect --fn`).
 - Hot path: stop checks run only when a debug controller is attached.
 - **I7 / B8:** `coil debug` sets `Pipeline::set_debugger_attached(true)`.
@@ -105,5 +106,6 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
   **MIR `Deopt` metadata is unused** by `coil-debug` / DAP — emit skips
   those insts. **C3** keeps compiler-internal resume maps and remaps
   named `let` slots after SSA register assign; params stay identity.
-  Line locs on dense / LIR reconstruct are still sparse. See
-  [mir-deopt.md](mir-deopt.md).
+  Dense / LIR reconstruct keeps most statement locations; lines whose ops are
+  merged (constant `let`s folded into one dense init, eliminated copies) have
+  none. See [mir-deopt.md](mir-deopt.md).

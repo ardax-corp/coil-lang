@@ -320,12 +320,12 @@ fn dap_line_breakpoint_hit() {
         Some(false),
         "bogus line should be unverified"
     );
-    // Line 11 (`return 1`) should verify when debug_locs cover it.
-    if bps[0].get("verified").and_then(|v| v.as_bool()) != Some(true) {
-        // Fall back: disconnect cleanly if line mapping is sparse in this build.
-        client.disconnect();
-        return;
-    }
+    // Line 11 (`if n <= 2`): every statement carries a debug location.
+    assert_eq!(
+        bps[0].get("verified").and_then(|v| v.as_bool()),
+        Some(true),
+        "line 11 must verify: {set_bp}"
+    );
 
     let done = client.request("configurationDone", serde_json::json!({}));
     assert_eq!(done.get("success"), Some(&serde_json::json!(true)));
