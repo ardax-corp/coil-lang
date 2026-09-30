@@ -1,22 +1,21 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::exit;
 
 use coil_cli::{LoadErr, dispatch_helper, execute_archived_program, try_load_archive};
-use common::{ARCHIVE_VERSION, ArchivedProgram, Byte, ProgramDebug, format_archive_version};
-use compiler::{HostGrants, OptLevel, Pipeline};
-use machine::Machine;
+use coil_host::{
+    ExecutePipelineArgs, bind_cli_roots, execute_pipeline, ffi_entry_path, pipeline_dload_gate,
+};
+use common::{ARCHIVE_VERSION, ArchivedProgram, ProgramDebug, format_archive_version};
+use compiler::Pipeline;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 use rkyv::rancor::Error;
 
 mod cli;
 mod package_app;
-mod host_wire;
 
 use cli::{Command, DEFAULT_OUT, parse_args, print_version};
 use package_app::{cmd_package, native_lock_from_project_manifest};
-
-const TESTS_DIR: &str = "tests";
 
 
 fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
@@ -42,11 +41,6 @@ fn resolve_entry_filename(filename: &str) -> Result<String, String> {
     } else {
         Ok(filename.to_string())
     }
-}
-
-fn bind_cli_roots(pipeline: &mut Pipeline, extra: Vec<PathBuf>) {
-    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    pipeline.bind_project_roots_with_default(dir, extra);
 }
 
 fn print_opt_stats(text: bool, json: bool) {
@@ -212,10 +206,6 @@ mod archive_staleness {
 }
 
 /// Canonical entry path for FFI `base_dir` resolution (best-effort absolute).
-fn ffi_entry_path(entry: &Path) -> PathBuf {
-    std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf())
-}
-
 /// Warn when a cached `.hyc` is older than sources recorded in its debug bundle.
 fn maybe_warn_stale_archive(
     pipeline: &mut Pipeline,
@@ -255,41 +245,6 @@ fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &Pr
     }
 }
 
-struct ExecuteArchiveArgs<'a> {
-    pipeline: &'a Pipeline,
-    bytecode: &'a [Byte],
-    constants: &'a [u64],
-    strings: &'a [String],
-    static_slots: u32,
-    debug: ProgramDebug,
-    entry: Option<&'a Path>,
-    operand_stack_slots: u32,
-}
-
-/// Run archived bytecode. Returns `true` when a language-level `panic` aborted.
-/// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
-pub(crate) fn execute_archive(args: ExecuteArchiveArgs<'_>) -> bool {
-    let ExecuteArchiveArgs {
-        pipeline,
-        bytecode,
-        constants,
-        strings,
-        static_slots,
-        debug,
-        entry,
-        operand_stack_slots,
-    } = args;
-    let operand_slots = operand_stack_slots
-        .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
-    let entry = entry.map(ffi_entry_path);
-    let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
-    crate::host_wire::wire_pipeline_vm(pipeline, &mut machine, entry.as_deref());
-    crate::host_wire::wire_pipeline_threads(pipeline, &mut machine, bytecode, constants, strings);
-    machine.set_program_debug(debug);
-    machine.run_raw(bytecode, constants, strings, static_slots);
-    machine.panicked()
-}
-
 fn cmd_build_and_run(
     pipeline: &mut Pipeline,
     filename: &str,
@@ -319,7 +274,7 @@ fn cmd_build_and_run(
 
     maybe_warn_stale_default_out(pipeline, filename, &debug);
     let entry = ffi_entry_path(Path::new(filename));
-    let panicked = execute_archive(ExecuteArchiveArgs {
+    let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
         bytecode: &bytecode,
         constants: &constants,
@@ -407,306 +362,8 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         &loaded,
         Some(entry),
         pipeline.ffi_search_path_bufs(),
-        Some(crate::host_wire::pipeline_dload_gate(pipeline)),
+        Some(pipeline_dload_gate(pipeline)),
     ) {
-        exit(1);
-    }
-}
-
-fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if !dir.is_dir() {
-        return Err(format!("tests directory `{}` not found", dir.display()));
-    }
-
-    let mut files = Vec::new();
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("unable to read `{}`: {e}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("unable to read directory entry: {e}"))?;
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out)?;
-            } else if path.extension().and_then(|e| e.to_str()) == Some("hy") {
-                out.push(path);
-            }
-        }
-        Ok(())
-    }
-    walk(dir, &mut files)?;
-    files.sort();
-    if files.is_empty() {
-        return Err(format!(
-            "no `.hy` test files found under `{}`",
-            dir.display()
-        ));
-    }
-    Ok(files)
-}
-
-/// Negative syntax / type tests live under any path segment named `compile_fail`.
-/// Those files must fail to compile; a successful compile is a harness failure.
-fn is_compile_fail(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == "compile_fail")
-}
-
-/// Classify a `catch_unwind` compile result for a `compile_fail/` file.
-/// Only a clean diagnostic rejection (`Ok(Err(_))`) is harness success.
-/// Panic does not count (release builds use `panic = "abort"`).
-fn compile_fail_rejected<T, E>(compiled: &std::thread::Result<Result<T, E>>) -> bool {
-    matches!(compiled, Ok(Err(_)))
-}
-
-fn run_test_case(
-    pipeline: &Pipeline,
-    bytecode: &[Byte],
-    constants: &[u64],
-    strings: &[String],
-    entry: Option<&Path>,
-    name: &str,
-    offset: u32,
-) -> bool {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut machine = Machine::<256>::default();
-            crate::host_wire::wire_pipeline_vm(pipeline, &mut machine, entry);
-            machine.set_program_debug(pipeline.program_debug());
-            machine.init_static_slots(pipeline.static_slot_count());
-            machine.load_program(bytecode, constants, strings);
-            if let Some(main) = pipeline.main_offset() {
-                let setup = pipeline.prologue_jmp_target();
-                if setup != main {
-                    machine.halt_first_jump_to(setup as usize, main);
-                    machine.run_from(setup as usize);
-                }
-            }
-            let ret = machine.call_function(offset, &[]);
-            let ok = !machine.panicked() && machine.result_is_ok(ret);
-            let reason = if ok || machine.panicked() {
-                None
-            } else {
-                machine.result_err_text(ret)
-            };
-            (ok, reason)
-        }));
-    match result {
-        Ok((ok, reason)) => {
-            if !ok {
-                match reason {
-                    // `assert(cond, "message")?` returns `Err("message")`.
-                    Some(reason) => eprintln!("> Test \"{name}\" failed: {reason}"),
-                    None => eprintln!("> Test \"{name}\" failed"),
-                }
-            }
-            ok
-        }
-        Err(_) => {
-            eprintln!("> Test \"{name}\" failed");
-            false
-        }
-    }
-}
-
-/// Run the test harness over `root` and return `(passed, failed)` without exiting.
-/// Extracted from `cmd_test` so unit tests can assert compile_fail inversion and
-/// fail-fast behavior without terminating the process.
-fn run_test_suite(
-    config: ReportConfig,
-    root: &Path,
-    fail_fast: bool,
-    opt_level: OptLevel,
-    grants: HostGrants,
-    extra_roots: &[PathBuf],
-) -> Result<(usize, usize), String> {
-    let files = collect_test_files(root)?;
-
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut stop = false;
-
-    for path in &files {
-        if stop {
-            break;
-        }
-        let display = path.display().to_string();
-        let expect_compile_fail = is_compile_fail(path);
-        let format = config.format;
-        // Expected compile rejection: suppress ariadne noise so the harness
-        // summary stays readable when many compile_fail files exist.
-        let mut pipeline = if expect_compile_fail {
-            Pipeline::with_reporter(config.clone(), Box::new(std::io::sink()))
-        } else {
-            Pipeline::with_reporter(config.clone(), writer_for(format))
-        };
-        pipeline.set_include_tests(true);
-        pipeline.set_opt_level(opt_level);
-        pipeline.set_host_grants(grants.clone());
-        // Same search path CI passes with `--root`: examples and a sibling
-        // coil-stdlib checkout, when those directories exist.
-        let mut roots = extra_roots.to_vec();
-        for extra in compiler::Pipeline::workspace_language_extra_roots() {
-            if extra.is_dir() && !roots.contains(&extra) {
-                roots.push(extra);
-            }
-        }
-        bind_cli_roots(&mut pipeline, roots);
-
-        // catch_unwind isolates a compiler ICE from aborting the whole
-        // harness under panic=unwind. Release builds use panic=abort, so
-        // compile_fail fixtures must reject via Ok(Err(_)), not panic.
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pipeline.compile_src_from_file(&display)
-        }));
-        let cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
-        let _ = pipeline.finish_reporting();
-
-        let file_ok = if expect_compile_fail {
-            // Only a clean diagnostic rejection counts. A panic is a
-            // harness failure (and aborts under release panic=abort).
-            if compile_fail_rejected(&compiled) {
-                passed += 1;
-                true
-            } else {
-                failed += 1;
-                match &compiled {
-                    Ok(Ok(_)) => {
-                        eprintln!("> Test \"{display}\" failed (expected compile failure)");
-                    }
-                    Err(_) => {
-                        eprintln!("> Test \"{display}\" failed (compiler panicked)");
-                    }
-                    Ok(Err(_)) => unreachable!("compile_fail_rejected is true for Ok(Err(_))"),
-                }
-                if fail_fast {
-                    stop = true;
-                }
-                false
-            }
-        } else {
-            match compiled {
-                Err(_) => {
-                    failed += 1;
-                    eprintln!("> Test \"{display}\" failed (compiler panicked)");
-                    if fail_fast {
-                        stop = true;
-                    }
-                    false
-                }
-                Ok(Err(_)) => {
-                    failed += 1;
-                    eprintln!("> Test \"{display}\" failed");
-                    if fail_fast {
-                        stop = true;
-                    }
-                    false
-                }
-                Ok(Ok((bytecode, constants))) => {
-                    let strings = pipeline.strings().to_vec();
-                    let static_slots = pipeline.static_slot_count();
-                    let entry = path.as_path();
-                    if cases.is_empty() {
-                        // Legacy: whole-file `main` is one opaque case.
-                        let debug = pipeline.program_debug();
-                        let operand_stack_slots = pipeline.operand_stack_slots();
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            execute_archive(ExecuteArchiveArgs {
-                                pipeline: &pipeline,
-                                bytecode: &bytecode,
-                                constants: &constants,
-                                strings: &strings,
-                                static_slots,
-                                debug,
-                                entry: Some(entry),
-                                operand_stack_slots,
-                            })
-                        }));
-                        let ok = match result {
-                            Ok(panicked) => !panicked,
-                            Err(_) => false,
-                        };
-                        if ok {
-                            passed += 1;
-                        } else {
-                            failed += 1;
-                            eprintln!("> Test \"{display}\" failed");
-                            if fail_fast {
-                                stop = true;
-                            }
-                        }
-                        ok
-                    } else {
-                        let mut any_fail = false;
-                        for (name, offset) in &cases {
-                            let ok = run_test_case(
-                                &pipeline,
-                                &bytecode,
-                                &constants,
-                                &strings,
-                                Some(entry),
-                                name,
-                                *offset,
-                            );
-                            if ok {
-                                passed += 1;
-                            } else {
-                                failed += 1;
-                                any_fail = true;
-                                if fail_fast {
-                                    stop = true;
-                                    break;
-                                }
-                            }
-                        }
-                        !any_fail
-                    }
-                }
-            }
-        };
-
-        if file_ok {
-            eprintln!("ok   {display}");
-        } else {
-            eprintln!("FAILED {display}");
-        }
-    }
-
-    Ok((passed, failed))
-}
-
-fn cmd_test(
-    config: ReportConfig,
-    path: Option<String>,
-    fail_fast: bool,
-    opt_level: OptLevel,
-    grants: HostGrants,
-    extra_roots: Vec<PathBuf>,
-) {
-    let root = path.unwrap_or_else(|| TESTS_DIR.to_string());
-    let tests_dir = Path::new(&root);
-    let (passed, failed) =
-        match run_test_suite(
-            config.clone(),
-            tests_dir,
-            fail_fast,
-            opt_level,
-            grants,
-            &extra_roots,
-        ) {
-        Ok(counts) => counts,
-        Err(msg) => {
-            let format = config.format;
-            let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
-            fail_and_exit(&mut pipeline, ErrorCode::IoError, msg);
-        }
-    };
-
-    eprintln!();
-    eprintln!(
-        "test result: {}. {passed} passed; {failed} failed; {} total",
-        if failed == 0 { "ok" } else { "FAILED" },
-        passed + failed
-    );
-
-    if failed != 0 {
         exit(1);
     }
 }
@@ -794,14 +451,7 @@ fn main() {
     };
 
     match cli.command {
-        Command::Test { path, fail_fast } => cmd_test(
-            config,
-            path,
-            fail_fast,
-            cli.opt_level,
-            cli.host_grants,
-            cli.module_roots,
-        ),
+        Command::Test => dispatch_helper("test"),
         Command::Dissect { .. } => dispatch_helper("dissect"),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
@@ -865,7 +515,7 @@ fn main() {
                 Command::Natives { exe, tsv } => {
                     cmd_natives_dump(&mut pipeline, exe.as_deref(), tsv);
                 }
-                Command::Test { .. }
+                Command::Test
                 | Command::Dissect { .. }
                 | Command::Debug { .. }
                 | Command::Fmt
@@ -884,6 +534,8 @@ mod tests {
         archive_is_stale, archive_mtime, archive_source_mtime, same_source_path,
     };
     use super::*;
+    use common::Byte;
+    use std::path::PathBuf;
 
     fn unique_tmp(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1124,126 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_test_files_errors_and_discovers_nested() {
-        let missing = unique_tmp("no_tests");
-        assert!(collect_test_files(&missing).is_err());
-
-        let empty = unique_tmp("empty_tests");
-        std::fs::create_dir_all(&empty).unwrap();
-        assert!(collect_test_files(&empty).is_err());
-
-        let root = unique_tmp("nested_tests");
-        let nested = root.join("more");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join("b.hy"), b"fn main() {}").unwrap();
-        std::fs::write(nested.join("a.hy"), b"fn main() {}").unwrap();
-        std::fs::write(root.join("ignore.txt"), b"x").unwrap();
-        let files = collect_test_files(&root).expect("files");
-        assert_eq!(files.len(), 2);
-        assert!(files[0].ends_with("a.hy") || files[0].ends_with("b.hy"));
-        // Sorted lexicographically by full path.
-        assert!(files[0] < files[1]);
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&empty);
-    }
-
-    #[test]
-    fn is_compile_fail_detects_path_segment() {
-        assert!(is_compile_fail(Path::new("tests/compile_fail/bad.hy")));
-        assert!(is_compile_fail(Path::new("/tmp/compile_fail/x.hy")));
-        assert!(is_compile_fail(Path::new(
-            "suite/nested/compile_fail/deep/x.hy"
-        )));
-        assert!(!is_compile_fail(Path::new("tests/arithmetic.hy")));
-        assert!(!is_compile_fail(Path::new("tests/compile_fail_not/x.hy")));
-        assert!(!is_compile_fail(Path::new("tests/my_compile_fail/x.hy")));
-    }
-
-    #[test]
-    fn compile_fail_rejected_requires_clean_diagnostic_err() {
-        let rejected_err: std::thread::Result<Result<(), ()>> = Ok(Err(()));
-        assert!(compile_fail_rejected(&rejected_err));
-
-        let unexpected_ok: std::thread::Result<Result<(), ()>> = Ok(Ok(()));
-        assert!(!compile_fail_rejected(&unexpected_ok));
-
-        // Panic is NOT a clean rejection (release panic=abort aborts anyway).
-        let panicked: std::thread::Result<Result<(), ()>> = Err(Box::new("boom"));
-        assert!(!compile_fail_rejected(&panicked));
-    }
-
-    #[test]
-    fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
-        let root = unique_tmp("compile_fail_suite");
-        let cf = root.join("compile_fail");
-        let pos = root.join("positive");
-        std::fs::create_dir_all(&cf).unwrap();
-        std::fs::create_dir_all(&pos).unwrap();
-
-        // Type error under compile_fail/ ⇒ harness pass.
-        std::fs::write(
-            cf.join("bad.hy"),
-            "fn main() {\n  let x: int = \"no\";\n}\n",
-        )
-        .unwrap();
-        // Well-typed under compile_fail/ ⇒ harness failure (inverted).
-        std::fs::write(
-            cf.join("unexpected_ok.hy"),
-            "fn main() {\n  let _x = 1;\n}\n",
-        )
-        .unwrap();
-        // Normal positive case still runs.
-        std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  assert(true)?;\n}\n").unwrap();
-
-        let (passed, failed) = run_test_suite(
-            ReportConfig::default(),
-            &root,
-            false,
-            OptLevel::Standard,
-            HostGrants::deny_all(),
-            &[],
-        )
-        .expect("suite runs");
-        assert_eq!(passed, 2, "bad compile_fail + positive ok");
-        assert_eq!(failed, 1, "unexpected_ok under compile_fail must fail");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
-        let root = unique_tmp("compile_fail_fail_fast");
-        let cf = root.join("compile_fail");
-        std::fs::create_dir_all(&cf).unwrap();
-
-        // Lexicographic order: a_ok before z_bad — fail-fast must stop after a_ok.
-        std::fs::write(
-            cf.join("a_ok.hy"),
-            "fn main() {\n  let _x = 1;\n}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            cf.join("z_bad.hy"),
-            "fn main() {\n  let x: int = \"no\";\n}\n",
-        )
-        .unwrap();
-
-        let (passed, failed) = run_test_suite(
-            ReportConfig::default(),
-            &root,
-            true,
-            OptLevel::Standard,
-            HostGrants::deny_all(),
-            &[],
-        )
-        .expect("suite runs");
-        assert_eq!(failed, 1, "a_ok should fail (unexpected compile success)");
-        assert_eq!(passed, 0, "fail-fast must not reach z_bad");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn archive_mtime_returns_none_for_missing() {
         assert!(archive_mtime(unique_tmp("no_mtime").to_str().unwrap()).is_none());
     }
@@ -1273,54 +805,5 @@ mod tests {
             "should resolve src/worker.hy relative to cwd"
         );
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Fresh VM per case: soft-fail / panic in earlier cases must not skip later ones.
-    #[test]
-    fn harness_isolates_cases_and_continues_after_failures() {
-        let src = r#"
-test("soft fail") {
-    assert(false)?;
-}
-test("panics") {
-    panic "boom";
-}
-test("still runs") {
-    assert(true)?;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        pipeline.set_include_tests(true);
-        let (bytecode, constants) = pipeline
-            .compile_src(src)
-            .expect("multi-case harness source should compile");
-        let cases = pipeline.test_cases().to_vec();
-        assert_eq!(cases.len(), 3, "expected three test(\"…\") cases");
-        assert_eq!(cases[0].0, "soft fail");
-        assert_eq!(cases[1].0, "panics");
-        assert_eq!(cases[2].0, "still runs");
-
-        let mut passed = 0usize;
-        let mut failed = 0usize;
-        for (name, offset) in &cases {
-            if run_test_case(
-                &pipeline,
-                &bytecode,
-                &constants,
-                pipeline.strings(),
-                None,
-                name,
-                *offset,
-            ) {
-                passed += 1;
-            } else {
-                failed += 1;
-            }
-        }
-        assert_eq!(failed, 2, "soft-fail + panic should each count as failures");
-        assert_eq!(
-            passed, 1,
-            "later case must still run after earlier failures"
-        );
     }
 }
