@@ -190,6 +190,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile) -> (usize, usize) {
             passed: ok,
             reason,
             hits,
+            ..
         } = match case.state {
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
@@ -396,6 +397,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
                 init_ip,
                 expect_ok_result,
                 coverage: run.coverage.is_some(),
+                step_budget: None,
             };
             let output = Arc::new(Mutex::new(Vec::new()));
             let print = Arc::clone(&output);
