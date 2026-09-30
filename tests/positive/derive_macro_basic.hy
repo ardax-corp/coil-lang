@@ -1,7 +1,7 @@
 // User derive / attribute macros from `examples/src/derive_macros.hy`.
-use derive_macros::{FieldNames, VariantName, add_after};
+use derive_macros::{FieldNames, VariantName, Tagged, add_after};
 
-#[derive(FieldNames)]
+#[derive(FieldNames, Tagged)]
 class Config {
     #[names(rename = "server-port")]
     pub port: int,
@@ -39,4 +39,9 @@ test("derive over enum variants") {
 
 test("attribute macro replaces the function") {
     assert(triple(2) == 16)?;
+}
+
+test("generated code names provider items by path") {
+    let t = Config::tag();
+    assert(t.label == "tag:Config")?;
 }

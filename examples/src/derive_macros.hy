@@ -57,3 +57,25 @@ attr add_after(FnDecl f, int by) -> Code {
         }
     };
 }
+
+/// Returned by `Tagged` derives; generated code names it `derive_macros::Tag`.
+class Tag {
+    pub label: string,
+}
+
+fn tag_prefix() -> string {
+    return "tag:";
+}
+
+/// `T::tag()` builds a provider `Tag` through a provider helper, neither of
+/// which the using module imports.
+derive Tagged(TypeDecl t) -> Code {
+    return quote items {
+        impl ${t.name} {
+            pub static fn tag() -> Tag {
+                let label = tag_prefix() + ${lit(t.name.str())};
+                return new Tag(label);
+            }
+        }
+    };
+}

@@ -9,7 +9,10 @@
 //!
 //! Hygiene: a name bound with `let` / `for` inside any quote of one item is
 //! renamed to `name__m` in all of that item's quotes, so generated locals
-//! never capture or shadow names in code spliced from the user.
+//! never capture or shadow names in code spliced from the user. A bare name
+//! for one of the module's own items (`JsonValue`, `helper()`) is written as
+//! its fully qualified path (`json::JsonValue`), so expansions never depend
+//! on what the using module imports.
 
 use std::collections::HashSet;
 
@@ -40,10 +43,19 @@ pub fn lower_program(ast: &mut Output<'_>, module: &str) -> Lowered {
     };
     let mut uses_quote = false;
     let mut uses_join = false;
+    let own_items = if module.is_empty() || module == MACRO_MODULE {
+        HashSet::new()
+    } else {
+        module_item_names(children)
+    };
     for child in children.iter_mut() {
         lower_item(child, &mut out);
-        let bound = quote_bound_names(child);
-        lower_quotes(child, &bound, &mut uses_quote, &mut uses_join, &mut out.messages);
+        let names = Names {
+            bound: quote_bound_names(child),
+            own_items: &own_items,
+            module,
+        };
+        lower_quotes(child, &names, &mut uses_quote, &mut uses_join, &mut out.messages);
     }
     if module != MACRO_MODULE && (uses_quote || !out.decls.is_empty()) {
         let mut needed = vec!["Code"];
@@ -51,6 +63,31 @@ pub fn lower_program(ast: &mut Output<'_>, module: &str) -> Lowered {
             needed.push("join");
         }
         inject_macro_uses(children, &needed);
+    }
+    out
+}
+
+/// How template text is rewritten: hygienic locals and module-qualified items.
+struct Names<'n> {
+    bound: HashSet<String>,
+    own_items: &'n HashSet<String>,
+    module: &'n str,
+}
+
+/// Top-level types, traits, functions and statics a module declares.
+fn module_item_names(children: &[Output<'_>]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for c in children {
+        let name = match c.1.as_ref() {
+            Expression::Class { name, .. }
+            | Expression::EnumDecl { name, .. }
+            | Expression::TypeClass { name, .. }
+            | Expression::TypeAlias { name, .. }
+            | Expression::Function { name, .. } => *name,
+            Expression::StaticDecl { name, .. } => *name,
+            _ => continue,
+        };
+        out.insert(name.to_string());
     }
     out
 }
@@ -312,9 +349,11 @@ fn token_spans(text: &str) -> Vec<(Tok<'_>, std::ops::Range<usize>)> {
     out
 }
 
-/// Rename bound names in one piece of template text (not after `.` / `::`).
-fn rename_bound(text: &str, bound: &HashSet<String>) -> String {
-    if bound.is_empty() {
+/// Rewrite one piece of template text: bound locals get [`HYGIENE_SUFFIX`],
+/// the module's own items get their module path. Names after `.` or `::`
+/// (members, already-qualified paths) are left alone.
+fn rewrite_names(text: &str, names: &Names<'_>) -> String {
+    if names.bound.is_empty() && names.own_items.is_empty() {
         return text.to_string();
     }
     let spans = token_spans(text);
@@ -322,16 +361,26 @@ fn rename_bound(text: &str, bound: &HashSet<String>) -> String {
     let mut last = 0;
     for (k, (tok, range)) in spans.iter().enumerate() {
         let Tok::Ident(name) = tok else { continue };
-        if !bound.contains(*name) {
-            continue;
-        }
-        let after_member = k > 0 && matches!(spans[k - 1].0, Tok::Punct('.') | Tok::Punct(':'));
+        let prev = k.checked_sub(1).map(|p| &spans[p].0);
+        let after_member = matches!(prev, Some(Tok::Punct('.')))
+            || (matches!(prev, Some(Tok::Punct(':')))
+                && k >= 2
+                && matches!(spans[k - 2].0, Tok::Punct(':'))
+                && spans[k - 2].1.end == spans[k - 1].1.start);
         if after_member {
             continue;
         }
-        out.push_str(&text[last..range.end]);
-        out.push_str(HYGIENE_SUFFIX);
-        last = range.end;
+        if names.bound.contains(*name) {
+            out.push_str(&text[last..range.end]);
+            out.push_str(HYGIENE_SUFFIX);
+            last = range.end;
+        } else if names.own_items.contains(*name) {
+            out.push_str(&text[last..range.start]);
+            out.push_str(names.module);
+            out.push_str("::");
+            out.push_str(name);
+            last = range.end;
+        }
     }
     out.push_str(&text[last..]);
     out
@@ -339,14 +388,14 @@ fn rename_bound(text: &str, bound: &HashSet<String>) -> String {
 
 fn lower_quotes(
     node: &mut Output<'_>,
-    bound: &HashSet<String>,
+    names: &Names<'_>,
     uses_quote: &mut bool,
     uses_join: &mut bool,
     messages: &mut Vec<Message>,
 ) {
     // Holes first: a hole may itself contain a quote.
     node.1
-        .for_each_child_mut(&mut |c| lower_quotes(c, bound, uses_quote, uses_join, messages));
+        .for_each_child_mut(&mut |c| lower_quotes(c, names, uses_quote, uses_join, messages));
     let span = node.0;
     let Expression::Quote { parts, .. } = node.1.as_mut() else {
         return;
@@ -357,7 +406,7 @@ fn lower_quotes(
     for part in parts {
         match part {
             QuotePart::Lit(text) => {
-                let renamed = rename_bound(text, bound);
+                let renamed = rewrite_names(text, names);
                 if !renamed.is_empty() {
                     pieces.push(node_at(Expression::String(leak(super::escape_string_lit(&renamed)))));
                 }
@@ -412,9 +461,29 @@ mod tests {
 
     #[test]
     fn rename_skips_members_and_strings() {
-        let bound: HashSet<String> = ["obj".to_string()].into_iter().collect();
-        let out = rename_bound("let obj = x.obj; \"obj\"; obj.set(obj)", &bound);
+        let own = HashSet::new();
+        let names = Names {
+            bound: ["obj".to_string()].into_iter().collect(),
+            own_items: &own,
+            module: "m",
+        };
+        let out = rewrite_names("let obj = x.obj; \"obj\"; obj.set(obj)", &names);
         assert_eq!(out, "let obj__m = x.obj; \"obj\"; obj__m.set(obj__m)");
+    }
+
+    #[test]
+    fn own_items_become_qualified() {
+        let own: HashSet<String> = ["Value".to_string(), "helper".to_string()].into_iter().collect();
+        let names = Names {
+            bound: HashSet::new(),
+            own_items: &own,
+            module: "json",
+        };
+        let out = rewrite_names("let v: Value = helper(Value::make(), json::Value, o.helper, x: int)", &names);
+        assert_eq!(
+            out,
+            "let v: json::Value = json::helper(json::Value::make(), json::Value, o.helper, x: int)"
+        );
     }
 
     #[test]
