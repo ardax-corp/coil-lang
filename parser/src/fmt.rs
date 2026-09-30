@@ -738,19 +738,19 @@ impl<'s> Formatter<'s> {
 
             Expression::Negate(n) => {
                 self.push_str("-");
-                self.fmt_output(n);
+                self.fmt_operand(n, PREC_UNARY);
             }
             Expression::Positive(n) => {
                 self.push_str("+");
-                self.fmt_output(n);
+                self.fmt_operand(n, PREC_UNARY);
             }
             Expression::Not(n) => {
                 self.push_str("~");
-                self.fmt_output(n);
+                self.fmt_operand(n, PREC_UNARY);
             }
             Expression::LogicalNot(n) => {
                 self.push_str("!");
-                self.fmt_output(n);
+                self.fmt_operand(n, PREC_UNARY);
             }
             Expression::Try(inner) => {
                 self.fmt_output(inner);
@@ -786,14 +786,18 @@ impl<'s> Formatter<'s> {
             | Expression::Gt(lhs, rhs)
             | Expression::Leq(lhs, rhs)
             | Expression::Geq(lhs, rhs) => {
-                self.fmt_output(lhs);
+                // `+` / `-` associate left, every other binary operator right.
+                let prec = expr_prec(expr);
+                let left_assoc = matches!(expr, Expression::Add(..) | Expression::Sub(..));
+                let (lhs_min, rhs_min) = if left_assoc { (prec, prec + 1) } else { (prec + 1, prec) };
+                self.fmt_operand(lhs, lhs_min);
                 self.push_str(" ");
                 self.push_str(binary_op(expr));
                 self.push_str(" ");
-                self.fmt_output(rhs);
+                self.fmt_operand(rhs, rhs_min);
             }
             Expression::Cast(expr, ty) => {
-                self.fmt_output(expr);
+                self.fmt_operand(expr, PREC_CAST);
                 self.push_str(" as ");
                 self.fmt_type(ty);
             }
@@ -1969,6 +1973,10 @@ impl<'s> Formatter<'s> {
             }
             return;
         }
+        // An operand that binds looser than the chain's operator (`||` in an
+        // `&&` chain) needs parentheses; the parser drops them after parsing
+        // only in synthetic trees, which have no `Group`.
+        let min = expr_prec(root) + 1;
 
         let mut flat = String::new();
         for (i, operand) in operands.iter().enumerate() {
@@ -1977,7 +1985,14 @@ impl<'s> Formatter<'s> {
                 flat.push_str(op);
                 flat.push(' ');
             }
+            let wrap = expr_prec(operand) < min;
+            if wrap {
+                flat.push('(');
+            }
             flat.push_str(&self.render_flat(operand));
+            if wrap {
+                flat.push(')');
+            }
         }
 
         if self.fits_flat(&flat) {
@@ -1989,7 +2004,7 @@ impl<'s> Formatter<'s> {
                 }
                 let was_flat = self.flat;
                 self.flat = true;
-                self.fmt_expression(operand);
+                self.fmt_operand_expr(operand, min);
                 self.flat = was_flat;
             }
             return;
@@ -2003,7 +2018,22 @@ impl<'s> Formatter<'s> {
                 self.newline();
                 self.pad_to_col(hang);
             }
-            self.fmt_expression(operand);
+            self.fmt_operand_expr(operand, min);
+        }
+    }
+
+    /// Format `e`, in parentheses when it binds looser than `min`.
+    fn fmt_operand(&mut self, e: &Output<'_>, min: u8) {
+        self.fmt_operand_expr(e.1.as_ref(), min);
+    }
+
+    fn fmt_operand_expr(&mut self, e: &Expression<'_>, min: u8) {
+        if expr_prec(e) < min {
+            self.push_str("(");
+            self.fmt_expression(e);
+            self.push_str(")");
+        } else {
+            self.fmt_expression(e);
         }
     }
 
@@ -2321,6 +2351,32 @@ fn collect_member_chain<'a>(expr: &'a Expression<'a>) -> Option<Vec<ChainPart<'a
         return None;
     }
     Some(rev)
+}
+
+const PREC_CAST: u8 = 11;
+const PREC_UNARY: u8 = 12;
+
+/// Binding strength of an operator expression (the parser's `Precedence`
+/// order); atoms and anything parenthesized bind tightest.
+fn expr_prec(e: &Expression<'_>) -> u8 {
+    match e {
+        Expression::Assignment(..) | Expression::CompoundAssign(..) => 0,
+        Expression::Coalesce(..) => 1,
+        Expression::Or(..) => 2,
+        Expression::Xor(..) => 3,
+        Expression::And(..) => 4,
+        Expression::Eq(..) | Expression::Neq(..) => 5,
+        Expression::Range { .. } => 6,
+        Expression::Le(..) | Expression::Gt(..) | Expression::Leq(..) | Expression::Geq(..) => 7,
+        Expression::Shl(..) | Expression::Shr(..) | Expression::BitAnd(..) | Expression::BitOr(..) => 8,
+        Expression::Add(..) | Expression::Sub(..) => 9,
+        Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) | Expression::Pow(..) => 10,
+        Expression::Cast(..) => PREC_CAST,
+        Expression::Negate(_) | Expression::Positive(_) | Expression::Not(_) | Expression::LogicalNot(_) => {
+            PREC_UNARY
+        }
+        _ => u8::MAX,
+    }
 }
 
 fn binary_op(expr: &Expression<'_>) -> &'static str {

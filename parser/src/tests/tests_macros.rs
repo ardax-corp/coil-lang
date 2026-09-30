@@ -122,3 +122,22 @@ fn format_keeps_method_attributes_before_pub() {
     let src = "impl C {\n    #[twice]\n    pub fn get() -> int {\n        return 1;\n    }\n}\n";
     assert_eq!(crate::format_source(src).expect("format"), src);
 }
+
+/// Synthetic trees (built-in derives) have no `Group`: the formatter must
+/// add the parentheses precedence needs.
+#[test]
+fn format_parenthesizes_by_precedence() {
+    use ast::Output;
+    let sp = SimpleSpan::from(0..1);
+    let id = |n: &'static str| -> Output<'static> { (sp, Box::new(Expression::Identifier(n))) };
+    let node = |e: Expression<'static>| -> Output<'static> { (sp, Box::new(e)) };
+    let not_eq = node(Expression::LogicalNot(node(Expression::Eq(id("a"), id("b")))));
+    let or_in_and = node(Expression::And(id("p"), node(Expression::Or(id("q"), id("r")))));
+    let sub_right = node(Expression::Sub(id("a"), node(Expression::Sub(id("b"), id("c")))));
+    let mul_of_add = node(Expression::Mul(node(Expression::Add(id("a"), id("b"))), id("c")));
+    let out = |e: &Output<'_>| crate::format_program(e.1.as_ref());
+    assert_eq!(out(&not_eq).trim(), "!(a == b)");
+    assert_eq!(out(&or_in_and).trim(), "p && (q || r)");
+    assert_eq!(out(&sub_right).trim(), "a - (b - c)");
+    assert_eq!(out(&mul_of_add).trim(), "(a + b) * c");
+}
