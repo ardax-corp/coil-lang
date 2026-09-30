@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use compiler::{HostGrants, OptLevel};
 use reporting::ReportConfig;
 
+use crate::coverage::{CoverageOptions, DEFAULT_LCOV_OUT};
 use crate::order::{Order, fresh_seed, parse_seed};
 use crate::runner::TestOptions;
 
@@ -16,7 +17,7 @@ pub const SEED_ENV: &str = "COIL_TEST_SEED";
 
 pub enum Parsed {
     Help,
-    Run(ReportConfig, TestOptions),
+    Run(ReportConfig, Box<TestOptions>),
 }
 
 pub fn print_help() {
@@ -35,6 +36,9 @@ pub fn print_help() {
          \x20 --no-shuffle       Run files in sorted path order and cases in source order\n\
          \x20 -j, --jobs N       Run cases on N reactor workers (default: available CPUs)\n\
          \x20 --show-output      Also print passing cases' output (failures always show it)\n\
+         \x20 --coverage         Line coverage of project sources: lcov + summary\n\
+         \x20 --coverage-out F   lcov path (default target/coverage/lcov.info; implies --coverage)\n\
+         \x20 --coverage-per-test F  Also write test -> file -> lines JSON (implies --coverage)\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
@@ -58,6 +62,9 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut no_shuffle = false;
     let mut jobs: Option<usize> = None;
     let mut show_output = false;
+    let mut coverage = false;
+    let mut coverage_out: Option<PathBuf> = None;
+    let mut per_test_out: Option<PathBuf> = None;
     let mut path: Option<String> = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut grants = HostGrants::deny_all();
@@ -85,6 +92,21 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--fail-fast" => fail_fast = true,
             "--no-shuffle" => no_shuffle = true,
             "--show-output" => show_output = true,
+            "--coverage" => coverage = true,
+            "--coverage-out" => {
+                i += 1;
+                coverage_out = Some(PathBuf::from(value(i, "FILE", a)?));
+            }
+            s if s.starts_with("--coverage-out=") => {
+                coverage_out = Some(PathBuf::from(s.trim_start_matches("--coverage-out=")));
+            }
+            "--coverage-per-test" => {
+                i += 1;
+                per_test_out = Some(PathBuf::from(value(i, "FILE", a)?));
+            }
+            s if s.starts_with("--coverage-per-test=") => {
+                per_test_out = Some(PathBuf::from(s.trim_start_matches("--coverage-per-test=")));
+            }
             "-j" | "--jobs" => {
                 i += 1;
                 jobs = Some(parse_jobs(&value(i, "N", a)?)?);
@@ -151,16 +173,23 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
     Ok(Parsed::Run(
         config,
-        TestOptions {
+        Box::new(TestOptions {
             root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
             fail_fast,
             order,
             jobs: jobs.unwrap_or_else(default_jobs),
             show_output,
+            coverage: (coverage || coverage_out.is_some() || per_test_out.is_some()).then(|| {
+                CoverageOptions {
+                    lcov_out: coverage_out.unwrap_or_else(|| PathBuf::from(DEFAULT_LCOV_OUT)),
+                    per_test_out,
+                    project_root: std::env::current_dir().unwrap_or_default(),
+                }
+            }),
             opt_level,
             grants,
             extra_roots,
-        },
+        }),
     ))
 }
 
@@ -214,7 +243,7 @@ mod tests {
 
     fn run(parts: &[&str]) -> (ReportConfig, TestOptions) {
         match parse_args(&argv(parts)).expect("parses") {
-            Parsed::Run(config, options) => (config, options),
+            Parsed::Run(config, options) => (config, *options),
             Parsed::Help => panic!("unexpected help"),
         }
     }
@@ -286,6 +315,31 @@ mod tests {
         for bad in [&["--jobs", "0"][..], &["-j", "x"], &["--jobs"]] {
             assert!(parse_args(&argv(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn coverage_flags() {
+        let (_, o) = run(&[]);
+        assert_eq!(o.coverage, None);
+        let (_, o) = run(&["--coverage"]);
+        assert_eq!(
+            o.coverage,
+            Some(CoverageOptions {
+                lcov_out: PathBuf::from(DEFAULT_LCOV_OUT),
+                per_test_out: None,
+                project_root: std::env::current_dir().unwrap(),
+            })
+        );
+        let (_, o) = run(&["--coverage-out", "cov.info", "--coverage-per-test=t.json"]);
+        assert_eq!(
+            o.coverage,
+            Some(CoverageOptions {
+                lcov_out: PathBuf::from("cov.info"),
+                per_test_out: Some(PathBuf::from("t.json")),
+                project_root: std::env::current_dir().unwrap(),
+            })
+        );
+        assert!(parse_args(&argv(&["--coverage-out"])).is_err());
     }
 
     #[test]

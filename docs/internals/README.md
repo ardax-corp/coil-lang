@@ -35,7 +35,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
-| [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, per-case VMs, test-only features |
+| [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, seeded order, reactor jobs (`-j`), line coverage (`--coverage`, lcov) |
 | [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.hy` |
 | [LSP](lsp.md) | `coil lsp` — language server |
 | [Test health report](test-health-report.md) | Historical flaky/broken-test notes |

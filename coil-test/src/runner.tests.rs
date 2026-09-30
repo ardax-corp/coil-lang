@@ -1,4 +1,5 @@
 use super::*;
+use crate::coverage::CoverageOptions;
 
 fn unique_tmp(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -18,6 +19,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         order: Order::Sorted,
         jobs: 2,
         show_output: false,
+        coverage: None,
         opt_level: OptLevel::Standard,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),
@@ -263,5 +265,53 @@ fn seeded_file_order_is_reproducible_and_complete() {
     let mut resorted = a.files_run.clone();
     resorted.sort();
     assert_eq!(resorted, sorted.files_run, "shuffle keeps every file");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--coverage` end to end: hit lines, a missed branch, a never-called
+/// function (kept, reported 0), test bodies left out, per-test lines.
+#[test]
+fn coverage_reports_project_lines() {
+    let root = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("coil_test_coverage_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("src/mathx.hy"),
+        "fn clamp(int x, int lo, int hi) -> int {\n    if x < lo {\n        return lo;\n    }\n    if x > hi {\n        return hi;\n    }\n    return x;\n}\n\nfn never_called(int x) -> int {\n    let y = x * 2;\n    return y + 1;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/clamp.hy"),
+        "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    assert(clamp(-5, 0, 10) == 0)?;\n}\n\ntest(\"passes through\") {\n    assert(clamp(5, 0, 10) == 5)?;\n}\n",
+    )
+    .unwrap();
+    for jobs in [1, 2] {
+        let opts = TestOptions {
+            jobs,
+            extra_roots: vec![root.join("src")],
+            coverage: Some(CoverageOptions {
+                lcov_out: root.join("unused.info"),
+                per_test_out: Some(root.join("unused.json")),
+                project_root: root.clone(),
+            }),
+            ..options(&root.join("tests"), false)
+        };
+        let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+        assert_eq!((result.passed, result.failed), (2, 0));
+        let cov = result.coverage.expect("coverage collected");
+        assert_eq!(
+            cov.lcov(),
+            "TN:\nSF:src/mathx.hy\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
+            "jobs={jobs}"
+        );
+        let json = cov.per_test_json().unwrap();
+        assert!(
+            json.contains("\"name\":\"clamps low\",\"lines\":{\"src/mathx.hy\":[2,3]}"),
+            "{json}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -47,6 +47,9 @@ struct WorkItem {
     namespace: Option<String>,
 }
 
+/// Predicate over a source path (see [`Pipeline::set_keep_fns_in`]).
+pub type KeepFnFilter = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct Pipeline {
     failed: bool,
     project_root: PathBuf,
@@ -93,6 +96,8 @@ pub struct Pipeline {
     ast_cache: crate::ast_cache::AstCache,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
+    /// Coverage: keep every function defined in files this accepts.
+    keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
@@ -279,6 +284,7 @@ impl Pipeline {
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
             c.set_include_tests(self.include_tests);
+            c.set_keep_fns_in(self.keep_fns_in.clone());
             #[cfg(any(test, feature = "vm-wire"))]
             for (name, params, ret, id) in &self.native_sigs {
                 c.register(name, params, ret);
@@ -684,6 +690,7 @@ impl Pipeline {
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
             include_tests: false,
+            keep_fns_in: None,
             auto_par: true,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
@@ -1666,6 +1673,15 @@ impl Pipeline {
         self.include_tests
     }
 
+    /// Coverage compiles: keep (do not tree-shake) every function whose body
+    /// lies in a source file `filter` accepts, called or not, so it can be
+    /// reported as uncovered. `filter` gets the path as recorded in
+    /// `ProgramDebug::source_files`.
+    pub fn set_keep_fns_in(&mut self, filter: Option<KeepFnFilter>) {
+        self.keep_fns_in = filter.clone();
+        self.compiler_lazy_mut().set_keep_fns_in(filter);
+    }
+
     /// Disable automatic fork-join of pure recursive calls and counted loops.
     pub fn set_auto_par(&mut self, on: bool) {
         self.auto_par = on;
@@ -1856,6 +1872,33 @@ mod tests {
 
     use common::Instruction;
     use super::Pipeline;
+
+    /// Coverage compiles keep never-called functions from accepted files;
+    /// the default tree-shake drops them.
+    #[test]
+    fn keep_fns_in_roots_unused_functions() {
+        let src = "fn unused(int x) -> int {\n    return x * 3;\n}\n\nfn main() {\n    let _ = 1;\n}\n";
+        let dir = std::env::temp_dir().join(format!("coil_keep_fns_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("keep.hy");
+        std::fs::write(&file, src).unwrap();
+        let symbols = |keep: Option<crate::KeepFnFilter>| {
+            let mut p = Pipeline::new();
+            p.set_keep_fns_in(keep);
+            p.compile_src_from_file(file.to_str().unwrap()).expect("compiles");
+            p.program_debug()
+                .fn_symbols
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!symbols(None).iter().any(|n| n.ends_with("unused")));
+        let kept = symbols(Some(Arc::new(|path: &str| path.ends_with("keep.hy"))));
+        assert!(kept.iter().any(|n| n.ends_with("unused")), "{kept:?}");
+        let other = symbols(Some(Arc::new(|path: &str| path.ends_with("other.hy"))));
+        assert!(!other.iter().any(|n| n.ends_with("unused")), "{other:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Cloneable in-memory writer so tests can inspect sink output.
     #[derive(Clone, Default)]

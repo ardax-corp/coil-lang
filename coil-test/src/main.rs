@@ -10,7 +10,7 @@ fn main() {
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
         Ok(Parsed::Help) => print_help(),
-        Ok(Parsed::Run(config, options)) => cmd_test(config, options),
+        Ok(Parsed::Run(config, options)) => cmd_test(config, *options),
         Err(msg) => {
             eprintln!("coil-test: {msg}");
             print_help();
