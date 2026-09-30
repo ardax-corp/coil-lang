@@ -746,6 +746,7 @@ fn lower_op(
             if let Some((base, index)) = hints.field_of(*slot) {
                 let _ = b.ins_field_store(v, base, index)?;
             } else {
+                b.retag_stored_value(v, op.loc());
                 b.def_local(LocalId(*slot), v)?;
             }
             Ok(())

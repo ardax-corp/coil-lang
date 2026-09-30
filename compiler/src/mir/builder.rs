@@ -102,6 +102,17 @@ impl MirBuilder {
         Ok(v)
     }
 
+    /// A store named `val` a source local at `loc`: give the instruction
+    /// that produced it the store's location. A variable's defining store
+    /// carries the variable's def site (see `crate::debug_vars`); in SSA the
+    /// store vanishes, so its producer must carry the tag into the register
+    /// it is assigned.
+    pub fn retag_stored_value(&mut self, val: ValueId, loc: DebugLoc) {
+        if loc.is_known() && self.func.value_locs.contains_key(&val) {
+            self.func.value_locs.insert(val, loc);
+        }
+    }
+
     /// Bind a source local to an SSA value in the current block.
     pub fn def_local(&mut self, local: LocalId, val: ValueId) -> Result<(), MirError> {
         let b = self.cur()?;
