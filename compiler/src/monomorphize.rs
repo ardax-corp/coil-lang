@@ -832,7 +832,6 @@ where
         Expression::EnumVariant { .. }
         | Expression::Use { .. }
         | Expression::Module(_, _)
-        | Expression::Comment(_)
         | Expression::Integer(_)
         | Expression::Float(_)
         | Expression::String(_)

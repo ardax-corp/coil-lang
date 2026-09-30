@@ -823,7 +823,6 @@ fn is_declaration_like(node: &Output) -> bool {
             | Expression::Constant(..)
             | Expression::Assignment(..)
             | Expression::TypeAlias { .. }
-            | Expression::Comment(..)
             | Expression::Use { .. }
             | Expression::Noop(..)
     )

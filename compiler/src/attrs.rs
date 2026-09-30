@@ -861,7 +861,6 @@ fn collect_free_idents<'a>(
         | Expression::String(_)
         | Expression::Bool(_)
         | Expression::Type(_)
-        | Expression::Comment(_)
         | Expression::Default(_)
         | Expression::Break
         | Expression::Continue
@@ -1049,7 +1048,6 @@ fn rewrite_expr_inline<'a>(
         | Expression::String(_)
         | Expression::Bool(_)
         | Expression::Type(_)
-        | Expression::Comment(_)
         | Expression::Default(_)
         | Expression::Break
         | Expression::Continue

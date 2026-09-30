@@ -2398,7 +2398,6 @@ impl Checker {
             }
 
             Expression::Noop(_)
-            | Expression::Comment(_)
             | Expression::Break
             | Expression::Continue => unit_ty(),
             // Named call-site arg: type is the value's type.
@@ -13410,7 +13409,6 @@ impl Checker {
 
             // Recurse into the same children that `id::pre_walk` would
             Expression::Noop(_)
-            | Expression::Comment(_)
             | Expression::Integer(_)
             | Expression::Float(_)
             | Expression::String(_)

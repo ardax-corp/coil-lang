@@ -14666,7 +14666,6 @@ impl Compiler {
                 | Expression::Expr(_)
                 | Expression::Group(_)
                 | Expression::Fragment(_)
-                | Expression::Comment(_)
                 | Expression::Noop(_)
                 | Expression::Break
                 | Expression::Continue
@@ -15131,7 +15130,6 @@ impl Compiler {
         let (span, child) = ast;
 
         match child.borrow() {
-            Expression::Comment(_) => (),
             Expression::Use {
                 path: p,
                 name,

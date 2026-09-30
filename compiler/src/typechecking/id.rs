@@ -111,7 +111,6 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
     use parser::ast::Expression;
     match node.1.as_ref() {
         Expression::Noop(_)
-        | Expression::Comment(_)
         | Expression::Integer(_)
         | Expression::Float(_)
         | Expression::String(_)

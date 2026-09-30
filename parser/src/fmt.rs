@@ -1,12 +1,17 @@
 //! Source pretty-printer for coil `.hy` files.
 //!
-//! Preserves `//` comments and emits attached `///` docs on declarations.
+//! Comments are parser trivia, so the formatter reads them from
+//! [`crate::comments::collect`] and reattaches them by byte position:
+//! a comment on its own line leads the next item, a comment after code on
+//! the same line trails it. Single blank lines between items are kept.
+//! `///` docs are part of the AST and are emitted with their declaration.
 
 use crate::ast::{
     AdjustOp, AssignOp, Attribute, EnumConstructPayload, EnumVariantPayload, Expression,
     ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility, WhereConstraint,
 };
+use crate::comments::{self, Comment};
 use crate::Pratt;
 use chumsky::span::SimpleSpan;
 use reporting::Message;
@@ -17,7 +22,30 @@ const MAX_WIDTH: usize = 100;
 
 pub fn format_source(src: &str) -> Result<String, Message> {
     let ast = Pratt::default().parse(src)?;
-    Ok(format_program(ast.1.as_ref()))
+    let comments = comments::collect(src);
+    let expected = comments.len();
+    let mut f = Formatter::new(src, comments);
+    f.fmt_expression(ast.1.as_ref());
+    f.flush_comments(usize::MAX);
+    let out = f.finish();
+    // Never hand back code that lost a comment or no longer parses.
+    let kept = comments::collect(&out).len();
+    let reparse = Pratt::default().parse(&out).err();
+    if kept != expected || reparse.is_some() {
+        let why = match reparse {
+            Some(err) => {
+                let line = out[..err.range().start.min(out.len())].matches('\n').count() + 1;
+                format!("output line {line} does not parse: {}", err.message())
+            }
+            None => format!("{expected} comments became {kept}"),
+        };
+        return Err(Message::error(
+            reporting::ErrorCode::ParseError,
+            format!("coil fmt bug, file left unchanged: {why}"),
+            0..0,
+        ));
+    }
+    Ok(out)
 }
 
 /// Format a source range while preserving the formatter's whole-file parse
@@ -27,28 +55,256 @@ pub fn format_range(src: &str, _range: std::ops::Range<usize>) -> Result<String,
     format_source(src)
 }
 
+/// Format an AST without its source text (no comments, no blank-line
+/// preservation). Prefer [`format_source`].
 pub fn format_program(expr: &Expression<'_>) -> String {
-    let mut f = Formatter::new();
+    let mut f = Formatter::new("", Vec::new());
     f.fmt_expression(expr);
-    if !f.out.ends_with('\n') {
-        f.out.push('\n');
-    }
-    f.out
+    f.finish()
 }
 
-struct Formatter {
+struct Formatter<'s> {
     indent: usize,
     out: String,
     /// When true, never insert soft wraps (used to measure flat width).
     flat: bool,
+    src: &'s str,
+    comments: Vec<Comment<'s>>,
+    /// First comment not yet emitted.
+    next_comment: usize,
+    /// End of the last source element emitted (blank-line detection).
+    last_end: usize,
+    /// Inside a type annotation (`[T; N]` vs the array literal `[a, b]`).
+    type_ctx: bool,
 }
 
-impl Formatter {
-    fn new() -> Self {
+impl<'s> Formatter<'s> {
+    fn new(src: &'s str, comments: Vec<Comment<'s>>) -> Self {
         Self {
             indent: 0,
             out: String::new(),
             flat: false,
+            src,
+            comments,
+            next_comment: 0,
+            last_end: 0,
+            type_ctx: false,
+        }
+    }
+
+    /// Scratch formatter for measuring flat width. It has no comments, so
+    /// callers must not choose a flat layout that spans pending comments
+    /// (see [`Self::has_comment_in`]).
+    fn measure(indent: usize) -> Formatter<'static> {
+        Formatter {
+            indent,
+            flat: true,
+            ..Formatter::new("", Vec::new())
+        }
+    }
+
+    fn finish(mut self) -> String {
+        while self.out.ends_with("\n\n") {
+            self.out.pop();
+        }
+        if !self.out.ends_with('\n') {
+            self.out.push('\n');
+        }
+        self.out
+    }
+
+    // ---- comments and blank lines -------------------------------------
+
+    /// Comments are sorted and disjoint, so both starts and ends are sorted.
+    fn comment_starting_at(&self, pos: usize) -> Option<&Comment<'s>> {
+        let i = self.comments.binary_search_by_key(&pos, |c| c.span.start).ok()?;
+        self.comments.get(i)
+    }
+
+    fn comment_ending_at(&self, pos: usize) -> Option<&Comment<'s>> {
+        let i = self.comments.binary_search_by_key(&pos, |c| c.span.end).ok()?;
+        self.comments.get(i)
+    }
+
+    fn pending(&self) -> Option<&Comment<'s>> {
+        self.comments.get(self.next_comment)
+    }
+
+    /// First byte of real code in `span`: node spans can start or end with
+    /// the whitespace and comments the parser skipped as padding.
+    fn content_start(&self, span: SimpleSpan) -> usize {
+        let bytes = self.src.as_bytes();
+        let mut pos = span.start.min(bytes.len());
+        loop {
+            while pos < span.end && bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                pos += 1;
+            }
+            match self.comment_starting_at(pos) {
+                Some(c) if pos < span.end => pos = c.span.end,
+                _ => return pos,
+            }
+        }
+    }
+
+    /// End of real code in `span` (see [`Self::content_start`]).
+    fn content_end(&self, span: SimpleSpan) -> usize {
+        let bytes = self.src.as_bytes();
+        let mut pos = span.end.min(bytes.len());
+        loop {
+            while pos > span.start && bytes.get(pos - 1).is_some_and(u8::is_ascii_whitespace) {
+                pos -= 1;
+            }
+            match self.comment_ending_at(pos) {
+                Some(c) if pos > span.start => pos = c.span.start,
+                _ => return pos,
+            }
+        }
+    }
+
+    /// Byte offset of a `&str` borrowed from the source.
+    fn offset_of(&self, text: &str) -> Option<usize> {
+        let base = self.src.as_ptr() as usize;
+        let ptr = text.as_ptr() as usize;
+        (ptr >= base && ptr + text.len() <= base + self.src.len()).then(|| ptr - base)
+    }
+
+    /// Position of the `close` delimiter after `from`, skipping whitespace,
+    /// comments and a trailing comma.
+    fn closing_after(&self, from: usize, close: u8) -> Option<usize> {
+        let bytes = self.src.as_bytes();
+        let mut pos = from;
+        loop {
+            match bytes.get(pos) {
+                Some(b) if *b == close => return Some(pos),
+                Some(b) if b.is_ascii_whitespace() || *b == b',' || *b == b';' => pos += 1,
+                Some(_) => pos = self.comment_starting_at(pos)?.span.end,
+                None => return None,
+            }
+        }
+    }
+
+    /// Position of the `open` delimiter before `to`, skipping whitespace and
+    /// comments.
+    fn opening_before(&self, to: usize, open: u8) -> Option<usize> {
+        let bytes = self.src.as_bytes();
+        let mut pos = to;
+        while pos > 0 {
+            let b = bytes[pos - 1];
+            if b.is_ascii_whitespace() {
+                pos -= 1;
+            } else if b == open {
+                return Some(pos - 1);
+            } else {
+                pos = self.comment_ending_at(pos)?.span.start;
+            }
+        }
+        None
+    }
+
+    /// End of a node, including the closing brace of a bare block (block
+    /// spans cover only their statements).
+    fn node_end(&self, node: &Output<'_>) -> usize {
+        let end = self.content_end(node.0);
+        match node.1.as_ref() {
+            Expression::Block(_) => self.closing_after(end, b'}').map_or(end, |close| close + 1),
+            _ => end,
+        }
+    }
+
+    fn has_comment_in(&self, start: usize, end: usize) -> bool {
+        self.comments[self.next_comment..]
+            .iter()
+            .any(|c| c.span.start >= start && c.span.start < end)
+    }
+
+    /// Whether the output is at the start of a block / list (no blank line
+    /// belongs there).
+    fn at_open(&self) -> bool {
+        let trimmed = self.out.trim_end_matches(' ');
+        trimmed.is_empty()
+            || trimmed.ends_with("\n\n")
+            || trimmed.ends_with("{\n")
+            || trimmed.ends_with("(\n")
+            || trimmed.ends_with("[\n")
+            || trimmed.ends_with("<\n")
+    }
+
+    /// Keep one blank line where the source had at least one between the last
+    /// emitted element and `start`.
+    fn blank_line_before(&mut self, start: usize) {
+        let gap = self.src.get(self.last_end..start).unwrap_or("");
+        if gap.matches('\n').count() >= 2 && !self.at_open() {
+            self.out.push('\n');
+        }
+    }
+
+    /// Emit every pending comment that starts before `pos`, each on its own
+    /// line at the current indent. Call at the start of a line.
+    fn leading_comments(&mut self, pos: usize) {
+        while let Some(c) = self.pending() {
+            if c.span.start >= pos {
+                break;
+            }
+            let (start, end, text) = (c.span.start, c.span.end, c.text);
+            if !self.out.is_empty() && !self.out.ends_with('\n') {
+                self.out.push('\n');
+            }
+            self.blank_line_before(start);
+            self.write_indent();
+            self.push_str(text);
+            self.newline();
+            self.last_end = end;
+            self.next_comment += 1;
+        }
+    }
+
+    /// Append the comment that follows `end` on the same source line.
+    fn trailing_comment(&mut self, end: usize) {
+        let Some(c) = self.pending() else {
+            return;
+        };
+        // Same source line, and not past a closer: `return 1; }, // c`
+        // belongs to the arm, not to the statement inside its block.
+        let same_line = c.span.start >= end
+            && !self
+                .src
+                .get(end..c.span.start)
+                .unwrap_or("\n")
+                .contains(['\n', '}', ')', ']']);
+        if same_line {
+            let (end, text) = (c.span.end, c.text);
+            self.push_str(" ");
+            self.push_str(text);
+            self.last_end = end;
+            self.next_comment += 1;
+        }
+    }
+
+    /// Emit all remaining comments before `pos` (end of a body or the file).
+    fn flush_comments(&mut self, pos: usize) {
+        self.leading_comments(pos);
+    }
+
+    /// One element of a multi-line body: leading comments and blank line,
+    /// indent, `emit`, trailing comment, newline.
+    fn body_item(&mut self, span: SimpleSpan, emit: impl FnOnce(&mut Self)) {
+        let start = self.content_start(span);
+        let end = self.content_end(span);
+        self.leading_comments(start);
+        self.blank_line_before(start);
+        self.write_indent();
+        emit(self);
+        self.last_end = end.max(self.last_end);
+        self.trailing_comment(end);
+        self.newline();
+    }
+
+    /// Comments between the last body element and its closing delimiter.
+    fn body_close(&mut self, last: Option<SimpleSpan>, close: u8) {
+        if let Some(last) = last
+            && let Some(pos) = self.closing_after(self.content_end(last), close)
+        {
+            self.leading_comments(pos);
         }
     }
 
@@ -90,17 +346,20 @@ impl Formatter {
 
     /// Render `expr` with soft wraps disabled (single-line preference).
     fn render_flat(&self, expr: &Expression<'_>) -> String {
-        let mut f = Formatter {
-            indent: self.indent,
-            out: String::new(),
-            flat: true,
-        };
+        let mut f = Formatter::measure(self.indent);
         f.fmt_expression(expr);
         f.out
     }
 
     fn fits_flat(&self, flat: &str) -> bool {
         self.flat || self.current_col().saturating_add(flat.len()) <= MAX_WIDTH
+    }
+
+    /// A type annotation.
+    fn fmt_type(&mut self, ty: &Output<'_>) {
+        let was = std::mem::replace(&mut self.type_ctx, true);
+        self.fmt_output(ty);
+        self.type_ctx = was;
     }
 
     fn fmt_output(&mut self, output: &Output<'_>) {
@@ -128,11 +387,7 @@ impl Formatter {
         }
 
         let flat = {
-            let mut f = Formatter {
-                indent: self.indent,
-                out: String::new(),
-                flat: true,
-            };
+            let mut f = Formatter::measure(self.indent);
             f.push_str(open);
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
@@ -153,8 +408,13 @@ impl Formatter {
                 Expression::Argument { docs, .. } if !docs.is_empty()
             )
         });
+        let first = self.content_start(items[0].0);
+        let close_at = self
+            .closing_after(self.content_end(items[items.len() - 1].0), close.as_bytes()[0])
+            .unwrap_or(first);
+        let has_comments = self.has_comment_in(first, close_at);
 
-        if !has_docs && self.fits_flat(&flat) {
+        if !has_docs && !has_comments && self.fits_flat(&flat) {
             self.push_str(open);
             let was = self.flat;
             self.flat = true;
@@ -176,11 +436,12 @@ impl Formatter {
         self.newline();
         self.with_indent(|f| {
             for item in items {
-                f.write_indent();
-                f.fmt_output(item);
-                f.push_str(",");
-                f.newline();
+                f.body_item(item.0, |f| {
+                    f.fmt_output(item);
+                    f.push_str(",");
+                });
             }
+            f.body_close(items.last().map(|i| i.0), close.as_bytes()[0]);
         });
         self.write_indent();
         self.push_str(close);
@@ -233,11 +494,7 @@ impl Formatter {
             return;
         }
         let flat = {
-            let mut f = Formatter {
-                indent: self.indent,
-                out: String::new(),
-                flat: true,
-            };
+            let mut f = Formatter::measure(self.indent);
             f.push_str("{ ");
             for (i, field) in items.iter().enumerate() {
                 if i > 0 {
@@ -250,7 +507,16 @@ impl Formatter {
             f.push_str(" }");
             f.out
         };
-        if self.fits_flat(&flat) {
+        let spans: Vec<SimpleSpan> = items
+            .iter()
+            .map(|field| self.field_span(field.name, field.value.0))
+            .collect();
+        let has_comments = self.has_comment_in(
+            self.content_start(spans[0]),
+            self.closing_after(self.content_end(spans[spans.len() - 1]), b'}')
+                .unwrap_or(0),
+        );
+        if !has_comments && self.fits_flat(&flat) {
             self.push_str("{ ");
             let was = self.flat;
             self.flat = true;
@@ -269,17 +535,25 @@ impl Formatter {
         self.push_str("{");
         self.newline();
         self.with_indent(|f| {
-            for field in items {
-                f.write_indent();
-                f.push_str(field.name);
-                f.push_str(": ");
-                f.fmt_output(&field.value);
-                f.push_str(",");
-                f.newline();
+            for (field, span) in items.iter().zip(&spans) {
+                f.body_item(*span, |f| {
+                    f.push_str(field.name);
+                    f.push_str(": ");
+                    f.fmt_output(&field.value);
+                    f.push_str(",");
+                });
             }
+            f.body_close(spans.last().copied(), b'}');
         });
         self.write_indent();
         self.push_str("}");
+    }
+
+    /// Span of `name: value` from the name's source slice (falls back to the
+    /// value alone for synthetic names).
+    fn field_span(&self, name: &str, value: SimpleSpan) -> SimpleSpan {
+        let start = self.offset_of(name).map_or(value.start, |o| o.min(value.start));
+        SimpleSpan::from(start..value.end)
     }
 
     /// Class / enum-style body: always multiline when non-empty, trailing commas.
@@ -292,11 +566,12 @@ impl Formatter {
         self.newline();
         self.with_indent(|f| {
             for item in items {
-                f.write_indent();
-                f.fmt_expression(item.1.as_ref());
-                f.push_str(",");
-                f.newline();
+                f.body_item(item.0, |f| {
+                    f.fmt_expression(item.1.as_ref());
+                    f.push_str(",");
+                });
             }
+            f.body_close(items.last().map(|i| i.0), b'}');
         });
         self.write_indent();
         self.push_str("}");
@@ -317,8 +592,6 @@ impl Formatter {
 
     fn fmt_expression(&mut self, expr: &Expression<'_>) {
         match expr {
-            Expression::Comment(text) => self.fmt_comment_line(text),
-
             Expression::Integer(n) => self.push_str(&n.to_string()),
             Expression::Float(n) => self.push_str(&format!("{n:?}")),
             Expression::Bool(b) => self.push_str(if *b { "true" } else { "false" }),
@@ -462,7 +735,7 @@ impl Formatter {
             Expression::Cast(expr, ty) => {
                 self.fmt_output(expr);
                 self.push_str(" as ");
-                self.fmt_output(ty);
+                self.fmt_type(ty);
             }
             Expression::CompoundAssign(lhs, op, rhs) => {
                 self.fmt_output(lhs);
@@ -503,6 +776,14 @@ impl Formatter {
                 self.fmt_output(rhs);
             }
 
+            // `[T; N]` in a type position shares the value array node.
+            Expression::Array(items) if self.type_ctx && items.len() == 2 => {
+                self.push_str("[");
+                self.fmt_output(&items[0]);
+                self.push_str("; ");
+                self.fmt_output(&items[1]);
+                self.push_str("]");
+            }
             Expression::List(items) | Expression::Array(items) => {
                 self.fmt_delimited_outputs("[", "]", items, false);
             }
@@ -557,13 +838,13 @@ impl Formatter {
                             self.push_str(name);
                         }
                         Some(t) => {
-                            self.fmt_output(t);
+                            self.fmt_type(t);
                             self.push_str("... ");
                             self.push_str(name);
                         }
                     }
                 } else {
-                    self.fmt_output(ty.as_ref().expect("fixed param"));
+                    self.fmt_type(ty.as_ref().expect("fixed param"));
                     self.push_str(" ");
                     self.push_str(name);
                 }
@@ -604,7 +885,7 @@ impl Formatter {
                 self.push_str(name);
                 if let Some(t) = ty {
                     self.push_str(": ");
-                    self.fmt_output(t);
+                    self.fmt_type(t);
                 }
             }
             Expression::Constant(name, ty) => {
@@ -612,7 +893,7 @@ impl Formatter {
                 self.fmt_output(name);
                 if let Some(t) = ty {
                     self.push_str(": ");
-                    self.fmt_output(t);
+                    self.fmt_type(t);
                 }
             }
             Expression::LetDestructure { pattern, rhs } => {
@@ -628,16 +909,15 @@ impl Formatter {
                 init,
             } => {
                 if *is_const {
-                    self.push_str("static const");
+                    self.push_str("static const ");
                 } else {
-                    self.push_str("static let");
+                    self.push_str("static let ");
                 }
+                self.push_str(name);
                 if let Some(t) = ty {
                     self.push_str(": ");
-                    self.fmt_output(t);
+                    self.fmt_type(t);
                 }
-                self.push_str(" ");
-                self.push_str(name);
                 self.push_str(" = ");
                 self.fmt_output(init);
                 self.push_str(";");
@@ -730,18 +1010,24 @@ impl Formatter {
                 self.fmt_output(scrutinee);
                 self.push_str(" {");
                 self.newline();
+                let spans: Vec<SimpleSpan> = arms
+                    .iter()
+                    .map(|arm| SimpleSpan::from(arm.pattern.0.start..self.node_end(&arm.body)))
+                    .collect();
                 self.with_indent(|f| {
-                    for (i, arm) in arms.iter().enumerate() {
-                        f.write_indent();
-                        f.fmt_pattern(&arm.pattern);
-                        f.push_str(" => ");
-                        f.fmt_match_arm_body(&arm.body);
-                        if i + 1 < arms.len() {
-                            f.push_str(",");
-                        }
-                        f.newline();
+                    for (i, (arm, span)) in arms.iter().zip(&spans).enumerate() {
+                        f.body_item(*span, |f| {
+                            f.fmt_pattern(&arm.pattern);
+                            f.push_str(" => ");
+                            f.fmt_match_arm_body(&arm.body);
+                            if i + 1 < arms.len() {
+                                f.push_str(",");
+                            }
+                        });
                     }
+                    f.body_close(spans.last().copied(), b'}');
                 });
+                self.write_indent();
                 self.push_str("}");
             }
 
@@ -791,7 +1077,7 @@ impl Formatter {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_output(ty);
+                self.fmt_type(ty);
                 self.push_str(";");
             }
             Expression::TypeApp { name, args } => {
@@ -821,7 +1107,7 @@ impl Formatter {
                 self.push_str("forall ");
                 self.fmt_type_params_list(params);
                 self.push_str(". ");
-                self.fmt_output(ty);
+                self.fmt_type(ty);
             }
 
             Expression::AttrDecl {
@@ -840,7 +1126,7 @@ impl Formatter {
                 self.fmt_paren_arg_list(args);
                 if let Some(ret) = returns {
                     self.push_str(" -> ");
-                    self.fmt_output(ret);
+                    self.fmt_type(ret);
                 }
                 self.fmt_where(where_constraints);
                 self.push_str(" ");
@@ -910,7 +1196,7 @@ impl Formatter {
                 self.fmt_field_modifier(*modifier);
                 self.fmt_output(name);
                 self.push_str(": ");
-                self.fmt_output(ty);
+                self.fmt_type(ty);
                 if let Some(i) = init {
                     self.push_str(" = ");
                     self.fmt_output(i);
@@ -959,10 +1245,12 @@ impl Formatter {
                 self.push_str(class);
                 if let Some((for_ty, rest)) = args.split_first() {
                     if !rest.is_empty() {
+                        let was = std::mem::replace(&mut self.type_ctx, true);
                         self.fmt_delimited_outputs("<", ">", rest, false);
+                        self.type_ctx = was;
                     }
                     self.push_str(" for ");
-                    self.fmt_output(for_ty);
+                    self.fmt_type(for_ty);
                 }
                 self.fmt_braced_items(methods);
             }
@@ -981,7 +1269,7 @@ impl Formatter {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_output(ty);
+                self.fmt_type(ty);
                 self.push_str(";");
             }
 
@@ -1008,7 +1296,6 @@ impl Formatter {
 
     fn fmt_statement_line(&mut self, s: &Output<'_>) {
         match s.1.as_ref() {
-            Expression::Comment(text) => self.fmt_comment_line(text),
             Expression::ExprStatement(_) => self.fmt_expression(s.1.as_ref()),
             other => {
                 self.fmt_expression(other);
@@ -1019,36 +1306,56 @@ impl Formatter {
         }
     }
 
-    fn fmt_block_stmt(&mut self, item: &Output<'_>) {
+    /// A block statement without indent / newline (see [`Self::body_item`]).
+    ///
+    /// `is_last`: the value-producing tail of a match-arm / lambda body
+    /// (`{ let a = x + 1; a }`) has no `;` in the source and must not gain
+    /// one; that would turn the block's value into `unit`.
+    fn fmt_block_stmt(&mut self, item: &Output<'_>, is_last: bool) {
         match item.1.as_ref() {
-            Expression::Comment(text) => {
-                self.write_indent();
-                self.fmt_comment_line(text);
-                self.newline();
-            }
-            Expression::Statement(s) => {
-                self.write_indent();
-                self.fmt_statement_line(s);
-                self.newline();
-            }
+            Expression::Statement(s) => self.fmt_statement_line(s),
             other => {
-                self.write_indent();
                 self.fmt_expression(other);
-                if stmt_needs_semicolon(other) {
+                let tail = is_last && !self.src.is_empty() && !self.semicolon_after(item.0);
+                if stmt_needs_semicolon(other) && !tail {
                     self.push_str(";");
                 }
-                self.newline();
             }
         }
     }
 
+    /// Whether the source has a `;` ending the node at `span`.
+    fn semicolon_after(&self, span: SimpleSpan) -> bool {
+        let end = self.content_end(span);
+        if end > 0 && self.src.as_bytes().get(end - 1) == Some(&b';') {
+            return true;
+        }
+        self.closing_after(end, b';').is_some()
+    }
+
     fn fmt_block_braced(&mut self, items: &[Output<'_>]) {
+        let open = items
+            .first()
+            .and_then(|first| self.opening_before(self.content_start(first.0), b'{'));
+        let comments_inside = open.is_some_and(|open| {
+            self.closing_after(self.content_end(items[items.len() - 1].0), b'}')
+                .is_some_and(|close| self.has_comment_in(open, close))
+        });
+        if items.is_empty() && !comments_inside {
+            self.push_str("{}");
+            return;
+        }
         self.push_str("{");
+        if let Some(open) = open {
+            // `fn f() { // why` keeps its comment on the brace line.
+            self.trailing_comment(open + 1);
+        }
         self.newline();
         self.with_indent(|f| {
-            for item in items {
-                f.fmt_block_stmt(item);
+            for (i, item) in items.iter().enumerate() {
+                f.body_item(item.0, |f| f.fmt_block_stmt(item, i + 1 == items.len()));
             }
+            f.body_close(items.last().map(|i| i.0), b'}');
         });
         self.write_indent();
         self.push_str("}");
@@ -1061,29 +1368,73 @@ impl Formatter {
         }
     }
 
+    /// Top level: one blank line between items (a run of `use`s is one
+    /// item). A comment after an item is separated by a blank line; after a
+    /// comment the source spacing is kept, so a comment directly above an
+    /// item stays attached and a header block stays one block.
     fn fmt_program(&mut self, items: &[Output<'_>]) {
-        let mut prev_comment = false;
+        // `None` before the first element, else whether it was a comment.
+        let mut prev: Option<bool> = None;
         let mut i = 0;
         while i < items.len() {
-            let item = &items[i];
-            let is_comment = matches!(item.1.as_ref(), Expression::Comment(_));
-            if i > 0 {
-                self.newline();
-                if !(prev_comment && is_comment) {
-                    self.newline();
-                }
-            }
-            if matches!(item.1.as_ref(), Expression::Use { .. }) {
-                let start = i;
-                while i < items.len() && matches!(items[i].1.as_ref(), Expression::Use { .. }) {
+            let start = self.content_start(items[i].0);
+            self.top_level_comments(start, &mut prev);
+            self.top_level_separator(prev, start);
+            let last = if matches!(items[i].1.as_ref(), Expression::Use { .. }) {
+                let run_start = i;
+                i += 1;
+                // A comment between two `use`s ends the run and stays put.
+                while i < items.len()
+                    && matches!(items[i].1.as_ref(), Expression::Use { .. })
+                    && !self
+                        .pending()
+                        .is_some_and(|c| c.span.start < self.content_start(items[i].0))
+                {
                     i += 1;
                 }
-                self.fmt_use_group(&items[start..i]);
+                self.fmt_use_group(&items[run_start..i]);
+                &items[i - 1]
             } else {
-                self.fmt_expression(item.1.as_ref());
+                self.fmt_expression(items[i].1.as_ref());
                 i += 1;
+                &items[i - 1]
+            };
+            let end = self.content_end(last.0);
+            self.last_end = end;
+            self.trailing_comment(end);
+            self.newline();
+            prev = Some(false);
+        }
+        self.top_level_comments(usize::MAX, &mut prev);
+    }
+
+    fn top_level_comments(&mut self, before: usize, prev: &mut Option<bool>) {
+        while let Some(c) = self.pending() {
+            if c.span.start >= before {
+                break;
             }
-            prev_comment = is_comment;
+            let (start, end, text) = (c.span.start, c.span.end, c.text);
+            self.top_level_separator(*prev, start);
+            self.push_str(text);
+            self.newline();
+            self.last_end = end;
+            self.next_comment += 1;
+            *prev = Some(true);
+        }
+    }
+
+    fn top_level_separator(&mut self, prev: Option<bool>, start: usize) {
+        let source_blank = self
+            .src
+            .get(self.last_end..start)
+            .is_some_and(|gap| gap.matches('\n').count() >= 2);
+        let blank = match prev {
+            None => false,
+            Some(false) => true,
+            Some(true) => source_blank,
+        };
+        if blank {
+            self.out.push('\n');
         }
     }
 
@@ -1216,7 +1567,7 @@ impl Formatter {
                 self.push_str(name);
                 if let Some(t) = ty {
                     self.push_str(": ");
-                    self.fmt_output(t);
+                    self.fmt_type(t);
                 }
                 if let Some(val) = items.get(1) {
                     self.push_str(" = ");
@@ -1228,7 +1579,7 @@ impl Formatter {
                 self.fmt_output(name);
                 if let Some(t) = ty {
                     self.push_str(": ");
-                    self.fmt_output(t);
+                    self.fmt_type(t);
                 }
                 if let Some(val) = items.get(1) {
                     self.push_str(" = ");
@@ -1259,11 +1610,11 @@ impl Formatter {
         self.newline();
         self.with_indent(|f| {
             for item in items {
-                f.write_indent();
-                f.fmt_expression(item.1.as_ref());
-                f.newline();
+                f.body_item(item.0, |f| f.fmt_expression(item.1.as_ref()));
             }
+            f.body_close(items.last().map(|i| i.0), b'}');
         });
+        self.write_indent();
         self.push_str("}");
     }
 
@@ -1278,7 +1629,7 @@ impl Formatter {
         match fields {
             EnumConstructPayload::Unit => {}
             EnumConstructPayload::Tuple(args) => {
-                self.fmt_delimited_outputs("(", ")", args, args.len() == 1);
+                self.fmt_delimited_outputs("(", ")", args, false);
             }
             EnumConstructPayload::Record(parts) => self.fmt_record_list(parts),
         }
@@ -1291,7 +1642,9 @@ impl Formatter {
                 if parts.is_empty() {
                     return;
                 }
-                self.fmt_delimited_outputs("(", ")", parts, parts.len() == 1);
+                let was = std::mem::replace(&mut self.type_ctx, true);
+                self.fmt_delimited_outputs("(", ")", parts, false);
+                self.type_ctx = was;
             }
             EnumVariantPayload::Record(fields) => {
                 self.push_str(" ");
@@ -1306,11 +1659,7 @@ impl Formatter {
             return;
         }
         let flat = {
-            let mut f = Formatter {
-                indent: self.indent,
-                out: String::new(),
-                flat: true,
-            };
+            let mut f = Formatter::measure(self.indent);
             f.push_str("{ ");
             for (i, rf) in fields.iter().enumerate() {
                 if i > 0 {
@@ -1318,12 +1667,21 @@ impl Formatter {
                 }
                 f.push_str(rf.name);
                 f.push_str(": ");
-                f.fmt_output(&rf.value);
+                f.fmt_type(&rf.value);
             }
             f.push_str(" }");
             f.out
         };
-        if self.fits_flat(&flat) {
+        let spans: Vec<SimpleSpan> = fields
+            .iter()
+            .map(|rf| self.field_span(rf.name, rf.value.0))
+            .collect();
+        let has_comments = self.has_comment_in(
+            self.content_start(spans[0]),
+            self.closing_after(self.content_end(spans[spans.len() - 1]), b'}')
+                .unwrap_or(0),
+        );
+        if !has_comments && self.fits_flat(&flat) {
             self.push_str("{ ");
             let was = self.flat;
             self.flat = true;
@@ -1333,7 +1691,7 @@ impl Formatter {
                 }
                 self.push_str(rf.name);
                 self.push_str(": ");
-                self.fmt_output(&rf.value);
+                self.fmt_type(&rf.value);
             }
             self.flat = was;
             self.push_str(" }");
@@ -1342,14 +1700,15 @@ impl Formatter {
         self.push_str("{");
         self.newline();
         self.with_indent(|f| {
-            for rf in fields {
-                f.write_indent();
-                f.push_str(rf.name);
-                f.push_str(": ");
-                f.fmt_output(&rf.value);
-                f.push_str(",");
-                f.newline();
+            for (rf, span) in fields.iter().zip(&spans) {
+                f.body_item(*span, |f| {
+                    f.push_str(rf.name);
+                    f.push_str(": ");
+                    f.fmt_type(&rf.value);
+                    f.push_str(",");
+                });
             }
+            f.body_close(spans.last().copied(), b'}');
         });
         self.write_indent();
         self.push_str("}");
@@ -1367,11 +1726,7 @@ impl Formatter {
                         self.push_str("...");
                     } else {
                         let flat = {
-                            let mut f = Formatter {
-                                indent: self.indent,
-                                out: String::new(),
-                                flat: true,
-                            };
+                            let mut f = Formatter::measure(self.indent);
                             for (i, item) in items.iter().enumerate() {
                                 if i > 0 {
                                     f.push_str(", ");
@@ -1424,7 +1779,7 @@ impl Formatter {
         }
         if let Some(ret) = &decl.returns {
             self.push_str(" -> ");
-            self.fmt_output(ret);
+            self.fmt_type(ret);
         }
         self.push_str(";");
     }
@@ -1443,7 +1798,7 @@ impl Formatter {
                 f.write_indent();
                 f.push_str(name);
                 f.push_str(": ");
-                f.fmt_output(ty);
+                f.fmt_type(ty);
                 f.push_str(",");
                 f.newline();
             }
@@ -1539,11 +1894,7 @@ impl Formatter {
 
     fn fmt_member_chain(&mut self, parts: &[ChainPart<'_>]) {
         let flat = {
-            let mut f = Formatter {
-                indent: self.indent,
-                out: String::new(),
-                flat: true,
-            };
+            let mut f = Formatter::measure(self.indent);
             f.emit_member_chain_flat(parts);
             f.out
         };
@@ -1622,14 +1973,6 @@ impl Formatter {
         }
     }
 
-    fn fmt_comment_line(&mut self, text: &str) {
-        self.push_str("//");
-        if !text.is_empty() {
-            self.push_str(" ");
-            self.push_str(text);
-        }
-    }
-
     /// Pretty-print a [`Expression::Function`], optionally emitting attached docs.
     fn fmt_function(&mut self, func: &Output<'_>, emit_docs: bool) {
         self.fmt_function_expr(func.1.as_ref(), emit_docs);
@@ -1668,7 +2011,7 @@ impl Formatter {
         self.fmt_paren_arg_list(args);
         if let Some(ret) = returns {
             self.push_str(" -> ");
-            self.fmt_output(ret);
+            self.fmt_type(ret);
         }
         self.fmt_where(where_constraints);
         match body {
@@ -1905,6 +2248,13 @@ fn stmt_needs_semicolon(expr: &Expression<'_>) -> bool {
             | Expression::IfLet { .. }
             | Expression::WhileLet { .. }
             | Expression::Defer { .. }
+            // These print their own `;`.
+            | Expression::TypeAlias { .. }
+            | Expression::StaticDecl { .. }
+            | Expression::Module(..)
+            | Expression::Use { .. }
+            | Expression::AssocTypeDecl { .. }
+            | Expression::AssocTypeDef { .. }
     )
 }
 
@@ -2303,5 +2653,82 @@ fn main() { return; }
             "1-tuple must keep trailing comma:\n{formatted}"
         );
         round_trip(src);
+    }
+
+    /// Already-formatted input must come back byte-identical.
+    fn stable(src: &str) {
+        let formatted = format_source(src).expect("format failed");
+        assert_eq!(formatted, src, "formatted:\n{formatted}");
+    }
+
+    #[test]
+    fn header_comment_block_stays_one_block() {
+        stable("// one\n// two\n//\n// four\n\nuse io::stdout;\n");
+    }
+
+    #[test]
+    fn trailing_comments_stay_on_their_line() {
+        stable(
+            "fn f(int a) -> int { // why\n    let x = a + 1; // step\n    return x; // done\n}\n",
+        );
+    }
+
+    #[test]
+    fn single_blank_lines_are_kept_and_runs_collapse() {
+        let src = "fn main() {\n    let a = 1;\n\n\n\n    let b = 2;\n    let c = 3;\n}\n";
+        assert_eq!(
+            format_source(src).unwrap(),
+            "fn main() {\n    let a = 1;\n\n    let b = 2;\n    let c = 3;\n}\n"
+        );
+    }
+
+    #[test]
+    fn comments_in_bodies_and_lists() {
+        stable(concat!(
+            "class P {\n",
+            "    // lead\n",
+            "    pub x: int, // trail\n",
+            "}\n",
+            "\n",
+            "fn main() {\n",
+            "    let xs = [\n",
+            "        1, // one\n",
+            "        // before two\n",
+            "        2,\n",
+            "    ];\n",
+            "    /* closing */\n",
+            "}\n",
+        ));
+    }
+
+    #[test]
+    fn comment_forces_list_to_break() {
+        let formatted = format_source("fn main() {\n    let xs = [1, /* one */ 2];\n}\n").unwrap();
+        assert!(formatted.contains("[\n"), "list must break around its comment:\n{formatted}");
+        assert!(formatted.contains("/* one */"));
+    }
+
+    #[test]
+    fn arm_trailing_comment_stays_on_the_arm() {
+        let src = "fn f(int y) -> int {\n    return match y {\n        1 => {\n            return 1;\n        }, // arm\n        _ => y,\n    };\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.contains("}, // arm"), "{formatted}");
+    }
+
+    #[test]
+    fn block_tail_value_gets_no_semicolon() {
+        let src = "fn f(int y) -> int {\n    return match y {\n        _ => {\n            let a = y + 1;\n            a\n        }\n    };\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.contains("            a\n"), "tail `a` must stay bare:\n{formatted}");
+    }
+
+    #[test]
+    fn static_decl_and_fixed_array_types_round_trip() {
+        stable("static let hits: int = 0;\n\nfn sum3([int; 3] xs) -> int {\n    return xs[0];\n}\n");
+    }
+
+    #[test]
+    fn empty_block_is_compact() {
+        stable("fn g() {}\n");
     }
 }
