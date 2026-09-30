@@ -1300,14 +1300,9 @@ impl Compiler {
             ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            self.bytecode.append(dest);
-            self.bytecode.il_mut().emit_entry_ret_at(
-                kind,
-                arity,
-                label,
-                DebugLoc::unknown(),
-                ret_words,
-            );
+            // Reserved entry (body later): keep the CALL in `dest` so it stays
+            // in order with the enclosing expression's staged operands.
+            dest.emit_root_entry(kind, arity, label, ret_words);
             true
         } else {
             false
