@@ -11,7 +11,7 @@ use compiler::{
     BuiltinExport, Checker, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
     format_ty_for_diag,
 };
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError};
 use lsp_types::{
     Command, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, Diagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, Documentation, DocumentFormattingParams,
@@ -54,6 +54,11 @@ struct ServerState {
     project_index: Option<ProjectIndex>,
     workspace_root: Option<PathBuf>,
     last_typecheck: Vec<(PathBuf, Vec<CoilMessage>)>,
+    /// URIs (as strings: `Uri` is not a sound hash key) whose last
+    /// published diagnostics were non-empty.
+    dirty_uris: HashSet<String>,
+    /// Entry of `last_typecheck`; the project checker holds its span types.
+    last_entry: Option<PathBuf>,
 }
 
 fn main() {
@@ -90,7 +95,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         ),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
-        rename_provider: Some(lsp_types::OneOf::Left(true)),
+        rename_provider: Some(lsp_types::OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         semantic_tokens_provider: Some(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -148,15 +156,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     send_response(&connection, request.id, Value::Null)?;
                     continue;
                 }
-                if let Some(value) = handle_request(&mut state, &request)? {
-                    send_response(&connection, request.id, value)?;
+                match handle_request(&mut state, &request) {
+                    Ok(Some(value)) => send_response(&connection, request.id, value)?,
+                    // Every request needs a reply; silence hangs the client.
+                    Ok(None) => send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::MethodNotFound,
+                        format!("unsupported request `{}`", request.method),
+                    )?,
+                    Err(error) => send_error(
+                        &connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("{}: {error}", request.method),
+                    )?,
                 }
             }
             Message::Notification(notification) => {
                 if notification.method == "exit" {
                     break;
                 }
-                handle_notification(&connection, &mut state, &notification)?;
+                // A bad notification must not take the server down.
+                if let Err(error) = handle_notification(&connection, &mut state, &notification) {
+                    eprintln!("coil-lsp: {}: {error}", notification.method);
+                }
             }
             Message::Response(_) => {}
         }
@@ -174,6 +198,24 @@ fn send_response(
         id,
         result: Some(result),
         error: None,
+    }))?;
+    Ok(())
+}
+
+fn send_error(
+    connection: &Connection,
+    id: RequestId,
+    code: ErrorCode,
+    message: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    connection.sender.send(Message::Response(Response {
+        id,
+        result: None,
+        error: Some(ResponseError {
+            code: code as i32,
+            message,
+            data: None,
+        }),
     }))?;
     Ok(())
 }
@@ -258,12 +300,19 @@ fn handle_request(
         }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
-            let hover = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    hover(document, params.text_document_position_params.position)
-                });
+            let hover = project_hover(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+            .or_else(|| {
+                state
+                    .documents
+                    .get(&params.text_document_position_params.text_document.uri)
+                    .and_then(|document| {
+                        hover(document, params.text_document_position_params.position)
+                    })
+            });
             Some(serde_json::to_value(hover)?)
         }
         "textDocument/completion" => {
@@ -280,12 +329,14 @@ fn handle_request(
         "textDocument/signatureHelp" => {
             let params: lsp_types::SignatureHelpParams =
                 serde_json::from_value(request.params.clone())?;
-            let signature = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    signature_help(document, params.text_document_position_params.position)
-                });
+            let uri = &params.text_document_position_params.text_document.uri;
+            let position = params.text_document_position_params.position;
+            let signature = decl_signature_help(state, uri, position).or_else(|| {
+                state
+                    .documents
+                    .get(uri)
+                    .and_then(|document| signature_help(document, position))
+            });
             Some(serde_json::to_value(signature)?)
         }
         "textDocument/documentHighlight" => {
@@ -350,8 +401,34 @@ fn handle_request(
                 data: tokens,
             }))?)
         }
+        "textDocument/prepareRename" => {
+            let params: lsp_types::TextDocumentPositionParams =
+                serde_json::from_value(request.params.clone())?;
+            let range = state.documents.get(&params.text_document.uri).and_then(|document| {
+                let offset = position_to_byte(&document.text, params.position)?;
+                let word = word_range(&document.text, offset)?;
+                let name = &document.text[word.clone()];
+                if coil_keywords().contains(&name) || name == "self" {
+                    return None;
+                }
+                // Only symbols we can resolve: renaming a stray word would
+                // silently leave its real uses behind.
+                let found = !identifier_locations(
+                    state,
+                    &params.text_document.uri,
+                    params.position,
+                    true,
+                )
+                .is_empty();
+                found.then(|| byte_range(&document.text, &word))
+            });
+            Some(serde_json::to_value(range)?)
+        }
         "textDocument/rename" => {
             let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
+            if !is_valid_identifier(&params.new_name) {
+                return Err(format!("`{}` is not a valid identifier", params.new_name).into());
+            }
             let edits = rename_identifier(
                 state,
                 &params.text_document_position.text_document.uri,
@@ -444,23 +521,94 @@ fn handle_notification(
     Ok(())
 }
 
+/// Publish diagnostics for `uri` and every file in the last project
+/// typecheck (an imported file's parse error belongs to that file). Files
+/// published earlier that are now clean get an empty list.
 fn publish_diagnostics(
     connection: &Connection,
-    state: &ServerState,
+    state: &mut ServerState,
     uri: &Uri,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(document) = state.documents.get(uri) else {
-        return Ok(());
-    };
-    let diagnostics = project_diagnostics(state, uri, document);
+    let mut batch: Vec<(Uri, Vec<Diagnostic>, Option<i32>)> = Vec::new();
+    if let Some(document) = state.documents.get(uri) {
+        batch.push((
+            uri.clone(),
+            project_diagnostics(state, uri, document),
+            Some(document.version),
+        ));
+    }
+    let own_path = uri_path(uri);
+    for (path, messages) in &state.last_typecheck {
+        if own_path.as_ref() == Some(path) {
+            continue;
+        }
+        let Some(file_uri) = path_to_uri(path) else {
+            continue;
+        };
+        let open = state.documents.get(&file_uri);
+        let text = match open {
+            Some(document) => document.text.clone(),
+            None => match state
+                .project_index
+                .as_ref()
+                .and_then(|index| index.source_for(path))
+            {
+                Some(text) => text.to_owned(),
+                None => std::fs::read_to_string(path).unwrap_or_default(),
+            },
+        };
+        let diagnostics = messages
+            .iter()
+            .map(|message| diagnostic(&file_uri, &text, message))
+            .collect();
+        batch.push((file_uri, diagnostics, open.map(|d| d.version)));
+    }
+    let mut now_dirty = HashSet::new();
+    for (file_uri, diagnostics, version) in batch {
+        let key = file_uri.to_string();
+        let dirty = !diagnostics.is_empty();
+        // Skip clean files nobody saw diagnostics for.
+        if !dirty && !state.dirty_uris.contains(&key) && &file_uri != uri {
+            continue;
+        }
+        if dirty {
+            now_dirty.insert(key);
+        }
+        send_diagnostics(connection, file_uri, diagnostics, version)?;
+    }
+    // Clear files that had diagnostics and are no longer in the result.
+    let current: HashSet<String> = state
+        .last_typecheck
+        .iter()
+        .filter_map(|(p, _)| path_to_uri(p).map(|u| u.to_string()))
+        .chain(std::iter::once(uri.to_string()))
+        .collect();
+    for stale in state.dirty_uris.difference(&now_dirty) {
+        if current.contains(stale) {
+            continue;
+        }
+        if let Ok(stale_uri) = stale.parse::<Uri>() {
+            send_diagnostics(connection, stale_uri, Vec::new(), None)?;
+        }
+    }
+    state.dirty_uris = now_dirty;
+    Ok(())
+}
+
+fn send_diagnostics(
+    connection: &Connection,
+    uri: Uri,
+    diagnostics: Vec<Diagnostic>,
+    version: Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     connection
         .sender
         .send(Message::Notification(Notification::new(
             "textDocument/publishDiagnostics".into(),
             PublishDiagnosticsParams {
-                uri: uri.clone(),
+                uri,
                 diagnostics,
-                version: Some(document.version),
+                version,
             },
         )))?;
     Ok(())
@@ -509,6 +657,7 @@ fn refresh_project(state: &mut ServerState, entry: &Path) {
         }
     }
     state.last_typecheck = index.typecheck_entry(entry);
+    state.last_entry = Some(entry.to_path_buf());
 }
 
 fn project_diagnostics(state: &ServerState, uri: &Uri, document: &Document) -> Vec<Diagnostic> {
@@ -705,6 +854,19 @@ fn identifier_locations(
     let Some(name) = identifier_name(document, position) else {
         return Vec::new();
     };
+    // Function locals resolve through lexical scopes, never by name.
+    if let Some(offset) = position_to_byte(&document.text, position)
+        && let Some(binding) = compiler::binding_at(&document.text, offset)
+    {
+        return binding
+            .occurrences()
+            .skip(usize::from(!include_declaration))
+            .map(|range| Location {
+                uri: uri.clone(),
+                range: byte_range(&document.text, range),
+            })
+            .collect();
+    }
     let mut locations = Vec::new();
     let mut seen = HashSet::new();
 
@@ -722,6 +884,12 @@ fn identifier_locations(
     };
 
     let mut visit_index = |path: &Path, source: &str, index: &SymbolIndex| {
+        // A local that happens to share the global's name is not a use of it.
+        let local_starts: HashSet<usize> = compiler::local_bindings(source)
+            .iter()
+            .filter(|binding| binding.name == name)
+            .flat_map(|binding| binding.occurrences().map(|r| r.start).collect::<Vec<_>>())
+            .collect();
         if include_declaration {
             for definition in index.definitions(&name) {
                 if let Some(location) = location_for_file(state, path, &definition.name_range)
@@ -737,6 +905,9 @@ fn identifier_locations(
             }
         }
         for site in index.references(&name) {
+            if local_starts.contains(&site.range.start) {
+                continue;
+            }
             if let Some(location) = location_for_file(state, path, &site.range) {
                 push(location);
             }
@@ -1740,6 +1911,165 @@ fn function_snippet(name: &str, parameters: &[String]) -> String {
     format!("{name}({args})$0")
 }
 
+/// Hover from the project typecheck: cross-file types and docs.
+///
+/// The checker keeps the span tables of the last checked module (the
+/// entry), so re-run the project with this document as entry if needed.
+/// `None` when the buffer does not parse; the single-file path handles that.
+fn project_hover(state: &mut ServerState, uri: &Uri, position: Position) -> Option<Hover> {
+    let path = uri_path(uri)?;
+    state.project_index.as_ref()?;
+    let text = state.documents.get(uri)?.text.clone();
+    let offset = position_to_byte(&text, position)?;
+    let range = word_range(&text, offset)?;
+    let name = text.get(range.clone())?.to_owned();
+    let ast = Pratt::default().parse(&text).ok()?;
+    if state.last_entry.as_ref() != Some(&path) {
+        refresh_project(state, &path);
+    }
+    let checker = state.project_index.as_ref()?.checker();
+    let ty_text = hover_type(&ast, Some(checker), &text, &name, offset, &range);
+    let docs = find_param_docs_for_name(ast.1.as_ref(), &name)
+        .or_else(|| find_docs_for_name(ast.1.as_ref(), &name))
+        .or_else(|| definition_docs(state, uri, position, &name))
+        .or_else(|| {
+            virtual_completion_candidates(ast.1.as_ref())
+                .remove(&name)
+                .map(|(_, docs)| docs)
+        });
+    if ty_text.is_none() && docs.is_none() {
+        return None;
+    }
+    hover_markup(&text, &name, range, ty_text, docs)
+}
+
+/// `///` docs at the definition site of the word under the cursor, which may
+/// live in another (possibly unopened) file.
+fn definition_docs(state: &ServerState, uri: &Uri, position: Position, name: &str) -> Option<String> {
+    goto_definitions(state, uri, position).into_iter().find_map(|location| {
+        let path = uri_path(&location.uri)?;
+        let source = match state.documents.get(&location.uri) {
+            Some(document) => document.text.clone(),
+            None => state
+                .project_index
+                .as_ref()
+                .and_then(|index| index.source_for(&path).map(str::to_owned))
+                .or_else(|| std::fs::read_to_string(&path).ok())?,
+        };
+        let ast = Pratt::default().parse(&source).ok()?;
+        find_docs_for_name(ast.1.as_ref(), name)
+    })
+}
+
+/// Type text for `name` at `offset`, most specific source first.
+fn hover_type(
+    ast: &Output<'_>,
+    checker: Option<&Checker>,
+    source: &str,
+    name: &str,
+    offset: usize,
+    range: &Range<usize>,
+) -> Option<String> {
+    let show = |checker: &Checker, ty: &compiler::Ty| format_ty_for_diag(checker.subst(), ty);
+    // `let x: T = …` names its own type; `let x = e` has the type of `e`.
+    let binding = let_binding_at(ast, name, range.start);
+    if let Some((Some(annotation), _)) = &binding {
+        return source.get(annotation.clone()).map(|text| text.trim().to_owned());
+    }
+    let checker = checker?;
+    if let Some(ty) = checker.lookup_for_codegen_span(range.start, range.end) {
+        return Some(show(checker, &ty));
+    }
+    if let Some((None, Some(value))) = &binding
+        && let Some(ty) = checker.lookup_for_codegen_span(value.start, value.end)
+    {
+        return Some(show(checker, &ty));
+    }
+    if let Some(text) = find_parameter_type_for_name(ast.1.as_ref(), name) {
+        return Some(text);
+    }
+    // Member names (`p.sum`) have no node of their own: use the smallest
+    // enclosing access / call. Statement spans type as `unit`; skip them.
+    let mut enclosing = Vec::new();
+    collect_nodes_containing(ast, offset, &mut enclosing);
+    enclosing.sort_by_key(|node| node.0.end - node.0.start);
+    for node in enclosing {
+        if !matches!(
+            node.1.as_ref(),
+            Expression::Access(..)
+                | Expression::OptionalAccess(..)
+                | Expression::Call { .. }
+                | Expression::QualifiedAccess { .. }
+                | Expression::Instantiate(..)
+        ) {
+            continue;
+        }
+        if let Some(ty) = checker.lookup_for_codegen_span(node.0.start, node.0.end) {
+            return Some(show(checker, &ty));
+        }
+    }
+    checker
+        .env()
+        .lookup(name)
+        .map(|scheme| show(checker, &scheme.ty))
+}
+
+/// `(annotation, initializer)` spans of a `let`.
+type LetSpans = (Option<Range<usize>>, Option<Range<usize>>);
+
+/// For `let name[: T] [= value]` whose name starts at `name_start`, the
+/// annotation and initializer spans.
+fn let_binding_at(
+    ast: &Output<'_>,
+    name: &str,
+    name_start: usize,
+) -> Option<LetSpans> {
+    let mut found = None;
+    visit_nodes(ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::Fragment(items) = node.1.as_ref() else {
+            return;
+        };
+        let Some((span, head)) = items.first() else {
+            return;
+        };
+        let Expression::Variable(var, annotation) = head.as_ref() else {
+            return;
+        };
+        // `let` + space, then the name: the name sits inside the head span
+        // and before the annotation / initializer.
+        let before_rest = annotation
+            .as_ref()
+            .map(|a| a.0.start)
+            .or_else(|| items.get(1).map(|v| v.0.start))
+            .unwrap_or(span.end);
+        if *var == name && name_start >= span.start && name_start < before_rest {
+            found = Some((
+                annotation.as_ref().map(|a| a.0.start..a.0.end),
+                items.get(1).map(|v| v.0.start..v.0.end),
+            ));
+        }
+    });
+    found
+}
+
+/// Pre-order walk of every node.
+fn visit_nodes<'a, 'e>(node: &'a Output<'e>, f: &mut dyn FnMut(&'a Output<'e>)) {
+    f(node);
+    node.1.for_each_child(&mut |child| visit_nodes(child, f));
+}
+
+fn collect_nodes_containing<'a, 'e>(node: &'a Output<'e>, offset: usize, out: &mut Vec<&'a Output<'e>>) {
+    if offset < node.0.start || offset > node.0.end {
+        return;
+    }
+    out.push(node);
+    node.1
+        .for_each_child(&mut |child| collect_nodes_containing(child, offset, out));
+}
+
 fn hover(document: &Document, position: Position) -> Option<Hover> {
     let offset = position_to_byte(&document.text, position)?;
     let range = word_range(&document.text, offset)?;
@@ -2077,6 +2407,190 @@ fn find_param_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<S
     }
 }
 
+/// Innermost unclosed `(` before the end of `prefix` (skipping strings and
+/// `//` comments) and the number of top-level commas after it.
+fn enclosing_call_paren(prefix: &str) -> Option<(usize, u32)> {
+    let mut stack: Vec<(usize, u32)> = Vec::new();
+    let bytes = prefix.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'(' | b'[' | b'{' => stack.push((i, 0)),
+            b')' | b']' | b'}' => {
+                stack.pop();
+            }
+            b',' => {
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let &(open, commas) = stack.last()?;
+    (bytes[open] == b'(').then_some((open, commas))
+}
+
+/// Signature of the call around the cursor, read from the callee's
+/// declaration (possibly in another file).
+fn decl_signature_help(state: &ServerState, uri: &Uri, position: Position) -> Option<SignatureHelp> {
+    let text = &state.documents.get(uri)?.text;
+    let offset = position_to_byte(text, position)?;
+    let (open, commas) = enclosing_call_paren(&text[..offset])?;
+    let name_end = text[..open].trim_end().len();
+    let name_start = text[..name_end]
+        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .map_or(0, |i| i + 1);
+    let name = &text[name_start..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let name_position = byte_position(text, name_start);
+    let mut sources: Vec<String> = goto_definitions(state, uri, name_position)
+        .into_iter()
+        .filter_map(|location| {
+            let path = uri_path(&location.uri)?;
+            state
+                .documents
+                .get(&location.uri)
+                .map(|d| d.text.clone())
+                .or_else(|| {
+                    state
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.source_for(&path).map(str::to_owned))
+                })
+                .or_else(|| std::fs::read_to_string(&path).ok())
+        })
+        .collect();
+    // Methods have no goto target yet: fall back to this file and the
+    // indexed project files. The call being typed rarely parses; blank its
+    // lines (same length, so declaration spans stay valid).
+    sources.push(text.clone());
+    let line_start = text[..open].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);
+    let mut repaired = text.clone().into_bytes();
+    for byte in &mut repaired[line_start..line_end] {
+        if *byte != b'\n' {
+            *byte = b' ';
+        }
+    }
+    sources.push(String::from_utf8(repaired).unwrap_or_default());
+    if let Some(index) = &state.project_index {
+        for path in index.indexed_paths() {
+            if let Some(source) = index.source_for(path) {
+                sources.push(source.to_owned());
+            }
+        }
+    }
+    let signature = sources
+        .iter()
+        .find_map(|source| function_signature(source, name))?;
+    let active = commas.min(signature.parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: signature.label,
+            documentation: signature.docs.map(|docs| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: docs,
+                })
+            }),
+            parameters: Some(signature.parameters),
+            active_parameter: Some(active),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active),
+    })
+}
+
+struct FnSignature {
+    label: String,
+    docs: Option<String>,
+    parameters: Vec<ParameterInformation>,
+}
+
+/// `name(T a, U b) -> R` for the first `fn name` declared in `source`.
+fn function_signature(source: &str, name: &str) -> Option<FnSignature> {
+    let ast = Pratt::default().parse(source).ok()?;
+    let mut found = None;
+    visit_nodes(&ast, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::Function {
+            name: fn_name,
+            docs,
+            args,
+            returns,
+            ..
+        } = node.1.as_ref()
+        else {
+            return;
+        };
+        if *fn_name != name {
+            return;
+        }
+        let mut parameters = Vec::new();
+        if let Expression::Fragment(items) = args.1.as_ref() {
+            for (span, item) in items {
+                let Expression::Argument { docs, .. } = item.as_ref() else {
+                    continue;
+                };
+                // Source text of the parameter, minus its `///` lines.
+                let label = source[span.start..span.end]
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("///"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parameters.push(ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(label),
+                    documentation: docs_markdown(docs).map(|value| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value,
+                        })
+                    }),
+                });
+            }
+        }
+        let params_text = parameters
+            .iter()
+            .map(|p| match &p.label {
+                lsp_types::ParameterLabel::Simple(label) => label.clone(),
+                lsp_types::ParameterLabel::LabelOffsets(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = returns
+            .as_ref()
+            .map(|r| format!(" -> {}", source[r.0.start..r.0.end].trim()))
+            .unwrap_or_default();
+        found = Some(FnSignature {
+            label: format!("{name}({params_text}){ret}"),
+            docs: docs_markdown(docs),
+            parameters,
+        });
+    });
+    found
+}
+
 fn signature_help(document: &Document, position: Position) -> Option<SignatureHelp> {
     let source = &document.text;
     let offset = position_to_byte(source, position)?;
@@ -2401,12 +2915,23 @@ fn occurrences(source: &str, word: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !coil_keywords().contains(&name)
+        && name != "self"
+}
+
 fn coil_keywords() -> &'static [&'static str] {
     &[
         "fn", "let", "const", "class", "enum", "type", "if", "else", "for", "while", "in",
         "match", "return", "true", "false", "use", "mod", "pub", "static", "async", "defer",
         "raise", "panic", "yield", "break", "continue", "where", "impl", "trait", "extern", "as",
-        "readonly", "new", "default", "typeof", "resume", "with", "done",
+        "readonly", "new", "default", "typeof", "resume", "with", "done", "attr", "struct",
+        "test", "forall", "from",
     ]
 }
 
@@ -3611,5 +4136,101 @@ fn main() {
         let uri: Uri = "file:///tmp/my%20pkg/src/lib.hy".parse().unwrap();
         let path = uri_path(&uri).expect("path");
         assert!(path.ends_with("my pkg/src/lib.hy"), "{path:?}");
+    }
+
+    fn state_with(source: &str) -> (ServerState, Uri) {
+        let mut state = ServerState::default();
+        let uri: Uri = "file:///tmp/coil-lsp-test.hy".parse().unwrap();
+        state.documents.insert(
+            uri.clone(),
+            Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
+        );
+        (state, uri)
+    }
+
+    fn renamed_ranges(source: &str, edits: lsp_types::WorkspaceEdit, uri: &Uri) -> Vec<Range<usize>> {
+        let mut ranges: Vec<_> = edits
+            .changes
+            .unwrap_or_default()
+            .remove(uri)
+            .unwrap_or_default()
+            .iter()
+            .map(|edit| lsp_range_to_byte_range(source, edit.range).unwrap())
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        ranges
+    }
+
+    #[test]
+    fn rename_local_includes_declaration_and_stays_in_scope() {
+        let source = "fn a() {\n    let p = 1;\n    let _ = p;\n}\nfn b() {\n    let p = 2;\n    let _ = p;\n}\n";
+        let (state, uri) = state_with(source);
+        let use_offset = source.find("_ = p").unwrap() + 4;
+        let edits = rename_identifier(&state, &uri, byte_position(source, use_offset), "q");
+        let decl = source.find("let p").unwrap() + 4;
+        assert_eq!(
+            renamed_ranges(source, edits, &uri),
+            vec![decl..decl + 1, use_offset..use_offset + 1],
+            "only fn a's `p`, declaration included"
+        );
+    }
+
+    #[test]
+    fn rename_global_skips_same_named_local() {
+        let source = "fn helper() -> int { return 1; }\nfn main() {\n    let _ = helper();\n}\nfn other() {\n    let helper = 2;\n    let _ = helper;\n}\n";
+        let (state, uri) = state_with(source);
+        let call = source.find("helper()").unwrap();
+        let edits = rename_identifier(&state, &uri, byte_position(source, call), "util");
+        let ranges = renamed_ranges(source, edits, &uri);
+        assert_eq!(ranges.len(), 2, "decl + call only: {ranges:?}");
+        assert!(ranges.iter().all(|r| r.end <= source.find("fn other").unwrap()));
+    }
+
+    #[test]
+    fn identifier_validation_rejects_keywords_and_junk() {
+        assert!(is_valid_identifier("value_2"));
+        assert!(!is_valid_identifier("2value"));
+        assert!(!is_valid_identifier("let"));
+        assert!(!is_valid_identifier("self"));
+        assert!(!is_valid_identifier("a-b"));
+        assert!(!is_valid_identifier(""));
+    }
+
+    #[test]
+    fn hover_type_of_let_uses_initializer_not_statement() {
+        let source = "fn two() -> int { return 2; }\nfn main() {\n    let s = two();\n    let t: string = \"x\";\n}\n";
+        let ast = Pratt::default().parse(source).unwrap();
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&ast);
+        let at = |needle: &str| {
+            let offset = source.find(needle).unwrap() + 4;
+            let range = offset..offset + 1;
+            hover_type(&ast, Some(&checker), source, &source[range.clone()], offset, &range)
+        };
+        assert_eq!(at("let s").as_deref(), Some("int"));
+        assert_eq!(at("let t").as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn call_paren_scan_handles_nesting_strings_and_commas() {
+        assert_eq!(enclosing_call_paren("f(a, g(b), "), Some((1, 2)));
+        assert_eq!(enclosing_call_paren("f(g(x"), Some((3, 0)));
+        assert_eq!(enclosing_call_paren("f(\"(,\", "), Some((1, 1)));
+        assert_eq!(enclosing_call_paren("f(a)"), None);
+        assert_eq!(enclosing_call_paren("f([1, "), None);
+    }
+
+    #[test]
+    fn signature_help_reads_declaration_with_return_type() {
+        let source = "fn add(int a, int b) -> int { return a + b; }\nfn main() {\n    let _ = add(1, add(2, \n}\n";
+        let (state, uri) = state_with(source);
+        let offset = source.find("add(2, ").unwrap() + "add(2, ".len();
+        let help = decl_signature_help(&state, &uri, byte_position(source, offset)).expect("help");
+        assert_eq!(help.signatures[0].label, "add(int a, int b) -> int");
+        assert_eq!(help.active_parameter, Some(1));
     }
 }
