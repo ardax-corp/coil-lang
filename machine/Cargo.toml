@@ -5,8 +5,12 @@ edition = "2024"
 
 [features]
 default = []
+# `debugger` / `coverage` gate the hook state and APIs only. The dispatch
+# loop picks its hooked instantiation (`execute::<true>`) only while a
+# controller / collector is attached, so workspace feature unification adds
+# no per-instruction cost to `coil` (#558).
 debugger = []
-# Per-instruction hit counts for `coil-test --coverage`. Never in `coil`.
+# Per-instruction hit counts for `coil-test --coverage`.
 coverage = []
 vm_profile = []
 # Collect at every allocation safepoint (GC soundness testing only).
