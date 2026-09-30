@@ -1558,12 +1558,14 @@ impl Pipeline {
         let functions = self.compiler_lazy_mut().function_symbols();
         let debug = self.program_debug();
         let (classes, enums) = self.compiler_lazy().debug_type_tables();
+        let il_post = self.compiler_lazy_mut().take_post_il_snapshot();
         Ok(crate::DissectArtifacts {
             bytecode: std::mem::take(&mut self.bytecode),
             constants: self.compiler_lazy_mut().constants().to_vec(),
             strings: self.compiler_lazy_mut().strings().to_vec(),
             functions,
             il,
+            il_post,
             debug,
             classes,
             enums,

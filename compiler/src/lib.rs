@@ -14,6 +14,7 @@ pub(crate) mod mir;
 pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
+pub use mir::{start_mir_capture, take_mir_capture};
 mod host_grants;
 mod local_scopes;
 mod lockfile;
@@ -29,7 +30,8 @@ mod codegen;
 
 #[cfg(any(test, feature = "dissect"))]
 pub use dissect::{
-    DissectArtifacts, FnSym, IlSnapshot, filter_symbols, format_bytecode, format_bytecode_section,
+    DissectArtifacts, FnSym, IlSnapshot, filter_symbols, format_bytecode, format_bytecode_annotated,
+    format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
 pub use host_grants::HostGrants;

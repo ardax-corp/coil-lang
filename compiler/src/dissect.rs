@@ -50,6 +50,8 @@ pub struct DissectArtifacts {
     pub strings: Vec<String>,
     pub functions: Vec<FnSym>,
     pub il: Option<IlSnapshot>,
+    /// Optimized, pre-fuse IL (with `il`).
+    pub il_post: Option<IlSnapshot>,
     pub debug: ProgramDebug,
     /// Class fields and enum variants for rendering heap values.
     pub classes: crate::debug_vars::DebugClassTable,
@@ -349,6 +351,62 @@ fn format_operands(
             let (flags, dest, arr, idx) = byte.dense_abc_parts();
             format!("flags={flags} dest={dest} arr={arr} idx={idx}")
         }
+        // Dense register ops: `rN` is frame slot N.
+        Instruction::DenseConst => {
+            let (_ty, dest, payload, pool) = byte.dense_const_parts();
+            if pool {
+                let bits = constants.get(payload as usize).copied().unwrap_or(0);
+                format!("r{dest} = pool[{payload}] ({bits:#x} / {})", f64::from_bits(bits))
+            } else {
+                format!("r{dest} = {}", payload as i16)
+            }
+        }
+        Instruction::DenseMove => {
+            let (d, s) = byte.dense_move_parts();
+            format!("r{d} = r{s}")
+        }
+        Instruction::DenseArrayLen => {
+            let (d, a) = byte.dense_move_parts();
+            format!("r{d} = len(r{a})")
+        }
+        Instruction::DenseUnary | Instruction::DenseCast => {
+            let (kind, d, s) = byte.dense_unary_parts();
+            format!("kind={kind} r{d} = r{s}")
+        }
+        Instruction::DenseIndex => {
+            let (flags, d, arr, idx) = byte.dense_abc_parts();
+            format!("r{d} = r{arr}[r{idx}] flags={flags}")
+        }
+        Instruction::DenseStoreIndex => {
+            let (flags, v, arr, idx) = byte.dense_abc_parts();
+            format!("r{arr}[r{idx}] = r{v} flags={flags}")
+        }
+        Instruction::DenseCmp => {
+            let (kind, d, a, b) = byte.dense_abc_parts();
+            format!("kind={kind} r{d} = r{a} ? r{b}")
+        }
+        Instruction::DenseFieldLoad | Instruction::DenseFieldStore | Instruction::DenseArrayPush => {
+            let (kind, d, a, b) = byte.dense_abc_parts();
+            format!("kind={kind} r{d} r{a} r{b}")
+        }
+        Instruction::DenseMake => {
+            let (kind, dest, arity, base) = byte.dense_abc_parts();
+            let what = match kind {
+                common::dense::MAKE_ARRAY => "array",
+                common::dense::MAKE_TUPLE => "tuple",
+                common::dense::MAKE_ENUM => "enum",
+                _ => "?",
+            };
+            format!("r{dest} = {what}(r{base}..r{})", base + arity)
+        }
+        Instruction::DensePush => {
+            let (arity, base) = byte.dense_move_parts();
+            format!("push r{base}..r{}", base + arity)
+        }
+        Instruction::DenseMakeObject => {
+            let (dest, nfields, type_id) = common::dense::unpack_make_object(byte.operand_u32());
+            format!("r{dest} = new #{type_id} ({nfields} fields)")
+        }
         _ => {
             let o = byte.operand_u32();
             if o == 0 {
@@ -554,6 +612,49 @@ pub fn format_bytecode(artifacts: &DissectArtifacts, pat: Option<&str>) -> Resul
     Ok(out)
 }
 
+/// [`format_bytecode`] with the source line interleaved wherever it
+/// changes: `;; path:line │ text`, read from the recorded source files.
+pub fn format_bytecode_annotated(
+    artifacts: &DissectArtifacts,
+    pat: Option<&str>,
+) -> Result<String, String> {
+    let plain = format_bytecode(artifacts, pat)?;
+    let debug = &artifacts.debug;
+    // Per file: its text and the byte offset of each line start.
+    let mut files: HashMap<u32, Option<(String, Vec<usize>)>> = HashMap::new();
+    let mut out = String::new();
+    let mut last: Option<(u32, usize)> = None;
+    for line in plain.lines() {
+        if line.starts_with(";; fn ") {
+            last = None;
+        }
+        let pc = line.get(..5).and_then(|p| p.parse::<usize>().ok());
+        if let Some(loc) = pc.and_then(|pc| debug.debug_locs.get(pc)).filter(|l| l.is_known()) {
+            let file = files.entry(loc.file).or_insert_with(|| {
+                let path = debug.source_files.get(loc.file as usize)?;
+                let text = std::fs::read_to_string(path).ok()?;
+                let starts = std::iter::once(0)
+                    .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+                    .collect();
+                Some((text, starts))
+            });
+            if let Some((text, starts)) = file {
+                let line_no = starts.partition_point(|&s| s <= loc.start_byte as usize) - 1;
+                let end = starts.get(line_no + 1).copied().unwrap_or(text.len());
+                let src = text[starts[line_no]..end].trim();
+                if last != Some((loc.file, line_no)) && !src.is_empty() {
+                    last = Some((loc.file, line_no));
+                    let path = &debug.source_files[loc.file as usize];
+                    let _ = writeln!(out, "       ;; {path}:{} │ {src}", line_no + 1);
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 pub(crate) fn format_il_op(op: &IlOp) -> String {
     match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => format!("Label L{}", l.0),
@@ -733,6 +834,7 @@ mod tests {
                 },
             ],
             il: None,
+            il_post: None,
             debug: ProgramDebug::default(),
             classes: Default::default(),
             enums: Default::default(),

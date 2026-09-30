@@ -1005,6 +1005,9 @@ pub struct Compiler {
     fn_defining_module: HashMap<String, String>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
+    /// `dissect --il-post` snapshot from the last capturing finalize.
+    #[cfg(any(test, feature = "dissect"))]
+    post_il_snapshot: Option<crate::dissect::IlSnapshot>,
     /// Debug variables per function (see [`crate::debug_vars`]).
     fn_debug_vars: HashMap<String, Vec<crate::debug_vars::DebugVar>>,
     /// Source end offset of each enclosing scope (block / function body).
@@ -1149,6 +1152,8 @@ impl Default for Compiler {
             fn_inline_spans: HashMap::new(),
             fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
+            #[cfg(any(test, feature = "dissect"))]
+            post_il_snapshot: None,
             fn_debug_vars: HashMap::new(),
             debug_scope_ends: Vec::new(),
             debug_stmt_start: 0,
