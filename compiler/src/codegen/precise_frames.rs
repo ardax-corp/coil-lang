@@ -489,11 +489,6 @@ impl FrameState {
         self.ptr[p] = must;
     }
 
-    /// Slot write of an allocation result (dense `DenseMake*`).
-    fn set_ptr(&mut self, p: usize) -> Option<()> {
-        self.set_copy(p, true, true)
-    }
-
     /// Slot write that copies another word's heap / pointer state.
     fn set_copy(&mut self, p: usize, heap: bool, must: bool) -> Option<()> {
         self.set(p, heap)?;
@@ -501,9 +496,9 @@ impl FrameState {
         Some(())
     }
 
-    /// Push of an allocation result.
-    fn push_ptr(&mut self) -> Option<()> {
-        self.push_copy(true, true)
+    /// Whether frame slot `slot` may hold a heap word right now.
+    fn slot_may_hold_heap(&self, slot: usize) -> bool {
+        self.bits.get(slot).copied().unwrap_or(false)
     }
 
     /// Push that copies a word's heap / pointer state; an inexact cursor
@@ -1160,7 +1155,45 @@ struct Step {
 }
 
 /// Apply one op to `st`. `None` refuses the body (unmodeled op).
+/// `BITAND` / `BITOR` / `XOR` as a fused binary op: may carry a tagged
+/// heap word through (see the plain-op case in [`transfer`]).
+fn tag_bit_op(op: u8) -> bool {
+    op == Instruction::BITAND as u8 || op == Instruction::BITOR as u8 || op == Instruction::XOR as u8
+}
+
+/// Push an allocation's result and record the safepoint row. The collector
+/// runs inside the allocation, before the result is pushed, so the result
+/// word is recorded as a heap word that may still hold anything (not a
+/// must-pointer); it becomes a must-pointer for the ops that follow (#555).
+fn record_alloc(st: &mut FrameState, step: &mut Step) -> Option<()> {
+    st.push(true)?;
+    step.record = Some(st.heap_slots(st.hi, true));
+    // From here on the word (and the operand it is) definitely holds the
+    // new object: the same marks `push_copy(true, true)` would have set.
+    let pushed = st.pushed.clone();
+    for p in pushed {
+        st.set_must(p, true);
+    }
+    if let Some(top) = st.ops.last_mut() {
+        *top = true;
+    }
+    Some(())
+}
+
+/// [`record_alloc`] for a dense allocation that writes its result to slot
+/// `dest`: the slot is recorded as a heap word that may hold anything.
+fn record_dense_alloc(st: &mut FrameState, step: &mut Step, dest: usize) -> Option<()> {
+    st.set_copy(dest, true, false)?;
+    step.record = Some(st.heap_slots(st.hi, true));
+    st.set_must(dest, true);
+    Some(())
+}
+
 fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Option<Step> {
+    // Per-op scratch (liveness reads it after the step; `record_alloc` marks
+    // the words this op pushed).
+    st.popped = st.lo;
+    st.pushed.clear();
     let b = body.bytecode.get(pc)?;
     let tail_word = body.bytecode.get(pc + 1);
     let next_receives = receives_send(body.bytecode, pc + 1);
@@ -1193,9 +1226,18 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             }
         }
         STORE | StorePop => {
-            for i in 0..b.load_store_count() {
+            // The VM pops every listed value first, then keeps the cursor at
+            // or past the highest written slot (`dispatch::store`). Popping
+            // and storing one slot at a time left the cursor one word low
+            // when a lower slot came last (`STORE s0=1,s1=0`), so the next
+            // push was modelled at the wrong word (#555).
+            let n = b.load_store_count();
+            let mut popped = Vec::with_capacity(n);
+            for _ in 0..n {
+                popped.push(st.pop_copy()?);
+            }
+            for (i, (heap, must)) in popped.into_iter().enumerate() {
                 let slot = b.load_store_slot_at(i) as usize;
-                let (heap, must) = st.pop_copy()?;
                 st.store_copy(slot, heap, must)?;
             }
         }
@@ -1209,21 +1251,39 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.pop()?;
         }
         LoadStatic => st.push(true)?,
-        ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
-        | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | XOR
-        | AND | OR => {
+        // Bit ops build and strip the heap-heap niche tag (`Result::Err` is
+        // `ptr | 1`, its payload `word ^ 1`), so their result may still name
+        // an object when an operand did (#555). Every other op is a scalar.
+        BITAND | BITOR | XOR => {
+            let (b_heap, _) = st.pop_copy()?;
+            let (a_heap, _) = st.pop_copy()?;
+            st.push(a_heap || b_heap)?;
+        }
+        ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | ADDF | SUBF
+        | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | AND | OR => {
             st.pop_n(2)?;
             st.push(false)?;
         }
-        BinSlotImm | BinSlotSlot => st.push(false)?,
+        BinSlotImm => {
+            let (op, slot, _) = b.bin_slot_imm_parts();
+            let heap = tag_bit_op(op) && st.slot_may_hold_heap(slot);
+            st.push(heap)?;
+        }
+        BinSlotSlot => {
+            let (op, a, c) = b.bin_slot_slot_parts();
+            let heap = tag_bit_op(op) && (st.slot_may_hold_heap(a) || st.slot_may_hold_heap(c));
+            st.push(heap)?;
+        }
         BinSlotImmStore => {
-            let (_, _, pool_idx) = b.bin_slot_imm_store_parts();
+            let (op, slot, pool_idx) = b.bin_slot_imm_store_parts();
             let dest = (constants.get(pool_idx)? >> 32) as usize;
-            st.store(dest, false)?;
+            let heap = tag_bit_op(op) && st.slot_may_hold_heap(slot);
+            st.store(dest, heap)?;
         }
         BinSlotSlotStore => {
-            let (_, _, _, dest) = b.bin_slot_slot_store_parts();
-            st.store(dest, false)?;
+            let (op, a, c, dest) = b.bin_slot_slot_store_parts();
+            let heap = tag_bit_op(op) && (st.slot_may_hold_heap(a) || st.slot_may_hold_heap(c));
+            st.store(dest, heap)?;
         }
         JMP => {
             step.fallthrough = false;
@@ -1248,8 +1308,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         // returns the new enum.
         MakeEnumReturn | MakeEnumReturnK => {
             st.pop_n(b.make_arity() as usize)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
             step.fallthrough = false;
         }
         CALL => {
@@ -1326,20 +1385,17 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             if matches!(inst, MakePolyFnCapture) {
                 st.pop_n((b.operand_u32() & 0xFF) as usize + 1)?;
             }
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         // Pops `[captures..., filled..., mask, entry]`, pushes the closure.
         MakeFn => {
             let op = b.operand_u32();
             st.pop_n((op & 0xFF) as usize + ((op >> 8) & 0xFF) as usize + 2)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         MakeCoro => {
             st.pop_n(b.call_parts().0)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         HostInvoke => {
             let arity = (b.operand_u32() & 0xFFFF) as usize;
@@ -1349,40 +1405,35 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         MakeTuple | MakeArray | MakeEnum => {
             st.pop_n((b.operand_u32() & 0xFFFF) as usize)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         MakeTupleK | MakeEnumK | MakeArrayK => {
             st.pop_n(b.make_arity() as usize)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         InitTyped | INIT | STRING => {
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         BoxValue | STRINGIFY => {
             st.pop()?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         FORMAT => {
             let n = b.operand_u32() as usize;
             if n != 0 {
                 st.pop_n(n + 1)?;
-                st.push_ptr()?;
+                record_alloc(st, &mut step)?;
+            } else {
+                step.record = Some(st.heap_slots(st.hi, true));
             }
-            step.record = Some(st.heap_slots(st.hi, true));
         }
         MakeDict => {
             st.pop_n(2 * (b.operand_u32() & 0xFFFF) as usize)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         ArrayPush => {
             st.pop_n(2)?;
-            st.push_ptr()?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_alloc(st, &mut step)?;
         }
         UnboxValue | LoadField => {
             st.pop()?;
@@ -1447,13 +1498,11 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         // `DenseMakeK` keeps `dest` in the same byte as `DenseMake`.
         DenseMake | DenseMakeK | DenseArrayPush => {
-            st.set_ptr(b.dense_abc_parts().1)?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_dense_alloc(st, &mut step, b.dense_abc_parts().1)?;
         }
         DenseMakeObject => {
             let (dest, _, _) = common::dense::unpack_make_object(b.operand_u32());
-            st.set_ptr(dest as usize)?;
-            step.record = Some(st.heap_slots(st.hi, true));
+            record_dense_alloc(st, &mut step, dest as usize)?;
         }
         DenseBin2 | DenseBinJmpf | DenseIndexJmpf => {
             if pc + 2 > end {
@@ -1589,6 +1638,49 @@ mod tests {
     }
 
     #[test]
+    fn niche_tag_bit_ops_keep_the_heap_word() {
+        // `Result::Err(new C(..))` is `ptr | 1` and its payload `word ^ 1`
+        // (#555): [2] InitTyped [3] store 0 [4] load 0 [5] CONST 1 [6] BITOR
+        // [7] store 1 [8] load 1 [9] CONST 1 [10] XOR [11] store 2
+        // [12] InitTyped (safepoint) [13] RETURN
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(0),
+            load(0),
+            konst(1),
+            op(Instruction::BITOR),
+            store(1),
+            load(1),
+            konst(1),
+            op(Instruction::XOR),
+            store(2),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert_eq!(slots_at(&maps, 12), Some(vec![0, 1, 2, 3]));
+        // Tagged words are roots but not rewritable must-pointers; the
+        // allocating op's own result word is not one either.
+        assert_eq!(must_at(&maps, 12), Some(vec![0]));
+    }
+
+    #[test]
+    fn arithmetic_on_a_heap_word_is_a_scalar() {
+        // [2] InitTyped [3] store 0 [4] load 0 [5] CONST 1 [6] ADD [7] store 1
+        // [8] InitTyped [9] RETURN
+        let maps = bind(&[
+            op(Instruction::InitTyped),
+            store(0),
+            load(0),
+            konst(1),
+            op(Instruction::ADD),
+            store(1),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        assert_eq!(slots_at(&maps, 8), Some(vec![0, 2]));
+    }
+
+    #[test]
     fn call_records_caller_words_below_args() {
         let maps = bind(&[
             konst(1),
@@ -1617,7 +1709,9 @@ mod tests {
             op(Instruction::POP),
             op(Instruction::RETURN),
         ]);
-        assert_eq!(must_at(&maps, 6), Some(vec![0, 1, 2]));
+        // The result word of the allocating op is not a must-pointer at its
+        // own safepoint (the collector runs before it is pushed).
+        assert_eq!(must_at(&maps, 6), Some(vec![0, 1]));
     }
 
     #[test]
@@ -1743,7 +1837,7 @@ mod tests {
         // After resume: saved local 0, the sent value in slot 1, a new object.
         assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
         // Allocations are definitely pointers; the sent value is not known.
-        assert_eq!(must_at(&maps, 7), Some(vec![0, 2]));
+        assert_eq!(must_at(&maps, 7), Some(vec![0]));
     }
 
     #[test]
@@ -1845,9 +1939,9 @@ mod tests {
             params: vec![common::WORD_POINTER],
             ret: common::WORD_UNKNOWN,
         };
-        assert_eq!(must_at(&bind_with(&body, ptr), 2), Some(vec![0, 1]));
+        assert_eq!(must_at(&bind_with(&body, ptr), 2), Some(vec![0]));
         // Without a signature the param is only a may-pointer.
-        assert_eq!(must_at(&bind(&body), 2), Some(vec![1]));
+        assert_eq!(must_at(&bind(&body), 2), Some(vec![]));
     }
 
     #[test]
@@ -1864,8 +1958,8 @@ mod tests {
             params: vec![common::WORD_SCALAR],
             ret: common::WORD_POINTER,
         };
-        assert_eq!(must_at(&bind_with(&body, ptr), 5), Some(vec![1, 2]));
-        assert_eq!(must_at(&bind(&body), 5), Some(vec![2]));
+        assert_eq!(must_at(&bind_with(&body, ptr), 5), Some(vec![1]));
+        assert_eq!(must_at(&bind(&body), 5), Some(vec![]));
     }
 
     #[test]
@@ -1927,7 +2021,8 @@ mod tests {
             op(Instruction::MakeEnumReturnK).with_operand_u32(2),
         ]);
         assert_eq!(slots_at(&maps, 4), Some(vec![0, 1]));
-        assert_eq!(must_at(&maps, 4), Some(vec![1]));
+        // The enum being allocated is not a must-pointer at its own safepoint.
+        assert_eq!(must_at(&maps, 4), Some(vec![]));
     }
 
     #[test]

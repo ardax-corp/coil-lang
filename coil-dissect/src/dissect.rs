@@ -29,6 +29,8 @@ pub struct DissectArgs {
     pub opt_level: OptLevel,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
+    /// Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test`.
+    pub include_tests: bool,
 }
 
 /// Bytecode of a compiled `.hyc` archive (function names from its debug
@@ -73,6 +75,7 @@ fn archive_artifacts(path: &str) -> Result<DissectArtifacts, String> {
 pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     let format = config.format;
     let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
+    pipeline.set_include_tests(args.include_tests);
     pipeline.set_host_grants(args.grants);
     let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     pipeline.bind_project_roots_with_default(dir, args.extra_roots);

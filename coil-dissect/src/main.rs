@@ -35,6 +35,7 @@ fn print_help() {
          \x20 --fn <pat>         Filter functions by FQN substring / trailing name\n\
          \x20 --il               Also print pre-opt stack IL\n\
          \x20 --il-post          Also print the optimized IL (before fuse / lowering)\n\
+         \x20 --tests            Compile `test` cases too (`__zs_test_N`), like `coil test`\n\
          \x20 --mir              Also print the MIR of numeric bodies (dense / LIR)\n\
          \x20 --no-source        Do not interleave source lines in the bytecode\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2, aggressive/3, size/s, debug/g\n\
@@ -69,6 +70,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
     let mut grants = HostGrants::deny_all();
     let mut show_mir = false;
     let mut show_il_post = false;
+    let mut include_tests = false;
     let mut source = true;
     let mut opt_level = compiler::OptLevel::default();
     let mut opt_stats = false;
@@ -89,6 +91,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             "--il" => show_il = true,
             "--mir" => show_mir = true,
             "--il-post" => show_il_post = true,
+            "--tests" => include_tests = true,
             "--no-source" => source = false,
             "--opt-stats" => opt_stats = true,
             "--opt-stats-json" => opt_stats_json = true,
@@ -194,6 +197,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             opt_level,
             opt_stats,
             opt_stats_json,
+            include_tests,
         },
     ))
 }

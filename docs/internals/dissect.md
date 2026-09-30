@@ -22,6 +22,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--fn <pat>` | Case-insensitive FQN match (exact, substring, trailing segment, `name#N`) |
 | `--il` | Also print **pre-opt** stack IL (snapshot after finalize splices, before lower) |
 | `--il-post` | Also print the **optimized** IL (after IL passes and MIR substitution, before fuse / lowering) |
+| `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
 | `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or lost the cost gate to fuse-IL |
 | `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print the IL counters) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
