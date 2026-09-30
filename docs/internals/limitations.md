@@ -22,6 +22,20 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 | Module-qualified paths | **Implemented:** a compiled module's items resolve by path without a `use` of the item: types (`m::T`, `a::b::T<int>`, aliases; in params, returns, `let`, fields, generic args, `impl Trait for m::T`), calls (`m::f(…)`, `m::C::f(…)`), `new m::C(…)`, enum constructors and patterns (`m::E::V(…)`), and the trait of an `impl m::Trait for T` head. Trait / type-param owners keep associated-type projection. The module must be in the compile (some `use` reaches it). Not yet: a function **value** by path (`let f = m::f`), virtual-module types by path (`io::IoError`); cross-module trait impls are [#522](https://github.com/ardax-corp/coil-lang/issues/522). | — |
 | Binding patterns | **Implemented:** `for` reuses `LetPattern` (`for (k, v) in d`, `for _`, records). `if let P = e` / `while let P = e` reuse match `Pattern` (including `else` / `else if let`). C-style `for (;;)` stays a parse error. | [COI-371](https://linear.app/ardax/issue/COI-371) |
 
+## Macros (medium)
+
+See [macros.md](macros.md).
+
+| Issue | Detail | Linear |
+|-------|--------|--------|
+| Derives on generic types | **Refused** (user and built-in): `impl<T: Show> Show for Box<T>` does not parse and `InstanceDef` has no constraints. Write the `impl` by hand. | — |
+| Package traits in generated code | A derive that implements its own package's trait for the user's type (`impl json::ToJson for Config`) needs cross-module trait impls, [coil-lang#522](https://github.com/ardax-corp/coil-lang/issues/522). Traits in the using module and prelude traits work. | — |
+| Types are as written | `TypeDecl` / `TypeRef` describe annotations, not resolved types; a derive cannot ask whether a field type implements a trait. The typechecker reports it on the generated code (at the `#[derive]`). | — |
+| `macro` model shape | The model uses classes and strings only (no traits, aliases or payload enums) because those did not resolve across modules; `${…}` splices `.src()`, so strings need `lit(...)` / `raw(...)`. | — |
+| No cross-compile cache | A compile that uses user macros compiles the providing modules once more (in memory). | — |
+| Provider statics | The expansion program has no `main`, so provider module statics are not initialised when macros run. | — |
+| `Vec::from([new A(new B(…))])` | Miscompile (pre-existing, every `-O`): elements of an inline `Vec::from` array whose constructors nest `new` share the inner object. Array literals, locals, and inner calls are fine. Macro input encoding binds each object to a `let` to avoid it. | — |
+
 ## Lambdas / captures
 
 Lambdas and `defer` isolate the env (`take_and_isolate`). File-level imports and **module-visible named `fn`s** rebind like globals — a lambda body may **CALL** them with empty captures (direct `CALL`, not a closure slot). Still require `use (…)` for outer **locals** / non-fn values and for other **function values** (anonymous lambdas or `let`-bound fn values). Nested named `fn`s inside another function are not module-visible and follow the local rule.
