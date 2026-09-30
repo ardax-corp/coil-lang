@@ -268,6 +268,70 @@ impl Compiler {
             }
         }
 
+        // Ground function-style trait call `method(x, …)`: the typechecker
+        // discharged the instance for the first argument into `call_dicts_at`
+        // (only when no fn / local of that name exists).
+        if let Expression::Identifier(method) = name.1.as_ref()
+            && self.lookup_slot(method).is_none()
+            && !self.functions.contains_key(*method)
+            && let Some((class, inst_args, fqn)) = self
+                .sidecar_dicts(self_id, span.start, span.end)
+                .and_then(|dicts| dicts.first())
+                .and_then(|instance| {
+                    let fqn = instance.method_fqns.get(*method)?.clone();
+                    (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
+                        .then(|| (instance.class.clone(), instance.args.clone(), fqn))
+                })
+        {
+            // Box the positions the instance entry unboxes (the ones the trait
+            // types as a class type parameter). A ground heap object passes
+            // as-is: `UnboxValue` returns a non-box object unchanged, and a
+            // `BoxValue` there would only allocate.
+            let unbox_tys = self.instance_method_unbox_tys(&class, method, &inst_args);
+            let arg_slice = args.as_deref().unwrap_or(&[]);
+            // Operands that may clobber the operand stack (`new C(..)`) are
+            // staged into temps and reloaded above them, so the CALL result
+            // lands where the enclosing expression expects it.
+            let stage = arg_slice
+                .iter()
+                .any(|arg| self.expr_may_clobber_operand_stack(arg));
+            let mut temps = Vec::new();
+            let mut nargs = 0u32;
+            for (i, arg) in arg_slice.iter().enumerate() {
+                self.append_with_existential_pack(&mut bytecode, arg);
+                if unbox_tys.get(i).is_some_and(Option::is_some)
+                    && let Some(ty) = self.codegen_expr_ty(arg)
+                    && crate::typechecking::value_layout::word_kind(&self.checker, &ty)
+                        != common::WORD_POINTER
+                {
+                    Self::emit_box_if_needed(
+                        &mut bytecode,
+                        &Self::show_lookup_ty_for_instance(&ty),
+                    );
+                }
+                if stage {
+                    let tmp = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
+                nargs += 1;
+            }
+            for tmp in &temps {
+                bytecode.push_load(*tmp);
+            }
+            // Only a default body reaches siblings through its trailing
+            // dictionary; a concrete instance method never reads it.
+            if Self::is_default_method_fqn(&class, method, &fqn)
+                && self.emit_instance_dict(&mut bytecode, &class, &inst_args)
+            {
+                nargs += 1;
+            }
+            if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
+                self.missing_call_target(&fqn, span.into_range());
+            }
+            return bytecode;
+        }
+
         // Method call: `recv.method(args)`.
         if let Expression::Access(recv, method) = name.1.borrow() {
             // Ground trait method (`recv.into()`, …): typechecker
