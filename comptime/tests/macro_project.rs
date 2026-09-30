@@ -44,7 +44,7 @@ fn debug_locs_for_expanded_macros_point_at_the_use_site() {
         "use macro::{Expr, Code};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n",
     )
     .unwrap();
-    let main = "use gen::{twice};\n\nfn main() {\n    let x = twice!(21);\n    return x;\n}\n";
+    let main = "use gen::{twice};\n\nfn main() {\n    let n = 21;\n    return twice!(n);\n}\n";
     std::fs::write(src.join("main.hy"), main).unwrap();
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_root(dir.clone(), vec!["src".into()]);
