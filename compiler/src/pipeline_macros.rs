@@ -889,7 +889,8 @@ fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replaceme
     }
     if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
         if matches!(replacement, Some(Replacement::Expr(_))) {
-            let Some(Replacement::Expr(value)) = replacement.take() else { unreachable!() };
+            let Some(Replacement::Expr(mut value)) = replacement.take() else { unreachable!() };
+            stamp_span(&mut value, target);
             *node = value;
         }
         return;
@@ -900,11 +901,19 @@ fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replaceme
             .iter()
             .position(|i| crate::attrs::statement_call(i).is_some_and(|c| c.0 == target))
     {
-        let Some(Replacement::Stmts(stmts)) = replacement.take() else { unreachable!() };
+        let Some(Replacement::Stmts(mut stmts)) = replacement.take() else { unreachable!() };
+        for stmt in &mut stmts {
+            stamp_span(stmt, target);
+        }
         items.splice(at..=at, stmts);
         return;
     }
     node.1.for_each_child_mut(&mut |c| replace_call(c, target, replacement));
+}
+
+fn stamp_span(node: &mut Output<'_>, target: parser::SimpleSpan) {
+    node.0 = target;
+    node.1.for_each_child_mut(&mut |c| stamp_span(c, target));
 }
 
 /// The `name!(…)` call at `target`.

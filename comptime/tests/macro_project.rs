@@ -73,7 +73,8 @@ fn debug_locs_for_expanded_macros_point_at_the_use_site() {
         debug.debug_locs.iter().any(|loc| {
             loc.is_known() && loc.start_byte <= twice_at && loc.end_byte > twice_at
         }),
-        "expected a debug loc on twice!, got {:?}",
+        "expected a debug loc on twice!, files={:?} locs={:?}",
+        debug.source_files,
         debug.debug_locs.iter().filter(|l| l.is_known()).collect::<Vec<_>>()
     );
 }
