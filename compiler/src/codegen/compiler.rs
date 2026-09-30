@@ -11180,8 +11180,15 @@ impl Compiler {
 
         let prev_result_mode = self.compiling_result_mode;
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-        self.compiling_result_mode = self.checker.fn_is_result_mode(name);
-        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
+        // Instance methods are recorded under their FQN; the bare name may
+        // belong to a free fn (or another instance).
+        let mode_key = if self.checker.fn_return_ty(&qualified).is_some() {
+            qualified.as_str()
+        } else {
+            name
+        };
+        self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
+        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         let prev_try_fail = self.compiling_try_fail.take();
         self.compiling_two_word_enum = if *is_coro {
