@@ -84,7 +84,10 @@ impl SymbolIndex {
                 Expression::EnumDecl { name, .. } => (*name, SymbolKind::Enum),
                 Expression::TypeAlias { name, .. } => (*name, SymbolKind::TypeAlias),
                 Expression::StaticDecl { name, .. } => (*name, SymbolKind::Variable),
-                Expression::AttrDecl { name, .. } => (*name, SymbolKind::Method),
+                Expression::AttrDecl { name, .. } | Expression::DeriveDecl { name, .. } => {
+                    (*name, SymbolKind::Method)
+                }
+                Expression::FnMacroDecl { name, .. } => (*name, SymbolKind::Function),
                 Expression::Use { name, alias, .. } => {
                     (alias.as_deref().unwrap_or(name), SymbolKind::Namespace)
                 }
@@ -257,8 +260,17 @@ impl SymbolIndex {
                     visit_output(index, file, params);
                     visit_output(index, file, ret);
                 }
-                Expression::TypeApp { args, .. } | Expression::MacroCall { args, .. } => {
-                    visit_outputs(index, file, args)
+                Expression::TypeApp { args, .. } => visit_outputs(index, file, args),
+                Expression::MacroCall { name, args } => {
+                    let start = span.start;
+                    let end = (start + name.len()).min(span.end);
+                    index.references.entry((*name).to_owned()).or_default().push(RefSite {
+                        name: (*name).to_owned(),
+                        file: file.clone(),
+                        range: start..end,
+                        def_id: None,
+                    });
+                    visit_outputs(index, file, args);
                 }
                 Expression::Quote { parts, .. } => {
                     for part in parts {
@@ -520,6 +532,33 @@ fn add(int a, int b) -> int { return a + b; }
         assert_eq!(add.len(), 1);
         assert_eq!(add[0].kind, SymbolKind::Function);
         assert_eq!(&source[add[0].name_range.clone()], "add");
+    }
+
+    #[test]
+    fn indexes_macro_and_derive_declarations_and_calls() {
+        let source = "\
+/// Double.
+macro twice(Expr e) -> Code { return quote expr { ${e} * 2 }; }
+derive Answer(TypeDecl t) -> Code { return quote items { }; }
+fn main() {
+    let x = twice!(1 + 2);
+}
+";
+        let idx = index(source);
+        let twice = idx.definitions("twice");
+        assert_eq!(twice.len(), 1);
+        assert_eq!(twice[0].kind, SymbolKind::Function);
+        assert_eq!(&source[twice[0].name_range.clone()], "twice");
+
+        let answer = idx.definitions("Answer");
+        assert_eq!(answer.len(), 1);
+        assert_eq!(answer[0].kind, SymbolKind::Method);
+
+        let refs = idx.references("twice");
+        assert!(
+            refs.iter().any(|site| &source[site.range.clone()] == "twice"),
+            "expected twice! call site, got {refs:?}"
+        );
     }
 
     #[test]
