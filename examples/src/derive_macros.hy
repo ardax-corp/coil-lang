@@ -46,11 +46,12 @@ derive VariantName(TypeDecl t) -> Code {
     };
 }
 
-/// Wrap a function so it returns `result + by`.
+/// Wrap a function so it returns `result + by` (its other attributes stay on
+/// the wrapped body, so stacked macros compose).
 attr add_after(FnDecl f, int by) -> Code {
     let inner = ident(f.name.str() + "__inner");
     return quote items {
-        fn ${raw(f.signature(inner.str()))} ${raw(f.body_source())}
+        ${raw(f.with_name(inner.str()))}
         fn ${raw(f.signature(f.name.str()))} {
             let r = ${inner}(${raw(f.arg_names())});
             return r + ${lit_int(by)};

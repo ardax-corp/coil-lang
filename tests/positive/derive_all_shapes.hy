@@ -1,6 +1,6 @@
 // Every built-in derive on every declaration shape (classes, unit / tuple /
 // record enums, scalar enums). Also the input of the derive equivalence gate.
-use string::{format};
+use string::format;
 
 #[derive(Show, Eq, Ord, Default, Hash, String, Send, Sensitive)]
 class Pt {
@@ -9,8 +9,7 @@ class Pt {
 }
 
 #[derive(Show, Eq, Ord, Default, Hash, String)]
-class Unit {
-}
+class Unit {}
 
 #[derive(Show, Eq, Ord, Default, Hash, String, Send)]
 enum Sh {
@@ -63,7 +62,7 @@ test("enum Show / String") {
     assert(Sh::Dot.show() == "Sh::Dot")?;
     assert(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show())?;
     assert(Sh::Pair(1, "a").show() == "Sh::Pair(1, a)", Sh::Pair(1, "a").show())?;
-    assert(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
+    assert(Sh::Rect{ w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
 }
 
 test("enum Eq / Ord") {
@@ -73,9 +72,9 @@ test("enum Eq / Ord") {
     assert(Sh::Dot != Sh::Circle(0))?;
     assert(Sh::Dot < Sh::Circle(0))?;
     assert(Sh::Circle(1) < Sh::Circle(2))?;
-    assert(Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 })?;
-    assert(Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 })?;
-    assert(Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, "z"))?;
+    assert(Sh::Rect{ w: 1, h: 2 } < Sh::Rect{ w: 1, h: 3 })?;
+    assert(Sh::Rect{ w: 1, h: 2 } >= Sh::Rect{ w: 1, h: 2 })?;
+    assert(Sh::Rect{ w: 0, h: 0 } > Sh::Pair(9, "z"))?;
 }
 
 test("enum Hash") {

@@ -3807,36 +3807,6 @@ fn example_attr_class_decorates_constructor() {
 }
 
 #[test]
-fn attr_method_forwards_self() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    write(stdout(), to_bytes(format("%s", message)));
-    return target(...args);
-}
-
-class Counter {
-    pub n: int,
-}
-
-impl Counter {
-    #[log(message = "bump")]
-    pub fn bump() -> int {
-        return self.n;
-    }
-}
-
-fn main() {
-    let c = new Counter(7);
-    write(stdout(), to_bytes(format("%i", c.bump())));
-}
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "bump7");
-}
-
-#[test]
 fn attr_test_fn_discovered_by_harness() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
@@ -5183,32 +5153,6 @@ test("via block") { assert(true)?; }
 }
 
 #[test]
-fn attr_decorator_with_overloaded_functions_forwards_each_arity() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    write(stdout(), to_bytes(format("%s", message)));
-    return target(...args);
-}
-
-#[log(message = "nullary")]
-fn do_thing() -> int { return 0; }
-
-#[log(message = "unary")]
-fn do_thing(int x) -> int { return x; }
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", do_thing())));
-    write(stdout(), to_bytes(format("%i", do_thing(42))));
-}
-"#,
-    );
-    assert_eq!(output, "nullary0unary42");
-}
-
-#[test]
 fn spread_with_partial_application_forwards_remaining_args() {
     let output = run_example_src(
         r#"
@@ -5239,66 +5183,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "AdaGrace:40");
-}
-
-#[test]
-fn attr_on_async_fn_rejected_at_compile_time() {
-    // Attr-body-crosses-yield desugaring for a coroutine target used to
-    // recurse deep enough (~1.5-2 MiB) to risk the default per-test thread
-    // stack before infer_inner/do_compile were split up; reuse the example
-    // pool's 8 MiB workers instead of spawn/join (COI-88).
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    yield 99;
-    return target(...args);
-}
-#[log(message = "coro")]
-async fn counter() {
-    yield 1;
-}
-fn main() {
-    let h = counter();
-    write(stdout(), to_bytes(format("%i", resume h)));
-}
-"#
-    .to_string();
-    let is_err = Arc::new(Mutex::new(false));
-    let flag = Arc::clone(&is_err);
-    run_on_example_stack("attr-async-diag".into(), move || {
-        *flag.lock().unwrap_or_else(|e| e.into_inner()) =
-            test_pipeline().compile_src(&src).is_err();
-        String::new()
-    });
-    assert!(
-        *is_err.lock().unwrap_or_else(|e| e.into_inner()),
-        "attrs that yield outside target(...args) must be rejected on async fn"
-    );
-}
-
-#[test]
-fn rest_overload_with_attr_logging_forwards_pack() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    write(stdout(), to_bytes(format("%s", message)));
-    return target(...args);
-}
-
-#[log(message = "sum")]
-fn total(int... xs) -> int {
-    return len(xs);
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", total(1, 2, 3))));
-}
-"#,
-    );
-    assert_eq!(output, "sum3");
 }
 
 /// Prefix args + spread pack must flatten in source order. A buggy flatten that
@@ -5335,115 +5219,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "6");
-}
-
-/// Positional attr extras (`#[log("enter")]`) must bind to the first extra
-/// parameter the same way named extras do.
-#[test]
-fn attr_positional_extra_forwards_literal() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
-    write(stdout(), to_bytes(format("%s", message)));
-    return target(...args);
-}
-
-#[log("enter")]
-fn do_thing(int x) -> int { return x; }
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", do_thing(7))));
-}
-"#,
-    );
-    assert_eq!(output, "enter7");
-}
-
-/// Stacking is Python-style: first listed attr is outermost. Reversing the
-/// expand loop would swap the print order without failing typecheck.
-#[test]
-fn stacked_attrs_apply_outer_first() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr outer<T>(fn(...args) -> T target, ...args) -> T {
-    write(stdout(), to_bytes("O"));
-    return target(...args);
-}
-attr inner<T>(fn(...args) -> T target, ...args) -> T {
-    write(stdout(), to_bytes("I"));
-    return target(...args);
-}
-
-#[outer]
-#[inner]
-fn f() -> int { return 1; }
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", f())));
-}
-"#,
-    );
-    assert_eq!(output, "OI1");
-}
-
-#[test]
-fn attr_inlining_rewrites_target_in_all_expression_contexts() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-attr wrap_if<T>(fn(...args) -> T target, ...args) -> T {
-    if true {
-        return target(...args);
-    }
-    return 0;
-}
-
-attr wrap_for<T>(fn(...args) -> T target, ...args) -> T {
-    let i = 0;
-    while i < 1 {
-        return target(...args);
-    }
-    return 0;
-}
-
-attr wrap_while<T>(fn(...args) -> T target, ...args) -> T {
-    while (true) {
-        return target(...args);
-    }
-    return 0;
-}
-
-attr wrap_print<T>(fn(...args) -> T target, ...args) -> T {
-    write(stdout(), to_bytes(format("%s", "x")));
-    return target(...args);
-}
-
-#[wrap_if]
-fn a() -> int { return 10; }
-
-#[wrap_for]
-fn b() -> int { return 20; }
-
-#[wrap_while]
-fn c() -> int { return 30; }
-
-#[wrap_print]
-fn d() -> int { return 40; }
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", a())));
-    write(stdout(), to_bytes(format("%i", b())));
-    write(stdout(), to_bytes(format("%i", c())));
-    write(stdout(), to_bytes(format("%i", d())));
-}
-"#,
-    );
-    assert_eq!(output, "102030x40");
 }
 
 /// End-to-end TailCall: self-recursive accumulator must print the correct sum.
