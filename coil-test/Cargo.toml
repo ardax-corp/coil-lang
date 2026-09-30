@@ -19,6 +19,7 @@ compiler = { path = "../compiler", default-features = false }
 machine = { path = "../machine", default-features = false }
 reporting = { path = "../reporting" }
 coil-host = { path = "../coil-host" }
+comptime = { path = "../comptime" }
 
 [features]
 default = []

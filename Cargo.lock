@@ -387,6 +387,7 @@ dependencies = [
  "coil-host",
  "common",
  "compiler",
+ "comptime",
  "machine",
  "reporting",
 ]
