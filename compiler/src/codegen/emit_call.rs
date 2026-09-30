@@ -556,10 +556,31 @@ impl Compiler {
                     self.consume_spread_emit_ids(arg_slice);
                     let (fixed, rest, pack_rest) =
                         self.split_call_args_for_rest(&lookup_name, arg_slice);
+                    // The shared body unboxes only params typed as a bare type
+                    // parameter (`T proto`), not `Val v` / `[T] xs`.
+                    let bare_t_args: Vec<bool> = self
+                        .checker
+                        .env()
+                        .lookup(&lookup_name)
+                        .map(|scheme| {
+                            let mut params = Vec::new();
+                            let mut cur = &scheme.ty;
+                            while let Ty::Fun(p, r) = cur {
+                                params.push(p.as_ref().clone());
+                                cur = r;
+                            }
+                            let skip = params.len().saturating_sub(fixed.len());
+                            params[skip..]
+                                .iter()
+                                .map(|p| matches!(p, Ty::Var(v) if scheme.bounds.contains(v)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let mut arg_temps: Vec<u32> = Vec::new();
-                    for arg in &fixed {
+                    for (i, arg) in fixed.iter().enumerate() {
                         self.append_with_existential_pack(&mut bytecode, arg);
                         if box_generic_args
+                            && bare_t_args.get(i).copied().unwrap_or(true)
                             && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                                 Self::emit_box_if_needed(&mut bytecode, &arg_ty);
                             }

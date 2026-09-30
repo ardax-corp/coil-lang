@@ -481,6 +481,63 @@ impl Compiler {
         }
     }
 
+    /// `Class::method(...)` for a generic static method: the shared-body ABI
+    /// of free generic fns (bare-`T` args boxed, one dictionary per bound
+    /// appended, a boxed `T` return unboxed).
+    fn emit_generic_static_call(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        fqn: &str,
+        args: &[Output],
+        call: &Output,
+    ) {
+        let bare_t: Vec<bool> = self
+            .checker
+            .env()
+            .lookup(fqn)
+            .map(|scheme| {
+                let mut out = Vec::new();
+                let mut cur = &scheme.ty;
+                while let Ty::Fun(p, r) = cur {
+                    out.push(matches!(p.as_ref(), Ty::Var(v) if scheme.bounds.contains(v)));
+                    cur = r;
+                }
+                out
+            })
+            .unwrap_or_default();
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            self.append_with_existential_pack(bytecode, arg);
+            let ty = self.codegen_expr_ty(arg);
+            if bare_t.get(i).copied().unwrap_or(false)
+                && let Some(ty) = ty.as_ref()
+            {
+                Self::emit_box_if_needed(bytecode, ty);
+            }
+            if let Some(ty) = ty {
+                arg_tys.push(ty);
+            }
+        }
+        let mut dicts = 0u32;
+        let id = self.node_id_of(call);
+        if let Some(indices) = self.forwarded_dicts_hint(id, call.0.start, call.0.end) {
+            for dict_index in indices {
+                if let Some(slot) = self.lookup_slot(&format!("__dict{}", dict_index)) {
+                    bytecode.push_load(slot);
+                    dicts += 1;
+                }
+            }
+        }
+        let call_ty = self.codegen_expr_ty(call);
+        dicts += self.emit_call_site_dicts(bytecode, fqn, &arg_tys, call_ty.as_ref()) as u32;
+        let _ = self.emit_direct_fn_call(bytecode, fqn, args.len() as u32 + dicts);
+        if self.generic_return_is_boxed(fqn)
+            && let Some(ty) = call_ty.as_ref()
+        {
+            Self::emit_unbox_if_needed(bytecode, ty);
+        }
+    }
+
     fn emit_scalar_backing(
         &mut self,
         backing: &crate::typechecking::ty::ScalarBacking,
@@ -537,6 +594,10 @@ impl Compiler {
                         return bytecode;
                     }
                 };
+                if self.checker.is_generic_fn(&fqn) {
+                    self.emit_generic_static_call(&mut bytecode, &fqn, arg_slice, ast);
+                    return bytecode;
+                }
                 let arity = self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
                 // `Vec<Node>::new()` → the pointer-element constructor.
                 let target = self.pointer_vec_ctor(&fqn, ast).unwrap_or(fqn);
