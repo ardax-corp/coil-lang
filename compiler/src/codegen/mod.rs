@@ -898,9 +898,6 @@ pub struct Compiler {
     /// at slots 0..N-1 (same layout as lambda capture slots).
     fn_defers: Vec<(BbLabel, Vec<String>)>,
 
-    /// Class name → decorated constructor function name (from attr expansion).
-    decorated_class_ctors: HashMap<String, String>,
-
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
 
@@ -1116,7 +1113,6 @@ impl Default for Compiler {
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),
             fn_defers: Vec::new(),
-            decorated_class_ctors: HashMap::new(),
             active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,

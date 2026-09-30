@@ -1167,7 +1167,7 @@ impl Pipeline {
         }
         if cached.expanded() {
             let expand = cached.take_expand();
-            compiler.apply_expand_result(module, expand);
+            compiler.apply_expand_result(expand);
             if let Some(ast) = cached.ast_mut() {
                 compiler.typecheck_module(module, ast);
             }
