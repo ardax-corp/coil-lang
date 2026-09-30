@@ -163,7 +163,7 @@ pub struct Pratt<'pratt> {
 /// Join `a`, `b`, `C` into `a::b::C` for a `'src` AST borrow. One segment
 /// borrows it directly; longer paths leak the joined string (as the
 /// multi-segment `Construct` head always has).
-fn join_path_segments<'a>(mut segments: Vec<&'a str>) -> &'a str {
+fn join_path_segments(mut segments: Vec<&str>) -> &str {
     if segments.len() == 1 {
         return segments.pop().unwrap_or_default();
     }
