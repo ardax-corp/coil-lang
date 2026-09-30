@@ -14965,6 +14965,29 @@ impl Checker {
                     }
                 }
             }
+            // Arguments past the last specifier: the VM drops them. Infer them
+            // anyway (codegen needs their types) and reject the call.
+            if spec_index < p.len() {
+                for arg in &p[spec_index..] {
+                    let _ = self.infer(arg);
+                }
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "Format string has fewer specifiers than arguments \
+                         (argument #{} has no `%` specifier)",
+                        spec_index + 1
+                    ),
+                    p[spec_index].0.into_range(),
+                );
+                msg.with_help(if s.contains("{}") {
+                    "`{}` is not a format specifier: use `%s`, `%i`, `%f`, `%z` or `%v`"
+                        .to_string()
+                } else {
+                    "add a `%` specifier for it, or remove the argument".to_string()
+                });
+                self.messages.push(msg);
+            }
         } else if let Some(p) = params {
             // No format specifiers: still type-check args (VM consumes them).
             for arg in p {
