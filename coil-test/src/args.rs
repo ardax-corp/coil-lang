@@ -17,7 +17,7 @@ pub const SEED_ENV: &str = "COIL_TEST_SEED";
 
 pub enum Parsed {
     Help,
-    Run(ReportConfig, TestOptions),
+    Run(ReportConfig, Box<TestOptions>),
 }
 
 pub fn print_help() {
@@ -173,7 +173,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
     Ok(Parsed::Run(
         config,
-        TestOptions {
+        Box::new(TestOptions {
             root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
             fail_fast,
             order,
@@ -189,7 +189,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             opt_level,
             grants,
             extra_roots,
-        },
+        }),
     ))
 }
 
@@ -243,7 +243,7 @@ mod tests {
 
     fn run(parts: &[&str]) -> (ReportConfig, TestOptions) {
         match parse_args(&argv(parts)).expect("parses") {
-            Parsed::Run(config, options) => (config, options),
+            Parsed::Run(config, options) => (config, *options),
             Parsed::Help => panic!("unexpected help"),
         }
     }

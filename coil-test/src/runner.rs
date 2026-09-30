@@ -591,10 +591,10 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) {
         } else {
             eprintln!("coverage: lcov written to {}", out.lcov_out.display());
         }
-        if let (Some(path), Some(json)) = (&out.per_test_out, cov.per_test_json()) {
-            if let Err(e) = write_file(path, &json) {
-                eprintln!("coverage: cannot write `{}`: {e}", path.display());
-            }
+        if let (Some(path), Some(json)) = (&out.per_test_out, cov.per_test_json())
+            && let Err(e) = write_file(path, &json)
+        {
+            eprintln!("coverage: cannot write `{}`: {e}", path.display());
         }
     }
 
