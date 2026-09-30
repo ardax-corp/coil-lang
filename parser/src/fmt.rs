@@ -168,6 +168,18 @@ impl<'s> Formatter<'s> {
         (ptr >= base && ptr + text.len() <= base + self.src.len()).then(|| ptr - base)
     }
 
+    /// Whether `name` (borrowed from the source) is followed by `()`. The
+    /// parser folds `Vec::new()` and `Vec::new` into one node; the source
+    /// keeps the spelling.
+    fn empty_parens_after(&self, name: &str) -> bool {
+        let Some(start) = self.offset_of(name) else {
+            return false;
+        };
+        let rest = self.src[start + name.len()..].trim_start();
+        rest.strip_prefix('(')
+            .is_some_and(|inner| inner.trim_start().starts_with(')'))
+    }
+
     /// Position of the `close` delimiter after `from`, skipping whitespace,
     /// comments and a trailing comma.
     fn closing_after(&self, from: usize, close: u8) -> Option<usize> {
@@ -836,6 +848,9 @@ impl<'s> Formatter<'s> {
                 self.push_str(owner);
                 self.push_str("::");
                 self.push_str(member);
+                if self.empty_parens_after(member) {
+                    self.push_str("()");
+                }
             }
             Expression::Member(inner) => self.fmt_output(inner),
 
@@ -1061,6 +1076,9 @@ impl<'s> Formatter<'s> {
                 self.push_str(enum_name);
                 self.push_str("::");
                 self.push_str(variant_name);
+                if matches!(fields, EnumConstructPayload::Unit) && self.empty_parens_after(variant_name) {
+                    self.push_str("()");
+                }
                 self.fmt_construct_payload(fields);
             }
 
@@ -2416,6 +2434,13 @@ mod tests {
         assert!(once.contains("/// Right operand."));
         assert!(once.contains("int left,"));
         assert_eq!(once, format_source(&once).unwrap());
+    }
+
+    #[test]
+    fn keeps_empty_call_parens_on_paths() {
+        let src = "fn main() {\n    let v: Vec<int> = Vec::new();\n    let n = Option::None;\n    let t = clock::mono_nanos();\n    let f = Vec::new;\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, src);
     }
 
     #[test]
