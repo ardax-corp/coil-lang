@@ -16540,7 +16540,9 @@ impl Checker {
             .get(&owner)
             .and_then(|m| m.get(method))
             .map(|(_, s)| s.clone())?;
-        let fun_ty = self.instantiate_ty(&scheme);
+        // Keep the scheme's bounds (`static fn make<T: Tr>`): they are
+        // discharged below so the call site passes their dictionaries.
+        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
 
         // Named-arg / rest reorder when the call uses a tuple payload.
         let arg_tys = match fields {
@@ -16573,7 +16575,12 @@ impl Checker {
             }
         };
 
-        Some(self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range))
+        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range.clone());
+        if !constraints.is_empty() {
+            self.discharge_constraints(call_id, &constraints, &range);
+            self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);
+        }
+        Some(result)
     }
 
     /// True if `name` was declared as `async fn`.

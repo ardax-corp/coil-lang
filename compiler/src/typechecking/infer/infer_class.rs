@@ -828,6 +828,7 @@ impl Checker {
                 if let Expression::Function {
                     docs: _,
                     name,
+                    type_params: method_type_params,
                     is_coro,
                     is_static,
                     args,
@@ -854,11 +855,16 @@ impl Checker {
                         );
                     }
                     let self_ty = if *is_static { None } else { Some(&owner_ty) };
-                    // Type params stay in the outer impl frame so `self`
-                    // and method annotations share the same variables.
+                    // Impl type params stay in the outer impl frame so `self`
+                    // and method annotations share the same variables; the
+                    // method's own `<U: Bound>` params get their own frame and
+                    // active bounds. A generic method infers as a poly
+                    // function under its bare name: shield that name.
+                    let shield = (!method_type_params.is_empty())
+                        .then(|| self.shield_bare_names([*name]));
                     let fun_ty = self.infer_function(super::infer_fn::InferFunctionArgs {
                         name,
-                        type_params: &[],
+                        type_params: method_type_params,
                         args,
                         returns: returns.as_ref(),
                         where_constraints,
@@ -869,6 +875,20 @@ impl Checker {
                         method_owner: Some(&owner_key),
                         is_static_method: *is_static,
                     });
+                    // Method-level vars / bounds come after the impl's (the
+                    // body's `__dict{i}` order: impl bounds were active first).
+                    let (method_vars, method_constraints) = match shield {
+                        Some(shield) => {
+                            let own = self
+                                .env
+                                .lookup(name)
+                                .map(|s| (s.bounds.clone(), s.constraints.clone()))
+                                .unwrap_or_default();
+                            self.unshield_bare_names(shield);
+                            own
+                        }
+                        None => (Vec::new(), Vec::new()),
+                    };
                     if *name == "drop" {
                         let mut ret = apply_ty(&self.subst, &fun_ty);
                         while let Ty::Fun(_, r) = ret {
@@ -905,15 +925,19 @@ impl Checker {
                     if let Some(tuple) = self.fn_tuple_rest.get(*name).copied() {
                         self.fn_tuple_rest.insert(fqn.clone(), tuple);
                     }
-                    let scheme = if param_vars.is_empty() {
+                    let mut all_vars = param_vars.clone();
+                    all_vars.extend(method_vars);
+                    let mut all_constraints = impl_constraints.clone();
+                    all_constraints.extend(method_constraints);
+                    let scheme = if all_vars.is_empty() {
                         Scheme::mono(fun_ty.clone())
                     } else {
-                        Scheme::poly(param_vars.clone(), impl_constraints.clone(), fun_ty.clone())
+                        Scheme::poly(all_vars, all_constraints.clone(), fun_ty.clone())
                     };
                     // Env lookup feeds `emit_call_site_dicts` at method CALL.
                     self.env.insert_top(fqn.clone(), scheme.clone());
-                    if !impl_constraints.is_empty() {
-                        let dict_n = impl_constraints.len();
+                    if !all_constraints.is_empty() {
+                        let dict_n = all_constraints.len();
                         // Bare name: method compile looks up dict arity by
                         // the function's short name; FQN: call sites / env.
                         self.fn_dict_arity.insert((*name).to_string(), dict_n);
