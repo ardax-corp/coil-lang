@@ -1,6 +1,7 @@
 //! Match lowering extracted from `do_compile` (stack-margin style).
 
 use super::*;
+use crate::typechecking::ScalarBacking;
 
 impl Compiler {
     #[inline(never)]
@@ -53,6 +54,9 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[&MatchArm<'compiler>],
     ) -> CodeBuf {
+        if has_nested_test(arms) {
+            return self.compile_match_sequential(scrutinee, arms);
+        }
         if self.try_compile_scalar_enum_match(scrutinee, arms) {
             return CodeBuf::new();
         }
@@ -777,24 +781,7 @@ impl Compiler {
             // (e.g. `match try_recv(rx)` after print→write_all).
             let mut scrutinee_bc = self.do_compile(scrutinee);
             self.bytecode.append(&mut scrutinee_bc);
-            if self.repr.force_heap_option
-                && self.expr_layout(scrutinee).is_niche_option()
-                && !Self::is_option_construct(scrutinee)
-            {
-                Self::emit_niche_option_to_boxed(&mut self.bytecode);
-            }
-            if self.repr.force_heap_result
-                && self.expr_layout(scrutinee).is_niche_unit_result()
-                && !Self::is_result_construct(scrutinee)
-            {
-                Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
-            }
-            if self.repr.force_heap_result
-                && self.expr_layout(scrutinee).is_niche_result()
-                && !Self::is_result_construct(scrutinee)
-            {
-                Self::emit_niche_result_to_boxed(&mut self.bytecode);
-            }
+            self.emit_scrutinee_as_boxed(scrutinee);
 
             // First payload slot after locals + scrutinee temps.
             // JumpIfMatch/Unpack push payloads onto the stack
@@ -871,174 +858,37 @@ impl Compiler {
                 }
             }
 
-            // Shared outer tag + differing inner patterns: emit a test chain
-            // between JUMP_IF_MATCH and reverse binding. Rebind arm_0_label to
-            // the chain start; last arm falls through. Reverse pass must not
-            // re-emit POP/STORE for `test_chain_arms` (already consumed here).
-            let mut pass_labels: HashMap<usize, Option<crate::block_builder::Label>> =
-                HashMap::new();
-            let mut test_chain_first_arms: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-            // Arms whose bindings were emitted by the test chain (skip reverse POP/STORE).
-            let mut test_chain_arms: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-            // arm_idx → name → slot from `emit_inner_test` (avoid double-bind in reverse).
-            let mut match_bindings_per_arm: HashMap<usize, HashMap<String, u32>> = HashMap::new();
-
-            for group in &tag_groups {
-                if group.arm_indices.len() <= 1 {
-                    continue;
-                }
-                let has_runtime_test = group
-                    .arm_indices
-                    .iter()
-                    .any(|&i| arm_has_runtime_test(arms[i]));
-                if !has_runtime_test {
-                    continue;
-                }
-
-                let first_arm_idx = group.arm_indices[0];
-                let first_arm_label = arm_labels[first_arm_idx]
-                    .expect("non-last group's first arm must have a Label");
-
-                // Rebind so JUMP_IF_MATCH lands at the test chain, not the body.
-                bb.bind_label(first_arm_label, self.bytecode.il_mut());
-                test_chain_first_arms.insert(first_arm_idx);
-                for &arm_idx in &group.arm_indices {
-                    test_chain_arms.insert(arm_idx);
-                }
-
-                // Several payload fields: test each field in its own slot.
-                if group.arity > 1 && self.slot_chain_supported(arms, &group.arm_indices) {
-                    self.emit_slot_test_chain(SlotTestChain {
-                        arms,
-                        arm_indices: &group.arm_indices,
-                        bb: &mut bb,
-                        pass_labels: &mut pass_labels,
-                        match_bindings_per_arm: &mut match_bindings_per_arm,
-                        payload_base,
-                    });
-                    continue;
-                }
-
-                // Source order; every arm JMPs to its body via `pass_label`.
-                // Fall-through after the last arm is only safe when that body
-                // is emitted next (group is source-last); later tag groups make
-                // fall-through land in the wrong body.
-                for (rank, &arm_idx) in group.arm_indices.iter().enumerate() {
-                    let is_last_in_group = rank == group.arm_indices.len() - 1;
-
-                    let pass_label = Some(bb.fresh_label(self.bytecode.il_mut()));
-
-                    // Fail → next arm's label, or `end_label` for the last arm.
-                    let fail_label = if !is_last_in_group {
-                        let next_arm_idx = group.arm_indices[rank + 1];
-                        arm_labels[next_arm_idx].unwrap_or(end_label)
-                    } else {
-                        end_label
-                    };
-
-                    pass_labels.insert(arm_idx, pass_label);
-
-                    let (enum_name, variant_name, payload) = match &arms[arm_idx].pattern.1 {
-                        Pattern::Constructor {
-                            enum_name,
-                            variant_name,
-                            payload,
-                            ..
-                        } => (*enum_name, *variant_name, payload),
-                        _ => continue,
-                    };
-
-                    emit_inner_test(EmitInnerTestArgs {
-                        arm_idx,
-                        checker: &self.checker,
-                        enum_name,
-                        variant_name,
-                        payload,
-                        match_bindings_per_arm: &mut match_bindings_per_arm,
-                        bytecode: &mut self.bytecode,
-                        bb: &mut bb,
-                        pass_label,
-                        _fail_label: fail_label,
-                        payload_base,
-                    });
-                }
-            }
-
             // Reverse order: last arm body first; non-first arms JMP to end.
             for i in (0..arms.len()).rev() {
                 let arm = &arms[i];
                 let is_first = i == 0;
 
-                // Bind JUMP_IF_MATCH landing (skip test-chain first arms: already rebound).
-                if !test_chain_first_arms.contains(&i)
-                    && let Some(label) = arm_labels[i]
-                {
+                // Bind the JUMP_IF_MATCH landing.
+                if let Some(label) = arm_labels[i] {
                     bb.bind_label(label, self.bytecode.il_mut());
                 }
 
-                if let Some(Some(label)) = pass_labels.get(&i) {
-                    bb.bind_label(*label, self.bytecode.il_mut());
-                }
-
-                // Per-arm binding slots (`payload_base` = first payload).
+                // Payload field `k` sits in slot `payload_base + k` (JUMP_IF_MATCH /
+                // UNPACK pushed them); arms here have no nested tests.
                 let mut arm_bindings: HashMap<String, u32> = HashMap::new();
-                let mut next_slot: u32 = payload_base;
-                // Test-chain: payload already on stack; `consume_values = false`.
-                let in_test_chain = test_chain_arms.contains(&i);
-                if let Some(bindings) = match_bindings_per_arm.get(&i) {
-                    arm_bindings = bindings.clone();
-                } else if in_test_chain {
-                    // Nested Constructor tests only: record bindings, no re-emit.
-                    match &arm.pattern.1 {
-                        Pattern::Binding { name } => {
-                            arm_bindings.insert(name.to_string(), payload_base);
-                        }
-                        Pattern::Constructor {
-                            enum_name,
-                            variant_name,
-                            ..
-                        } => {
-                            let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                            emit_pattern_binding(EmitPatternBindingArgs {
-                                checker: &self.checker,
-                                match_bindings: &mut arm_bindings,
-                                next_slot: &mut next_slot,
-                                pattern: &arm.pattern.1,
-                                parent_decl_order: &decl_order,
-                                bytecode: &mut self.bytecode,
-                                consume_values: false,
-                                is_outer: true,
-                            });
-                        }
-                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
+                match &arm.pattern.1 {
+                    Pattern::Binding { name } => {
+                        // The scrutinee itself sits at `payload_base`.
+                        arm_bindings.insert(name.to_string(), payload_base);
                     }
-                } else {
-                    match &arm.pattern.1 {
-                        Pattern::Binding { name } => {
-                            // Forward pass already STOREd scrutinee at `payload_base`.
-                            arm_bindings.insert(name.to_string(), payload_base);
+                    Pattern::Constructor {
+                        enum_name,
+                        variant_name,
+                        payload,
+                    } => {
+                        let fields = payload_fields(&self.checker, enum_name, variant_name, payload);
+                        for (k, field) in fields.iter().enumerate() {
+                            if let Some(Pattern::Binding { name }) = field {
+                                arm_bindings.insert(name.to_string(), payload_base + k as u32);
+                            }
                         }
-                        Pattern::Constructor {
-                            enum_name,
-                            variant_name,
-                            ..
-                        } => {
-                            let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                            emit_pattern_binding(EmitPatternBindingArgs {
-                                checker: &self.checker,
-                                match_bindings: &mut arm_bindings,
-                                next_slot: &mut next_slot,
-                                pattern: &arm.pattern.1,
-                                parent_decl_order: &decl_order,
-                                bytecode: &mut self.bytecode,
-                                consume_values: true,
-                                is_outer: true,
-                            });
-                        }
-                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
+                    Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                 }
 
                 // Nested matches keep outer bindings; inner names shadow.
@@ -1116,16 +966,6 @@ impl Compiler {
     }
 }
 
-/// One tag group's arms for [`Compiler::emit_slot_test_chain`].
-struct SlotTestChain<'a, 'compiler> {
-    arms: &'a [&'a MatchArm<'compiler>],
-    arm_indices: &'a [usize],
-    bb: &'a mut BlockBuilder,
-    pass_labels: &'a mut HashMap<usize, Option<crate::block_builder::Label>>,
-    match_bindings_per_arm: &'a mut HashMap<usize, HashMap<String, u32>>,
-    payload_base: u32,
-}
-
 /// A group arm's payload fields in declaration order (`None` = not matched
 /// on: omitted record field).
 fn payload_fields<'p, 'c>(
@@ -1147,131 +987,6 @@ fn payload_fields<'p, 'c>(
                     .map(|f| &f.pattern.1)
             })
             .collect(),
-    }
-}
-
-impl Compiler {
-    /// Whether [`Self::emit_slot_test_chain`] can lower this group: nested
-    /// constructors carry no bindings of their own (unit, or only `_`
-    /// inside), and the group's last arm has no test to fail (so a miss
-    /// never has to leave the group).
-    fn slot_chain_supported(&self, arms: &[&MatchArm<'_>], arm_indices: &[usize]) -> bool {
-        let simple_nested = |p: &Pattern<'_>| match p {
-            Pattern::Constructor { payload, .. } => match payload {
-                PatternPayload::Unit => true,
-                PatternPayload::Tuple(parts) => parts
-                    .iter()
-                    .all(|q| matches!(q.1, Pattern::Wildcard | Pattern::Default)),
-                PatternPayload::Record(_) => false,
-            },
-            _ => true,
-        };
-        for (rank, &arm_idx) in arm_indices.iter().enumerate() {
-            let Pattern::Constructor {
-                enum_name,
-                variant_name,
-                payload,
-            } = &arms[arm_idx].pattern.1
-            else {
-                return false;
-            };
-            let fields = payload_fields(&self.checker, enum_name, variant_name, payload);
-            if fields.iter().flatten().any(|p| !simple_nested(p)) {
-                return false;
-            }
-            let is_last = rank == arm_indices.len() - 1;
-            if is_last
-                && fields
-                    .iter()
-                    .flatten()
-                    .any(|p| matches!(p, Pattern::Constructor { .. }))
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Test chain for a tag group whose payload has several fields. The
-    /// outer `JumpIfMatch` left field `k` in slot `payload_base + k`; each
-    /// arm copies a field with a nested constructor, `JumpIfMatch`es its
-    /// tag, and on a miss drops the copy and tries the next arm. Fields stay
-    /// in their slots, so every arm (and its bindings) sees the same layout.
-    fn emit_slot_test_chain(&mut self, chain: SlotTestChain<'_, '_>) {
-        let SlotTestChain {
-            arms,
-            arm_indices,
-            bb,
-            pass_labels,
-            match_bindings_per_arm,
-            payload_base,
-        } = chain;
-        let mut next_start: Option<crate::block_builder::Label> = None;
-        for (rank, &arm_idx) in arm_indices.iter().enumerate() {
-            if let Some(label) = next_start.take() {
-                bb.bind_label(label, self.bytecode.il_mut());
-            }
-            let pass_label = bb.fresh_label(self.bytecode.il_mut());
-            pass_labels.insert(arm_idx, Some(pass_label));
-            let bindings = match_bindings_per_arm.entry(arm_idx).or_default();
-            let Pattern::Constructor {
-                enum_name,
-                variant_name,
-                payload,
-            } = &arms[arm_idx].pattern.1
-            else {
-                unreachable!("slot_chain_supported checked every arm");
-            };
-            let fields = payload_fields(&self.checker, enum_name, variant_name, payload);
-            let is_last = rank == arm_indices.len() - 1;
-            let fail_label = if is_last {
-                None
-            } else {
-                let label = bb.fresh_label(self.bytecode.il_mut());
-                next_start = Some(label);
-                Some(label)
-            };
-            for (k, field) in fields.iter().enumerate() {
-                let slot = payload_base + k as u32;
-                match field {
-                    Some(Pattern::Binding { name }) => {
-                        bindings.insert(name.to_string(), slot);
-                    }
-                    Some(Pattern::Constructor {
-                        enum_name: sub_enum,
-                        variant_name: sub_variant,
-                        ..
-                    }) => {
-                        let (Some(tag), Some(fail)) =
-                            (self.checker.tag_for(sub_enum, sub_variant), fail_label)
-                        else {
-                            continue;
-                        };
-                        let arity = self.checker.arity_for(sub_enum, sub_variant).unwrap_or(0);
-                        let hit = bb.fresh_label(self.bytecode.il_mut());
-                        self.bytecode.push_load(slot);
-                        bb.emit_jump_to(
-                            hit,
-                            BbJumpKind::JumpIfMatch {
-                                tag,
-                                arity: arity as u32,
-                            },
-                            self.bytecode.il_mut(),
-                        );
-                        // Miss: the copy is still on the stack.
-                        self.bytecode.push_pop();
-                        bb.emit_jump_to(fail, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                        bb.bind_label(hit, self.bytecode.il_mut());
-                        // Hit: drop the nested payload (only `_` inside).
-                        for _ in 0..arity {
-                            self.bytecode.push_pop();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            bb.emit_jump_to(pass_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        }
     }
 }
 
@@ -1300,5 +1015,307 @@ fn arm_body_pushes_value(body: &Output<'_>) -> bool {
         | Expression::TypeAlias { .. }
         | Expression::Function { .. } => false,
         _ => true,
+    }
+}
+
+/// True when an arm tests a sub-pattern of its payload (a literal or an
+/// inner constructor). Outer-tag dispatch cannot tell such arms apart:
+/// `Some(200)` must fall through to a later `Some(_)` or `default`.
+fn has_nested_test(arms: &[&MatchArm<'_>]) -> bool {
+    fn tests(pattern: &Pattern<'_>) -> bool {
+        matches!(pattern, Pattern::Integer(_) | Pattern::Constructor { .. })
+    }
+    arms.iter().any(|arm| match &arm.pattern.1 {
+        Pattern::Constructor { payload, .. } => match payload {
+            PatternPayload::Unit => false,
+            PatternPayload::Tuple(parts) => parts.iter().any(|p| tests(&p.1)),
+            PatternPayload::Record(fields) => fields.iter().any(|f| tests(&f.pattern.1)),
+        },
+        _ => false,
+    })
+}
+
+/// One arm's test in [`Compiler::compile_match_sequential`].
+struct ArmTest {
+    /// First slot above the scrutinee; payload words land from here.
+    base: u32,
+    /// Words the test has pushed above `base` so far.
+    depth: u32,
+    max_depth: u32,
+    /// Last arm: exhaustiveness guarantees a match, so only unpack.
+    irrefutable: bool,
+    /// Miss labels, each with the number of words to pop before the next arm.
+    misses: Vec<(crate::block_builder::Label, u32)>,
+    bindings: HashMap<String, u32>,
+}
+
+impl Compiler {
+    /// `JumpIfMatch` / `Unpack` need an `ObjEnum`: compile a pointer-niche
+    /// scrutinee as a heap enum (under `force_heap_*`, set by the caller).
+    fn emit_scrutinee_as_boxed(&mut self, scrutinee: &Output<'_>) {
+        if self.repr.force_heap_option
+            && self.expr_layout(scrutinee).is_niche_option()
+            && !Self::is_option_construct(scrutinee)
+        {
+            Self::emit_niche_option_to_boxed(&mut self.bytecode);
+        }
+        if self.repr.force_heap_result
+            && self.expr_layout(scrutinee).is_niche_unit_result()
+            && !Self::is_result_construct(scrutinee)
+        {
+            Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
+        }
+        if self.repr.force_heap_result
+            && self.expr_layout(scrutinee).is_niche_result()
+            && !Self::is_result_construct(scrutinee)
+        {
+            Self::emit_niche_result_to_boxed(&mut self.bytecode);
+        }
+    }
+
+    /// Lower a match whose arms test nested sub-patterns arm by arm. The
+    /// scrutinee goes to a slot; each arm tests it (pushing the payloads it
+    /// opens above that slot, where its bindings live), then runs its body.
+    /// A failed test pops what the arm pushed and falls into the next arm.
+    fn compile_match_sequential<'compiler>(
+        &mut self,
+        scrutinee: &Output<'compiler>,
+        arms: &[&MatchArm<'compiler>],
+    ) -> CodeBuf {
+        let scrutinee_ty = self.codegen_expr_ty(scrutinee);
+        let layout = self.expr_layout(scrutinee);
+        let outer = self.repr;
+        self.repr.force_heap_option |= layout.is_niche_option();
+        self.repr.force_heap_result |= layout.is_niche_unit_result() || layout.is_niche_result();
+        self.bytecode.push_seek(self.context.variables.len() as u32);
+        let mut scrutinee_bc = self.do_compile(scrutinee);
+        self.bytecode.append(&mut scrutinee_bc);
+        self.emit_scrutinee_as_boxed(scrutinee);
+        self.repr = outer;
+
+        let slot = self.context.variables.len() as u32;
+        self.context.variables.intern(format!("__match_scrutinee{slot}"));
+        self.bytecode.push_store_pop(slot);
+
+        let mut bb = BlockBuilder::new();
+        let end = bb.fresh_label(self.bytecode.il_mut());
+        for (i, arm) in arms.iter().enumerate() {
+            let is_last = i + 1 == arms.len();
+            let mut test = ArmTest {
+                base: slot + 1,
+                depth: 0,
+                max_depth: 0,
+                irrefutable: is_last,
+                misses: Vec::new(),
+                bindings: HashMap::new(),
+            };
+            self.emit_pattern_test(
+                &mut bb,
+                &mut test,
+                &arm.pattern.1,
+                slot,
+                scrutinee_ty.as_ref(),
+                ValueLayout::Boxed,
+            );
+
+            // Arm-body temps go above the payload words.
+            while (self.context.variables.len() as u32) < test.base + test.max_depth {
+                let pad = format!("__match{}", self.context.variables.len());
+                let _ = self.context.variables.intern(pad);
+            }
+            for (name, slot) in &test.bindings {
+                self.record_debug_local(name, *slot);
+            }
+            let saved_bindings = self.push_match_bindings(std::mem::take(&mut test.bindings));
+            // Per-arm types so Access on a reused binding name sees this arm's payload.
+            let mut arm_binding_tys = HashMap::new();
+            collect_pattern_binding_types(&self.checker, &arm.pattern.1, &mut arm_binding_tys);
+            self.mono_codegen_var_types.push(arm_binding_tys);
+            if self.match_tail_call {
+                let mut arm_bc = CodeBuf::new();
+                // Tail-call arguments are operands: no inherited repr.
+                let prev = std::mem::take(&mut self.repr);
+                let tail = self.try_emit_tail_call_expr(&arm.body, &mut arm_bc);
+                self.repr = prev;
+                if !tail {
+                    arm_bc = self.compile_arm_body(&arm.body);
+                }
+                self.bytecode.append(&mut arm_bc);
+            } else {
+                self.emit_arm_body(&arm.body);
+            }
+            self.mono_codegen_var_types.pop();
+            self.context.match_bindings = saved_bindings;
+            if !is_last {
+                bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            }
+
+            // Misses unwind to the arm's base and fall into the next arm:
+            // deepest first, one POP between depths.
+            let deepest = test.misses.iter().map(|&(_, d)| d).max().unwrap_or(0);
+            for depth in (0..=deepest).rev() {
+                for &(label, d) in &test.misses {
+                    if d == depth {
+                        bb.bind_label(label, self.bytecode.il_mut());
+                    }
+                }
+                if depth > 0 && !test.misses.is_empty() {
+                    self.bytecode.push_pop();
+                }
+            }
+        }
+
+        // Value-join bind so fuse-select / invert-guard do not eat the
+        // match. Omitted when StorePop consumes the match immediately.
+        if self.suppress_match_fusion_barrier {
+            bb.bind_label(end, self.bytecode.il_mut());
+        } else {
+            bb.bind_join_label(end, self.bytecode.il_mut());
+        }
+        CodeBuf::new()
+    }
+
+    /// Branch to a new miss label of `test` (popping `pending` extra words
+    /// on the way) when the flag on top of the stack is `on`.
+    fn emit_miss_jump(&mut self, bb: &mut BlockBuilder, test: &mut ArmTest, kind: BbJumpKind, pending: u32) {
+        let label = bb.fresh_label(self.bytecode.il_mut());
+        test.misses.push((label, test.depth + pending));
+        bb.emit_jump_to_hinted(label, kind, FuseHint::nofuse_value_under_jmp(), self.bytecode.il_mut());
+    }
+
+    /// Test `pattern` against the value in `slot` (static type `ty`, word
+    /// layout `layout`), recording bindings; a miss jumps to a label in
+    /// `test.misses`.
+    fn emit_pattern_test(
+        &mut self,
+        bb: &mut BlockBuilder,
+        test: &mut ArmTest,
+        pattern: &Pattern<'_>,
+        slot: u32,
+        ty: Option<&Ty>,
+        layout: ValueLayout,
+    ) {
+        let Pattern::Constructor {
+            enum_name,
+            variant_name,
+            payload,
+        } = pattern
+        else {
+            match pattern {
+                Pattern::Binding { name } => {
+                    test.bindings.insert(name.to_string(), slot);
+                }
+                Pattern::Integer(n) if !test.irrefutable => {
+                    self.emit_scalar_test(bb, test, slot, &ScalarBacking::Int(*n));
+                }
+                _ => {}
+            }
+            return;
+        };
+        if let Some(backing) = self.checker.scalar_for(enum_name, variant_name).cloned() {
+            if !test.irrefutable {
+                self.emit_scalar_test(bb, test, slot, &backing);
+            }
+            return;
+        }
+
+        // Payload sub-patterns and their instantiated types, in declaration order.
+        let subs = payload_fields(&self.checker, enum_name, variant_name, payload);
+        let field_tys: Vec<Ty> = ty
+            .and_then(|ty| self.checker.instantiated_variants(ty))
+            .and_then(|variants| {
+                variants
+                    .into_iter()
+                    .find(|(name, _)| name == variant_name)
+                    .map(|(_, payload)| payload.field_pairs().into_iter().map(|(_, t)| t).collect())
+            })
+            .unwrap_or_default();
+        let field_layout = |this: &Self, k: usize| {
+            field_tys
+                .get(k)
+                .map_or(ValueLayout::Boxed, |t| this.value_layout(t))
+        };
+
+        if layout != ValueLayout::Boxed {
+            // Pointer niche: the payload is the word itself (an `Err` with
+            // its tag bit cleared). `0` is `None` / `Ok(())`; bit 0 is `Err`.
+            let wanted = matches!(*variant_name, "Some" | "Err");
+            if !test.irrefutable {
+                self.bytecode.push_load(slot);
+                if layout.is_niche_result() {
+                    self.bytecode.push_const(1);
+                    self.bytecode.push(Byte::new(Instruction::BITAND));
+                    let kind = if *variant_name == "Err" {
+                        BbJumpKind::JumpIfFalse
+                    } else {
+                        BbJumpKind::JumpIfTrue
+                    };
+                    self.emit_miss_jump(bb, test, kind, 0);
+                } else {
+                    self.bytecode.push(Byte::new(Instruction::LogNot));
+                    let kind = if wanted {
+                        BbJumpKind::JumpIfTrue
+                    } else {
+                        BbJumpKind::JumpIfFalse
+                    };
+                    self.emit_miss_jump(bb, test, kind, 0);
+                }
+            }
+            let Some(Some(sub)) = subs.first() else {
+                return;
+            };
+            let mut inner = slot;
+            if layout.is_niche_result() && *variant_name == "Err" {
+                self.bytecode.push_load(slot);
+                Self::push_result_untag(&mut self.bytecode);
+                inner = test.base + test.depth;
+                test.depth += 1;
+                test.max_depth = test.max_depth.max(test.depth);
+            }
+            let sub_layout = field_layout(self, 0);
+            self.emit_pattern_test(bb, test, sub, inner, field_tys.first(), sub_layout);
+            return;
+        }
+
+        let Some(tag) = self.checker.tag_for(enum_name, variant_name) else {
+            return;
+        };
+        let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0) as u32;
+        self.bytecode.push_load(slot);
+        if test.irrefutable {
+            self.bytecode
+                .push(Byte::new(Instruction::Unpack).with_operand_u32(arity));
+        } else {
+            let hit = bb.fresh_label(self.bytecode.il_mut());
+            bb.emit_jump_to(
+                hit,
+                BbJumpKind::JumpIfMatch { tag, arity },
+                self.bytecode.il_mut(),
+            );
+            // Miss: the enum is still on the stack.
+            let miss = bb.fresh_label(self.bytecode.il_mut());
+            test.misses.push((miss, test.depth + 1));
+            bb.emit_jump_to(miss, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            bb.bind_label(hit, self.bytecode.il_mut());
+        }
+        let first = test.base + test.depth;
+        test.depth += arity;
+        test.max_depth = test.max_depth.max(test.depth);
+        for k in 0..arity as usize {
+            if let Some(Some(sub)) = subs.get(k) {
+                let sub_layout = field_layout(self, k);
+                self.emit_pattern_test(bb, test, sub, first + k as u32, field_tys.get(k), sub_layout);
+            }
+        }
+    }
+
+    /// `LOAD slot; <literal>; EQ` and miss when false.
+    fn emit_scalar_test(&mut self, bb: &mut BlockBuilder, test: &mut ArmTest, slot: u32, backing: &ScalarBacking) {
+        self.bytecode.push_load(slot);
+        let mut literal = CodeBuf::new();
+        self.emit_scalar_backing(backing, &mut literal);
+        self.bytecode.append(&mut literal);
+        self.bytecode.push(Byte::new(Instruction::EQ));
+        self.emit_miss_jump(bb, test, BbJumpKind::JumpIfFalse, 0);
     }
 }
