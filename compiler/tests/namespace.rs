@@ -1603,3 +1603,50 @@ struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);
 impl Drop for CwdLockGuard {
     fn drop(&mut self) {}
 }
+
+/// #605: modules with no `use` edge between them were ordered by a
+/// `HashMap`'s iteration, so the same project linked its functions in a
+/// different order on every compile. Each `Pipeline` hashes with fresh
+/// keys, so a few compiles in one process expose any such order.
+#[test]
+fn independent_modules_link_in_the_same_order_every_compile() {
+    let names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    let mut files: Vec<(String, String)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let class = format!("{}{}", n[..1].to_uppercase(), &n[1..]);
+            let src = format!(
+                "class {class} {{\n    pub v: int,\n}}\n\nimpl {class} {{\n    pub static fn make() -> {class} {{\n        return new {class}({i});\n    }}\n\n    pub fn get() -> int {{\n        return self.v;\n    }}\n}}\n\nfn {n}_value() -> int {{\n    return {class}::make().get();\n}}\n"
+            );
+            (format!("src/{n}.hy"), src)
+        })
+        .collect();
+    let mut main = String::new();
+    for n in names {
+        main.push_str(&format!("use {n}::{{{n}_value}};\n"));
+    }
+    main.push_str("\nfn main() {\n    let total = 0;\n");
+    for n in names {
+        main.push_str(&format!("    total = total + {n}_value();\n"));
+    }
+    main.push_str("}\n");
+    files.push(("src/main.hy".to_string(), main));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let (root, entry) = build_project("module_order", "", &refs, "src/main.hy");
+
+    let compile = || {
+        with_project_cwd(&root, || {
+            let mut pipeline = Pipeline::new();
+            bind_ns_pipeline(&mut pipeline, &[root.join("src")]);
+            pipeline
+                .compile_src_from_file(entry.to_str().unwrap())
+                .unwrap_or_else(|_| panic!("compile failed: {:?}", pipeline.messages()))
+        })
+    };
+    let first = compile();
+    for run in 1..6 {
+        assert!(compile() == first, "compile {run} linked differently from compile 0");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
