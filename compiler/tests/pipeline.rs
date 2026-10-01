@@ -1922,32 +1922,29 @@ fn example_ffi_sum_via_dlopen_prints_42() {
     };
     assert_eq!(output, "42", "sum(40, 2) via userland FFI should print 42");
 }
-
+/// `extern "c"` (a libc alias) is denied even when `c` is granted.
 #[test]
-fn example_strlen_is_compile_error_for_libc() {
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join("examples/strlen.hy");
-    let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
-}
-
-#[test]
-fn example_strlen_from_file_is_compile_error_for_libc() {
+fn extern_c_is_denied_even_when_granted() {
     let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("c");
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join("examples/strlen.hy");
-    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
+    let result = pipeline.compile_src(
+        r#"
+extern "c" {
+    fn strlen(string s) -> int;
+}
+fn main() {
+    let _ = strlen("hello");
+}
+"#,
+    );
     assert!(result.is_err());
     assert!(
         pipeline
             .messages()
             .iter()
-            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied))
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied)),
+        "expected HostDloadDenied, got {:?}",
+        pipeline.messages()
     );
 }
 
@@ -2036,17 +2033,6 @@ fn clean_captured_os_stdout(output: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[cfg(unix)]
-#[test]
-fn example_ffi_printf_is_compile_error_for_libc() {
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join("examples/ffi_printf.hy");
-    let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
-    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
 }
 
 #[test]
@@ -3610,6 +3596,30 @@ fn example_ffi_callback_return_prints_1() {
     assert_eq!(output, "1");
 }
 
+#[cfg(unix)]
+#[test]
+fn example_ffi_extern_prints_42() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_extern.hy", &libsum);
+    assert_eq!(output, "42");
+}
+
+#[cfg(unix)]
+#[test]
+fn example_ffi_varargs_prints_60() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_varargs.hy", &libsum);
+    assert_eq!(output, "60");
+}
+
 #[test]
 fn example_operators_prints_expected() {
     let output = run_example("examples/operators.hy");
@@ -3768,24 +3778,6 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "true,true,false,true,false");
-}
-
-#[test]
-fn example_attr_ffi_strlen_is_compile_error_for_libc() {
-    let mut pipeline = test_pipeline();
-    pipeline.grant_dload_stem("c");
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join("examples/attr_ffi.hy");
-    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
-    assert!(result.is_err());
-    assert!(
-        pipeline
-            .messages()
-            .iter()
-            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied))
-    );
 }
 
 #[test]
@@ -11328,30 +11320,18 @@ fn main() {
         compiler::ErrorCode::HostDloadDenied,
     );
 }
-
-/// COI-19: `extern "c"` in an imported module is still a compile error.
+/// COI-19: an `extern` block in an imported module, with a `Vec` allocation
+/// between two calls.
+#[cfg(unix)]
 #[test]
-fn extern_in_imported_module_libc_is_compile_error() {
-    let mut pipeline = test_pipeline();
-    pipeline.grant_dload_stem("c");
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root");
-    let full = workspace_root.join("examples/ffi_mod_entry.hy");
-    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
-    assert!(
-        result.is_err(),
-        "extern c must not compile: {:?}",
-        pipeline.messages()
-    );
-    assert!(
-        pipeline
-            .messages()
-            .iter()
-            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied)),
-        "expected HostDloadDenied, got {:?}",
-        pipeline.messages()
-    );
+fn example_ffi_mod_entry_prints_10() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_mod_entry.hy", &libsum);
+    assert_eq!(output, "10");
 }
 
 /// COI-106: binding a unary Result/Option call before match must preserve heap payloads.
