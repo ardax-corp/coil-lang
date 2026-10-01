@@ -1,6 +1,3 @@
-use io::{stdout, write};
-use string::{format, to_bytes};
-
 class Holder {
     pub start: int,
     pub end: int,
@@ -14,10 +11,16 @@ impl IntoIterator for Holder {
     }
 }
 
-fn main() {
+fn total(Holder h) -> int {
     let s = 0;
-    for x in new Holder(0, 4) {
+    for x in h {
         s = s + x;
     }
-    write(stdout(), to_bytes(format("%i", s)));
+    return s;
+}
+
+test("IntoIterator returning a Range") {
+    assert(total(new Holder(0, 4)) == 6)?;
+    assert(total(new Holder(3, 6)) == 12)?;
+    assert(total(new Holder(5, 5)) == 0)?;
 }

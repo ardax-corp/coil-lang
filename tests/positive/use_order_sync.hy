@@ -6,6 +6,10 @@ use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;
 
-fn main() {
-    write_all(stdout(), to_bytes("ok"))?;
+test("a userland module imported before io::sync") {
+    assert(Path::from("a/b").as_str() == "a/b")?;
+    match write_all(stdout(), to_bytes("")) {
+        Result::Ok(_) => {},
+        Result::Err(_) => panic "write_all",
+    }
 }

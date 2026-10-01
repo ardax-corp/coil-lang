@@ -1,7 +1,3 @@
-use io::{stdout, write};
-
-use string::{format, to_bytes};
-
 class TextCounter {
     pub cur: int,
     pub end: int,
@@ -27,9 +23,21 @@ impl Iterator for TextCounter {
     }
 }
 
-fn main() {
-    let value = new TextCounter(0, 2, "x");
-    for text in value {
-        write(stdout(), to_bytes(format("%s", text)));
+test("iterator yielding Option<string> (pointer niche)") {
+    let joined = "";
+    let n = 0;
+    for text in new TextCounter(0, 3, "ab") {
+        joined = joined + text;
+        n = n + 1;
     }
+    assert(n == 3)?;
+    assert(joined == "ababab")?;
+}
+
+test("empty niche iterator") {
+    let n = 0;
+    for text in new TextCounter(2, 2, "x") {
+        n = n + 1;
+    }
+    assert(n == 0)?;
 }
