@@ -20,7 +20,13 @@ struct Client {
 
 impl Client {
     fn spawn(root: &Path) -> Self {
+        Self::spawn_with(root, &[])
+    }
+
+    /// Spawn with command-line flags (`--root`, host grants).
+    fn spawn_with(root: &Path, args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_coil-lsp"))
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -212,6 +218,36 @@ fn dependency_classes_and_enums_resolve() {
     for messages in published {
         assert!(messages.is_empty(), "false diagnostics in main.hy: {messages:?}");
     }
+}
+
+/// #582: `--root` adds module search dirs and the grant flags reach the
+/// checker, as for `coil compile`.
+#[test]
+fn command_line_roots_and_grants_reach_diagnostics() {
+    let geo = "class Point {\n    pub x: int,\n}\n\nimpl Point {\n    pub static fn at(int x) -> Point {\n        return new Point(x);\n    }\n}\n";
+    let main = "use env::{exec};\nuse geo::{Point};\n\nfn main() {\n    let p = Point::at(2);\n    let argv: Vec<string> = Vec::new();\n    let _ = exec(\"true\", argv);\n    let _ = p.x;\n}\n";
+    let dir = project("cli-roots", &[("vendor/geo.hy", geo), ("src/main.hy", main)]);
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let last = |args: &[&str]| -> Vec<String> {
+        let mut client = Client::spawn_with(&dir, args);
+        open(&mut client, &main_uri, main);
+        client.request("shutdown", Value::Null);
+        client.diagnostics_for(&main_uri).pop().expect("diagnostics published")
+    };
+
+    let without = last(&[]);
+    assert!(
+        without.iter().any(|m| m.contains("Point")),
+        "vendor/ is not a root by default: {without:?}"
+    );
+    assert!(
+        without.iter().any(|m| m.contains("--allow-exec")),
+        "exec needs the grant: {without:?}"
+    );
+
+    let vendor = dir.join("vendor");
+    let with = last(&["--root", vendor.to_str().unwrap(), "--allow-exec"]);
+    assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
 }
 
 fn open(client: &mut Client, uri: &str, text: &str) {
