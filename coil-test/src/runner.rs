@@ -689,10 +689,10 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         }
     }
 
-    if failed != 0 {
-        if let Order::Shuffled(seed) = options.order {
-            eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
-        }
+    if failed != 0
+        && let Order::Shuffled(seed) = options.order
+    {
+        eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
     }
     suite_exit_code(failed)
 }
