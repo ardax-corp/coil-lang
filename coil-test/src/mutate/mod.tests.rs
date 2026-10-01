@@ -45,8 +45,20 @@ fn score_counts_timeouts_as_kills_and_skips_unscored() {
     assert!(report.summary().starts_with(
         "mutation score: 50.0% (1 killed, 1 timed out, 2 survived; 1 unviable, 1 without coverage)"
     ));
-    assert!(report.json().starts_with("{\"score\":50.00,\"mutants\":[{\"file\":\"src/a.hy\",\"line\":1,\"operator\":\"arith\",\"from\":\"+\",\"to\":\"-\",\"status\":\"killed\",\"killed_by\":null}"));
-    assert!(report.json().contains("\"status\":\"no_coverage\""));
+    assert_eq!(
+        mutant_event(&report.mutants[0]).finish(),
+        "{\"event\":\"mutant\",\"file\":\"src/a.hy\",\"line\":1,\"operator\":\"arith\",\"from\":\"+\",\"to\":\"-\",\"status\":\"killed\",\"killed_by\":null}"
+    );
+    assert!(
+        mutant_event(&report.mutants[5])
+            .finish()
+            .contains("\"status\":\"no_coverage\"")
+    );
+    assert_eq!(
+        report.summary_event(Some(60.0)).finish(),
+        "{\"event\":\"summary\",\"ok\":false,\"score\":50.00,\"min_score\":60,\"killed\":1,\"timed_out\":1,\"survived\":2,\"unviable\":1,\"no_coverage\":1}"
+    );
+    assert!(report.summary_event(None).finish().contains("\"ok\":true"));
     assert_eq!(MutateReport::default().score(), None);
 }
 
@@ -120,6 +132,7 @@ fn weak_suite_end_to_end() {
             opt_level: OptLevel::Standard,
             grants: HostGrants::deny_all(),
             extra_roots: vec![root.join("src")],
+            report: Default::default(),
         },
         files: Vec::new(),
         operators: Operator::ALL.to_vec(),

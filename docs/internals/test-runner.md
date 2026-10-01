@@ -211,12 +211,39 @@ source order whatever `-j` is.
 | `--timeout-factor N` | step budget multiplier |
 | `--wall-timeout S` | per-mutant worker time limit |
 | `--min-score P` | exit 1 below P percent |
-| `--json` | `{"score":…,"mutants":[{"file","line","operator","from","to","status","killed_by"}]}` on stdout |
+| `--json` | NDJSON events on stdout instead of the text report (see [JSON events](#json-events)) |
 
 On coil-stdlib (~2k mutants) a release `coil mutate -j 4` takes about five
 minutes. Not yet: `--since REV` (changed lines only), statement deletion and
 body replacement operators, dependency sources (`--include-deps`), and
 compiling all of a file's mutants into one program (mutant schemata).
+
+## JSON events
+
+`coil test --json` and `coil mutate --json` print one JSON object per line on
+stdout, flushed as it happens, instead of the text on stderr. Tools (spool)
+render them. `--json` cannot be combined with `--log-json` / `--log-lsp`.
+
+`coil test`:
+
+| `event` | Fields |
+|---------|--------|
+| `start` | `files`, `seed` (`"0x…"`, `null` with `--no-shuffle`), `jobs` |
+| `file` | `file`, `ok`, `passed`, `failed`, `message` (file-level verdict or `null`), `diagnostics` (compiler output or `null`), `cases`: `[{name, ok, timed_out, reason, output}]` (`output` only for failures or with `--show-output`) |
+| `error` | `message` (harness error; the run then exits 1) |
+| `summary` | `ok`, `passed`, `failed`, `total`, `seed`, `coverage`: `null` or `{hit, total, lcov, files: [{file, hit, total}]}` |
+
+Files are reported in start order, as in the text report.
+
+`coil mutate` (the baseline run is silent):
+
+| `event` | Fields |
+|---------|--------|
+| `baseline` | none (the baseline suite started) |
+| `plan` | `mutants`, `files`, `covered`, `jobs` |
+| `mutant` | `file`, `line`, `operator`, `from`, `to`, `status` (`killed`, `timed_out`, `survived`, `unviable`, `no_coverage`), `killed_by` |
+| `error` | `message` |
+| `summary` | `ok` (false below `--min-score`), `score` (`null` when nothing scored), `min_score`, `killed`, `timed_out`, `survived`, `unviable`, `no_coverage` |
 
 ## Compile
 

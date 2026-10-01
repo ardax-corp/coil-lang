@@ -6,6 +6,7 @@
 
 pub mod args;
 pub mod coverage;
+pub mod events;
 pub mod mutate;
 pub mod order;
 pub mod runner;
