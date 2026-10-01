@@ -1966,7 +1966,17 @@ mod tests {
         let mut heap = Heap::default();
         assert_eq!(io_drive(&mut heap).as_int(), 0);
         w.write_all(b"q").expect("write");
-        assert_eq!(io_drive(&mut heap).as_int(), 1);
+        // One non-blocking poll right after the write can miss the byte on
+        // macOS loopback (#590); this test checks counting, not latency.
+        let mut ready = 0;
+        for _ in 0..200 {
+            ready = io_drive(&mut heap).as_int();
+            if ready != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(ready, 1);
         io.cancel_wait(tok);
         drop(r);
         drop(w);
