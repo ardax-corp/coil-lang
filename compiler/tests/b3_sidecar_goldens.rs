@@ -35,11 +35,11 @@ const CORPUS: &[&str] = &[
 /// COI-388 X3 fuses `MakeEnum; RETURN` → `MakeEnumReturn` (shorter corpus).
 /// IlFunc spans for trait instance methods retarget `user_trait_dispatch.hy`.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "53c04a3bd949039e_572"),
-    ("functions.hy", "7d51114f1381cfe6_378"),
-    ("loops.hy", "b8e88a433a519860_257"),
-    ("option_pair.hy", "ff9c92377a1d43b7_379"),
-    ("user_trait_dispatch.hy", "c82ac0d364215b73_151"),
+    ("arithmetic.hy", "1dc5a373b81a6de1_572"),
+    ("functions.hy", "6e24df8cd5108a4a_378"),
+    ("loops.hy", "a5b24132677ff601_257"),
+    ("option_pair.hy", "dc1fb9f7f1fd9301_379"),
+    ("user_trait_dispatch.hy", "faae411b0f61ba06_151"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

@@ -1393,32 +1393,6 @@ fn derive_non_derivable_trait_reports_diagnostic() {
 }
 
 #[test]
-fn derive_generic_enum_reports_diagnostic() {
-    let msgs = compile_messages("#[derive(Show)] enum Box<T> { Box(T) } fn main() {}");
-    assert!(
-        msgs.iter().any(|m| {
-            m.contains("Cannot derive traits for generic enum `Box`")
-                && m.contains("write an explicit `impl`")
-        }),
-        "expected generic-enum derive diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
-fn derive_generic_class_reports_diagnostic() {
-    let msgs = compile_messages("#[derive(Eq)] class Cell<T> { pub value: T } fn main() {}");
-    assert!(
-        msgs.iter().any(|m| {
-            m.contains("Cannot derive traits for generic class `Cell`")
-                && m.contains("write an explicit `impl`")
-        }),
-        "expected generic-class derive diagnostic, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
 fn unknown_attribute_reports_diagnostic() {
     let msgs = compile_messages("#[bench] fn foo() { } fn main() {}");
     assert!(

@@ -8451,11 +8451,7 @@ impl Compiler {
             // Instance heads use `Ty::Con("Point")`; construct sites often
             // produce `Constructor` / `Sum`, peel to the enum name.
             let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
-            if let Some(instance) = self
-                .checker
-                .generics()
-                .find_instance("Show", std::slice::from_ref(&lookup_ty))
-                .cloned()
+            if let Some(instance) = self.find_show_instance(&lookup_ty)
                 && let Some(fqn) = instance.method_fqns.get("show").cloned()
                 && (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
             {
@@ -8472,7 +8468,8 @@ impl Compiler {
                 }
                 // Box using the lookup head so enum Constructs get Enum tag.
                 Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
-                let _ = self.emit_named_entry_on_module(&fqn, 1, crate::il::EntryKind::Call);
+                let arity = 1 + self.emit_show_instance_dict(&fqn, &lookup_ty, arg.0.into_range());
+                let _ = self.emit_named_entry_on_module(&fqn, arity, crate::il::EntryKind::Call);
                 return;
             }
         }
@@ -8560,22 +8557,48 @@ impl Compiler {
                     }
                     ValueLayout::Boxed => {}
                 }
-                if let Some(instance) = self
-                    .checker
-                    .generics()
-                    .find_instance("Show", std::slice::from_ref(&lookup_ty))
-                    .cloned()
+                if let Some(instance) = self.find_show_instance(&lookup_ty)
                     && let Some(fqn) = instance.method_fqns.get("show").cloned()
                     && (self.functions.contains_key(&fqn)
                         || self.fn_entry_labels.contains_key(&fqn))
                 {
                     Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
-                    let _ = self.emit_named_entry_on_module(&fqn, 1, crate::il::EntryKind::Call);
+                    let arity = 1 + self.emit_show_instance_dict(&fqn, &lookup_ty, 0..0);
+                    let _ = self.emit_named_entry_on_module(&fqn, arity, crate::il::EntryKind::Call);
                 } else {
                     self.bytecode.push(Byte::new(Instruction::STRINGIFY));
                 }
             }
         }
+    }
+
+    /// `Show` instance for a `%v` value: exact, else a generic instance
+    /// (`Show for Box<T: Show>` for a `Box<int>`).
+    fn find_show_instance(&self, lookup_ty: &Ty) -> Option<crate::typechecking::generics::InstanceDef> {
+        let generics = self.checker.generics();
+        generics
+            .find_instance("Show", std::slice::from_ref(lookup_ty))
+            .or_else(|| generics.find_generic_instance("Show", std::slice::from_ref(lookup_ty)))
+            .cloned()
+    }
+
+    /// Push the instance dictionary a `%v` call to `show` entry `fqn` takes
+    /// (a bounded generic instance); returns how many words were pushed.
+    fn emit_show_instance_dict(
+        &mut self,
+        fqn: &str,
+        lookup_ty: &Ty,
+        range: std::ops::Range<usize>,
+    ) -> u32 {
+        let mut dict = CodeBuf::new();
+        let pushed = self.emit_call_instance_dict(
+            &mut dict,
+            ("Show", "show", fqn),
+            std::slice::from_ref(lookup_ty),
+            range,
+        );
+        self.bytecode.append(&mut dict);
+        u32::from(pushed)
     }
 
     fn emit_tuple_show_for_stack_value(&mut self, items: &[Ty]) {
@@ -10679,6 +10702,26 @@ impl Compiler {
             self.bind_function_entry(fqn);
             self.bytecode.push_load(0);
             self.bytecode.push_unbox_value(tag as u32);
+            self.bytecode.push_return();
+        }
+        // Default thunks (`static fn default()`): the primitive's zero value,
+        // raw like the Hash results; a dictionary call's trailing dictionary
+        // is ignored.
+        for (ty, value) in [
+            ("int", ConstValue::Int(0)),
+            ("byte", ConstValue::Int(0)),
+            ("float", ConstValue::Float(0.0)),
+            ("bool", ConstValue::Bool(false)),
+            ("string", ConstValue::Str(String::new())),
+        ] {
+            let fqn = Generics::builtin_instance_fqn("Default", ty, "default");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.bind_function_entry(fqn);
+            let mut value_bc = CodeBuf::new();
+            self.emit_const_value(&value, &mut value_bc);
+            self.bytecode.append(&mut value_bc);
             self.bytecode.push_return();
         }
         {

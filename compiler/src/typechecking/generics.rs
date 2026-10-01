@@ -866,6 +866,26 @@ impl Generics {
             });
         }
 
+        // `Default` for the primitives (`0`, `0.0`, `false`, `""`), so a
+        // derived `Default for Box<T: Default>` applies to `Box<int>` (#552).
+        for (ty, ty_str) in [
+            (int(), "int"),
+            (float(), "float"),
+            (string(), "string"),
+            (boolean(), "bool"),
+            (super::ty::byte(), "byte"),
+        ] {
+            self.instances.push(InstanceDef {
+                class: "Default".into(),
+                defined_module: PRELUDE_MODULE.into(),
+                range: 0..0,
+                args: vec![ty],
+                method_fqns: make_fqns("Default", ty_str, &["default"]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
+
         self.instances.push(InstanceDef {
             class: "Eq".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -996,6 +1016,28 @@ impl Generics {
     pub fn has_instance(&self, class: &str, ty: &Ty) -> bool {
         self.find_instance(class, std::slice::from_ref(ty))
             .is_some()
+    }
+
+    /// A generic instance (`Show for Box<T>`, head with type variables) whose
+    /// head unifies with `args`: the fallback after an exact
+    /// [`Self::find_instance`] miss. Concrete instances are never returned.
+    pub fn find_generic_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
+        self.instances.iter().find(|inst| {
+            inst.args.iter().any(ty_has_var) && Self::instances_unify(class, args, inst)
+        })
+    }
+}
+
+fn ty_has_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Fun(a, b) => ty_has_var(a) || ty_has_var(b),
+        Ty::App(h, args) => ty_has_var(h) || args.iter().any(ty_has_var),
+        Ty::Tuple(items) => items.iter().any(ty_has_var),
+        Ty::List(inner) | Ty::Readonly(inner) => ty_has_var(inner),
+        Ty::Array { element, .. } => ty_has_var(element),
+        Ty::Constructor { owner, .. } => ty_has_var(owner),
+        _ => false,
     }
 }
 

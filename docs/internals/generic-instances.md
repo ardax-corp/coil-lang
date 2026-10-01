@@ -1,6 +1,6 @@
 # Trait instances for generic types
 
-GitHub: [#550](https://github.com/ardax-corp/coil-lang/issues/550) (unbounded), [#551](https://github.com/ardax-corp/coil-lang/issues/551) (bounded), [#552](https://github.com/ardax-corp/coil-lang/issues/552) (derives). Status: #550 and #551 **implemented**; #552 open.
+GitHub: [#550](https://github.com/ardax-corp/coil-lang/issues/550) (unbounded), [#551](https://github.com/ardax-corp/coil-lang/issues/551) (bounded), [#552](https://github.com/ardax-corp/coil-lang/issues/552) (derives). Status: **implemented** (#550, #551, #552).
 
 ```hy
 class Box<T> {
@@ -46,7 +46,22 @@ Instance methods keep the explicit receiver parameter every trait method has (`f
 - **Open goals.** A goal that still mentions a type variable is served from scope (`resolve_open_dict_goal`): inside a bounded instance, its own dictionary (`__dict0`, for recursion such as `Tree<T>`) or a context slot; inside a generic function, its bound's `__dictN` (scheme order); in a mono clone, the goal at the clone's concrete types (`mono_var_tys`). A goal like `Describe<Pair<T, int>>` goes through the generic `Pair` instance and resolves its context from scope. An open goal never falls back to a concrete instance.
 - **Allocation.** Building a bounded instance's dictionary allocates one tuple per level at each use. Interning dictionaries for ground goals is a possible follow-up if a hit bench shows it matters.
 
+## Derives (#552)
+
+Built-in and user derives on generic types expand to bounded instances: each
+type parameter is bounded by the trait the derived body uses (`Show for
+Box<T: Show>`, `Ord for Box<T: Ord + Eq>`). `TypeDecl::impl_head(bound)` and
+`TypeDecl::self_type()` in the `macro` model write the head and the signature
+type; see [macros.md](macros.md). The primitives have built-in `Default`
+instances so a derived `Default for Box<T: Default>` applies to `Box<int>`.
+A static trait call on a generic owner (`Box::default()`) is `Box<β…>`, fixed
+by the expected type. Generic instances are found by the superclass check, the
+`%v` check and dispatch, and the operand checks (`find_generic_instance`).
+
 ## Not done
 
-- **Derives on generic types (#552).** Built-in derives expand to `impl Trait for Name<T: Trait, …>` with a `Trait` bound on each parameter; user derives get a `t.impl_head(trait)` helper. `Default` needs static trait methods (#524, done).
-- **Superclass contexts.** `impl Ord for Box<T: Ord>` needs `Eq<Box<T>>` when `Ord` requires `Eq`; the superclass instance must exist, as for concrete instances.
+- **Superclass contexts.** `impl Ord for Box<T: Ord>` still needs its own
+  superclass instances (`Lt<Box<T>>`, …) declared, as for concrete instances;
+  the derive declares them.
+- **Dictionary allocation.** A bounded instance's dictionary is built at each
+  use; interning ground dictionaries is a follow-up if a hit bench shows it.

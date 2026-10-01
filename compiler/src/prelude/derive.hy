@@ -124,8 +124,8 @@ derive Show(TypeDecl t) -> Code {
     if t.repr != "" {
         let n = "__show_n_" + t.name.str();
         return quote items {
-            impl Show for ${t.name} {
-                fn show(${t.name} ${raw(p)}) -> string {
+            impl Show for ${t.impl_head("Show")} {
+                fn show(${t.self_type()} ${raw(p)}) -> string {
                     let ${raw(n)}: ${raw(t.repr)} = ${raw(p)};
                     return ${raw(n)}.show();
                 }
@@ -133,8 +133,8 @@ derive Show(TypeDecl t) -> Code {
         };
     }
     return quote items {
-        impl Show for ${t.name} {
-            fn show(${t.name} ${raw(p)}) -> string {
+        impl Show for ${t.impl_head("Show")} {
+            fn show(${t.self_type()} ${raw(p)}) -> string {
                 ${raw(show_format(t, p))}
             }
         }
@@ -147,8 +147,8 @@ derive String(TypeDecl t) -> Code {
     if t.repr != "" {
         let n = "__str_n_" + t.name.str();
         return quote items {
-            impl String for ${t.name} {
-                fn to_string(${t.name} ${raw(p)}) -> string {
+            impl String for ${t.impl_head("Show")} {
+                fn to_string(${t.self_type()} ${raw(p)}) -> string {
                     let ${raw(n)}: ${raw(t.repr)} = ${raw(p)};
                     return ${raw(n)}.show();
                 }
@@ -156,8 +156,8 @@ derive String(TypeDecl t) -> Code {
         };
     }
     return quote items {
-        impl String for ${t.name} {
-            fn to_string(${t.name} ${raw(p)}) -> string {
+        impl String for ${t.impl_head("Show")} {
+            fn to_string(${t.self_type()} ${raw(p)}) -> string {
                 ${raw(show_format(t, p))}
             }
         }
@@ -215,11 +215,11 @@ derive Eq(TypeDecl t) -> Code {
         body = "return match " + a + " {\n" + arms + "default => false,\n};";
     }
     return quote items {
-        impl Eq for ${t.name} {
-            fn eq(${t.name} ${raw(a)}, ${t.name} ${raw(b)}) -> bool {
+        impl Eq for ${t.impl_head("Eq")} {
+            fn eq(${t.self_type()} ${raw(a)}, ${t.self_type()} ${raw(b)}) -> bool {
                 ${raw(body)}
             }
-            fn ne(${t.name} ${raw(a)}, ${t.name} ${raw(b)}) -> bool {
+            fn ne(${t.self_type()} ${raw(a)}, ${t.self_type()} ${raw(b)}) -> bool {
                 return !(${raw(a)} == ${raw(b)});
             }
         }
@@ -296,8 +296,9 @@ fn ord_impl(TypeDecl t, string trait_name, string method, string op, string scal
         }
         body = "return match " + a + " {\n" + arms + "default => false,\n};";
     }
-    return "impl " + trait_name + " for " + t.name.str() + " {\nfn " + method + "(" + t.name.str() + " " + a
-        + ", " + t.name.str() + " " + b + ") -> bool {\n" + body + "\n}\n}\n";
+    return "impl " + trait_name + " for " + t.impl_head("Ord + Eq").src() + " {\nfn " + method + "("
+        + t.self_type().src() + " " + a + ", " + t.self_type().src() + " " + b + ") -> bool {\n" + body
+        + "\n}\n}\n";
 }
 
 /// `impl Lt/Le/Gt/Ge` (lexicographic over fields, then variant order) and `Ord`.
@@ -306,7 +307,7 @@ derive Ord(TypeDecl t) -> Code {
         + ord_impl(t, "Gt", "gt", ">", ">", false) + ord_impl(t, "Ge", "ge", ">", ">=", true);
     return quote items {
         ${raw(impls)}
-        impl Ord for ${t.name} {
+        impl Ord for ${t.impl_head("Ord + Eq")} {
         }
     };
 }
@@ -352,8 +353,8 @@ derive Hash(TypeDecl t) -> Code {
         body = "return match " + p + " {\n" + arms + "default => 0,\n};";
     }
     return quote items {
-        impl Hash for ${t.name} {
-            fn hash(${t.name} ${raw(p)}) -> int {
+        impl Hash for ${t.impl_head("Hash")} {
+            fn hash(${t.self_type()} ${raw(p)}) -> int {
                 ${raw(body)}
             }
         }
@@ -425,8 +426,8 @@ derive Default(TypeDecl t) -> Code {
         }
     }
     return quote items {
-        impl Default for ${t.name} {
-            static fn default() -> ${t.name} {
+        impl Default for ${t.impl_head("Default")} {
+            static fn default() -> ${t.self_type()} {
                 return ${raw(value)};
             }
         }
@@ -436,7 +437,7 @@ derive Default(TypeDecl t) -> Code {
 /// Marker: the type may cross threads.
 derive Send(TypeDecl t) -> Code {
     return quote items {
-        impl Send for ${t.name} {
+        impl Send for ${t.impl_head("Send")} {
         }
     };
 }
@@ -444,7 +445,7 @@ derive Send(TypeDecl t) -> Code {
 /// Marker: the type holds sensitive data.
 derive Sensitive(TypeDecl t) -> Code {
     return quote items {
-        impl Sensitive for ${t.name} {
+        impl Sensitive for ${t.impl_head("Sensitive")} {
         }
     };
 }

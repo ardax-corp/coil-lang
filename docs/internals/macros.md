@@ -104,7 +104,7 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 
 | Type | Members |
 |------|---------|
-| `TypeDecl` | `name: Ident`, `kind` (`"class"` / `"enum"`), `generics`, `fields()`, `variants()`, `attrs`, `repr` (scalar backing or `""`), `module`, `docs`, `source`, `is_class()`, `is_enum()`, `has_attr`, `attr_str` |
+| `TypeDecl` | `name: Ident`, `kind` (`"class"` / `"enum"`), `generics`, `fields()`, `variants()`, `attrs`, `repr` (scalar backing or `""`), `module`, `docs`, `source`, `is_class()`, `is_enum()`, `self_type()` (`Name` / `Name<T, …>`), `impl_head(bound)` (`Name` / `Name<T: bound, …>`), `has_attr`, `attr_str` |
 | `Field` | `name: Ident`, `ty: TypeRef`, `is_pub`, `attrs`, `docs`, `has_attr`, `attr_str` |
 | `Variant` | `name`, `shape` (`"unit"` / `"tuple"` / `"record"`), `tuple: Vec<TypeRef>`, `fields: Vec<Field>`, `value` (discriminant as written), `arity()` |
 | `TypeRef` | `str()`, `head()`, `args()` |
@@ -280,11 +280,21 @@ variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `Serialize` / `Deserialize` were removed (placeholders that cast fields to a
 byte); serializers belong in format packages as user derives.
 
+**Generic types (#552).** A derive on a generic type expands to a bounded
+instance (see [generic-instances.md](generic-instances.md)): every type
+parameter is bounded by the trait the body uses, `Show for Box<T: Show>`,
+`Ord` (and `Lt` / `Le` / `Gt` / `Ge`) for `Box<T: Ord + Eq>` since the chain
+compares with `<` and `==`, `String` by `Show` (it formats with `%v`).
+`TypeDecl::impl_head(bound)` writes that head (`Name` or `Name<T: bound, …>`)
+and `TypeDecl::self_type()` the type in signatures (`Name` or `Name<T, …>`);
+user derives use the same two helpers (`impl ${trait} for
+${t.impl_head("Show")}`). `Default` fills a `T` field with `T::default()`;
+the primitives have built-in `Default` instances (`0`, `0.0`, `false`, `""`)
+so `Box<int>::default()` resolves. Generic types get no type-name `Show` /
+`String` default.
+
 ## Not yet
 
-- Derives on generic types are refused, as for built-ins:
-  `impl<T: Show> Show for Box<T>` does not parse, and instances carry no
-  constraints.
 - `comptime` (stage 4 of the macro design) is not started.
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.

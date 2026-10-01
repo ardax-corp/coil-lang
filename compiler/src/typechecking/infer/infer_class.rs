@@ -668,7 +668,14 @@ impl Checker {
                 if !seen_super.insert(super_name.clone()) {
                     continue;
                 }
-                if self.generics.find_instance(&super_name, &arg_tys).is_none() {
+                // A generic instance's superclass instance is generic too
+                // (`Lt for Box<T: …>` beside `Ord for Box<T: …>`).
+                if self.generics.find_instance(&super_name, &arg_tys).is_none()
+                    && self
+                        .generics
+                        .find_generic_instance(&super_name, &arg_tys)
+                        .is_none()
+                {
                     missing_supers.push(super_name.clone());
                 }
                 if let Some(super_def) = self.generics.typeclass(&super_name) {

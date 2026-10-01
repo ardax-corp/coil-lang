@@ -6108,10 +6108,14 @@ impl Checker {
             _ => None,
         };
         if let Some(class) = trait_name
-            && self
+            && (self
                 .generics
                 .find_instance(class, std::slice::from_ref(&lookup))
                 .is_some()
+                || self
+                    .generics
+                    .find_generic_instance(class, std::slice::from_ref(&lookup))
+                    .is_some())
         {
             return;
         }
@@ -6152,6 +6156,10 @@ impl Checker {
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
             .is_some()
+            || self
+                .generics
+                .find_generic_instance(class, std::slice::from_ref(&lookup))
+                .is_some()
         {
             return;
         }
@@ -15950,6 +15958,10 @@ impl Checker {
             other => {
                 let lookup = show_lookup_ty(&other);
                 self.generics.has_instance("Show", &lookup)
+                    || self
+                        .generics
+                        .find_generic_instance("Show", std::slice::from_ref(&lookup))
+                        .is_some()
             }
         }
     }
@@ -17171,6 +17183,22 @@ impl Checker {
     /// class, an enum or a primitive. Generic heads (`Box<T>`) are not
     /// callable this way yet (#550).
     fn static_call_owner_ty(&mut self, owner: &str, range: &Range<usize>) -> Option<Ty> {
+        // A generic owner (`Box::default()`) is `Box<β…>`: the expected type
+        // or the arguments choose the parameters, and it matches a generic
+        // instance head (#552).
+        let key = self.resolve_class_key(owner).or_else(|| self.resolve_enum_key(owner));
+        if let Some(key) = key.as_ref() {
+            let arity = self
+                .generics
+                .generic_type_ctors
+                .get(key)
+                .or_else(|| self.generics.generic_type_ctors.get(owner))
+                .map_or(0, Vec::len);
+            if arity > 0 {
+                let args = (0..arity).map(|_| Ty::Var(self.counter.fresh())).collect();
+                return Some(Ty::App(Box::new(Ty::Con(key.clone())), args));
+            }
+        }
         if let Some(key) = self.resolve_class_key(owner) {
             return Some(Ty::Con(key));
         }
@@ -17239,7 +17267,8 @@ impl Checker {
                 for (cname, cdef) in &self.generics.typeclasses {
                     if cdef.type_params.len() != 1
                         || !cdef.methods.iter().any(|m| m.name == method)
-                        || self.generics.find_instance(cname, lookup).is_none()
+                        || (self.generics.find_instance(cname, lookup).is_none()
+                            && self.generics.find_generic_instance(cname, lookup).is_none())
                     {
                         continue;
                     }

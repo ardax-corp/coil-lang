@@ -391,7 +391,6 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
 
         /// A class or enum whose derives to record.
         struct Job<'a> {
-            kind: &'static str,
             name: &'a str,
             generic: bool,
             derives: Vec<&'a str>,
@@ -412,7 +411,6 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     None
                 } else {
                 Some(Job {
-                    kind: "enum",
                     name,
                     generic: !type_params.is_empty(),
                     derives: derive_traits_from_attrs(attrs),
@@ -432,7 +430,6 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     None
                 } else {
                 Some(Job {
-                    kind: "class",
                     name,
                     generic: !type_params.is_empty(),
                     derives: derive_traits_from_attrs(attrs),
@@ -446,13 +443,11 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
         let synthesized = job.map(|job| {
             expand_derives(ExpandDerivesArgs {
                 span,
-                kind: job.kind,
                 name: job.name,
                 generic: job.generic,
                 derives: &job.derives,
                 scalar_backing: job.scalar_backing,
                 decls,
-                messages: &mut messages,
                 pending,
             })
         });
@@ -508,13 +503,11 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
 
 struct ExpandDerivesArgs<'args, 'a> {
     span: SimpleSpan,
-    kind: &'static str,
     name: &'a str,
     generic: bool,
     derives: &'args [&'a str],
     scalar_backing: Option<&'a str>,
     decls: &'args [Output<'a>],
-    messages: &'args mut Vec<Message>,
     pending: &'args mut Vec<PendingMacro>,
 }
 
@@ -524,27 +517,21 @@ struct ExpandDerivesArgs<'args, 'a> {
 fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
     let ExpandDerivesArgs {
         span,
-        kind,
         name,
         generic,
         derives,
         scalar_backing,
         decls,
-        messages,
         pending,
     } = args;
-    if generic {
-        if !derives.is_empty() {
-            messages.push(Message::error(
-                ErrorCode::GenericTypeError,
-                format!("Cannot derive traits for generic {kind} `{name}`; write an explicit `impl`"),
-                span.into_range(),
-            ));
-        }
-        return Vec::new();
-    }
+    // A generic type's derives expand to bounded instances
+    // (`impl Show for Box<T: Show>`, #552) via `TypeDecl::impl_head`.
     for &trait_name in derives {
         pending.push(pending_derive(trait_name, span));
+    }
+    // The type-name `Show` / `String` defaults are for non-generic types.
+    if generic {
+        return Vec::new();
     }
     let mut out = Vec::new();
     push_default_display_impls(span, name, derives, decls, scalar_backing, &mut out);
