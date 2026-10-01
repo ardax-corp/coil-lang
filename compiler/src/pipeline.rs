@@ -1280,10 +1280,17 @@ impl Pipeline {
             })
         };
 
+        let messages_before = self.compiler_lazy().get_messages().len();
         if !self.parse_expand_check_file(&file, &namespace, !self.include_tests) {
             self.failed = true;
             return;
         }
+        // Codegen of a module the checker rejected only restates the same
+        // mistakes in its own words (`x` undefined after a rejected `const`
+        // assignment, an unknown function reported twice): skip it.
+        let check_failed = self.compiler_lazy().get_messages()[messages_before..]
+            .iter()
+            .any(|m| *m.kind() == reporting::MessageKind::ERROR);
 
         let rel = file
             .strip_prefix(&self.project_root)
@@ -1296,7 +1303,9 @@ impl Pipeline {
             .set_source_file(rel);
 
         // `compile_prepared_module`: expand/check already ran.
-        let bytecode = {
+        let bytecode = if check_failed {
+            Vec::new()
+        } else {
             let compiler = self.compiler.get_mut().expect("compiler initialized");
             let cached = self
                 .ast_cache

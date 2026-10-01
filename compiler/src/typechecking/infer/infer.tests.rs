@@ -1385,10 +1385,46 @@ fn not_a_function_message_uses_cannot_call_format() {
     let (mut c, _) = check("let x = 5; x(2);");
     let msgs = c.take_messages();
     assert!(!msgs.is_empty(), "expected a message");
-    let msg = msgs.iter().find(|m| {
-        m.message().contains("Cannot call value") || m.message().contains("too many arguments")
-    });
+    let msg = msgs
+        .iter()
+        .find(|m| m.message().contains("`x` is not a function: it has type `int`"));
     assert!(msg.is_some(), "got: {:?}", msgs);
+}
+
+#[test]
+fn logical_operand_mismatch_expects_bool() {
+    // #618: the operand is the `int`; `&&` expects `bool`.
+    let (mut c, _) = check("let a = 1 && 2;");
+    let msgs = c.take_messages();
+    assert!(
+        msgs.iter()
+            .any(|m| m.message().contains("expected `bool`, found `int`")),
+        "got: {:?}",
+        msgs
+    );
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.message().contains("expected `int`, found `bool`")),
+        "reversed mismatch: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn optional_access_on_result_prints_result_type() {
+    // #618: the structural sum of a `Result::Ok` construct prints as written.
+    let (mut c, _) = check("let r = Result::Ok({ v: 1 }); let x = r?.v;");
+    let msgs = c.take_messages();
+    let msg = msgs
+        .iter()
+        .find(|m| m.message().contains("`?.` requires Option"))
+        .unwrap_or_else(|| panic!("no `?.` diagnostic: {msgs:?}"));
+    assert!(
+        msg.message().contains("found `Result<{ v: int }, a>`"),
+        "got: {}",
+        msg.message()
+    );
 }
 
 #[test]
@@ -4250,8 +4286,8 @@ fn dump<T: Ord>(T a, T b) {
     assert!(
         c.messages()
             .iter()
-            .any(|m| m.message().contains("cannot iterate over `RangeInclusive")),
-        "expected RangeInclusive to_vec diagnostic, got {:?}",
+            .any(|m| m.message().contains("cannot iterate over `RangeInclusive<T>`")),
+        "expected RangeInclusive<T> to_vec diagnostic (type parameter by name), got {:?}",
         c.messages()
     );
 }

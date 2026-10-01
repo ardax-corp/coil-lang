@@ -236,6 +236,38 @@ fn assert_compile_fails(src: &str, code: compiler::ErrorCode) {
     assert_compile_fails_pipeline(&mut pipeline, src, code);
 }
 
+/// #618: a module the checker rejects is not code-generated, so each
+/// mistake is reported once (codegen used to restate them: a rejected
+/// `const` assignment also gave "Undefined variable", an unknown function
+/// was reported twice).
+#[test]
+fn rejected_module_reports_each_mistake_once() {
+    for (src, code) in [
+        (
+            "fn main() {\n    const x = 1;\n    x = 2;\n}\n",
+            compiler::ErrorCode::InvalidAssignment,
+        ),
+        (
+            "fn main() {\n    missing_fn();\n}\n",
+            compiler::ErrorCode::UnknownFunction,
+        ),
+        (
+            "fn main() {\n    let _ = not_defined + 1;\n}\n",
+            compiler::ErrorCode::UnknownValue,
+        ),
+    ] {
+        let mut pipeline = test_pipeline();
+        assert!(pipeline.compile_src(src).is_err(), "{src}");
+        let errors: Vec<_> = pipeline
+            .messages()
+            .iter()
+            .filter(|m| *m.kind() == reporting::MessageKind::ERROR)
+            .collect();
+        assert_eq!(errors.len(), 1, "{src}: {errors:?}");
+        assert_eq!(errors[0].code(), Some(code), "{src}: {errors:?}");
+    }
+}
+
 #[test]
 fn fixed_array_push_is_type_error_not_mir_refuse() {
     let src = r#"

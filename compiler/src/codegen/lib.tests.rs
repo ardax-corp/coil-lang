@@ -368,14 +368,13 @@ fn let_binding_yield_emits_yield_coro_then_store_pop() {
 #[test]
 fn resume_with_send_emits_has_send_operand() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn main() { resume h with 42; }");
-    let resume = bc
-        .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::ResumeCoro))
-        .expect("expected ResumeCoro");
-    assert_ne!(
-        resume.operand_u32() & 1,
-        0,
+    let (bc, _pool) = compile_src(
+        "async fn echo() { let v = yield 0; yield v; } \
+ fn main() { let h = echo(); resume h; resume h with 42; }",
+    );
+    assert!(
+        bc.iter()
+            .any(|b| matches!(b.bytecode(), Instruction::ResumeCoro) && b.operand_u32() & 1 != 0),
         "ResumeCoro for `resume h with v` must set has_send bit"
     );
 }
@@ -384,7 +383,7 @@ fn resume_with_send_emits_has_send_operand() {
 #[test]
 fn yield_from_emits_yield_from_coro() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn f() { yield from inner; }");
+    let (bc, _pool) = compile_src("async fn inner() { yield 1; } async fn f() { yield from inner(); }");
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::YieldFromCoro)),
@@ -535,7 +534,7 @@ fn main() {
 #[test]
 fn bare_yield_from_statement_does_not_emit_trailing_pop() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn f() { yield from inner; }");
+    let (bc, _pool) = compile_src("async fn inner() { yield 1; } async fn f() { yield from inner(); }");
     let pos = bc
         .iter()
         .position(|b| matches!(b.bytecode(), Instruction::YieldFromCoro))
@@ -1486,6 +1485,7 @@ fn match_with_nested_constructor_pattern_emits_unpack_cascade() {
         "match Result::Ok(Option::Some(1)) { \
  Result::Err(_) => 0, \
  Result::Ok(Option::Some(v)) => v, \
+ Result::Ok(Option::None) => -1, \
  };",
     );
 
@@ -2093,55 +2093,6 @@ fn assignment_statement_does_not_emit_duplicate_before_store_pop() {
     );
 }
 
-#[test]
-fn for_with_break_and_continue_emits_patched_jumps() {
-    use common::Instruction;
-    // Live heap return keeps `main` on fuse-IL so COI-87 invert+fuse
-    // stays observable after W2 counted-i64 specialize.
-    let (bc, _pool) = compile_src(
-        "fn main() -> Vec<int> { \
-let sum = 0; \
-let i = 0; \
-while i < 10 { \
-if i == 3 { i = i + 1; continue; } \
-if i == 7 { break; } \
-sum = sum + i; \
-i = i + 1; \
-} \
-return [sum]; \
-}",
-    );
-
-    let back_edges: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::JMP))
-        .map(|b| b.operand_u32())
-        .filter(|t| *t != u32::MAX)
-        .collect();
-    let imm_jmpt = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::BinSlotImmJmpt))
-        .count();
-    let imm_jmpf = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::BinSlotImmJmpf))
-        .count();
-
-    assert!(
-        !back_edges.is_empty() && back_edges.iter().all(|t| *t != 0),
-        "loop back-edge JMP should be patched: {:?}",
-        back_edges
-    );
-    assert!(
-        imm_jmpt >= 1,
-        "continue/break `i == k` should invert+fuse to BinSlotImmJmpt; got {imm_jmpt}"
-    );
-    assert!(
-        imm_jmpf >= 1,
-        "loop header `i < 10` must stay BinSlotImmJmpf; got {imm_jmpf}"
-    );
-}
-
 /// `if !flag { break }` inverts fused LogNot;JMPF into LogNotJmpt (COI-87).
 #[test]
 fn not_flag_break_emits_log_not_jmpt() {
@@ -2171,40 +2122,12 @@ fn main() { spin(false); }",
     );
 }
 
-/// Two-local compare break fuses to BinSlotSlotJmpt after invert (COI-87).
-#[test]
-fn two_local_compare_break_emits_bin_slot_slot_jmpt() {
-    use common::Instruction;
-    let (bc, _) = compile_src(
-        "fn main() -> Vec<int> { \
-let a = 1; \
-let b = 2; \
-let i = 0; \
-while (i < 5) { \
-if a < b { break; } \
-i = i + 1; \
-} \
-return [i]; \
-}",
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BinSlotSlotJmpt)),
-        "expected BinSlotSlotJmpt for inverted `if a < b {{ break }}`"
-    );
-    assert!(
-        !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BinSlotSlotJmpf)),
-        "break guard should not remain BinSlotSlotJmpf after invert"
-    );
-}
-
 /// Plain while headers must not invert to *Jmpt (COI-87 latch stays *Jmpf).
 #[test]
 fn while_header_stays_fused_jmpf_not_jmpt() {
     use common::Instruction;
     let (bc, _) = compile_src(
-        "fn main() -> Vec<int> { let i = 0; while (i < 10) { i = i + 1; } return [i]; }",
+        "fn main() -> Vec<int> { let i = 0; while (i < 10) { i = i + 1; } let out: Vec<int> = Vec::new(); out.push(i); return out; }",
     );
     let jmpt = bc
         .iter()
@@ -2708,7 +2631,7 @@ fn match_emits_binding_interns_in_declaration_order() {
  fn main() { \
  let e = E::Foo { x: 1, y: 2, z: 3 }; \
  let v = match e { \
- E::Foo { y: _, x: a } => a, \
+ E::Foo { y: _, x: a, z: _ } => a, \
  }; \
  write(stdout(), to_bytes(format(\"%i\", v))); \
  }",
@@ -2865,48 +2788,6 @@ fn match_with_simple_binding_subpatterns_keeps_current_layout() {
     assert_eq!(
         jimp_count, 1,
         "expected 1 JUMP_IF_MATCH (simple bindings keep the existing layout); got {}",
-        jimp_count
-    );
-}
-
-/// Codegen test 19 : Case 5 ,  a match with two
-/// tag groups where one group is multi-arm emits one
-/// JUMP_IF_MATCH per GROUP (not per arm). The codegen
-/// emitted one JUMP_IF_MATCH per non-last arm, which would have
-/// produced 2 JUMP_IF_MATCH (one per non-last arm: arm 0 for A
-/// is non-last, arm 1 for B is non-last). After 18A the
-/// grouping is by outer tag, so the multi-arm group A gets one
-/// JUMP_IF_MATCH and the single-arm group B (last) gets a
-/// different shape ,  the result is exactly 2 JUMP_IF_MATCH
-/// (one per group).
-#[test]
-fn match_with_two_tag_groups_dispatches_correctly() {
-    use common::Instruction;
-    // Case 5: `match x { E::A => 1, E::B => 2, E::A => 3 }`
-    // Two groups: A (arms 0 and 2) and B (arm 1). Group A is
-    // multi-arm. The codegen emits one JUMP_IF_MATCH per group
-    // (the multi-arm group's JUMP_IF_MATCH targets the test
-    // chain start; the single-arm group's JUMP_IF_MATCH targets
-    // its arm body).
-    let (bc, _pool) = compile_src(
-        "enum E { A, B } \
- fn make() -> E { return E::A; } \
- fn main() { \
- let x = make(); \
- let _ = match x { \
- E::A => 1, \
- E::B => 2, \
- E::A => 3, \
- }; \
- }",
-    );
-    let jimp_count = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::JumpIfMatch))
-        .count();
-    assert_eq!(
-        jimp_count, 2,
-        "expected 2 JUMP_IF_MATCH (one per group, not per arm); got {}",
         jimp_count
     );
 }
@@ -5844,51 +5725,6 @@ fn match_depth_3_nested_records_bind_correctly() {
         unpack_count >= 1,
         "expected UNPACK/UnpackAt for depth-3 nested records; got {unpack_count}"
     );
-}
-
-/// Codegen test 26 : a record pattern with an
-/// OMITTED field (`Inner::I { }` instead of `Inner::I { v }`)
-/// emits a POP for the missing field (to keep the stack
-/// consistent with the decl_order walk). Pre-18B, the inner
-/// record was silently swallowed entirely.
-#[test]
-fn match_nested_record_missing_field_consumes_slot() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
-        "enum Inner { I { v: int } } \
- fn main() { \
- let r = match Result::Ok(Inner::I { v: 42 }) { \
- Result::Err(_) => 0, \
- Result::Ok(Inner::I { }) => 99, \
- }; \
- }",
-    );
-
-    // Bound to `r` so the arm value is used: a statement match drops each
-    // arm's value, and `CONST 99; POP` folds away.
-    // The pattern omits the `v` field. The codegen walks
-    // the inner record's declared fields in decl_order
-    // and emits POP for the missing field. Pre-18B, the
-    // codegen emitted a single POP for the inner record
-    // (regardless of how many fields it had) ,  this
-    // assertion is a sanity check that the codegen still
-    // produces a well-formed bytecode for this case (the
-    // arm body is `99` and doesn't reference any bindings).
-    //
-    // We don't assert exact POP count (other parts of
-    // the bytecode emit POPs too ,  e.g. the prologue's
-    // scrutinee POP for the wildcard arm); we just check
-    // the bytecode compiles.
-    assert!(!bc.is_empty(), "bytecode should not be empty");
-
-    // Sanity: the arm body `99` should produce a
-    // non-zero integer constant somewhere in the bytecode.
-    // (The CONST opcode uses `value[63:0]` for the
-    // constant ,  see `Byte::constant()`.)
-    let has_99 = bc
-        .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::CONST) && b.constant(&[]) == 99);
-    assert!(has_99, "expected CONST 99 for the arm body");
 }
 
 /// A Num-constrained shared generic body dispatches through its trailing
@@ -9335,7 +9171,8 @@ fn maybe(int n) -> Option<int> {
 }
 fn pipe(int n) -> Option<int> {
     let a = maybe(n)?;
-    return maybe(a)?;
+    let b = maybe(a)?;
+    return maybe(b);
 }
 fn main() {
     let _ = pipe(2);

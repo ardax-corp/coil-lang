@@ -19096,7 +19096,18 @@ impl Compiler {
                 crate::strip_tests::strip_test_declarations(ast);
             }
             // Expand `derive` / `ffi` then check (see `expand_and_check`).
+            let before = self.messages.len();
             self.expand_and_check(module, ast);
+            // Codegen of a rejected module only restates the checker's errors
+            // (an undefined `x` after a rejected `const` assignment, an
+            // unknown function twice): stop here. Pipeline `compile_file`
+            // does the same for modules it checked ahead of codegen.
+            if self.messages[before..]
+                .iter()
+                .any(|m| *m.kind() == reporting::MessageKind::ERROR)
+            {
+                return;
+            }
         } else {
             self.checker.set_current_module(module);
             // Check already ran via `parse_expand_check` / `typecheck_module`.
