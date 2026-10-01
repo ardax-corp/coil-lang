@@ -27,6 +27,7 @@
 /// in that library. The VM then wraps the resolved function
 /// pointer in a `LibraryFn` and dispatches `NATIVE` opcodes
 /// that name `sum` to it.
+#include <stdarg.h>
 #include <stdint.h>
 
 int64_t sum(int64_t a, int64_t b) {
@@ -69,4 +70,16 @@ static int64_t doubler(int64_t x) {
 /// Return a C function pointer (opaque Ptr / Callback to coil).
 int64_fn_int64 get_doubler(void) {
     return &doubler;
+}
+
+/// C varargs: sum `n` trailing `int64_t` arguments (for extern `...` tests).
+int64_t sum_n(int64_t n, ...) {
+    va_list args;
+    va_start(args, n);
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += va_arg(args, int64_t);
+    }
+    va_end(args);
+    return total;
 }

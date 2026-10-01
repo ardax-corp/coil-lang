@@ -1,10 +1,18 @@
-// COI-19: extern in an imported module + Vec before repeat calls.
+// ffi_mod_entry.hy — an `extern` block declared in an imported module
+// (examples/src/ffi_mod/sys.hy) and called from here, with a `Vec`
+// allocation between two calls.
+//
+// Build and grant libsum as in ffi_extern.hy:
+//
+//   coil --root examples/src --allow-dload sum examples/ffi_mod_entry.hy
+//
+// Output: 10
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 use ffi_mod::sys::run_twice;
 
 fn main() {
-    let n = run_twice();
-    let _ = write_all(stdout(), to_bytes(format("%v\n", n)));
+    write_all(stdout(), to_bytes(format("%i", run_twice())));
 }

@@ -69,7 +69,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | Errors | Built-in `Option`/`Result`; `raise` (catchable `Err`), `?`, `??`, `?.`. `panic` **aborts the process** (Q5). Checksum / CLI boards use `panic`, not `raise`. |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
-| FFI | `extern "c" { fn …; }` or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
+| FFI | `extern "lib" { fn …; }` (any stem but the libc aliases) or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
 | Attributes | `#[derive(Show, Eq, Ord, Hash, String, Default, Send, Sensitive)]` (composes with `#[repr(int)]` on scalar enums), user derives and attribute macros (below); tests are `test("desc") { … }` only |
 | Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }`, `attr name(FnDecl f, int by) -> Code { … }` and `macro name(Expr a, Vec<Expr> rest) -> Code { … }` (used as `name!(…)` in expression, statement or item position) run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Expr, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
 | Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime) |
@@ -127,7 +127,7 @@ Body is Result mode. `raise` / failed `assert` is a catchable `Err` (harness fai
 | Option/Result | `examples/option.hy`, `examples/result.hy` |
 | Modules | `examples/modules.hy` |
 | Coroutines | `examples/coro.hy` |
-| FFI | `examples/strlen.hy` |
+| FFI | `examples/ffi_extern.hy` (extern block), `examples/ffi_sum.hy` (`dload`) |
 | GC `fn drop()` | `examples/finalizer.hy` |
 | Full catalog | [examples](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/examples.md) (`/docs/manual/examples`) |
 
