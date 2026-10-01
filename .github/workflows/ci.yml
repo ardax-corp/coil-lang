@@ -144,6 +144,7 @@ jobs:
       - name: Workspace tests (${{ matrix.features.id }})
         if: matrix.features.mode == 'test'
         run: |
+          set -euo pipefail
           # macOS: cargo lists many test binaries in parallel and hits EAGAIN.
           # Raise nofile and serialize package test runs so listing is sequential.
           jobs=""
@@ -155,13 +156,52 @@ jobs:
             extra="-- --test-threads=1"
             export RUST_TEST_THREADS=1
           fi
-          n=0
-          until cargo test --workspace --lib --tests --bins $jobs ${{ matrix.features.flags }} $extra; do
-            n=$((n + 1))
-            if [ "$n" -ge 5 ]; then
-              exit 1
+          run_ws_tests() {
+            cargo test --workspace --lib --tests --bins $jobs ${{ matrix.features.flags }} $extra
+          }
+          # Linux: one shot. A FAILED summary with exit 0 must still fail the job.
+          if [ "${{ runner.os }}" != "macOS" ]; then
+            log="$(mktemp)"
+            set +e
+            run_ws_tests 2>&1 | tee "$log"
+            code="${PIPESTATUS[0]}"
+            set -e
+            if grep -E -q 'test result: FAILED|error: test failed' "$log"; then
+              if [ "$code" -eq 0 ]; then
+                echo "::error::tests reported failure but cargo exited 0" >&2
+                exit 1
+              fi
+              exit "$code"
             fi
-            sleep 5
+            exit "$code"
+          fi
+          # macOS: retry listing/resource errors only — never retry a red suite.
+          log="$(mktemp)"
+          n=0
+          while true; do
+            set +e
+            run_ws_tests 2>&1 | tee "$log"
+            code="${PIPESTATUS[0]}"
+            set -e
+            if grep -E -q 'test result: FAILED|error: test failed' "$log"; then
+              if [ "$code" -eq 0 ]; then
+                echo "::error::tests reported failure but cargo exited 0" >&2
+                exit 1
+              fi
+              exit "$code"
+            fi
+            if [ "$code" -eq 0 ]; then
+              exit 0
+            fi
+            if grep -E -q 'EAGAIN|EMFILE|os error 24|os error 35' "$log"; then
+              n=$((n + 1))
+              if [ "$n" -ge 5 ]; then
+                exit "$code"
+              fi
+              sleep 5
+              continue
+            fi
+            exit "$code"
           done
 
       - name: Release label lower (COI-407)

@@ -2,7 +2,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::exit;
 
 use std::sync::{Arc, Mutex};
 
@@ -208,15 +207,16 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
     }
     for case in file.cases {
         let TestReport {
-            passed: ok,
+            passed: report_ok,
             reason,
             hits,
             steps,
-            ..
+            timed_out,
         } = match case.state {
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
         };
+        let ok = report_ok && !timed_out;
         let covered = match (run.coverage, &file.lines, hits) {
             (Some(cov), Some(lines), Some(hits)) => cov
                 .lock()
@@ -239,10 +239,11 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             passed += 1;
         } else {
             failed += 1;
-            match reason {
+            match (timed_out, reason) {
+                (true, _) => eprintln!("> Test \"{}\" failed (timed out)", case.name),
                 // `assert(cond, "message")?` returns `Err("message")`.
-                Some(reason) => eprintln!("> Test \"{}\" failed: {reason}", case.name),
-                None => eprintln!("> Test \"{}\" failed", case.name),
+                (false, Some(reason)) => eprintln!("> Test \"{}\" failed: {reason}", case.name),
+                (false, None) => eprintln!("> Test \"{}\" failed", case.name),
             }
         }
     }
@@ -641,8 +642,16 @@ pub(crate) fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// `coil test` entry: run the suite, print the summary, exit non-zero on failure.
-pub fn cmd_test(config: ReportConfig, options: TestOptions) {
+/// Process status for a finished suite: non-zero iff any case failed.
+pub fn suite_exit_code(failed: usize) -> i32 {
+    if failed == 0 { 0 } else { 1 }
+}
+
+/// `coil test` entry: run the suite, print the summary, return the process status.
+///
+/// A `test result: FAILED` summary always returns 1. Callers must `exit` that
+/// value — falling off `main` after a red summary would green CI.
+pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
     let SuiteResult {
         passed,
         failed,
@@ -655,7 +664,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) {
             let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
             pipeline.emit_spanless_error(ErrorCode::IoError, msg);
             let _ = pipeline.finish_reporting();
-            exit(1);
+            return 1;
         }
     };
 
@@ -684,8 +693,8 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) {
         if let Order::Shuffled(seed) = options.order {
             eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
         }
-        exit(1);
     }
+    suite_exit_code(failed)
 }
 
 #[cfg(test)]

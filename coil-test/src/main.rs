@@ -21,7 +21,7 @@ fn main() {
     }
     match parse_args(&raw) {
         Ok(Parsed::Help) => print_help(),
-        Ok(Parsed::Run(config, options)) => cmd_test(config, *options),
+        Ok(Parsed::Run(config, options)) => exit(cmd_test(config, *options)),
         Ok(Parsed::MutateHelp) => print_mutate_help(),
         Ok(Parsed::Mutate(config, options)) => cmd_mutate(config, *options),
         Err(msg) => {
