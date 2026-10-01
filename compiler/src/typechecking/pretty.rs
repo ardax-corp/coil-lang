@@ -12,8 +12,18 @@ use super::ty::{ArrayLength, EnumVariantPayloadTy, Scheme, Ty, TyVarId, ftv_ty};
 /// type variables to `a`, `b`, `c`, … so messages never show raw
 /// counters like `` `t43` ``.
 pub fn format_ty_for_diag(subst: &Subst, ty: &Ty) -> String {
+    format_ty_for_diag_named(subst, ty, &HashMap::new())
+}
+
+/// Like [`format_ty_for_diag`], printing the variables in `names` (the type
+/// parameters in scope) by their source name (`T`) instead of `a`, `b`, ….
+pub fn format_ty_for_diag_named(
+    subst: &Subst,
+    ty: &Ty,
+    names: &HashMap<TyVarId, String>,
+) -> String {
     let pruned = apply_ty_prune(subst, ty);
-    let mut rename = HashMap::new();
+    let mut rename = names.clone();
     let mut next = 0u32;
     format_ty_renamed(&pruned, &mut rename, &mut next)
 }
@@ -217,6 +227,27 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
             }
         }
         Ty::List(inner) => format!("[{}]", format_ty_renamed(inner, rename, next)),
+        // A builtin `Option` / `Result` construct carries its structural
+        // sum: print it as written (`Result<int, a>`).
+        Ty::Sum { name, variants } if common::is_poly_builtin_enum(name) => {
+            let payload = |variant: &str, rename: &mut HashMap<TyVarId, String>, next: &mut u32| {
+                variants
+                    .iter()
+                    .find(|(n, _)| n == variant)
+                    .and_then(|(_, p)| match p {
+                        EnumVariantPayloadTy::Tuple(tys) => tys.first(),
+                        _ => None,
+                    })
+                    .map_or("_".to_string(), |t| format_ty_renamed(t, rename, next))
+            };
+            if common::is_builtin_option_enum(name) {
+                format!("{}<{}>", name, payload("Some", rename, next))
+            } else {
+                let ok = payload("Ok", rename, next);
+                let err = payload("Err", rename, next);
+                format!("{}<{}, {}>", name, ok, err)
+            }
+        }
         Ty::Sum { name, variants } => {
             let mut out = format!("enum {} {{ ", name);
             for (i, (vname, payload)) in variants.iter().enumerate() {

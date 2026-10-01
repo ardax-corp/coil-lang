@@ -2582,8 +2582,8 @@ impl Checker {
             Expression::And(lhs, rhs) | Expression::Or(lhs, rhs) => {
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
-                self.unify(&lt, &boolean(), &lhs.0.into_range(), "left of logical");
-                self.unify(&rt, &boolean(), &rhs.0.into_range(), "right of logical");
+                self.unify(&boolean(), &lt, &lhs.0.into_range(), "left of logical");
+                self.unify(&boolean(), &rt, &rhs.0.into_range(), "right of logical");
                 boolean()
             }
 
@@ -2846,7 +2846,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "`typeof` requires a ground type, found `{}`",
-                            crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                            self.diag_ty(&resolved)
                         ),
                         inner.0.into_range(),
                         Some(
@@ -2903,7 +2903,10 @@ impl Checker {
                 } else {
                     return self.error(
                         ErrorCode::InvalidOptionalAccess,
-                        format!("`?.` requires Option, found `{}`", resolved),
+                        format!(
+                            "`?.` requires Option, found `{}`",
+                            crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                        ),
                         range,
                     );
                 };
@@ -8189,6 +8192,16 @@ impl Checker {
                         // We've run out of function parameters, the call
                         // had more arguments than the function accepts.
                         let actual = format!("{}", apply_ty_prune(&self.subst, &pruned));
+                        if i == 0 {
+                            // Not a function at all (`let x = 5; x(1);`).
+                            let what = name.map_or("this value".to_string(), |n| format!("`{n}`"));
+                            return self.error_with_help(
+                                ErrorCode::GenericTypeError,
+                                format!("{what} is not a function: it has type `{actual}`"),
+                                range,
+                                Some("only functions and function values can be called".to_string()),
+                            );
+                        }
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
                             match name {
@@ -10149,18 +10162,24 @@ impl Checker {
         }
     }
 
+    /// `ty` as a diagnostic shows it: type parameters in scope by name
+    /// (`T`), other unknowns as `a`, `b`, …, builtin sums as `Result<T, E>`.
+    fn diag_ty(&self, ty: &Ty) -> String {
+        let names: HashMap<TyVarId, String> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.iter().map(|(name, var)| (*var, name.clone())))
+            .collect();
+        crate::typechecking::pretty::format_ty_for_diag_named(&self.subst, ty, &names)
+    }
+
     fn instance_signature(&self, class: &str, args: &[Ty]) -> String {
         if args.is_empty() {
             class.to_string()
         } else {
-            format!(
-                "{}<{}>",
-                class,
-                args.iter()
-                    .map(|ty| ty.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            // One type, so distinct unknowns get distinct names (`a`, `b`).
+            let app = Ty::App(Box::new(Ty::Con(class.to_string())), args.to_vec());
+            self.diag_ty(&app)
         }
     }
 
@@ -15820,8 +15839,8 @@ impl Checker {
                         let mut msg = Message::error(
                             ErrorCode::FormatSpecifierMismatch,
                             format!(
-                                "Format specifier `%v` requires a `Show` instance, found {}",
-                                arg_ty
+                                "Format specifier `%v` requires a `Show` instance, found `{}`",
+                                self.diag_ty(arg_ty)
                             ),
                             arg_range.clone(),
                         );
@@ -15839,8 +15858,8 @@ impl Checker {
                         let mut msg = Message::error(
                             ErrorCode::FormatSpecifierMismatch,
                             format!(
-                                "Format specifier `%v` requires a `Show` instance, found {}",
-                                other
+                                "Format specifier `%v` requires a `Show` instance, found `{}`",
+                                self.diag_ty(other)
                             ),
                             arg_range.clone(),
                         );
@@ -16954,7 +16973,10 @@ impl Checker {
             other => {
                 let _ = self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("cannot iterate over `{type_name}<{other}>`"),
+                    format!(
+                        "cannot iterate over `{type_name}<{}>`",
+                        self.diag_ty(other)
+                    ),
                     range.clone(),
                     Some(
                         "`for` and `.to_vec()` require element type `int`, `byte`, or `float` \

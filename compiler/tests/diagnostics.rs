@@ -495,8 +495,8 @@ fn calling_non_function_produces_helpful_message() {
     let (_ty, msgs) = check("let x = 42; x(1);");
     assert!(
         msgs.iter()
-            .any(|m| m.contains("too many arguments") || m.contains("Cannot call")),
-        "expected a 'too many arguments' / 'cannot call' diagnostic, got: {:?}",
+            .any(|m| m.contains("`x` is not a function: it has type `int`")),
+        "expected a 'not a function' diagnostic, got: {:?}",
         msgs
     );
 }
