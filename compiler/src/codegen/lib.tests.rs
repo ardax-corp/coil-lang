@@ -2896,20 +2896,13 @@ fn match_with_same_tag_different_constructors_emits_inner_test_chain() {
     let _ = pop_count;
 }
 
-/// Codegen test 17 : Case 1 ,  wildcard inner
-/// sub-patterns DON'T trigger the new test chain. The runtime
-/// always accepts a wildcard, so a runtime inner test would be
-/// redundant; the codegen keeps the existing layout (just one
-/// JUMP_IF_MATCH for the outer tag).
+/// Codegen test 17 : Case 1 ,  nested tags under a shared outer tag
+/// need a runtime test even without bindings (#579): `Option::None` and
+/// `Option::Some(_)` are different tags, so a single outer JUMP_IF_MATCH
+/// would send every `E::A(..)` to the first arm.
 #[test]
-fn match_with_same_tag_and_wildcard_subpatterns_keeps_current_layout() {
+fn match_with_same_tag_and_nested_tag_subpatterns_emits_test_chain() {
     use common::Instruction;
-    // Case 1: `match x { E::A(Option::None) => 1, E::A(Option::Some(_)) => 2 }`
-    // Both arms share the outer tag `E::A`. The inner
-    // sub-patterns are Unit (`None`) and Wildcard (`Some(_)`) ,
-    // neither carries a Binding, so `arm_has_runtime_test`
-    // returns false for both arms. No test chain is emitted;
-    // the codegen keeps the existing layout.
     // `x` is a parameter: a local would be scalarized (`enum_sroa`).
     let (bc, _pool) = compile_src(
         "enum E { A(Option) } \
@@ -2927,9 +2920,10 @@ fn match_with_same_tag_and_wildcard_subpatterns_keeps_current_layout() {
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::JumpIfMatch))
         .count();
+    // Outer `E::A` plus one inner tag test per arm.
     assert_eq!(
-        jimp_count, 1,
-        "expected exactly 1 JUMP_IF_MATCH (no test chain for wildcard sub-patterns); got {}",
+        jimp_count, 3,
+        "expected 3 JUMP_IF_MATCH (outer A, inner None, inner Some); got {}",
         jimp_count
     );
 }

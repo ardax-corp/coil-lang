@@ -908,6 +908,19 @@ impl Compiler {
                     test_chain_arms.insert(arm_idx);
                 }
 
+                // Several payload fields: test each field in its own slot.
+                if group.arity > 1 && self.slot_chain_supported(arms, &group.arm_indices) {
+                    self.emit_slot_test_chain(SlotTestChain {
+                        arms,
+                        arm_indices: &group.arm_indices,
+                        bb: &mut bb,
+                        pass_labels: &mut pass_labels,
+                        match_bindings_per_arm: &mut match_bindings_per_arm,
+                        payload_base,
+                    });
+                    continue;
+                }
+
                 // Source order; every arm JMPs to its body via `pass_label`.
                 // Fall-through after the last arm is only safe when that body
                 // is emitted next (group is source-last); later tag groups make
@@ -1100,6 +1113,165 @@ impl Compiler {
             // pending jump is bound.
         }
         bytecode
+    }
+}
+
+/// One tag group's arms for [`Compiler::emit_slot_test_chain`].
+struct SlotTestChain<'a, 'compiler> {
+    arms: &'a [&'a MatchArm<'compiler>],
+    arm_indices: &'a [usize],
+    bb: &'a mut BlockBuilder,
+    pass_labels: &'a mut HashMap<usize, Option<crate::block_builder::Label>>,
+    match_bindings_per_arm: &'a mut HashMap<usize, HashMap<String, u32>>,
+    payload_base: u32,
+}
+
+/// A group arm's payload fields in declaration order (`None` = not matched
+/// on: omitted record field).
+fn payload_fields<'p, 'c>(
+    checker: &Checker,
+    enum_name: &str,
+    variant_name: &str,
+    payload: &'p PatternPayload<'c>,
+) -> Vec<Option<&'p Pattern<'c>>> {
+    match payload {
+        PatternPayload::Unit => Vec::new(),
+        PatternPayload::Tuple(parts) => parts.iter().map(|p| Some(&p.1)).collect(),
+        PatternPayload::Record(fields) => checker
+            .payload_tys_for(enum_name, variant_name)
+            .iter()
+            .map(|(name, _)| {
+                fields
+                    .iter()
+                    .find(|f| f.name == name.as_str())
+                    .map(|f| &f.pattern.1)
+            })
+            .collect(),
+    }
+}
+
+impl Compiler {
+    /// Whether [`Self::emit_slot_test_chain`] can lower this group: nested
+    /// constructors carry no bindings of their own (unit, or only `_`
+    /// inside), and the group's last arm has no test to fail (so a miss
+    /// never has to leave the group).
+    fn slot_chain_supported(&self, arms: &[&MatchArm<'_>], arm_indices: &[usize]) -> bool {
+        let simple_nested = |p: &Pattern<'_>| match p {
+            Pattern::Constructor { payload, .. } => match payload {
+                PatternPayload::Unit => true,
+                PatternPayload::Tuple(parts) => parts
+                    .iter()
+                    .all(|q| matches!(q.1, Pattern::Wildcard | Pattern::Default)),
+                PatternPayload::Record(_) => false,
+            },
+            _ => true,
+        };
+        for (rank, &arm_idx) in arm_indices.iter().enumerate() {
+            let Pattern::Constructor {
+                enum_name,
+                variant_name,
+                payload,
+            } = &arms[arm_idx].pattern.1
+            else {
+                return false;
+            };
+            let fields = payload_fields(&self.checker, enum_name, variant_name, payload);
+            if fields.iter().flatten().any(|p| !simple_nested(p)) {
+                return false;
+            }
+            let is_last = rank == arm_indices.len() - 1;
+            if is_last
+                && fields
+                    .iter()
+                    .flatten()
+                    .any(|p| matches!(p, Pattern::Constructor { .. }))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Test chain for a tag group whose payload has several fields. The
+    /// outer `JumpIfMatch` left field `k` in slot `payload_base + k`; each
+    /// arm copies a field with a nested constructor, `JumpIfMatch`es its
+    /// tag, and on a miss drops the copy and tries the next arm. Fields stay
+    /// in their slots, so every arm (and its bindings) sees the same layout.
+    fn emit_slot_test_chain(&mut self, chain: SlotTestChain<'_, '_>) {
+        let SlotTestChain {
+            arms,
+            arm_indices,
+            bb,
+            pass_labels,
+            match_bindings_per_arm,
+            payload_base,
+        } = chain;
+        let mut next_start: Option<crate::block_builder::Label> = None;
+        for (rank, &arm_idx) in arm_indices.iter().enumerate() {
+            if let Some(label) = next_start.take() {
+                bb.bind_label(label, self.bytecode.il_mut());
+            }
+            let pass_label = bb.fresh_label(self.bytecode.il_mut());
+            pass_labels.insert(arm_idx, Some(pass_label));
+            let bindings = match_bindings_per_arm.entry(arm_idx).or_default();
+            let Pattern::Constructor {
+                enum_name,
+                variant_name,
+                payload,
+            } = &arms[arm_idx].pattern.1
+            else {
+                unreachable!("slot_chain_supported checked every arm");
+            };
+            let fields = payload_fields(&self.checker, enum_name, variant_name, payload);
+            let is_last = rank == arm_indices.len() - 1;
+            let fail_label = if is_last {
+                None
+            } else {
+                let label = bb.fresh_label(self.bytecode.il_mut());
+                next_start = Some(label);
+                Some(label)
+            };
+            for (k, field) in fields.iter().enumerate() {
+                let slot = payload_base + k as u32;
+                match field {
+                    Some(Pattern::Binding { name }) => {
+                        bindings.insert(name.to_string(), slot);
+                    }
+                    Some(Pattern::Constructor {
+                        enum_name: sub_enum,
+                        variant_name: sub_variant,
+                        ..
+                    }) => {
+                        let (Some(tag), Some(fail)) =
+                            (self.checker.tag_for(sub_enum, sub_variant), fail_label)
+                        else {
+                            continue;
+                        };
+                        let arity = self.checker.arity_for(sub_enum, sub_variant).unwrap_or(0);
+                        let hit = bb.fresh_label(self.bytecode.il_mut());
+                        self.bytecode.push_load(slot);
+                        bb.emit_jump_to(
+                            hit,
+                            BbJumpKind::JumpIfMatch {
+                                tag,
+                                arity: arity as u32,
+                            },
+                            self.bytecode.il_mut(),
+                        );
+                        // Miss: the copy is still on the stack.
+                        self.bytecode.push_pop();
+                        bb.emit_jump_to(fail, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                        bb.bind_label(hit, self.bytecode.il_mut());
+                        // Hit: drop the nested payload (only `_` inside).
+                        for _ in 0..arity {
+                            self.bytecode.push_pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            bb.emit_jump_to(pass_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        }
     }
 }
 
