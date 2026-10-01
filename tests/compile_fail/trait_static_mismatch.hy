@@ -1,4 +1,4 @@
-// Expected: compile failure — the trait declares `from_val` static, the
+// Expected: E0119 — the trait declares `from_val` static, the
 // instance implements it as an instance method.
 class Val {
     pub i: int,

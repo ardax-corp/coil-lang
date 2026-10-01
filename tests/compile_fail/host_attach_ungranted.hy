@@ -1,4 +1,4 @@
-// Expected: compile failure — `Stream.attach` requires `--allow-attach`.
+// Expected: E0408 — `Stream.attach` requires `--allow-attach`.
 use io::{stdout};
 
 fn main() {

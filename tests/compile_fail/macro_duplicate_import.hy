@@ -1,4 +1,4 @@
-// Expected: compile failure — `FieldNames` is imported from two modules.
+// Expected: E0119 — `FieldNames` is imported from two modules.
 use derive_macros::{FieldNames};
 use derive_macros_bad::{FieldNames};
 

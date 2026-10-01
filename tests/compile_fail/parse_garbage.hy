@@ -1,4 +1,4 @@
-// Expected: compile/parse failure — garbage tokens.
+// Expected: E0001 — garbage tokens.
 fn main() {
     @@@ ### ;;;
 }

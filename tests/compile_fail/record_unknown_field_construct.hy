@@ -1,4 +1,4 @@
-// Expected: compile failure — unknown field in record constructor.
+// Expected: E0207 — unknown field in record constructor.
 enum Point {
     Point { x: int, y: int },
 }

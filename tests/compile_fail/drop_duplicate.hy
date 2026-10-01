@@ -1,4 +1,4 @@
-// Expected: compile failure — at most one fn drop per class (E0126).
+// Expected: E0126 — at most one fn drop per class.
 class Handle { pub fd: int }
 
 impl Handle {

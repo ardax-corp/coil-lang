@@ -1,4 +1,4 @@
-// Expected: compile failure — `Box<T>` covers `Box<int>`.
+// Expected: E0119 — `Box<T>` covers `Box<int>`.
 class Box<T> {
     pub item: T,
 }

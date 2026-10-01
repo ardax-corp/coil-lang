@@ -1,4 +1,4 @@
-// Expected: compile failure — `_` is not a catch-all (`default` is).
+// Expected: E0216 — `_` is not a catch-all (`default` is).
 enum Status { Open, Closed }
 
 fn main() {

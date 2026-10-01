@@ -1,4 +1,4 @@
-// Expected: compile failure — break outside loop.
+// Expected: E0801 — break outside loop.
 fn main() {
     break;
 }

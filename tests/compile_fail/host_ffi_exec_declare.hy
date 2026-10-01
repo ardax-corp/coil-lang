@@ -1,4 +1,4 @@
-// Expected: compile failure — FFI `system` requires `--allow-ffi-exec`.
+// Expected: E0409 — FFI `system` requires `--allow-ffi-exec`.
 use ffi::{declare};
 use ffi::types::{Int, Ptr};
 

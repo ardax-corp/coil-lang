@@ -1,4 +1,4 @@
-// Expected: compile failure — ?. on Result.
+// Expected: E0116 — ?. on Result.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

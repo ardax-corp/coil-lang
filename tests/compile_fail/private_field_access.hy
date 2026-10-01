@@ -1,4 +1,4 @@
-// Expected: compile failure — private field outside impl (E0128).
+// Expected: E0128 — private field outside impl.
 class Box {
     n: int,
 }

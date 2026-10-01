@@ -1,4 +1,4 @@
-// Expected: compile failure — duplicate field in match record pattern (parse E0208).
+// Expected: E0208 — duplicate field in match record pattern (parse E0208).
 enum P {
     P { x: int, y: int },
 }

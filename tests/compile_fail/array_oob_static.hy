@@ -1,4 +1,4 @@
-// Expected: compile failure — static OOB index.
+// Expected: E0400 — static OOB index.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

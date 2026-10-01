@@ -1,4 +1,4 @@
-// Expected: compile failure — unknown variant.
+// Expected: E0203 — unknown variant.
 enum Color {
     Red,
 }

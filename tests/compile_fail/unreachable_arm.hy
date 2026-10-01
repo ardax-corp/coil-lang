@@ -1,4 +1,4 @@
-// Expected: compile failure — unreachable match arm.
+// Expected: E0210 — unreachable match arm.
 enum Color {
     Red,
     Blue,

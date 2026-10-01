@@ -1,4 +1,4 @@
-// Expected: compile failure — bare `Ok` is Status::Ok and Result::Ok.
+// Expected: E0201 — bare `Ok` is Status::Ok and Result::Ok.
 enum Status {
     Ok = 200,
     NotFound = 404,

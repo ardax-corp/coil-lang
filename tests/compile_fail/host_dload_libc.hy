@@ -1,4 +1,4 @@
-// Expected: compile failure — `dload("c")` is always denied.
+// Expected: E0410 — `dload("c")` is always denied.
 use ffi::{dload};
 
 fn main() {

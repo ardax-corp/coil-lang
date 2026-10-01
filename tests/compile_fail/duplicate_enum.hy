@@ -1,4 +1,4 @@
-// Expected: compile failure — duplicate enum name.
+// Expected: E0200 — duplicate enum name.
 enum Foo {
     A,
 }

@@ -1,4 +1,4 @@
-// Expected: compile failure — private method outside impl (E0128).
+// Expected: E0128 — private method outside impl.
 class Box {
     n: int,
 }

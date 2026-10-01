@@ -1,4 +1,4 @@
-// Expected: compile failure — record variant called as tuple.
+// Expected: E0205 — record variant called as tuple.
 enum Point {
     P { x: int, y: int },
     Q(int),

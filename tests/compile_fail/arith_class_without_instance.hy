@@ -1,4 +1,4 @@
-// Expected: compile failure — `-` on a class with no `Sub` instance (#554).
+// Expected: E0102 — `-` on a class with no `Sub` instance (#554).
 class Vec2 {
     pub x: int,
 }

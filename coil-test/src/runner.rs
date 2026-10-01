@@ -98,6 +98,59 @@ pub fn is_compile_fail(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "compile_fail")
 }
 
+/// Error codes (`E0209`) a `compile_fail/` file declares on the `// Expected:`
+/// lines of its leading comment header.
+pub fn declared_error_codes(src: &str) -> Vec<String> {
+    src.lines()
+        .take_while(|l| l.starts_with("//"))
+        .filter(|l| l.contains("Expected"))
+        .flat_map(error_codes_in)
+        .collect()
+}
+
+/// Every `E` + four digits in `text`, in order.
+fn error_codes_in(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut codes = Vec::new();
+    for i in 0..bytes.len() {
+        let code = bytes.get(i..i + 5);
+        let boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        if let Some(code) = code
+            && boundary
+            && code[0] == b'E'
+            && code[1..].iter().all(u8::is_ascii_digit)
+            && bytes.get(i + 5).is_none_or(|b| !b.is_ascii_alphanumeric())
+        {
+            codes.push(String::from_utf8_lossy(code).into_owned());
+        }
+    }
+    codes
+}
+
+/// A rejected `compile_fail/` file passes when its diagnostics include one of
+/// the error codes its header declares, so a test cannot keep passing after
+/// it starts failing for an unrelated reason.
+fn compile_fail_verdict(src: &str, reported: &str) -> (bool, Option<String>) {
+    let declared = declared_error_codes(src);
+    if declared.is_empty() {
+        return (
+            false,
+            Some("no expected error code: start the file with `// Expected: E…`".to_string()),
+        );
+    }
+    let mut got = error_codes_in(reported);
+    got.dedup();
+    if got.iter().any(|c| declared.contains(c)) {
+        (true, None)
+    } else {
+        let got = if got.is_empty() { "none".to_string() } else { got.join(", ") };
+        (
+            false,
+            Some(format!("expected {}, compiler reported {got}", declared.join(" or "))),
+        )
+    }
+}
+
 /// Classify a `catch_unwind` compile result for a `compile_fail/` file.
 /// Only a clean diagnostic rejection (`Ok(Err(_))`) is harness success.
 /// Panic does not count (release builds use `panic = "abort"`).
@@ -397,9 +450,15 @@ pub(crate) fn compile_test_file(
     let expect_compile_fail = is_compile_fail(path);
     // Expected compile rejection: suppress ariadne noise so the harness
     // summary stays readable when many compile_fail files exist.
+    // A rejection's diagnostics are kept apart: the case checks their error
+    // codes against the file's `// Expected:` header instead of printing them.
+    let rejection = Captured::default();
     let mut pipeline = match diagnostics {
         Some(d) if !expect_compile_fail => {
             Pipeline::with_reporter(config.clone(), Box::new(d.clone()))
+        }
+        _ if expect_compile_fail => {
+            Pipeline::with_reporter(config.clone(), Box::new(rejection.clone()))
         }
         _ => Pipeline::with_reporter(config.clone(), Box::new(std::io::sink())),
     };
@@ -436,12 +495,16 @@ pub(crate) fn compile_test_file(
     if expect_compile_fail {
         // Only a clean diagnostic rejection counts. A panic is a
         // harness failure (and aborts under release panic=abort).
-        let (ok, message) = match &compiled {
-            _ if compile_fail_rejected(&compiled) => (true, None),
-            Ok(Ok(_)) => (false, Some("expected compile failure")),
-            _ => (false, Some("compiler panicked")),
+        let (ok, why) = match &compiled {
+            _ if compile_fail_rejected(&compiled) => {
+                let src = std::fs::read_to_string(path).unwrap_or_default();
+                let reported = String::from_utf8_lossy(&rejection.take()).into_owned();
+                compile_fail_verdict(&src, &reported)
+            }
+            Ok(Ok(_)) => (false, Some("expected compile failure".to_string())),
+            _ => (false, Some("compiler panicked".to_string())),
         };
-        let message = message.map(|why| format!("> Test \"{display}\" failed ({why})"));
+        let message = why.map(|why| format!("> Test \"{display}\" failed ({why})"));
         return Compiled::Decided(ok, message);
     }
     let (bytecode, constants) = match compiled {
