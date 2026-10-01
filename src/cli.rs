@@ -373,11 +373,13 @@ enum RawCommand {
         #[arg(required = true, trailing_var_arg = true)]
         paths: Vec<String>,
     },
-    /// Start the Coil language server over stdin/stdout
+    /// Start the Coil language server over stdin/stdout (re-execs `coil-lsp`)
+    #[command(disable_help_flag = true)]
     Lsp {
-        /// Accepted for LSP clients; ignored
-        #[arg(long, hide = true)]
-        stdio: bool,
+        /// Forwarded to `coil-lsp`: `--root DIR`, host grants, `--stdio`
+        /// (`coil lsp --help` lists them)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
     },
 }
 
@@ -563,7 +565,7 @@ impl RawCli {
                     self.roots.root,
                 )
             }
-            Some(RawCommand::Lsp { stdio: _ }) => cli_from(
+            Some(RawCommand::Lsp { args: _ }) => cli_from(
                 Command::Lsp,
                 LogFlags::default(),
                 false,
@@ -830,6 +832,21 @@ mod tests {
     #[test]
     fn parse_lsp_with_stdio() {
         let cli = parse_args(&args(&["lsp", "--stdio"])).unwrap();
+        assert_eq!(cli.command, Command::Lsp);
+    }
+
+    #[test]
+    fn parse_lsp_forwards_roots_and_grants() {
+        let cli = parse_args(&args(&[
+            "lsp",
+            "--root",
+            "src",
+            "--allow-exec",
+            "--allow-dload",
+            "sdl2",
+            "--help",
+        ]))
+        .unwrap();
         assert_eq!(cli.command, Command::Lsp);
     }
 

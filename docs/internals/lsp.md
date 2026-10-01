@@ -42,10 +42,25 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Semantic tokens | Lexical comments (`//`, nestable `/* */`), strings (including escaped quotes), numbers, operators, plus AST / `Checker` classification. Contextual `derive` / `macro` / `quote` / `attrs` highlight as keywords; `name!(…)` calls use the `macro` token type |
 
 Search roots for an opened workspace are `src`, `.` (sibling files at the
-project root), and each `.deps/*/src` checkout when present. That matches
-typical package + spool layouts. Language `use`/`mod` still does **not**
+project root), and each `.deps/*/src` checkout when present, then any
+`--root DIR` given on the command line. A file under nested roots is
+namespaced by the innermost one. Language `use`/`mod` still does **not**
 read `[module].roots` from `coil.toml` (same rule as `coil` without
-`--root`).
+`--root`); tools pass them as flags instead.
+
+`coil lsp` takes the same root and host-grant flags as `coil compile`, so a
+project tool (spool) can start it with the flags it uses everywhere else:
+
+```
+coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exec
+```
+
+`--root DIR` (repeatable; relative to the server's working directory),
+`--allow-attach` / `--allow-exit` / `--allow-exec` / `--allow-ffi-exec`,
+`--allow-dload STEM` and `--ffi-search-path DIR`. The grants reach the
+project typecheck, so code that the project is allowed to compile is not
+flagged in the editor. `--stdio` is accepted and ignored; `coil lsp --help`
+lists the flags.
 
 Virtual-module imports use the compiler's `VirtualModules` registry.
 Imported functions, types, and implicit prelude exports get completion and
@@ -72,7 +87,7 @@ Leave these for a later LSP pass unless they block daily editing:
 - The default-arm quick fix skips value `match`es (a value arm needs an
   expression the fix cannot choose).
 - `coil.toml` `[module].roots` (compiler language path ignores it; pass
-  `--root` on CLI).
+  `--root` to `coil lsp`).
 - Semantic token modifiers (`declaration`, `readonly`, …).
 
 The reporting crate exposes byte-to-LSP UTF-16 position conversion so other

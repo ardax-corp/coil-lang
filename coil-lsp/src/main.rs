@@ -8,7 +8,7 @@ use std::{
 };
 
 use compiler::{
-    BuiltinExport, Checker, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
+    BuiltinExport, Checker, HostGrants, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
     format_ty_for_diag,
 };
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError};
@@ -62,17 +62,93 @@ struct ServerState {
     /// Edited documents whose re-analysis waits until the queued edits
     /// behind them are applied (one typecheck per burst of keystrokes).
     pending_analysis: Vec<Uri>,
+    /// `--root` dirs from the command line, searched after the defaults.
+    extra_roots: Vec<PathBuf>,
+}
+
+/// Command-line options: extra module roots and host grants, spelled as for
+/// `coil compile` so tools can pass the same flags to every subcommand.
+#[derive(Debug, Default, PartialEq)]
+struct LspOptions {
+    /// Absolute (relative ones resolve against the current directory).
+    extra_roots: Vec<PathBuf>,
+    grants: HostGrants,
+}
+
+const USAGE: &str = "\
+Start the Coil language server over stdin/stdout
+
+Usage:
+  coil lsp [OPTIONS]
+
+Options:
+  --root DIR          Extra module search directory (repeatable), searched
+                      after `src`, `.` and `.deps/*/src`
+  --allow-attach      Allow Stream.attach (default deny)
+  --allow-exit        Allow env::exit (default deny)
+  --allow-exec        Allow env::exec (default deny)
+  --allow-ffi-exec    Allow FFI process-exec symbols (default deny)
+  --allow-dload STEM  Allow dload of STEM (repeatable)
+  --ffi-search-path DIR
+                      Extra FFI lookup directory (repeatable; not a grant)
+  --stdio             Accepted for LSP clients; stdio is the only transport
+  -h, --help          Show this help";
+
+/// `Ok(None)` when help was asked for.
+fn parse_options(
+    args: impl IntoIterator<Item = String>,
+    cwd: &Path,
+) -> Result<Option<LspOptions>, String> {
+    let mut options = LspOptions::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
+            _ => (arg.clone(), None),
+        };
+        let mut value = |what: &str| -> Result<String, String> {
+            inline
+                .clone()
+                .or_else(|| args.next())
+                .ok_or_else(|| format!("missing {what} after {flag}"))
+        };
+        match flag.as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--stdio" => {}
+            "--allow-attach" => options.grants.allow_attach = true,
+            "--allow-exit" => options.grants.allow_exit = true,
+            "--allow-exec" => options.grants.allow_exec = true,
+            "--allow-ffi-exec" => options.grants.allow_ffi_exec = true,
+            "--allow-dload" => options.grants.grant_dload_allow(value("STEM")?),
+            "--ffi-search-path" => options.grants.add_ffi_search_path(cwd.join(value("DIR")?)),
+            "--root" => options.extra_roots.push(cwd.join(value("DIR")?)),
+            _ => return Err(format!("unrecognized argument `{arg}`")),
+        }
+    }
+    Ok(Some(options))
 }
 
 fn main() {
     comptime::install();
-    if let Err(error) = run() {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let options = match parse_options(std::env::args().skip(1), &cwd) {
+        Ok(Some(options)) => options,
+        Ok(None) => {
+            println!("{USAGE}");
+            return;
+        }
+        Err(error) => {
+            eprintln!("coil-lsp: {error}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = run(options) {
         eprintln!("coil-lsp: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (connection, io_threads) = Connection::stdio();
     let (request_id, initialize_params) = connection.initialize_start()?;
     let _params: InitializeParams = serde_json::from_value(initialize_params)?;
@@ -147,7 +223,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     connection.initialize_finish(request_id, serde_json::to_value(result)?)?;
 
-    let mut state = ServerState::default();
+    let mut state = ServerState {
+        extra_roots: options.extra_roots,
+        ..ServerState::default()
+    };
     let workspace_root = _params
         .root_uri
         .as_ref()
@@ -161,7 +240,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     if let Some(root_uri) = workspace_root {
         state.workspace_root = Some(root_uri.clone());
-        let index = ProjectIndex::with_roots(root_uri.clone(), lsp_module_roots(&root_uri));
+        let mut index = ProjectIndex::with_roots(
+            root_uri.clone(),
+            lsp_module_roots(&root_uri, &state.extra_roots),
+        );
+        // Without the project's grants, `env::exec` & co. are false errors.
+        index.pipeline_mut().set_host_grants(options.grants);
         state.project_index = Some(index);
     }
     // Messages read ahead of the one being handled: cancellations and
@@ -746,7 +830,7 @@ fn analyze(source: &str) -> Vec<CoilMessage> {
     checker.take_messages()
 }
 
-fn lsp_module_roots(workspace: &Path) -> Vec<PathBuf> {
+fn lsp_module_roots(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots = compiler::default_module_roots();
     let dot = PathBuf::from(".");
     if !roots.contains(&dot) {
@@ -764,6 +848,11 @@ fn lsp_module_roots(workspace: &Path) -> Vec<PathBuf> {
             } else {
                 roots.push(src);
             }
+        }
+    }
+    for root in extra {
+        if !roots.contains(root) {
+            roots.push(root.clone());
         }
     }
     roots
@@ -2507,7 +2596,7 @@ fn modules_declaring(state: &ServerState, from: &Path, name: &str) -> Vec<String
     let Some(root) = &state.workspace_root else {
         return Vec::new();
     };
-    let module_roots: Vec<PathBuf> = lsp_module_roots(root)
+    let module_roots: Vec<PathBuf> = lsp_module_roots(root, &state.extra_roots)
         .into_iter()
         .map(|r| if r.is_absolute() { r } else { root.join(r) })
         .collect();
@@ -4204,6 +4293,41 @@ mod tests {
         assert_eq!(text, "fn main() {\n    let answer = 42;\n}\n// end\n");
         apply_change(&mut text, change(None, "fn main() {}\n"));
         assert_eq!(text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn options_parse_roots_and_grants_like_coil_compile() {
+        let cwd = Path::new("/work/app");
+        let args = [
+            "--stdio",
+            "--root",
+            "vendor",
+            "--root=/abs/lib",
+            "--allow-exec",
+            "--allow-exit",
+            "--allow-dload",
+            "sdl2",
+            "--ffi-search-path=native",
+        ]
+        .map(String::from);
+        let options = parse_options(args, cwd).unwrap().expect("not help");
+        assert_eq!(
+            options.extra_roots,
+            vec![PathBuf::from("/work/app/vendor"), PathBuf::from("/abs/lib")]
+        );
+        assert!(options.grants.allow_exec && options.grants.allow_exit);
+        assert!(!options.grants.allow_attach);
+        assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
+        assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
+    }
+
+    #[test]
+    fn options_report_help_and_errors() {
+        let cwd = Path::new("/");
+        assert_eq!(parse_options(["--help".to_string()], cwd), Ok(None));
+        assert_eq!(parse_options(Vec::new(), cwd), Ok(Some(LspOptions::default())));
+        assert!(parse_options(["--root".to_string()], cwd).is_err());
+        assert!(parse_options(["--bogus".to_string()], cwd).is_err());
     }
 
     #[test]
