@@ -1,9 +1,4 @@
-// Expected output: 1
-//
 // Trait-instance methods may call inherent methods on the same type (COI-115).
-
-use io::{stdout, write};
-use string::{format, to_bytes};
 
 class ItemBox {
     pub v: int,
@@ -38,9 +33,13 @@ impl Iterator for ItemBoxIter {
     }
 }
 
-fn main() {
-    let b = new ItemBox(0);
-    for x in b {
-        write(stdout(), to_bytes(format("%i", x)));
+test("trait instance method calls an inherent method") {
+    let n = 0;
+    let total = 0;
+    for x in new ItemBox(0) {
+        n = n + 1;
+        total = total + x;
     }
+    assert(n == 1)?;
+    assert(total == 1)?;
 }

@@ -1,10 +1,5 @@
 // CALL into_iter/next must use reserved labels when impls follow the user.
 
-use io::stdout;
-use io::sync::write_all;
-
-use string::{format, to_bytes};
-
 class Counter {
     pub cur: int,
     pub end: int,
@@ -38,6 +33,8 @@ impl Iterator for Counter {
     }
 }
 
-fn main() {
-    write_all(stdout(), to_bytes(format("%i", consume(new Counter(0, 3)))));
+test("for-in over a user iterator whose impls follow its use") {
+    assert(consume(new Counter(0, 3)) == 3)?;
+    assert(consume(new Counter(2, 5)) == 9)?;
+    assert(consume(new Counter(4, 4)) == 0)?;
 }
