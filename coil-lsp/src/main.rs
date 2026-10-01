@@ -142,14 +142,46 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(error) = run(options) {
-        eprintln!("coil-lsp: {error}");
-        std::process::exit(1);
-    }
+    let (connection, io_threads) = Connection::stdio();
+    let result = run(&connection, options);
+    let code = match &result {
+        Ok(()) => 0,
+        // stdin closed (even mid-handshake): a normal shutdown.
+        Err(error) if is_disconnect(error.as_ref()) => 0,
+        Err(error) => {
+            eprintln!("coil-lsp: {error}");
+            1
+        }
+    };
+    finish_io(connection, io_threads);
+    std::process::exit(code);
 }
 
-fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let (connection, io_threads) = Connection::stdio();
+/// Whether `error` is lsp-server's "the client went away" (stdin EOF).
+fn is_disconnect(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<lsp_server::ProtocolError>()
+        .is_some_and(|e| e.channel_is_disconnected())
+}
+
+/// Flush queued messages before exiting (#583): dropping the connection
+/// lets the writer thread drain its channel, and joining waits for it.
+/// `exit` while the writer still held a response lost it, e.g. the
+/// `initialize` result when stdin closed right after the request.
+/// `IoThreads::join` also waits for the reader, which only returns at
+/// stdin EOF, so a client that keeps stdin open after an error gets a
+/// bounded wait instead of a hang.
+fn finish_io(connection: Connection, io_threads: lsp_server::IoThreads) {
+    drop(connection);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = io_threads.join();
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+}
+
+fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (request_id, initialize_params) = connection.initialize_start()?;
     let _params: InitializeParams = serde_json::from_value(initialize_params)?;
     let capabilities = ServerCapabilities {
@@ -254,7 +286,7 @@ fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mut cancelled: HashSet<RequestId> = HashSet::new();
     loop {
         if queue.is_empty() {
-            flush_pending_analysis(&connection, &mut state)?;
+            flush_pending_analysis(connection, &mut state)?;
             match connection.receiver.recv() {
                 Ok(message) => queue.push_back(message),
                 Err(_) => break,
@@ -271,7 +303,7 @@ fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
             Message::Request(request) => {
                 if cancelled.remove(&request.id) {
                     send_error(
-                        &connection,
+                        connection,
                         request.id,
                         ErrorCode::RequestCanceled,
                         format!("`{}` was cancelled", request.method),
@@ -279,21 +311,21 @@ fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 if request.method == "shutdown" {
-                    send_response(&connection, request.id, Value::Null)?;
+                    send_response(connection, request.id, Value::Null)?;
                     continue;
                 }
-                flush_pending_analysis(&connection, &mut state)?;
+                flush_pending_analysis(connection, &mut state)?;
                 match handle_request(&mut state, &request) {
-                    Ok(Some(value)) => send_response(&connection, request.id, value)?,
+                    Ok(Some(value)) => send_response(connection, request.id, value)?,
                     // Every request needs a reply; silence hangs the client.
                     Ok(None) => send_error(
-                        &connection,
+                        connection,
                         request.id,
                         ErrorCode::MethodNotFound,
                         format!("unsupported request `{}`", request.method),
                     )?,
                     Err(error) => send_error(
-                        &connection,
+                        connection,
                         request.id,
                         ErrorCode::InvalidParams,
                         format!("{}: {error}", request.method),
@@ -305,17 +337,16 @@ fn run(options: LspOptions) -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 if notification.method != "textDocument/didChange" {
-                    flush_pending_analysis(&connection, &mut state)?;
+                    flush_pending_analysis(connection, &mut state)?;
                 }
                 // A bad notification must not take the server down.
-                if let Err(error) = handle_notification(&connection, &mut state, &notification) {
+                if let Err(error) = handle_notification(connection, &mut state, &notification) {
                     eprintln!("coil-lsp: {}: {error}", notification.method);
                 }
             }
             Message::Response(_) => {}
         }
     }
-    io_threads.join()?;
     Ok(())
 }
 

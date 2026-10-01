@@ -250,6 +250,38 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
 }
 
+/// #583: a reply already queued when stdin closes is still written, and
+/// end of input is a clean exit. Exiting raced the writer thread before
+/// (about 7% of runs lost the `initialize` result), so repeat.
+#[test]
+fn initialize_reply_survives_stdin_closing_at_once() {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "processId": null, "rootUri": null, "capabilities": {} },
+    })
+    .to_string();
+    for run in 0..40 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_coil-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn coil-lsp");
+        let mut stdin = child.stdin.take().unwrap();
+        write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        drop(stdin);
+        let output = child.wait_with_output().expect("wait");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"capabilities\""),
+            "run {run}: initialize reply lost: {stdout:?}"
+        );
+        assert_eq!(output.status.code(), Some(0), "run {run}: EOF is a clean exit");
+    }
+}
+
 fn open(client: &mut Client, uri: &str, text: &str) {
     client.notify(
         "textDocument/didOpen",
