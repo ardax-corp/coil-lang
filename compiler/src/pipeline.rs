@@ -958,10 +958,13 @@ impl Pipeline {
             }
         }
         let entry = self.entry_file.clone();
-        let mut ready: Vec<PathBuf> = remaining
+        // Seed in worklist order, not `remaining`'s hash order: modules with
+        // no edge between them must still come out the same way every run,
+        // or the archive's function layout changes between builds (#605).
+        let mut ready: Vec<PathBuf> = items
             .iter()
-            .filter(|(_, n)| **n == 0)
-            .map(|(p, _)| p.clone())
+            .filter(|i| remaining.get(&i.file) == Some(&0))
+            .map(|i| i.file.clone())
             .collect();
         let mut order_paths: Vec<PathBuf> = Vec::with_capacity(items.len());
         while !ready.is_empty() {
