@@ -1,5 +1,6 @@
 //! IL stream builder with symbolic label allocation.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::{Byte, DebugLoc, Instruction};
@@ -25,6 +26,15 @@ impl std::fmt::Display for IlError {
 
 impl std::error::Error for IlError {}
 
+/// Raw index of every code-emitting op in `ops[..scanned]`, extended lazily
+/// as ops are pushed. Maps a code offset (PC) to its op in O(1) instead of
+/// a scan from op 0 (#608).
+#[derive(Clone, Default)]
+struct CodeIndex {
+    scanned: usize,
+    positions: Vec<usize>,
+}
+
 /// Accumulates stack IL with symbolic jump/entry targets.
 #[derive(Clone, Default)]
 pub struct IlBuilder {
@@ -34,6 +44,8 @@ pub struct IlBuilder {
     targeted: BTreeSet<u32>,
     /// Labels that have been bound at least once.
     bound: BTreeSet<u32>,
+    /// Valid for `ops[..scanned]`; reset by structural edits.
+    code_index: RefCell<CodeIndex>,
 }
 
 impl IlBuilder {
@@ -46,11 +58,98 @@ impl IlBuilder {
         &self.ops
     }
 
+    /// Structural access (insert / remove / reorder ops). Drops the code
+    /// index, so prefer [`Self::ops_slice_mut`] for in-place rewrites.
     pub fn ops_mut(&mut self) -> &mut Vec<IlOp> {
+        *self.code_index.get_mut() = CodeIndex::default();
         &mut self.ops
     }
 
+    /// In-place access to the ops (locations, site tags, an `Entry` for an
+    /// absolute CALL byte). The caller must not change which ops emit code.
+    pub fn ops_slice_mut(&mut self) -> &mut [IlOp] {
+        &mut self.ops
+    }
+
+    /// Drop every op from raw index `keep` on.
+    pub fn truncate_raw(&mut self, keep: usize) {
+        self.ops.truncate(keep);
+        let index = self.code_index.get_mut();
+        if index.scanned > keep {
+            index.scanned = keep;
+            let n = index.positions.partition_point(|&p| p < keep);
+            index.positions.truncate(n);
+        }
+    }
+
+    /// Index every emitting op pushed since the last query.
+    fn indexed(&self) -> std::cell::Ref<'_, CodeIndex> {
+        {
+            let mut index = self.code_index.borrow_mut();
+            let from = index.scanned;
+            if from < self.ops.len() {
+                for (i, op) in self.ops[from..].iter().enumerate() {
+                    if op.emits_code() {
+                        index.positions.push(from + i);
+                    }
+                }
+                index.scanned = self.ops.len();
+            }
+        }
+        self.code_index.borrow()
+    }
+
+    /// Raw index of the emitting op at code offset `pc`, if there is one.
+    pub fn raw_index_of_code(&self, pc: usize) -> Option<usize> {
+        self.indexed().positions.get(pc).copied()
+    }
+
+    /// Raw ops range holding code offsets `[start, end)` plus the labels
+    /// bound at those offsets: from just after the op at `start - 1` to just
+    /// after the op at `end - 1` (labels at offset `end` excluded; past the
+    /// last op, trailing labels are included only when `end` exceeds it).
+    pub fn raw_range_of_code(&self, start: usize, end: usize) -> std::ops::Range<usize> {
+        let index = self.indexed();
+        let total = index.positions.len();
+        let after = |pc: usize| -> usize {
+            if pc == 0 {
+                0
+            } else if pc <= total {
+                index.positions[pc - 1] + 1
+            } else {
+                self.ops.len()
+            }
+        };
+        let lo = after(start);
+        let hi = if end > total { self.ops.len() } else { after(end) };
+        lo..hi.max(lo)
+    }
+
+    /// Where an op inserted at code offset `code_pos` goes: right after the
+    /// op at `code_pos - 1`, so labels bound at `code_pos` follow it (the
+    /// end when `code_pos` is past the last op).
+    pub fn raw_insert_point(&self, code_pos: usize) -> usize {
+        if code_pos == 0 {
+            return 0;
+        }
+        self.raw_index_of_code(code_pos - 1)
+            .map_or(self.ops.len(), |i| i + 1)
+    }
+
+    /// Remove the last emitting op (labels after it stay).
+    pub fn remove_last_emitting(&mut self) -> Option<IlOp> {
+        let idx = self.ops.iter().rposition(|op| op.emits_code())?;
+        let op = self.ops.remove(idx);
+        let index = self.code_index.get_mut();
+        if index.scanned > idx {
+            index.positions.pop();
+            index.scanned -= 1;
+        }
+        Some(op)
+    }
+
     pub fn clear(&mut self) {
+        *self.code_index.get_mut() = CodeIndex::default();
         self.ops.clear();
         self.next_label_id = 0;
         self.targeted.clear();
@@ -63,7 +162,7 @@ impl IlBuilder {
 
     /// Number of code-emitting ops (labels excluded). Useful for spans.
     pub fn code_len(&self) -> usize {
-        self.ops.iter().filter(|o| o.emits_code()).count()
+        self.indexed().positions.len()
     }
 
     /// Total IL items including label markers.
@@ -92,6 +191,7 @@ impl IlBuilder {
 
     /// Insert a bound label marker at raw op index `raw_idx` (does not append).
     pub fn insert_bound_label_at(&mut self, raw_idx: usize, label: Label) {
+        *self.code_index.get_mut() = CodeIndex::default();
         self.bound.insert(label.0);
         self.ops.insert(raw_idx, IlOp::Label(label));
     }
@@ -436,20 +536,8 @@ impl IlBuilder {
     /// Splice `inserted` before the first op at logical code index `code_pos`
     /// (counting only emitting ops). Used for static-init insertion.
     pub fn splice_code_at(&mut self, code_pos: usize, mut inserted: IlBuilder) {
-        let mut emitting = 0usize;
-        let mut raw_idx = self.ops.len();
-        for (i, op) in self.ops.iter().enumerate() {
-            if emitting == code_pos {
-                raw_idx = i;
-                break;
-            }
-            if op.emits_code() {
-                emitting += 1;
-            }
-        }
-        if emitting < code_pos {
-            raw_idx = self.ops.len();
-        }
+        let raw_idx = self.raw_insert_point(code_pos);
+        *self.code_index.get_mut() = CodeIndex::default();
         let mut chunk = std::mem::take(&mut inserted.ops);
         // Remap labels from inserted into our namespace.
         let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
@@ -486,5 +574,75 @@ impl IlBuilder {
             }
         }
         self.ops.splice(raw_idx..raw_idx, chunk);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `[L0] a [L1] b [L2] c [L3]`: three emitting ops, a label at each PC.
+    fn sample() -> IlBuilder {
+        let mut il = IlBuilder::new();
+        for k in 0..3 {
+            let l = il.fresh_label();
+            il.bind_label(l);
+            il.push_const(k);
+        }
+        let l = il.fresh_label();
+        il.bind_label(l);
+        il
+    }
+
+    /// The scan the index replaces: labels at PC `i` in `[start, end)` plus
+    /// emitting ops `[start, end)`.
+    fn scanned(il: &IlBuilder, start: usize, end: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut pc = 0;
+        for (i, op) in il.ops().iter().enumerate() {
+            if op.emits_code() {
+                if pc >= end {
+                    break;
+                }
+                if pc >= start {
+                    out.push(i);
+                }
+                pc += 1;
+            } else if pc >= start && pc < end {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn code_ranges_match_a_scan() {
+        let il = sample();
+        assert_eq!(il.code_len(), 3);
+        for start in 0..5 {
+            for end in start..6 {
+                let range: Vec<usize> = il.raw_range_of_code(start, end).collect();
+                assert_eq!(range, scanned(&il, start, end), "[{start}, {end})");
+            }
+        }
+        assert_eq!(il.raw_insert_point(0), 0);
+        assert_eq!(il.raw_insert_point(2), 4);
+        assert_eq!(il.raw_insert_point(9), il.raw_len());
+    }
+
+    #[test]
+    fn index_follows_pushes_truncation_and_edits() {
+        let mut il = sample();
+        assert_eq!(il.raw_index_of_code(2), Some(5));
+        il.truncate_raw(3);
+        assert_eq!(il.code_len(), 1);
+        il.push_const(7);
+        assert_eq!(il.code_len(), 2);
+        assert_eq!(il.raw_index_of_code(1), Some(3));
+        assert!(il.remove_last_emitting().is_some());
+        assert_eq!(il.code_len(), 1);
+        il.ops_mut().insert(0, IlOp::Pop { loc: DebugLoc::unknown() });
+        assert_eq!(il.code_len(), 2);
+        assert_eq!(il.raw_index_of_code(0), Some(0));
     }
 }
