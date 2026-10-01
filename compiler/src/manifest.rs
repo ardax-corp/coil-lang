@@ -731,19 +731,24 @@ pub fn resolve_mod_in_roots(roots: &[PathBuf], project_root: &Path, name: &str) 
     None
 }
 
-/// Namespace from the first search root that contains `file`.
+/// Namespace of `file` from the innermost search root that contains it.
 pub fn namespace_of_in_roots(
     roots: &[PathBuf],
     project_root: &Path,
     file: &Path,
 ) -> Option<String> {
-    for root in roots {
-        let abs_root = abs_search_root(project_root, root);
-        if let Ok(rel) = file.strip_prefix(&abs_root) {
-            return Some(path_to_namespace(rel));
-        }
-    }
-    None
+    // Nested roots (`.` and `.deps/pkg/src`) both contain a dependency file;
+    // the innermost one gives the namespace `use` resolves it by (`pkg`, not
+    // `.deps::pkg::src::pkg`), so take the shortest relative path (#581).
+    // Ties keep root order.
+    roots
+        .iter()
+        .filter_map(|root| {
+            let abs_root = abs_search_root(project_root, root);
+            file.strip_prefix(&abs_root).ok().map(Path::to_path_buf)
+        })
+        .min_by_key(|rel| rel.components().count())
+        .map(|rel| path_to_namespace(&rel))
 }
 
 /// Strip an inline comment (everything after `#`, but not
@@ -1219,6 +1224,29 @@ mod tests {
 
         let ns = namespace_of_in_roots(&[PathBuf::from(".")], &tmp, &file);
         assert_eq!(ns.as_deref(), Some("a::foo"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn namespace_of_prefers_the_innermost_root() {
+        // #581: `.` before `.deps/shapes/src`, as the LSP lists them.
+        let tmp = std::env::temp_dir().join(format!(
+            "coil_manifest_nested_roots_{}",
+            std::process::id()
+        ));
+        let dep_src = tmp.join(".deps").join("shapes").join("src");
+        std::fs::create_dir_all(&dep_src).unwrap();
+        let file = dep_src.join("shapes.hy");
+        std::fs::write(&file, "// empty\n").unwrap();
+
+        let roots = [PathBuf::from("."), PathBuf::from(".deps/shapes/src")];
+        let ns = namespace_of_in_roots(&roots, &tmp, &file);
+        assert_eq!(ns.as_deref(), Some("shapes"));
+        // Order does not matter.
+        let reversed = [PathBuf::from(".deps/shapes/src"), PathBuf::from(".")];
+        let ns = namespace_of_in_roots(&reversed, &tmp, &file);
+        assert_eq!(ns.as_deref(), Some("shapes"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
