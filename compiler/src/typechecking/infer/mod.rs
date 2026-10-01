@@ -659,26 +659,12 @@ struct PendingExhaustive {
     match_range: Range<usize>,
 }
 
-/// Coverage tree for match exhaustiveness (full inner-pattern shape).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum CoverageTree {
-    Any,
-    Tag(u32, Vec<CoverageTree>),
-    Tuple(Vec<CoverageTree>),
-    Record(BTreeMap<String, CoverageTree>),
-}
-
 /// Per-arm coverage info, captured at the match site.
 #[derive(Debug, Clone)]
 struct ArmCoverage {
-    /// The variant tag this arm covers, if it was a constructor
-    /// pattern. `None` for wildcards, bindings, and irrefutable
-    /// catches.
-    tag: Option<u32>,
-    /// The inner pattern's coverage, when this arm's pattern is a
-    /// Constructor with a payload coverage tree.
-    inner: CoverageTree,
-    /// True if the arm was a wildcard (`_`), `default`, or a binding (`name`).
+    /// The arm pattern's shape (nested payloads included).
+    tree: CoverageTree,
+    /// True if the arm was `default` or a binding (`name`).
     /// Such arms cover all remaining cases (Rust-style).
     is_catchall: bool,
     /// True for `_` and `default` (not identifier bindings).
@@ -695,7 +681,9 @@ impl Default for Checker {
 }
 
 mod checker;
+mod coverage;
 mod sidecar;
+use coverage::CoverageTree;
 pub use sidecar::{SelectedOverload, TypedSidecar};
 
 /// Human-readable name of a payload shape, used in

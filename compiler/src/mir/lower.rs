@@ -431,7 +431,9 @@ fn bind_match_payloads(args: BindMatchPayloadsArgs<'_>) -> Result<Vec<ValueId>, 
     let ty = match_payload_ty(b.func().ty(src));
     let mut payloads = Vec::with_capacity(n as usize);
     for i in 0..n {
-        payloads.push(b.ins_match_payload(src, i, ty)?);
+        let payload = b.ins_match_payload(src, i, ty)?;
+        b.match_payloads.insert(payload);
+        payloads.push(payload);
     }
     if n == 0 {
         return Ok(payloads);
@@ -669,6 +671,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
             let scrutinee = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("JumpIfMatch stack".into()))?;
+            if b.match_payloads.contains(&scrutinee) {
+                return Err(LowerError::Refused("nested match pattern".into()));
+            }
             let taken = *labels
                 .get(target)
                 .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
@@ -1179,6 +1184,9 @@ fn lower_byte(
             let src = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
+            if b.match_payloads.contains(&src) {
+                return Err(LowerError::Refused("nested match pattern".into()));
+            }
             let n_payloads = jim_taken_payloads(arity, next);
             bind_match_payloads(BindMatchPayloadsArgs {
                 b,

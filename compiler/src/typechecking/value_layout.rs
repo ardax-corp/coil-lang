@@ -75,11 +75,14 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), ty);
     let ty = strip_readonly(&ty);
     if let Ty::Con(name) = ty
-        && (matches!(
+        && matches!(
             name.as_str(),
             super::ty::INT | super::ty::FLOAT | super::ty::BOOL | super::ty::BYTE | UNIT
-        ) || checker.is_scalar_enum(name))
+        )
     {
+        return common::WORD_SCALAR;
+    }
+    if is_scalar_enum_ty(checker, ty) {
         return common::WORD_SCALAR;
     }
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
@@ -110,9 +113,22 @@ pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
     }
 }
 
+/// A scalar-backed enum (`#[repr(int)]`), named or as a variant /
+/// sum type (`Level::High` types as `Constructor { owner: Sum }`).
+fn is_scalar_enum_ty(checker: &Checker, ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Con(name) | Ty::Sum { name, .. } => checker.is_scalar_enum(name),
+        Ty::Constructor { owner, .. } => is_scalar_enum_ty(checker, owner),
+        _ => false,
+    }
+}
+
 /// True when `ty` is a ground heap object, so a niche can use `0` / bit 0.
 pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
     let ty = strip_readonly(ty);
+    if is_scalar_enum_ty(checker, ty) {
+        return false;
+    }
     match ty {
         Ty::Constructor { owner, .. } => niche_heap_only(checker, owner),
         Ty::Con(name) => {

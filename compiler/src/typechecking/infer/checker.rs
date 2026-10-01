@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use parser::ast::{Expression, ExternFunction, FieldModifier, Output, Pattern, Visibility};
@@ -15392,131 +15392,80 @@ impl Checker {
         }
     }
 
-    /// Inspect the first non-trivial sub-pattern of a payload and
-    /// report which inner tag (if any) it tests. Two arms of the
-    /// same outer tag are reachable as long as their inner coverage
-    /// differs, e.g. `Result::Ok(Option::Some(v))` and
-    /// `Result::Ok(Option::None)` are two distinct reachable arms.
-    /// The codegen's inner `JUMP_IF_MATCH` test chain guarantees
-    /// this at runtime; the typechecker just needs to stay out of
-    /// the way.
-    fn pattern_coverage(
-        pattern: &Pattern,
-        enum_tags: &BTreeMap<String, BTreeMap<String, u32>>,
-    ) -> CoverageTree {
+    /// Shape of one pattern for match usefulness: a literal stays a
+    /// literal, a constructor carries its whole payload in declaration
+    /// order (omitted record fields are `Any`).
+    fn coverage_tree(&self, pattern: &Pattern) -> CoverageTree {
+        use parser::ast::PatternPayload;
         match pattern {
             Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => CoverageTree::Any,
-            Pattern::Integer(_) => CoverageTree::Any,
+            Pattern::Integer(n) => CoverageTree::Int(*n),
             Pattern::Constructor {
                 enum_name,
                 variant_name,
                 payload,
-                ..
-            } => {
-                let tag = enum_tags
-                    .get(enum_name.to_string().as_str())
-                    .and_then(|t| t.get(variant_name.to_string().as_str()).copied());
-                let inner = Self::payload_coverage(payload, enum_tags);
-                tag.map(|t| CoverageTree::Tag(t, vec![inner]))
-                    .unwrap_or(CoverageTree::Any)
-            }
-        }
-    }
-
-    fn payload_coverage(
-        payload: &parser::ast::PatternPayload<'_>,
-        enum_tags: &BTreeMap<String, BTreeMap<String, u32>>,
-    ) -> CoverageTree {
-        use parser::ast::PatternPayload;
-        match payload {
-            PatternPayload::Unit => CoverageTree::Any,
-            PatternPayload::Tuple(parts) => CoverageTree::Tuple(
-                parts
-                    .iter()
-                    .map(|p| Self::pattern_coverage(&p.1, enum_tags))
-                    .collect(),
-            ),
-            PatternPayload::Record(fields) => CoverageTree::Record(
-                fields
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.to_string(),
-                            Self::pattern_coverage(&f.pattern.1, enum_tags),
-                        )
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
-    /// Payload coverage for constructor arms (full inner tree).
-    fn inner_coverage(
-        payload: &parser::ast::PatternPayload<'_>,
-        enum_tags: &BTreeMap<String, BTreeMap<String, u32>>,
-    ) -> CoverageTree {
-        Self::payload_coverage(payload, enum_tags)
-    }
-
-    /// Capture per-arm coverage info for the deferred
-    /// exhaustiveness check.
-    fn arm_coverage(&self, pattern: &Pattern, range: &Range<usize>) -> ArmCoverage {
-        match pattern {
-            Pattern::Wildcard => ArmCoverage {
-                tag: None,
-                inner: CoverageTree::Any,
-                is_catchall: false,
-                is_keyword_catchall: false,
-                range: range.clone(),
-            },
-            Pattern::Default => ArmCoverage {
-                tag: None,
-                inner: CoverageTree::Any,
-                is_catchall: true,
-                is_keyword_catchall: true,
-                range: range.clone(),
-            },
-            Pattern::Binding { .. } => ArmCoverage {
-                tag: None,
-                inner: CoverageTree::Any,
-                is_catchall: true,
-                is_keyword_catchall: false,
-                range: range.clone(),
-            },
-            Pattern::Integer(_) => ArmCoverage {
-                tag: None,
-                inner: CoverageTree::Any,
-                is_catchall: false,
-                is_keyword_catchall: false,
-                range: range.clone(),
-            },
-            Pattern::Constructor {
-                enum_name,
-                variant_name,
-                payload,
-                ..
             } => {
                 // Imported short names resolve via env/FQN, same as
                 // `infer_pattern` / `infer_construct`.
-                let enum_key = self
+                let key = self
                     .resolve_enum_key(enum_name)
                     .unwrap_or_else(|| enum_name.to_string());
-                let tag = self
-                    .enum_tags
-                    .get(enum_key.as_str())
-                    .and_then(|t| t.get(variant_name.to_string().as_str()).copied());
-                let inner = Self::inner_coverage(payload, &self.enum_tags);
-                ArmCoverage {
+                let Some(tags) = self.enum_tags.get(key.as_str()) else {
+                    return CoverageTree::Any;
+                };
+                let Some(&tag) = tags.get(*variant_name) else {
+                    return CoverageTree::Any;
+                };
+                let decl: Vec<String> = self
+                    .enum_payloads
+                    .get(key.as_str())
+                    .and_then(|p| p.get(tag as usize))
+                    .map(|p| p.field_pairs().into_iter().map(|(n, _)| n).collect())
+                    .unwrap_or_default();
+                let fields = match payload {
+                    PatternPayload::Unit => vec![CoverageTree::Any; decl.len()],
+                    PatternPayload::Tuple(parts) => (0..decl.len())
+                        .map(|i| {
+                            parts
+                                .get(i)
+                                .map_or(CoverageTree::Any, |p| self.coverage_tree(&p.1))
+                        })
+                        .collect(),
+                    PatternPayload::Record(given) => decl
+                        .iter()
+                        .map(|name| {
+                            given
+                                .iter()
+                                .find(|f| f.name == name.as_str())
+                                .map_or(CoverageTree::Any, |f| self.coverage_tree(&f.pattern.1))
+                        })
+                        .collect(),
+                };
+                CoverageTree::Ctor {
                     tag,
-                    inner,
-                    is_catchall: false,
-                    is_keyword_catchall: false,
-                    range: range.clone(),
+                    variants: tags.len() as u32,
+                    fields,
                 }
             }
         }
     }
 
+    /// Capture per-arm coverage info for the deferred
+    /// exhaustiveness check.
+    fn arm_coverage(&self, pattern: &Pattern, range: &Range<usize>) -> ArmCoverage {
+        let (is_catchall, is_keyword_catchall) = match pattern {
+            Pattern::Default => (true, true),
+            Pattern::Binding { .. } => (true, false),
+            // Whole-arm `_` is rejected at the match site; it closes nothing.
+            Pattern::Wildcard | Pattern::Integer(_) | Pattern::Constructor { .. } => (false, false),
+        };
+        ArmCoverage {
+            tree: self.coverage_tree(pattern),
+            is_catchall,
+            is_keyword_catchall,
+            range: range.clone(),
+        }
+    }
     /// Post-pass: run every deferred exhaustiveness check. By this
     /// point the substitution is closed, so the scrutinee type is
     /// fully resolved (any free type variables that were bound
@@ -15535,9 +15484,9 @@ impl Checker {
     fn check_exhaustiveness(&mut self, pending: &PendingExhaustive) {
         let resolved = apply_ty_prune(&self.subst, &pending.scrutinee_ty);
 
-        // Same outer tag + different inner coverage stays reachable (runtime
-        // JUMP_IF_MATCH chain). Duplicate (tag, inner) is unreachable.
-        let mut seen: BTreeMap<u32, BTreeSet<CoverageTree>> = BTreeMap::new();
+        // An arm is reachable when it matches some value no earlier arm
+        // does (nested literals and constructors included).
+        let mut rows: Vec<&CoverageTree> = Vec::with_capacity(pending.arms.len());
         let mut has_catchall = false;
         let mut keyword_catchalls: Vec<Range<usize>> = Vec::new();
         for arm in &pending.arms {
@@ -15546,16 +15495,17 @@ impl Checker {
             }
             if arm.is_catchall {
                 has_catchall = true;
-            } else if let Some(t) = arm.tag {
-                let inner_seen = seen.entry(t).or_default();
-                if !inner_seen.insert(arm.inner.clone()) {
-                    self.messages.push(Message::error(
-                        ErrorCode::UnreachableArm,
-                        "Unreachable arm: this pattern is matched by an earlier arm".to_string(),
-                        arm.range.clone(),
-                    ));
-                }
+            } else if matches!(arm.tree, CoverageTree::Any) {
+                // Whole-arm `_` (already an error) closes nothing.
+                continue;
+            } else if !coverage::useful(&rows, &arm.tree) {
+                self.messages.push(Message::error(
+                    ErrorCode::UnreachableArm,
+                    "Unreachable arm: this pattern is matched by an earlier arm".to_string(),
+                    arm.range.clone(),
+                ));
             }
+            rows.push(&arm.tree);
         }
 
         if keyword_catchalls.len() > 1 {
@@ -15587,9 +15537,50 @@ impl Checker {
             return;
         }
 
-        // Unwrap a Constructor to its parent sum/app. For Ty::Var /
-        // Ty::Con, no exhaustiveness check.
-        let variants = match &resolved {
+        // Ty::Var / unknown types get no exhaustiveness check.
+        let Some(variants) = self.instantiated_variants(&resolved) else {
+            return;
+        };
+        // A variant no arm names is listed bare; one whose payloads some
+        // value escapes (`Some(200)` alone) as `Some(..)`.
+        let missing: Vec<String> = variants
+            .iter()
+            .enumerate()
+            .filter_map(|(tag, (name, payload))| {
+                let probe = CoverageTree::Ctor {
+                    tag: tag as u32,
+                    variants: variants.len() as u32,
+                    fields: vec![CoverageTree::Any; payload.field_pairs().len()],
+                };
+                if !coverage::useful(&rows, &probe) {
+                    return None;
+                }
+                let named = rows
+                    .iter()
+                    .any(|r| matches!(r, CoverageTree::Ctor { tag: t, .. } if *t == tag as u32));
+                Some(if named {
+                    format!("`{name}(..)`")
+                } else {
+                    format!("`{name}`")
+                })
+            })
+            .collect();
+        if !missing.is_empty() {
+            let mut msg = Message::error(
+                ErrorCode::NonExhaustiveMatch,
+                format!("Non-exhaustive match: variants not covered: {}", missing.join(", ")),
+                pending.match_range.clone(),
+            );
+            msg.with_help("add a `default => ...` arm to cover the remaining cases".to_string());
+            self.messages.push(msg);
+        }
+    }
+
+    /// Variants of the enum type `ty` with payload types instantiated
+    /// (`Option<int>` → `Some(int)`); `None` when `ty` is not a known enum.
+    pub fn instantiated_variants(&self, ty: &Ty) -> Option<Vec<(String, EnumVariantPayloadTy)>> {
+        let ty = apply_ty_prune(&self.subst, ty);
+        match strip_readonly(&ty) {
             Ty::Sum { variants, .. } => Some(variants.clone()),
             Ty::Constructor { owner, .. } => match owner.as_ref() {
                 Ty::Sum { variants, .. } => Some(variants.clone()),
@@ -15605,32 +15596,6 @@ impl Checker {
                 Some(variant_names.into_iter().zip(payloads).collect())
             }
             other => self.poly_variants_from_app(other),
-        };
-
-        if let Some(variants) = variants {
-            let covered: BTreeSet<u32> = seen.into_keys().collect();
-            let missing: Vec<String> = variants
-                .iter()
-                .enumerate()
-                .filter(|(tag, _)| !covered.contains(&(*tag as u32)))
-                .map(|(_, (n, _))| n.clone())
-                .collect();
-            if !missing.is_empty() {
-                let names = missing
-                    .iter()
-                    .map(|s| format!("`{}`", s))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut msg = Message::error(
-                    ErrorCode::NonExhaustiveMatch,
-                    format!("Non-exhaustive match: variants not covered: {}", names),
-                    pending.match_range.clone(),
-                );
-                msg.with_help(
-                    "add a `default => ...` arm to cover the remaining cases".to_string(),
-                );
-                self.messages.push(msg);
-            }
         }
     }
 
