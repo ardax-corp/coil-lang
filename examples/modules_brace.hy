@@ -4,7 +4,7 @@
 // both in one statement; the resolver falls back to the module file
 // (`math.hy`) because there is no `math/add.hy` / `math/mul.hy`.
 //
-// Expected output: `1242`
+// Output: 1242
 
 use math::{add, mul};
 use io::stdout;

@@ -1,4 +1,7 @@
 // Decode `Vec<byte>` → string with `from_bytes`, encode with `to_bytes`.
+//
+// Output: hello2
+
 use io::stdout;
 use io::sync::write_all;
 

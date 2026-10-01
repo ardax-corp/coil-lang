@@ -1,10 +1,12 @@
 // examples/classes.hy — class ctor args, fields, mutation, methods.
 //
-// Output: 7458
+// Prints, in order:
 //   7  — 2*2+3
 //   4  — Point(1,3).sum()
 //   5  — p.x after set_x(5)
 //   8  — p.sum() after mutation
+//
+// Output: 7458
 
 use io::stdout;
 use io::sync::write_all;

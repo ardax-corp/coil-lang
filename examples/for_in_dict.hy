@@ -1,7 +1,8 @@
-// Expected output: 12
 //
 // Homogeneous dicts iterate as (string, V) pairs. Print the values via
 // tuple index. Insertion/table order is preserved by DictEntries.
+//
+// Output: 12
 
 use io::stdout;
 use io::sync::write_all;

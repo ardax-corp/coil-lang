@@ -2,6 +2,7 @@
 // class and adds a logging `make` constructor.
 //
 // Output: Point ctor512
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

@@ -1,9 +1,10 @@
 // examples/ffi_callback_ret.hy — FFI callback/function-pointer return.
 //
 // get_doubler() returns a C function pointer as an opaque Ptr value.
-// Output: the pointer printed as int (non-zero). Re-invoking that
 // address as a coil callback requires a separate declare/host
 // trampoline (not automatic in this phase).
+//
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::declare;
 use ffi::dload;

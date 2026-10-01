@@ -1,3 +1,7 @@
+// A worker thread fed jobs over a channel until it receives "stop".
+//
+// Output: a,b,
+
 use thread::{Sender, Thread, channel, join, send, spawn};
 use pool::worker::run_jobs;
 

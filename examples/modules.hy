@@ -1,15 +1,11 @@
-// examples/modules.hy — Phase 29A: namespace system live.
+// examples/modules.hy — modules and `use`.
 //
-// `use foo::sadge;` brings `sadge` (a function in
-// `src/foo/sadge.hy`) into scope. The module's name
-// (`foo`) is resolved via the manifest's search roots
-// (default: `src/`). The function's fully qualified
-// name is `foo::sadge::sadge`; the alias `sadge`
-// resolves to that FQN at the call site.
+// `use foo::sadge;` brings `sadge` (a function in `examples/src/foo/sadge.hy`)
+// into scope. Modules are found on the search roots
+// (`--root examples/src`); the function's fully qualified name is
+// `foo::sadge::sadge`.
 //
-// Expected output:
-//   "1a4\n"   (sadge prints 420 in hex, then newline)
-//   "45"     (69 in hex, from the inline print)
+// Output: 1a4\n45\n
 
 use foo::sadge;
 use io::stdout;

@@ -1,5 +1,8 @@
 // UDP datagram round-trip via `io::net::udp`.
 // Server binds ephemeral port; client send_to; server recv_from_wait.
+//
+// Output: 2
+
 use io::close;
 use io::stdout;
 use io::net::udp::bind;

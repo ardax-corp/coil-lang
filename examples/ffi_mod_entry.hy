@@ -6,7 +6,7 @@
 //
 //   coil --root examples/src --allow-dload sum examples/ffi_mod_entry.hy
 //
-// Output: 10
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use io::stdout;
 use io::sync::write_all;

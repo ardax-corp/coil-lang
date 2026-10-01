@@ -1,8 +1,9 @@
-// Expected output: 32
 //
 // Prelude `Into`: convert with `let y: T = x.into();`. Both Self and the
 // target type must be local (strict orphan rule — builtin heads like `int`
 // are not allowed as instance arguments for foreign traits).
+//
+// Output: 32
 
 use io::stdout;
 use io::sync::write_all;

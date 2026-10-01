@@ -1,7 +1,8 @@
-// Expected output: 4242
 //
 // User trait dictionaries are consumed inside generic bodies and
 // forwarded through nested generic calls.
+//
+// Output: 4242
 
 use io::stdout;
 use io::sync::write_all;

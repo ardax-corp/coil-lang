@@ -1,4 +1,4 @@
-// examples/collections_map.hy — HashMap insert / get_or / update
+// examples/collections_map.hy — HashMap insert, overwrite and lookup
 //
 // Output: A,2
 
@@ -12,5 +12,5 @@ fn main() {
     m.insert(1, "a");
     m.insert(2, "b");
     m.insert(1, "A");
-    write_all(stdout(), to_bytes(format("%s,%i", m.get_or(1, "?"), m.size())));
+    write_all(stdout(), to_bytes(format("%s,%i", m.get(1, "?"), m.size())));
 }

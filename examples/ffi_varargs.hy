@@ -10,7 +10,7 @@
 // coil `int` is a 64-bit integer, which matches the C side's `int64_t`
 // `va_arg`.
 //
-// Output: 60
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use io::stdout;
 use io::sync::write_all;

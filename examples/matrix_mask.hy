@@ -1,6 +1,7 @@
 // Matrix compares, bitwise ops, intersect, and diff.
 // Compares and intersect/diff are byte masks of 0 and 1.
-// Expected output: 10101001,10305008,10111101,01000010,00000001,2,221,1001
+//
+// Output: 10101001,10305008,10111101,01000010,00000001,2,221,1001
 
 use io::stdout;
 use io::sync::write_all;

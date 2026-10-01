@@ -1,5 +1,7 @@
-// Multi-param trait + where clause (Phase 3).
-// Convert<A, B> with an int→int identity instance; cast(42) → 42.
+// A multi-parameter trait with a `where` clause: `Convert<A, B>` with an
+// `int` -> `int` identity instance.
+//
+// Output: 42
 
 use io::stdout;
 use io::sync::write_all;

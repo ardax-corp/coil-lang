@@ -1,5 +1,6 @@
 // Packed aggregate SIMD path — static length ≥ 8 uses HostInvoke.
-// Expected output: 246810121416,3691215182124
+//
+// Output: 246810121416,3691215182124
 
 use io::stdout;
 use io::sync::write_all;

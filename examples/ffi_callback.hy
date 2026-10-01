@@ -1,4 +1,6 @@
 // C calls back into coil via ffi::types::Callback. Expected output: `42`.
+//
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::declare;
 use ffi::dload;

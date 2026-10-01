@@ -1,4 +1,7 @@
-// Expected output: (1, 2){ a: 3, b: 4 }
+// `%v` formats tuples and records.
+//
+// Output: (1, 2){ a: 3, b: 4 }
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

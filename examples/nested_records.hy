@@ -1,18 +1,11 @@
-// examples/nested_records.hy — nested record patterns (Phase 18B).
+// examples/nested_records.hy — nested record patterns.
 //
-// The Phase 17B-cleanup pass documented the "nested record
-// patterns" limitation: a record pattern inside an arm body
-// was rejected because the codegen emitted a POP for the
-// inner record instead of walking its declared fields.
+// `Wrap::W { inner: Inner::I { v }, name }` destructures a record variant
+// whose field is itself a record variant, binding `v` and `name` in one
+// pattern.
 //
-// Phase 18B lifts the limitation. `Inner` and `Wrap` are
-// both record-shaped enums; `Wrap::W { inner: Inner::I { v },
-// name }` binds `v` and `name` from a single `match` — the
-// inner record's `v` slot is reached by walking the inner
-// record's declared fields in decl_order, with `emit_pattern_binding`
-// recursing at unbounded depth.
-//
-// Output: `99` (the value of `v`).
+// Output: 99
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

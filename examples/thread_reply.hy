@@ -1,3 +1,7 @@
+// Threads: request/reply over two channels.
+//
+// Output: ping
+
 use thread::{Receiver, Sender, channel, join, recv, send, spawn};
 use io::stdout;
 use io::sync::write_all;

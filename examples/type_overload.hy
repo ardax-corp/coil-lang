@@ -1,3 +1,7 @@
+// Same-arity overloads selected by argument type.
+//
+// Output: i:7f:1.5s:hi
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

@@ -1,4 +1,7 @@
 // Async-first: block_on drives a coroutine to its completion value.
+//
+// Output: 2
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

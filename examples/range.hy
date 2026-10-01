@@ -1,9 +1,10 @@
-// Expected output: 012340123561.02.03.0
 //
 // Lazy Range<T: Ord>: half-open `a..b`, closed `a..=b`, first-class
 // values, byte/float bounds. Decreasing ranges are empty (Rust-like).
 // Iteration steps by +1 / +1.0 for int/byte/float.
 // Numeric ranges also collect with `.to_vec()` — see tests/positive/range_to_vec.hy.
+//
+// Output: 012340123561.02.03.0
 
 use io::stdout;
 use io::sync::write_all;

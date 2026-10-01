@@ -3,6 +3,9 @@
 // refuses, so a plain CALL is emitted. Regression anchor — a refused attempt
 // must leave no partial body behind, or it runs ahead of the CALL and stores
 // into caller slots.
+//
+// Output: 13
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

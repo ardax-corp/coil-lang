@@ -1,3 +1,7 @@
+// Threads: `spawn` a function and `join` its result.
+//
+// Output: 42
+
 use thread::{join, spawn};
 use io::stdout;
 use io::sync::write_all;

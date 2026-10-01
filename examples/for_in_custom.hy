@@ -1,7 +1,8 @@
-// Expected output: 012
 //
 // User-defined IntoIterator + Iterator on a class. `next` mutates the
 // heap instance in place so state advances across resumes.
+//
+// Output: 012
 
 use io::stdout;
 use io::sync::write_all;

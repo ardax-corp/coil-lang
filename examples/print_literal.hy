@@ -2,7 +2,7 @@
 //
 // Exercises writing a string literal through io::stdout and string::to_bytes.
 //
-// Expected output: "hello".
+// Output: hello
 
 use io::stdout;
 use io::sync::write_all;

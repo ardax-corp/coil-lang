@@ -1,3 +1,8 @@
+// `readonly` values: reads and `self` methods are allowed, outside mutation is
+// not.
+//
+// Output: 322
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

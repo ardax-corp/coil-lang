@@ -4,6 +4,7 @@
 // expanded program.
 //
 // Output: 9 15 16 swapped 2 1 clicks 2
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

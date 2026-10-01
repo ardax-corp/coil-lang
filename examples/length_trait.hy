@@ -1,9 +1,10 @@
 // examples/length_trait.hy — `len` via the Length typeclass.
 //
-// Output:
 // 3
 // 2
 // 42
+//
+// Output: 3\n2\n42\n
 
 use io::stdout;
 use io::sync::write_all;

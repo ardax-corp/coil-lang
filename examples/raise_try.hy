@@ -1,4 +1,7 @@
 // raise + ? with inferred Result return (catchable; not process abort — Q5).
+//
+// Output: 10,neg
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
