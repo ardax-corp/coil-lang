@@ -59,10 +59,6 @@ pub struct MirBuilder {
     /// Scrutinee slot of the `JumpIfMatch` / `Unpack` being lowered, from
     /// the IL cursor (`tell - 1`): the VM writes payloads from here up.
     pub match_base: Option<u32>,
-    /// Payload values bound by a `JumpIfMatch` / `Unpack`. A match on one
-    /// of them (a nested pattern) is refused: LIR emits a match against the
-    /// scrutinee it just computed, not a payload re-read from a slot.
-    pub match_payloads: std::collections::HashSet<ValueId>,
 }
 
 impl MirBuilder {
@@ -82,7 +78,6 @@ impl MirBuilder {
             pending_loc: DebugLoc::unknown(),
             match_seek: None,
             match_base: None,
-            match_payloads: std::collections::HashSet::new(),
         }
     }
 

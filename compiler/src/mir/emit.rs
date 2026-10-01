@@ -1715,7 +1715,7 @@ fn seed_jim_taken_stack(
 
 /// Every pred reaches `block` as the miss edge of a `JumpIfMatch` on
 /// `scrutinee`, which peeks and so leaves it on top of the stack.
-fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> bool {
+pub(super) fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> bool {
     let preds = &func.preds()[block.index()];
     !preds.is_empty()
         && preds.iter().all(|p| {
