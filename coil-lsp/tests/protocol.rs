@@ -192,6 +192,28 @@ fn imported_parse_error_is_reported_on_that_file() {
     }
 }
 
+/// #581: classes and enums of a `.deps/<pkg>/src` module resolve. The
+/// dependency file sits under both `.` and `.deps/shapes/src`; its
+/// namespace must come from the innermost root (`shapes`).
+#[test]
+fn dependency_classes_and_enums_resolve() {
+    let shapes = "class Box {\n    pub w: int,\n}\n\nimpl Box {\n    pub static fn make(int w) -> Box {\n        return new Box(w);\n    }\n\n    pub fn width() -> int {\n        return self.w;\n    }\n}\n\nenum Fault {\n    Bad { line: int },\n    Worse { line: int },\n}\n";
+    let main = "use shapes::{Box, Fault};\n\nfn describe(Fault f) -> int {\n    return match f {\n        Fault::Bad { line } => line,\n        Fault::Worse { line } => line + 1,\n    };\n}\n\nfn main() {\n    let b = Box::make(3);\n    let _ = describe(Fault::Bad { line: b.width() });\n}\n";
+    let dir = project(
+        "dep-types",
+        &[(".deps/shapes/src/shapes.hy", shapes), ("src/main.hy", main)],
+    );
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main_uri, main);
+    client.request("shutdown", Value::Null);
+    let published = client.diagnostics_for(&main_uri);
+    assert!(!published.is_empty(), "no diagnostics published for main.hy");
+    for messages in published {
+        assert!(messages.is_empty(), "false diagnostics in main.hy: {messages:?}");
+    }
+}
+
 fn open(client: &mut Client, uri: &str, text: &str) {
     client.notify(
         "textDocument/didOpen",
