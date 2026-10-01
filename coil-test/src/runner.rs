@@ -10,13 +10,26 @@ use coil_host::{
 };
 use common::{Byte, Instruction, ProgramDebug};
 use compiler::{HostGrants, OptLevel, Pipeline};
+use machine::Machine;
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
-use machine::Machine;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
+use crate::events::{self, Event};
 use crate::order::{Order, format_seed};
+
+/// How a run reports its progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Report {
+    /// Text on stderr.
+    #[default]
+    Human,
+    /// NDJSON events on stdout (`--json`).
+    Json,
+    /// Nothing (the `coil mutate --json` baseline).
+    Silent,
+}
 
 /// What to run and how to compile it.
 #[derive(Debug, Clone)]
@@ -37,6 +50,8 @@ pub struct TestOptions {
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
     pub extra_roots: Vec<PathBuf>,
+    /// Text, `--json` events, or nothing.
+    pub report: Report,
 }
 
 pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
@@ -190,21 +205,27 @@ impl Captured {
 /// Wait for a file's cases, print its report, and add it to `result`.
 /// Returns the file's failed count.
 fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> usize {
+    let report = run.options.report;
     let diagnostics = file.diagnostics.take();
-    if !diagnostics.is_empty() {
+    if !diagnostics.is_empty() && report == Report::Human {
         let _ = writer_for(run.config.format).write_all(&diagnostics);
     }
     let (mut passed, mut failed) = (0, 0);
-    if let Some((ok, message)) = file.verdict {
-        if let Some(m) = message {
+    let mut message = None;
+    if let Some((ok, m)) = file.verdict {
+        if report == Report::Human
+            && let Some(m) = &m
+        {
             eprintln!("{m}");
         }
+        message = m;
         if ok {
             passed += 1;
         } else {
             failed += 1;
         }
     }
+    let mut case_events = Vec::new();
     for case in file.cases {
         let TestReport {
             passed: report_ok,
@@ -232,25 +253,67 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             covered,
         });
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
-        if !ok || run.options.show_output {
-            print_captured(&output);
-        }
+        let show = !ok || run.options.show_output;
         if ok {
             passed += 1;
         } else {
             failed += 1;
-            match (timed_out, reason) {
-                (true, _) => eprintln!("> Test \"{}\" failed (timed out)", case.name),
-                // `assert(cond, "message")?` returns `Err("message")`.
-                (false, Some(reason)) => eprintln!("> Test \"{}\" failed: {reason}", case.name),
-                (false, None) => eprintln!("> Test \"{}\" failed", case.name),
+        }
+        match report {
+            Report::Human => {
+                if show {
+                    print_captured(&output);
+                }
+                if !ok {
+                    match (timed_out, &reason) {
+                        (true, _) => eprintln!("> Test \"{}\" failed (timed out)", case.name),
+                        // `assert(cond, "message")?` returns `Err("message")`.
+                        (false, Some(reason)) => {
+                            eprintln!("> Test \"{}\" failed: {reason}", case.name)
+                        }
+                        (false, None) => eprintln!("> Test \"{}\" failed", case.name),
+                    }
+                }
             }
+            Report::Json => {
+                let text = String::from_utf8_lossy(&output);
+                case_events.push(
+                    Event::object()
+                        .str("name", &case.name)
+                        .bool("ok", ok)
+                        .bool("timed_out", timed_out)
+                        .opt_str("reason", reason.as_deref())
+                        .opt_str("output", (show && !text.is_empty()).then_some(&*text))
+                        .finish(),
+                );
+            }
+            Report::Silent => {}
         }
     }
-    if failed == 0 {
-        eprintln!("ok   {}", file.display);
-    } else {
-        eprintln!("FAILED {}", file.display);
+    match report {
+        Report::Human => {
+            if failed == 0 {
+                eprintln!("ok   {}", file.display);
+            } else {
+                eprintln!("FAILED {}", file.display);
+            }
+        }
+        Report::Json => {
+            let diagnostics = String::from_utf8_lossy(&diagnostics);
+            Event::new("file")
+                .str("file", &file.display)
+                .bool("ok", failed == 0)
+                .num("passed", passed)
+                .num("failed", failed)
+                .opt_str("message", message.as_deref())
+                .opt_str(
+                    "diagnostics",
+                    (!diagnostics.is_empty()).then_some(&*diagnostics),
+                )
+                .raw("cases", &events::array(&case_events))
+                .emit();
+        }
+        Report::Silent => {}
     }
     result.passed += passed;
     result.failed += failed;
@@ -513,14 +576,22 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
     let mut files = collect_test_files(&options.root)?;
     options.order.order_files(&mut files);
     let jobs = options.jobs.max(1);
-    eprintln!(
-        "running {} file{} ({}, {} job{})",
-        files.len(),
-        if files.len() == 1 { "" } else { "s" },
-        options.order.describe(),
-        jobs,
-        if jobs == 1 { "" } else { "s" },
-    );
+    match options.report {
+        Report::Human => eprintln!(
+            "running {} file{} ({}, {} job{})",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+            options.order.describe(),
+            jobs,
+            if jobs == 1 { "" } else { "s" },
+        ),
+        Report::Json => Event::new("start")
+            .num("files", files.len())
+            .opt_str("seed", seed_of(options.order).as_deref())
+            .num("jobs", jobs)
+            .emit(),
+        Report::Silent => {}
+    }
 
     let reactor = Reactor::new(jobs);
     let coverage = options.coverage.as_ref().map(|c| {
@@ -630,6 +701,14 @@ fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
     result
 }
 
+/// The `--seed` value that reproduces this order (`None` when sorted).
+fn seed_of(order: Order) -> Option<String> {
+    match order {
+        Order::Shuffled(seed) => Some(format_seed(seed)),
+        Order::Sorted => None,
+    }
+}
+
 pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -652,6 +731,7 @@ pub fn suite_exit_code(failed: usize) -> i32 {
 /// A `test result: FAILED` summary always returns 1. Callers must `exit` that
 /// value — falling off `main` after a red summary would green CI.
 pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
+    let json = options.report == Report::Json;
     let SuiteResult {
         passed,
         failed,
@@ -660,6 +740,10 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
     } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
         Err(msg) => {
+            if json {
+                events::emit_error(&msg);
+                return 1;
+            }
             let format = config.format;
             let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
             pipeline.emit_spanless_error(ErrorCode::IoError, msg);
@@ -668,33 +752,82 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         }
     };
 
-    eprintln!();
-    eprintln!(
-        "test result: {}. {passed} passed; {failed} failed; {} total",
-        if failed == 0 { "ok" } else { "FAILED" },
-        passed + failed
-    );
-    if let (Some(cov), Some(out)) = (&coverage, &options.coverage) {
+    if !json {
         eprintln!();
-        eprint!("{}", cov.summary());
+        eprintln!(
+            "test result: {}. {passed} passed; {failed} failed; {} total",
+            if failed == 0 { "ok" } else { "FAILED" },
+            passed + failed
+        );
+    }
+    let mut coverage_event = "null".to_string();
+    if let (Some(cov), Some(out)) = (&coverage, &options.coverage) {
+        if !json {
+            eprintln!();
+            eprint!("{}", cov.summary());
+        }
+        let lcov = out.lcov_out.display().to_string();
+        let mut lcov_written = true;
         if let Err(e) = write_file(&out.lcov_out, &cov.lcov()) {
-            eprintln!("coverage: cannot write `{}`: {e}", out.lcov_out.display());
-        } else {
-            eprintln!("coverage: lcov written to {}", out.lcov_out.display());
+            lcov_written = false;
+            report_problem(json, &format!("coverage: cannot write `{lcov}`: {e}"));
+        } else if !json {
+            eprintln!("coverage: lcov written to {lcov}");
         }
-        if let (Some(path), Some(json)) = (&out.per_test_out, cov.per_test_json())
-            && let Err(e) = write_file(path, &json)
+        if let (Some(path), Some(per_test)) = (&out.per_test_out, cov.per_test_json())
+            && let Err(e) = write_file(path, &per_test)
         {
-            eprintln!("coverage: cannot write `{}`: {e}", path.display());
+            report_problem(
+                json,
+                &format!("coverage: cannot write `{}`: {e}", path.display()),
+            );
         }
+        let (mut hit, mut total) = (0usize, 0usize);
+        let files: Vec<String> = cov
+            .file_totals()
+            .into_iter()
+            .map(|(path, h, t)| {
+                hit += h;
+                total += t;
+                Event::object()
+                    .str("file", &path)
+                    .num("hit", h)
+                    .num("total", t)
+                    .finish()
+            })
+            .collect();
+        coverage_event = Event::object()
+            .num("hit", hit)
+            .num("total", total)
+            .opt_str("lcov", lcov_written.then_some(lcov.as_str()))
+            .raw("files", &events::array(&files))
+            .finish();
     }
 
-    if failed != 0
+    if json {
+        Event::new("summary")
+            .bool("ok", failed == 0)
+            .num("passed", passed)
+            .num("failed", failed)
+            .num("total", passed + failed)
+            .opt_str("seed", seed_of(options.order).as_deref())
+            .raw("coverage", &coverage_event)
+            .emit();
+    } else if failed != 0
         && let Order::Shuffled(seed) = options.order
     {
         eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
     }
     suite_exit_code(failed)
+}
+
+/// A non-fatal problem: an `error` event under `--json`, else stderr.
+fn report_problem(json: bool, message: &str) {
+    if json {
+        events::emit_error(message);
+    } else {
+        eprintln!("{message}");
+    }
 }
 
 #[cfg(test)]

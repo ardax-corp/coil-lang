@@ -10,7 +10,7 @@ use crate::mutate::MutateOptions;
 use crate::mutate::job::Isolation;
 use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
-use crate::runner::TestOptions;
+use crate::runner::{Report, TestOptions};
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
@@ -55,7 +55,7 @@ pub fn print_mutate_help() {
          \x20 --timeout-factor N Step budget per case = N x its baseline steps (default 10)\n\
          \x20 --wall-timeout S   Kill a mutant's worker process after S seconds (default 60)\n\
          \x20 --min-score P      Exit 1 when the mutation score is below P percent\n\
-         \x20 --json             Print a JSON report on stdout\n\
+         \x20 --json             NDJSON events on stdout (plan, mutant, summary, error)\n\
          \x20 --seed N, --no-shuffle, -j N, -O L, --root DIR, --allow-*, --log-*\n\
          \x20                    As for `coil test`\n\
          \x20 -h, --help         Show this help"
@@ -194,6 +194,8 @@ pub fn print_help() {
          \x20 --allow-ffi-exec   Allow FFI process-exec symbols (default deny)\n\
          \x20 --allow-dload STEM Allow dload of STEM (repeatable; libc still denied)\n\
          \x20 --ffi-search-path  Extra FFI lookup directory (repeatable; not a grant)\n\
+         \x20 --json             NDJSON events on stdout (start, file, summary, error)\n\
+         \x20                    instead of the text report\n\
          \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
          \x20 --log-lsp          Emit LSP Diagnostic NDJSON on stdout\n\
          \x20 -h, --help         Show this help"
@@ -208,6 +210,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     }
     let mut log_json = false;
     let mut log_lsp = false;
+    let mut json = false;
     let mut fail_fast = false;
     let mut seed: Option<u64> = None;
     let mut no_shuffle = false;
@@ -240,6 +243,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--log-json" => log_json = true,
             "--log-lsp" => log_lsp = true,
+            "--json" => json = true,
             "--fail-fast" => fail_fast = true,
             "--no-shuffle" => no_shuffle = true,
             "--show-output" => show_output = true,
@@ -319,6 +323,9 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
         i += 1;
     }
 
+    if json && (log_json || log_lsp) {
+        return Err("--json cannot be combined with --log-json or --log-lsp".to_string());
+    }
     let config = ReportConfig::from_cli_flags(log_json, log_lsp).map_err(|e| e.to_string())?;
     let env_seed = std::env::var(SEED_ENV).ok();
     let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
@@ -340,6 +347,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             opt_level,
             grants,
             extra_roots,
+            report: if json { Report::Json } else { Report::Human },
         }),
     ))
 }

@@ -15,7 +15,6 @@ pub mod job;
 pub mod sites;
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,10 +23,11 @@ use std::sync::{Arc, mpsc};
 use machine::reactor::Reactor;
 use reporting::{ErrorCode, ReportConfig};
 
-use crate::coverage::{CoverageOptions, json_str};
+use crate::coverage::CoverageOptions;
+use crate::events::{self, Event};
 use crate::runner::{
-    CaseOutcome, Compiled, SuiteResult, TestOptions, canonical, compile_test_file, run_test_suite,
-    writer_for,
+    CaseOutcome, Compiled, Report, SuiteResult, TestOptions, canonical, compile_test_file,
+    run_test_suite, writer_for,
 };
 use job::{Isolation, MutantJob, Verdict, run_in_child, run_job};
 use sites::{Operator, Site};
@@ -126,31 +126,42 @@ impl MutateReport {
         )
     }
 
-    pub fn json(&self) -> String {
-        let mut out = String::from("{");
-        let score = self
-            .score()
-            .map_or("null".to_string(), |s| format!("{s:.2}"));
-        let _ = write!(out, "\"score\":{score},\"mutants\":[");
-        for (i, m) in self.mutants.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(
-                out,
-                "{{\"file\":{},\"line\":{},\"operator\":\"{}\",\"from\":{},\"to\":{},\"status\":\"{}\",\"killed_by\":{}}}",
-                json_str(&m.file),
-                m.line,
-                m.operator.name(),
-                json_str(&m.original),
-                json_str(&m.replacement),
-                m.status.name().replace(' ', "_"),
-                m.killed_by.as_deref().map_or("null".to_string(), json_str),
-            );
-        }
-        out.push_str("]}\n");
-        out
+    /// The `--json` summary event.
+    pub fn summary_event(&self, min_score: Option<f64>) -> Event {
+        let score = self.score();
+        Event::new("summary")
+            .bool("ok", !below(score, min_score))
+            .raw(
+                "score",
+                &score.map_or("null".to_string(), |s| format!("{s:.2}")),
+            )
+            .raw(
+                "min_score",
+                &min_score.map_or("null".to_string(), |s| s.to_string()),
+            )
+            .num("killed", self.count(Status::Killed))
+            .num("timed_out", self.count(Status::TimedOut))
+            .num("survived", self.count(Status::Survived))
+            .num("unviable", self.count(Status::Unviable))
+            .num("no_coverage", self.count(Status::NoCoverage))
     }
+}
+
+/// The `--json` event for one mutant.
+pub fn mutant_event(m: &MutantResult) -> Event {
+    Event::new("mutant")
+        .str("file", &m.file)
+        .num("line", m.line)
+        .str("operator", m.operator.name())
+        .str("from", &m.original)
+        .str("to", &m.replacement)
+        .str("status", &m.status.name().replace(' ', "_"))
+        .opt_str("killed_by", m.killed_by.as_deref())
+}
+
+/// True when a score exists and is under `--min-score`.
+fn below(score: Option<f64>, min: Option<f64>) -> bool {
+    matches!((score, min), (Some(s), Some(m)) if s < m)
 }
 
 /// A source file to mutate.
@@ -176,12 +187,19 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
     let mut baseline_options = options.test.clone();
     baseline_options.fail_fast = false;
     baseline_options.show_output = false;
+    if options.json {
+        baseline_options.report = Report::Silent;
+    }
     baseline_options.coverage = Some(CoverageOptions {
         lcov_out: PathBuf::new(),
         per_test_out: None,
         project_root: cwd.clone(),
     });
-    eprintln!("mutate: baseline run");
+    if options.json {
+        Event::new("baseline").emit();
+    } else {
+        eprintln!("mutate: baseline run");
+    }
     let SuiteResult {
         failed,
         coverage,
@@ -250,16 +268,25 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
         });
     }
     let runnable = planned.iter().filter(|p| !p.covering.is_empty()).count();
-    eprintln!(
-        "\nmutate: {} mutant{} in {} file{} ({} covered, {} job{})",
-        planned.len(),
-        if planned.len() == 1 { "" } else { "s" },
-        targets.len(),
-        if targets.len() == 1 { "" } else { "s" },
-        runnable,
-        options.test.jobs,
-        if options.test.jobs == 1 { "" } else { "s" },
-    );
+    if options.json {
+        Event::new("plan")
+            .num("mutants", planned.len())
+            .num("files", targets.len())
+            .num("covered", runnable)
+            .num("jobs", options.test.jobs)
+            .emit();
+    } else {
+        eprintln!(
+            "\nmutate: {} mutant{} in {} file{} ({} covered, {} job{})",
+            planned.len(),
+            if planned.len() == 1 { "" } else { "s" },
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" },
+            runnable,
+            options.test.jobs,
+            if options.test.jobs == 1 { "" } else { "s" },
+        );
+    }
 
     let mut run_options = options.test.clone();
     run_options.coverage = None;
@@ -297,6 +324,7 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
         cases: &cases,
         timeout_factor: options.timeout_factor.max(1),
         isolation: &options.isolation,
+        json: options.json,
     };
     let mutants = run_all(&ctx, &planned, options.test.jobs.max(1));
     reactor.shutdown();
@@ -312,6 +340,8 @@ struct MutantCtx<'a> {
     cases: &'a [CaseOutcome],
     timeout_factor: u64,
     isolation: &'a Isolation,
+    /// Mutant events instead of text lines.
+    json: bool,
 }
 
 /// Run `planned` on `jobs` threads; print and return results in order.
@@ -343,7 +373,11 @@ fn run_all(ctx: &MutantCtx<'_>, planned: &[Planned], jobs: usize) -> Vec<MutantR
         for (i, result) in rx.iter() {
             ready.insert(i, result);
             while let Some(result) = ready.remove(&results.len()) {
-                print_result(&result);
+                if ctx.json {
+                    mutant_event(&result).emit();
+                } else {
+                    print_result(&result);
+                }
                 results.push(result);
             }
         }
@@ -453,22 +487,31 @@ pub fn cmd_mutate(config: ReportConfig, options: MutateOptions) {
     let report = match run_mutate(config.clone(), &options) {
         Ok(report) => report,
         Err(msg) => {
+            let msg = format!("coil mutate: {msg}");
+            if options.json {
+                events::emit_error(&msg);
+                exit(1);
+            }
             let format = config.format;
             let mut pipeline = compiler::Pipeline::with_reporter(config, writer_for(format));
-            pipeline.emit_spanless_error(ErrorCode::IoError, format!("coil mutate: {msg}"));
+            pipeline.emit_spanless_error(ErrorCode::IoError, msg);
             let _ = pipeline.finish_reporting();
             exit(1);
         }
     };
-    eprintln!();
-    eprintln!("{}", report.summary());
+    let score = report.score();
     if options.json {
-        print!("{}", report.json());
+        report.summary_event(options.min_score).emit();
+    } else {
+        eprintln!();
+        eprintln!("{}", report.summary());
+        if let (Some(min), Some(score)) = (options.min_score, score)
+            && score < min
+        {
+            eprintln!("mutation score {score:.1}% is below --min-score {min}");
+        }
     }
-    if let (Some(min), Some(score)) = (options.min_score, report.score())
-        && score < min
-    {
-        eprintln!("mutation score {score:.1}% is below --min-score {min}");
+    if below(score, options.min_score) {
         exit(1);
     }
 }

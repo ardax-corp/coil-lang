@@ -237,6 +237,17 @@ impl Coverage {
         files
     }
 
+    /// `(display path, lines hit, lines total)` per covered file, sorted.
+    pub fn file_totals(&self) -> Vec<(String, usize, usize)> {
+        self.sorted_files()
+            .into_iter()
+            .map(|f| {
+                let hit = f.lines.values().filter(|n| **n > 0).count();
+                (f.path.clone(), hit, f.lines.len())
+            })
+            .collect()
+    }
+
     /// lcov tracefile text (`SF` / `DA` / `LF` / `LH` per file).
     pub fn lcov(&self) -> String {
         let mut out = String::from("TN:\n");
