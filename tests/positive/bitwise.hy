@@ -29,3 +29,31 @@ test("compound bitwise") {
     x >>= 2;
     assert(x == 7)?;
 }
+
+// The literal cases above fold at compile time. `opaque` hides a value from
+// the optimizer (it round-trips through a `Vec`), so the cases below run the
+// VM's bitwise and shift instructions.
+fn opaque(int x) -> int {
+    let v: Vec<int> = Vec::new();
+    v.push(x);
+    return v[0];
+}
+
+test("runtime and or xor") {
+    assert((opaque(7) & opaque(3)) == 3)?;
+    assert((opaque(4) | opaque(1)) == 5)?;
+    assert((opaque(7) ^ opaque(3)) == 4)?;
+    assert((opaque(-7) ^ opaque(3)) == -6)?;
+}
+
+test("runtime not") {
+    assert(~opaque(0) == -1)?;
+    assert(~opaque(5) == -6)?;
+}
+
+test("runtime shifts") {
+    assert(opaque(1) << opaque(3) == 8)?;
+    assert(opaque(1) << opaque(62) == 4611686018427387904)?;
+    assert(opaque(16) >> opaque(2) == 4)?;
+    assert(opaque(-16) >> opaque(2) == -4)?; // arithmetic shift
+}

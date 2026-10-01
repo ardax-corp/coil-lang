@@ -35,7 +35,7 @@ const CORPUS: &[&str] = &[
 /// COI-388 X3 fuses `MakeEnum; RETURN` → `MakeEnumReturn` (shorter corpus).
 /// IlFunc spans for trait instance methods retarget `user_trait_dispatch.hy`.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "1dc5a373b81a6de1_572"),
+    ("arithmetic.hy", "e798157d65e9f1a3_1029"),
     ("functions.hy", "6e24df8cd5108a4a_378"),
     ("loops.hy", "a5b24132677ff601_257"),
     ("option_pair.hy", "b25194e5292a4f0c_377"),
