@@ -3397,6 +3397,72 @@
         assert_eq!(s, "keep-me");
     }
 
+    /// Recorded lines (#580): locations resolve without reading the source,
+    /// even when the file is gone or was edited after compiling.
+    #[test]
+    fn recorded_debug_lines_need_no_source_file() {
+        use common::{DebugLine, DebugLoc, ProgramDebug};
+
+        let dir = std::env::temp_dir().join(format!("coil_debug_lines_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let edited = dir.join("edited.hy");
+        // Byte 5 is inside `·`: reading this file would give a wrong line.
+        std::fs::write(&edited, "// ··\n").unwrap();
+        let mut vm = Machine::<8>::default();
+        vm.set_program_debug(ProgramDebug {
+            source_files: vec![
+                dir.join("missing.hy").display().to_string(),
+                edited.display().to_string(),
+            ],
+            debug_locs: vec![
+                DebugLoc {
+                    file: 0,
+                    start_byte: 40,
+                    end_byte: 45,
+                },
+                DebugLoc {
+                    file: 1,
+                    start_byte: 5,
+                    end_byte: 6,
+                },
+            ],
+            fn_symbols: Vec::new(),
+            debug_lines: vec![DebugLine { line: 7, column: 2 }, DebugLine { line: 9, column: 1 }],
+        });
+        assert_eq!(vm.debug_pc_line(0), Some((0, 7)));
+        assert_eq!(vm.debug_pc_line(1), Some((1, 9)));
+        let (path, line, column) = vm.resolve_pc_location(0).expect("location");
+        assert!(path.ends_with("missing.hy"), "{path}");
+        assert_eq!((line, column), (7, 2));
+        assert_eq!(vm.resolve_pc_location(1).map(|(_, l, c)| (l, c)), Some((9, 1)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Older archives (no recorded lines) still resolve against the source.
+    #[test]
+    fn debug_lines_fall_back_to_source_files() {
+        use common::{DebugLoc, ProgramDebug};
+
+        let dir = std::env::temp_dir().join(format!("coil_debug_fallback_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("main.hy");
+        std::fs::write(&file, "fn main() {\n    panic \"x\";\n}\n").unwrap();
+        let mut vm = Machine::<8>::default();
+        vm.set_program_debug(ProgramDebug {
+            source_files: vec![file.display().to_string()],
+            debug_locs: vec![DebugLoc {
+                file: 0,
+                start_byte: 16,
+                end_byte: 21,
+            }],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        });
+        assert_eq!(vm.debug_pc_line(0), Some((0, 2)));
+        assert_eq!(vm.resolve_pc_location(0).map(|(_, l, c)| (l, c)), Some((2, 4)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Panic backtraces resolve `fn_symbols` by entry PC (binary search).
     #[test]
     fn runtime_panic_backtrace_includes_fn_symbols() {
@@ -3418,6 +3484,7 @@
                     entry_pc: 9,
                 },
             ],
+            debug_lines: vec![],
         });
         vm.run(&[
             make_coro(0, 9),

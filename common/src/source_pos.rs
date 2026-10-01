@@ -33,9 +33,49 @@ pub fn byte_to_position(text: &str, byte: usize) -> SourcePosition {
     }
 }
 
+/// Line starts of one text, for many [`byte_to_position`] lookups without
+/// rescanning from the top each time.
+pub struct LineIndex<'t> {
+    text: &'t str,
+    /// Byte offset where each line starts (`line_starts[0] == 0`).
+    line_starts: Vec<usize>,
+}
+
+impl<'t> LineIndex<'t> {
+    pub fn new(text: &'t str) -> Self {
+        let mut line_starts = vec![0];
+        line_starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        Self { text, line_starts }
+    }
+
+    /// Same result as [`byte_to_position`].
+    pub fn position(&self, byte: usize) -> SourcePosition {
+        let mut byte = byte.min(self.text.len());
+        while !self.text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        // Last line starting at or before `byte`.
+        let line = self.line_starts.partition_point(|&start| start <= byte) - 1;
+        let column = self.text[self.line_starts[line]..byte].chars().count() as u32;
+        SourcePosition {
+            line: line as u32 + 1,
+            column,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_index_matches_byte_to_position() {
+        let text = "fn main() {\n    let s = \"·✓\";\n\n}\nend";
+        let index = LineIndex::new(text);
+        for byte in 0..=text.len() + 2 {
+            assert_eq!(index.position(byte), byte_to_position(text, byte), "byte {byte}");
+        }
+    }
 
     #[test]
     fn byte_to_position_rounds_down_inside_a_char() {

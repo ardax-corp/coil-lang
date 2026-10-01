@@ -1366,20 +1366,22 @@ impl Pipeline {
         // Wrap the bytecode in the versioned `ArchivedProgram` envelope
         // so that older `.hyc` files can be rejected at load time via
         // `version` mismatch (see `Pipeline::run`).
+        let debug = self.program_debug();
         let program = ArchivedProgram {
             version: ARCHIVE_VERSION,
             static_slot_count: self.compiler_lazy().static_slot_count(),
             constants: self.compiler_lazy().constants().to_vec(),
             strings: self.compiler_lazy().strings().to_vec(),
-            source_files: self.compiler_lazy().source_files_list(),
-            debug_locs: self.compiler_lazy().debug_locs().to_vec(),
-            fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+            source_files: debug.source_files,
+            debug_locs: debug.debug_locs,
+            fn_symbols: debug.fn_symbols,
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: self.stack_maps().to_vec(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
+            debug_lines: debug.debug_lines,
             bytecode: self.bytecode,
         };
 
@@ -1774,8 +1776,18 @@ impl Pipeline {
             source_files: self.compiler_lazy().source_files_list(),
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+            debug_lines: Vec::new(),
         };
         self.remap_generated_debug_locs(&mut debug);
+        // Lines are resolved now, while the sources exist, so archives and
+        // packaged binaries never read them back (#580).
+        debug.resolve_lines(|file| {
+            let path = Path::new(file);
+            self.overlays
+                .get(path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(path).ok())
+        });
         debug
     }
 
@@ -1865,6 +1877,7 @@ impl Pipeline {
                 source_files: program.source_files,
                 debug_locs: program.debug_locs,
                 fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+                debug_lines: program.debug_lines,
             },
         ))
     }
@@ -2096,6 +2109,7 @@ fn main() {
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
+            debug_lines: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -2140,6 +2154,7 @@ fn main() {
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
+            debug_lines: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");

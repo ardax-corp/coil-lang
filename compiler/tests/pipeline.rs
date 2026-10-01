@@ -8058,6 +8058,7 @@ fn main() {
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
+        debug_lines: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -8087,6 +8088,7 @@ fn main() {
         precise_frames: loaded.precise_frames.clone(),
         class_word_kinds: loaded.class_word_kinds.clone(),
         static_word_kinds: loaded.static_word_kinds.clone(),
+        debug_lines: Vec::new(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
@@ -10895,6 +10897,7 @@ fn main() {
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
+        debug_lines: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

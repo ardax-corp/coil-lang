@@ -85,6 +85,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
+        debug_lines: debug.debug_lines,
     };
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
@@ -586,6 +587,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -613,6 +615,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
@@ -652,6 +655,7 @@ mod tests {
             source_files: vec![a.to_string_lossy().into_owned()],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         // Running b.hy against an archive built from a.hy must rebuild.
         assert!(archive_is_stale(
@@ -688,6 +692,7 @@ mod tests {
             ],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         assert!(archive_is_stale(
             entry.to_str().unwrap(),
@@ -709,6 +714,7 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         // Entry not newer than archive → fresh via the empty-list branch.
         assert!(!archive_is_stale(
@@ -742,6 +748,7 @@ mod tests {
             ],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         assert!(
             archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
@@ -770,6 +777,7 @@ mod tests {
             ],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let a = arch.to_str().unwrap();
         assert!(!recorded_sources_newer(a, &debug), "fresh archive");
