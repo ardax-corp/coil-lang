@@ -121,6 +121,12 @@ impl Subst {
         self.data.index.get(&v).map(|&pos| &self.data.mappings[pos].1)
     }
 
+    /// True when `other` is this very substitution (a clone that was never
+    /// written to): `unify_with` hands back its input when it binds nothing.
+    pub fn is_same(&self, other: &Subst) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+
     /// Number of bindings.
     pub fn len(&self) -> usize {
         self.data.mappings.len()
