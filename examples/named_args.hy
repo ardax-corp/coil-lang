@@ -1,3 +1,7 @@
+// Named arguments, alone or after positional ones.
+//
+// Output: Ada36Grace40
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

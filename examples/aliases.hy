@@ -1,14 +1,9 @@
-// examples/aliases.hy — Phase 28 type aliases.
+// examples/aliases.hy — type aliases.
 //
-// `type X = T;` declares an alias that is substituted at
-// typecheck time. Aliases are zero-cost (no runtime effect)
-// and purely source-level: they make types more readable in
-// bigger programs.
+// `type X = T;` declares an alias for an existing type. Aliases only exist
+// at compile time (no runtime cost); they make long types readable.
 //
-// Runtime output:
-//   3
-//   4
-//   7
+// Output: 347
 
 use io::stdout;
 use io::sync::write_all;

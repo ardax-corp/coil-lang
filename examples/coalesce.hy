@@ -1,4 +1,7 @@
 // ?? coalesce on Option and Result (Result Err is swallowed).
+//
+// Output: bar,hi,7,9
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

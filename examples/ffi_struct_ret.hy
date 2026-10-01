@@ -1,6 +1,6 @@
 // examples/ffi_struct_ret.hy — FFI struct return via make_point.
 //
-// Output: 34  (Point { x: 3, y: 4 } fields)
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::Error;
 use ffi::declare;

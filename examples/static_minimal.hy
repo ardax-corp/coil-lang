@@ -1,3 +1,7 @@
+// Module statics (`static let`) and class statics.
+//
+// Output: 11
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

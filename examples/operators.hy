@@ -1,3 +1,7 @@
+// Compound assignment, `++` / `--`, and `**`.
+//
+// Output: 801125428falsetrue3
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

@@ -1,13 +1,16 @@
-// examples/static_ctor.hy — `static fn` constructors alongside positional `new`.
+// examples/static_ctor.hy — `static fn` constructors alongside positional
+// `new`.
 //
 // Positional `new Class(...)` is unchanged. A `static fn new(...)` (or any
 // other static method) is called as `Class::new(...)` and builds the
 // instance by calling `new Class(...)` inside the body.
 //
-// Output: 42,1,1
+// Prints, in order:
 //   42 — Point::new(40, 2).sum()
 //   1  — Counter::fresh().id (count was bumped to 1)
 //   1  — Counter::count after one fresh()
+//
+// Output: 42,1,1
 
 use io::stdout;
 use io::sync::write_all;

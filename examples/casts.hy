@@ -1,3 +1,8 @@
+// Primitive casts with `as`: int to byte wraps, float to int truncates, int to
+// bool.
+//
+// Output: 13true
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

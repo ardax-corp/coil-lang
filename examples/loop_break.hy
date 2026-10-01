@@ -1,3 +1,7 @@
+// `break` and `continue` in a `while` loop.
+//
+// Output: 18
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

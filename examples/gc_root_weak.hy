@@ -1,3 +1,7 @@
+// GC roots and weak references: `root`, `get`, `weak`, `upgrade`, `unroot`.
+//
+// Output: pinned\npinned
+
 use gc::{get, root, unroot, upgrade, weak};
 use io::stdout;
 use io::sync::write_all;

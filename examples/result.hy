@@ -1,6 +1,8 @@
-// Built-in Result + Option — nested match with two Ok arms
-// (inner Some vs None) plus Err. Exercises Phase 18A inner-pattern
-// dispatch. Output: 420-1
+// Built-in `Result` and `Option`: a nested match with two `Ok` arms (inner
+// `Some` vs `None`) and an `Err` arm.
+//
+// Output: 420-1
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

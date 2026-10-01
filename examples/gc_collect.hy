@@ -1,3 +1,7 @@
+// Weak references: `upgrade` fails once the value is unrooted and collected.
+//
+// Output: none
+
 use gc::{collect, get, root, unroot, upgrade, weak};
 use io::stdout;
 use io::sync::write_all;

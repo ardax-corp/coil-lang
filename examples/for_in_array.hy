@@ -1,6 +1,7 @@
-// Expected output: 123
 //
 // `for x in` over an array — IntoIterator synthesises Item = element type.
+//
+// Output: 123
 
 use io::stdout;
 use io::sync::write_all;

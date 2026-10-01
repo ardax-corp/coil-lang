@@ -1,9 +1,8 @@
-// Expected output: truetruefalse
+// Trait superclasses: `Ordered<T: Equal>` requires `Equal`. A generic bound
+// only by `T: Ordered` can still call `eq_val`, through the implied `Equal`
+// bound.
 //
-// Phase 5: trait superclass / implied bounds.
-// `Ordered<T: Equal>` stores Equal as a superclass. Dictionary layout is
-// flattened (Ordered methods, then Equal methods). A generic with only
-// `T: Ordered` can call `eq_val` via the implied Equal bound.
+// Output: truetruefalse
 
 use io::stdout;
 use io::sync::write_all;

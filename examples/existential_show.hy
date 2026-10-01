@@ -1,5 +1,6 @@
 // Bare-class existential: `Show` as a value type.
-// Expected output: 42
+//
+// Output: 42
 
 use io::stdout;
 use io::sync::write_all;

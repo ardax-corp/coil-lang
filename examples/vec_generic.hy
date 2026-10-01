@@ -1,7 +1,8 @@
 // Numeric tower — Tier B/C: element-generic + shape-generic Num.
 // `scale` keeps a fixed `(T,T)` shape; `add` is fully shape-generic and
 // monomorphizes to zip when called with ground tuples.
-// Expected output: 24,55
+//
+// Output: 24,55
 
 use io::stdout;
 use io::sync::write_all;

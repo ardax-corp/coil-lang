@@ -1,3 +1,7 @@
+// Functions as values, and partial application (`add(1)`).
+//
+// Output: 423
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

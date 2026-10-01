@@ -1,3 +1,7 @@
+// Threads: send a value over a channel.
+//
+// Output: hello
+
 use thread::{Sender, channel, join, recv, send, spawn};
 use io::stdout;
 use io::sync::write_all;

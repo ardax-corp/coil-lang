@@ -1,5 +1,6 @@
 // Named helpers — `dot` and `cross` on homogeneous vectors.
-// Expected output: 32,001
+//
+// Output: 32,001
 
 use io::stdout;
 use io::sync::write_all;

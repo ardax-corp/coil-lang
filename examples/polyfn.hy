@@ -1,4 +1,7 @@
-// Expected output: 424.0424242
+// Polymorphic function values: `forall T. T -> T` parameters, and a function
+// returned with its trait evidence captured.
+//
+// Output: 424.0424242
 
 use io::stdout;
 use io::sync::write_all;

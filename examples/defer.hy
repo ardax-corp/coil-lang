@@ -1,5 +1,8 @@
 // `defer` runs on function exit (`return` / `return;`), LIFO.
 // Outer locals must be listed in `use (…)` — same capture rule as lambdas.
+//
+// Output: enterleave,021,okd7,d99,55
+
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,5 +1,8 @@
 // Batch two cooperative awaits without wrapping each in block_on.
 // Each await_* inside an async fn yields + registers; wait_ready polls both.
+//
+// Output: ok
+
 use io::stdout;
 use io::open;
 use io::close;

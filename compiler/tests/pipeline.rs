@@ -443,6 +443,73 @@ fn run_example_multifile(path: &str) -> String {
     run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
 }
 
+/// Undo the escapes of an example's `// Output:` line (`\n`, `\t`, `\e`, `\\`).
+fn unescape_documented_output(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('e') => out.push('\u{1b}'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Every `examples/*.hy` ends its header with `// Output: <exact stdout>`
+/// (escaped) or `// Output: (not checked: <why>)`. Run each one and compare,
+/// so an example cannot break or drift from what it documents (#614).
+#[test]
+fn examples_print_their_documented_output() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let mut names: Vec<String> = std::fs::read_dir(workspace_root.join("examples"))
+        .expect("read examples/")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".hy"))
+        .collect();
+    names.sort();
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for name in &names {
+        let path = format!("examples/{name}");
+        let src = std::fs::read_to_string(workspace_root.join(&path)).expect("read example");
+        let documented = src
+            .lines()
+            .take_while(|l| l.starts_with("//"))
+            .find_map(|l| l.strip_prefix("// Output:"));
+        let Some(documented) = documented else {
+            failures.push(format!("{path}: no `// Output:` line in its header"));
+            continue;
+        };
+        let documented = documented.strip_prefix(' ').unwrap_or(documented);
+        if documented.starts_with("(not checked") {
+            continue;
+        }
+        let expected = unescape_documented_output(documented);
+        let got = run_example(&path);
+        checked += 1;
+        if got != expected {
+            failures.push(format!("{path}: documented {expected:?}, printed {got:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "examples disagree with their `// Output:` headers:\n{}",
+        failures.join("\n")
+    );
+    assert!(checked > 100, "only {checked} examples were checked");
+}
+
 /// Soft-skip an FFI-dependent test outside CI. In CI (`CI` env set), skip is a
 /// hard failure so missing `cc` / libffi never silently greens the suite.
 fn ffi_soft_skip(reason: &str) {
@@ -532,18 +599,6 @@ fn example_panic_loc_archive_has_source_files() {
 }
 
 #[test]
-fn example_option_prints_42() {
-    let output = run_example("examples/option.hy");
-    assert_eq!(output, "42");
-}
-
-#[test]
-fn example_scalar_enum_prints_ok_200() {
-    let output = run_example("examples/scalar_enum.hy");
-    assert_eq!(output, "ok 200 200\n");
-}
-
-#[test]
 fn scalar_enum_construct_emits_no_make_enum() {
     let src = r#"
 enum HttpCode { Ok = 200, NotFound = 404 }
@@ -568,30 +623,6 @@ fn main() {
             )),
         "scalar-backed HttpCode::Ok must not allocate ObjEnum (MakeEnum)"
     );
-}
-
-#[test]
-fn example_generics_uses_builtin_dictionary_abi() {
-    let output = run_example("examples/generics.hy");
-    assert_eq!(output, "7424.0427");
-}
-
-#[test]
-fn example_result_prints_42_and_neg1() {
-    let output = run_example("examples/result.hy");
-    assert_eq!(output, "420-1");
-}
-
-#[test]
-fn example_raise_try_prints_10_neg() {
-    let output = run_example("examples/raise_try.hy");
-    assert_eq!(output, "10,neg");
-}
-
-#[test]
-fn example_assert_prints_ok_assertion_failed_custom() {
-    let output = run_example("examples/assert.hy");
-    assert_eq!(output, "ok,assertion failed,custom");
 }
 
 #[test]
@@ -646,73 +677,6 @@ fn main() {
     );
 }
 
-#[test]
-fn example_coalesce_prints_bar_hi_7_9() {
-    let output = run_example("examples/coalesce.hy");
-    assert_eq!(output, "bar,hi,7,9");
-}
-
-#[test]
-fn example_optional_chain_prints_42_0() {
-    let output = run_example("examples/optional_chain.hy");
-    assert_eq!(output, "42,0");
-}
-
-#[test]
-fn example_tree_prints_6() {
-    let output = run_example("examples/tree.hy");
-    assert_eq!(output, "6");
-}
-
-#[test]
-fn example_fib_still_works() {
-    let output = run_example("examples/fib.hy");
-    assert_eq!(output, "2178309");
-}
-
-#[test]
-fn example_record_prints_169_5_12() {
-    let output = run_example("examples/record.hy");
-    assert_eq!(output, "169512");
-}
-
-#[test]
-fn example_dict_prints_42_100_42() {
-    let output = run_example("examples/dict.hy");
-    assert_eq!(output, "4210042");
-}
-
-#[test]
-fn example_array_grow_prints_len_first_and_last() {
-    let output = run_example("examples/array_grow.hy");
-    assert_eq!(output, "414");
-}
-
-#[test]
-fn example_static_singleton_prints_121() {
-    let output = run_example("examples/static_singleton.hy");
-    assert_eq!(output, "121");
-}
-
-/// `static fn new(...)` / `Class::fresh()` alongside positional `new Class(...)`.
-#[test]
-fn example_static_ctor_prints_42_1_1() {
-    let output = run_example("examples/static_ctor.hy");
-    assert_eq!(output, "42,1,1");
-}
-
-#[test]
-fn example_static_minimal_prints_11() {
-    let output = run_example("examples/static_minimal.hy");
-    assert_eq!(output, "11");
-}
-
-#[test]
-fn example_readonly_seal_prints_322() {
-    let output = run_example("examples/readonly_seal.hy");
-    assert_eq!(output, "322");
-}
-
 /// `static const` is readable via LoadStatic; only reassignment is rejected.
 #[test]
 fn static_const_reads_via_load_static() {
@@ -753,45 +717,9 @@ fn main() {
 }
 
 #[test]
-fn example_classes_prints_7458() {
-    let output = run_example("examples/classes.hy");
-    assert_eq!(output, "7458");
-}
-
-#[test]
-fn example_generic_class_prints_42() {
-    let output = run_example("examples/generic_class.hy");
-    assert_eq!(output, "42");
-}
-
-#[test]
-fn example_aliases_prints_3_4_7() {
-    let output = run_example("examples/aliases.hy");
-    assert_eq!(output, "347");
-}
-
-#[test]
-fn example_nested_aggregates_prints_rows_and_total() {
-    let output = run_example("examples/nested_aggregates.hy");
-    assert_eq!(output, "alice:30bob:25total:55");
-}
-
-#[test]
 fn example_modules_brace_prints_12_42() {
     let output = run_example_multifile("examples/modules_brace.hy");
     assert_eq!(output, "1242");
-}
-
-#[test]
-fn example_match_block_self_prints_5() {
-    let output = run_example("examples/match_block_self.hy");
-    assert_eq!(output, "5");
-}
-
-#[test]
-fn example_defer_prints_enterleave_lifo_and_early_return() {
-    let output = run_example("examples/defer.hy");
-    assert_eq!(output, "enterleave,021,okd7,d99,55");
 }
 
 /// Regression: inherent `fn send` must not shadow `thread::send`, so
@@ -939,91 +867,6 @@ fn main() {
     assert_eq!(output, "d1,d2");
 }
 
-#[test]
-fn example_generic_alias_prints_7() {
-    let output = run_example("examples/generic_alias.hy");
-    assert_eq!(output, "7");
-}
-
-#[test]
-fn example_generic_enum_prints_7() {
-    let output = run_example("examples/generic_enum.hy");
-    assert_eq!(output, "7");
-}
-
-#[test]
-fn example_generics_prints_add_results_for_int_and_float() {
-    let output = run_example("examples/generics.hy");
-    assert_eq!(output, "7424.0427");
-}
-
-#[test]
-fn example_typeclass_dict_forwards_dictionary_and_prints_42_twice() {
-    let output = run_example("examples/typeclass_dict.hy");
-    assert_eq!(output, "4242");
-}
-
-#[test]
-fn example_typeclass_default_calls_sibling_and_prints_42() {
-    let output = run_example("examples/typeclass_default.hy");
-    assert_eq!(output, "42");
-}
-
-#[test]
-fn example_polyfn_supports_multi_instantiation_constraints_and_rank_n() {
-    let output = run_example("examples/polyfn.hy");
-    assert_eq!(output, "424.0424242");
-}
-
-/// Phase 4: `%v` displays through Show (builtin + user instance + format).
-#[test]
-fn example_generic_print_shows_primitives_and_user_type() {
-    let output = run_example("examples/generic_print.hy");
-    assert_eq!(output, "42hi1.5true(3,4)99");
-}
-
-/// Advanced generics Phase 4: a bare unary trait name is an existential type.
-#[test]
-fn example_existential_show_prints_42() {
-    let output = run_example("examples/existential_show.hy");
-    assert_eq!(output, "42");
-}
-
-/// Phase 8: tuples and anonymous records have structural Show for `%v`.
-#[test]
-fn example_show_tuple_prints_structural_tuple_and_record() {
-    let output = run_example("examples/show_tuple.hy");
-    assert_eq!(output, "(1, 2){ a: 3, b: 4 }");
-}
-
-/// Constructor-kind trait `Container<Option>` + `get<F: Container, A>(F<A>)`.
-#[test]
-fn example_hkt_container_prints_42() {
-    let output = run_example("examples/hkt_container.hy");
-    assert_eq!(output, "42");
-}
-
-/// Phase 1 advanced generics: binary HKT `Bifunctor<Result>`.
-#[test]
-fn example_hkt_bifunctor_prints_42() {
-    let output = run_example("examples/hkt_bifunctor.hy");
-    assert_eq!(output, "42");
-}
-
-/// Phase 3: multi-param trait `Convert<A, B>` + `where` clause.
-#[test]
-fn example_multiparam_prints_42() {
-    let output = run_example("examples/multiparam.hy");
-    assert_eq!(output, "42");
-}
-
-/// Prelude `Into`: `let f: Fahrenheit = c.into();` with two local classes.
-#[test]
-fn example_into_prints_32() {
-    let output = run_example("examples/into.hy");
-    assert_eq!(output, "32");
-}
-
 /// Inline receiver `new Celsius(0).into()` must typecheck and run (Bugbot:
 /// codegen used to skip boxing when `receiver_type` only handled Identifier/Access).
 #[test]
@@ -1076,34 +919,6 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "32");
-}
-
-/// Phase 5: superclass / implied bounds (`Ordered<T: Equal>` → `eq_val` under `T: Ordered`).
-#[test]
-fn example_superclass_ord_prints_truetruefalse() {
-    let output = run_example("examples/superclass_ord.hy");
-    assert_eq!(output, "truetruefalse");
-}
-
-/// Advanced generics Phase 5: `c: * -> Constraint, T: c` with superclass method use.
-#[test]
-fn example_constraint_kind_prints_42() {
-    let output = run_example("examples/constraint_kind.hy");
-    assert_eq!(output, "42");
-}
-
-/// Phase 6: associated types — `Collect::Elem` pinned from ground instance.
-#[test]
-fn example_assoc_type_prints_42() {
-    let output = run_example("examples/assoc_type.hy");
-    assert_eq!(output, "42");
-}
-
-/// Phase 3 advanced generics: generic associated type `Pointer::Ref<A>`.
-#[test]
-fn example_gat_pointer_prints_42() {
-    let output = run_example("examples/gat_pointer.hy");
-    assert_eq!(output, "42");
 }
 
 /// Shuffled record pattern `{ y: _, x: a }` must bind declaration-order `x`.
@@ -1340,18 +1155,6 @@ fn add<T: Num>(T a, T b) -> T {
 }
 
 #[test]
-fn example_const_prints_42hi() {
-    let output = run_example("examples/const.hy");
-    assert_eq!(output, "42hi");
-}
-
-#[test]
-fn string_fmt_example_prints_concatenated_and_formatted_strings() {
-    let output = run_example("examples/string_fmt.hy");
-    assert_eq!(output, "hello world42-x");
-}
-
-#[test]
 fn string_plus_equal_updates_binding() {
     let output = run_example_src(
         r#"use io::{stdout, write};
@@ -1363,24 +1166,6 @@ fn main() {
         }"#,
     );
     assert_eq!(output, "ab");
-}
-
-#[test]
-fn example_mixed_prints_zero_circle_square_triangle() {
-    let output = run_example("examples/mixed.hy");
-    assert_eq!(output, "025122");
-}
-
-#[test]
-fn example_chained_prints_42_7() {
-    let output = run_example("examples/chained.hy");
-    assert_eq!(output, "427");
-}
-
-#[test]
-fn example_match_with_two_ok_arms_dispatches_correctly() {
-    let output = run_example("examples/result.hy");
-    assert_eq!(output, "420-1");
 }
 
 #[test]
@@ -1437,18 +1222,6 @@ use string::{format, to_bytes};
         "expected exactly 2 STORE writes to binding slot 0 for one let + one re-assignment; got {}",
         binding_store_count
     );
-}
-
-#[test]
-fn example_let_reassignment_works() {
-    let output = run_example("examples/let_test.hy");
-    assert_eq!(output, "51020");
-}
-
-#[test]
-fn example_named_args_prints_ada36_grace40() {
-    let output = run_example("examples/named_args.hy");
-    assert_eq!(output, "Ada36Grace40");
 }
 
 /// Critical regression: shuffled named args must reorder to declaration
@@ -1548,12 +1321,6 @@ fn main() {
     assert_eq!(output, "137");
 }
 
-#[test]
-fn example_let_destructure_prints_12342() {
-    let output = run_example("examples/let_destructure.hy");
-    assert_eq!(output, "12342");
-}
-
 /// Nested let destructure must bind inner tuple slots correctly (not swap).
 #[test]
 fn let_nested_tuple_destructure_binds_in_order() {
@@ -1570,12 +1337,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "123");
-}
-
-#[test]
-fn example_variadic_prints_60_hi() {
-    let output = run_example("examples/variadic.hy");
-    assert_eq!(output, "60Hi!?");
 }
 
 /// Phase P0: `let x = match { … }` must bind the arm value via
@@ -1696,12 +1457,6 @@ fn main() {
 }
 "#;
     assert_eq!(run_example_src(src), "4,2");
-}
-
-#[test]
-fn example_nested_records_prints_99() {
-    let output = run_example("examples/nested_records.hy");
-    assert_eq!(output, "99");
 }
 
 /// COI-16: inlined `Vec::push` must stage the receiver when the arg emits
@@ -2855,71 +2610,11 @@ fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
 }
 
 #[test]
-fn example_coro_prints_suspended_1_resumed() {
-    let output = run_example("examples/coro.hy");
-    assert_eq!(output, "Suspended\n1Resumed\n");
-}
-
-#[test]
-fn example_coro_gen_prints_012() {
-    let output = run_example("examples/coro_gen.hy");
-    assert_eq!(output, "012");
-}
-
-#[test]
-fn example_coro_interleave_prints_out_of_order_counters() {
-    let output = run_example("examples/coro_interleave.hy");
-    assert_eq!(output, "10,100,101,11,12,102");
-}
-
-#[test]
-fn example_coro_send_prints_hello() {
-    let output = run_example("examples/coro_send.hy");
-    assert_eq!(output, "hello");
-}
-
-#[test]
-fn example_coro_yield_from_prints_012() {
-    let output = run_example("examples/coro_yield_from.hy");
-    assert_eq!(output, "012");
-}
-
-#[test]
-fn example_coro_done_prints_false_false_true() {
-    let output = run_example("examples/coro_done.hy");
-    assert_eq!(output, "falsefalsetrue");
-}
-
-#[test]
 fn example_for_in_coro_prints_012_and_breaks() {
     // counter yields 0,1,2 then returns 99 — completion must NOT print.
     // early yields 10,20,30 — break on 20 prints only 10.
     let output = run_example("examples/for_in_coro.hy");
     assert_eq!(output, "01210");
-}
-
-#[test]
-fn example_for_in_array_prints_123() {
-    let output = run_example("examples/for_in_array.hy");
-    assert_eq!(output, "123");
-}
-
-#[test]
-fn example_for_in_tuple_prints_123() {
-    let output = run_example("examples/for_in_tuple.hy");
-    assert_eq!(output, "123");
-}
-
-#[test]
-fn example_for_in_dict_prints_12() {
-    let output = run_example("examples/for_in_dict.hy");
-    assert_eq!(output, "12");
-}
-
-#[test]
-fn example_for_in_custom_prints_012() {
-    let output = run_example("examples/for_in_custom.hy");
-    assert_eq!(output, "012");
 }
 
 #[test]
@@ -3621,12 +3316,6 @@ fn example_ffi_varargs_prints_60() {
 }
 
 #[test]
-fn example_operators_prints_expected() {
-    let output = run_example("examples/operators.hy");
-    assert_eq!(output, "801125428falsetrue3");
-}
-
-#[test]
 fn example_while_loop_accumulates_correctly() {
     let output = run_example_src(
         r#"
@@ -3644,36 +3333,6 @@ use string::{format, to_bytes};
         "#,
     );
     assert_eq!(output, "4950");
-}
-
-#[test]
-fn example_for_break_prints_18() {
-    let output = run_example("examples/for_break.hy");
-    assert_eq!(output, "18");
-}
-
-#[test]
-fn example_derive_show_eq_prints_expected() {
-    let output = run_example("examples/derive_show_eq.hy");
-    assert_eq!(
-        output,
-        "Color::Red,true,false,true,Point::Point { x: 5, y: 12 },true,false,Cell { value: 42 },true,false"
-    );
-}
-
-#[test]
-fn example_typeof_len_prints_expected() {
-    let output = run_example("examples/typeof_len.hy");
-    assert_eq!(
-        output,
-        "int\nstring\n(int, int)\n3\n3\n2\n2\nPoint\nPoint\n"
-    );
-}
-
-#[test]
-fn example_length_trait_prints_expected() {
-    let output = run_example("examples/length_trait.hy");
-    assert_eq!(output, "3\n2\n42\n");
 }
 
 /// Structural `len` on non-literal values: string hits VM `ArrayLen`;
@@ -3778,30 +3437,6 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "true,true,false,true,false");
-}
-
-#[test]
-fn example_spread_prints_3_and_60() {
-    let output = run_example("examples/spread.hy");
-    assert_eq!(output, "360");
-}
-
-#[test]
-fn example_attr_decorator_forwards_args_and_stacks_attrs() {
-    let output = run_example("examples/attr_decorator.hy");
-    assert_eq!(output, "enterdo_thinghi42");
-}
-
-#[test]
-fn example_macro_fn_expands_in_each_position() {
-    let output = run_example("examples/macro_fn.hy");
-    assert_eq!(output, "9 15 16 swapped 2 1 clicks 2");
-}
-
-#[test]
-fn example_attr_class_decorates_constructor() {
-    let output = run_example("examples/attr_class.hy");
-    assert_eq!(output, "Point ctor512");
 }
 
 #[test]
@@ -4015,36 +3650,6 @@ fn example_perf_coro_ping_prints_expected() {
 }
 
 #[test]
-fn example_io_bytes_prints_25532() {
-    let output = run_example("examples/io_bytes.hy");
-    assert_eq!(output, "25532");
-}
-
-#[test]
-fn example_io_file_prints_2() {
-    let output = run_example("examples/io_file.hy");
-    assert_eq!(output, "2");
-}
-
-#[test]
-fn example_io_eof_prints_eof() {
-    let output = run_example("examples/io_eof.hy");
-    assert_eq!(output, "eof");
-}
-
-#[test]
-fn example_io_text_prints_hello2() {
-    let output = run_example("examples/io_text.hy");
-    assert_eq!(output, "hello2");
-}
-
-#[test]
-fn example_io_udp_prints_2() {
-    let output = run_example("examples/io_udp.hy");
-    assert_eq!(output, "2");
-}
-
-#[test]
 fn io_tcp_helper_hostinvokes_are_wired() {
     let output = run_example_src(
         r#"
@@ -4085,43 +3690,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "11112");
-}
-
-/// Nested IO HostInvoke (`read_to_end(open(...)?)`) must leave the stream on
-/// the stack as the MakeTuple element, not the outer native id.
-#[test]
-fn example_io_nested_host_prints_3() {
-    let output = run_example("examples/io_nested_host.hy");
-    assert_eq!(output, "3");
-}
-
-/// Nested IO as the first of two HostInvoke args (`write(open(...), buf)`).
-/// Outer arity > 1 — MakeTuple must pack the stream, not the outer native id.
-#[test]
-fn example_io_nested_write_prints_2() {
-    let output = run_example("examples/io_nested_write.hy");
-    assert_eq!(output, "2");
-}
-
-/// Prelude `block_on` drives a coroutine to its completion value.
-#[test]
-fn example_block_on_io_prints_2() {
-    let output = run_example("examples/block_on_io.hy");
-    assert_eq!(output, "2");
-}
-
-/// Top-level `drive` with no waiters returns 0 (smoke for host wiring).
-#[test]
-fn example_io_await_drive_prints_0() {
-    let output = run_example("examples/io_await.hy");
-    assert_eq!(output, "0");
-}
-
-/// Cooperative `await_*` inside coroutines + `wait_ready` batch poll.
-#[test]
-fn example_io_wait_ready_prints_ok() {
-    let output = run_example("examples/io_wait_ready.hy");
-    assert_eq!(output, "ok");
 }
 
 /// Nested `let server = match accept_wait(listener) { … }` inside a loop must handle
@@ -4824,30 +4392,6 @@ fn main() {
     assert_eq!(output, "421");
 }
 
-#[test]
-fn example_overload_prints_15() {
-    let output = run_example("examples/overload.hy");
-    assert_eq!(output, "15");
-}
-
-#[test]
-fn example_type_overload_prints_typed_tags() {
-    let output = run_example("examples/type_overload.hy");
-    assert_eq!(output, "i:7f:1.5s:hi");
-}
-
-#[test]
-fn example_fn_value_prints_423() {
-    let output = run_example("examples/fn_value.hy");
-    assert_eq!(output, "423");
-}
-
-#[test]
-fn example_lambda_prints_42() {
-    let output = run_example("examples/lambda.hy");
-    assert_eq!(output, "42");
-}
-
 /// Disk-module imports (e.g. `io::sync::write_all`) are file-level globals.
 /// After `take_and_isolate` they must be rebound like virtual imports — not
 /// treated as missing captures inside lambdas.
@@ -5050,12 +4594,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "42");
-}
-
-#[test]
-fn example_method_overload_prints_1116() {
-    let output = run_example("examples/method_overload.hy");
-    assert_eq!(output, "1116");
 }
 
 /// Named under-apply must build a partial whose holes fill in declaration
@@ -8499,24 +8037,6 @@ fn main() {
 }
 
 #[test]
-fn example_thread_join_prints_42() {
-    let output = run_example("examples/thread_join.hy");
-    assert_eq!(output, "42");
-}
-
-#[test]
-fn example_thread_channel_prints_hello() {
-    let output = run_example("examples/thread_channel.hy");
-    assert_eq!(output, "hello");
-}
-
-#[test]
-fn example_thread_reply_prints_ping() {
-    let output = run_example("examples/thread_reply.hy");
-    assert_eq!(output, "ping");
-}
-
-#[test]
 fn thread_main_exits_without_join_still_runs_worker_recv() {
     // Regression: process exit used to kill workers still in `recv`, so
     // nothing after the worker's recv ran and the script looked like it
@@ -8572,18 +8092,6 @@ fn main() {
 }
 
 #[test]
-fn example_thread_mutex_prints_2() {
-    let output = run_example("examples/thread_mutex.hy");
-    assert_eq!(output, "2");
-}
-
-#[test]
-fn example_gc_root_weak_prints_pinned() {
-    let output = run_example("examples/gc_root_weak.hy");
-    assert_eq!(output, "pinned\npinned");
-}
-
-#[test]
 fn gc_upgrade_some_while_rooted() {
     let output = run_example_src(
         r#"
@@ -8607,16 +8115,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "some");
-}
-
-#[test]
-fn example_gc_collect_clears_weak() {
-    assert_eq!(run_example("examples/gc_collect.hy"), "none");
-}
-
-#[test]
-fn example_finalizer_prints_closed() {
-    assert_eq!(run_example("examples/finalizer.hy"), "closed");
 }
 
 #[test]
@@ -9251,18 +8749,6 @@ fn main() {
 }
 
 #[test]
-fn example_vec_tuple_prints_zip_broadcast_negate() {
-    let output = run_example("examples/vec_tuple.hy");
-    assert_eq!(output, "22,23,24,-1-2");
-}
-
-#[test]
-fn example_vec_packed_mul_uses_hostinvoke_path() {
-    let output = run_example("examples/vec_packed_mul.hy");
-    assert_eq!(output, "246810121416,3691215182124");
-}
-
-#[test]
 fn packed_vec_arith_runtime_neg_div_and_scalar_left() {
     // Covers unary neg, float zip div, and non-commutative scalar-left sub
     // on the N≥8 HostInvoke path (mul/broadcast already covered by the example).
@@ -9356,12 +8842,6 @@ fn main() {
 }
 
 #[test]
-fn example_vec_array_prints_zip_broadcast_pow() {
-    let output = run_example("examples/vec_array.hy");
-    assert_eq!(output, "46,45,18");
-}
-
-#[test]
 fn example_s2i_vec_array_checksums() {
     let output = run_example("examples/perf/s2i_vec_array.hy");
     assert_eq!(output, "");
@@ -9371,39 +8851,6 @@ fn example_s2i_vec_array_checksums() {
 fn example_s2j_class_sroa_checksums() {
     let output = run_example("examples/perf/s2j_class_sroa.hy");
     assert_eq!(output, "28");
-}
-
-#[test]
-fn example_vec_generic_prints_scale_and_shape_generic_add() {
-    let output = run_example("examples/vec_generic.hy");
-    assert_eq!(output, "24,55");
-}
-
-#[test]
-fn example_vec_dot_prints_32_and_cross_product() {
-    let output = run_example("examples/vec_dot.hy");
-    assert_eq!(output, "32,001");
-}
-
-#[test]
-fn example_vec_matmul_prints_2x2_product() {
-    let output = run_example("examples/vec_matmul.hy");
-    assert_eq!(output, "19,22,43,50");
-}
-
-#[test]
-fn example_matrix_mul_prints_product_and_hadamard_add() {
-    let output = run_example("examples/matrix_mul.hy");
-    assert_eq!(output, "19,22,43,502");
-}
-
-#[test]
-fn example_matrix_mask_prints_compares_bits_and_presence() {
-    let output = run_example("examples/matrix_mask.hy");
-    assert_eq!(
-        output,
-        "10101001,10305008,10111101,01000010,00000001,2,221,1001"
-    );
 }
 
 #[test]
@@ -9488,11 +8935,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "46");
-}
-
-#[test]
-fn example_casts_primitive_as_operators() {
-    assert_eq!(run_example("examples/casts.hy"), "13true");
 }
 
 #[test]
@@ -9813,11 +9255,6 @@ fn main() {
     );
 }
 
-#[test]
-fn example_io_tls_does_not_import_virtual_tls() {
-    assert_eq!(run_example("examples/io_tls.hy"), "use-coil-tls");
-}
-
 /// Feature-off `use` of extracted packages is a compile error (E0900 /
 /// "Module not found"), not a hang. Stays ungated so `--no-default-features`
 /// still exercises it. Virtual crypto / leftover `io::__tls` / virtual time
@@ -9916,21 +9353,6 @@ fn main() {
 "#,
     );
     assert_eq!(output, "Color::Red");
-}
-
-/// `static fn` in a trait: `Point::from_val(v)`, `T::from_val(v)` chosen by
-/// the expected type, and `Config::default()` from `#[derive(Default)]`.
-#[test]
-fn example_static_trait_method_prints_4_8_0() {
-    let output = run_example("examples/static_trait_method.hy");
-    assert_eq!(output, "4,8,0");
-}
-
-/// Recursive `#[derive(Hash)]` + primitive Hash instances.
-#[test]
-fn example_derive_hash_prints_true_true_true_true() {
-    let output = run_example("examples/derive_hash.hy");
-    assert_eq!(output, "true,true,true,true");
 }
 
 /// Primitive `Hash` covers non-int payloads used by derive.

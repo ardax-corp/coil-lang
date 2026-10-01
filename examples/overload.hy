@@ -1,3 +1,7 @@
+// Free functions overloaded by arity.
+//
+// Output: 15
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

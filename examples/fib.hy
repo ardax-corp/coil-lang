@@ -1,11 +1,15 @@
+// Recursive Fibonacci.
+//
+// Output: 2178309
+
 use io::stdout;
 use io::sync::write_all;
 
 use string::{format, to_bytes};
 
-/// Calculate the sum of `n` fib sequence
+/// The `n`-th Fibonacci number (1, 1, 2, 3, 5, …).
 fn fib(
-    /// The N number of items to calculate the fib sum of
+    /// Position in the sequence, from 1.
     int n,
 ) -> int {
     if n <= 2 {

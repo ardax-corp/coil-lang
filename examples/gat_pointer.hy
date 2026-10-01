@@ -1,9 +1,8 @@
-// Expected output: 42
+// Generic associated types (GATs): `Ref<T>` is an associated type
+// constructor. The generic `get` returns the projection `P::Ref<A>`, which
+// the `Pointer<Option>` instance resolves to `A`.
 //
-// Phase 3 advanced generics: generic associated types (GATs).
-// `Ref<T>` is an associated type constructor. The generic `get`
-// returns the applied projection `P::Ref<A>`, pinned by the
-// `Pointer<Option>` instance to `A`.
+// Output: 42
 
 use io::stdout;
 use io::sync::write_all;

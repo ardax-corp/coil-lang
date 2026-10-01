@@ -1,10 +1,8 @@
-// Expected output: 42
+// Associated types: `type Elem;` in a trait, `type Elem = int;` in an
+// instance. A method returns the bare `Elem`; the projection `C::Elem` under
+// `C: Collect` resolves to `int` at a ground call site.
 //
-// Phase 6: associated types and projections.
-// `type Elem;` in the trait; `type Elem = int;` in the impl.
-// Method return uses bare `Elem`, resolved to the class assoc type.
-// Open projection `C::Elem` under `C: Collect` is pinned to `int` when
-// `take_head` is applied at a ground `Option<int>` call site.
+// Output: 42
 
 use io::stdout;
 use io::sync::write_all;

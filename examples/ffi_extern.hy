@@ -13,7 +13,7 @@
 // library stem needs `--allow-dload STEM`; the libc aliases (`extern "c"`)
 // are always denied.
 //
-// Output: 42
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use io::stdout;
 use io::sync::write_all;

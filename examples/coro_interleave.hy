@@ -1,5 +1,8 @@
 // Two handles from the SAME parameterized async fn, interleaved,
 // with `resume` used inline directly as a `print` argument.
+//
+// Output: 10,100,101,11,12,102
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

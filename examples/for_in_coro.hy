@@ -1,3 +1,8 @@
+// `for x in coroutine()` iterates its yields (not its `return` value); `break`
+// stops early.
+//
+// Output: 01210
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

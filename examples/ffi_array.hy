@@ -1,4 +1,6 @@
 // Sum a coil int array via C `sum_array`. Expected output: `15`.
+//
+// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::declare;
 use ffi::dload;

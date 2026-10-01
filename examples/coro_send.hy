@@ -1,3 +1,8 @@
+// `resume h with v` sends a value into a suspended coroutine (the value of its
+// `yield`).
+//
+// Output: hello
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

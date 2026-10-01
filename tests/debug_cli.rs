@@ -29,6 +29,16 @@ fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
 
+/// 1-based line of `examples/fib.hy` holding `needle` (tests must not
+/// hardcode line numbers: the example's header can change).
+fn fib_line(needle: &str) -> usize {
+    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.hy");
+    src.lines()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.hy"))
+        + 1
+}
+
 fn apply_workspace_roots(cmd: &mut Command) {
     for root in compiler::Pipeline::workspace_language_extra_roots() {
         cmd.arg("--root").arg(root);
@@ -72,10 +82,12 @@ fn run_debug_script_on(
 /// file:line, and `next` moves to another line.
 #[test]
 fn debug_batch_line_breakpoint_bt_and_next() {
+    let line = fib_line("return 1;");
     let (out, _cwd) = run_debug_script(
-        "break 12\nrun\nbt\ndelete\nnext\ncontinue\nquit\n",
+        &format!("break {line}\nrun\nbt\ndelete\nnext\ncontinue\nquit\n"),
         "line_bp",
     );
+    let at = format!("fib.hy:{line}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -83,12 +95,12 @@ fn debug_batch_line_breakpoint_bt_and_next() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("Breakpoint 1, fib at") && stdout.contains("fib.hy:12"),
-        "expected a stop at fib.hy:12, stdout={stdout}"
+        stdout.contains("Breakpoint 1, fib at") && stdout.contains(&at),
+        "expected a stop at {at}, stdout={stdout}"
     );
     assert!(
-        stdout.lines().any(|l| l.contains("fib pc=") && l.contains("fib.hy:12")),
-        "bt should show fib.hy:12, stdout={stdout}"
+        stdout.lines().any(|l| l.contains("fib pc=") && l.contains(&at)),
+        "bt should show {at}, stdout={stdout}"
     );
     assert!(
         stdout.contains("Next, "),

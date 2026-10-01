@@ -1,4 +1,7 @@
 // User generic enum — same construct/match machinery as builtin Option.
+//
+// Output: 7
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

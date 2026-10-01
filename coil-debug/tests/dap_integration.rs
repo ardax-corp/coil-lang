@@ -38,6 +38,16 @@ fn fib_entry() -> PathBuf {
         .expect("examples/fib.hy")
 }
 
+/// 1-based line of `examples/fib.hy` holding `needle` (tests must not
+/// hardcode line numbers: the example's header can change).
+fn fib_line(needle: &str) -> usize {
+    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.hy");
+    src.lines()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.hy"))
+        + 1
+}
+
 struct DapClient {
     child: Child,
     stdin: ChildStdin,
@@ -305,7 +315,7 @@ fn dap_line_breakpoint_hit() {
         "setBreakpoints",
         serde_json::json!({
             "source": { "path": entry.to_string_lossy() },
-            "breakpoints": [{ "line": 11 }, { "line": 99999 }]
+            "breakpoints": [{ "line": fib_line("if n <= 2") }, { "line": 99999 }]
         }),
     );
     assert_eq!(set_bp.get("success"), Some(&serde_json::json!(true)));
@@ -320,7 +330,7 @@ fn dap_line_breakpoint_hit() {
         Some(false),
         "bogus line should be unverified"
     );
-    // Line 11 (`if n <= 2`): every statement carries a debug location.
+    // `if n <= 2`: every statement carries a debug location.
     assert_eq!(
         bps[0].get("verified").and_then(|v| v.as_bool()),
         Some(true),

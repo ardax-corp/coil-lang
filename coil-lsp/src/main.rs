@@ -4631,18 +4631,20 @@ fn fib(
 
     #[test]
     fn parameter_hover_in_condition_uses_binding_type() {
+        let text = include_str!("../../examples/fib.hy");
+        // `if n <= 2` — character 7 is the binding `n` (0-based).
+        let line = text
+            .lines()
+            .position(|l| l.contains("if n <= 2"))
+            .expect("`if n <= 2` in examples/fib.hy") as u32;
         let document = Document {
-            text: include_str!("../../examples/fib.hy").into(),
+            text: text.into(),
             version: 1,
             last_good: None,
         };
         let hover = hover(
             &document,
-            Position {
-                // `if n <= 2` — character 7 is the binding `n` (0-based).
-                line: 10,
-                character: 7,
-            },
+            Position { line, character: 7 },
         )
         .expect("condition parameter hover");
         let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {

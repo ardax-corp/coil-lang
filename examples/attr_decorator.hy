@@ -2,6 +2,7 @@
 // Stacked macros apply outermost first: `log` wraps `measure` wraps the body.
 //
 // Output: enterdo_thinghi42
+
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

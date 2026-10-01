@@ -1,5 +1,8 @@
 // File round-trip via virtual `io` module.
 // Writes two bytes, reads them back with read_to_end, prints length.
+//
+// Output: 2
+
 use io::close;
 use io::open;
 use io::stdout;
