@@ -786,17 +786,10 @@ impl<'s> Formatter<'s> {
             | Expression::Gt(lhs, rhs)
             | Expression::Leq(lhs, rhs)
             | Expression::Geq(lhs, rhs) => {
-                // `+ - * / %` associate left, every other binary operator right
+                // `**` associates right, every other binary operator left
                 // (mirrors the parser's operator table).
                 let prec = expr_prec(expr);
-                let left_assoc = matches!(
-                    expr,
-                    Expression::Add(..)
-                        | Expression::Sub(..)
-                        | Expression::Mul(..)
-                        | Expression::Div(..)
-                        | Expression::Mod(..)
-                );
+                let left_assoc = !matches!(expr, Expression::Pow(..));
                 let (lhs_min, rhs_min) = if left_assoc { (prec, prec + 1) } else { (prec + 1, prec) };
                 self.fmt_operand(lhs, lhs_min);
                 self.push_str(" ");
@@ -2395,9 +2388,9 @@ fn collect_member_chain<'a>(expr: &'a Expression<'a>) -> Option<Vec<ChainPart<'a
     Some(rev)
 }
 
-const PREC_POW: u8 = 11;
-const PREC_CAST: u8 = 12;
-const PREC_UNARY: u8 = 13;
+const PREC_POW: u8 = 13;
+const PREC_CAST: u8 = 14;
+const PREC_UNARY: u8 = 15;
 
 /// Binding strength of an operator expression (the parser's `Precedence`
 /// order); atoms and anything parenthesized bind tightest.
@@ -2406,14 +2399,16 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         Expression::Assignment(..) | Expression::CompoundAssign(..) => 0,
         Expression::Coalesce(..) => 1,
         Expression::Or(..) => 2,
-        Expression::Xor(..) => 3,
-        Expression::And(..) => 4,
-        Expression::Eq(..) | Expression::Neq(..) => 5,
-        Expression::Range { .. } => 6,
-        Expression::Le(..) | Expression::Gt(..) | Expression::Leq(..) | Expression::Geq(..) => 7,
-        Expression::Shl(..) | Expression::Shr(..) | Expression::BitAnd(..) | Expression::BitOr(..) => 8,
-        Expression::Add(..) | Expression::Sub(..) => 9,
-        Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) => 10,
+        Expression::And(..) => 3,
+        Expression::Eq(..) | Expression::Neq(..) => 4,
+        Expression::Range { .. } => 5,
+        Expression::Le(..) | Expression::Gt(..) | Expression::Leq(..) | Expression::Geq(..) => 6,
+        Expression::BitOr(..) => 7,
+        Expression::Xor(..) => 8,
+        Expression::BitAnd(..) => 9,
+        Expression::Shl(..) | Expression::Shr(..) => 10,
+        Expression::Add(..) | Expression::Sub(..) => 11,
+        Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) => 12,
         Expression::Pow(..) => PREC_POW,
         Expression::Cast(..) => PREC_CAST,
         Expression::Negate(_) | Expression::Positive(_) | Expression::Not(_) | Expression::LogicalNot(_) => {
