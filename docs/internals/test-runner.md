@@ -49,6 +49,10 @@ test result: FAILED. 628 passed; 1 failed; 629 total
 rerun in this order with `--seed 0x5eed`
 ```
 
+The process **exits 1** whenever that summary is `FAILED` (and 0 when it is
+`ok`). Callers (`coil test` re-exec, CI) must use that status; a red summary
+with exit 0 would green the job.
+
 | Flag / env | Effect |
 |------------|--------|
 | `--seed N` | shuffle with `N` (decimal or `0x` hex) |
