@@ -293,33 +293,21 @@ fn group_arms_by_outer_tag(arms: &[&MatchArm], checker: &Checker) -> Vec<TagGrou
 
 /// True when an arm needs inner-pattern runtime tests (nested bindings/constructors).
 fn arm_has_runtime_test(arm: &MatchArm) -> bool {
-    /// Recursive helper: does the inner payload of this arm's
-    /// outer Constructor pattern carry a `Binding` or further
-    /// nested `Constructor` (i.e., a value to extract)?
-    fn inner_carries_value(pattern: &Pattern) -> bool {
+    /// Whether a sub-pattern of the outer constructor must be checked at
+    /// run time. A nested constructor always is: its tag decides the arm,
+    /// even with a unit payload (`Result::Err(Color::Red)`, #579). Without
+    /// the test chain every arm sharing the outer tag took the first body.
+    fn needs_test(pattern: &Pattern) -> bool {
         match pattern {
             Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } | Pattern::Integer(_) => false,
-            Pattern::Constructor { payload, .. } => match payload {
-                PatternPayload::Unit => false,
-                PatternPayload::Tuple(parts) => parts
-                    .iter()
-                    .any(|p| matches!(p.1, Pattern::Binding { .. } | Pattern::Constructor { .. })),
-                PatternPayload::Record(fields) => fields.iter().any(|f| {
-                    matches!(
-                        f.pattern.1,
-                        Pattern::Binding { .. } | Pattern::Constructor { .. }
-                    )
-                }),
-            },
+            Pattern::Constructor { .. } => true,
         }
     }
     if let Pattern::Constructor { payload, .. } = &arm.pattern.1 {
         match payload {
             PatternPayload::Unit => false,
-            PatternPayload::Tuple(parts) => parts.iter().any(|p| inner_carries_value(&p.1)),
-            PatternPayload::Record(fields) => {
-                fields.iter().any(|f| inner_carries_value(&f.pattern.1))
-            }
+            PatternPayload::Tuple(parts) => parts.iter().any(|p| needs_test(&p.1)),
+            PatternPayload::Record(fields) => fields.iter().any(|f| needs_test(&f.pattern.1)),
         }
     } else {
         false
