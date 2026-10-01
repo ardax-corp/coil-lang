@@ -790,6 +790,15 @@ impl<'s> Formatter<'s> {
                 // (mirrors the parser's operator table).
                 let prec = expr_prec(expr);
                 let left_assoc = !matches!(expr, Expression::Pow(..));
+                if left_assoc && !self.flat {
+                    // Only a long single-line chain wraps; one ending in a
+                    // block (`acc + match x { … }`) keeps its inline shape.
+                    let flat = self.render_flat(expr);
+                    if !flat.contains('\n') && !self.fits_flat(&flat) {
+                        self.fmt_binary_chain(expr, prec);
+                        return;
+                    }
+                }
                 let (lhs_min, rhs_min) = if left_assoc { (prec, prec + 1) } else { (prec + 1, prec) };
                 self.fmt_operand(lhs, lhs_min);
                 self.push_str(" ");
@@ -2057,6 +2066,31 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// A left-associative chain of one precedence level (`a + b - c + …`)
+    /// that does not fit on the line: operands fill each line, which breaks
+    /// after an operator and continues aligned under the first operand.
+    fn fmt_binary_chain(&mut self, root: &Expression<'_>, prec: u8) {
+        let (first, rest) = flatten_binary_chain(root, prec);
+        let hang = self.current_col();
+        self.fmt_operand_expr(first, prec);
+        for (op, operand) in rest {
+            let flat = self.render_flat(operand);
+            let fits_here = self.current_col() + op.len() + 2 + flat.len() <= MAX_WIDTH;
+            // Break only when that makes the operand fit; a call too long for
+            // any line stays here and breaks inside its own parentheses.
+            let fits_below = hang + flat.len() <= MAX_WIDTH;
+            self.push_str(" ");
+            self.push_str(op);
+            if fits_here || !fits_below {
+                self.push_str(" ");
+            } else {
+                self.newline();
+                self.pad_to_col(hang);
+            }
+            self.fmt_operand_expr(operand, prec + 1);
+        }
+    }
+
     /// Format `e`, in parentheses when it binds looser than `min`.
     fn fmt_operand(&mut self, e: &Output<'_>, min: u8) {
         self.fmt_operand_expr(e.1.as_ref(), min);
@@ -2159,10 +2193,8 @@ impl<'s> Formatter<'s> {
         if docs.is_empty() {
             return;
         }
-        for (i, line) in docs.iter().enumerate() {
-            if i > 0 {
-                self.write_indent();
-            }
+        // Each line ends with the next line's indent already written.
+        for line in docs {
             self.push_str("///");
             if !line.is_empty() {
                 self.push_str(" ");
@@ -2302,6 +2334,48 @@ enum ChainPart<'a> {
 }
 
 /// Flatten a left-associative `&&` / `||` / `??` tree into operand expressions.
+/// Split a left-associative chain of precedence `prec` into its first
+/// operand and the `(operator, operand)` pairs that follow, in source order.
+fn flatten_binary_chain<'a>(
+    expr: &'a Expression<'a>,
+    prec: u8,
+) -> (&'a Expression<'a>, Vec<(&'static str, &'a Expression<'a>)>) {
+    let mut rest = Vec::new();
+    let mut node = expr;
+    loop {
+        let parts = match node {
+            Expression::Add(l, r)
+            | Expression::Sub(l, r)
+            | Expression::Mul(l, r)
+            | Expression::Div(l, r)
+            | Expression::Mod(l, r)
+            | Expression::Shl(l, r)
+            | Expression::Shr(l, r)
+            | Expression::Xor(l, r)
+            | Expression::BitAnd(l, r)
+            | Expression::BitOr(l, r)
+            | Expression::Eq(l, r)
+            | Expression::Neq(l, r)
+            | Expression::Le(l, r)
+            | Expression::Gt(l, r)
+            | Expression::Leq(l, r)
+            | Expression::Geq(l, r)
+                if expr_prec(node) == prec =>
+            {
+                Some((l, r))
+            }
+            _ => None,
+        };
+        let Some((l, r)) = parts else {
+            break;
+        };
+        rest.push((binary_op(node), r.1.as_ref()));
+        node = l.1.as_ref();
+    }
+    rest.reverse();
+    (node, rest)
+}
+
 fn flatten_logic<'a>(expr: &'a Expression<'a>, op: &str) -> Vec<&'a Expression<'a>> {
     match (expr, op) {
         (Expression::And(lhs, rhs), "&&") => {
@@ -2632,6 +2706,28 @@ mod tests {
         round_trip(src);
         let formatted = format_source(src).unwrap();
         assert!(formatted.contains("// hello"));
+    }
+
+    #[test]
+    fn method_doc_comment_lines_share_one_indent() {
+        let src = "class C {\n    pub v: int,\n}\n\nimpl C {\n    /// First line.\n    /// Second line.\n    pub fn get() -> int {\n        return self.v;\n    }\n}\n";
+        assert_eq!(format_source(src).expect("formats"), src);
+    }
+
+    #[test]
+    fn long_binary_chain_fills_lines_under_its_first_operand() {
+        let src = "fn f(string a, string b) -> string {\n    return \"aaaaaaaaaaaaaaaaaaaa\" + a + \"bbbbbbbbbbbbbbbbbbbbbbbb\" + b + \"cccccccccccccccccccccc\" + a + \"dddddddd\";\n}\n";
+        let want = "fn f(string a, string b) -> string {\n    return \"aaaaaaaaaaaaaaaaaaaa\" + a + \"bbbbbbbbbbbbbbbbbbbbbbbb\" + b + \"cccccccccccccccccccccc\" +\n           a + \"dddddddd\";\n}\n";
+        assert!(want.lines().all(|l| l.len() <= MAX_WIDTH));
+        let got = format_source(src).expect("formats");
+        assert_eq!(got, want);
+        assert_eq!(format_source(&got).expect("formats"), got, "idempotent");
+    }
+
+    #[test]
+    fn binary_chain_ending_in_a_block_stays_inline() {
+        let src = "fn f(Option<int> o) -> int {\n    let acc = 1;\n    acc = acc + match o {\n        Option::Some(v) => v,\n        Option::None => 0,\n    };\n    return acc;\n}\n";
+        assert_eq!(format_source(src).expect("formats"), src);
     }
 
     #[test]
