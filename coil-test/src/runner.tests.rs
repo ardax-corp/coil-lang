@@ -315,3 +315,38 @@ fn coverage_reports_project_lines() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn suite_exit_code_is_nonzero_iff_any_case_failed() {
+    assert_eq!(suite_exit_code(0), 0);
+    assert_eq!(suite_exit_code(1), 1);
+    assert_eq!(suite_exit_code(12), 1);
+}
+
+#[test]
+fn cmd_test_returns_one_when_the_summary_is_failed() {
+    let root = unique_tmp("cmd_test_exit");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("fail.hy"),
+        "test(\"no\") {\n    assert(false)?;\n}\n",
+    )
+    .unwrap();
+    let code = cmd_test(ReportConfig::default(), options(&root, false));
+    assert_eq!(code, 1, "FAILED summary must not fall off main as 0");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cmd_test_returns_zero_when_the_suite_is_green() {
+    let root = unique_tmp("cmd_test_ok");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("ok.hy"),
+        "test(\"yes\") {\n    assert(true)?;\n}\n",
+    )
+    .unwrap();
+    let code = cmd_test(ReportConfig::default(), options(&root, false));
+    assert_eq!(code, 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
