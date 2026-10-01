@@ -3974,7 +3974,7 @@ impl Checker {
                     let prev_pruned = apply_ty_prune(&self.subst, prev);
                     match unify_with(&self.subst, &prev_pruned, &t_pruned) {
                         Ok(s) => {
-                            self.subst = compose(&s, &self.subst);
+                            self.absorb(&s);
                             elem_ty = Some(apply_ty_prune(
                                 &self.subst,
                                 &crate::typechecking::ty::peel_constructor_refinement(prev_pruned),
@@ -5376,7 +5376,7 @@ impl Checker {
             return;
         }
         if let Ok(s) = unify_with(&self.subst, &resolved, &expected) {
-            self.subst = compose(&s, &self.subst);
+            self.absorb(&s);
         }
     }
 
@@ -9077,13 +9077,23 @@ impl Checker {
         }
     }
 
+    /// Adopt `s`, a substitution unification derived from `self.subst`.
+    /// When it bound nothing it is `self.subst` itself, and composing a
+    /// substitution with itself only re-resolves chains one step, which
+    /// every reader prunes anyway: skip that O(n) rebuild (#607).
+    fn absorb(&mut self, s: &Subst) {
+        if !s.is_same(&self.subst) {
+            self.subst = compose(s, &self.subst);
+        }
+    }
+
     /// Unify two types under the current substitution, updating
     /// `self.subst` on success. On failure, record a message and return
     /// a fresh variable so inference can continue.
     fn unify(&mut self, t1: &Ty, t2: &Ty, range: &Range<usize>, ctx: &str) -> Ty {
         match unify_with(&self.subst, t1, t2) {
             Ok(s) => {
-                self.subst = compose(&s, &self.subst);
+                self.absorb(&s);
                 apply_ty(&self.subst, t1)
             }
             Err(UnifyError::Mismatch { left, right }) => {
@@ -9471,7 +9481,7 @@ impl Checker {
             0 => Ok(None),
             1 => {
                 let (inst, local) = matches.pop().expect("one match");
-                self.subst = compose(&local, &self.subst);
+                self.absorb(&local);
                 Ok(Some(inst))
             }
             _ => {
@@ -16993,7 +17003,7 @@ impl Checker {
                 local = s;
             }
         }
-        self.subst = compose(&local, &self.subst);
+        self.absorb(&local);
         Some(apply_ty_prune(&self.subst, &first))
     }
 
