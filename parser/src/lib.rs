@@ -38,7 +38,11 @@ enum Precedence {
     Compare,
     Binary,
     Term,
+    /// `*` `/` `%`, left-associative (`a * b / c` is `(a * b) / c`).
     Factor,
+    /// `**`, right-associative and tighter than `*` (`2 * 3 ** 2` is 18,
+    /// `2 ** 3 ** 2` is `2 ** 9`).
+    Power,
     /// `as` — below unary `-` so `-1 as byte` is `(-1) as byte` (Rust-like).
     Cast,
     Negate,
@@ -583,14 +587,17 @@ impl<'pratt> Pratt<'pratt> {
                 infix(right(Precedence::Or as u16), op!("||"), |lhs, _, rhs, e| {
                     (e.span(), Box::new(Expression::Or(lhs, rhs)))
                 }),
+                // `**` before `*` so the digraph wins.
+                infix(right(Precedence::Power as u16), op!("**"), |lhs, _, rhs, e| {
+                    (e.span(), Box::new(Expression::Pow(lhs, rhs)))
+                }),
                 infix(
-                    right(Precedence::Factor as u16),
-                    choice((op!("**"), op!("*"), op!("/"), op!("%"))),
+                    left(Precedence::Factor as u16),
+                    choice((op!("*"), op!("/"), op!("%"))),
                     |lhs, op, rhs, e| {
                         (
                             e.span(),
                             Box::new(match op {
-                                "**" => Expression::Pow(lhs, rhs),
                                 "*" => Expression::Mul(lhs, rhs),
                                 "/" => Expression::Div(lhs, rhs),
                                 "%" => Expression::Mod(lhs, rhs),

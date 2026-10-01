@@ -786,9 +786,17 @@ impl<'s> Formatter<'s> {
             | Expression::Gt(lhs, rhs)
             | Expression::Leq(lhs, rhs)
             | Expression::Geq(lhs, rhs) => {
-                // `+` / `-` associate left, every other binary operator right.
+                // `+ - * / %` associate left, every other binary operator right
+                // (mirrors the parser's operator table).
                 let prec = expr_prec(expr);
-                let left_assoc = matches!(expr, Expression::Add(..) | Expression::Sub(..));
+                let left_assoc = matches!(
+                    expr,
+                    Expression::Add(..)
+                        | Expression::Sub(..)
+                        | Expression::Mul(..)
+                        | Expression::Div(..)
+                        | Expression::Mod(..)
+                );
                 let (lhs_min, rhs_min) = if left_assoc { (prec, prec + 1) } else { (prec + 1, prec) };
                 self.fmt_operand(lhs, lhs_min);
                 self.push_str(" ");
@@ -2387,8 +2395,9 @@ fn collect_member_chain<'a>(expr: &'a Expression<'a>) -> Option<Vec<ChainPart<'a
     Some(rev)
 }
 
-const PREC_CAST: u8 = 11;
-const PREC_UNARY: u8 = 12;
+const PREC_POW: u8 = 11;
+const PREC_CAST: u8 = 12;
+const PREC_UNARY: u8 = 13;
 
 /// Binding strength of an operator expression (the parser's `Precedence`
 /// order); atoms and anything parenthesized bind tightest.
@@ -2404,7 +2413,8 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         Expression::Le(..) | Expression::Gt(..) | Expression::Leq(..) | Expression::Geq(..) => 7,
         Expression::Shl(..) | Expression::Shr(..) | Expression::BitAnd(..) | Expression::BitOr(..) => 8,
         Expression::Add(..) | Expression::Sub(..) => 9,
-        Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) | Expression::Pow(..) => 10,
+        Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) => 10,
+        Expression::Pow(..) => PREC_POW,
         Expression::Cast(..) => PREC_CAST,
         Expression::Negate(_) | Expression::Positive(_) | Expression::Not(_) | Expression::LogicalNot(_) => {
             PREC_UNARY

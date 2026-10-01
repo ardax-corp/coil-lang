@@ -92,6 +92,84 @@
         same!("foo()");
     }
 
+    /// Fully parenthesised arithmetic, to make grouping visible.
+    fn shape(o: &crate::ast::Output<'_>) -> String {
+        let bin = |op: &str, l: &crate::ast::Output<'_>, r: &crate::ast::Output<'_>| {
+            format!("({} {op} {})", shape(l), shape(r))
+        };
+        match &*o.1 {
+            Expression::Add(l, r) => bin("+", l, r),
+            Expression::Sub(l, r) => bin("-", l, r),
+            Expression::Mul(l, r) => bin("*", l, r),
+            Expression::Div(l, r) => bin("/", l, r),
+            Expression::Mod(l, r) => bin("%", l, r),
+            Expression::Pow(l, r) => bin("**", l, r),
+            Expression::Negate(n) => format!("-{}", shape(n)),
+            Expression::Group(g) | Expression::Expr(g) => shape(g),
+            Expression::Fragment(items) if items.len() == 1 => shape(&items[0]),
+            other => other.to_string(),
+        }
+    }
+
+    macro_rules! grouped {
+        ($case: expr) => {
+            shape(&Pratt::default().expr().parse($case).into_result().unwrap())
+        };
+    }
+
+    #[test]
+    fn factor_operators_associate_left() {
+        // #578: these were grouped right (`a * (b / c)`).
+        assert_eq!(grouped!("a * b / c"), "((a * b) / c)");
+        assert_eq!(grouped!("a / b / c"), "((a / b) / c)");
+        assert_eq!(grouped!("a / b * c"), "((a / b) * c)");
+        assert_eq!(grouped!("a % b * c"), "((a % b) * c)");
+        assert_eq!(grouped!("a * b % c"), "((a * b) % c)");
+        assert_eq!(grouped!("a - b - c"), "((a - b) - c)");
+        assert_eq!(grouped!("a + b * c / d"), "(a + ((b * c) / d))");
+        // Explicit parentheses still win.
+        assert_eq!(grouped!("a / (b * c)"), "(a / (b * c))");
+    }
+
+    #[test]
+    fn power_is_right_associative_and_binds_tighter_than_factor() {
+        assert_eq!(grouped!("a ** b ** c"), "(a ** (b ** c))");
+        assert_eq!(grouped!("a ** b * c"), "((a ** b) * c)");
+        assert_eq!(grouped!("a * b ** c"), "(a * (b ** c))");
+        assert_eq!(grouped!("a / b ** c / d"), "((a / (b ** c)) / d)");
+    }
+
+    #[test]
+    fn formatting_keeps_arithmetic_grouping() {
+        // `coil fmt` drops only parentheses the parser does not need, so a
+        // format round trip must parse to the same tree.
+        let cases = [
+            "a / (b * c)",
+            "(a * b) / c",
+            "a * b / c",
+            "a - (b - c)",
+            "(a / b) * c",
+            "a % (b * c)",
+            "(a ** b) ** c",
+            "a ** (b * c)",
+            "(a * b) ** c",
+            "-(a ** b)",
+        ];
+        for case in cases {
+            let src = format!("fn main() {{\n    let x = {case};\n}}\n");
+            let formatted = crate::fmt::format_source(&src).expect("formats");
+            let line = formatted
+                .lines()
+                .find(|l| l.contains("let x ="))
+                .expect("let line")
+                .trim()
+                .trim_start_matches("let x = ")
+                .trim_end_matches(';')
+                .to_string();
+            assert_eq!(grouped!(case), grouped!(line.as_str()), "`{case}` formatted as `{line}`");
+        }
+    }
+
     #[test]
     fn pratt_test_statements() {
         stmt!("write(\"%i\", 42);");
