@@ -3427,13 +3427,44 @@ impl<const S: usize> Machine<S> {
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         IN_EXECUTE.set(IN_EXECUTE.get() + 1);
-        let paused = self.execute(code, constants, start_ip);
+        // The dispatch loop is instantiated twice: with hooks (a debugger or
+        // coverage is attached) and without. Plain runs never pay a
+        // per-instruction check, however the binary was built: cargo unifies
+        // `machine` features across a workspace build, so `coil` can carry
+        // the `debugger` / `coverage` code without using it (#558).
+        let paused = if self.exec_hooks_attached() {
+            self.execute::<true>(code, constants, start_ip)
+        } else {
+            self.execute::<false>(code, constants, start_ip)
+        };
         IN_EXECUTE.set(IN_EXECUTE.get() - 1);
         paused
     }
 
+    /// A debugger or a coverage collector is attached: the dispatch loop
+    /// must check breakpoints / count instructions before every op.
+    #[inline(always)]
+    fn exec_hooks_attached(&self) -> bool {
+        #[cfg(any(test, feature = "debugger"))]
+        if self.debug.is_some() {
+            return true;
+        }
+        #[cfg(any(test, feature = "coverage"))]
+        if self.coverage.is_some() {
+            return true;
+        }
+        false
+    }
+
+    /// The dispatch loop. `HOOKS` is a compile-time switch: with `false`
+    /// every debugger / coverage check below folds away.
     #[inline(never)]
-    fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
+    fn execute<const HOOKS: bool>(
+        &mut self,
+        code: &[Byte],
+        constants: &[u64],
+        start_ip: usize,
+    ) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
 
         let mut ip: usize = start_ip;
@@ -3447,15 +3478,10 @@ impl<const S: usize> Machine<S> {
         let stack_cap = crate::MAX_OPERAND_STACK_SLOTS;
         let code_len = code.len();
 
-        // A debugger checks breakpoints / steps before every instruction:
-        // never run a dense streak past it.
-        #[cfg(any(test, feature = "debugger"))]
-        let streaks_allowed = self.debug.is_none();
-        #[cfg(not(any(test, feature = "debugger")))]
-        let streaks_allowed = true;
-        // Coverage counts at the main dispatch only: no streaks past it either.
-        #[cfg(any(test, feature = "coverage"))]
-        let streaks_allowed = streaks_allowed && self.coverage.is_none();
+        // A debugger checks breakpoints / steps and coverage counts before
+        // every instruction at the main dispatch: never run a dense streak
+        // past either. Without hooks this is the constant `true`.
+        let streaks_allowed = !HOOKS;
 
         macro_rules! then_hot_streak {
             () => {
@@ -3513,7 +3539,8 @@ impl<const S: usize> Machine<S> {
 
         while ip < code_len {
             #[cfg(any(test, feature = "debugger"))]
-            if unlikely(self.debug.is_some())
+            if HOOKS
+                && unlikely(self.debug.is_some())
                 && let Some(reason) = self.debug_check_stop_at(ip)
             {
                 self.frames.get_mut().seek(ip);
@@ -3523,14 +3550,14 @@ impl<const S: usize> Machine<S> {
             }
 
             #[cfg(any(test, feature = "debugger"))]
-            let debug_attached = self.debug.is_some();
+            let debug_attached = HOOKS && self.debug.is_some();
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
 
             note_dispatch_at(ip, &self.stack, sp);
 
             #[cfg(any(test, feature = "coverage"))]
-            if unlikely(self.coverage.is_some()) {
+            if HOOKS && unlikely(self.coverage.is_some()) {
                 self.note_coverage(ip);
             }
 

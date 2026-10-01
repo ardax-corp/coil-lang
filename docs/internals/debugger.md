@@ -129,7 +129,11 @@ paths stored at compile time.
   one. `break 12` on a line without code (or code the optimizer merged away)
   fails with `no code locations`. `bt` / DAP stack frames show `file:line`.
 - Function breakpoints use live compile symbols (same FQN rules as `coil dissect --fn`).
-- Hot path: stop checks run only when a debug controller is attached.
+- Hot path: stop checks run only when a debug controller is attached. The
+  dispatch loop is generic over a `const HOOKS: bool` (`execute::<HOOKS>`):
+  `run_execute` picks the hooked instantiation only while a controller (or a
+  coverage collector) is attached, so a `coil` built with the `debugger`
+  feature through workspace unification still has no per-instruction check.
 - **I7 / B8:** `coil debug` sets `Pipeline::set_debugger_attached(true)`.
   Stops remain on reconstructed bytecode (fuse-IL, LIR, or dense).
   Function breakpoints and `stepi` work on specialized bodies; with a

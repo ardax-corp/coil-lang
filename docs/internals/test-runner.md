@@ -112,8 +112,9 @@ coverage: lcov written to target/coverage/lcov.info
   hit counter per PC, filled at the main dispatch while a job asks for it;
   dense streaks are off while counting, as under the debugger. Test jobs
   (`TestJob::coverage`) return the counts in `TestReport::hits`. Threads a case
-  spawns run on other VMs and are not counted. Off, the counter is one
-  predictable branch per instruction in `coil-test` only.
+  spawns run on other VMs and are not counted. Off, it costs nothing per
+  instruction: the dispatch loop runs its hook-free instantiation
+  (`execute::<false>`) unless a collector is attached (#558).
 - **Lines.** Each PC's `DebugLoc` start gives its line (a statement's first
   line). A line is coverable when some instruction carries it; counts are
   summed over every test program that contains it.

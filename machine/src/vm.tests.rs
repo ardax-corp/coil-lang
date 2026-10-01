@@ -2678,7 +2678,7 @@
             Byte::new(Instruction::HostInvoke).with_operand_u32(1),
             Byte::new(Instruction::HALT),
         ];
-        let paused = vm.execute(&code, &[], 0);
+        let paused = vm.run_execute(&code, &[], 0);
         assert!(paused, "HostInvoke park must pause execute");
         assert!(
             vm.pending_io.is_some(),
@@ -2744,7 +2744,7 @@
             Byte::new(Instruction::HostInvoke).with_operand_u32(operand),
             Byte::new(Instruction::HALT),
         ];
-        let paused = vm.execute(&code, &[], 0);
+        let paused = vm.run_execute(&code, &[], 0);
         assert!(paused, "empty socket must park");
         let pending = vm.pending_io.take().expect("pending_io");
         writer.write_all(b"x").expect("write");
@@ -2851,7 +2851,7 @@
                     Ok(Some(_)) | Err(IoErrorTag::WouldBlock) => {
                         vm.push(Value::from(fn_id as i64));
                         vm.push(stream);
-                        let paused = vm.execute(&code, &[], 0);
+                        let paused = vm.run_execute(&code, &[], 0);
                         assert!(paused, "empty socket must park round {round}");
                         let pending = vm.pending_io.take().expect("pending_io");
                         vm.finish_pending_io_wait(pending);
