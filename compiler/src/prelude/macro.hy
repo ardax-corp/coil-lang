@@ -694,7 +694,18 @@ impl Reader {
         let module = self.str();
         let docs = self.strings();
         let source = self.str();
-        return new TypeDecl(name, kind, generics, fields, variants, attrs, repr, module, docs, source);
+        return new TypeDecl(
+            name,
+            kind,
+            generics,
+            fields,
+            variants,
+            attrs,
+            repr,
+            module,
+            docs,
+            source,
+        );
     }
 
     pub fn fn_decl() -> FnDecl {
@@ -719,6 +730,19 @@ impl Reader {
         let docs = self.strings();
         let body = self.str();
         let source = self.str();
-        return new FnDecl(name, params, ret, type_params, attrs, owner, is_pub, is_static, is_coro, docs, body, source);
+        return new FnDecl(
+            name,
+            params,
+            ret,
+            type_params,
+            attrs,
+            owner,
+            is_pub,
+            is_static,
+            is_coro,
+            docs,
+            body,
+            source,
+        );
     }
 }

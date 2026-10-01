@@ -53,7 +53,8 @@ jobs:
         run: cargo clippy --workspace --lib --tests --bins ${{ matrix.features.flags }} -- -D warnings
 
   # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
-  # deliberately broken programs and is not checked.
+  # deliberately broken programs and is not checked. The embedded prelude
+  # (`compiler/src/prelude`) and the comptime fixtures are.
   fmt:
     name: coil fmt --check
     runs-on: ubuntu-latest
@@ -76,7 +77,7 @@ jobs:
       - name: coil fmt --check
         run: |
           cargo build -p coil-fmt
-          ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy
+          ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy compiler/src/prelude comptime/tests
 
   test:
     name: test (${{ matrix.os }}, ${{ matrix.features.id }})

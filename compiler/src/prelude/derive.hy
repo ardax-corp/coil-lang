@@ -86,7 +86,8 @@ fn show_format(TypeDecl t, string p) -> string {
             args += ", " + p + "." + f.name.str();
             i += 1;
         }
-        return "return string::format(" + lit(t.name.str() + " { " + specs + " }").src() + args + ");";
+        return "return string::format(" + lit(t.name.str() + " { " + specs + " }").src() + args +
+               ");";
     }
     let arms = "";
     for v in t.variants() {
@@ -197,8 +198,8 @@ derive Eq(TypeDecl t) -> Code {
     if t.repr != "" {
         let al = "__eq_al_" + t.name.str();
         let bl = "__eq_bl_" + t.name.str();
-        body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b
-            + ";\nreturn " + al + " == " + bl + ";";
+        body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b +
+               ";\nreturn " + al + " == " + bl + ";";
     } else if t.is_class() {
         let names: Vec<string> = Vec::new();
         for f in t.fields() {
@@ -209,7 +210,8 @@ derive Eq(TypeDecl t) -> Code {
         let arms = "";
         for v in t.variants() {
             let names = payload_names(v);
-            let inner = pattern(t, v, "b_") + " => " + eq_fields(names, a, b, v.is_tuple()) + ",\ndefault => false,";
+            let inner = pattern(t, v, "b_") + " => " + eq_fields(names, a, b, v.is_tuple()) +
+                        ",\ndefault => false,";
             arms += pattern(t, v, "a_") + " => match " + b + " {\n" + inner + "\n},\n";
         }
         body = "return match " + a + " {\n" + arms + "default => false,\n};";
@@ -234,13 +236,21 @@ fn ord_chain(Vec<string> ls, Vec<string> rs, string op, bool eq_result) -> strin
     }
     let i = len(ls) - 1;
     while i >= 0 {
-        acc = "((" + ls[i] + " " + op + " " + rs[i] + ") || ((" + ls[i] + " == " + rs[i] + ") && " + acc + "))";
+        acc = "((" + ls[i] + " " + op + " " + rs[i] + ") || ((" + ls[i] + " == " + rs[i] + ") && " +
+              acc + "))";
         i -= 1;
     }
     return acc;
 }
 
-fn ord_impl(TypeDecl t, string trait_name, string method, string op, string scalar_op, bool eq_result) -> string {
+fn ord_impl(
+    TypeDecl t,
+    string trait_name,
+    string method,
+    string op,
+    string scalar_op,
+    bool eq_result,
+) -> string {
     let a = "__ord_" + method + "_a_" + t.name.str();
     let b = "__ord_" + method + "_b_" + t.name.str();
     let body = "";
@@ -250,8 +260,8 @@ fn ord_impl(TypeDecl t, string trait_name, string method, string op, string scal
     if t.repr != "" && t.repr != "string" {
         let al = "__ord_" + method + "_al_" + t.name.str();
         let bl = "__ord_" + method + "_bl_" + t.name.str();
-        body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b
-            + ";\nreturn " + al + " " + scalar_op + " " + bl + ";";
+        body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b +
+               ";\nreturn " + al + " " + scalar_op + " " + bl + ";";
     } else if t.is_class() {
         let ls: Vec<string> = Vec::new();
         let rs: Vec<string> = Vec::new();
@@ -291,20 +301,21 @@ fn ord_impl(TypeDecl t, string trait_name, string method, string op, string scal
                 }
                 j += 1;
             }
-            arms += pattern(t, vs[i], "a_") + " => match " + b + " {\n" + inner + "default => false,\n},\n";
+            arms += pattern(t, vs[i], "a_") + " => match " + b + " {\n" + inner +
+                    "default => false,\n},\n";
             i += 1;
         }
         body = "return match " + a + " {\n" + arms + "default => false,\n};";
     }
-    return "impl " + trait_name + " for " + t.impl_head("Ord + Eq").src() + " {\nfn " + method + "("
-        + t.self_type().src() + " " + a + ", " + t.self_type().src() + " " + b + ") -> bool {\n" + body
-        + "\n}\n}\n";
+    return "impl " + trait_name + " for " + t.impl_head("Ord + Eq").src() + " {\nfn " + method + "(" +
+           t.self_type().src() + " " + a + ", " + t.self_type().src() + " " + b + ") -> bool {\n" +
+           body + "\n}\n}\n";
 }
 
 /// `impl Lt/Le/Gt/Ge` (lexicographic over fields, then variant order) and `Ord`.
 derive Ord(TypeDecl t) -> Code {
-    let impls = ord_impl(t, "Lt", "lt", "<", "<", false) + ord_impl(t, "Le", "le", "<", "<=", true)
-        + ord_impl(t, "Gt", "gt", ">", ">", false) + ord_impl(t, "Ge", "ge", ">", ">=", true);
+    let impls = ord_impl(t, "Lt", "lt", "<", "<", false) + ord_impl(t, "Le", "le", "<", "<=", true) +
+                ord_impl(t, "Gt", "gt", ">", ">", false) + ord_impl(t, "Ge", "ge", ">", ">=", true);
     return quote items {
         ${raw(impls)}
         impl Ord for ${t.impl_head("Ord + Eq")} {
