@@ -1,7 +1,8 @@
 //! Integration tests for `coil` helper re-exec (`coil-{fmt,lsp,debug,dissect,test}`).
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 fn coil_bin() -> PathBuf {
     PathBuf::from(
@@ -19,16 +20,42 @@ fn scratch_dir(suffix: &str) -> PathBuf {
     cwd
 }
 
+/// `coil` alone in a fresh directory (no helper binaries beside it).
+///
+/// A hard link has no write fd at all; a copy (other filesystem) is closed
+/// before we spawn, but a `fork` on another test thread can still inherit
+/// the fd while it is open, so exec'ing the copy may fail with `ETXTBSY`
+/// until that child execs (#599). [`run`] retries for that window.
+fn isolated_coil(cwd: &Path) -> PathBuf {
+    let isolated = cwd.join(format!("coil{}", std::env::consts::EXE_SUFFIX));
+    if std::fs::hard_link(coil_bin(), &isolated).is_err() {
+        std::fs::copy(coil_bin(), &isolated).expect("copy coil without helpers");
+    }
+    isolated
+}
+
+/// Run `bin args…`, retrying while the binary is still busy (see [`isolated_coil`]).
+fn run(bin: &Path, args: &[&str]) -> Output {
+    let mut attempt = 0;
+    loop {
+        match Command::new(bin).args(args).output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => {
+                return result.unwrap_or_else(|e| panic!("spawn {} {args:?}: {e}", bin.display()));
+            }
+        }
+    }
+}
+
 #[test]
 fn missing_helper_reports_required_binary() {
     let cwd = scratch_dir("missing");
-    let isolated = cwd.join(format!("coil{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(coil_bin(), &isolated).expect("copy coil without helpers");
+    let isolated = isolated_coil(&cwd);
 
-    let out = Command::new(&isolated)
-        .args(["fmt", "missing.hy"])
-        .output()
-        .expect("spawn isolated coil fmt");
+    let out = run(&isolated, &["fmt", "missing.hy"]);
     assert!(
         !out.status.success(),
         "expected failure when coil-fmt is absent"
@@ -39,10 +66,7 @@ fn missing_helper_reports_required_binary() {
         "stderr={err}"
     );
 
-    let lsp = Command::new(&isolated)
-        .args(["lsp"])
-        .output()
-        .expect("spawn isolated coil lsp");
+    let lsp = run(&isolated, &["lsp"]);
     assert!(!lsp.status.success(), "expected failure when coil-lsp is absent");
     let err = String::from_utf8_lossy(&lsp.stderr);
     assert!(
@@ -56,12 +80,8 @@ fn missing_helper_reports_required_binary() {
 #[test]
 fn test_subcommand_requires_and_forwards_to_coil_test() {
     let cwd = scratch_dir("test_missing");
-    let isolated = cwd.join(format!("coil{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(coil_bin(), &isolated).expect("copy coil without helpers");
-    let out = Command::new(&isolated)
-        .args(["test", "--fail-fast"])
-        .output()
-        .expect("spawn isolated coil test");
+    let isolated = isolated_coil(&cwd);
+    let out = run(&isolated, &["test", "--fail-fast"]);
     assert!(!out.status.success(), "expected failure when coil-test is absent");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("requires `coil-test`"), "stderr={err}");
