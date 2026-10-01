@@ -5138,6 +5138,13 @@ impl Compiler {
     }
 
     fn arg_emits_on_self_bytecode(&self, expr: &Output<'_>) -> bool {
+        // `e?` lowers straight onto `self.bytecode` (its value, then the
+        // early-return test) and returns an empty local vec. Left in a
+        // pure-first / local-vec arg list, its value sits on the stack while
+        // the other args' temps are stored over it (#593).
+        if Self::expr_contains_try(expr) {
+            return true;
+        }
         match expr.1.as_ref() {
             Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
                 self.arg_emits_on_self_bytecode(v)
@@ -5182,6 +5189,22 @@ impl Compiler {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Whether `expr` has a `?` outside any nested function literal.
+    fn expr_contains_try(expr: &Output<'_>) -> bool {
+        match expr.1.as_ref() {
+            Expression::Try(_) => true,
+            // A lambda's `?` returns from the lambda, compiled on its own.
+            Expression::Lambda { .. } | Expression::Function { .. } => false,
+            other => {
+                let mut found = false;
+                other.for_each_child(&mut |child| {
+                    found = found || Self::expr_contains_try(child);
+                });
+                found
+            }
         }
     }
 
