@@ -1,7 +1,7 @@
 //! Unification (Robinson's algorithm with occurs check).
 
 use super::env::substitute_vars;
-use super::subst::{Subst, apply_ty, compose};
+use super::subst::{Subst, apply_ty};
 use super::ty::{
     Constraint, Ty, TyVarId, ftv_ty, option_inner, peel_constructor_refinement, result_ok_err,
 };
@@ -534,8 +534,10 @@ fn bind_var(subst: &Subst, var: TyVarId, ty: Ty) -> Result<Subst, UnifyError> {
     if ftv_ty(&ty).contains(&var) {
         return Err(UnifyError::Occurs { var, ty });
     }
-    let new_binding = Subst::singleton(var, ty);
-    Ok(compose(subst, &new_binding))
+    // `compose(subst, {var ↦ ty})`, extending a (shared) copy in place.
+    let mut s = subst.clone();
+    s.insert(var, apply_ty(subst, &ty));
+    Ok(s)
 }
 
 #[cfg(test)]
