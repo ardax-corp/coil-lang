@@ -3,82 +3,144 @@
 //! `apply_ty` does a single lookup per variable (no chain chasing) so
 //! [`compose`] stays correct. Use [`apply_ty_prune`] for fully resolved types.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 
 use super::ty::{Scheme, Ty, TyVarId, ftv_ty};
+
+/// Hasher for dense `TyVarId` keys: one multiply, no SipHash rounds.
+#[derive(Default, Clone, Copy)]
+struct VarHasher(u64);
+
+impl Hasher for VarHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.0 = (self.0 ^ u64::from(n)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type VarIndex = HashMap<TyVarId, usize, BuildHasherDefault<VarHasher>>;
 
 /// A partial map from `TyVarId` to `Ty`.
 ///
 /// `mappings` is iterated in insertion order, which makes the result of
-/// `compose` deterministic (important for snapshot tests).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `compose` deterministic (important for snapshot tests). `index` maps a
+/// variable to its position, so lookups and inserts are O(1), and the data
+/// is shared copy-on-write, so a clone is O(1): unification returns the
+/// whole substitution from every leaf, and a whole program's checker
+/// composes after every unification (#598).
+#[derive(Debug, Clone, Default)]
 pub struct Subst {
-    mappings: Vec<(TyVarId, Ty)>,
+    data: Arc<SubstData>,
 }
+
+#[derive(Debug, Clone, Default)]
+struct SubstData {
+    mappings: Vec<(TyVarId, Ty)>,
+    index: VarIndex,
+}
+
+impl PartialEq for Subst {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data) || self.data.mappings == other.data.mappings
+    }
+}
+
+impl Eq for Subst {}
 
 impl Subst {
     /// Build an empty substitution.
     pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build an empty substitution with room for `n` bindings.
+    fn with_capacity(n: usize) -> Self {
         Self {
-            mappings: Vec::new(),
+            data: Arc::new(SubstData {
+                mappings: Vec::with_capacity(n),
+                index: VarIndex::with_capacity_and_hasher(n, Default::default()),
+            }),
         }
     }
 
     /// Build a substitution with a single binding.
     pub fn singleton(v: TyVarId, ty: Ty) -> Self {
-        Self {
-            mappings: vec![(v, ty)],
-        }
+        let mut s = Self::with_capacity(1);
+        s.insert(v, ty);
+        s
     }
 
     /// Insert (or overwrite) a binding. Last write wins, matching the
     /// canonical "most recent substitution wins" semantics used by
     /// `compose`.
     pub fn insert(&mut self, v: TyVarId, ty: Ty) {
-        if let Some(slot) = self.mappings.iter_mut().find(|(k, _)| *k == v) {
-            slot.1 = ty;
+        let data = Arc::make_mut(&mut self.data);
+        if let Some(&pos) = data.index.get(&v) {
+            data.mappings[pos].1 = ty;
             return;
         }
-        self.mappings.push((v, ty));
+        data.index.insert(v, data.mappings.len());
+        data.mappings.push((v, ty));
     }
 
     /// Remove any binding for `v`. Returns the removed value if there was
     /// one.
     pub fn remove(&mut self, v: TyVarId) -> Option<Ty> {
-        let pos = self.mappings.iter().position(|(k, _)| *k == v)?;
-        Some(self.mappings.remove(pos).1)
+        if !self.contains(v) {
+            return None;
+        }
+        let data = Arc::make_mut(&mut self.data);
+        let pos = data.index.remove(&v)?;
+        let (_, ty) = data.mappings.remove(pos);
+        for (k, _) in &data.mappings[pos..] {
+            if let Some(p) = data.index.get_mut(k) {
+                *p -= 1;
+            }
+        }
+        Some(ty)
     }
 
     /// True if `v` is in the domain of this substitution.
     pub fn contains(&self, v: TyVarId) -> bool {
-        self.mappings.iter().any(|(k, _)| *k == v)
+        self.data.index.contains_key(&v)
     }
 
     /// Look up the binding for `v`, if any.
     pub fn get(&self, v: TyVarId) -> Option<&Ty> {
-        self.mappings.iter().find(|(k, _)| *k == v).map(|(_, t)| t)
+        self.data.index.get(&v).map(|&pos| &self.data.mappings[pos].1)
     }
 
     /// Number of bindings.
     pub fn len(&self) -> usize {
-        self.mappings.len()
+        self.data.mappings.len()
     }
 
     /// True if the substitution has no bindings.
     pub fn is_empty(&self) -> bool {
-        self.mappings.is_empty()
+        self.data.mappings.is_empty()
     }
 
     /// Iterate over `(variable, type)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (TyVarId, &Ty)> {
-        self.mappings.iter().map(|(k, v)| (*k, v))
+        self.data.mappings.iter().map(|(k, v)| (*k, v))
     }
 
     /// Free variables of the codomain (i.e. of every mapped-to type).
     /// Useful when checking whether a substitution is closed.
     pub fn ftv(&self) -> HashSet<TyVarId> {
         let mut acc = HashSet::new();
-        for (_, t) in &self.mappings {
+        for (_, t) in &self.data.mappings {
             acc.extend(ftv_ty(t));
         }
         acc
@@ -224,7 +286,7 @@ pub fn apply_scheme(subst: &Subst, s: &Scheme) -> Scheme {
 
 /// Compose: `apply(compose(s1, s2), t) == apply(s1, apply(s2, t))`.
 pub fn compose(s1: &Subst, s2: &Subst) -> Subst {
-    let mut result = Subst::empty();
+    let mut result = Subst::with_capacity(s1.len() + s2.len());
     for (v, t) in s2.iter() {
         result.insert(v, apply_ty(s1, t));
     }
@@ -376,6 +438,37 @@ mod tests {
         };
         let result = apply_scheme(&s, &scheme);
         assert_eq!(result.ty, Ty::Fun(Box::new(v(0)), Box::new(int())));
+    }
+
+    #[test]
+    fn insert_overwrites_in_place_and_remove_reindexes() {
+        let mut s = Subst::empty();
+        for i in 0..5 {
+            s.insert(TyVarId(i), v(i + 10));
+        }
+        s.insert(TyVarId(2), int());
+        assert_eq!(s.len(), 5);
+        assert_eq!(s.get(TyVarId(2)), Some(&int()));
+        assert_eq!(s.remove(TyVarId(1)), Some(v(11)));
+        assert_eq!(s.remove(TyVarId(1)), None);
+        let order: Vec<u32> = s.iter().map(|(k, _)| k.0).collect();
+        assert_eq!(order, vec![0, 2, 3, 4]);
+        for i in [0, 2, 3, 4] {
+            assert!(s.contains(TyVarId(i)));
+        }
+        assert_eq!(s.get(TyVarId(4)), Some(&v(14)));
+    }
+
+    #[test]
+    fn clones_are_independent() {
+        let mut a = Subst::singleton(TyVarId(0), int());
+        let b = a.clone();
+        a.insert(TyVarId(1), string());
+        a.insert(TyVarId(0), float());
+        assert_eq!(b.len(), 1);
+        assert_eq!(b.get(TyVarId(0)), Some(&int()));
+        assert_eq!(a.get(TyVarId(0)), Some(&float()));
+        assert_ne!(a, b);
     }
 
     #[test]
