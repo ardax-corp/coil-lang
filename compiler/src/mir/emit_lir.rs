@@ -88,15 +88,16 @@ pub fn emit_lir(
                     continue;
                 }
                 if *index == 0 {
-                    emit_last_arm_unpack(
-                        &mut out,
+                    emit_last_arm_unpack(EmitLastArmUnpackArgs {
+                        out: &mut out,
                         func,
-                        block.id,
-                        *scrutinee,
-                        &plan,
-                        &regs,
+                        block: block.id,
+                        scrutinee: *scrutinee,
+                        plan: &plan,
+                        regs: &regs,
+                        pool,
                         loc,
-                    );
+                    })?;
                 }
                 continue;
             }
@@ -437,19 +438,38 @@ fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<
     group
 }
 
-fn emit_last_arm_unpack(
-    out: &mut Vec<IlOp>,
-    func: &MirFunc,
+struct EmitLastArmUnpackArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    func: &'args MirFunc,
     block: BlockId,
     scrutinee: ValueId,
-    plan: &EmitPlan,
-    regs: &[u8],
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) {
+}
+
+fn emit_last_arm_unpack(args: EmitLastArmUnpackArgs<'_>) -> Result<(), LowerError> {
+    let EmitLastArmUnpackArgs {
+        out,
+        func,
+        block,
+        scrutinee,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
     let group = last_arm_payloads(func, block, scrutinee);
     let arity = group.len() as u32;
     if arity == 0 {
-        return;
+        return Ok(());
+    }
+    // `Unpack` pops the scrutinee. A `JumpIfMatch` miss leaves it on the
+    // stack; otherwise (a single-variant match, or a nested pattern on a
+    // payload) it lives in a register or is an inline tree (#606).
+    if !super::emit::scrutinee_left_by_miss(func, block, scrutinee) {
+        emit_stack(out, scrutinee, func, plan, regs, pool, loc)?;
     }
     out.push(IlOp::from_plain_byte(
         Byte::new(Instruction::Unpack).with_operand_u32(arity),
@@ -463,6 +483,7 @@ fn emit_last_arm_unpack(
             });
         }
     }
+    Ok(())
 }
 
 fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
