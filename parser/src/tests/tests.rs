@@ -104,6 +104,19 @@
             Expression::Div(l, r) => bin("/", l, r),
             Expression::Mod(l, r) => bin("%", l, r),
             Expression::Pow(l, r) => bin("**", l, r),
+            Expression::Shl(l, r) => bin("<<", l, r),
+            Expression::Shr(l, r) => bin(">>", l, r),
+            Expression::BitAnd(l, r) => bin("&", l, r),
+            Expression::Xor(l, r) => bin("^", l, r),
+            Expression::BitOr(l, r) => bin("|", l, r),
+            Expression::Eq(l, r) => bin("==", l, r),
+            Expression::Neq(l, r) => bin("!=", l, r),
+            Expression::Le(l, r) => bin("<", l, r),
+            Expression::Leq(l, r) => bin("<=", l, r),
+            Expression::Gt(l, r) => bin(">", l, r),
+            Expression::Geq(l, r) => bin(">=", l, r),
+            Expression::And(l, r) => bin("&&", l, r),
+            Expression::Or(l, r) => bin("||", l, r),
             Expression::Negate(n) => format!("-{}", shape(n)),
             Expression::Group(g) | Expression::Expr(g) => shape(g),
             Expression::Fragment(items) if items.len() == 1 => shape(&items[0]),
@@ -140,6 +153,31 @@
     }
 
     #[test]
+    fn shift_and_bitwise_follow_rust_precedence() {
+        // #596: `<< >> & |` shared one right-associative level and `^` sat
+        // below `&&`. Rust: shifts > `&` > `^` > `|` > comparisons.
+        assert_eq!(grouped!("a << b | c"), "((a << b) | c)");
+        assert_eq!(grouped!("a & b | c"), "((a & b) | c)");
+        assert_eq!(grouped!("a >> b & c"), "((a >> b) & c)");
+        assert_eq!(grouped!("a << b << c"), "((a << b) << c)");
+        assert_eq!(grouped!("a >> b >> c"), "((a >> b) >> c)");
+        assert_eq!(grouped!("a & b << c"), "(a & (b << c))");
+        assert_eq!(grouped!("a ^ b & c"), "(a ^ (b & c))");
+        assert_eq!(grouped!("a | b ^ c"), "(a | (b ^ c))");
+        assert_eq!(grouped!("a << b + c"), "(a << (b + c))");
+        assert_eq!(grouped!("a ^ b == c"), "((a ^ b) == c)");
+        assert_eq!(grouped!("a | b < c"), "((a | b) < c)");
+        assert_eq!(grouped!("a == b && c ^ d"), "((a == b) && (c ^ d))");
+    }
+
+    #[test]
+    fn equality_and_comparison_associate_left() {
+        assert_eq!(grouped!("a == b == c"), "((a == b) == c)");
+        assert_eq!(grouped!("a != b == c"), "((a != b) == c)");
+        assert_eq!(grouped!("a < b == c < d"), "((a < b) == (c < d))");
+    }
+
+    #[test]
     fn formatting_keeps_arithmetic_grouping() {
         // `coil fmt` drops only parentheses the parser does not need, so a
         // format round trip must parse to the same tree.
@@ -154,6 +192,15 @@
             "a ** (b * c)",
             "(a * b) ** c",
             "-(a ** b)",
+            "a << (b | c)",
+            "(a << b) | c",
+            "a & (b | c)",
+            "a ^ (b | c)",
+            "(a ^ b) & c",
+            "a << (b << c)",
+            "a == (b == c)",
+            "(a | b) == c",
+            "a && (b || c)",
         ];
         for case in cases {
             let src = format!("fn main() {{\n    let x = {case};\n}}\n");

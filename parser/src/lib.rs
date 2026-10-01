@@ -30,13 +30,19 @@ enum Precedence {
     /// `??` null-coalesce (between Or and Assign).
     Coalesce,
     Or,
-    Xor,
     And,
+    /// `==` `!=`, left-associative.
     Equal,
     /// `..` / `..=` — below comparisons, non-associative (Phase P3).
     Range,
+    /// `<` `<=` `>` `>=`, left-associative.
     Compare,
-    Binary,
+    /// Bitwise `|` < `^` < `&` < shifts, all above comparisons and
+    /// left-associative (Rust order: `1 << 2 | 1` is 5, `6 & 3 | 8` is 10).
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shift,
     Term,
     /// `*` `/` `%`, left-associative (`a * b / c` is `(a * b) / c`).
     Factor,
@@ -560,17 +566,17 @@ impl<'pratt> Pratt<'pratt> {
                 // (which should be parsed as a single infix operator).
                 // Prefix `!` is logical NOT; prefix `~` is bitwise NOT on integers.
                 infix(
-                    right(Precedence::Binary as u16),
+                    left(Precedence::Shift as u16),
                     op!("<<"),
                     |lhs, _, rhs, e| (e.span(), Box::new(Expression::Shl(lhs, rhs))),
                 ),
                 infix(
-                    right(Precedence::Binary as u16),
+                    left(Precedence::Shift as u16),
                     op!(">>"),
                     |lhs, _, rhs, e| (e.span(), Box::new(Expression::Shr(lhs, rhs))),
                 ),
                 infix(
-                    right(Precedence::Binary as u16),
+                    left(Precedence::BitAnd as u16),
                     op!('&'),
                     |lhs, _, rhs, e| (e.span(), Box::new(Expression::BitAnd(lhs, rhs))),
                 ),
@@ -580,7 +586,7 @@ impl<'pratt> Pratt<'pratt> {
                     |lhs, _, rhs, e| (e.span(), Box::new(Expression::And(lhs, rhs))),
                 ),
                 infix(
-                    right(Precedence::Binary as u16),
+                    left(Precedence::BitOr as u16),
                     op!('|'),
                     |lhs, _, rhs, e| (e.span(), Box::new(Expression::BitOr(lhs, rhs))),
                 ),
@@ -607,7 +613,7 @@ impl<'pratt> Pratt<'pratt> {
                     },
                 ),
                 infix(
-                    right(Precedence::Compare as u16),
+                    left(Precedence::Compare as u16),
                     choice((op!(">="), op!("<="), op!(">"), op!("<"))),
                     |lhs, op, rhs, e| {
                         (
@@ -640,7 +646,7 @@ impl<'pratt> Pratt<'pratt> {
                     },
                 ),
                 infix(
-                    right(Precedence::Equal as u16),
+                    left(Precedence::Equal as u16),
                     choice((op!("=="), op!("!="))),
                     |lhs, op, rhs, e| {
                         (
@@ -653,7 +659,7 @@ impl<'pratt> Pratt<'pratt> {
                         )
                     },
                 ),
-                infix(right(Precedence::Xor as u16), op!('^'), |lhs, _, rhs, e| {
+                infix(left(Precedence::BitXor as u16), op!('^'), |lhs, _, rhs, e| {
                     (e.span(), Box::new(Expression::Xor(lhs, rhs)))
                 }),
                 infix(
