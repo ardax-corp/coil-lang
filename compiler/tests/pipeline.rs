@@ -8088,7 +8088,6 @@ fn main() {
         precise_frames: loaded.precise_frames.clone(),
         class_word_kinds: loaded.class_word_kinds.clone(),
         static_word_kinds: loaded.static_word_kinds.clone(),
-        debug_lines: Vec::new(),
     });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
