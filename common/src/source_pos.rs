@@ -8,8 +8,13 @@ pub struct SourcePosition {
 }
 
 /// Map a UTF-8 byte offset in `text` to a source position.
+/// An offset inside a multi-byte character (stale debug info against an
+/// edited file) rounds down to that character's start instead of panicking.
 pub fn byte_to_position(text: &str, byte: usize) -> SourcePosition {
-    let byte = byte.min(text.len());
+    let mut byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
     let mut line: u32 = 0;
     let mut line_start = 0usize;
     for (idx, ch) in text.char_indices() {
@@ -31,6 +36,14 @@ pub fn byte_to_position(text: &str, byte: usize) -> SourcePosition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_to_position_rounds_down_inside_a_char() {
+        let text = "a\n·b";
+        // Byte 3 is the second byte of `·` (bytes 2..4).
+        let pos = byte_to_position(text, 3);
+        assert_eq!((pos.line, pos.column), (2, 0));
+    }
 
     #[test]
     fn byte_to_position_tracks_newlines() {
