@@ -126,6 +126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         SemanticTokenType::NUMBER,
                         SemanticTokenType::NAMESPACE,
                         SemanticTokenType::OPERATOR,
+                        SemanticTokenType::MACRO,
                     ],
                     token_modifiers: Vec::new(),
                 },
@@ -1133,6 +1134,7 @@ fn workspace_symbols(state: &ServerState, query: &str) -> Vec<SymbolInformation>
                 compiler::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
                 compiler::SymbolKind::Namespace => lsp_types::SymbolKind::NAMESPACE,
                 compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
+                compiler::SymbolKind::Macro => lsp_types::SymbolKind::FUNCTION,
             },
             tags: None,
             deprecated: None,
@@ -1283,6 +1285,9 @@ fn symbol_for(source: &str, item: &Output<'_>) -> Option<DocumentSymbol> {
         Expression::EnumDecl { name, .. } => (*name, lsp_types::SymbolKind::ENUM),
         Expression::StaticDecl { name, .. } => (*name, lsp_types::SymbolKind::VARIABLE),
         Expression::AttrDecl { name, .. } => (*name, lsp_types::SymbolKind::METHOD),
+        Expression::DeriveDecl { name, .. } | Expression::FnMacroDecl { name, .. } => {
+            (*name, lsp_types::SymbolKind::FUNCTION)
+        }
         Expression::Use { name, alias, .. } => (
             alias.as_deref().unwrap_or(name),
             lsp_types::SymbolKind::NAMESPACE,
@@ -1396,7 +1401,7 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
     let qualifier = offset.and_then(|offset| qualifier_before(&document.text, offset));
 
     let mut by_label: HashMap<String, CompletionCandidate> = HashMap::new();
-    for keyword in coil_keywords() {
+    for keyword in coil_keywords().iter().chain(highlight_keywords()) {
         by_label.insert(
             (*keyword).into(),
             CompletionCandidate {
@@ -1629,7 +1634,11 @@ fn collect_decl_candidates(expression: &Expression<'_>, out: &mut HashMap<String
                 collect_decl_candidates(method, out);
             }
         }
-        Expression::AttrDecl { name, docs, .. } => {
+        Expression::AttrDecl { name, docs, .. }
+        | Expression::FnMacroDecl { name, docs, .. } => {
+            insert_decl_candidate(out, name, CompletionItemKind::FUNCTION, docs);
+        }
+        Expression::DeriveDecl { name, docs, .. } => {
             insert_decl_candidate(out, name, CompletionItemKind::FUNCTION, docs);
         }
         _ => {}
@@ -3121,6 +3130,16 @@ fn find_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<String>
             name: item_name,
             docs,
             ..
+        }
+        | Expression::DeriveDecl {
+            name: item_name,
+            docs,
+            ..
+        }
+        | Expression::FnMacroDecl {
+            name: item_name,
+            docs,
+            ..
         } if *item_name == name => docs_markdown(docs),
         Expression::Method(_, inner) => find_docs_for_name(inner.1.as_ref(), name),
         Expression::Implementation { methods, .. } => methods
@@ -3209,14 +3228,7 @@ fn decl_signature_help(state: &ServerState, uri: &Uri, position: Position) -> Op
     let text = &state.documents.get(uri)?.text;
     let offset = position_to_byte(text, position)?;
     let (open, commas) = enclosing_call_paren(&text[..offset])?;
-    let name_end = text[..open].trim_end().len();
-    let name_start = text[..name_end]
-        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .map_or(0, |i| i + 1);
-    let name = &text[name_start..name_end];
-    if name.is_empty() {
-        return None;
-    }
+    let (name_start, name) = callee_name_before_paren(text, open)?;
     let name_position = byte_position(text, name_start);
     let mut sources: Vec<String> = goto_definitions(state, uri, name_position)
         .into_iter()
@@ -3282,7 +3294,7 @@ struct FnSignature {
     parameters: Vec<ParameterInformation>,
 }
 
-/// `name(T a, U b) -> R` for the first `fn name` declared in `source`.
+/// `name(T a, U b) -> R` for the first `fn` / `macro` / `attr` / `derive` of `name`.
 fn function_signature(source: &str, name: &str) -> Option<FnSignature> {
     let ast = Pratt::default().parse(source).ok()?;
     let mut found = None;
@@ -3290,62 +3302,105 @@ fn function_signature(source: &str, name: &str) -> Option<FnSignature> {
         if found.is_some() {
             return;
         }
-        let Expression::Function {
-            name: fn_name,
-            docs,
-            args,
-            returns,
-            ..
-        } = node.1.as_ref()
-        else {
-            return;
+        let (fn_name, docs, args, returns) = match node.1.as_ref() {
+            Expression::Function {
+                name: fn_name,
+                docs,
+                args,
+                returns,
+                ..
+            }
+            | Expression::AttrDecl {
+                name: fn_name,
+                docs,
+                args,
+                returns,
+                ..
+            }
+            | Expression::DeriveDecl {
+                name: fn_name,
+                docs,
+                args,
+                returns,
+                ..
+            }
+            | Expression::FnMacroDecl {
+                name: fn_name,
+                docs,
+                args,
+                returns,
+                ..
+            } => (fn_name, docs, args, returns),
+            _ => return,
         };
         if *fn_name != name {
             return;
         }
-        let mut parameters = Vec::new();
-        if let Expression::Fragment(items) = args.1.as_ref() {
-            for (span, item) in items {
-                let Expression::Argument { docs, .. } = item.as_ref() else {
-                    continue;
-                };
-                // Source text of the parameter, minus its `///` lines.
-                let label = source[span.start..span.end]
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("///"))
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                parameters.push(ParameterInformation {
-                    label: lsp_types::ParameterLabel::Simple(label),
-                    documentation: docs_markdown(docs).map(|value| {
-                        Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value,
-                        })
-                    }),
-                });
-            }
-        }
-        let params_text = parameters
-            .iter()
-            .map(|p| match &p.label {
-                lsp_types::ParameterLabel::Simple(label) => label.clone(),
-                lsp_types::ParameterLabel::LabelOffsets(_) => String::new(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let ret = returns
-            .as_ref()
-            .map(|r| format!(" -> {}", source[r.0.start..r.0.end].trim()))
-            .unwrap_or_default();
-        found = Some(FnSignature {
-            label: format!("{name}({params_text}){ret}"),
-            docs: docs_markdown(docs),
-            parameters,
-        });
+        found = Some(signature_from_params(source, name, docs, args, returns.as_ref()));
     });
     found
+}
+
+fn signature_from_params(
+    source: &str,
+    name: &str,
+    docs: &[&str],
+    args: &Output<'_>,
+    returns: Option<&Output<'_>>,
+) -> FnSignature {
+    let mut parameters = Vec::new();
+    if let Expression::Fragment(items) = args.1.as_ref() {
+        for (span, item) in items {
+            let Expression::Argument { docs, .. } = item.as_ref() else {
+                continue;
+            };
+            let label = source[span.start..span.end]
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("///"))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" ");
+            parameters.push(ParameterInformation {
+                label: lsp_types::ParameterLabel::Simple(label),
+                documentation: docs_markdown(docs).map(|value| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    })
+                }),
+            });
+        }
+    }
+    let params_text = parameters
+        .iter()
+        .map(|p| match &p.label {
+            lsp_types::ParameterLabel::Simple(label) => label.clone(),
+            lsp_types::ParameterLabel::LabelOffsets(_) => String::new(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = returns
+        .map(|r| format!(" -> {}", source[r.0.start..r.0.end].trim()))
+        .unwrap_or_default();
+    FnSignature {
+        label: format!("{name}({params_text}){ret}"),
+        docs: docs_markdown(docs),
+        parameters,
+    }
+}
+
+/// Identifier immediately before `(`; `name!(` strips the `!`.
+fn callee_name_before_paren(prefix: &str, open: usize) -> Option<(usize, &str)> {
+    let mut name_end = prefix[..open].trim_end().len();
+    if name_end > 0 && prefix.as_bytes()[name_end - 1] == b'!' {
+        name_end = prefix[..name_end - 1].trim_end().len();
+    }
+    let name_start = prefix[..name_end]
+        .rfind(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let name = &prefix[name_start..name_end];
+    (!name.is_empty()).then_some((name_start, name))
 }
 
 fn signature_help(document: &Document, position: Position) -> Option<SignatureHelp> {
@@ -3353,16 +3408,13 @@ fn signature_help(document: &Document, position: Position) -> Option<SignatureHe
     let offset = position_to_byte(source, position)?;
     let prefix = &source[..offset.min(source.len())];
     let open = prefix.rfind('(')?;
-    let name_end = prefix[..open].trim_end().len();
-    let name_start = prefix[..name_end]
-        .rfind(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let name = &prefix[name_start..name_end];
-    if source.find(&format!("fn {name}")).is_none() {
+    let (_, name) = callee_name_before_paren(prefix, open)?;
+    let declaration = ["fn ", "macro ", "attr ", "derive "]
+        .iter()
+        .find_map(|prefix_kw| source.find(&format!("{prefix_kw}{name}")));
+    let Some(declaration) = declaration else {
         return signature_help_from_index(document, name, prefix, open);
-    }
-    let declaration = source.find(&format!("fn {name}"))?;
+    };
     let params_start = source[declaration..].find('(')? + declaration + 1;
     let params_end = source[params_start..].find(')')? + params_start;
     let mut parameters = source[params_start..params_end]
@@ -3692,6 +3744,11 @@ fn coil_keywords() -> &'static [&'static str] {
     ]
 }
 
+/// Contextual words that highlight as keywords (`macro name(`, `quote items`).
+fn highlight_keywords() -> &'static [&'static str] {
+    &["derive", "macro", "quote", "attrs"]
+}
+
 const TOKEN_KEYWORD: u32 = 0;
 const TOKEN_FUNCTION: u32 = 1;
 const TOKEN_TYPE: u32 = 2;
@@ -3701,6 +3758,7 @@ const TOKEN_STRING: u32 = 5;
 const TOKEN_NUMBER: u32 = 6;
 const TOKEN_NAMESPACE: u32 = 7;
 const TOKEN_OPERATOR: u32 = 8;
+const TOKEN_MACRO: u32 = 9;
 const TOKEN_TYPED_PRIORITY: u8 = 5;
 const TOKEN_AST_PRIORITY: u8 = 4;
 
@@ -3749,6 +3807,7 @@ fn merge_spanned_tokens(mut tokens: Vec<SpannedToken>) -> Vec<SpannedToken> {
 fn symbol_kind_to_token_type(kind: SymbolKind) -> u32 {
     match kind {
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
+        SymbolKind::Macro => TOKEN_MACRO,
         SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias => TOKEN_TYPE,
         SymbolKind::Namespace => TOKEN_NAMESPACE,
         SymbolKind::Variable => TOKEN_VARIABLE,
@@ -3769,6 +3828,7 @@ fn definition_token_type(checker: &Checker, definition: &compiler::SymbolDef) ->
             symbol_kind_to_token_type(definition.kind)
         }
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
+        SymbolKind::Macro => TOKEN_MACRO,
         SymbolKind::Variable => checker
             .codegen_var_type(&definition.name)
             .map(semantic_token_type_for_ty)
@@ -3884,10 +3944,15 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
         if byte == b'"' {
             let start = index;
             index += 1;
-            while index < bytes.len() && bytes[index] != b'"' {
-                index += 1;
-            }
-            if index < bytes.len() {
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[index] == b'"' {
+                    index += 1;
+                    break;
+                }
                 index += 1;
             }
             tokens.push(SpannedToken {
@@ -3901,6 +3966,28 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
             let start = index;
             while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
+            }
+            tokens.push(SpannedToken {
+                range: start..index,
+                token_type: TOKEN_COMMENT,
+                priority: 5,
+            });
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let start = index;
+            let mut depth = 1;
+            index += 2;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    depth -= 1;
+                    index += 2;
+                } else if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    depth += 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
             }
             tokens.push(SpannedToken {
                 range: start..index,
@@ -3943,13 +4030,23 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
                 index += 1;
             }
             let word = &source[start..index];
+            let macro_call = bytes.get(index) == Some(&b'!') && bytes.get(index + 1) == Some(&b'(');
             let contextual_keyword = (word == "from" && is_yield_from_keyword(source, start))
                 || (word == "with" && is_resume_with_keyword(source, start));
-            if coil_keywords().contains(&word) || contextual_keyword {
+            if coil_keywords().contains(&word)
+                || highlight_keywords().contains(&word)
+                || contextual_keyword
+            {
                 tokens.push(SpannedToken {
                     range: start..index,
                     token_type: TOKEN_KEYWORD,
                     priority: 3,
+                });
+            } else if macro_call {
+                tokens.push(SpannedToken {
+                    range: start..index,
+                    token_type: TOKEN_MACRO,
+                    priority: 6,
                 });
             } else {
                 let token_type = if is_type_like_ident(word) {
@@ -4003,7 +4100,7 @@ fn scan_operator(source: &str, index: usize) -> Option<(Range<usize>, u32)> {
     matches!(
         remaining[0],
         b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' | b'&' | b'|' | b'^' | b'~'
-            | b'.' | b',' | b';' | b':' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'@'
+            | b'.' | b',' | b';' | b':' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'@' | b'#'
     )
     .then_some((index..index + 1, TOKEN_OPERATOR))
 }
@@ -4427,6 +4524,21 @@ fn add(int a, int b) -> int { return a + b; }
     }
 
     #[test]
+    fn document_symbols_cover_macro_and_derive_decls() {
+        let source = "\
+macro twice(Expr e) -> Code { return quote expr { ${e} }; }
+derive Answer(TypeDecl t) -> Code { return quote items {}; }
+";
+        let symbols = document_symbols(source);
+        let by_name: std::collections::HashMap<_, _> = symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert_eq!(by_name.get("twice"), Some(&lsp_types::SymbolKind::FUNCTION));
+        assert_eq!(by_name.get("Answer"), Some(&lsp_types::SymbolKind::FUNCTION));
+    }
+
+    #[test]
     fn signature_help_reports_active_parameter() {
         let source = "\
 fn add(int a, int b) -> int { return a + b; }
@@ -4454,6 +4566,32 @@ fn main() {
             sig.label
         );
         assert_eq!(sig.parameters.as_ref().map(|p| p.len()), Some(2));
+    }
+
+    #[test]
+    fn signature_help_function_style_macro_call() {
+        let source = "\
+macro twice(Expr e) -> Code { return quote expr { ${e} * 2 }; }
+fn main() {
+    twice!(
+}
+";
+        let help = signature_help(
+            &Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
+            byte_position(source, source.find("twice!(").expect("call") + "twice!(".len()),
+        )
+        .expect("macro signature help");
+        let sig = &help.signatures[0];
+        assert!(
+            sig.label.contains("twice"),
+            "expected twice signature, got {}",
+            sig.label
+        );
+        assert_eq!(sig.parameters.as_ref().map(|p| p.len()), Some(1));
     }
 
     fn token_types_at_word(source: &str, encoded: &[SemanticToken], word: &str) -> Vec<u32> {
@@ -4530,6 +4668,49 @@ fn main() {
         assert!(types.contains(&TOKEN_NUMBER));
         assert!(types.contains(&TOKEN_KEYWORD));
         assert!(types.contains(&TOKEN_OPERATOR));
+    }
+
+    #[test]
+    fn semantic_tokens_mark_block_comments_and_escaped_strings() {
+        let source = "/* outer /* inner */ still */\nfn main() { let s = \"a\\\"//not\"; }\n";
+        let tokens = semantic_tokens(source, None, None);
+        assert!(
+            token_types_at_word(source, &tokens, "still").is_empty(),
+            "block comment body must not be a name token"
+        );
+        let comment = token_at_byte(source, &tokens, 0).expect("block comment");
+        assert_eq!(comment.token_type, TOKEN_COMMENT);
+        assert!(comment.length as usize >= "/* outer /* inner */ still */".len());
+        let string_start = source.find("\"a\\").expect("string start");
+        let inside = token_at_byte(source, &tokens, string_start).expect("string token");
+        assert_eq!(inside.token_type, TOKEN_STRING);
+    }
+
+    #[test]
+    fn semantic_tokens_four_slashes_are_line_comments_not_docs() {
+        let source = "//// banner\nfn main() { return; }\n";
+        let tokens = semantic_tokens(source, None, None);
+        let banner = token_at_byte(source, &tokens, 0).expect("////");
+        assert_eq!(banner.token_type, TOKEN_COMMENT);
+        let kw = token_types_at_word(source, &tokens, "fn");
+        assert_eq!(kw, vec![TOKEN_KEYWORD]);
+    }
+
+    #[test]
+    fn semantic_tokens_mark_macro_keywords_and_calls() {
+        let source =
+            "macro twice(Expr e) -> Code { return quote expr { ${e} }; }\nfn main() { twice!(1); }\n";
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let kw = token_types_at_word(source, &tokens, "macro");
+        assert_eq!(kw, vec![TOKEN_KEYWORD]);
+        let quote = token_types_at_word(source, &tokens, "quote");
+        assert_eq!(quote, vec![TOKEN_KEYWORD]);
+        let decl = source.find("twice").expect("decl");
+        let at_decl = token_at_byte(source, &tokens, decl).expect("macro name");
+        assert_eq!(at_decl.token_type, TOKEN_MACRO);
+        let call = source.rfind("twice").expect("call");
+        let at_call = token_at_byte(source, &tokens, call).expect("twice!");
+        assert_eq!(at_call.token_type, TOKEN_MACRO);
     }
 
     #[test]
@@ -5042,6 +5223,8 @@ fn main() {
         assert_eq!(enclosing_call_paren("f(\"(,\", "), Some((1, 1)));
         assert_eq!(enclosing_call_paren("f(a)"), None);
         assert_eq!(enclosing_call_paren("f([1, "), None);
+        assert_eq!(callee_name_before_paren("twice!(1, ", 6), Some((0, "twice")));
+        assert_eq!(callee_name_before_paren("add(1, ", 3), Some((0, "add")));
     }
 
     #[test]

@@ -41,7 +41,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [LSP](lsp.md) | `coil lsp` — language server |
 | [Test health report](test-health-report.md) | Historical flaky/broken-test notes |
 | [String table migration](string-table-migration.md) | Completed migration note (retired `print` keyword) |
-| [Grammar](grammar/) | tree-sitter grammar sources |
+| [Grammar](grammar/) | tree-sitter grammar sources (`tree-sitter-coil`; `queries/highlights.scm`) |
 
 ## Crate map
 

@@ -1770,10 +1770,38 @@ impl Pipeline {
     }
 
     pub fn program_debug(&self) -> ProgramDebug {
-        ProgramDebug {
+        let mut debug = ProgramDebug {
             source_files: self.compiler_lazy().source_files_list(),
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+        };
+        self.remap_generated_debug_locs(&mut debug);
+        debug
+    }
+
+    /// Generated snippets live past the original file; map their locs to the
+    /// `#[derive]` / `name!(…)` site so the debugger reads real source.
+    fn remap_generated_debug_locs(&self, debug: &mut ProgramDebug) {
+        if self.generated_ranges.is_empty() {
+            return;
+        }
+        for loc in &mut debug.debug_locs {
+            if !loc.is_known() {
+                continue;
+            }
+            let Some(stored) = debug.source_files.get(loc.file as usize) else {
+                continue;
+            };
+            let byte = loc.start_byte as usize;
+            let Some(g) = self.generated_ranges.iter().find(|g| {
+                g.range.contains(&byte) && source_file_matches_generated(stored, &g.file)
+            }).or_else(|| {
+                self.generated_ranges.iter().find(|g| g.range.contains(&byte))
+            }) else {
+                continue;
+            };
+            loc.start_byte = g.site.start as u32;
+            loc.end_byte = (g.site.end.max(g.site.start + 1)) as u32;
         }
     }
 
@@ -1840,6 +1868,14 @@ impl Pipeline {
             },
         ))
     }
+}
+
+fn source_file_matches_generated(stored: &str, generated: &std::path::Path) -> bool {
+    let stored = std::path::Path::new(stored);
+    stored == generated
+        || stored.file_name() == generated.file_name()
+        || generated.ends_with(stored)
+        || stored.ends_with(generated)
 }
 
 #[cfg(any(test, feature = "vm-wire"))]

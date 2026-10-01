@@ -889,7 +889,8 @@ fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replaceme
     }
     if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
         if matches!(replacement, Some(Replacement::Expr(_))) {
-            let Some(Replacement::Expr(value)) = replacement.take() else { unreachable!() };
+            let Some(Replacement::Expr(mut value)) = replacement.take() else { unreachable!() };
+            value.0 = target;
             *node = value;
         }
         return;
