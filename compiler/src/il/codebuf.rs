@@ -284,25 +284,18 @@ impl CodeBuf {
     }
 
     fn rewrite_abs_entries_in(&mut self, from_code: usize, to_code: usize) {
-        let mut emitting = 0usize;
         let mut rewrites = Vec::new();
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if !op.emits_code() {
-                continue;
+        let range = self.il.raw_range_of_code(from_code, to_code);
+        for (i, op) in self.il.ops()[range.clone()].iter().enumerate() {
+            if let IlOp::Byte { byte, loc } = op
+                && let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(*byte)
+            {
+                rewrites.push((range.start + i, kind, arity, label, *loc, ret_words));
             }
-            if emitting >= to_code {
-                break;
-            }
-            if emitting >= from_code
-                && let IlOp::Byte { byte, loc } = op
-                    && let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(*byte)
-                    {
-                        rewrites.push((i, kind, arity, label, *loc, ret_words));
-                    }
-            emitting += 1;
         }
+        // A byte and its `Entry` both emit code: the code index stays valid.
         for (i, kind, arity, target, loc, ret_words) in rewrites {
-            self.il.ops_mut()[i] = IlOp::Entry {
+            self.il.ops_slice_mut()[i] = IlOp::Entry {
                 kind,
                 arity,
                 target,
@@ -558,35 +551,12 @@ impl CodeBuf {
         if suffix.is_empty() {
             return;
         }
-        let mut emitting = 0usize;
-        let mut raw_idx = self.il.raw_len();
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if emitting == code_pos {
-                raw_idx = i;
-                break;
-            }
-            if op.emits_code() {
-                emitting += 1;
-            }
-        }
-        if emitting < code_pos {
-            raw_idx = self.il.raw_len();
-        }
+        let raw_idx = self.il.raw_insert_point(code_pos);
         self.il.ops_mut().splice(raw_idx..raw_idx, suffix);
     }
 
     pub fn insert_jump_at(&mut self, code_pos: usize, target: Label) {
-        let mut emitting = 0usize;
-        let mut raw_idx = self.il.raw_len();
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if emitting == code_pos {
-                raw_idx = i;
-                break;
-            }
-            if op.emits_code() {
-                emitting += 1;
-            }
-        }
+        let raw_idx = self.il.raw_insert_point(code_pos);
         self.il.ops_mut().insert(
             raw_idx,
             IlOp::Jump {
@@ -635,23 +605,13 @@ impl CodeBuf {
     /// at that PC and beyond are dropped.
     pub fn truncate(&mut self, code_len: usize) {
         assert!(self.lowered.is_none());
-        let mut emitting = 0usize;
-        let mut keep = 0usize;
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if op.emits_code() {
-                if emitting == code_len {
-                    break;
-                }
-                emitting += 1;
-                keep = i + 1;
-            } else if emitting > code_len {
-                break;
-            } else {
-                // Keep labels/markers at PCs `<= code_len` (incl. entry binds).
-                keep = i + 1;
-            }
-        }
-        self.il.ops_mut().truncate(keep);
+        // Keep labels/markers at PCs `<= code_len` (incl. entry binds): cut
+        // at the op at `code_len`, or nothing when there is none.
+        let keep = self
+            .il
+            .raw_index_of_code(code_len)
+            .unwrap_or_else(|| self.il.raw_len());
+        self.il.truncate_raw(keep);
         // Keep entries bound at `code_len` (next-emit PC). `discard_compile` of
         // a const-`if` condition often truncates back to a function's entry PC;
         // `pc < code_len` would drop that bind and leave later CALLs as stale
@@ -663,70 +623,32 @@ impl CodeBuf {
     /// Jump/Entry ops are omitted from the returned vec — callers that need
     /// a faithful body copy must judge candidacy via [`Self::code_slice_ops`].
     pub fn code_slice_bytes(&self, start: usize, end: usize) -> Vec<Byte> {
-        let mut out = Vec::new();
-        let mut i = 0usize;
-        for op in self.il.ops() {
-            if let Some(b) = op.as_plain_byte() {
-                if i >= start && i < end {
-                    out.push(b);
-                }
-                i += 1;
-                if i >= end {
-                    break;
-                }
-            } else if op.emits_code() {
-                i += 1;
-                if i >= end {
-                    break;
-                }
-            }
-        }
-        out
+        let range = self.il.raw_range_of_code(start, end);
+        self.il.ops()[range]
+            .iter()
+            .filter_map(|op| op.as_plain_byte())
+            .collect()
     }
 
     /// Emitting ops in `[start, end)` (labels skipped; Jump/Entry included).
     pub fn code_slice_ops(&self, start: usize, end: usize) -> Vec<super::IlOp> {
-        let mut out = Vec::new();
-        let mut i = 0usize;
-        for op in self.il.ops() {
-            if !op.emits_code() {
-                continue;
-            }
-            if i >= end {
-                break;
-            }
-            if i >= start {
-                out.push(op.clone());
-            }
-            i += 1;
-        }
-        out
+        let range = self.il.raw_range_of_code(start, end);
+        self.il.ops()[range]
+            .iter()
+            .filter(|op| op.emits_code())
+            .cloned()
+            .collect()
     }
 
     /// Ops in emitting range `[start, end)`, including [`IlOp::Label`] markers
     /// that sit at those emitting positions (needed to copy jump diamonds).
     pub fn code_slice_raw_ops(&self, start: usize, end: usize) -> Vec<super::IlOp> {
-        let mut out = Vec::new();
-        let mut i = 0usize;
-        for op in self.il.ops() {
-            if matches!(op, super::IlOp::Label(_) | IlOp::JoinLabel(_)) {
-                if i >= start && i < end {
-                    out.push(op.clone());
-                }
-                continue;
-            }
-            if !op.emits_code() {
-                continue;
-            }
-            if i >= end {
-                break;
-            }
-            if i >= start {
-                out.push(op.clone());
-            }
-            i += 1;
-        }
-        out
+        let range = self.il.raw_range_of_code(start, end);
+        self.il.ops()[range]
+            .iter()
+            .filter(|op| op.emits_code() || matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+            .cloned()
+            .collect()
     }
 
     /// Shift [`Self::entry_at_offset`] keys after a splice that inserts `delta`
@@ -760,9 +682,7 @@ impl CodeBuf {
     /// Remove the last emitting op (labels after it are left in place).
     pub fn pop_last_emitting(&mut self) -> Option<IlOp> {
         self.invalidate_lowered();
-        let ops = self.il.ops_mut();
-        let idx = ops.iter().rposition(|op| op.emits_code())?;
-        Some(ops.remove(idx))
+        self.il.remove_last_emitting()
     }
 }
 

@@ -253,12 +253,8 @@ impl Compiler {
     }
 
     fn pad_debug_locs(&mut self) {
-        while self.debug_locs.len() < self.bytecode.len() {
-            self.debug_locs.push(DebugLoc::unknown());
-        }
-        if self.debug_locs.len() > self.bytecode.len() {
-            self.debug_locs.truncate(self.bytecode.len());
-        }
+        self.debug_locs
+            .resize(self.bytecode.len(), DebugLoc::unknown());
     }
 
     /// Run registered `defer` thunks in LIFO order.
@@ -333,7 +329,7 @@ impl Compiler {
             return;
         }
         let loc = self.loc_from_span(span);
-        for op in bytes.il_mut().ops_mut() {
+        for op in bytes.il_mut().ops_slice_mut() {
             op.set_loc(loc);
         }
         let n = bytes.len();
@@ -2120,7 +2116,7 @@ impl Compiler {
         let Some(loc) = loc.filter(|l| l.is_known()) else {
             return;
         };
-        for op in bytecode.il_mut().ops_mut().iter_mut().skip(from) {
+        for op in bytecode.il_mut().ops_slice_mut().iter_mut().skip(from) {
             if !op.loc().is_known() && !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 op.set_loc(loc);
             }
@@ -3744,7 +3740,7 @@ impl Compiler {
         // site so it stays identified wherever a pass moves it.
         if let Some(slots) = component_slots {
             let file = self.intern_source_file();
-            let ops = self.bytecode.il_mut().ops_mut();
+            let ops = self.bytecode.il_mut().ops_slice_mut();
             let from = il_start.min(ops.len());
             let mut tagged = false;
             for op in &mut ops[from..] {
@@ -3787,7 +3783,7 @@ impl Compiler {
             end_byte: site.1.max(site.0 + 1),
         };
         // The last store to the local's slot in this statement defines it.
-        let ops = self.bytecode.il_mut().ops_mut();
+        let ops = self.bytecode.il_mut().ops_slice_mut();
         let from = il_start.min(ops.len());
         let Some(store) = ops[from..].iter_mut().rev().find(|op| match op {
             IlOp::StorePop { slot: s, .. } => *s == slot,
@@ -3857,7 +3853,7 @@ impl Compiler {
         if pending.is_empty() {
             return;
         }
-        let ops = self.bytecode.il_mut().ops_mut();
+        let ops = self.bytecode.il_mut().ops_slice_mut();
         let from = il_start.min(ops.len());
         let mut tagged = vec![false; pending.len()];
         for op in &mut ops[from..] {
@@ -4257,7 +4253,7 @@ impl Compiler {
             self.escape_decl_depth.insert(name.to_string(), depth);
         }
         self.stmt_depth = depth;
-        let il_start = self.bytecode.il_mut().ops_mut().len();
+        let il_start = self.bytecode.il_mut().raw_len();
         let saved_stmt_start = std::mem::replace(&mut self.debug_stmt_start, child.0.start as u32);
         let vars_before = self.debug_var_count();
         self.compile_block_stmt_at(child, depth);
@@ -4277,7 +4273,7 @@ impl Compiler {
         if !loc.is_known() {
             return;
         }
-        let ops = self.bytecode.il_mut().ops_mut();
+        let ops = self.bytecode.il_mut().ops_slice_mut();
         if il_start >= ops.len() {
             return;
         }
