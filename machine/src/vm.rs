@@ -12,7 +12,7 @@ use std::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{
-    byte_to_position, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
+    LineIndex, byte_to_position, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte,
     ProgramDebug, Value,
 };
@@ -817,16 +817,30 @@ impl<const S: usize> Machine<S> {
     }
 
     fn rebuild_pc_line_cache(&mut self) {
-        use std::collections::HashMap;
-        let mut texts: HashMap<u32, String, AddrHashBuilder> = HashMap::default();
         self.pc_lines.clear();
         self.pc_lines.reserve(self.program_debug.debug_locs.len());
+        // Lines resolved at compile time (archive minor 30+): no file I/O,
+        // so a packaged binary never depends on its sources (#580).
+        if self.program_debug.debug_lines.len() == self.program_debug.debug_locs.len() {
+            for (loc, line) in self
+                .program_debug
+                .debug_locs
+                .iter()
+                .zip(&self.program_debug.debug_lines)
+            {
+                self.pc_lines
+                    .push((loc.is_known() && line.is_known()).then_some((loc.file, line.line)));
+            }
+            return;
+        }
+        // Older archives: resolve against the sources, if they are there.
+        use std::collections::HashMap;
+        let mut texts: HashMap<u32, String, AddrHashBuilder> = HashMap::default();
         for loc in &self.program_debug.debug_locs {
             if !loc.is_known() {
-                self.pc_lines.push(None);
                 continue;
             }
-            let text = texts.entry(loc.file).or_insert_with(|| {
+            texts.entry(loc.file).or_insert_with(|| {
                 let path = self
                     .program_debug
                     .source_files
@@ -835,13 +849,32 @@ impl<const S: usize> Machine<S> {
                     .unwrap_or_default();
                 std::fs::read_to_string(path).unwrap_or_default()
             });
-            if text.is_empty() {
-                self.pc_lines.push(None);
-                continue;
-            }
-            let pos = byte_to_position(text, loc.start_byte as usize);
-            self.pc_lines.push(Some((loc.file, pos.line)));
         }
+        let indexes: HashMap<u32, LineIndex<'_>, AddrHashBuilder> = texts
+            .iter()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(&file, text)| (file, LineIndex::new(text)))
+            .collect();
+        for loc in &self.program_debug.debug_locs {
+            let line = loc
+                .is_known()
+                .then(|| indexes.get(&loc.file))
+                .flatten()
+                .map(|index| (loc.file, index.position(loc.start_byte as usize).line));
+            self.pc_lines.push(line);
+        }
+    }
+
+    /// `(line, column)` for the location at `pc`: recorded at compile time,
+    /// else read from the source file (older archives).
+    fn pc_line_column(&self, pc: usize, loc: &common::DebugLoc) -> Option<(u32, u32)> {
+        if let Some(line) = self.program_debug.line_at(pc) {
+            return Some((line.line, line.column));
+        }
+        let path = self.program_debug.source_files.get(loc.file as usize)?;
+        let text = std::fs::read_to_string(self.resolve_source_path(path)).ok()?;
+        let pos = byte_to_position(&text, loc.start_byte as usize);
+        Some((pos.line, pos.column))
     }
 
     /// Resolve PC → `(path, line, column)` when debug locs are known.
@@ -851,10 +884,9 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         let path = self.program_debug.source_files.get(loc.file as usize)?;
+        let (line, column) = self.pc_line_column(pc, loc)?;
         let resolved = self.resolve_source_path(path);
-        let text = std::fs::read_to_string(&resolved).ok()?;
-        let pos = byte_to_position(&text, loc.start_byte as usize);
-        Some((resolved.display().to_string(), pos.line, pos.column))
+        Some((resolved.display().to_string(), line, column))
     }
 
     pub fn debug_ip(&self) -> usize {
@@ -1076,10 +1108,8 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         let path = self.program_debug.source_files.get(loc.file as usize)?;
-        let read_path = self.resolve_source_path(path);
-        let text = std::fs::read_to_string(&read_path).ok()?;
-        let pos = byte_to_position(&text, loc.start_byte as usize);
-        Some(format!("{}:{}:{}", path, pos.line, pos.column))
+        let (line, column) = self.pc_line_column(panic_insn_ip, loc)?;
+        Some(format!("{}:{}:{}", path, line, column))
     }
 
     fn fn_symbol_at_ip(&self, ip: usize) -> Option<&str> {

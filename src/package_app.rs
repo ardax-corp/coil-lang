@@ -26,10 +26,10 @@ fn compile_program_archive_bytes(
 ) -> Result<Vec<u8>, ()> {
     let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let debug = pipeline.program_debug();
-    let (source_files, debug_locs) = if strip_debug {
-        (Vec::new(), Vec::new())
+    let (source_files, debug_locs, debug_lines) = if strip_debug {
+        (Vec::new(), Vec::new(), Vec::new())
     } else {
-        (debug.source_files, debug.debug_locs)
+        (debug.source_files, debug.debug_locs, debug.debug_lines)
     };
     let program = ArchivedProgram {
         version: ARCHIVE_VERSION,
@@ -46,6 +46,7 @@ fn compile_program_archive_bytes(
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
+        debug_lines,
     };
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
@@ -367,6 +368,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -389,6 +391,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -414,6 +417,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

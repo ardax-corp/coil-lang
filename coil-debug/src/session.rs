@@ -1194,6 +1194,7 @@ mod tests {
             source_files: vec![path.clone()],
             debug_locs: vec![DebugLoc::unknown(); 5],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let ret_off = text.find("return").unwrap() as u32;
         debug.debug_locs[3] = DebugLoc {
@@ -1217,6 +1218,7 @@ mod tests {
             source_files: vec![path.clone()],
             debug_locs: vec![DebugLoc::unknown(); 4],
             fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
         };
         let ret_off = text.find("return").unwrap() as u32;
         debug.debug_locs[2] = DebugLoc {
