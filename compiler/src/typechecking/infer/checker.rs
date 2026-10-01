@@ -5838,10 +5838,12 @@ impl Checker {
     /// Peel `Constructor` / structural `Sum` down to a nominal head so
     /// `Color::Red == Color::Blue` unifies as `Color` rather than as two
     /// incompatible constructor refinements.
+    /// A builtin `Option` / `Result` construct keeps its structural `Sum`
+    /// (its payload types), which unifies with `Option<T>` / `Result<T, E>`.
     fn peel_comparison_ty(ty: &Ty) -> Ty {
         match ty {
             Ty::Constructor { owner, .. } => Self::peel_comparison_ty(owner),
-            Ty::Sum { name, .. } => Ty::Con(name.clone()),
+            Ty::Sum { name, .. } if !common::is_poly_builtin_enum(name) => Ty::Con(name.clone()),
             other => other.clone(),
         }
     }
