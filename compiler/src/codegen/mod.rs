@@ -590,6 +590,11 @@ pub struct Compiler {
     functions: HashMap<String, usize>,
     /// Entry labels for names in [`Self::functions`] (step-3 binds).
     fn_entry_labels: HashMap<String, IlLabel>,
+    /// `Show` thunks of the builtin error enums: reserved up front, emitted
+    /// after the module only when a call used them (their variant names
+    /// would otherwise land in every archive's string table).
+    builtin_show_thunks: Vec<(String, &'static str, &'static [&'static str])>,
+    builtin_show_used: HashSet<String>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -917,6 +922,8 @@ impl Default for Compiler {
             aliases: HashMap::default(),
             functions: HashMap::with_capacity(32),
             fn_entry_labels: HashMap::with_capacity(32),
+            builtin_show_thunks: Vec::new(),
+            builtin_show_used: HashSet::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),

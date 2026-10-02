@@ -1510,6 +1510,9 @@ impl Compiler {
                 DebugLoc::unknown(),
                 ret_words,
             );
+            if self.builtin_show_thunks.iter().any(|(fqn, _, _)| fqn == name) {
+                self.builtin_show_used.insert(name.to_string());
+            }
             true
         } else {
             false

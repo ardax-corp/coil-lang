@@ -423,6 +423,15 @@ impl Generics {
     ///
     /// Convention: `{Class}__{concrete_type_str}__{method}`
     /// e.g. `Add__int__add`, `Lt__float__lt`, `Eq__string__eq`.
+    /// Builtin enums with a builtin `Show` instance, with their variants in
+    /// tag order (`Show__IoError__show` returns the variant's name).
+    pub const BUILTIN_SHOW_ENUMS: [(&'static str, &'static [&'static str]); 4] = [
+        (common::BUILTIN_IO_ERROR_ENUM, common::BUILTIN_IO_ERROR_VARIANTS),
+        (common::BUILTIN_THREAD_ERROR_ENUM, common::BUILTIN_THREAD_ERROR_VARIANTS),
+        (common::BUILTIN_ENV_ERROR_ENUM, common::BUILTIN_ENV_ERROR_VARIANTS),
+        (common::BUILTIN_FFI_ERROR_KIND_ENUM, common::BUILTIN_FFI_ERROR_KIND_VARIANTS),
+    ];
+
     pub fn builtin_instance_fqn(class: &str, ty_str: &str, method: &str) -> String {
         format!("{}__{}__{}", class, ty_str, method)
     }
@@ -846,6 +855,19 @@ impl Generics {
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
+
+        // The builtin error enums render as their variant name (`NotFound`).
+        for name in Self::BUILTIN_SHOW_ENUMS.iter().map(|(name, _)| *name) {
+            self.instances.push(InstanceDef {
+                class: "Show".into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                range: 0..0,
+                args: vec![Ty::Con(name.into())],
+                method_fqns: make_fqns("Show", name, &["show"]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
 
         for (ty, ty_str) in [
             (int(), "int"),
