@@ -1,4 +1,4 @@
-// Expected: compile failure — matching a raw int on Status is not a case.
+// Expected: E0102 — matching a raw int on Status is not a case.
 enum Status {
     Ok = 200,
     NotFound = 404,

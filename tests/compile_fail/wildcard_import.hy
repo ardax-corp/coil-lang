@@ -1,4 +1,4 @@
-// Expected: compile failure — wildcard import not allowed (E0124).
+// Expected: E0124 — wildcard import not allowed.
 use io::*;
 
 fn main() {}

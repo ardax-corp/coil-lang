@@ -1,4 +1,4 @@
-// Expected: compile failure — calling an FFI process-exec symbol requires `--allow-ffi-exec`.
+// Expected: E0409 — calling an FFI process-exec symbol requires `--allow-ffi-exec`.
 extern "plugin" {
     fn system() -> int;
 }

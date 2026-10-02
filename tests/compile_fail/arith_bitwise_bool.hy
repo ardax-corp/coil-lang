@@ -1,4 +1,4 @@
-// Expected: compile failure — bitwise operators take `int` / `byte`;
+// Expected: E0102 — bitwise operators take `int` / `byte`;
 // `&&` / `||` are the boolean connectives (#554).
 fn main() {
     let a = true & false;

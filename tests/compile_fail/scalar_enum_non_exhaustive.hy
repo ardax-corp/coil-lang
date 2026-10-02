@@ -1,4 +1,4 @@
-// Expected: compile failure — missing scalar case.
+// Expected: E0209 — missing scalar case.
 enum Status {
     Ok = 200,
     NotFound = 404,

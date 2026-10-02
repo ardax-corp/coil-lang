@@ -1,4 +1,4 @@
-// Expected: compile failure — each argument must parse as an expression.
+// Expected: E0001 — each argument must parse as an expression.
 use fn_macros::{square};
 
 fn main() {

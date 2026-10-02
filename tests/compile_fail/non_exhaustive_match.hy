@@ -1,4 +1,4 @@
-// Expected: compile failure — non-exhaustive match.
+// Expected: E0209 — non-exhaustive match.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

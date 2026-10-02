@@ -32,7 +32,7 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 
 | Path | Expectation |
 |------|-------------|
-| any `.hy` under a `compile_fail/` segment | the compiler must reject it with a diagnostic (a compiler panic is a failure) |
+| any `.hy` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// Expected: E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case |
 

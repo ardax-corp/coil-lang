@@ -1,4 +1,4 @@
-// Expected: compile failure — cannot assign to const class field.
+// Expected: E0107 — cannot assign to const class field.
 class Point {
     pub const x: int,
     pub y: int,

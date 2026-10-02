@@ -1,4 +1,4 @@
-// Expected: compile failure — %s requires string.
+// Expected: E0300 — %s requires string.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

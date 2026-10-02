@@ -1,4 +1,4 @@
-// Expected: compile failure — cannot index non-aggregate.
+// Expected: E0401 — cannot index non-aggregate.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

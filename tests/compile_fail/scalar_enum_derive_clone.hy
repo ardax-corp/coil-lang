@@ -1,4 +1,4 @@
-// Expected: compile failure — Clone is not derivable on payload or scalar enums.
+// Expected: E0119 — Clone is not derivable on payload or scalar enums.
 #[repr(int)]
 #[derive(Clone)]
 enum Status {

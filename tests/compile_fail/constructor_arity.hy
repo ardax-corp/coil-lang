@@ -1,4 +1,4 @@
-// Expected: compile failure — constructor arity mismatch.
+// Expected: E0204 — constructor arity mismatch.
 // Avoid Some/None: those collide with prelude Option.
 enum MyOpt {
     Yea(int),

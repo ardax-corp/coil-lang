@@ -174,7 +174,8 @@ pub fn print_help() {
          Usage:\n\
          \x20 coil test [OPTIONS] [PATH]\n\
          \n\
-         Files under a `compile_fail/` directory must be rejected by the compiler.\n\
+         Files under a `compile_fail/` directory must be rejected by the compiler\n\
+         with an error code their header declares (`// Expected: E0209 — why`).\n\
          \n\
          Options:\n\
          \x20 --fail-fast        Stop after the first failed case\n\

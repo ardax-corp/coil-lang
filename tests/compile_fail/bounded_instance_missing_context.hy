@@ -1,4 +1,4 @@
-// Expected: compile failure — `Describe for Box<T: Describe>` needs
+// Expected: E0119 — `Describe for Box<T: Describe>` needs
 // `Describe<Point>`, and there is none.
 class Box<T> {
     pub item: T,

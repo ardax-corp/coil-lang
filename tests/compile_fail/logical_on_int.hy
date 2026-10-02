@@ -1,7 +1,4 @@
-// Expected: compile failure — && requires bool operands.
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
+// Expected: E0102 — && requires bool operands.
 fn main() {
-    write_all(stdout(), to_bytes(format("%z", 1 && 2)));
+    let both = 1 && 2;
 }

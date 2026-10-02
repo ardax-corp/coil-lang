@@ -1,4 +1,4 @@
-// Expected: compile failure — the derive loops forever (step budget).
+// Expected: E0119 — the derive loops forever (step budget).
 use derive_macros_bad::{Spin};
 
 #[derive(Spin)]

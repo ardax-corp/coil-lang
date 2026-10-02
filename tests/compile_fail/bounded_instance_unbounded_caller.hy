@@ -1,4 +1,4 @@
-// Expected: compile failure — `T` has no `Describe` bound, so
+// Expected: E0119 — `T` has no `Describe` bound, so
 // `Describe<Box<T>>` cannot get its context.
 class Box<T> {
     pub item: T,

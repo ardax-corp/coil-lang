@@ -1,4 +1,4 @@
-// Expected: compile failure — duplicate same-arity same-type overload (E0121).
+// Expected: E0121 — duplicate same-arity same-type overload.
 fn f(int x) -> int {
     return x;
 }

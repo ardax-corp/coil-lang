@@ -84,10 +84,16 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     std::fs::create_dir_all(&cf).unwrap();
     std::fs::create_dir_all(&pos).unwrap();
 
-    // Type error under compile_fail/ ⇒ harness pass.
+    // Type error under compile_fail/, with its code declared ⇒ harness pass.
     std::fs::write(
         cf.join("bad.hy"),
-        "fn main() {\n  let x: int = \"no\";\n}\n",
+        "// Expected: E0102 — a string is not an int.\nfn main() {\n  let x: int = \"no\";\n}\n",
+    )
+    .unwrap();
+    // Rejected, but for another reason than the declared one ⇒ failure.
+    std::fs::write(
+        cf.join("wrong_reason.hy"),
+        "// Expected: E0209 — not what this file does.\nfn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
     // Well-typed under compile_fail/ ⇒ harness failure (inverted).
@@ -102,7 +108,7 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
     assert_eq!(passed, 2, "bad compile_fail + positive ok");
-    assert_eq!(failed, 1, "unexpected_ok under compile_fail must fail");
+    assert_eq!(failed, 2, "unexpected_ok and wrong_reason under compile_fail must fail");
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -350,4 +356,26 @@ fn cmd_test_returns_zero_when_the_suite_is_green() {
     let code = cmd_test(ReportConfig::default(), options(&root, false));
     assert_eq!(code, 0);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn compile_fail_header_declares_error_codes() {
+    let src = "// Expected: E0209 — non-exhaustive match.\n// E0999 in a later comment line is not a declaration.\nfn main() {}\n";
+    assert_eq!(declared_error_codes(src), vec!["E0209".to_string()]);
+    let two = "// Expected: E0410 or E0409 — either gate.\nfn main() {}\n";
+    assert_eq!(declared_error_codes(two), vec!["E0410", "E0409"]);
+    assert!(declared_error_codes("// Expected: compile failure.\n").is_empty());
+    assert!(declared_error_codes("fn main() {}\n// Expected: E0209\n").is_empty());
+}
+
+#[test]
+fn compile_fail_passes_only_on_a_declared_code() {
+    let src = "// Expected: E0209 — x.\n";
+    assert_eq!(compile_fail_verdict(src, "Error: [E0209] Non-exhaustive"), (true, None));
+    let (ok, why) = compile_fail_verdict(src, "Error: [E0001] unexpected `@`");
+    assert!(!ok);
+    assert_eq!(why.as_deref(), Some("expected E0209, compiler reported E0001"));
+    let (ok, why) = compile_fail_verdict("fn main() {}\n", "Error: [E0209] x");
+    assert!(!ok);
+    assert!(why.unwrap().contains("no expected error code"));
 }

@@ -1,4 +1,4 @@
-// Expected: compile failure — `{}` is not a format specifier, so both
+// Expected: E0119 — `{}` is not a format specifier, so both
 // arguments are surplus (the VM would silently drop them).
 use io::stdout;
 use io::sync::write_all;

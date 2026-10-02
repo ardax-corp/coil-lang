@@ -1,4 +1,4 @@
-// Expected: compile failure — the output is not an expression.
+// Expected: E0119 — the output is not an expression.
 use fn_macros_bad::{broken};
 
 fn main() {

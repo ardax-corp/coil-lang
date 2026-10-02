@@ -1,4 +1,4 @@
-// Expected: compile failure — macros cannot read the environment.
+// Expected: E0119 — macros cannot read the environment.
 use derive_macros_bad::{Peek};
 
 #[derive(Peek)]

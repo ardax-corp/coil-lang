@@ -1,4 +1,4 @@
-// Expected: compile failure — drop cannot be static (E0126).
+// Expected: E0126 — drop cannot be static.
 class Handle { pub fd: int }
 
 impl Handle {
