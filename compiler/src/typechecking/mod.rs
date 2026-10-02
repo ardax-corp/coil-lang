@@ -37,7 +37,7 @@ pub use aggregate_arith::{
 pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
 pub use def_id::{DefId, DefInterner, DefKind, ModuleId};
 #[allow(unused_imports)] // public API re-export
-pub use infer::{
+pub use infer::{TestTry, 
     CStructDef, CallbackSigDef, Checker, ForInCounted, ForInInfo, ForInKind, SelectedOverload,
     TypedSidecar,
 };

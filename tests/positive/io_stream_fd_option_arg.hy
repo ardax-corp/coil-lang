@@ -25,24 +25,12 @@ fn enable_like(Stream s, Option<string> ca) -> Result<Stream, IoError> {
 }
 
 test("Stream.fd ? with Option arg in two-word Result") {
-    let l = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    let n = match fd_with_opt(l, "localhost", false, Option::None) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "fd",
-    };
+    let l = listen("127.0.0.1", 0)?;
+    let n = fd_with_opt(l, "localhost", false, Option::None)?;
     assert(n >= 0)?;
 }
 
 test("two-word Result int ? into heap Result Stream") {
-    let l = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    match enable_like(l, Option::None) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "enable_like",
-    }
+    let l = listen("127.0.0.1", 0)?;
+    enable_like(l, Option::None)?;
 }

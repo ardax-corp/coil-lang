@@ -35,23 +35,11 @@ fn four_q(Stream s) -> Result<Stream, IoError> {
 }
 
 test("two-word Result int ? into heap Result keeps payload") {
-    let l = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    match take_q(l) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "take_q",
-    }
+    let l = listen("127.0.0.1", 0)?;
+    take_q(l)?;
 }
 
 test("four two-word Result int ? into heap Result") {
-    let l = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    match four_q(l) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "four_q",
-    }
+    let l = listen("127.0.0.1", 0)?;
+    four_q(l)?;
 }

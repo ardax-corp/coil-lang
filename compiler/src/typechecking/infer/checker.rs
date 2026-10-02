@@ -209,6 +209,8 @@ impl Checker {
             extern_variadic_nfixed: HashMap::new(),
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
+            in_test_case: false,
+            test_try_sites: HashMap::new(),
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
@@ -2806,7 +2808,9 @@ impl Checker {
                 let inner_ty = self.infer(inner);
                 self.current_expected = prev_expected;
                 let resolved = apply_ty_prune(&self.subst, &inner_ty);
-                if let Some((ok, err)) = result_ok_err(&resolved) {
+                if let Some(ty) = self.infer_test_try(&resolved, &range) {
+                    ty
+                } else if let Some((ok, err)) = result_ok_err(&resolved) {
                     let _ = self.ensure_result_mode(&err, &range);
                     ok
                 } else if is_option_ty(&resolved) {
@@ -11941,6 +11945,46 @@ impl Checker {
 
     /// Typecheck `test("desc") { body }`, name must be a string literal;
     /// body runs in Result<(), string> mode.
+    /// `?` in a test body on an `Option`, or on a `Result` whose error is a
+    /// concrete type other than `string`: the case fails with the error's
+    /// `Show` text (or on `None`) instead of requiring a `string` error, so a
+    /// test can write `let s = open(path, "w")?;` (#628). `None` here means
+    /// the ordinary `?` rules apply.
+    fn infer_test_try(&mut self, operand: &Ty, range: &Range<usize>) -> Option<Ty> {
+        if !self.in_test_case {
+            return None;
+        }
+        let key = (range.start, range.end);
+        if is_option_ty(operand) {
+            self.test_try_sites.insert(key, TestTry::NoneValue);
+            return Some(option_inner(operand).unwrap_or_else(|| Ty::Var(self.counter.fresh())));
+        }
+        let (ok, err) = result_ok_err(operand)?;
+        let err = apply_ty_prune(&self.subst, &err);
+        if matches!(err, Ty::Var(_)) || err == string() {
+            return None;
+        }
+        if !self.is_showable_for_format(&err) {
+            return Some(self.error_with_help(
+                ErrorCode::InvalidTry,
+                format!(
+                    "`?` in a test needs an error type with `Show`, found `{}`",
+                    self.diag_ty(&err)
+                ),
+                range.clone(),
+                Some("implement or derive `Show` for the error type, or `match` the result".into()),
+            ));
+        }
+        self.test_try_sites.insert(key, TestTry::ShowErr(err));
+        Some(ok)
+    }
+
+    /// How a test-body `?` at this span fails its case, when it does so
+    /// itself (see [`Self::infer_test_try`]).
+    pub fn test_try_at(&self, start: usize, end: usize) -> Option<&TestTry> {
+        self.test_try_sites.get(&(start, end))
+    }
+
     fn infer_test_case(&mut self, name: &Output, body: &Output, range: &Range<usize>) -> Ty {
         let name_ty = self.infer(name);
         self.unify(&name_ty, &string(), &name.0.into_range(), "test case name");
@@ -11966,10 +12010,12 @@ impl Checker {
         let prev_ret = self.current_return_ty.take();
         self.fn_result_mode = Some((unit_ty(), string()));
         self.current_return_ty = Some(unit_ty());
+        let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
 
         self.push_scope();
         let _ = self.infer(body);
         self.pop_scope();
+        self.in_test_case = prev_in_test;
 
         self.result_mode_fns.insert(fn_name);
         self.current_return_ty = prev_ret;
