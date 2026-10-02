@@ -10695,6 +10695,19 @@ impl Compiler {
             self.bytecode.push_return();
         }
 
+        // Show thunks for the builtin error enums: reserved here, emitted by
+        // `emit_used_builtin_show_thunks` once a call uses one.
+        for (enum_name, variants) in Generics::BUILTIN_SHOW_ENUMS {
+            let fqn = Generics::builtin_instance_fqn("Show", enum_name, "show");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.reserve_function_entry(fqn.clone());
+            if !self.builtin_show_thunks.iter().any(|(f, _, _)| *f == fqn) {
+                self.builtin_show_thunks.push((fqn, enum_name, variants));
+            }
+        }
+
         // Length__string__len: unbox (dict ABI) then ArrayLen (byte length).
         {
             let fqn = Generics::builtin_instance_fqn("Length", "string", "len");
@@ -19185,7 +19198,63 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
 
         self.bytecode.append(&mut program);
+        self.emit_used_builtin_show_thunks();
         self.pad_debug_locs();
+    }
+
+    /// Emit the reserved `Show` thunks of the builtin error enums that this
+    /// module called (behind a jump, so control never falls into them):
+    /// unbox (dict ABI; enums box as `Instance`, an unboxed value passes
+    /// through), dispatch on the tag, return the variant's name.
+    fn emit_used_builtin_show_thunks(&mut self) {
+        let due: Vec<_> = self
+            .builtin_show_thunks
+            .iter()
+            .filter(|(fqn, _, _)| {
+                self.builtin_show_used.contains(fqn) && !self.functions.contains_key(fqn)
+            })
+            .cloned()
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let mut skip = BlockBuilder::new();
+        let after = skip.fresh_label(self.bytecode.il_mut());
+        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        for (fqn, enum_name, variants) in due {
+            self.bind_function_entry(fqn);
+            let mut bb = BlockBuilder::new();
+            let labels: Vec<_> = variants
+                .iter()
+                .map(|_| bb.fresh_label(self.bytecode.il_mut()))
+                .collect();
+            self.bytecode.push_load(0);
+            self.bytecode.push_unbox_value(ValueTag::Instance as u32);
+            for (tag, label) in labels.iter().enumerate() {
+                bb.emit_jump_to(
+                    *label,
+                    BbJumpKind::JumpIfMatch {
+                        tag: tag as u32,
+                        arity: 0,
+                    },
+                    self.bytecode.il_mut(),
+                );
+            }
+            // Not one of the variants (unreachable for a well-typed value).
+            self.bytecode.push_pop();
+            let mut text = CodeBuf::new();
+            self.emit_raw_string_literal(&mut text, enum_name);
+            self.bytecode.append(&mut text);
+            self.bytecode.push_return();
+            for (variant, label) in variants.iter().zip(labels) {
+                bb.bind_label(label, self.bytecode.il_mut());
+                let mut text = CodeBuf::new();
+                self.emit_raw_string_literal(&mut text, variant);
+                self.bytecode.append(&mut text);
+                self.bytecode.push_return();
+            }
+        }
+        skip.bind_label(after, self.bytecode.il_mut());
     }
 
     /// Register `type_id → drop PC` via internal `gc_register_finalizer`.
