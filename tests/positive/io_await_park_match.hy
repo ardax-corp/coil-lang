@@ -15,10 +15,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     let listener = listen("127.0.0.1", 0)?;
     let addr = local_addr(listener)?;
     let client = connect("127.0.0.1", addr[1])?;
-    match await_readable(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "listen wait",
-    }
+    await_readable(listener)?;
     let server = accept(listener)?;
     return Result::Ok((client, server, listener));
 }
@@ -52,10 +49,7 @@ async fn http_write_response(Stream s) -> int {
 }
 
 test("await_readable match Ok after WouldBlock park") {
-    let triple = match connected_pair() {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "pair",
-    };
+    let triple = connected_pair()?;
     let c = triple[0];
     let s = triple[1];
     let listener = triple[2];
@@ -66,25 +60,13 @@ test("await_readable match Ok after WouldBlock park") {
     wait_ready();
     let n = resume reader;
     assert(n > 0)?;
-    match close(c) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close client",
-    }
-    match close(s) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close server",
-    }
-    match close(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close listener",
-    }
+    close(c)?;
+    close(s)?;
+    close(listener)?;
 }
 
 test("await_writable match Ok on connected socket") {
-    let triple = match connected_pair() {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "pair",
-    };
+    let triple = connected_pair()?;
     let c = triple[0];
     let s = triple[1];
     let listener = triple[2];
@@ -92,16 +74,7 @@ test("await_writable match Ok on connected socket") {
         Result::Ok(_) => {},
         Result::Err(_) => panic "await_writable treated Ok as Err",
     }
-    match close(c) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close client",
-    }
-    match close(s) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close server",
-    }
-    match close(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close listener",
-    }
+    close(c)?;
+    close(s)?;
+    close(listener)?;
 }

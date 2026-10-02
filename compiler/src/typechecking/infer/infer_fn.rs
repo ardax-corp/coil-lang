@@ -156,7 +156,9 @@ impl Checker {
 
         let ret_slot = Ty::Var(self.counter.fresh());
         let prev_ret = self.current_return_ty.replace(ret_slot.clone());
+        let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
         let body_ty = self.infer(body);
+        self.in_test_case = prev_in_test;
         self.unify(&ret_slot, &body_ty, &range, "lambda body");
         self.current_return_ty = prev_ret;
         self.lambda_uncaptured_outer = prev_uncaptured;
@@ -320,6 +322,8 @@ impl Checker {
         // function's own type remains `Result<T,E>` / `Option<T>`.
         let prev_result_mode = self.fn_result_mode.take();
         let prev_option_mode = self.fn_option_mode.take();
+        // A nested function or lambda is not the test body itself.
+        let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
         let return_slot = if is_coro {
             yield_slot.clone().unwrap_or_else(unit_ty)
         } else if let Some((ok, err)) = result_ok_err(&ret_ty) {
@@ -529,6 +533,7 @@ impl Checker {
         self.current_return_ty = prev_ret;
         self.fn_result_mode = prev_result_mode;
         self.fn_option_mode = prev_option_mode;
+        self.in_test_case = prev_in_test;
         fun_ty = Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), self_ty.is_some());
         self.unify(&Ty::Var(alpha), &fun_ty, range, "function type");
         self.reject_free_generic_option_return(name, is_generic, &param_vars, &fun_ty, range);

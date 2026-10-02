@@ -15,10 +15,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     let listener = listen("127.0.0.1", 0)?;
     let addr = local_addr(listener)?;
     let client = connect("127.0.0.1", addr[1])?;
-    match await_readable(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "listen wait",
-    }
+    await_readable(listener)?;
     let server = accept(listener)?;
     return Result::Ok((client, server, listener));
 }
@@ -58,42 +55,22 @@ test("200 sequential Connection-close GETs park then discard") {
     let i = 0;
     let total = 0;
     while i < 200 {
-        let triple = match connected_pair() {
-            Result::Ok(v) => v,
-            Result::Err(_) => panic "pair",
-        };
+        let triple = connected_pair()?;
         let c = triple[0];
         let s = triple[1];
         let listener = triple[2];
         let reader = http_read_after_wait(c);
         let n = resume reader;
-        match write(
-            s,
-            to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"),
-        ) {
-            Result::Ok(_) => {},
-            Result::Err(_) => panic "server write",
-        }
+        write(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))?;
         while !done(reader) {
             wait_ready();
             n = resume reader;
         }
-        if n < 2 {
-            panic "short";
-        }
+        assert(n >= 2)?;
         total = total + 2;
-        match close(c) {
-            Result::Ok(_) => {},
-            Result::Err(_) => panic "close client",
-        }
-        match close(s) {
-            Result::Ok(_) => {},
-            Result::Err(_) => panic "close server",
-        }
-        match close(listener) {
-            Result::Ok(_) => {},
-            Result::Err(_) => panic "close listener",
-        }
+        close(c)?;
+        close(s)?;
+        close(listener)?;
         i = i + 1;
     }
     assert(total == 400)?;

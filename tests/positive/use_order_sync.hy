@@ -8,8 +8,5 @@ use string::to_bytes;
 
 test("a userland module imported before io::sync") {
     assert(Path::from("a/b").as_str() == "a/b")?;
-    match write_all(stdout(), to_bytes("")) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "write_all",
-    }
+    write_all(stdout(), to_bytes(""))?;
 }

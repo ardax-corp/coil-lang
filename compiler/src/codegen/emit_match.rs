@@ -1052,7 +1052,7 @@ struct ArmTest {
 impl Compiler {
     /// `JumpIfMatch` / `Unpack` need an `ObjEnum`: compile a pointer-niche
     /// scrutinee as a heap enum (under `force_heap_*`, set by the caller).
-    fn emit_scrutinee_as_boxed(&mut self, scrutinee: &Output<'_>) {
+    pub(super) fn emit_scrutinee_as_boxed(&mut self, scrutinee: &Output<'_>) {
         if self.repr.force_heap_option
             && self.expr_layout(scrutinee).is_niche_option()
             && !Self::is_option_construct(scrutinee)

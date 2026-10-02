@@ -62,6 +62,16 @@ pub struct ExistentialPack {
     pub value_ty: Ty,
 }
 
+/// How a `?` in a test body fails the case when the operand is not `string`
+/// error-typed (#628).
+#[derive(Debug, Clone)]
+pub enum TestTry {
+    /// `Err(e)` fails with `e`'s `Show` text (`e: Show`, of this type).
+    ShowErr(Ty),
+    /// `None` fails the case.
+    NoneValue,
+}
+
 /// Runtime lowering strategy for `for x in expr` (unified Iterator protocol).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForInKind {
@@ -543,6 +553,11 @@ pub struct Checker {
     /// Enclosing function is in Result mode: bare `return` wraps `Ok`,
     /// `raise` produces `Err`. Holds `(Ok_ty, Err_ty)`.
     fn_result_mode: Option<(Ty, Ty)>,
+    /// Inside a `test("…") { … }` body (not a nested function or lambda):
+    /// `?` there may unwrap any showable error or an `Option` (#628).
+    in_test_case: bool,
+    /// Test-body `?` sites that fail the case themselves, by operand span.
+    test_try_sites: HashMap<(usize, usize), TestTry>,
 
     /// Enclosing function is in Option mode: `?` propagates `None`.
     fn_option_mode: Option<Ty>,

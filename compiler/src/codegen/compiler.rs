@@ -11765,6 +11765,65 @@ impl Compiler {
     /// `?` on a `[payload, tag]` pair: keep the payload on success; on
     /// failure return the pair (same two-slot ABI) or box it if the
     /// enclosing function is not two-slot.
+    /// `e?` in a test body whose failure the case reports itself (#628):
+    /// leave the `Ok` / `Some` payload, or fail the case with
+    /// `` `?` got Err(<e's Show text>) `` / `` `?` got None `` the way
+    /// `raise` would.
+    fn emit_test_try(&mut self, inner: &Output<'_>, kind: crate::typechecking::TestTry) {
+        use crate::typechecking::TestTry;
+        let layout = self.expr_layout(inner);
+        let outer = self.repr;
+        self.repr.force_heap_option |= layout.is_niche_option();
+        self.repr.force_heap_result |= layout.is_niche_unit_result() || layout.is_niche_result();
+        let mut inner_bc = self.do_compile(inner);
+        self.bytecode.append(&mut inner_bc);
+        self.emit_scrutinee_as_boxed(inner);
+        self.repr = outer;
+
+        let mut bb = BlockBuilder::new();
+        let ok = bb.fresh_label(self.bytecode.il_mut());
+        let success_tag = if matches!(kind, TestTry::NoneValue) { 1 } else { 0 };
+        bb.emit_jump_to(
+            ok,
+            BbJumpKind::JumpIfMatch {
+                tag: success_tag,
+                arity: 1,
+            },
+            self.bytecode.il_mut(),
+        );
+        match kind {
+            TestTry::ShowErr(err_ty) => {
+                // Miss: `Err(e)` is on the stack.
+                self.bytecode
+                    .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
+                self.emit_show_for_stack_value(&err_ty);
+                let shown = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(shown);
+                let mut fmt = CodeBuf::new();
+                self.emit_raw_string_literal(&mut fmt, "`?` got Err(%s)");
+                self.bytecode.append(&mut fmt);
+                self.bytecode.push_load(shown);
+                self.bytecode
+                    .push(Byte::new(Instruction::FORMAT).with_operand_u32(1));
+            }
+            TestTry::NoneValue => {
+                self.bytecode.push_pop();
+                let mut text = CodeBuf::new();
+                self.emit_raw_string_literal(&mut text, "`?` got None");
+                self.bytecode.append(&mut text);
+            }
+        }
+        if self.compiling_two_word_enum.is_some() {
+            self.bytecode.push_const(1);
+            self.push_return_two_word();
+        } else {
+            self.wrap_result_err_on_stack();
+            self.bytecode.push_return();
+        }
+        bb.bind_label(ok, self.bytecode.il_mut());
+        // The payload is left on the stack for the caller.
+    }
+
     fn emit_try_two_word_pair(&mut self, success_tag: u32, inner_kind: &str) {
         let mut bb = BlockBuilder::new();
         let success = bb.fresh_label(self.bytecode.il_mut());
@@ -18672,6 +18731,10 @@ impl Compiler {
                 }
             }
             Expression::Try(inner) => {
+                if let Some(kind) = self.checker.test_try_at(span.start, span.end).cloned() {
+                    self.emit_test_try(inner, kind);
+                    return bytecode;
+                }
                 // `e?`: Ok/Some leave payload else RETURN failure; two-slot stays [payload,tag].
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0

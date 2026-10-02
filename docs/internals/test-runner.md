@@ -36,6 +36,14 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case |
 
+A case body is checked in `Result<(), string>` mode, but its `?` is
+looser than a function's (#628). The checker records each such site in
+`Checker::test_try_sites`. A `Result` whose error type has `Show` but is
+not `string`, and any `Option`, lower in `emit_test_try`. That function
+returns ``Err("`?` got Err(<shown>)")`` or ``Err("`?` got None")`` instead
+of unifying with the case's error type. Helper functions and lambdas
+inside a case keep the ordinary `?` rules (`in_test_case` is reset).
+
 ## Order
 
 Files and the cases inside each file run in a **seeded random order** by

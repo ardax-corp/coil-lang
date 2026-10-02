@@ -13,44 +13,19 @@ fn fd_via_try(Stream s) -> Result<int, IoError> {
 }
 
 test("stdout has a fd") {
-    match stdout().fd() {
-        Result::Ok(n) => {
-            assert(n >= 0)?;
-        },
-        Result::Err(_) => {
-            panic "stdout fd";
-        },
-    }
+    assert(stdout().fd()? >= 0)?;
 }
 
 test("tcp listener fd is distinct from a connected client") {
-    let srv = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    let lfd = match srv.fd() {
-        Result::Ok(n) => n,
-        Result::Err(_) => panic "listener fd",
-    };
+    let srv = listen("127.0.0.1", 0)?;
+    let lfd = srv.fd()?;
     assert(lfd >= 0)?;
-    let addr = match local_addr(srv) {
-        Result::Ok(t) => t,
-        Result::Err(_) => panic "port",
-    };
+    let addr = local_addr(srv)?;
     let (_, port) = addr;
-    let cli = match connect("127.0.0.1", port) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "connect",
-    };
-    let cfd = match cli.fd() {
-        Result::Ok(n) => n,
-        Result::Err(_) => panic "client fd",
-    };
+    let cli = connect("127.0.0.1", port)?;
+    let cfd = cli.fd()?;
     assert(cfd >= 0)?;
     assert(cfd != lfd)?;
-    let via = match fd_via_try(cli) {
-        Result::Ok(n) => n,
-        Result::Err(_) => panic "fd try",
-    };
+    let via = fd_via_try(cli)?;
     assert(via == cfd)?;
 }
