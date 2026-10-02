@@ -31,7 +31,7 @@ fn first(Vec<int> xs) -> Option<int> {
 }
 
 test("io errors propagate with ?") {
-    let path = "/tmp/coil_test_try_any_error.txt";
+    let path = "coil_test_try_any_error.txt";
     let f = open(path, "w")?;
     write(f, to_bytes("hi"))?;
     close(f)?;
