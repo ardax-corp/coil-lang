@@ -53,20 +53,6 @@ pub fn par_expr_grain_for(site: &ParForkSite) -> i64 {
     }
 }
 
-/// True when every fork-tree node allocates a heap value (`EnumCtor`).
-///
-/// Such a site builds a heap structure the size of its fork tree, and every
-/// allocation made while a steal epoch is open takes the shared-heap lock with
-/// collection forbidden. Opening and closing each epoch also drains any
-/// incremental GC cycle with a full collection. Measured on `binary_trees`
-/// and a fib-shaped `build(30)` tree, the forked build is 1.5-4.7x slower than
-/// the sequential one at every worker count, so these sites never fork.
-/// `Tuple` combines are not refused: their arms return scalars (a tuple arm
-/// cannot recurse into its own site), so only the join allocates.
-pub fn combine_allocates_per_node(site: &ParForkSite) -> bool {
-    matches!(site.combine, ParCombine::EnumCtor { .. })
-}
-
 fn loose_expr_grain(base: i64) -> i64 {
     base.saturating_mul(DEFAULT_LOOSE_EXPR_GRAIN) / DEFAULT_EXPR_GRAIN.max(1)
 }
@@ -280,9 +266,6 @@ impl<'a> WorkEstimate<'a> {
     }
 
     fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
-        if self.sites.get(fn_name).is_some_and(combine_allocates_per_node) {
-            return false;
-        }
         self.nodes(fn_name, args, 0) > self.site_floor(fn_name)
     }
 
@@ -1500,10 +1483,6 @@ fn main() { return; }
             arm_args(build, 0),
             [ArgForm::ParamMinus { param: 0, sub: 1 }]
         );
-        // Every node allocates: detected, but never worth forking.
-        assert!(combine_allocates_per_node(build));
-        assert!(!args_worth_parallel(&sites, "build", &[40]));
-        assert_eq!(unary_dynamic_cutoff(&sites, "build"), None);
     }
 
     #[test]

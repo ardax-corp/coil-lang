@@ -335,11 +335,6 @@ those bits through Layer A collect before they land in a Coil slot. Nested
 AlwaysPar reuses the live epoch (`jobs` +1/−1); it is not a sendability
 issue.
 
-EnumCtor sites are now refused by the grain model (`combine_allocates_per_node`):
-building a whole tree under the epoch lock, with full collections at each
-epoch boundary, measured 1.5–4.7x slower than sequential
-([auto-par](auto-par.md#work-stealing-reactor)).
-
 No region nursery (C0 Q5): worker temps live on the shared Heap until the
 joiner’s post-epoch collect. Runtime freeze bit skipped (Q2); IPA arms are
 pure and 0-capture `MakeFn`. User `thread::spawn` stays isolate (Q4).
