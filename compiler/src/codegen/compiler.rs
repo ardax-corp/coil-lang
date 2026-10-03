@@ -12943,12 +12943,12 @@ impl Compiler {
             bytecode.append(&mut self.do_compile(lhs));
             bytecode.append(&mut self.do_compile(rhs));
         }
-        if matches!(
-            lhs_ty,
-            Some(crate::typechecking::ty::Ty::Con(ref name))
-                if name == crate::typechecking::ty::FLOAT
-        ) {
-            return true;
+        // A concrete codegen type decides. The id-walk fallback is only for
+        // operands without one: `emit_idx` can drift from the operand (e.g.
+        // after overload sets), and a stale id once turned `int * int` into
+        // `MULF` when it landed on a float node elsewhere in the module.
+        if let Some(crate::typechecking::ty::Ty::Con(ref name)) = lhs_ty {
+            return name == crate::typechecking::ty::FLOAT;
         }
         matches!(
             lhs_id.and_then(|id| self.checker.lookup_at(id)),
