@@ -1,7 +1,7 @@
 // `a + b` may append in place when `a` ends at its buffer's tail. Appending
 // to an older prefix must copy, never clobber a longer string that already
 // shares the buffer.
-use text::{join};
+use text::join;
 
 fn grow(string s, int n) -> string {
     let i = 0;

@@ -1,12 +1,14 @@
 // Regression: coil-stdlib num.hy (verbatim, minus coil-time). The float
 // overloads ahead of lcm once made its `a * b` compile to MULF, so
 // lcm(4, 6) returned 0.
-use prelude::math::{pow as float_pow};
+use prelude::math::pow as float_pow;
 
 // Circle constant π (IEEE f64). `///` would bind to a following `fn`.
 static const PI = 3.141592653589793;
+
 // Natural logarithm base e (IEEE f64).
 static const E = 2.718281828459045;
+
 // Full turn τ = 2π (IEEE f64).
 static const TAU = 6.283185307179586;
 
