@@ -1863,7 +1863,10 @@ fn fn_param_ids_do_not_overwrite_other_nodes() {
     // Parameter types used to be cached under the raw pre-order counter id.
     // Once the counter drifted, a later `float x` param landed on `lcm`'s
     // int `a`, and codegen compiled `a * b` to MULF.
-    let src = include_str!("../../../../tests/positive/overload_int_mul_after_float.hy");
+    // Windows checkouts may carry CRLF; spans below assume `\n`.
+    let src = include_str!("../../../../tests/positive/overload_int_mul_after_float.hy")
+        .replace("\r\n", "\n");
+    let src = src.as_str();
     let mut c = Checker::new();
     let ast = Pratt::default().parse(src).expect("parse");
     c.check_program(&ast);
