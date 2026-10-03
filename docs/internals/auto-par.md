@@ -49,7 +49,7 @@ independent pure calls — and collects **constant** call-site arguments
 | Combine | Source shape |
 |---|---|
 | `BinOp` | `f(…) ⊕ g(…)` (`+` / `-` / `*` / `^`); nested `+` / `*` / `^` flatten to N arms |
-| `EnumCtor` | `E::V(f(…), g(…))` (tuple or record payload) |
+| `EnumCtor` | `E::V(f(…), g(…))` (tuple or record payload); detected but **never forks** (below) |
 | `SelfCall` | `f(f(…), f(…), …)` (tak-style) |
 | `ApplyCall` | `h(f(…), g(…))` for a pure `h` |
 | `Tuple` | `(f(…), g(…))` |
@@ -281,9 +281,24 @@ for non-immediate args (empty maps → isolate). See
 
 C2 expression IPA (COI-364 E7 / COI-366 F1): parameterized AlwaysPar
 workers emit the same `thread_spawn_shared`. Fib/tak args are immediates
-(Layer A may steal without maps). EnumCtor/Tuple arms allocate on the shared
-Heap and publish the pointer at join (rooted through Layer A collect). User
+(Layer A may steal without maps). Tuple arms allocate on the shared Heap and
+publish the pointer at join (rooted through Layer A collect). User
 `thread::spawn` stays isolate.
+
+**EnumCtor sites never fork.** Such a site allocates at every fork-tree node, so the
+whole structure is built under the shared-heap lock with collection
+forbidden, and opening or closing each steal epoch drains any incremental
+GC cycle with a full collection. The forked build lost at every worker count
+(1, 2 and 4):
+
+| Load | Sequential | Forked |
+|---|---|---|
+| `build(30)` (fib-shaped `Tree`) | 0.32 s | 1.36–1.55 s |
+| `binary_trees` depth 16, with the inner `bottom_up` made loop-variant | 2.2 s | 3.2–3.7 s |
+
+[`combine_allocates_per_node`](../../compiler/src/typechecking/par_profit.rs)
+therefore makes `args_worth_parallel` refuse those sites. Revisit this once
+steal epochs can allocate without the lock and the forced collections.
 
 ## F3 — userland locks + hints (call-bag escapes)
 

@@ -5307,9 +5307,11 @@ fn main() {
     );
 }
 
-/// An `EnumCtor` combine forks both arms into a constructor, not a binop.
+/// An `EnumCtor` combine allocates at every fork-tree node, so it never
+/// forks: shared-heap steal epochs made `build(30)` 4.7x slower than
+/// sequential. The site is still detected; no worker is emitted.
 #[test]
-fn auto_par_enum_ctor_emits_spec_and_runs() {
+fn auto_par_enum_ctor_stays_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -5338,10 +5340,17 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
-        .expect("auto-par enum-ctor should compile");
+        .expect("enum-ctor fork site should compile");
     assert!(
-        pipeline.function_offset("__coil_par_build").is_some(),
-        "expected an enum-ctor worker for build"
+        pipeline.function_offset("__coil_par_build").is_none(),
+        "enum-ctor sites must not get a fork worker"
+    );
+    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    assert!(
+        !bytecode.iter().any(|b| {
+            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
+        }),
+        "enum-ctor sites must not HostInvoke thread_spawn_shared (id {shared_id})"
     );
     // `build` shares fib's recurrence, so the leaf count is fib(22).
     let output = run_bytecode(bytecode, constants, &pipeline, None);
@@ -6199,56 +6208,6 @@ fn main() {
     assert_eq!(
         encoded, 0,
         "C2 shared-heap fib spawn must not walk PortableValue (saw {encoded} encodes)"
-    );
-}
-
-/// EnumCtor IPA publishes heap pointers on the shared Heap (no graph copy).
-#[test]
-fn auto_par_enum_ctor_shared_heap_skips_portable_copy() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Tree {
-    Leaf,
-    Node(Tree, Tree),
-}
-#[max_depth(64)]
-fn build(int n) -> Tree {
-    if n <= 1 {
-        return Tree::Leaf();
-    }
-    return Tree::Node(build(n - 1), build(n - 2));
-}
-#[max_depth(64)]
-fn leaves(Tree t) -> int {
-    return match t {
-        Tree::Leaf => 1,
-        Tree::Node(l, r) => leaves(l) + leaves(r),
-    };
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", leaves(build(21)))));
-}
-"#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par enum-ctor should compile");
-    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
-    assert!(
-        bytecode.iter().any(|b| {
-            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
-        }),
-        "enum-ctor IPA should HostInvoke thread_spawn_shared (id {shared_id})"
-    );
-    machine::thread::reset_portable_encode_count();
-    let before = machine::thread::portable_encode_count();
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
-    assert_eq!(output, "17711");
-    let encoded = machine::thread::portable_encode_count() - before;
-    assert_eq!(
-        encoded, 0,
-        "C2 shared-heap enum-ctor spawn must not walk PortableValue (saw {encoded} encodes)"
     );
 }
 
