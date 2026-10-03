@@ -452,8 +452,7 @@ impl Checker {
                     ty,
                 } => {
                     // Consume the AssocTypeDef wrapper NodeId, then the RHS.
-                    let wrapper_id = self.ids.ids()[self.next_id_idx];
-                    self.next_id_idx += 1;
+                    let wrapper_id = self.next_walk_id(m);
                     self.cache.insert(wrapper_id, unit_ty());
                     let mut assoc_frame = HashMap::new();
                     let mut assoc_param_vars = Vec::new();

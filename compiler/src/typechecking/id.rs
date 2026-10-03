@@ -78,6 +78,11 @@ impl IdTable {
         id
     }
 
+    /// Source span recorded for a minted id.
+    pub fn span_of(&self, id: NodeId) -> Option<(usize, usize)> {
+        self.spans.get(id.0 as usize).copied()
+    }
+
     pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {
         let ptr = std::ptr::from_ref(node) as *const Output<'_> as usize;
         match self.by_expr_ptr.get(&ptr) {
