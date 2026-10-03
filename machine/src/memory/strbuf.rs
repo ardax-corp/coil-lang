@@ -18,7 +18,7 @@
 use std::alloc::{self, Layout};
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{fence, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::{fmt, mem, ptr, slice, str};
 
 /// Smallest capacity of a buffer created by concat.

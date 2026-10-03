@@ -711,6 +711,31 @@ pub const HOST_NATIVES: &[HostNative] = &[
         arity: 1,
         id: 138,
     },
+    HostNative {
+        name: "string_byte_at",
+        arity: 2,
+        id: 139,
+    },
+    HostNative {
+        name: "string_slice_bytes",
+        arity: 3,
+        id: 140,
+    },
+    HostNative {
+        name: "string_find_from",
+        arity: 3,
+        id: 141,
+    },
+    HostNative {
+        name: "string_rfind",
+        arity: 2,
+        id: 142,
+    },
+    HostNative {
+        name: "string_match_at",
+        arity: 3,
+        id: 143,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -747,6 +772,11 @@ pub const THREAD_SPAWN_SHARED_ID: u16 = 137;
 pub const THREAD_SPAWN_SHARED_NATIVE: &str = "thread_spawn_shared";
 pub const STREAM_FD_ID: u16 = 138;
 pub const STREAM_FD_NATIVE: &str = "stream_fd";
+/// First byte-offset `string` native (`string_byte_at`); the block runs
+/// through [`STRING_MATCH_AT_ID`] (archive minor 31).
+pub const STRING_BYTE_AT_ID: u16 = 139;
+/// Last byte-offset `string` native (`string_match_at`).
+pub const STRING_MATCH_AT_ID: u16 = 143;
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -794,7 +824,7 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 139);
+    assert!(HOST_NATIVES.len() == 144);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
@@ -806,6 +836,8 @@ const _: () = {
     assert!(HOST_NATIVES[136].id == SIMD_AXPY_REDUCE_ID);
     assert!(HOST_NATIVES[137].id == THREAD_SPAWN_SHARED_ID);
     assert!(HOST_NATIVES[138].id == STREAM_FD_ID);
+    assert!(HOST_NATIVES[139].id == STRING_BYTE_AT_ID);
+    assert!(HOST_NATIVES[143].id == STRING_MATCH_AT_ID);
 };
 
 /// HostInvoke id for a standard native name.

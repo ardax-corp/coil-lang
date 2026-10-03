@@ -452,6 +452,16 @@ pub enum StringBuiltin {
     Format,
     FromBytes,
     ToBytes,
+    /// `byte_at(s, i) -> int`: byte at offset `i`, or `-1`.
+    ByteAt,
+    /// `slice_bytes(s, start, end) -> Result<string, IoError>`.
+    SliceBytes,
+    /// `find_from(hay, needle, start) -> int`: offset, or `-1`.
+    FindFrom,
+    /// `rfind(hay, needle) -> int`: last offset, or `-1`.
+    Rfind,
+    /// `match_at(s, needle, at) -> bool`.
+    MatchAt,
 }
 
 impl StringBuiltin {
@@ -460,16 +470,16 @@ impl StringBuiltin {
             Self::Format => "format",
             Self::FromBytes => "from_bytes",
             Self::ToBytes => "to_bytes",
+            Self::ByteAt => "byte_at",
+            Self::SliceBytes => "slice_bytes",
+            Self::FindFrom => "find_from",
+            Self::Rfind => "rfind",
+            Self::MatchAt => "match_at",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "format" => Some(Self::Format),
-            "from_bytes" => Some(Self::FromBytes),
-            "to_bytes" => Some(Self::ToBytes),
-            _ => None,
-        }
+        Self::all().iter().copied().find(|k| k.as_str() == name)
     }
 
     pub fn native_name(self) -> Option<&'static str> {
@@ -477,11 +487,25 @@ impl StringBuiltin {
             Self::Format => None,
             Self::FromBytes => Some(IoBuiltin::FromBytes.native_name()),
             Self::ToBytes => Some(IoBuiltin::ToBytes.native_name()),
+            Self::ByteAt => Some("string_byte_at"),
+            Self::SliceBytes => Some("string_slice_bytes"),
+            Self::FindFrom => Some("string_find_from"),
+            Self::Rfind => Some("string_rfind"),
+            Self::MatchAt => Some("string_match_at"),
         }
     }
 
     pub fn all() -> &'static [StringBuiltin] {
-        &[Self::Format, Self::FromBytes, Self::ToBytes]
+        &[
+            Self::Format,
+            Self::FromBytes,
+            Self::ToBytes,
+            Self::ByteAt,
+            Self::SliceBytes,
+            Self::FindFrom,
+            Self::Rfind,
+            Self::MatchAt,
+        ]
     }
 }
 

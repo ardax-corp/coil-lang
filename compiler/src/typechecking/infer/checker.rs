@@ -987,6 +987,13 @@ impl Checker {
             StringBuiltin::Format => fun(&[string()], string()),
             StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), io_err)),
             StringBuiltin::ToBytes => fun(&[string()], bytes),
+            StringBuiltin::ByteAt => fun(&[string(), int()], int()),
+            StringBuiltin::SliceBytes => {
+                fun(&[string(), int(), int()], result_app_ty(string(), io_err))
+            }
+            StringBuiltin::FindFrom => fun(&[string(), string(), int()], int()),
+            StringBuiltin::Rfind => fun(&[string(), string()], int()),
+            StringBuiltin::MatchAt => fun(&[string(), string(), int()], boolean()),
         };
         Scheme::mono(ty)
     }
@@ -4757,8 +4764,8 @@ impl Checker {
                     StringBuiltin::Format => {
                         self.infer_string_format_call(reordered.as_slice(), range)
                     }
-                    StringBuiltin::FromBytes | StringBuiltin::ToBytes => {
-                        if kind == StringBuiltin::FromBytes
+                    _ => {
+                        if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
                             && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
                         {
                             self.register_builtin_io_error();
@@ -4788,8 +4795,8 @@ impl Checker {
             };
             return match kind {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
-                StringBuiltin::FromBytes | StringBuiltin::ToBytes => {
-                    if kind == StringBuiltin::FromBytes
+                _ => {
+                    if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
                         && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
                     {
                         self.register_builtin_io_error();

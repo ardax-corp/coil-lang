@@ -89,6 +89,8 @@ pub fn build_standard_host_natives(
     push_simd_axpy_reduce(&mut out, &mut register_id);
     push_thread_spawn_shared(&mut out, &mut register_id);
     push_stream_fd(&mut out, &mut register_id);
+    // Append-only after stream_fd: byte-offset `string` natives (minor 31).
+    push_string_bytes(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -244,6 +246,31 @@ fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
         };
         Ok(Some(as_result_value(heap, r)))
     })));
+}
+
+fn push_string_bytes(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::str_bytes::{
+        string_byte_at, string_find_from, string_match_at, string_rfind, string_slice_bytes,
+    };
+    let specs: &[(&str, usize, crate::HostValueFn)] = &[
+        ("string_byte_at", 2, string_byte_at),
+        ("string_slice_bytes", 3, string_slice_bytes),
+        ("string_find_from", 3, string_find_from),
+        ("string_rfind", 2, string_rfind),
+        ("string_match_at", 3, string_match_at),
+    ];
+    for &(name, arity, host) in specs {
+        let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
+            .expect("string byte native signature");
+        let id = out.len();
+        register_id(name, id);
+        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+            Ok(Some(host(heap, args)))
+        })));
+    }
 }
 
 /// Register each native on `machine` (same order as [`build_standard_host_natives`]).
@@ -1046,7 +1073,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some(common::STREAM_FD_NATIVE)
+            Some("string_match_at")
         );
         assert_eq!(attach, 119);
     }
@@ -1326,6 +1353,10 @@ mod tests {
             registrations.get(end + 2).map(|(n, _)| n.as_str()),
             Some(common::STREAM_FD_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 3);
+        assert_eq!(
+            registrations.get(end + 3).map(|(n, _)| n.as_str()),
+            Some("string_byte_at")
+        );
+        assert_eq!(registrations.len(), end + 8);
     }
 }
