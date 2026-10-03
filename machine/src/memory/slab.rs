@@ -391,6 +391,45 @@ impl Slab {
         self.carve_page(slot_size, align)
     }
 
+    /// Size class of `layout`: the key a batch of its slots is filed under.
+    pub fn class_of(layout: Layout) -> (u32, u32) {
+        let (slot_size, align) = slot_dims(layout);
+        (slot_size as u32, align as u32)
+    }
+
+    /// Hand out `n` slots of `layout`'s class at once (a steal-epoch
+    /// mutator's allocation batch). The slots stay poisoned until written.
+    /// Like the free list, the batch is popped from the back, and its last
+    /// slot is the one a plain [`Self::alloc`] would have returned first.
+    pub fn alloc_batch(&mut self, layout: Layout, n: usize, out: &mut Vec<NonNull<u8>>) {
+        let start = out.len();
+        out.reserve(n);
+        for _ in 0..n {
+            out.push(self.alloc(layout));
+        }
+        out[start..].reverse();
+    }
+
+    /// Return never-written slots of class `key` from a batch. The batch
+    /// keeps free-list order, so the next alloc hands out the same slot it
+    /// would have if the batch had never been taken.
+    pub fn give_back(&mut self, key: (u32, u32), slots: &mut Vec<NonNull<u8>>) {
+        if slots.is_empty() {
+            return;
+        }
+        if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
+            class.slots.append(slots);
+            return;
+        }
+        let rest = std::mem::take(slots);
+        let low_water = rest.len();
+        self.free.push(FreeClass {
+            key,
+            slots: rest,
+            low_water,
+        });
+    }
+
     pub fn free(&mut self, ptr: NonNull<u8>) {
         let Some((_, meta)) = self.chunk_for(ptr.as_ptr() as u64) else {
             debug_assert!(false, "slab free of unmapped pointer");

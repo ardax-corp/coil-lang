@@ -641,6 +641,10 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         Ok(Err(tag)) => Err(tag),
         Err(_) => Err(ThreadErrorTag::JoinFailed),
     };
+    if shared {
+        // Before the joiner can see the result and close the epoch.
+        vm.heap_mut().flush_epoch_batch();
+    }
     state.store_result(stored);
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();

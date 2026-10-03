@@ -2996,7 +2996,10 @@ impl<const S: usize> Machine<S> {
             return;
         }
         // Exit STW on the epoch Heap (root owned slab, or the borrowed ptr).
+        // Every worker flushed its batch before publishing; this thread's goes
+        // back while the lock is still installed.
         unsafe {
+            (*e.heap_ptr()).flush_epoch_batch();
             (*e.heap_ptr()).exit_epoch_stw();
         }
         self.shared_epoch = None;
