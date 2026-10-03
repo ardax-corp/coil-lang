@@ -348,8 +348,19 @@ Mark **Q** items that E6 must not guess silently.
    are mandatory before steal ships.
 2. **Runtime freeze bit** vs type-only `readonly` / purity. Defense in depth
    vs hot-path header checks.
-3. **Heap lock.** Mutex around `Heap::alloc` + collect is enough for C1 if
-   disjoint stores never take the lock. Per-size-class locks are later.
+3. **Heap lock.** Mutex around heap-structure mutation (interning, unit
+   enums, resize accounting, collect). `Heap::alloc` no longer takes it per
+   object: each mutator thread takes a batch of 64 slots per size class
+   under the lock and writes objects into them lock-free (`EpochBatch` in
+   `memory/heap.rs`). Byte / object counts fold back on the next refill;
+   leftovers go back to the free list before the epoch closes (a worker
+   flushes before it publishes its join result, the root in
+   `end_shared_steal`). Untaken slots are poisoned like any free slot, and no
+   collection runs inside an epoch, so a batch is invisible to the GC.
+   Measured on `binary_trees` (inner `bottom_up` made loop-variant, depth 16):
+   auto-par 3.4–3.7 s → 2.1–2.3 s, sequential 2.2 s; fib-shaped
+   `build(30)`: 1.36–1.55 s → 0.73 s (sequential 0.32 s; the remaining gap is
+   the forced collections at epoch boundaries and the GC-free epoch heap).
    `Gc::payload_mut` stays a clippy deny — disjoint element writes should
    use the existing `StoreIndex*` paths under the proof, not a new
    unsound `payload_mut` story.

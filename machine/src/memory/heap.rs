@@ -23,6 +23,47 @@ const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
+/// Slots one steal-epoch mutator takes per size class under the epoch lock.
+const EPOCH_BATCH: usize = 64;
+
+/// One size class's untaken slots: `(slot size, align)` and the slots.
+type BatchClass = ((u32, u32), Vec<NonNull<u8>>);
+
+/// One thread's allocation batch for the open steal epoch.
+///
+/// During a Layer A epoch every mutator shares one [`Heap`], so a plain
+/// `alloc` takes the epoch lock. Instead, a mutator takes [`EPOCH_BATCH`]
+/// slots of a size class under the lock once, then writes objects into them
+/// without it, and folds the byte / object counts back in on the next refill.
+/// Untaken slots stay poisoned (`kind == 0`), which is what a free slot looks
+/// like, and no collection runs inside an epoch, so a batch is invisible to
+/// the GC. [`Heap::flush_epoch_batch`] returns the leftovers before the
+/// epoch's last job ends (workers before publishing their result, the root
+/// before it leaves the epoch).
+#[derive(Default)]
+struct EpochBatch {
+    /// The epoch heap the slots belong to; null while the batch is empty.
+    heap: *const Heap,
+    classes: Vec<BatchClass>,
+    bytes: usize,
+    objects: usize,
+    weaks: usize,
+}
+
+impl EpochBatch {
+    fn is_empty(&self) -> bool {
+        self.classes.iter().all(|(_, v)| v.is_empty())
+            && self.bytes == 0
+            && self.objects == 0
+            && self.weaks == 0
+    }
+}
+
+thread_local! {
+    static EPOCH_BATCH_TLS: std::cell::RefCell<EpochBatch> =
+        std::cell::RefCell::new(EpochBatch::default());
+}
+
 /// Collector phase. `Idle` means the last cycle finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcPhase {
@@ -213,8 +254,89 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        let _epoch_guard = self.epoch_guard();
+        if unlikely(!self.alloc_lock.is_null()) {
+            return self.alloc_from_epoch_batch(data, map);
+        }
         self.alloc_unlocked(data, map)
+    }
+
+    /// Steal-epoch alloc: write into this thread's batch, taking the epoch
+    /// lock only to refill it (see [`EpochBatch`]).
+    #[inline(never)]
+    fn alloc_from_epoch_batch<T: GcSized, F>(&mut self, data: T, map: F) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
+        debug_assert_eq!(self.gc_phase, GcPhase::Idle, "steal epochs open with GC idle");
+        let layout = Layout::new::<GcData<T>>();
+        let key = Slab::class_of(layout);
+        let me: *const Heap = self;
+        let slot = EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            debug_assert!(
+                batch.heap.is_null() || batch.heap == me,
+                "epoch batch left over from another heap"
+            );
+            batch.heap = me;
+            let at = match batch.classes.iter().position(|(k, _)| *k == key) {
+                Some(at) => at,
+                None => {
+                    batch.classes.push((key, Vec::with_capacity(EPOCH_BATCH)));
+                    batch.classes.len() - 1
+                }
+            };
+            if let Some(p) = batch.classes[at].1.pop() {
+                return p;
+            }
+            let _epoch_guard = self.epoch_guard();
+            self.fold_epoch_counts(&mut batch);
+            let slots = &mut batch.classes[at].1;
+            self.slab.alloc_batch(layout, EPOCH_BATCH, slots);
+            slots.pop().expect("epoch batch refill")
+        });
+        let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
+        EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            batch.bytes += object.size();
+            batch.objects += 1;
+            if matches!(object, Object::Weak(_)) {
+                batch.weaks += 1;
+            }
+        });
+        crate::vm::note_heap_alloc();
+        (object, content)
+    }
+
+    /// Add a batch's pending byte / object counts to the heap (lock held).
+    fn fold_epoch_counts(&mut self, batch: &mut EpochBatch) {
+        self.alloc_bytes += std::mem::take(&mut batch.bytes);
+        self.live_count += std::mem::take(&mut batch.objects);
+        self.weak_count += std::mem::take(&mut batch.weaks);
+    }
+
+    /// Give this thread's unused epoch slots back and fold its counts in.
+    ///
+    /// Every mutator calls this before the epoch's last job ends: a worker
+    /// before it publishes its join result, the root before it leaves the
+    /// epoch. A no-op outside an epoch or with an empty batch.
+    pub fn flush_epoch_batch(&mut self) {
+        EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            if batch.is_empty() {
+                batch.heap = ptr::null();
+                return;
+            }
+            debug_assert!(
+                std::ptr::eq(batch.heap, self),
+                "epoch batch flushed into another heap"
+            );
+            let _epoch_guard = self.epoch_guard();
+            self.fold_epoch_counts(&mut batch);
+            for (key, slots) in &mut batch.classes {
+                self.slab.give_back(*key, slots);
+            }
+            batch.heap = ptr::null();
+        });
     }
 
     /// Serializes heap-structure mutation while a shared-heap steal epoch is
@@ -231,18 +353,7 @@ impl Heap {
     {
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
-        // Write the header and the payload straight into the slot. Building a
-        // `GcData` on the stack first cost a second payload copy, and its
-        // misaligned read-back straddled the separately stored header bytes
-        // (a store-forwarding stall on every allocation).
-        unsafe {
-            let p = slot.as_ptr();
-            ptr::addr_of_mut!((*p).header).write(GcHeader::new());
-            ptr::addr_of_mut!((*p).data).write(data);
-        }
-        let content = Gc::from_slot(slot);
-        let object = map(content);
-        content.set_kind(object.kind());
+        let (object, content) = Self::init_slot(slot, data, map);
         let size = object.size();
         self.alloc_bytes += size;
         self.live_count += 1;
@@ -268,6 +379,27 @@ impl Heap {
             object.addr()
         );
 
+        (object, content)
+    }
+
+    /// Write a fresh object into a slab slot and stamp its kind.
+    #[inline(always)]
+    fn init_slot<T: GcSized, F>(slot: NonNull<GcData<T>>, data: T, map: F) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
+        // Write the header and the payload straight into the slot. Building a
+        // `GcData` on the stack first cost a second payload copy, and its
+        // misaligned read-back straddled the separately stored header bytes
+        // (a store-forwarding stall on every allocation).
+        unsafe {
+            let p = slot.as_ptr();
+            ptr::addr_of_mut!((*p).header).write(GcHeader::new());
+            ptr::addr_of_mut!((*p).data).write(data);
+        }
+        let content = Gc::from_slot(slot);
+        let object = map(content);
+        content.set_kind(object.kind());
         (object, content)
     }
 
@@ -4006,16 +4138,47 @@ mod tests {
                         let (o, _) = heap.alloc(ObjString::from("x"), Object::String);
                         assert!(heap.find_object_by_addr(o.addr()).is_some());
                     }
+                    // A worker hands its batch back before it publishes.
+                    heap.flush_epoch_batch();
                 });
             }
         });
         heap.exit_epoch_stw();
+        // 500 interned keys plus 4 × 2000 batch allocations, all counted.
+        assert_eq!(heap.live_object_count(), 500 + 4 * 2000);
         for i in 0..500 {
             let key = format!("k{i}");
             let a = heap.intern_str(&key);
             let b = heap.intern_str(&key);
             assert!(Gc::ptr_eq(a, b), "{key} interned twice");
         }
+    }
+
+    /// An epoch batch hands out the same slots a plain alloc would, and its
+    /// unused slots go back to the free list on flush.
+    #[test]
+    fn epoch_batch_matches_plain_alloc_and_returns_leftovers() {
+        let mut plain = Heap::default();
+        let plain_addrs: Vec<u64> = (0..3)
+            .map(|_| plain.alloc(ObjString::from("p"), Object::String).0.addr())
+            .collect();
+        let next_plain = plain.alloc(ObjString::from("p"), Object::String).0.addr();
+
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        heap.enter_epoch_stw(&lock);
+        let addrs: Vec<u64> = (0..3)
+            .map(|_| heap.alloc(ObjString::from("p"), Object::String).0.addr())
+            .collect();
+        heap.flush_epoch_batch();
+        heap.exit_epoch_stw();
+        assert_eq!(heap.live_object_count(), 3);
+        // Same carve, so the same offsets inside each heap's first chunk.
+        let rel = |v: &[u64]| v.iter().map(|a| a - v[0]).collect::<Vec<_>>();
+        assert_eq!(rel(&addrs), rel(&plain_addrs));
+        let next = heap.alloc(ObjString::from("p"), Object::String).0.addr();
+        assert_eq!(next - addrs[0], next_plain - plain_addrs[0]);
+        assert_eq!(heap.live_object_count(), 4);
     }
 
     /// Allocs between sweep quanta prepend to `head`; freeing the old dead
