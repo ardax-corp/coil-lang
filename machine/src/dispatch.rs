@@ -227,6 +227,12 @@ pub(super) fn dense_unary(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, st
 
 #[inline(always)]
 pub(super) fn load(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) {
+    if let Some(slot) = opcode.load_store_single_slot() {
+        let slot = slot as usize;
+        promise!(sp + slot < stack_cap);
+        stack.push(stack[sp + slot]);
+        return;
+    }
     let count = opcode.load_store_count();
     for i in 0..count {
         let slot = opcode.load_store_slot_at(i) as usize;
@@ -237,6 +243,16 @@ pub(super) fn load(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap
 
 #[inline(always)]
 pub(super) fn store(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) {
+    if let Some(slot) = opcode.load_store_single_slot() {
+        let slot = sp + slot as usize;
+        promise!(slot < stack_cap);
+        let val = stack.pop();
+        stack[slot] = val;
+        if stack.tell() <= slot {
+            stack.seek(slot + 1);
+        }
+        return;
+    }
     let count = opcode.load_store_count();
     let mut max_slot = sp;
     for i in 0..count {

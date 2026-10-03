@@ -20,9 +20,49 @@ use crate::memory::{Heap, Member, Object};
 
 /// Deep / structural equality for VM values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
+    if let Some(eq) = flat_eq(heap, a, b) {
+        return eq;
+    }
     let mut fwd = HashMap::new();
     let mut rev = HashMap::new();
     values_eq_rec(heap, a, b, &mut fwd, &mut rev)
+}
+
+/// Answer without the cycle maps when no address can be visited twice:
+/// identical words, non-heap words, strings, and enums whose payload is at
+/// most one word that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
+/// `None` means the value needs the full walk.
+fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
+    if a.raw() == b.raw() {
+        return Some(true);
+    }
+    let aa = a.raw() as u64;
+    let bb = b.raw() as u64;
+    if aa == 0 || bb == 0 || (aa & 1) != (bb & 1) {
+        return Some(false);
+    }
+    if (aa & 1) != 0 {
+        return flat_eq(heap, Value::from(aa & !1), Value::from(bb & !1));
+    }
+    let (Some(oa), Some(ob)) = (heap.find_object_by_addr(aa), heap.find_object_by_addr(bb)) else {
+        return Some(false);
+    };
+    match (oa, ob) {
+        (Object::String(ga), Object::String(gb)) => Some(ga.as_ref().data == gb.as_ref().data),
+        (Object::Enum(ga), Object::Enum(gb)) => {
+            let (ea, eb) = (ga.as_ref(), gb.as_ref());
+            if ea.tag != eb.tag || ea.payload.len() != eb.payload.len() {
+                return Some(false);
+            }
+            match ea.payload.len() {
+                0 => Some(true),
+                1 => flat_eq(heap, ea.payload[0], eb.payload[0]),
+                _ => None,
+            }
+        }
+        (Object::Array(_) | Object::Tuple(_) | Object::Boxed(_), _) => None,
+        _ => Some(false),
+    }
 }
 
 fn values_eq_rec(
@@ -184,6 +224,29 @@ mod tests {
         assert!(values_eq(&heap, err(sa.addr()), err(sb.addr())));
         assert!(!values_eq(&heap, err(sa.addr()), err(sc.addr())));
         assert!(!values_eq(&heap, err(sa.addr()), Value::from(sb.addr())));
+    }
+
+    #[test]
+    fn flat_enum_with_array_payload_takes_full_walk() {
+        let mut heap = Heap::default();
+        let arr = |heap: &mut Heap, v: i64| {
+            let (a, _) = heap.alloc(ObjArray::new(vec![Value::from(v)]), Object::Array);
+            a.addr()
+        };
+        let (a1, a2, a3) = (arr(&mut heap, 1), arr(&mut heap, 1), arr(&mut heap, 2));
+        let some = |heap: &mut Heap, addr: u64| {
+            heap.alloc_enum_value(0, EnumPayload::one(Value::from(addr)))
+        };
+        let (e1, e2, e3) = (some(&mut heap, a1), some(&mut heap, a2), some(&mut heap, a3));
+        assert_eq!(flat_eq(&heap, e1, e2), None, "array payload needs the cycle-aware walk");
+        assert!(values_eq(&heap, e1, e2));
+        assert!(!values_eq(&heap, e1, e3));
+
+        let (sa, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let (sb, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let (sa, sb) = (sa.addr(), sb.addr());
+        let (oa, ob) = (some(&mut heap, sa), some(&mut heap, sb));
+        assert_eq!(flat_eq(&heap, oa, ob), Some(true));
     }
 
     #[test]
