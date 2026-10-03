@@ -1650,17 +1650,30 @@ impl<const S: usize> Machine<S> {
         match self.heap.gc_phase() {
             crate::memory::GcPhase::Idle => {
                 if self.heap.should_collect() {
-                    #[cfg(any(test, feature = "vm_profile"))]
-                    VM_GC_COUNT.with(|c| {
-                        c.fetch_add(1, Ordering::Relaxed);
-                    });
-                    self.gc_start_mark();
-                    self.gc_mark_slice();
+                    self.gc_start_incremental();
                 }
             }
             crate::memory::GcPhase::Marking => self.gc_mark_slice(),
             crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
         }
+    }
+
+    /// Open a cycle: mark to completion now, leave the sweep to later
+    /// safepoints.
+    fn gc_start_incremental(&mut self) {
+        #[cfg(any(test, feature = "vm_profile"))]
+        VM_GC_COUNT.with(|c| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        self.gc_start_mark();
+        self.gc_mark_slice();
+    }
+
+    /// Finish a pending lazy sweep in one go.
+    fn gc_finish_sweep(&mut self) {
+        self.heap.finish_sweep();
+        self.invalidate_program_string_cache();
+        self.gc_compact();
     }
 
     #[inline(never)]
@@ -2972,6 +2985,11 @@ impl<const S: usize> Machine<S> {
             e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(std::sync::Arc::clone(e));
         }
+        // A lazy sweep left over from the last cycle only needs finishing;
+        // a fresh full collect here would re-mark the whole heap.
+        if self.heap.get().gc_is_sweeping() {
+            self.gc_finish_sweep();
+        }
         if !self.heap.get().gc_is_idle() || self.heap.get().should_collect() {
             self.gc_collect();
         }
@@ -3008,7 +3026,13 @@ impl<const S: usize> Machine<S> {
         }
         self.steal_join_root = published;
         if self.heap.get().should_collect() {
-            self.gc_collect();
+            // Same incremental start as an alloc safepoint: mark now (with
+            // `published` rooted), sweep lazily from later safepoints.
+            if self.gc_in_progress {
+                self.gc_collect();
+            } else {
+                self.gc_start_incremental();
+            }
         }
         self.steal_join_root = Value::default();
     }

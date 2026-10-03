@@ -274,7 +274,7 @@ is mapped). User `thread::spawn` stays on this path.
 C1 shared-heap loop steal (COI-365 E6): counted-loop chunks submit
 `SpawnArg::Shared` `Value` bits onto one Heap (helpers **bind** that Heap;
 they do not `reset_isolate_heap` unmap it). Layer A epoch STW: no collect
-during the steal; a stolen chunk that would GC aborts to sequential /
+during the steal; a stolen chunk that outgrows the epoch GC ceiling aborts to sequential /
 isolate fallback; the joiner collects after `end_steal`. Maps are mandatory
 for non-immediate args (empty maps → isolate). See
 [shared-heap-sendability.md](shared-heap-sendability.md).
