@@ -907,7 +907,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
     match p {
         PortableValue::Immediate(raw) => Ok(Value::from(raw as *mut u8)),
         PortableValue::String(s) => {
-            let gc = heap.intern(s);
+            let gc = heap.alloc_string(s);
             Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
         }
         PortableValue::Array(elems) => {

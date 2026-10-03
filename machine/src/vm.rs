@@ -2254,8 +2254,8 @@ impl<const S: usize> Machine<S> {
     /// The intern table is a cache, not a GC root, unmarked interned strings
     /// are swept. The new object must be on the operand stack before
     /// [`Self::gc_collect`] so it survives the cycle.
-    fn push_interned_string(&mut self, data: String, ip: usize) {
-        let gc_string = self.heap.intern(data);
+    fn push_new_string(&mut self, data: String, ip: usize) {
+        let gc_string = self.heap.alloc_string(data);
         self.stack
             .push(Value::from(gc_string.as_ptr() as *mut u8 as u64));
         self.maybe_gc_after_alloc(ip);

@@ -261,7 +261,7 @@ impl<const S: usize> Machine<S> {
                             }
                         }
 
-                        self.push_interned_string(message, ip);
+                        self.push_new_string(message, ip);
                     }
                 }
                 Instruction::STRINGIFY => {
@@ -270,7 +270,7 @@ impl<const S: usize> Machine<S> {
                     // raw immediate (treated as int).
                     let v = self.stack.pop();
                     let text = Self::stringify_value(&self.heap, v);
-                    self.push_interned_string(text, ip);
+                    self.push_new_string(text, ip);
                 }
                 Instruction::PRINT => {
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
@@ -311,7 +311,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::INIT => {
                     let (_, mut r) = self.heap.alloc(ObjInstance::default(), Object::Instance);
                     let _ = r.as_mut();
-                    // Root before GC, same rule as `push_interned_string`.
+                    // Root before GC, same rule as `push_new_string`.
                     self.stack.push(Value::from(r.as_ptr().addr() as u64));
                     self.maybe_gc_after_alloc(ip);
                 }
@@ -1784,7 +1784,7 @@ impl<const S: usize> Machine<S> {
                             let sa = Self::object_string_value(&self.heap, &a_inner);
                             let sb = Self::object_string_value(&self.heap, &b_inner);
                             // Root before any GC (same as FORMAT/STRING).
-                            self.push_interned_string(sa + &sb, ip);
+                            self.push_new_string(sa + &sb, ip);
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Continue;
