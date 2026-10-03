@@ -9,6 +9,7 @@ use std::alloc::Layout;
 use std::collections::HashMap;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{promise, unlikely};
 
@@ -428,6 +429,13 @@ impl Heap {
         self.intern_new(data, hash)
     }
 
+    /// Allocate a runtime string without interning it. Equality compares
+    /// content, and table keys are interned on use ([`Self::intern_ref`]),
+    /// so values built by concat / format / decoding skip the intern hash.
+    pub fn alloc_string(&mut self, data: String) -> RefString {
+        self.alloc(ObjString::new(data), Object::String).1
+    }
+
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
         crate::vm::note_intern_str();
@@ -443,7 +451,7 @@ impl Heap {
     pub fn intern_ref(&mut self, string: RefString) -> RefString {
         let _epoch_guard = self.epoch_guard();
         let data = string.as_ref();
-        if let Some(s) = self.strings.find(&data.data, data.hash) {
+        if let Some(s) = self.strings.find(&data.data, data.hash_code()) {
             return s;
         }
         self.strings.insert(string, ());
@@ -451,7 +459,7 @@ impl Heap {
     }
 
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
-        let obj_string = ObjString { data, hash };
+        let obj_string = ObjString::with_hash(data, hash);
         let (_, s) = self.alloc_unlocked(obj_string, Object::String);
         self.strings.insert(s, ());
         s
@@ -2146,12 +2154,48 @@ impl GcSized for ObjEnum {
 }
 
 /// The content of a heap-allocated string object.
+///
+/// The content hash is computed on first use ([`Self::hash_code`]): only
+/// intern-table keys and `Hash` on `string` need it, so a string built at
+/// runtime (concat, format, `from_bytes`) never pays for a full-length hash.
 pub struct ObjString {
     pub data: String,
-    pub hash: u32,
+    /// `HASH_SET | hash` once computed, 0 before. Atomic (relaxed) because
+    /// steal-epoch workers may hash the same shared string concurrently.
+    hash: AtomicU64,
 }
 
+const HASH_SET: u64 = 1 << 32;
+
 impl ObjString {
+    /// A string whose hash is computed lazily.
+    #[must_use]
+    pub fn new(data: String) -> Self {
+        Self {
+            data,
+            hash: AtomicU64::new(0),
+        }
+    }
+
+    fn with_hash(data: String, hash: u32) -> Self {
+        Self {
+            data,
+            hash: AtomicU64::new(HASH_SET | u64::from(hash)),
+        }
+    }
+
+    /// Content hash ([`Self::hash`] of `data`), cached after the first call.
+    #[inline]
+    pub fn hash_code(&self) -> u32 {
+        let cached = self.hash.load(Ordering::Relaxed);
+        if cached & HASH_SET != 0 {
+            return cached as u32;
+        }
+        let h = Self::hash(&self.data);
+        self.hash.store(HASH_SET | u64::from(h), Ordering::Relaxed);
+        h
+    }
+
     #[must_use]
     pub fn hash(s: &str) -> u32 {
         let mut hash = 2_166_136_261;
@@ -2171,9 +2215,7 @@ impl GcSized for ObjString {
 
 impl From<&str> for ObjString {
     fn from(value: &str) -> Self {
-        let data = String::from(value);
-        let hash = Self::hash(value);
-        Self { data, hash }
+        Self::new(String::from(value))
     }
 }
 
@@ -3223,7 +3265,7 @@ impl<V> Store<V> {
 
     unsafe fn probe(cap: usize, ptr: NonNull<Entry<V>>, key: RefString) -> NonNull<Entry<V>> {
         let mut dead = None;
-        let mut index = key.as_ref().hash as usize & (cap - 1);
+        let mut index = key.as_ref().hash_code() as usize & (cap - 1);
         loop {
             let entry_ptr = unsafe { ptr.add(index) };
             match unsafe { entry_ptr.as_ref() } {
@@ -4173,6 +4215,22 @@ mod tests {
             let b = heap.intern_str(&key);
             assert!(Gc::ptr_eq(a, b), "{key} interned twice");
         }
+    }
+
+    /// `alloc_string` skips the intern table; `intern_ref` later resolves it
+    /// to the interned copy, and its lazy hash matches the eager one.
+    #[test]
+    fn alloc_string_is_not_interned_until_used_as_key() {
+        let mut heap = Heap::default();
+        let lit = heap.intern("same".to_owned());
+        let runtime = heap.alloc_string("same".to_owned());
+        assert!(!Gc::ptr_eq(lit, runtime));
+        assert_eq!(runtime.as_ref().hash_code(), ObjString::hash("same"));
+        assert!(Gc::ptr_eq(heap.intern_ref(runtime), lit));
+
+        let fresh = heap.alloc_string("only-runtime".to_owned());
+        assert!(heap.strings.find("only-runtime", ObjString::hash("only-runtime")).is_none());
+        assert!(Gc::ptr_eq(heap.intern_ref(fresh), fresh));
     }
 
     /// Inside a steal epoch the normal threshold does not trigger a collect

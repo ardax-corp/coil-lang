@@ -1210,7 +1210,7 @@ pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
 pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, IoErrorTag> {
     let bytes = value_as_bytes(heap, buf)?;
     let s = String::from_utf8(bytes).map_err(|_| IoErrorTag::InvalidInput)?;
-    let gc = heap.intern(s);
+    let gc = heap.alloc_string(s);
     Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
 }
 

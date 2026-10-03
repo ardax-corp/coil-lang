@@ -5,7 +5,8 @@
 //! Strings compare by UTF-8 content (interned or not). Tuples compare
 //! element-wise like arrays. Boxed `ObjEnum` values compare by tag and payload
 //! (so `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box).
-//! Heap-heap Result `Err` (`pointer | 1`) is not the same word as `Ok`.
+//! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
+//! compare their payloads.
 //!
 //! Cyclic graphs use a bijection of addresses already assumed equal: revisiting
 //! `a` must pair with the same `b` (and vice versa). A 1-cycle is therefore not
@@ -39,10 +40,14 @@ fn values_eq_rec(
     if aa == 0 || bb == 0 {
         return false;
     }
-    // Heap-heap Result: `Ok` is aligned, `Err` is `pointer | 1`.
-    // Tagged words are equal only when the raw words match (handled above).
-    if (aa & 1) != (bb & 1) || (aa & 1) != 0 {
+    // Heap-heap Result: `Ok` is aligned, `Err` is `pointer | 1`. An `Ok`
+    // never equals an `Err`; two `Err`s compare their payloads (runtime
+    // strings are not interned, so equal payloads need not share a word).
+    if (aa & 1) != (bb & 1) {
         return false;
+    }
+    if (aa & 1) != 0 {
+        return values_eq_rec(heap, Value::from(aa & !1), Value::from(bb & !1), fwd, rev);
     }
     if let Some(&mapped) = fwd.get(&aa) {
         return mapped == bb;
@@ -165,6 +170,20 @@ mod tests {
             Value::from(oa.addr()),
             Value::from(ob.addr())
         ));
+    }
+
+    /// Heap-heap `Result::Err` words (`pointer | 1`) compare payloads, and
+    /// never equal an `Ok` of the same payload.
+    #[test]
+    fn heap_heap_err_compares_payload() {
+        let mut heap = Heap::default();
+        let (sa, _) = heap.alloc(ObjString::from("e/x"), Object::String);
+        let (sb, _) = heap.alloc(ObjString::from("e/x"), Object::String);
+        let (sc, _) = heap.alloc(ObjString::from("other"), Object::String);
+        let err = |addr: u64| Value::from(addr | 1);
+        assert!(values_eq(&heap, err(sa.addr()), err(sb.addr())));
+        assert!(!values_eq(&heap, err(sa.addr()), err(sc.addr())));
+        assert!(!values_eq(&heap, err(sa.addr()), Value::from(sb.addr())));
     }
 
     #[test]

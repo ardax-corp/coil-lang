@@ -573,6 +573,35 @@
         );
     }
 
+    /// Runtime strings (concat) are not interned; a concat-built name must
+    /// still find the field stored under the program literal.
+    #[test]
+    fn concat_built_key_finds_literal_field() {
+        let strings = vec!["key".to_owned(), "k".to_owned(), "ey".to_owned()];
+        let code = vec![
+            const_int(1),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::MakeDict).with_operand_u32(1),
+            store_pop(0),
+            const_int(42),
+            load(0),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::SetField),
+            Byte::new(Instruction::POP),
+            load(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::STRING).with_operand_u32(2),
+            Byte::new(Instruction::DynAdd),
+            Byte::new(Instruction::GetField),
+            Byte::new(Instruction::HALT),
+        ];
+
+        let mut vm = Machine::<16>::default();
+        vm.run_with_pool(&code, &[], &strings, 0);
+        assert!(!vm.panicked());
+        assert_eq!(vm.pop().as_int(), 42);
+    }
+
     #[test]
     fn make_enum_mixed_int_and_string_payload_order() {
         use crate::memory::Member;
@@ -2133,7 +2162,7 @@
         assert_eq!(s, expect);
     }
 
-    /// DynAdd string concat also goes through `push_interned_string` (and
+    /// DynAdd string concat also goes through `push_new_string` (and
     /// `continue`s the dispatch loop). Root-after-intern is required here too.
     #[test]
     fn dyn_add_strings_survives_gc_triggered_at_intern() {
@@ -2171,7 +2200,7 @@
         assert_eq!(s, expect);
     }
 
-    /// STRINGIFY shares `push_interned_string`, GC at intern must not sweep
+    /// STRINGIFY shares `push_new_string`, GC at intern must not sweep
     /// the fresh display string before it is stacked.
     #[test]
     fn stringify_survives_gc_triggered_at_intern() {
