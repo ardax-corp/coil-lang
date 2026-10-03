@@ -821,7 +821,7 @@ fn encode_value(
         return Err(ThreadErrorTag::NotSendable);
     }
     match obj {
-        Object::String(gc) => Ok(PortableValue::String(gc.as_ref().data.clone())),
+        Object::String(gc) => Ok(PortableValue::String(gc.as_ref().data.to_string())),
         Object::Array(gc) => {
             let mut out = Vec::with_capacity(gc.as_ref().elements().len());
             for e in gc.as_ref().elements() {
@@ -856,7 +856,7 @@ fn encode_value(
                 }
             } else {
                 for (k, m) in inst.iter_fields() {
-                    let name = k.as_ref().data.clone();
+                    let name = k.as_ref().data.to_string();
                     let pv = match m {
                         Member::Value(iv) => encode_value(heap, iv, visited)?,
                         Member::Object(o) => encode_object(heap, o, visited)?,
@@ -1729,7 +1729,7 @@ mod tests {
         assert_eq!(
             heap.find_object_by_addr(back.raw() as u64)
                 .and_then(|o| match o {
-                    Object::String(g) => Some(g.as_ref().data.clone()),
+                    Object::String(g) => Some(g.as_ref().data.to_string()),
                     _ => None,
                 }),
             Some("hi".into())

@@ -5,8 +5,10 @@ mod frame;
 mod heap;
 mod slab;
 mod stack;
+mod strbuf;
 
 pub use addr_hash::*;
 pub use frame::*;
 pub use heap::*;
 pub use stack::*;
+pub use strbuf::StrData;

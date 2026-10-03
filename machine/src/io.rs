@@ -1153,7 +1153,7 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     let v = peel_one_boxed(heap, v);
     match heap.find_object_by_addr(v.raw() as u64) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.clone()),
+        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
         _ => Err(IoErrorTag::InvalidInput),
     }
 }
@@ -1219,11 +1219,11 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, IoErrorTag> {
 /// Non-string input yields an empty buffer (defensive — the typechecker
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
-    let bytes = match value_as_string(heap, s) {
-        Ok(text) => text.into_bytes(),
-        Err(_) => Vec::new(),
+    // One pass over the string's bytes (no intermediate `String` copy).
+    let elements: Vec<Value> = match heap.find_object_by_addr(peel_one_boxed(heap, s).raw() as u64) {
+        Some(Object::String(gc)) => gc.as_ref().data.bytes().map(|b| Value::from(b as i64)).collect(),
+        _ => Vec::new(),
     };
-    let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
     let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
     Value::from(obj.addr())
 }
