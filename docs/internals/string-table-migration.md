@@ -16,6 +16,12 @@
 
 - Machine holds `program_strings` next to `program_constants`.
 - `STRING` → `heap.intern(program_strings[idx])`.
+- Runtime-built strings (`DynAdd` concat, `FORMAT`, `STRINGIFY`, `from_bytes`,
+  thread-decoded strings) are **not** interned: `Heap::alloc_string` allocates
+  them with a lazily computed, cached hash (`ObjString::hash_code`). String
+  `==` compares content, and dict / field keys are interned on use
+  (`intern_key` → `Heap::intern_ref`), so pointer identity only matters for
+  intern-table keys.
 - Stdout/stderr `write`/`write_all` honor `Machine::with_output` via a thread-local redirect (tests keep capturing).
 
 ## Language surface

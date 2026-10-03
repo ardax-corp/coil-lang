@@ -7,7 +7,7 @@ use crate::io::{alloc_result_ok, value_as_string};
 use crate::memory::Heap;
 
 fn string_val(heap: &mut Heap, text: &str) -> Value {
-    let gc = heap.intern(text.to_string());
+    let gc = heap.alloc_string(text.to_string());
     Value::from(gc.as_ptr() as *mut u8 as u64)
 }
 
@@ -50,14 +50,15 @@ pub fn prelude_char(heap: &mut Heap, args: &[Value]) -> Value {
     pack_result_or_panic(heap, Ok(s))
 }
 
-/// Content hash for `Hash` on `string` — returns the interned `ObjString` FNV hash as `int`.
+/// Content hash for `Hash` on `string` — the `ObjString` FNV hash as `int`,
+/// cached on the string object after the first call.
 pub fn prelude_hash_string(heap: &mut Heap, args: &[Value]) -> Value {
-    match value_as_string(heap, args[0]) {
-        Ok(s) => {
-            let h = crate::memory::ObjString::hash(&s);
-            Value::from(h as i64)
-        }
-        Err(_) => Value::from(0_i64),
+    match heap.find_object_by_addr(args[0].raw() as u64) {
+        Some(crate::memory::Object::String(gc)) => Value::from(gc.as_ref().hash_code() as i64),
+        _ => match value_as_string(heap, args[0]) {
+            Ok(s) => Value::from(crate::memory::ObjString::hash(&s) as i64),
+            Err(_) => Value::from(0_i64),
+        },
     }
 }
 
