@@ -224,11 +224,15 @@ Host vec mutations in a stolen body are already a purity refuse.
 ### Two STW layers (C1 uses the first)
 
 **Layer A — epoch STW (C1 default).** No collect between `begin_steal` and
-`end_steal`. Allocations may bump `alloc_bytes` and map extra slabs. If a
-chunk would collect (`should_collect` / explicit `gc::collect` / OOM):
-**abort the epoch** (sequential leftover or isolate fallback). After join,
-the joiner is the only mutator and runs a normal collect with all published
-roots on its stack.
+`end_steal`. Allocations may bump `alloc_bytes` and map extra slabs. Inside
+the epoch `should_collect` compares against an epoch ceiling instead of the
+normal threshold: 4x the threshold at entry, and at least 256 MiB past the
+entry heap size. Past that ceiling, or on an explicit `gc::collect` / OOM:
+**abort the epoch** (sequential leftover or isolate fallback). Opening an
+epoch only finishes a pending lazy sweep rather than running a new full
+collect. After join, the joiner is the only mutator; if the threshold was
+crossed it opens a normal incremental cycle (mark now with the published
+root, sweep lazily).
 
 This is enough for C1 counted int-reduce / disjoint stores that allocate
 little. It avoids handshake latency on the first client.

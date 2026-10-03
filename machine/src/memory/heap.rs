@@ -17,6 +17,12 @@ use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
+/// A steal epoch cannot collect, so crossing the normal threshold aborts it
+/// and its forks rerun sequentially. Inside an epoch the heap may instead grow
+/// to this multiple of the threshold it entered with...
+const EPOCH_GC_HEADROOM_FACTOR: usize = 4;
+/// ...and never to less than this many bytes past the entry heap size.
+const EPOCH_GC_HEADROOM_MIN: usize = 256 * 1024 * 1024;
 /// Growth when most of the heap survived its last collection: the live set is
 /// still growing, so re-marking it every doubling is mostly wasted work.
 const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
@@ -110,6 +116,9 @@ pub struct Heap {
     epoch_stw: bool,
     /// Non-null while a C1 steal epoch is live (points at the epoch mutex).
     alloc_lock: *const Mutex<()>,
+    /// `alloc_bytes` past which a steal epoch aborts (see
+    /// [`EPOCH_GC_HEADROOM_FACTOR`]); only meaningful while `epoch_stw`.
+    epoch_gc_ceiling: usize,
 }
 
 /// Machine-owned heap that can borrow the root Heap for a C1 steal job.
@@ -141,6 +150,7 @@ impl Default for Heap {
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
             epoch_stw: false,
+            epoch_gc_ceiling: 0,
             alloc_lock: ptr::null(),
         }
     }
@@ -240,6 +250,10 @@ impl Heap {
 
     pub fn enter_epoch_stw(&mut self, lock: &Mutex<()>) {
         self.epoch_stw = true;
+        self.epoch_gc_ceiling = self
+            .gc_next_threshold
+            .saturating_mul(EPOCH_GC_HEADROOM_FACTOR)
+            .max(self.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
         self.alloc_lock = lock as *const Mutex<()>;
     }
 
@@ -705,10 +719,17 @@ impl Heap {
 
     /// True when idle and live heap bytes exceed the collection threshold.
     /// Mid-cycle work is paced from the alloc safepoint, not a second start.
+    /// In a steal epoch, where a collect means an abort, the bar is the
+    /// epoch ceiling instead; the joiner collects normally once it closes.
     #[inline]
     pub fn should_collect(&self) -> bool {
+        let limit = if self.epoch_stw {
+            self.epoch_gc_ceiling
+        } else {
+            self.gc_next_threshold
+        };
         self.gc_phase == GcPhase::Idle
-            && (cfg!(feature = "gc-stress") || self.alloc_bytes > self.gc_next_threshold)
+            && (cfg!(feature = "gc-stress") || self.alloc_bytes > limit)
     }
 
     /// Objects to sweep at one safepoint (doubles under pressure).
@@ -4152,6 +4173,25 @@ mod tests {
             let b = heap.intern_str(&key);
             assert!(Gc::ptr_eq(a, b), "{key} interned twice");
         }
+    }
+
+    /// Inside a steal epoch the normal threshold does not trigger a collect
+    /// (which would abort the epoch); only the epoch ceiling does.
+    #[test]
+    #[cfg(not(feature = "gc-stress"))]
+    fn epoch_defers_collect_until_ceiling() {
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
+        assert!(heap.should_collect());
+        heap.enter_epoch_stw(&lock);
+        assert!(!heap.should_collect(), "past threshold, under epoch ceiling");
+        heap.alloc_bytes = heap.epoch_gc_ceiling + 1;
+        assert!(heap.should_collect(), "past the epoch ceiling");
+        heap.exit_epoch_stw();
+        heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
+        assert!(heap.should_collect(), "normal threshold again after the epoch");
+        heap.alloc_bytes = 0;
     }
 
     /// An epoch batch hands out the same slots a plain alloc would, and its
