@@ -9,7 +9,7 @@ use super::infer::Checker;
 use super::subst::apply_ty_prune;
 use super::ty::{Ty, UNIT, strip_readonly};
 use crate::hir::layout::{self, Layout, is_scalar_enum_ty};
-pub use crate::hir::layout::{niche_heap_only, ty_is_closed};
+pub use crate::hir::layout::niche_heap_only;
 
 /// One-word representation of a value of some type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

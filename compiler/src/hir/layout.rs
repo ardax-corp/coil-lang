@@ -50,6 +50,9 @@ pub enum PairKind {
     Enum(String),
 }
 
+// `of`, `words` and `is_niche` are the HIR builder's (phase 1); only tests
+// call them until then.
+#[allow(dead_code)]
 impl Layout {
     /// Words on a direct `CALL`/`RETURN`.
     pub fn words(&self) -> u8 {
@@ -68,6 +71,7 @@ impl Layout {
 }
 
 /// Layout of `ty`, resolved through the checker's substitution.
+#[allow(dead_code)]
 pub fn of(checker: &Checker, ty: &Ty) -> Layout {
     let ty = apply_ty_prune(checker.subst(), ty);
     of_resolved(checker, &ty)

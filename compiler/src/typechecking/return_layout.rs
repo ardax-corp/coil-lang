@@ -14,7 +14,6 @@
 use super::infer::Checker;
 use super::ty::{Ty, range_app};
 use crate::hir::layout::{self, Layout, PairKind, is_immediate};
-pub(crate) use crate::hir::layout::is_unit;
 
 /// Kind string for a two-slot arity-2 immediate product. Not a user enum;
 /// boxing uses `MakeTuple(2)` instead of the enum cascade.
