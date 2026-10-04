@@ -254,12 +254,17 @@ pub(super) fn store(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_ca
         return;
     }
     let count = opcode.load_store_count();
+    // Pop every value before writing any slot: a listed slot can be the
+    // word a later pop reads (`x; y; STORE s0=0,s1=1` with `x` in slot 0).
+    let mut vals = [Value::default(); 3];
+    for val in vals.iter_mut().take(count) {
+        *val = stack.pop();
+    }
     let mut max_slot = sp;
-    for i in 0..count {
+    for (i, val) in vals.into_iter().take(count).enumerate() {
         let slot = sp + opcode.load_store_slot_at(i) as usize;
         promise!(slot < stack_cap);
         max_slot = max_slot.max(slot);
-        let val = stack.pop();
         stack[slot] = val;
     }
     let need = max_slot + 1;
