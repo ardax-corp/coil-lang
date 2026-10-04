@@ -98,6 +98,16 @@ fn counted_for_in_is_in_the_subset() {
 }
 
 #[test]
+fn len_of_a_call_or_index_is_in_the_subset() {
+    let src = "fn g() -> Vec<int> { let v: Vec<int> = []; return v; } fn f() -> int { return len(g()); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Vec<Vec<int>> xs) -> int { return len(xs[0]); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f() -> int { return len([1, 2]); }";
+    assert_eq!(refusal_of(src, "f"), Some("len-argument"));
+}
+
+#[test]
 fn bytes_casts_and_unit_tries_are_in_the_subset() {
     let src = "fn f(byte c) -> int {
             let z: byte = \"0\";

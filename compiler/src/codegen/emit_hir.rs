@@ -1128,7 +1128,12 @@ impl Compiler {
             Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
             Callee::Value(_) => false,
         };
-        if !is_len || !matches!(hir.expr(*arg).kind, HirKind::Local(_)) {
+        if !is_len
+            || !matches!(
+                hir.expr(*arg).kind,
+                HirKind::Local(_) | HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. }
+            )
+        {
             return None;
         }
         use crate::typechecking::ty::{ArrayLength, strip_readonly};
@@ -1280,7 +1285,9 @@ impl Compiler {
             HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => {
                 self.hir_check_value(hir, emit, *operand, &BOXED)?
             }
-            HirKind::Call { .. } if emit.lens.contains_key(&id.0) => {}
+            HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => {
+                self.hir_check_value(hir, emit, args[0], &BOXED)?
+            }
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
                 for (&arg, &param) in args.iter().zip(&call.params) {
@@ -1725,8 +1732,15 @@ impl Compiler {
                 }));
             }
             HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
-                // A fixed size: the local is not read (as in the AST).
-                Some(n) => self.bytecode.push_const(n as i32),
+                // A fixed size: a local is not read, anything else is
+                // evaluated and dropped (as in the AST).
+                Some(n) => {
+                    if !matches!(hir.expr(args[0]).kind, HirKind::Local(_)) {
+                        self.hir_value(hir, emit, args[0], &BOXED, depth);
+                        self.bytecode.push_pop();
+                    }
+                    self.bytecode.push_const(n as i32);
+                }
                 None => {
                     self.hir_value(hir, emit, args[0], &BOXED, depth);
                     self.bytecode.push(Byte::new(Instruction::ArrayLen));
