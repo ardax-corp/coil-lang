@@ -973,13 +973,24 @@ impl Compiler {
                     return bytecode;
                 }
 
-                if pair_kind.is_none()
-                    && !is_generic_src
+                // A pair callee inlines to the same `[payload, tag]` its `CALL`
+                // leaves, then boxes like the call path below.
+                if !is_generic_src
                     && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
-                    && self.try_emit_inline_direct_call(&n, Some(arg_slice), &mut bytecode)
+                    && self.try_emit_inline_direct_call(
+                        &n,
+                        Some(arg_slice),
+                        &mut bytecode,
+                        if pair_kind.is_some() { 2 } else { 1 },
+                    )
                 {
+                    if let Some(enum_name) = pair_kind.as_deref()
+                        && !self.repr_now().unboxing()
+                    {
+                        self.emit_box_pair_after_call(&mut bytecode, enum_name);
+                    }
                     return bytecode;
                 }
 

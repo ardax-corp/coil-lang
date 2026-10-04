@@ -1613,6 +1613,7 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile two-slot match+call");
     assert!(
         bc.iter()
@@ -4816,6 +4817,7 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile result helper");
     assert!(
         !bc.iter().any(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
@@ -4974,6 +4976,7 @@ fn main() {
     let path = dir.join("coi302_match_enum_loop.hy");
     std::fs::write(&path, src).expect("write src");
     let mut p = crate::Pipeline::new();
+    p.set_inline_max_cost(0);
     let arts = p
         .compile_dissect(path.to_str().unwrap(), true)
         .expect("compile match helpers");

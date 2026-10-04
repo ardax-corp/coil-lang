@@ -1488,6 +1488,13 @@ impl Compiler {
     /// Emitting shape (labels omitted by [`CodeBuf::code_slice_ops`]):
     /// `cond…; JumpIfFalse; then…; Return; else…; Return`.
     fn is_tiny_inline_diamond_il(ops: &[IlOp]) -> bool {
+        Self::is_tiny_inline_diamond_il_words(ops, 1)
+    }
+
+    /// [`Self::is_tiny_inline_diamond_il`] for a callee whose arms return
+    /// `ret_words` words. A two-word (`[payload, tag]`) diamond takes plain
+    /// `RETURN 2` arms only; the fused `*Return` forms are one-word.
+    fn is_tiny_inline_diamond_il_words(ops: &[IlOp], ret_words: u32) -> bool {
         if ops.is_empty() || ops.len() > Self::TINY_INLINE_DIAMOND_MAX_OPS {
             return false;
         }
@@ -1516,18 +1523,18 @@ impl Compiler {
         }
         // Cond / arms must not contain nested control or forbidden ops.
         if ops[..j].iter().any(|op| {
-            op.is_control() || Self::inline_forbidden_op(op) || Self::inline_is_return(op)
+            op.is_control() || Self::inline_forbidden_op(op) || Self::inline_is_any_return(op)
         }) {
             return false;
         }
-        let Some(then_end) = Self::diamond_arm_end(ops, j + 1) else {
+        let Some(then_end) = Self::diamond_arm_end(ops, j + 1, ret_words) else {
             return false;
         };
         if then_end + 1 >= ops.len() {
             return false;
         }
         let else_start = then_end + 1;
-        let Some(else_end) = Self::diamond_arm_end(ops, else_start) else {
+        let Some(else_end) = Self::diamond_arm_end(ops, else_start, ret_words) else {
             return false;
         };
         if else_end != ops.len() - 1 {
@@ -1535,7 +1542,24 @@ impl Compiler {
         }
         let then_arm = &ops[j + 1..=then_end];
         let else_arm = &ops[else_start..=else_end];
-        Self::diamond_arm_ok(then_arm) && Self::diamond_arm_ok(else_arm)
+        Self::diamond_arm_ok(then_arm, ret_words) && Self::diamond_arm_ok(else_arm, ret_words)
+    }
+
+    /// Plain `RETURN` of exactly `ret_words` words.
+    fn inline_is_return_words(op: &IlOp, ret_words: u32) -> bool {
+        matches!(op, IlOp::Return { ret_words: w, .. } if *w == ret_words)
+            || matches!(
+                op.as_plain_byte(),
+                Some(b) if *b.bytecode() == Instruction::RETURN
+                    && b.return_words() == ret_words
+            )
+    }
+
+    /// Any return, fused or plain, of any width.
+    fn inline_is_any_return(op: &IlOp) -> bool {
+        Self::inline_is_return(op)
+            || matches!(op, IlOp::Return { .. })
+            || matches!(op.as_plain_byte(), Some(b) if *b.bytecode() == Instruction::RETURN)
     }
 
     fn inline_is_return(op: &IlOp) -> bool {
@@ -1558,19 +1582,19 @@ impl Compiler {
     }
 
     /// Index of the last op of an arm starting at `start` (inclusive).
-    fn diamond_arm_end(ops: &[IlOp], start: usize) -> Option<usize> {
+    fn diamond_arm_end(ops: &[IlOp], start: usize, ret_words: u32) -> Option<usize> {
         if start >= ops.len() {
             return None;
         }
         // Sole fused *Return arm.
-        if Self::inline_is_fused_return(&ops[start]) {
+        if ret_words == 1 && Self::inline_is_fused_return(&ops[start]) {
             return Some(start);
         }
         for (i, op) in ops.iter().enumerate().skip(start) {
             if op.is_control() {
                 return None;
             }
-            if op.is_plain_return() {
+            if Self::inline_is_return_words(op, ret_words) {
                 return Some(i);
             }
         }
@@ -1592,12 +1616,12 @@ impl Compiler {
         )
     }
 
-    fn diamond_arm_ok(arm: &[IlOp]) -> bool {
+    fn diamond_arm_ok(arm: &[IlOp], ret_words: u32) -> bool {
         if arm.is_empty() {
             return false;
         }
         if Self::inline_is_fused_return(&arm[0]) {
-            return arm.len() == 1;
+            return ret_words == 1 && arm.len() == 1;
         }
         if arm
             .iter()
@@ -1605,10 +1629,11 @@ impl Compiler {
         {
             return false;
         }
-        arm.last().is_some_and(|op| op.is_plain_return())
+        arm.last()
+            .is_some_and(|op| Self::inline_is_return_words(op, ret_words))
             && arm[..arm.len() - 1]
                 .iter()
-                .all(|op| !Self::inline_is_return(op))
+                .all(|op| !Self::inline_is_any_return(op))
     }
 
     /// Body eligible for one-level self-unroll at a call site to `self_entry`.
@@ -1877,9 +1902,10 @@ impl Compiler {
         fqn: &str,
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
+        ret_words: u32,
     ) -> bool {
         let attempt = self.begin_emit_attempt(bytecode);
-        if self.try_inline_direct_call_into(fqn, args, bytecode) {
+        if self.try_inline_direct_call_into(fqn, args, bytecode, ret_words) {
             return true;
         }
         self.restore_emit_attempt(bytecode, attempt);
@@ -1973,6 +1999,7 @@ impl Compiler {
         fqn: &str,
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
+        ret_words: u32,
     ) -> bool {
         // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
         let Some((start, end, provisional)) = self.resolve_inline_span(fqn) else {
@@ -2001,7 +2028,9 @@ impl Compiler {
         if !super::inline_cost::should_inline_function(cost, &site, &cost_opts) {
             return false;
         }
-        if !Self::is_tiny_inline_il(&ops) {
+        // A pair callee inlines only as a diamond, which joins both words.
+        let is_diamond = Self::is_tiny_inline_diamond_il_words(&ops, ret_words);
+        if ret_words == 1 && !Self::is_tiny_inline_il(&ops) || ret_words != 1 && !is_diamond {
             return false;
         }
         let arg_slice = args.unwrap_or(&[]);
@@ -2027,18 +2056,24 @@ impl Compiler {
         }
         // Diamond CFG into `self.bytecode`, stash result, leave LOAD in `bytecode` for parent order.
         // On failure, roll back: unbound `JMP end_label` resolves to PC 0 and poisons fallbacks.
-        if Self::is_tiny_inline_diamond_il(&ops) {
+        if is_diamond {
             let raw = self.bytecode.code_slice_raw_ops(start, end);
             let rollback = self.bytecode.len();
             self.bytecode.append(bytecode);
-            if !self.emit_cfg_inline_body(&raw, &temps, /*allow_calls=*/ false) {
+            if !self.emit_cfg_inline_body(&raw, &temps, /*allow_calls=*/ false, ret_words) {
                 self.bytecode.truncate(rollback);
                 bytecode.clear();
                 return false;
             }
-            let result = self.alloc_temp_slot();
-            self.bytecode.push_store_pop(result);
-            bytecode.push_load(result);
+            // Stash the joined words (tag on top for a pair) and reload them
+            // in order, as the `CALL` would have left them.
+            let results: Vec<u32> = (0..ret_words).map(|_| self.alloc_temp_slot()).collect();
+            for &r in results.iter().rev() {
+                self.bytecode.push_store_pop(r);
+            }
+            for &r in &results {
+                bytecode.push_load(r);
+            }
             crate::il::opt::note_function_inlined();
             return true;
         }
@@ -2188,7 +2223,7 @@ impl Compiler {
         let raw = self.bytecode.code_slice_raw_ops(start, end);
         let rollback = self.bytecode.len();
         self.bytecode.append(bytecode);
-        if !self.emit_cfg_inline_body(&raw, &temps, /*allow_calls=*/ true) {
+        if !self.emit_cfg_inline_body(&raw, &temps, /*allow_calls=*/ true, 1) {
             self.bytecode.truncate(rollback);
             bytecode.clear();
             return false;
@@ -3071,7 +3106,13 @@ impl Compiler {
     /// Copy a CFG-bearing callee body into `self.bytecode`, remapping slots to
     /// `temps`. Strips `RETURN` / fused `*Return` so the value stays on stack.
     /// When `allow_calls` is set, `Entry`/`CALL` are preserved (self-unroll).
-    fn emit_cfg_inline_body(&mut self, ops: &[IlOp], temps: &[u32], allow_calls: bool) -> bool {
+    fn emit_cfg_inline_body(
+        &mut self,
+        ops: &[IlOp],
+        temps: &[u32],
+        allow_calls: bool,
+        ret_words: u32,
+    ) -> bool {
         use std::collections::{HashMap, HashSet};
         let mut label_map: HashMap<u32, IlLabel> = HashMap::new();
         let mut bound_mapped: HashSet<u32> = HashSet::new();
@@ -3143,10 +3184,10 @@ impl Compiler {
                     });
                     saw_value = true;
                 }
-                IlOp::Return { ret_words, .. } => {
-                    if *ret_words >= 2 {
-                        // Two-word return would leave `[payload, tag]` at the
-                        // join instead of one value. Refuse this peel.
+                IlOp::Return { ret_words: w, .. } => {
+                    if *w != ret_words {
+                        // Every arm must leave the width the call site expects
+                        // at the join (`[payload, tag]` for a pair callee).
                         return false;
                     }
                     // Arm/function return → jump to join with value on stack.
@@ -3157,6 +3198,13 @@ impl Compiler {
                         hint: Default::default(),
                     });
                     saw_value = true;
+                }
+                IlOp::ConstReturnImm { .. }
+                | IlOp::LoadReturnSlot { .. }
+                | IlOp::BinReturn { .. }
+                    if ret_words != 1 =>
+                {
+                    return false;
                 }
                 IlOp::ConstReturnImm { imm, loc } => {
                     self.bytecode.push_op(IlOp::Const {
@@ -3268,8 +3316,21 @@ impl Compiler {
                 other => {
                     // Plain producers / residual bytes, remap LOAD/STORE/BinSlot*.
                     if let Some(b) = other.as_plain_byte() {
+                        if ret_words != 1
+                            && matches!(
+                                *b.bytecode(),
+                                Instruction::ConstReturnImm
+                                    | Instruction::LoadReturnSlot
+                                    | Instruction::BinReturn
+                            )
+                        {
+                            return false;
+                        }
                         match *b.bytecode() {
                             Instruction::RETURN => {
+                                if b.return_words() != ret_words {
+                                    return false;
+                                }
                                 self.bytecode.push_op(IlOp::Jump {
                                     kind: IlJumpKind::Unconditional,
                                     target: end_label,

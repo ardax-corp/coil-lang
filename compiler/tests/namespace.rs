@@ -1409,6 +1409,8 @@ fn main() {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
+        // Pins the CALL ABI; the tiny `div` leaf would otherwise inline.
+        pipeline.set_inline_max_cost(0);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
             Err(_) => {
