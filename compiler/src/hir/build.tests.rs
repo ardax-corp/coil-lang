@@ -50,7 +50,9 @@ fn golden(name: &str, src: &str, bodies: &[&str]) {
         return;
     }
     let want = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e} (run with HIR_BLESS=1)", path.display()));
+        .unwrap_or_else(|e| panic!("{}: {e} (run with HIR_BLESS=1)", path.display()))
+        // A Windows checkout with autocrlf turns the goldens into CRLF.
+        .replace("\r\n", "\n");
     assert_eq!(got, want, "HIR of `{name}` changed; rerun with HIR_BLESS=1 if intended");
 }
 
