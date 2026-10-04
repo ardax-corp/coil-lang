@@ -107,14 +107,18 @@ test("try and coalesce on two-slot Options") {
 }
 
 test("Result-mode returns and raise") {
-    assert(match calc(10, 2) {
-        Result::Ok(n) => n == 6,
-        Result::Err(_) => false,
-    })?;
-    assert(match calc(1, 0) {
-        Result::Ok(_) => false,
-        Result::Err(e) => e == "div by zero",
-    })?;
+    assert(
+        match calc(10, 2) {
+            Result::Ok(n) => n == 6,
+            Result::Err(_) => false,
+        },
+    )?;
+    assert(
+        match calc(1, 0) {
+            Result::Ok(_) => false,
+            Result::Err(e) => e == "div by zero",
+        },
+    )?;
 }
 
 test("identity arms and bound locals of two-slot calls") {
@@ -122,10 +126,12 @@ test("identity arms and bound locals of two-slot calls") {
     assert(ok_or_zero(checked_div(8, 0)) == 0)?;
     assert(err_scaled(8, 2) == 4)?;
     assert(err_scaled(8, 0) == -100)?;
-    assert(match bind_then_try(8, 2) {
-        Result::Ok(v) => v == 4,
-        Result::Err(_) => false,
-    })?;
+    assert(
+        match bind_then_try(8, 2) {
+            Result::Ok(v) => v == 4,
+            Result::Err(_) => false,
+        },
+    )?;
 }
 
 test("payload built above a live operand") {
