@@ -52,6 +52,7 @@ let s = format("%s-%i", name, n);
   | Function | Result |
   |---|---|
   | `byte_at(s, i) -> int` | Byte at `i`, or `-1` out of range |
+  | `s[i] -> byte` | Byte at `i`; panics out of range (lowers to `byte_at`) |
   | `slice_bytes(s, start, end) -> Result<string, IoError>` | Offsets clamp to `[0, len(s)]`; `Err` inside a UTF-8 sequence |
   | `find_from(hay, needle, start) -> int` | First offset `>= start`, or `-1` |
   | `rfind(hay, needle) -> int` | Last offset, or `-1` |

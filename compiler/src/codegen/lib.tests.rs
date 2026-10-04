@@ -26,6 +26,28 @@ fn run_src_ok(src: &str) {
     assert!(!machine.panicked(), "program panicked");
 }
 
+/// Like [`run_src_ok`], but the program must panic.
+fn run_src_panics(src: &str) {
+    let mut pipeline = crate::Pipeline::new();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let mut machine = machine::Machine::<256>::default();
+    pipeline.wire_host_natives(&mut machine);
+    machine.run_raw(
+        &bytecode,
+        &constants,
+        pipeline.strings(),
+        pipeline.static_slot_count(),
+    );
+    assert!(machine.panicked(), "program should have panicked");
+}
+
+#[test]
+fn string_index_out_of_range_panics() {
+    run_src_ok("fn main() { let s = \"ab\"; let i = 1; if s[i] != \"b\" { panic \"value\"; } }");
+    run_src_panics("fn main() { let s = \"ab\"; let i = 2; let _ = s[i]; }");
+    run_src_panics("fn main() { let s = \"ab\"; let i = -1; let _ = s[i]; }");
+}
+
 fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |_| {})
 }

@@ -5207,6 +5207,8 @@ impl Compiler {
                 self.arg_emits_on_self_bytecode(v)
             }
             Expression::Match { .. } => true,
+            // `s[i]` is a HostInvoke plus a bounds branch on `self.bytecode`.
+            Expression::Index(target, Some(_)) if self.is_string_expr(target) => true,
             Expression::Call { name, .. } => {
                 if let Expression::Identifier(fname) = name.1.as_ref() {
                     if self.string_builtin_for_call(fname).is_some() {
@@ -10650,6 +10652,51 @@ impl Compiler {
         }
         // Result stays on the stack for the caller (ExprStatement POPs it).
         self.expr_depth = depth_on_entry;
+    }
+
+    /// `s[i]` onto `self.bytecode`: `string_byte_at`, which answers `-1` out
+    /// of range, then the same panic an array index gives.
+    fn emit_string_index(&mut self, target: &Output, index: &Output) {
+        let Some(native_id) = self.native_id("string_byte_at") else {
+            self.messages.push(Message::error(
+                ErrorCode::UnknownFunction,
+                "Host native `string_byte_at` is not registered with the pipeline".to_string(),
+                target.0.into_range(),
+            ));
+            return;
+        };
+        // Same staging as `emit_host_native_invoke`: operands into temps,
+        // then the native id under the reloaded args.
+        let depth_on_entry = self.expr_depth;
+        let mut arg_slots = [0u32; 2];
+        for (slot, arg) in arg_slots.iter_mut().zip([target, index]) {
+            let mut arg_bc = self.do_compile(arg);
+            self.bytecode.append(&mut arg_bc);
+            *slot = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(*slot);
+        }
+        self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+        self.expr_depth = depth_on_entry + 1;
+        for slot in arg_slots {
+            self.bytecode.push_load(slot);
+            self.expr_depth += 1;
+        }
+        self.bytecode.push_host_invoke(2);
+        self.expr_depth = depth_on_entry;
+        let byte = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(byte);
+        let ok = self.bytecode.fresh_label();
+        let mut bb = BlockBuilder::new();
+        self.bytecode.push_load(byte);
+        self.bytecode.push_const(0);
+        self.bytecode.push(Byte::new(Instruction::GEQ));
+        bb.emit_jump_to(ok, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+        let mut msg = CodeBuf::new();
+        self.emit_raw_string_literal(&mut msg, "index out of bounds");
+        self.bytecode.append(&mut msg);
+        self.bytecode.push(Byte::new(Instruction::Panic));
+        bb.bind_label(ok, self.bytecode.il_mut());
+        self.bytecode.push_load(byte);
     }
 
     fn emit_prelude_host_call(
@@ -17097,7 +17144,10 @@ impl Compiler {
                 }
             }
             Expression::Index(target, Some(index)) => {
-                if let Expression::Identifier(name) = target.1.as_ref()
+                if self.is_string_expr(target) {
+                    self.bytecode.append(&mut bytecode);
+                    self.emit_string_index(target, index);
+                } else if let Expression::Identifier(name) = target.1.as_ref()
                     && let Some(box_slot) = self.stack_array_boxed_slot(name)
                 {
                     self.emit_boxed_array_load(&mut bytecode, box_slot, index);
