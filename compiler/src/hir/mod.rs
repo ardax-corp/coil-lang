@@ -70,7 +70,8 @@ pub struct HirBody {
     /// Bare `return v` was wrapped as `Return(Make Ok v)`.
     pub result_mode: bool,
     pub is_coro: bool,
-    /// Generic over type parameters (built once, not per instance yet).
+    /// Generic over type parameters. Built once; a mono clone lowers a
+    /// copy with the instance's types (`Compiler::hir_instance`).
     pub is_generic: bool,
     /// Lambda captures, outer local in the parent body to inner local.
     pub captures: Vec<(LocalId, LocalId)>,
