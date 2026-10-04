@@ -79,6 +79,9 @@ struct BodyBuilder {
     scopes: Vec<HashMap<String, LocalId>>,
     /// Enclosing body's scopes, for lambda captures (innermost last).
     outer: Vec<HashMap<String, LocalId>>,
+    /// Result-mode with an `Ok` payload that is itself a `Result`: a
+    /// returned `Result::Ok(..)` is the payload, so it is wrapped too.
+    ok_is_result: bool,
 }
 
 impl BodyBuilder {
@@ -101,6 +104,7 @@ impl BodyBuilder {
             },
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
+            ok_is_result: false,
         }
     }
 
@@ -185,7 +189,7 @@ fn peel<'a, 'e>(node: &'a Output<'e>) -> &'a Output<'e> {
     }
 }
 
-fn is_result_construct(node: &Output<'_>) -> bool {
+fn is_result_construct(node: &Output<'_>, ok_is_result: bool) -> bool {
     match peel(node).1.as_ref() {
         Expression::Construct {
             enum_name,
@@ -193,10 +197,10 @@ fn is_result_construct(node: &Output<'_>) -> bool {
             ..
         } => {
             (*enum_name == common::BUILTIN_RESULT_ENUM || enum_name.ends_with("::Result"))
-                && (*variant_name == "Ok" || *variant_name == "Err")
+                && (*variant_name == "Err" || (*variant_name == "Ok" && !ok_is_result))
         }
         Expression::Call { name, .. } => {
-            matches!(peel(name).1.as_ref(), Expression::Identifier(n) if *n == "Ok" || *n == "Err")
+            matches!(peel(name).1.as_ref(), Expression::Identifier(n) if *n == "Err" || (*n == "Ok" && !ok_is_result))
         }
         _ => false,
     }
@@ -418,6 +422,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
         b.body.ret = ret;
         b.body.result_mode = keys.iter().any(|k| self.checker.fn_is_result_mode(k));
+        b.ok_is_result = keys.iter().any(|k| self.checker.fn_result_ok_is_result(k));
         if let Some(owner) = owner
             && !is_static
         {
@@ -1074,7 +1079,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
         let v = self.expr(b, value);
         let wrap = b.body.result_mode
-            && !is_result_construct(value)
+            && !is_result_construct(value, b.ok_is_result)
             && b.body.ret.as_ref().and_then(result_ok_err).is_some();
         let v = if wrap {
             let ret = b.body.ret.clone();

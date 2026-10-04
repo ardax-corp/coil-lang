@@ -6,7 +6,9 @@
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
 //! --hir`). Phase 2 is [`lower`]: under `--hir` / `COIL_HIR=1`, codegen
 //! lowers the bodies inside the core subset from HIR and keeps the AST walk
-//! for every other body.
+//! for every other body. Phase 3 widens that subset to enums, `Option` /
+//! `Result` in every layout (boxed, niche, two-slot), `match`, `?`, `??` and
+//! Result-mode returns.
 //!
 //! Each function body is an arena: nodes are [`HirExpr`]s in
 //! [`HirBody::exprs`], children are [`HirId`] indices, and locals are
