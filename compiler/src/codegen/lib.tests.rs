@@ -1740,6 +1740,27 @@ fn tiny_inline_binop_arms_stage_through_temps() {
     );
 }
 
+/// `match` and `??` emit onto the function buffer, so binop staging must
+/// go there in order: staged in the local buffer, `m1 - m2` ran as `m2 - m1`
+/// and a stacked `b - (call ?? d)` lost `b` under the pair temps.
+#[test]
+fn branching_binop_operands_keep_order() {
+    run_src_ok(
+        "fn lookup(int i, int n) -> Option<int> { \
+               if i < 0 || i >= n { return Option::None; } \
+               return Option::Some(i * 2); \
+             } \
+             fn main() { \
+               let b = 3; \
+               let m = match lookup(1, 7) { Option::Some(v) => v, Option::None => -1 } \
+                 - match lookup(3, 7) { Option::Some(v) => v, Option::None => -1 }; \
+               if m != -4 { panic \"match order\"; } \
+               if (lookup(1, 7) ?? -1) - (lookup(3, 7) ?? -1) != -4 { panic \"coalesce order\"; } \
+               if b - (lookup(1, 7) ?? -1) != 1 { panic \"stacked lhs\"; } \
+             }",
+    );
+}
+
 /// Nested call args are not stack leaves ,  binop arms must stage so the
 /// nested CALL's temps cannot bury the stacked sibling.
 #[test]
