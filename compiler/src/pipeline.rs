@@ -1716,6 +1716,14 @@ impl Pipeline {
         }
     }
 
+    /// Cap the tiny-inline cost; 0 keeps every direct `CALL`. Tests that pin
+    /// the two-slot `CALL` ABI use it, since small leaf callees inline.
+    pub fn set_inline_max_cost(&mut self, cost: usize) {
+        let opts = &mut self.compiler_lazy_mut().inline_cost;
+        opts.max_inline_cost = cost;
+        opts.max_cross_module_inline_cost = opts.max_cross_module_inline_cost.min(cost);
+    }
+
     /// Mark a debugger-attached compile (I7). `coil debug` sets this.
     /// B8: does not disable MIR specialize; stops stay on reconstructed bytecode.
     pub fn set_debugger_attached(&mut self, on: bool) {

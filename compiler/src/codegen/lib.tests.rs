@@ -27,6 +27,15 @@ fn run_src_ok(src: &str) {
 }
 
 fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |_| {})
+}
+
+/// Two-slot ABI tests pin the direct `CALL`; tiny leaf callees would inline.
+fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
+}
+
+fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Vec<u64>) {
     let mut owned = String::new();
     let needs_io = src.contains("write(")
         || src.contains("stdout()")
@@ -58,6 +67,7 @@ fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compiler.register_native_id(machine::PACKED_MATRIX_NEG, 9004);
     compiler.register_native_id(machine::PACKED_VEC_ARITH, 9005);
     compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
+    tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
     (bc, compiler.constants)
 }
@@ -3699,6 +3709,71 @@ fn early_return_callee_is_tiny_inlined() {
         "inlined diamond must keep a compare+branch; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
+}
+
+/// A diamond returning a two-word `Option<int>` inlines like a one-word one:
+/// the call site keeps the `[payload, tag]` pair without a `CALL`.
+#[test]
+fn pair_return_diamond_callee_is_tiny_inlined() {
+    use common::Instruction;
+    let (bc, _pool) = compile_src(
+        "fn lookup(int i, int n) -> Option<int> { \
+               if i < 0 || i >= n { return Option::None; } \
+               return Option::Some(i * 2); \
+             } \
+             fn main() { \
+               let i = 0; let acc = 0; \
+               while i < 9 { \
+                 acc = acc + match lookup(i, 7) { Option::Some(x) => x, Option::None => 0 }; \
+                 i = i + 1; \
+               } \
+               return acc; \
+             }",
+    );
+    let calls = bc
+        .iter()
+        .filter(|b| matches!(b.bytecode(), Instruction::CALL | Instruction::TailCall))
+        .count();
+    assert!(
+        calls <= 1,
+        "pair-returning diamond must be tiny-inlined (only prologue CALL); call_count={calls}; opcodes: {:?}",
+        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tiny_inline_diamond_takes_two_word_returns_only_when_asked() {
+    use crate::il::{IlJumpKind, IlOp, Label};
+    use common::{DebugLoc, Instruction};
+    let loc = DebugLoc::unknown;
+    let pair_arm = |payload: i32, tag: i32| {
+        vec![
+            IlOp::Const { imm: payload, loc: loc() },
+            IlOp::Const { imm: tag, loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 2 },
+        ]
+    };
+    let mut ops = vec![
+        IlOp::Load { slot: 0, loc: loc() },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Bin { op: Instruction::LEQ, loc: loc() },
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(0),
+            loc: loc(),
+            hint: Default::default(),
+        },
+    ];
+    ops.extend(pair_arm(0, 0));
+    ops.extend(pair_arm(5, 1));
+    assert!(Compiler::is_tiny_inline_diamond_il_words(&ops, 2));
+    assert!(!Compiler::is_tiny_inline_diamond_il(&ops));
+    assert!(!Compiler::is_tiny_inline_il(&ops));
+    // Mixed widths never join.
+    let n = ops.len();
+    ops[n - 1] = IlOp::Return { loc: loc(), ret_words: 1 };
+    assert!(!Compiler::is_tiny_inline_diamond_il_words(&ops, 2));
+    assert!(!Compiler::is_tiny_inline_diamond_il_words(&ops, 1));
 }
 
 #[test]
@@ -8779,7 +8854,7 @@ fn main() {
 
 #[test]
 fn two_slot_try_skips_make_enum() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn step(int n) -> Result<int, int> {
     if n == 0 {
@@ -8869,7 +8944,7 @@ fn main() {
 
 #[test]
 fn two_slot_return_try_forwards_pair() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn step(int n) -> Result<int, int> {
     if n == 0 {
@@ -8941,7 +9016,7 @@ fn main() {
 #[test]
 fn result_try_churn_does_not_make_enum() {
     let src = include_str!("../../../examples/perf/result_try_churn.hy");
-    let (bc, _) = compile_src(src);
+    let (bc, _) = compile_src_no_inline(src);
     assert!(
         !bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
@@ -9182,7 +9257,7 @@ fn main() {
 
 #[test]
 fn option_try_chain_skips_make_enum() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn maybe(int n) -> Option<int> {
     if n == 0 {
@@ -9223,7 +9298,7 @@ fn main() {
 
 #[test]
 fn product_then_try_keeps_both_abis() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn step(int n) -> Result<int, int> {
     if n < 0 {
