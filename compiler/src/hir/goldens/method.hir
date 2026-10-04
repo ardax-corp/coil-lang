@@ -1,0 +1,23 @@
+Method P::get(self%0: P) -> int
+  block : never
+    =>
+      return : never
+        field .x : int
+          local self%0 : P
+
+Function f() -> int
+  block : never
+    let p%0: P : unit
+      make class P : P
+        lit 3 : int {nonneg}
+    assign : int
+      field .x : int
+        local p%0 : P
+      bin IntAdd : int
+        field .x : int
+          local p%0 : P
+        lit 1 : int {nonneg}
+    =>
+      return : never
+        call .get : int
+          local p%0 : P

@@ -23,6 +23,8 @@ pub struct DissectArgs {
     pub extra_roots: Vec<std::path::PathBuf>,
     pub grants: HostGrants,
     pub show_mir: bool,
+    /// Print each body's HIR (typed, desugared tree).
+    pub show_hir: bool,
     pub show_il_post: bool,
     /// Interleave source lines in the bytecode listing.
     pub source: bool,
@@ -86,12 +88,12 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
 
     let from_archive = args.filename.ends_with(".hyc");
     if from_archive
-        && (args.show_il || args.show_il_post || args.show_mir || args.show_ast || args.show_expand)
+        && (args.show_il || args.show_il_post || args.show_mir || args.show_hir || args.show_ast || args.show_expand)
     {
         fail_and_exit(
             &mut pipeline,
             ErrorCode::InvalidCliFlags,
-            "--il / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
+            "--il / --hir / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
         );
     }
     if args.show_expand {
@@ -108,6 +110,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     if args.show_mir {
         compiler::start_mir_capture();
     }
+    if args.show_hir {
+        compiler::start_hir_capture();
+    }
     let artifacts = if from_archive {
         match archive_artifacts(&args.filename) {
             Ok(a) => a,
@@ -123,6 +128,7 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         }
     };
     let mir = if args.show_mir { compiler::take_mir_capture() } else { Vec::new() };
+    let hir = if args.show_hir { compiler::take_hir_capture() } else { Default::default() };
     if args.opt_stats || args.opt_stats_json {
         let stats = compiler::last_opt_stats();
         if args.opt_stats {
@@ -195,6 +201,20 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
                 ErrorCode::InvalidCliFlags,
                 "internal: --il-post requested but no optimized IL snapshot",
             ),
+        }
+    }
+
+    if args.show_hir {
+        println!("=== hir ===");
+        for (_, text) in hir
+            .bodies
+            .iter()
+            .filter(|(name, _)| pat.is_none_or(|p| compiler::matches_fn_pat(name, p)))
+        {
+            println!("{text}");
+        }
+        for problem in &hir.problems {
+            println!(";; hir problem: {problem}");
         }
     }
 

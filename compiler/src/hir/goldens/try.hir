@@ -1,0 +1,34 @@
+Function g(n%0: int) -> enum Result { Ok(int), Err(string) } [pair Result] result-mode
+  block : never
+    if : never
+      bin Lt : bool
+        local n%0 : int
+        lit 0 : int {nonneg}
+      block : never
+        =>
+          return : never
+            make Result::Err#1 : enum Result { Ok(int), Err(string) } [pair Result]
+              lit "neg" : string
+    =>
+      return : never
+        make Result::Ok#0 : enum Result { Ok(int), Err(string) } [pair Result]
+          local n%0 : int
+
+Function f(n%0: int) -> enum Result { Ok(int), Err(string) } [pair Result] result-mode
+  block : never
+    let v%3: int : unit
+      match : int
+        call g : enum Result { Ok(int), Err(string) } [pair Result]
+          local n%0 : int
+        Result::Ok#0(ok%1) =>
+          local ok%1 : int
+        Result::Err#1(err%2) =>
+          return : never
+            make Result::Err#1 : enum Result { Ok(int), Err(string) } [pair Result]
+              local err%2 : string
+    =>
+      return : never
+        make Result::Ok#0 : enum Result { Ok(int), Err(string) } [pair Result]
+          bin IntMul : int
+            local v%3 : int
+            lit 2 : int {nonneg}

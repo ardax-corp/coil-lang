@@ -14,6 +14,7 @@ pub(crate) mod mir;
 pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
+pub use hir::{start_hir_capture, take_hir_capture};
 pub use mir::{start_mir_capture, take_mir_capture};
 pub(crate) mod hir;
 mod host_grants;

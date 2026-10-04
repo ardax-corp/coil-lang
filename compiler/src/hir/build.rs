@@ -1,0 +1,1454 @@
+//! AST + checker facts to HIR ([`build_module`]).
+//!
+//! Runs after `check_program` on the same AST. Types come from the
+//! [`TypedSidecar`] (by span, then by [`NodeId`]); layouts from
+//! [`super::layout::of`]. Sugar is removed here:
+//!
+//! - `e?` is a `Match` whose miss arm returns the `None` / `Err`.
+//! - `a ?? b` is a `Match` with `b` in the miss arm.
+//! - `x op= e` and `x++` are `Assign` of a `Bin`.
+//! - `while c { b }` is `Loop { if c { b } else { break } }`;
+//!   `while let` and `if let` are `Match`.
+//! - `raise e` is `Return(Make Err e)`, and in a Result-mode function a bare
+//!   `return v` is `Return(Make Ok v)`.
+//!
+//! A construct the builder does not cover yet becomes
+//! [`HirKind::Unsupported`]; [`super::check::problems`] reports them.
+
+use std::collections::HashMap;
+
+use parser::ast::{
+    AdjustOp, AssignOp, EnumConstructPayload, Expression, LetPattern, MatchArm, Output, Pattern,
+    PatternPayload,
+};
+
+use super::layout::{self, Layout};
+use super::{
+    BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind,
+    HirLocal, HirModule, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span,
+    UnOp,
+};
+use crate::typechecking::infer::{Checker, TypedSidecar};
+use crate::typechecking::ty::{
+    self as coil_ty, Ty, is_option_ty, option_inner, result_ok_err, result_ty, strip_readonly,
+};
+
+/// Build HIR for every body in `ast` (a checked module's `Program`).
+/// `module` is the namespace path codegen compiles it under (`""` for the
+/// entry file); it prefixes body names and finds the checker's schemes.
+pub fn build_module(checker: &Checker, sidecar: &TypedSidecar, module_path: &str, ast: &Output<'_>) -> HirModule {
+    let mut module = HirModule::default();
+    let mut cx = Cx {
+        checker,
+        sidecar,
+        module: &mut module,
+    };
+    let mut top = BodyBuilder::new(&join(module_path, "<top>"), BodyKind::TopLevel, span_of(ast));
+    let mut top_stmts = Vec::new();
+    cx.items(ast, module_path, &mut top, &mut top_stmts);
+    if !top_stmts.is_empty() {
+        let root = top.push(
+            HirKind::Block {
+                stmts: top_stmts,
+                tail: None,
+            },
+            None,
+            span_of(ast),
+            None,
+        );
+        top.body.root = Some(root);
+        let body = top.finish();
+        module.bodies.insert(0, body);
+    }
+    module
+}
+
+fn span_of(node: &Output<'_>) -> Span {
+    (node.0.start, node.0.end)
+}
+
+struct Cx<'c, 'm> {
+    checker: &'c Checker,
+    sidecar: &'c TypedSidecar,
+    module: &'m mut HirModule,
+}
+
+/// One body under construction, plus its lexical scopes.
+struct BodyBuilder {
+    body: HirBody,
+    scopes: Vec<HashMap<String, LocalId>>,
+    /// Enclosing body's scopes, for lambda captures (innermost last).
+    outer: Vec<HashMap<String, LocalId>>,
+}
+
+impl BodyBuilder {
+    fn new(name: &str, kind: BodyKind, span: Span) -> Self {
+        Self {
+            body: HirBody {
+                name: name.to_string(),
+                kind,
+                span,
+                params: Vec::new(),
+                ret: None,
+                ret_layout: Layout::Word,
+                result_mode: false,
+                is_coro: false,
+                is_generic: false,
+                captures: Vec::new(),
+                locals: Vec::new(),
+                exprs: Vec::new(),
+                root: None,
+            },
+            scopes: vec![HashMap::new()],
+            outer: Vec::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        kind: HirKind,
+        ty: Option<Ty>,
+        span: Span,
+        node: Option<crate::typechecking::id::NodeId>,
+    ) -> HirId {
+        let id = HirId(self.body.exprs.len() as u32);
+        self.body.exprs.push(HirExpr {
+            kind,
+            ty,
+            layout: Layout::Word,
+            span,
+            node,
+            flags: HirFlags::default(),
+        });
+        id
+    }
+
+    fn local(&mut self, name: &str, ty: Option<Ty>, kind: LocalKind) -> LocalId {
+        let id = LocalId(self.body.locals.len() as u32);
+        self.body.locals.push(HirLocal {
+            name: name.to_string(),
+            ty,
+            kind,
+        });
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), id);
+        }
+        id
+    }
+
+    fn temp(&mut self, name: &str, ty: Option<Ty>) -> LocalId {
+        let id = LocalId(self.body.locals.len() as u32);
+        self.body.locals.push(HirLocal {
+            name: name.to_string(),
+            ty,
+            kind: LocalKind::Temp,
+        });
+        id
+    }
+
+    fn lookup(&mut self, name: &str) -> Option<LocalId> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(id) = scope.get(name) {
+                return Some(*id);
+            }
+        }
+        // A name of an enclosing body: capture it.
+        for scope in self.outer.iter().rev() {
+            if let Some(outer_id) = scope.get(name).copied() {
+                let inner = LocalId(self.body.locals.len() as u32);
+                self.body.locals.push(HirLocal {
+                    name: name.to_string(),
+                    ty: None,
+                    kind: LocalKind::Capture,
+                });
+                self.body.captures.push((outer_id, inner));
+                self.scopes[0].insert(name.to_string(), inner);
+                return Some(inner);
+            }
+        }
+        None
+    }
+
+    fn finish(self) -> HirBody {
+        self.body
+    }
+}
+
+/// Peel `Expr` / `Group` / `Statement` / one-item `Fragment` wrappers.
+fn peel<'a, 'e>(node: &'a Output<'e>) -> &'a Output<'e> {
+    match node.1.as_ref() {
+        Expression::Expr(inner) | Expression::Group(inner) | Expression::Statement(inner) => {
+            peel(inner)
+        }
+        Expression::Fragment(items) if items.len() == 1 => peel(&items[0]),
+        _ => node,
+    }
+}
+
+fn is_result_construct(node: &Output<'_>) -> bool {
+    match peel(node).1.as_ref() {
+        Expression::Construct {
+            enum_name,
+            variant_name,
+            ..
+        } => {
+            (*enum_name == common::BUILTIN_RESULT_ENUM || enum_name.ends_with("::Result"))
+                && (*variant_name == "Ok" || *variant_name == "Err")
+        }
+        Expression::Call { name, .. } => {
+            matches!(peel(name).1.as_ref(), Expression::Identifier(n) if *n == "Ok" || *n == "Err")
+        }
+        _ => false,
+    }
+}
+
+impl<'c, 'm> Cx<'c, 'm> {
+    // ----- facts -------------------------------------------------------
+
+    fn ty_of(&self, node: &Output<'_>) -> Option<Ty> {
+        self.sidecar
+            .ty_at_span(node.0.start, node.0.end)
+            .cloned()
+            .or_else(|| {
+                let id = self.checker.id_table().id_of_output(node)?;
+                self.sidecar.ty(id).cloned().or_else(|| self.checker.lookup_at(id))
+            })
+    }
+
+    fn node_id(&self, node: &Output<'_>) -> Option<crate::typechecking::id::NodeId> {
+        self.checker.id_table().id_of_output(node)
+    }
+
+    /// Push a node built from `node`, stamping its type, layout and flags.
+    fn emit(&self, b: &mut BodyBuilder, node: &Output<'_>, kind: HirKind) -> HirId {
+        let ty = self.ty_of(node);
+        self.emit_ty(b, node, kind, ty)
+    }
+
+    fn emit_ty(&self, b: &mut BodyBuilder, node: &Output<'_>, kind: HirKind, ty: Option<Ty>) -> HirId {
+        let id = self.node_id(node);
+        let hir = b.push(kind, ty, span_of(node), id);
+        self.stamp(b, hir);
+        if let Some(id) = id {
+            let flags = &mut b.body.exprs[hir.0 as usize].flags;
+            if self.sidecar.is_frame_local(id) {
+                flags.insert(HirFlags::FRAME_LOCAL);
+            }
+            if self.sidecar.is_frame_local_last_use(id) {
+                flags.insert(HirFlags::LAST_USE);
+            }
+            if self.sidecar.is_in_bounds_index(id) {
+                flags.insert(HirFlags::IN_BOUNDS);
+            }
+            if self.sidecar.is_nonneg_expr(id) {
+                flags.insert(HirFlags::NONNEG);
+            }
+        }
+        hir
+    }
+
+    /// Push a desugaring node with no AST node of its own.
+    fn synth(&self, b: &mut BodyBuilder, span: Span, kind: HirKind, ty: Option<Ty>) -> HirId {
+        let hir = b.push(kind, ty, span, None);
+        self.stamp(b, hir);
+        hir
+    }
+
+    fn stamp(&self, b: &mut BodyBuilder, hir: HirId) {
+        let expr = &mut b.body.exprs[hir.0 as usize];
+        if let Some(ty) = &expr.ty {
+            expr.layout = layout::of_resolved(self.checker, ty);
+        }
+    }
+
+    /// Give an untyped node (an assignment place) `from`'s type.
+    fn fill_ty(&self, b: &mut BodyBuilder, id: HirId, from: HirId) {
+        if b.body.exprs[id.0 as usize].ty.is_none() {
+            b.body.exprs[id.0 as usize].ty = self.ty_at(b, from);
+            self.stamp(b, id);
+        }
+    }
+
+    fn ty_at(&self, b: &BodyBuilder, id: HirId) -> Option<Ty> {
+        b.body.exprs[id.0 as usize].ty.clone()
+    }
+
+    fn unsupported(&self, b: &mut BodyBuilder, node: &Output<'_>, what: &'static str) -> HirId {
+        self.emit(b, node, HirKind::Unsupported(what))
+    }
+
+    // ----- items -------------------------------------------------------
+
+    /// Walk module-level items, building one body per function; top-level
+    /// statements go to `stmts` of the `<top>` body.
+    fn items(&mut self, node: &Output<'_>, prefix: &str, top: &mut BodyBuilder, stmts: &mut Vec<HirId>) {
+        match node.1.as_ref() {
+            Expression::Fragment(items)
+                if matches!(
+                    items.first().map(|i| i.1.as_ref()),
+                    Some(Expression::Variable(..) | Expression::Constant(..))
+                ) =>
+            {
+                let id = self.expr(top, node);
+                stmts.push(id);
+            }
+            Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
+                for item in items {
+                    self.items(item, prefix, top, stmts);
+                }
+            }
+            Expression::Expr(inner) | Expression::Statement(inner) | Expression::Group(inner) => {
+                self.items(inner, prefix, top, stmts)
+            }
+            Expression::Module(name, body) => {
+                let prefix = join(prefix, name);
+                self.items(body, &prefix, top, stmts);
+            }
+            Expression::Function { name, .. } => {
+                let full = join(prefix, name);
+                let keys = vec![full.clone(), name.to_string()];
+                self.function(node, &full, BodyKind::Function, None, &keys);
+            }
+            Expression::Method(_, inner) => self.items(inner, prefix, top, stmts),
+            Expression::Implementation { owner, methods, .. } => {
+                for method in methods {
+                    let Some(m) = fn_name(method) else { continue };
+                    let full = join(&join(prefix, owner), m);
+                    let keys = vec![full.clone(), format!("{owner}::{m}")];
+                    self.function(fn_node(method), &full, BodyKind::Method, Some(owner), &keys);
+                }
+            }
+            Expression::TypeClassImpl {
+                class,
+                args,
+                methods,
+                ..
+            } => {
+                let owner = args
+                    .first()
+                    .map(|a| a.1.to_string())
+                    .unwrap_or_default();
+                let span = node.0.into_range();
+                let instances = &self.checker.generics().instances;
+                let instance = instances
+                    .iter()
+                    .find(|inst| inst.class == *class && inst.range == span)
+                    .or_else(|| {
+                        // Derive-generated impls carry a synthetic span.
+                        let mut by_head = instances.iter().filter(|inst| {
+                            inst.class == *class
+                                && inst.args.first().is_some_and(|a| head_name(a) == head_str(&owner))
+                        });
+                        let first = by_head.next();
+                        if by_head.next().is_some() { None } else { first }
+                    });
+                let path = join(prefix, &format!("{class} for {owner}"));
+                for method in methods {
+                    let Some(m) = fn_name(method) else { continue };
+                    let mut keys = Vec::new();
+                    if let Some(fqn) = instance.and_then(|i| i.method_fqns.get(m)) {
+                        keys.push(fqn.clone());
+                    }
+                    let full = join(&path, m);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                }
+            }
+            Expression::TypeClass { name, methods, .. } => {
+                // Default method bodies.
+                for method in methods {
+                    let Some(m) = fn_name(method) else { continue };
+                    let keys = vec![crate::typechecking::generics::Generics::default_method_fqn(name, m)];
+                    let full = join(&join(prefix, name), m);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                }
+            }
+            Expression::TestCase { name, body } => {
+                let label = match peel(name).1.as_ref() {
+                    Expression::String(s) => format!("test {s:?}"),
+                    _ => "test".to_string(),
+                };
+                let mut tb = BodyBuilder::new(&label, BodyKind::Test, span_of(node));
+                tb.body.result_mode = true;
+                tb.body.ret = Some(result_ty(coil_ty::unit(), coil_ty::string()));
+                let root = self.expr(&mut tb, body);
+                self.implicit_ok_return(&mut tb, root);
+                tb.body.root = Some(root);
+                self.module.bodies.push(tb.finish());
+            }
+            // Declarations with no body.
+            Expression::Class { .. }
+            | Expression::EnumDecl { .. }
+            | Expression::TypeAlias { .. }
+            | Expression::Use { .. }
+            | Expression::ExternBlock { .. }
+            | Expression::ExternStruct(_)
+            | Expression::AttrDecl { .. }
+            | Expression::DeriveDecl { .. }
+            | Expression::FnMacroDecl { .. }
+            | Expression::Noop(_) => {}
+            _ => {
+                let id = self.expr(top, node);
+                stmts.push(id);
+            }
+        }
+    }
+
+    /// Build one function body. `owner` is set for inherent methods, whose
+    /// `self` is implicit; `keys` are the checker's names for its scheme.
+    fn function(&mut self, node: &Output<'_>, full: &str, kind: BodyKind, owner: Option<&str>, keys: &[String]) {
+        let Expression::Function {
+            is_coro,
+            is_static,
+            type_params,
+            args,
+            body,
+            ..
+        } = node.1.as_ref()
+        else {
+            return;
+        };
+        // A signature without a body (trait declaration, `fn f();`).
+        let Some(body) = body else { return };
+        let mut b = BodyBuilder::new(full, kind, span_of(node));
+        b.body.is_coro = *is_coro;
+        b.body.is_generic = !type_params.is_empty();
+        let ret = keys.iter().find_map(|k| self.checker.fn_return_ty(k));
+        b.body.ret_layout = ret
+            .as_ref()
+            .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
+        b.body.ret = ret;
+        b.body.result_mode = keys.iter().any(|k| self.checker.fn_is_result_mode(k));
+        if let Some(owner) = owner
+            && !is_static
+        {
+            let id = b.local("self", Some(Ty::Con(owner.to_string())), LocalKind::Param);
+            b.body.params.push(id);
+        }
+        let param_tys = keys.iter().find_map(|k| self.checker.fn_param_tys(k));
+        self.params(&mut b, args, param_tys.as_deref());
+        let root = self.expr(&mut b, body);
+        self.implicit_ok_return(&mut b, root);
+        b.body.root = Some(root);
+        self.module.bodies.push(b.finish());
+    }
+
+    /// A Result-mode body with a unit `Ok` that can fall off its end returns
+    /// `Ok(())` there; make that return explicit.
+    fn implicit_ok_return(&self, b: &mut BodyBuilder, root: HirId) {
+        if !b.body.result_mode {
+            return;
+        }
+        let Some((ok, _)) = b.body.ret.as_ref().and_then(result_ok_err) else {
+            return;
+        };
+        if !layout::is_unit(&ok) {
+            return;
+        }
+        let HirKind::Block { stmts, tail: None } = &b.body.exprs[root.0 as usize].kind else {
+            return;
+        };
+        let diverges = stmts.last().is_some_and(|last| {
+            matches!(b.body.exprs[last.0 as usize].ty.as_ref(), Some(Ty::Never))
+        });
+        if diverges {
+            return;
+        }
+        let span = (b.body.span.1, b.body.span.1);
+        let unit = self.synth(b, span, HirKind::Lit(Lit::Unit), Some(ok));
+        let ret = b.body.ret.clone();
+        let ok = self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![unit], ret);
+        let r = self.synth(b, span, HirKind::Return(Some(ok)), Some(Ty::Never));
+        if let HirKind::Block { stmts, .. } = &mut b.body.exprs[root.0 as usize].kind {
+            stmts.push(r);
+        }
+    }
+
+    fn params(&mut self, b: &mut BodyBuilder, args: &Output<'_>, tys: Option<&[Ty]>) {
+        let items: Vec<&Output<'_>> = match args.1.as_ref() {
+            Expression::Fragment(items) => items.iter().collect(),
+            _ => vec![args],
+        };
+        let skip = b.body.params.len();
+        for (i, item) in items.into_iter().enumerate() {
+            if let Expression::Argument { name, .. } = item.1.as_ref() {
+                let ty = tys
+                    .and_then(|t| t.get(skip + i).or_else(|| t.get(i)))
+                    .cloned()
+                    .filter(|t| !matches!(t, Ty::Con(n) if n == coil_ty::UNIT))
+                    .or_else(|| self.ty_of(item));
+                let id = b.local(name, ty, LocalKind::Param);
+                b.body.params.push(id);
+            }
+        }
+    }
+
+    // ----- expressions -------------------------------------------------
+
+    fn exprs(&mut self, b: &mut BodyBuilder, items: &[Output<'_>]) -> Vec<HirId> {
+        items.iter().map(|item| self.expr(b, item)).collect()
+    }
+
+    fn expr(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> HirId {
+        use Expression as E;
+        match node.1.as_ref() {
+            E::Integer(n) => self.emit_ty(b, node, HirKind::Lit(Lit::Int(*n)), self.ty_of(node).or(Some(coil_ty::int()))),
+            E::Float(f) => self.emit_ty(b, node, HirKind::Lit(Lit::Float(*f)), Some(coil_ty::float())),
+            E::Bool(v) => self.emit_ty(b, node, HirKind::Lit(Lit::Bool(*v)), Some(coil_ty::boolean())),
+            E::String(s) => self.emit_ty(b, node, HirKind::Lit(Lit::Str(s.to_string())), self.ty_of(node).or(Some(coil_ty::string()))),
+            E::Noop(_) => self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
+
+            E::Expr(inner) | E::Group(inner) | E::Statement(inner) => self.expr(b, inner),
+            E::ExprStatement(inner) => self.expr(b, inner),
+            E::NamedArg(name, value) => {
+                let value = self.expr(b, value);
+                let ty = self.ty_at(b, value);
+                self.emit_ty(b, node, HirKind::Named { name: name.to_string(), value }, ty)
+            }
+            E::Spread(inner) => {
+                let inner = self.expr(b, inner);
+                self.emit(b, node, HirKind::Spread(inner))
+            }
+
+            E::Identifier(name) => self.ident(b, node, name),
+            E::QualifiedAccess { owner, member } => {
+                if let Some(tag) = self.checker.tag_for(owner, member) {
+                    self.emit(
+                        b,
+                        node,
+                        HirKind::Make {
+                            kind: MakeKind::Variant {
+                                enum_name: owner.to_string(),
+                                variant: member.to_string(),
+                                tag: Some(tag),
+                                fields: None,
+                            },
+                            args: Vec::new(),
+                        },
+                    )
+                } else {
+                    let name = format!("{owner}::{member}");
+                    let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
+                    self.emit(b, node, HirKind::Global { name, def })
+                }
+            }
+
+            E::Block(items) => self.block(b, node, items, true),
+            E::Program(items) => self.block(b, node, items, false),
+            E::Fragment(items) => self.fragment(b, node, items),
+
+            E::Variable(name, _) => {
+                // A bare `let x;` (the init, if any, is the next fragment item).
+                let ty = self.local_ty(node, name);
+                let local = b.local(name, ty, LocalKind::Let);
+                self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
+            }
+            E::Constant(name, _) => {
+                let n = match name.1.as_ref() {
+                    E::Identifier(n) => n.to_string(),
+                    _ => "<const>".to_string(),
+                };
+                let ty = self.ty_of(name);
+                let local = b.local(&n, ty, LocalKind::Const);
+                self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
+            }
+            E::LetDestructure { pattern, rhs } => {
+                let init = self.expr(b, rhs);
+                let rhs_ty = self.ty_at(b, init);
+                let pat = self.let_pattern(b, pattern, rhs_ty.as_ref());
+                self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()))
+            }
+            E::StaticDecl { name, init, .. } => {
+                let ty = self.ty_of(init);
+                let local = b.local(name, ty, LocalKind::Const);
+                let init = self.expr(b, init);
+                self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()))
+            }
+
+            E::Assignment(target, value) => {
+                if let E::Index(base, None) = peel(target).1.as_ref() {
+                    let base = self.expr(b, base);
+                    let value = self.expr(b, value);
+                    return self.emit(b, node, HirKind::Append { base, value });
+                }
+                let value = self.expr(b, value);
+                let place = self.expr(b, target);
+                self.fill_ty(b, place, value);
+                self.emit(b, node, HirKind::Assign { place, value })
+            }
+            E::CompoundAssign(target, op, value) => self.compound_assign(b, node, target, *op, value),
+            E::Adjust { op, prefix, target } => self.adjust(b, node, *op, *prefix, target),
+
+            E::Add(l, r) => self.binary(b, node, l, r, "+"),
+            E::Sub(l, r) => self.binary(b, node, l, r, "-"),
+            E::Mul(l, r) => self.binary(b, node, l, r, "*"),
+            E::Div(l, r) => self.binary(b, node, l, r, "/"),
+            E::Mod(l, r) => self.binary(b, node, l, r, "%"),
+            E::Pow(l, r) => self.binary(b, node, l, r, "**"),
+            E::Shl(l, r) => self.binary(b, node, l, r, "<<"),
+            E::Shr(l, r) => self.binary(b, node, l, r, ">>"),
+            E::Xor(l, r) => self.binary(b, node, l, r, "^"),
+            E::BitAnd(l, r) => self.binary(b, node, l, r, "&"),
+            E::BitOr(l, r) => self.binary(b, node, l, r, "|"),
+            E::Eq(l, r) => self.binary(b, node, l, r, "=="),
+            E::Neq(l, r) => self.binary(b, node, l, r, "!="),
+            E::Le(l, r) => self.binary(b, node, l, r, "<"),
+            E::Leq(l, r) => self.binary(b, node, l, r, "<="),
+            E::Gt(l, r) => self.binary(b, node, l, r, ">"),
+            E::Geq(l, r) => self.binary(b, node, l, r, ">="),
+            E::And(l, r) | E::Or(l, r) => {
+                let and = matches!(node.1.as_ref(), E::And(..));
+                let lhs = self.expr(b, l);
+                let rhs = self.expr(b, r);
+                self.emit_ty(b, node, HirKind::Logic { and, lhs, rhs }, Some(coil_ty::boolean()))
+            }
+            E::Negate(e) => self.unary(b, node, e, UnOp::Neg),
+            E::Not(e) => self.unary(b, node, e, UnOp::BitNot),
+            E::LogicalNot(e) => self.unary(b, node, e, UnOp::Not),
+            E::Positive(e) => self.expr(b, e),
+            E::Cast(value, _) => {
+                let value = self.expr(b, value);
+                self.emit(b, node, HirKind::Cast { value })
+            }
+
+            E::Range { start, end, inclusive } => {
+                let args = vec![self.expr(b, start), self.expr(b, end)];
+                self.emit(b, node, HirKind::Make { kind: MakeKind::Range { inclusive: *inclusive }, args })
+            }
+            E::List(items) => {
+                let args = self.exprs(b, items);
+                self.emit(b, node, HirKind::Make { kind: MakeKind::List, args })
+            }
+            E::Array(items) => {
+                let args = self.exprs(b, items);
+                self.emit(b, node, HirKind::Make { kind: MakeKind::Array, args })
+            }
+            E::Tuple(items) => {
+                let args = self.exprs(b, items);
+                self.emit(b, node, HirKind::Make { kind: MakeKind::Tuple, args })
+            }
+            E::Dict(fields) => {
+                let names = fields.iter().map(|f| f.name.to_string()).collect();
+                let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
+                self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
+            }
+            E::Construct { enum_name, variant_name, fields } => {
+                let (args, names) = match fields {
+                    EnumConstructPayload::Unit => (Vec::new(), None),
+                    EnumConstructPayload::Tuple(items) => (self.exprs(b, items), None),
+                    EnumConstructPayload::Record(fields) => (
+                        fields.iter().map(|f| self.expr(b, &f.value)).collect(),
+                        Some(fields.iter().map(|f| f.name.to_string()).collect()),
+                    ),
+                };
+                self.make_variant(b, node, enum_name, variant_name, args, names)
+            }
+            E::Instantiate(class, args) => {
+                let name = match peel(class).1.as_ref() {
+                    E::Identifier(n) | E::Type(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                let args = args.as_ref().map_or_else(Vec::new, |a| self.exprs(b, a));
+                self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args })
+            }
+
+            E::Access(base, field) => {
+                let base = self.expr(b, base);
+                self.emit(b, node, HirKind::Field { base, name: field.to_string() })
+            }
+            E::OptionalAccess(base, field) => self.optional_access(b, node, base, field),
+            E::Index(base, Some(index)) => {
+                let base_id = self.expr(b, base);
+                let index = self.expr(b, index);
+                let kind = index_kind(self.ty_at(b, base_id).as_ref());
+                self.emit(b, node, HirKind::Index { base: base_id, index, kind })
+            }
+            E::Index(_, None) => self.unsupported(b, node, "append outside assignment"),
+
+            E::Call { name, args } => self.call(b, node, name, args.as_deref().unwrap_or(&[])),
+
+            E::If(branches) => self.if_chain(b, node, branches),
+            E::Branch(cond, body) => match cond {
+                Some(cond) => {
+                    let cond = self.expr(b, cond);
+                    let then = self.expr(b, body);
+                    self.emit(b, node, HirKind::If { cond, then, els: None })
+                }
+                None => self.expr(b, body),
+            },
+            E::Loop { identifier, pattern, iterable, body } => {
+                self.loop_(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body)
+            }
+            E::Break => self.emit_ty(b, node, HirKind::Break, Some(coil_ty::never())),
+            E::Continue => self.emit_ty(b, node, HirKind::Continue, Some(coil_ty::never())),
+            E::Return(value) | E::ImplicitReturn(value) => self.return_(b, node, value),
+            E::Raise(err) => {
+                let err = self.expr(b, err);
+                let ok = b.body.ret.as_ref().and_then(result_ok_err).map(|(ok, _)| ok);
+                let err_ty = self.ty_at(b, err);
+                let ty = match (ok, err_ty) {
+                    (Some(ok), Some(e)) => Some(result_ty(ok, e)),
+                    _ => b.body.ret.clone(),
+                };
+                let make = self.synth_variant(b, span_of(node), common::BUILTIN_RESULT_ENUM, "Err", vec![err], ty);
+                self.emit_ty(b, node, HirKind::Return(Some(make)), Some(coil_ty::never()))
+            }
+            E::Panic(msg) => {
+                let msg = self.expr(b, msg);
+                self.emit_ty(b, node, HirKind::Builtin { op: Builtin::Panic, args: vec![msg] }, Some(coil_ty::never()))
+            }
+            E::Try(inner) => self.try_(b, node, inner),
+            E::Coalesce(lhs, rhs) => self.coalesce(b, node, lhs, rhs),
+
+            E::Match { scrutinee, arms } => {
+                let arms: Vec<&MatchArm<'_>> = arms.iter().collect();
+                self.match_(b, node, scrutinee, &arms)
+            }
+            E::IfLet { scrutinee, then_arm, else_arm } => {
+                self.match_(b, node, scrutinee, &[then_arm, else_arm])
+            }
+            E::WhileLet { scrutinee, then_arm, on_miss } => {
+                let m = self.match_(b, node, scrutinee, &[then_arm, on_miss]);
+                let span = span_of(node);
+                let body = self.synth(b, span, HirKind::Block { stmts: vec![m], tail: None }, Some(coil_ty::unit()));
+                self.emit_ty(b, node, HirKind::Loop { body }, Some(coil_ty::unit()))
+            }
+
+            E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
+            E::Defer { body, .. } => {
+                let body = self.expr(b, body);
+                self.emit_ty(b, node, HirKind::Defer { body }, Some(coil_ty::unit()))
+            }
+            E::Yield(value) | E::YieldFrom(value) => {
+                let from = matches!(node.1.as_ref(), E::YieldFrom(_));
+                let value = self.expr(b, value);
+                self.emit(b, node, HirKind::Yield { value, from })
+            }
+            E::Resume(handle, value) => {
+                let handle = self.expr(b, handle);
+                let value = value.as_ref().map(|v| self.expr(b, v));
+                self.emit(b, node, HirKind::Resume { handle, value })
+            }
+
+            E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
+            E::Dload(inner) => self.builtin(b, node, Builtin::Dload, std::slice::from_ref(inner)),
+            E::Done(inner) => self.builtin(b, node, Builtin::Done, std::slice::from_ref(inner)),
+            E::Readonly(inner) => self.builtin(b, node, Builtin::Readonly, std::slice::from_ref(inner)),
+            E::Declare(args) => self.builtin(b, node, Builtin::Declare, args),
+            E::Invoke(args) => self.builtin(b, node, Builtin::Invoke, args),
+            E::Default(_) => self.builtin(b, node, Builtin::Default, &[]),
+
+            // Items nested in a body (local functions, impls) build their own
+            // bodies; the statement itself is a unit.
+            E::Function { name, .. } => {
+                let full = join(&b.body.name, name);
+                let keys = vec![full.clone(), name.to_string()];
+                self.function(node, &full, BodyKind::Function, None, &keys);
+                self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit()))
+            }
+            E::Class { .. } | E::EnumDecl { .. } | E::TypeAlias { .. } | E::Use { .. } => {
+                self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit()))
+            }
+
+            E::Member(_) => self.unsupported(b, node, "member"),
+            E::MacroCall { .. } => self.unsupported(b, node, "unexpanded macro call"),
+            E::Quote { .. } => self.unsupported(b, node, "quote"),
+            E::Module(..) => self.unsupported(b, node, "nested module"),
+            _ => self.unsupported(b, node, "declaration in expression position"),
+        }
+    }
+
+    fn builtin(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: Builtin, args: &[Output<'_>]) -> HirId {
+        let args = self.exprs(b, args);
+        self.emit(b, node, HirKind::Builtin { op, args })
+    }
+
+    /// Type of a `let` local: the node's own or, for `let x = …` fragments,
+    /// the init's (filled at the fragment).
+    fn local_ty(&self, node: &Output<'_>, _name: &str) -> Option<Ty> {
+        self.ty_of(node).filter(|ty| !matches!(ty, Ty::Con(n) if n == coil_ty::UNIT))
+    }
+
+    fn ident(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &str) -> HirId {
+        if let Some(local) = b.lookup(name) {
+            let ty = self.ty_of(node);
+            let slot = &mut b.body.locals[local.0 as usize];
+            if slot.ty.is_none() {
+                slot.ty.clone_from(&ty);
+            }
+            // An assignment target has no type of its own: use the local's.
+            let ty = ty.or_else(|| slot.ty.clone());
+            return self.emit_ty(b, node, HirKind::Local(local), ty);
+        }
+        if name == "None" {
+            return self.make_variant(b, node, common::BUILTIN_OPTION_ENUM, "None", Vec::new(), None);
+        }
+        let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
+        self.emit(b, node, HirKind::Global { name: name.to_string(), def })
+    }
+
+    fn block(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>], scoped: bool) -> HirId {
+        if scoped {
+            b.scopes.push(HashMap::new());
+        }
+        let mut stmts = Vec::with_capacity(items.len());
+        for item in items {
+            stmts.push(self.expr(b, item));
+        }
+        if scoped {
+            b.scopes.pop();
+        }
+        // The value of a block is its last expression unless it is a
+        // `;`-terminated statement.
+        let tail = match items.last().map(|n| n.1.as_ref()) {
+            Some(Expression::ExprStatement(_)) | None => None,
+            Some(_) => self.pop_tail(b, &mut stmts),
+        };
+        self.emit(b, node, HirKind::Block { stmts, tail })
+    }
+
+    fn fragment(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>]) -> HirId {
+        // `let x[: T] = init` and `const x = init` parse as `[decl, init]`.
+        if let [decl, init] = items {
+            match decl.1.as_ref() {
+                Expression::Variable(name, _) => {
+                    let init = self.expr(b, init);
+                    let ty = self.local_ty(decl, name).or_else(|| self.ty_at(b, init));
+                    let local = b.local(name, ty, LocalKind::Let);
+                    return self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()));
+                }
+                Expression::Constant(name, _) => {
+                    let n = match name.1.as_ref() {
+                        Expression::Identifier(n) => n.to_string(),
+                        _ => "<const>".to_string(),
+                    };
+                    let init = self.expr(b, init);
+                    let ty = self.ty_of(name).or_else(|| self.ty_at(b, init));
+                    let local = b.local(&n, ty, LocalKind::Const);
+                    return self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()));
+                }
+                _ => {}
+            }
+        }
+        if let [one] = items {
+            return self.expr(b, one);
+        }
+        let mut stmts = self.exprs(b, items);
+        let tail = self.pop_tail(b, &mut stmts);
+        self.emit(b, node, HirKind::Block { stmts, tail })
+    }
+
+    /// The last statement as the block's value, unless it is a binding.
+    fn pop_tail(&self, b: &BodyBuilder, stmts: &mut Vec<HirId>) -> Option<HirId> {
+        let last = *stmts.last()?;
+        match b.body.exprs[last.0 as usize].kind {
+            HirKind::Let { .. } | HirKind::LetPat { .. } | HirKind::Defer { .. } => None,
+            _ => stmts.pop(),
+        }
+    }
+
+    fn binary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, l: &Output<'_>, r: &Output<'_>, op: &'static str) -> HirId {
+        let lhs = self.expr(b, l);
+        let rhs = self.expr(b, r);
+        let op = resolve_bin(op, self.ty_at(b, lhs).as_ref(), self.ty_at(b, rhs).as_ref());
+        let ty = self.ty_of(node).or_else(|| match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(coil_ty::boolean()),
+            _ => self.ty_at(b, lhs),
+        });
+        self.emit_ty(b, node, HirKind::Bin { op, lhs, rhs }, ty)
+    }
+
+    fn unary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, e: &Output<'_>, op: UnOp) -> HirId {
+        let operand = self.expr(b, e);
+        self.emit(b, node, HirKind::Un { op, operand })
+    }
+
+    /// `x op= e` as `x = x op e`. The place is built twice (read and write);
+    /// lowering evaluates a place's base once.
+    fn compound_assign(&mut self, b: &mut BodyBuilder, node: &Output<'_>, target: &Output<'_>, op: AssignOp, value: &Output<'_>) -> HirId {
+        let sym = match op {
+            AssignOp::Add => "+",
+            AssignOp::Sub => "-",
+            AssignOp::Mul => "*",
+            AssignOp::Div => "/",
+            AssignOp::Mod => "%",
+            AssignOp::Pow => "**",
+            AssignOp::Shl => "<<",
+            AssignOp::Shr => ">>",
+            AssignOp::BitAnd => "&",
+            AssignOp::BitOr => "|",
+            AssignOp::BitXor => "^",
+        };
+        let read = self.expr(b, target);
+        let rhs = self.expr(b, value);
+        let lhs_ty = self.ty_at(b, read);
+        let bin_op = resolve_bin(sym, lhs_ty.as_ref(), self.ty_at(b, rhs).as_ref());
+        let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs }, lhs_ty);
+        let place = self.expr(b, target);
+        self.fill_ty(b, place, bin);
+        self.emit(b, node, HirKind::Assign { place, value: bin })
+    }
+
+    /// `x++` / `--x` as `x = x ± 1`. The node's value (old or new) is the
+    /// assign's: lowering reads `prefix` from the span when it matters.
+    fn adjust(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: AdjustOp, _prefix: bool, target: &Output<'_>) -> HirId {
+        let read = self.expr(b, target);
+        let ty = self.ty_at(b, read);
+        let is_float = matches!(ty.as_ref().map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::FLOAT);
+        let one = if is_float {
+            self.synth(b, span_of(node), HirKind::Lit(Lit::Float(1.0)), Some(coil_ty::float()))
+        } else {
+            self.synth(b, span_of(node), HirKind::Lit(Lit::Int(1)), Some(coil_ty::int()))
+        };
+        let sym = match op {
+            AdjustOp::Inc => "+",
+            AdjustOp::Dec => "-",
+        };
+        let bin_op = resolve_bin(sym, ty.as_ref(), ty.as_ref());
+        let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs: one }, ty.clone());
+        let place = self.expr(b, target);
+        self.fill_ty(b, place, bin);
+        self.emit_ty(b, node, HirKind::Assign { place, value: bin }, ty)
+    }
+
+    fn call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &Output<'_>, args: &[Output<'_>]) -> HirId {
+        use Expression as E;
+        let callee_node = peel(name);
+        match callee_node.1.as_ref() {
+            E::Identifier(n) if b.lookup(n).is_none() => {
+                if matches!(*n, "Some") {
+                    let args = self.exprs(b, args);
+                    return self.make_variant(b, node, common::BUILTIN_OPTION_ENUM, "Some", args, None);
+                }
+                if matches!(*n, "Ok" | "Err") {
+                    let args = self.exprs(b, args);
+                    return self.make_variant(b, node, common::BUILTIN_RESULT_ENUM, n, args, None);
+                }
+                let id = self.node_id(node);
+                let def = self
+                    .node_id(callee_node)
+                    .and_then(|i| self.sidecar.def_id(i))
+                    .or_else(|| id.and_then(|i| self.sidecar.def_id(i)));
+                let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
+                let args = self.exprs(b, args);
+                self.emit(
+                    b,
+                    node,
+                    HirKind::Call {
+                        callee: Callee::Named { name: n.to_string(), def, overload },
+                        args,
+                    },
+                )
+            }
+            E::QualifiedAccess { owner, member } => {
+                if self.checker.tag_for(owner, member).is_some() {
+                    let args = self.exprs(b, args);
+                    return self.make_variant(b, node, owner, member, args, None);
+                }
+                let id = self.node_id(node);
+                let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
+                let def = self.node_id(callee_node).and_then(|i| self.sidecar.def_id(i));
+                let args = self.exprs(b, args);
+                self.emit(
+                    b,
+                    node,
+                    HirKind::Call {
+                        callee: Callee::Named { name: format!("{owner}::{member}"), def, overload },
+                        args,
+                    },
+                )
+            }
+            E::Access(recv, method) => {
+                let recv = self.expr(b, recv);
+                let mut all = vec![recv];
+                all.extend(self.exprs(b, args));
+                self.emit(b, node, HirKind::Call { callee: Callee::Method { name: method.to_string() }, args: all })
+            }
+            _ => {
+                let callee = self.expr(b, name);
+                let args = self.exprs(b, args);
+                self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
+            }
+        }
+    }
+
+    fn make_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, args: Vec<HirId>, fields: Option<Vec<String>>) -> HirId {
+        let tag = self.checker.tag_for(enum_name, variant);
+        self.emit(
+            b,
+            node,
+            HirKind::Make {
+                kind: MakeKind::Variant {
+                    enum_name: enum_name.to_string(),
+                    variant: variant.to_string(),
+                    tag,
+                    fields,
+                },
+                args,
+            },
+        )
+    }
+
+    fn synth_variant(&self, b: &mut BodyBuilder, span: Span, enum_name: &str, variant: &str, args: Vec<HirId>, ty: Option<Ty>) -> HirId {
+        let tag = self.checker.tag_for(enum_name, variant);
+        self.synth(
+            b,
+            span,
+            HirKind::Make {
+                kind: MakeKind::Variant {
+                    enum_name: enum_name.to_string(),
+                    variant: variant.to_string(),
+                    tag,
+                    fields: None,
+                },
+                args,
+            },
+            ty,
+        )
+    }
+
+    fn if_chain(&mut self, b: &mut BodyBuilder, node: &Output<'_>, branches: &[Output<'_>]) -> HirId {
+        // Build from the last branch backwards so each `else` nests.
+        let chain_ty = self.ty_of(node);
+        let mut els: Option<HirId> = None;
+        for (i, branch) in branches.iter().enumerate().rev() {
+            match branch.1.as_ref() {
+                Expression::Branch(Some(cond), body) => {
+                    b.scopes.push(HashMap::new());
+                    let cond = self.expr(b, cond);
+                    let then = self.expr(b, body);
+                    b.scopes.pop();
+                    let kind = HirKind::If { cond, then, els };
+                    let at = if i == 0 { node } else { branch };
+                    els = Some(self.emit_ty(b, at, kind, chain_ty.clone()));
+                }
+                Expression::Branch(None, body) => {
+                    els = Some(self.expr(b, body));
+                }
+                _ => els = Some(self.expr(b, branch)),
+            }
+        }
+        els.unwrap_or_else(|| self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())))
+    }
+
+    fn loop_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, identifier: Option<&Output<'_>>, pattern: Option<&LetPattern<'_>>, iterable: &Output<'_>, body: &Output<'_>) -> HirId {
+        let span = span_of(node);
+        if identifier.is_none() && pattern.is_none() {
+            // `while cond { body }` is `loop { if cond { body } else { break } }`.
+            let cond = self.expr(b, iterable);
+            b.scopes.push(HashMap::new());
+            let then = self.expr(b, body);
+            b.scopes.pop();
+            let brk = self.synth(b, span, HirKind::Break, Some(coil_ty::never()));
+            let test = self.synth(b, span, HirKind::If { cond, then, els: Some(brk) }, Some(coil_ty::unit()));
+            let block = self.synth(b, span, HirKind::Block { stmts: vec![test], tail: None }, Some(coil_ty::unit()));
+            return self.emit_ty(b, node, HirKind::Loop { body: block }, Some(coil_ty::unit()));
+        }
+        let iter = self.expr(b, iterable);
+        let info = self
+            .node_id(node)
+            .and_then(|id| self.sidecar.for_in(id).cloned())
+            .or_else(|| self.checker.for_in_info_span(node.0.start, node.0.end).cloned());
+        let item_ty = info.as_ref().map(|i| i.item_ty.clone());
+        b.scopes.push(HashMap::new());
+        let pat = match (identifier, pattern) {
+            (_, Some(p)) => self.let_pattern(b, p, item_ty.as_ref()),
+            (Some(ident), None) => match peel(ident).1.as_ref() {
+                Expression::Identifier(n) | Expression::Variable(n, _) => {
+                    HirPat::Bind(b.local(n, item_ty.clone(), LocalKind::Pattern))
+                }
+                _ => HirPat::Wild,
+            },
+            (None, None) => HirPat::Wild,
+        };
+        let body = self.expr(b, body);
+        b.scopes.pop();
+        self.emit_ty(
+            b,
+            node,
+            HirKind::ForIn { pat, iterable: iter, body, kind: info.map(|i| i.kind) },
+            Some(coil_ty::unit()),
+        )
+    }
+
+    fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
+        let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
+        let v = self.expr(b, value);
+        let wrap = b.body.result_mode
+            && !is_result_construct(value)
+            && b.body.ret.as_ref().and_then(result_ok_err).is_some();
+        let v = if wrap {
+            let ret = b.body.ret.clone();
+            let span = span_of(value);
+            self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![v], ret)
+        } else {
+            v
+        };
+        let v = if is_unit && !wrap { None } else { Some(v) };
+        self.emit_ty(b, node, HirKind::Return(v), Some(coil_ty::never()))
+    }
+
+    /// `e?`: `match e { Some(x) / Ok(x) => x, miss => return miss }`.
+    fn try_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, inner: &Output<'_>) -> HirId {
+        let span = span_of(node);
+        let scrutinee = self.expr(b, inner);
+        let sty = self.ty_at(b, scrutinee);
+        let resolved = sty.as_ref().map(strip_readonly);
+        let ok_ty = self.ty_of(node);
+        let (enum_name, hit, miss) = match resolved {
+            Some(t) if is_option_ty(t) => (common::BUILTIN_OPTION_ENUM, "Some", "None"),
+            Some(t) if result_ok_err(t).is_some() => (common::BUILTIN_RESULT_ENUM, "Ok", "Err"),
+            _ => return self.unsupported(b, node, "`?` on an unresolved type"),
+        };
+        let x = b.temp("ok", ok_ty.clone());
+        let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
+        let hit_body = self.synth(b, span, HirKind::Local(x), ok_ty);
+        // The miss arm re-wraps the error in the function's own return type.
+        let (miss_pat, miss_val) = if enum_name == common::BUILTIN_OPTION_ENUM {
+            let ret = b.body.ret.clone();
+            (
+                self.variant_pat(enum_name, miss, HirPatFields::Unit),
+                self.synth_variant(b, span, enum_name, miss, Vec::new(), ret),
+            )
+        } else {
+            let err_ty = resolved.and_then(result_ok_err).map(|(_, e)| e);
+            let e = b.temp("err", err_ty.clone());
+            let read = self.synth(b, span, HirKind::Local(e), err_ty);
+            let ret = b.body.ret.clone();
+            (
+                self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)])),
+                self.synth_variant(b, span, enum_name, miss, vec![read], ret),
+            )
+        };
+        let ret = self.synth(b, span, HirKind::Return(Some(miss_val)), Some(coil_ty::never()));
+        let arms = vec![
+            HirArm { pat: hit_pat, body: hit_body },
+            HirArm { pat: miss_pat, body: ret },
+        ];
+        self.emit(b, node, HirKind::Match { scrutinee, arms })
+    }
+
+    /// `a ?? b`: `match a { Some(x) / Ok(x) => x, _ => b }`.
+    fn coalesce(&mut self, b: &mut BodyBuilder, node: &Output<'_>, lhs: &Output<'_>, rhs: &Output<'_>) -> HirId {
+        let span = span_of(node);
+        let scrutinee = self.expr(b, lhs);
+        let sty = self.ty_at(b, scrutinee);
+        let (enum_name, hit, inner) = match sty.as_ref().map(strip_readonly) {
+            Some(t) if is_option_ty(t) => (common::BUILTIN_OPTION_ENUM, "Some", option_inner(t)),
+            Some(t) if result_ok_err(t).is_some() => {
+                (common::BUILTIN_RESULT_ENUM, "Ok", result_ok_err(t).map(|(ok, _)| ok))
+            }
+            _ => return self.unsupported(b, node, "`??` on an unresolved type"),
+        };
+        let x = b.temp("val", inner.clone());
+        let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
+        let hit_body = self.synth(b, span, HirKind::Local(x), inner);
+        let default = self.expr(b, rhs);
+        let arms = vec![
+            HirArm { pat: hit_pat, body: hit_body },
+            HirArm { pat: HirPat::Wild, body: default },
+        ];
+        self.emit(b, node, HirKind::Match { scrutinee, arms })
+    }
+
+    /// `e?.f`: `match e { Some(x) => Some(x.f), _ => None }`.
+    fn optional_access(&mut self, b: &mut BodyBuilder, node: &Output<'_>, base: &Output<'_>, field: &str) -> HirId {
+        let span = span_of(node);
+        let scrutinee = self.expr(b, base);
+        let inner = self.ty_at(b, scrutinee).as_ref().map(strip_readonly).and_then(option_inner);
+        let out_ty = self.ty_of(node);
+        let field_ty = out_ty.as_ref().map(strip_readonly).and_then(option_inner);
+        let x = b.temp("some", inner.clone());
+        let read = self.synth(b, span, HirKind::Local(x), inner);
+        let get = self.synth(b, span, HirKind::Field { base: read, name: field.to_string() }, field_ty);
+        let some = self.synth_variant(b, span, common::BUILTIN_OPTION_ENUM, "Some", vec![get], out_ty.clone());
+        let none = self.synth_variant(b, span, common::BUILTIN_OPTION_ENUM, "None", Vec::new(), out_ty);
+        let arms = vec![
+            HirArm {
+                pat: self.variant_pat(common::BUILTIN_OPTION_ENUM, "Some", HirPatFields::Tuple(vec![HirPat::Bind(x)])),
+                body: some,
+            },
+            HirArm { pat: HirPat::Wild, body: none },
+        ];
+        self.emit(b, node, HirKind::Match { scrutinee, arms })
+    }
+
+    fn match_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, scrutinee: &Output<'_>, arms: &[&MatchArm<'_>]) -> HirId {
+        let scrutinee = self.expr(b, scrutinee);
+        let sty = self.ty_at(b, scrutinee);
+        let mut out = Vec::with_capacity(arms.len());
+        for arm in arms {
+            b.scopes.push(HashMap::new());
+            let pat = self.pattern(b, &arm.pattern.1, sty.as_ref());
+            let body = self.expr(b, &arm.body);
+            b.scopes.pop();
+            out.push(HirArm { pat, body });
+        }
+        self.emit(b, node, HirKind::Match { scrutinee, arms: out })
+    }
+
+    fn variant_pat(&self, enum_name: &str, variant: &str, fields: HirPatFields) -> HirPat {
+        HirPat::Variant {
+            enum_name: enum_name.to_string(),
+            variant: variant.to_string(),
+            tag: self.checker.tag_for(enum_name, variant),
+            fields,
+        }
+    }
+
+    fn pattern(&mut self, b: &mut BodyBuilder, pat: &Pattern<'_>, scrut_ty: Option<&Ty>) -> HirPat {
+        match pat {
+            Pattern::Wildcard | Pattern::Default => HirPat::Wild,
+            Pattern::Binding { name } => HirPat::Bind(b.local(name, scrut_ty.cloned(), LocalKind::Pattern)),
+            Pattern::Integer(n) => HirPat::Int(*n),
+            Pattern::Constructor { enum_name, variant_name, payload } => {
+                let field_tys = self.variant_field_tys(enum_name, variant_name, scrut_ty);
+                let fields = match payload {
+                    PatternPayload::Unit => HirPatFields::Unit,
+                    PatternPayload::Tuple(items) => HirPatFields::Tuple(
+                        items
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_, p))| {
+                                let ty = field_tys.get(i).cloned();
+                                self.pattern(b, p, ty.as_ref())
+                            })
+                            .collect(),
+                    ),
+                    PatternPayload::Record(fields) => HirPatFields::Record(
+                        fields
+                            .iter()
+                            .map(|f| (f.name.to_string(), self.pattern(b, &f.pattern.1, None)))
+                            .collect(),
+                    ),
+                };
+                self.variant_pat(enum_name, variant_name, fields)
+            }
+        }
+    }
+
+    /// Payload types of `enum_name::variant` at the scrutinee's instance.
+    fn variant_field_tys(&self, enum_name: &str, variant: &str, scrut_ty: Option<&Ty>) -> Vec<Ty> {
+        let scrut = scrut_ty.map(strip_readonly);
+        if let Some(t) = scrut {
+            if is_option_ty(t) && variant == "Some" {
+                return option_inner(t).into_iter().collect();
+            }
+            if let Some((ok, err)) = result_ok_err(t) {
+                return match variant {
+                    "Ok" => vec![ok],
+                    "Err" => vec![err],
+                    _ => Vec::new(),
+                };
+            }
+        }
+        self.checker
+            .enum_variants(enum_name)
+            .and_then(|vars| vars.into_iter().find(|(n, _, _)| n == variant))
+            .map(|(_, _, payload)| payload)
+            .filter(|payload| payload.iter().all(layout::ty_is_closed))
+            .unwrap_or_default()
+    }
+
+    fn let_pattern(&mut self, b: &mut BodyBuilder, pat: &LetPattern<'_>, ty: Option<&Ty>) -> HirPat {
+        let ty = ty.map(strip_readonly);
+        match pat {
+            LetPattern::Wildcard => HirPat::Wild,
+            LetPattern::Binding { name } => HirPat::Bind(b.local(name, ty.cloned(), LocalKind::Pattern)),
+            LetPattern::Tuple(items) => {
+                let tys: Vec<Ty> = match ty {
+                    Some(Ty::Tuple(tys)) => tys.clone(),
+                    _ => Vec::new(),
+                };
+                HirPat::Tuple(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| self.let_pattern(b, p, tys.get(i)))
+                        .collect(),
+                )
+            }
+            LetPattern::Record(fields) => {
+                let tys: Vec<(String, Ty)> = match ty {
+                    Some(Ty::Record { fields }) => fields.clone(),
+                    _ => Vec::new(),
+                };
+                HirPat::Record(
+                    fields
+                        .iter()
+                        .map(|f| {
+                            let fty = tys.iter().find(|(n, _)| n == f.name).map(|(_, t)| t.clone());
+                            (f.name.to_string(), self.let_pattern(b, &f.pattern, fty.as_ref()))
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
+        let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
+        let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
+        inner.outer = b.outer.clone();
+        inner.outer.extend(b.scopes.iter().cloned());
+        let fn_ty = self.ty_of(node);
+        if let Some(Ty::Fun(_, ret)) = fn_ty.as_ref().map(strip_readonly) {
+            let ret = final_ret(ret);
+            inner.body.ret_layout = layout::of_resolved(self.checker, &ret);
+            inner.body.ret = Some(ret);
+        }
+        self.params(&mut inner, args, None);
+        let root = self.expr(&mut inner, body);
+        inner.body.root = Some(root);
+        // Captures resolved through `outer` refer to `b`'s locals only when
+        // they came from `b`'s own scopes; deeper ones are re-captured by `b`.
+        let captured: Vec<String> = inner
+            .body
+            .captures
+            .iter()
+            .map(|(_, inner_id)| inner.body.locals[inner_id.0 as usize].name.clone())
+            .collect();
+        for (i, name) in captured.iter().enumerate() {
+            if let Some(outer) = b.lookup(name) {
+                inner.body.captures[i].0 = outer;
+            }
+        }
+        let index = self.module.bodies.len();
+        self.module.bodies.push(inner.finish());
+        self.emit(b, node, HirKind::Lambda { body: index })
+    }
+}
+
+/// `List<T>` → `List`, for matching an instance head to its source text.
+fn head_str(text: &str) -> &str {
+    text.split('<').next().unwrap_or(text).trim()
+}
+
+fn head_name(ty: &Ty) -> String {
+    match strip_readonly(ty) {
+        Ty::Con(n) => n.rsplit("::").next().unwrap_or(n).to_string(),
+        Ty::App(head, _) => head_name(head),
+        other => other.to_string(),
+    }
+}
+
+/// The `Function` inside a `Method` wrapper.
+fn fn_node<'a, 'e>(node: &'a Output<'e>) -> &'a Output<'e> {
+    match node.1.as_ref() {
+        Expression::Method(_, inner) => fn_node(inner),
+        _ => node,
+    }
+}
+
+fn fn_name<'e>(node: &Output<'e>) -> Option<&'e str> {
+    match fn_node(node).1.as_ref() {
+        Expression::Function { name, body: Some(_), .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// The result of a curried `A -> B -> R` function type.
+fn final_ret(ty: &Ty) -> Ty {
+    match strip_readonly(ty) {
+        Ty::Fun(_, ret) => final_ret(ret),
+        other => other.clone(),
+    }
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}::{name}")
+    }
+}
+
+fn index_kind(ty: Option<&Ty>) -> IndexKind {
+    match ty.map(strip_readonly) {
+        Some(Ty::Con(n)) if n == coil_ty::STRING => IndexKind::String,
+        Some(Ty::List(_) | Ty::Array { .. }) => IndexKind::Array,
+        Some(Ty::App(head, _)) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => {
+            IndexKind::Array
+        }
+        Some(Ty::Record { .. }) => IndexKind::Dict,
+        Some(Ty::App(head, _)) if matches!(head.as_ref(), Ty::Con(n) if n == "Dict") => IndexKind::Dict,
+        Some(Ty::Tuple(_)) => IndexKind::Tuple,
+        _ => IndexKind::Other,
+    }
+}
+
+/// The primitive lane of `l op r`, or [`BinOp::Overloaded`].
+fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> BinOp {
+    #[derive(PartialEq)]
+    enum Lane {
+        Int,
+        Float,
+        Str,
+        Bool,
+        Other,
+    }
+    let lane = |ty: Option<&Ty>| match ty.map(strip_readonly) {
+        Some(Ty::Con(n)) if n == coil_ty::INT || n == coil_ty::BYTE => Lane::Int,
+        Some(Ty::Con(n)) if n == coil_ty::FLOAT => Lane::Float,
+        Some(Ty::Con(n)) if n == coil_ty::STRING => Lane::Str,
+        Some(Ty::Con(n)) if n == coil_ty::BOOL => Lane::Bool,
+        _ => Lane::Other,
+    };
+    let (l, r) = (lane(l), lane(r));
+    let same = |want: Lane| l == want && r == want;
+    let cmp = |op: &str| match op {
+        "==" => Some(BinOp::Eq),
+        "!=" => Some(BinOp::Ne),
+        "<" => Some(BinOp::Lt),
+        "<=" => Some(BinOp::Le),
+        ">" => Some(BinOp::Gt),
+        ">=" => Some(BinOp::Ge),
+        _ => None,
+    };
+    if let Some(c) = cmp(op) {
+        let primitive = l == r && l != Lane::Other;
+        return if primitive { c } else { BinOp::Overloaded(op) };
+    }
+    if same(Lane::Int) {
+        return match op {
+            "+" => BinOp::IntAdd,
+            "-" => BinOp::IntSub,
+            "*" => BinOp::IntMul,
+            "/" => BinOp::IntDiv,
+            "%" => BinOp::IntRem,
+            "**" => BinOp::IntPow,
+            "<<" => BinOp::Shl,
+            ">>" => BinOp::Shr,
+            "&" => BinOp::BitAnd,
+            "|" => BinOp::BitOr,
+            "^" => BinOp::BitXor,
+            _ => BinOp::Overloaded(op),
+        };
+    }
+    if same(Lane::Float) {
+        return match op {
+            "+" => BinOp::FloatAdd,
+            "-" => BinOp::FloatSub,
+            "*" => BinOp::FloatMul,
+            "/" => BinOp::FloatDiv,
+            "%" => BinOp::FloatRem,
+            "**" => BinOp::FloatPow,
+            _ => BinOp::Overloaded(op),
+        };
+    }
+    if op == "+" && same(Lane::Str) {
+        return BinOp::StrConcat;
+    }
+    if same(Lane::Bool) {
+        return match op {
+            "&" => BinOp::BitAnd,
+            "|" => BinOp::BitOr,
+            "^" => BinOp::BitXor,
+            _ => BinOp::Overloaded(op),
+        };
+    }
+    BinOp::Overloaded(op)
+}
+
+#[cfg(test)]
+#[path = "build.tests.rs"]
+mod tests;

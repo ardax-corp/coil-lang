@@ -327,6 +327,9 @@ enum RawCommand {
         /// Also print the optimized IL (before fuse / lowering)
         #[arg(long)]
         il_post: bool,
+        /// Also print each body's HIR (typed, desugared tree)
+        #[arg(long)]
+        hir: bool,
         /// Also print the MIR of numeric bodies (dense / LIR)
         #[arg(long)]
         mir: bool,
@@ -710,6 +713,7 @@ impl RawCli {
                 fn_pat,
                 il,
                 il_post: _,
+                hir: _,
                 mir: _,
                 no_source: _,
                 ast,

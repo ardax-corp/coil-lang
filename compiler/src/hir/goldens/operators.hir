@@ -1,0 +1,20 @@
+Function f(a%0: int, x%1: float, s%2: string) -> int
+  block : never
+    let t%3: string : unit
+      bin StrConcat : string
+        local s%2 : string
+        lit "!" : string
+    let y%4: float : unit
+      bin FloatMul : float
+        local x%1 : float
+        lit 2.0 : float
+    =>
+      return : never
+        bin IntAdd : int
+          bin IntAdd : int
+            local a%0 : int
+            lit 1 : int {nonneg}
+          cast : int
+            index String : byte
+              local t%3 : string
+              lit 0 : int {nonneg}
