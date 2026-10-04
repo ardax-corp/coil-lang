@@ -47,6 +47,8 @@ pub struct TestOptions {
     /// Line coverage (`--coverage`); `None` = off.
     pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
+    /// `--hir`: lower function bodies from HIR where it covers them.
+    pub hir: bool,
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
     pub extra_roots: Vec<PathBuf>,
@@ -464,6 +466,9 @@ pub(crate) fn compile_test_file(
     };
     pipeline.set_include_tests(true);
     pipeline.set_opt_level(options.opt_level);
+    if options.hir {
+        pipeline.set_hir_lowering(true);
+    }
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling
     // coil-stdlib checkout, when those directories exist.

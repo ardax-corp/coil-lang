@@ -903,6 +903,13 @@ pub struct Compiler {
     /// Drafts before PC bind (tests / diagnostics).
     stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
+
+    /// Lower the HIR core subset instead of the AST walk (`--hir` / `COIL_HIR=1`).
+    hir_lowering: bool,
+    /// HIR of the module being compiled, when [`Self::hir_lowering`] is on.
+    hir_module: Option<crate::hir::HirModule>,
+    /// Function body index in [`Self::hir_module`] by declaration span.
+    hir_fns: HashMap<(usize, usize), usize>,
 }
 
 impl Default for Compiler {
@@ -1021,6 +1028,9 @@ impl Default for Compiler {
             stack_maps: Vec::new(),
             stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
+            hir_lowering: crate::hir::lowering_from_env(),
+            hir_module: None,
+            hir_fns: HashMap::new(),
         }
     }
 }

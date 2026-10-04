@@ -188,6 +188,7 @@ pub fn print_help() {
          \x20 --coverage-out F   lcov path (default target/coverage/lcov.info; implies --coverage)\n\
          \x20 --coverage-per-test F  Also write test -> file -> lines JSON (implies --coverage)\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
+         \x20 --hir             Lower function bodies from HIR where it covers them (also COIL_HIR=1)\n\
          \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
          \x20 --allow-exit       Allow env::exit (default deny)\n\
@@ -224,6 +225,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut grants = HostGrants::deny_all();
     let mut opt_level = OptLevel::default();
+    let mut hir = false;
     let parse_level = |v: &str| {
         OptLevel::parse(v).map_err(|_| {
             format!(
@@ -248,6 +250,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--fail-fast" => fail_fast = true,
             "--no-shuffle" => no_shuffle = true,
             "--show-output" => show_output = true,
+            "--hir" => hir = true,
             "--coverage" => coverage = true,
             "--coverage-out" => {
                 i += 1;
@@ -346,6 +349,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 }
             }),
             opt_level,
+            hir,
             grants,
             extra_roots,
             report: if json { Report::Json } else { Report::Human },

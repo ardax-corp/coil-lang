@@ -71,6 +71,8 @@ pub(crate) struct CliArgs {
     pub opt_level: OptLevel,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
+    /// `--hir`: lower function bodies from HIR where it covers them.
+    pub hir: bool,
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
@@ -93,6 +95,14 @@ struct OptLevelFlags {
     /// none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g
     #[arg(short = 'O', long = "opt-level", value_name = "LEVEL", value_parser = parse_opt_level)]
     opt_level: Option<OptLevel>,
+}
+
+/// `--hir` for commands that compile and run (`coil FILE`, `coil compile`).
+#[derive(Args, Clone, Debug, Default)]
+struct HirFlags {
+    /// Lower function bodies from HIR where it covers them (also `COIL_HIR=1`)
+    #[arg(long)]
+    hir: bool,
 }
 
 /// Opt-stat dump (need a compile, not `run` / `test` / `debug`).
@@ -207,6 +217,8 @@ struct RawCli {
     #[command(flatten)]
     profile: CompileProfileFlags,
     #[command(flatten)]
+    hir: HirFlags,
+    #[command(flatten)]
     grants: HostGrantFlags,
     #[command(flatten)]
     roots: RootFlags,
@@ -232,6 +244,8 @@ enum RawCommand {
         opt: OptLevelFlags,
         #[command(flatten)]
         profile: CompileProfileFlags,
+        #[command(flatten)]
+        hir: HirFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
         #[command(flatten)]
@@ -433,6 +447,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             opt_level: OptLevel::Standard,
             opt_stats: false,
             opt_stats_json: false,
+            hir: false,
             host_grants: HostGrants::deny_all(),
             module_roots: Vec::new(),
         });
@@ -507,6 +522,7 @@ fn cli_from(
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
+        hir: false,
         host_grants: grants.into_grants(),
         module_roots: roots,
     }
@@ -538,6 +554,7 @@ impl RawCli {
         self.log.is_set()
             || self.opt.is_set()
             || self.profile.is_set()
+            || self.hir.hir
             || self.include_tests
             || self.file.is_some()
             || self.grants.is_set()
@@ -558,15 +575,18 @@ impl RawCli {
                 if is_reserved(&filename) {
                     return Err("missing input file (pass a .hy file or `--entry`)".into());
                 }
-                cli_from(
-                    Command::BuildAndRun { filename },
-                    self.log,
-                    self.include_tests,
-                    self.opt,
-                    self.profile,
-                    self.grants,
-                    self.roots.root,
-                )
+                CliArgs {
+                    hir: self.hir.hir,
+                    ..cli_from(
+                        Command::BuildAndRun { filename },
+                        self.log,
+                        self.include_tests,
+                        self.opt,
+                        self.profile,
+                        self.grants,
+                        self.roots.root,
+                    )
+                }
             }
             Some(RawCommand::Lsp { args: _ }) => cli_from(
                 Command::Lsp,
@@ -613,6 +633,7 @@ impl RawCli {
                 log,
                 opt,
                 profile,
+                hir,
                 grants,
                 roots,
                 entry_flag,
@@ -625,18 +646,21 @@ impl RawCli {
                 if is_reserved(&filename) {
                     return Err("compile requires an entry file".into());
                 }
-                cli_from(
-                    Command::Compile {
-                        filename,
-                        output: output.unwrap_or_else(|| DEFAULT_OUT.to_string()),
-                    },
-                    log,
-                    include_tests,
-                    opt,
-                    profile,
-                    grants,
-                    roots.root,
-                )
+                CliArgs {
+                    hir: hir.hir,
+                    ..cli_from(
+                        Command::Compile {
+                            filename,
+                            output: output.unwrap_or_else(|| DEFAULT_OUT.to_string()),
+                        },
+                        log,
+                        include_tests,
+                        opt,
+                        profile,
+                        grants,
+                        roots.root,
+                    )
+                }
             }
             Some(RawCommand::Run {
                 log,
