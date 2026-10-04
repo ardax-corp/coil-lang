@@ -446,6 +446,14 @@ impl Heap {
         self.alloc(joined, Object::String).1
     }
 
+    /// Allocate bytes `[from, to)` of `src`, sharing its buffer when that is
+    /// cheap ([`super::StrData::slice`]). `None` when an offset is out of
+    /// range or splits a UTF-8 sequence.
+    pub fn alloc_slice(&mut self, src: RefString, from: usize, to: usize) -> Option<RefString> {
+        let data = src.as_ref().data.slice(from, to)?;
+        Some(self.alloc(ObjString::from_data(data), Object::String).1)
+    }
+
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
         crate::vm::note_intern_str();
@@ -2199,7 +2207,7 @@ impl ObjString {
         Self::from_data(data.into())
     }
 
-    fn from_data(data: super::StrData) -> Self {
+    pub(crate) fn from_data(data: super::StrData) -> Self {
         Self {
             data,
             hash: AtomicU64::new(0),
