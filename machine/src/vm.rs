@@ -2614,13 +2614,21 @@ impl<const S: usize> Machine<S> {
         });
     }
 
+    #[inline(always)]
     fn after_return(&mut self, ip: &mut usize, sp: &mut usize) {
         let caller = self.frames.get_mut();
         *ip = caller.tell();
         *sp = caller.get();
         // Coroutine resume bookkeeping is cold for ordinary calls (fib).
-        if unlikely(self.return_bookkeeping)
-            && !self.resume_stack.is_empty()
+        if unlikely(self.return_bookkeeping) {
+            self.after_return_bookkeeping();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn after_return_bookkeeping(&mut self) {
+        if !self.resume_stack.is_empty()
             && let Some(ctx) = self.resume_stack.last()
             && self.frames.len() <= ctx.frame_depth
         {
@@ -2647,11 +2655,9 @@ impl<const S: usize> Machine<S> {
             }
             self.resume_stack.pop();
         }
-        if unlikely(self.return_bookkeeping) {
-            self.return_bookkeeping = self.nested_depth > 0
-                || !self.resume_stack.is_empty()
-                || !self.frame_pins.is_empty();
-        }
+        self.return_bookkeeping = self.nested_depth > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
     }
 
     /// Register handle interest and yield so other coros / `wait_ready` can batch.
