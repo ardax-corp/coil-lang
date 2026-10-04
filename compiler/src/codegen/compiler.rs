@@ -11733,12 +11733,28 @@ impl Compiler {
             && self.compiling_result_mode
             && !self.skip_result_ok_wrap_for_return(expr)
         {
-            self.append_with_existential_pack(bytecode, expr);
+            if Self::is_unit_literal(expr) {
+                // `return ();` from `Result<(), E>`: the payload word of a
+                // unit is `0`, as for a unit variant, so no `()` is built.
+                bytecode.push_const(0);
+            } else {
+                self.append_with_existential_pack(bytecode, expr);
+            }
             bytecode.push_const(0); // Ok's builtin tag
             return;
         }
         self.append_with_existential_pack(bytecode, expr);
         Self::emit_unbox_enum_to_pair(&self.checker, bytecode, enum_name);
+    }
+
+    /// `()` written as a literal (through `( )` / single-item wrappers).
+    fn is_unit_literal(expr: &Output) -> bool {
+        match expr.1.as_ref() {
+            Expression::Tuple(items) => items.is_empty(),
+            Expression::Group(inner) | Expression::Expr(inner) => Self::is_unit_literal(inner),
+            Expression::Fragment(items) if items.len() == 1 => Self::is_unit_literal(&items[0]),
+            _ => false,
+        }
     }
 
     /// Convert the boxed `ObjEnum` pointer on top of `bytecode`'s stack into

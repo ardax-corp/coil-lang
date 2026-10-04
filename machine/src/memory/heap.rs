@@ -102,6 +102,8 @@ pub struct Heap {
     /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
     /// (binary-tree leaves) hit this instead of the map.
     unit_enum: Option<(u32, Object)>,
+    /// Shared `()` ([`Self::immortal_empty_tuple`]), never swept or moved.
+    empty_tuple: Option<Object>,
     /// Reused gray worklist / root buffers across collections.
     gc_gray: Vec<Object>,
     gc_root_objects: Vec<Object>,
@@ -143,6 +145,7 @@ impl Default for Heap {
             weak_count: 0,
             immortal_enums: HashMap::default(),
             unit_enum: None,
+            empty_tuple: None,
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
@@ -906,7 +909,22 @@ impl Heap {
         for obj in self.immortal_enums.values() {
             roots.push(obj.addr());
         }
+        if let Some(obj) = self.empty_tuple {
+            roots.push(obj.addr());
+        }
         roots
+    }
+
+    /// The shared empty tuple `()`. It has no elements to change, so every
+    /// `()` (a `Result<(), E>` `Ok`, a unit return) can be one object.
+    pub fn immortal_empty_tuple(&mut self) -> Object {
+        if let Some(obj) = self.empty_tuple {
+            return obj;
+        }
+        let _epoch_guard = self.epoch_guard();
+        let (object, _) = self.alloc_unlocked(ObjTuple::from_slice(&[]), Object::Tuple);
+        self.empty_tuple = Some(object);
+        object
     }
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
@@ -3841,6 +3859,22 @@ mod tests {
             immortal_addr,
             "post-sweep lookup must reuse the same singleton"
         );
+    }
+
+    #[test]
+    fn empty_tuple_is_one_immortal_object() {
+        let mut heap = Heap::default();
+        let first = heap.immortal_empty_tuple().addr();
+        assert_eq!(first, heap.immortal_empty_tuple().addr());
+        let roots = heap.take_gc_roots();
+        assert!(roots.contains(&first), "`()` is always a root");
+        heap.trace(&roots);
+        unsafe { heap.sweep() };
+        heap.restore_gc_roots(roots);
+        match heap.find_object_by_addr(first) {
+            Some(Object::Tuple(t)) => assert!(t.as_ref().elements().is_empty()),
+            _ => panic!("`()` must survive a sweep"),
+        }
     }
 
     #[test]

@@ -8846,6 +8846,47 @@ fn main() {
 }
 
 #[test]
+fn result_unit_int_is_two_slot_without_allocating() {
+    let (bc, _) = compile_src_no_inline(
+        r#"
+fn check(int n) -> Result<(), int> {
+    if n < 0 {
+        raise n;
+    }
+    return ();
+}
+fn run(int n) -> Result<(), int> {
+    check(n)?;
+    check(n + 1)?;
+    return ();
+}
+fn main() {
+    let _ = run(2);
+}
+"#,
+    );
+    let ops = || bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>();
+    assert!(
+        !bc.iter().any(|b| matches!(
+            b.bytecode(),
+            Instruction::MakeEnum
+                | Instruction::MakeEnumK
+                | Instruction::MakeEnumReturn
+                | Instruction::MakeEnumReturnK
+                | Instruction::MakeTuple
+        )),
+        "`Result<(), int>` returns `[0, tag]` with no `ObjEnum` or `()`; opcodes={:?}",
+        ops(),
+    );
+    assert!(
+        bc.iter()
+            .any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2),
+        "run must CALL check as two-slot; opcodes={:?}",
+        ops(),
+    );
+}
+
+#[test]
 fn result_mixed_int_heap_still_boxes() {
     let (bc, _) = compile_src(
         r#"

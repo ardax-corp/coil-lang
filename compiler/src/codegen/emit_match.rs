@@ -279,6 +279,7 @@ impl Compiler {
         }
 
         let mut arm_info: Vec<(u32, usize, Option<&str>)> = Vec::new();
+        let mut unit_arms = 0usize;
         let mut wildcard: Option<usize> = None;
         for (index, arm) in arms.iter().enumerate() {
             match &arm.pattern.1 {
@@ -294,6 +295,7 @@ impl Compiler {
                     if arity > 1 {
                         return false;
                     }
+                    unit_arms += usize::from(arity == 0);
                     let binding = match payload {
                         PatternPayload::Unit => None,
                         PatternPayload::Tuple(parts) if parts.len() == 1 => match &parts[0].1 {
@@ -329,6 +331,26 @@ impl Compiler {
         let mut scrutinee_bc = self.do_compile(scrutinee);
         self.repr.unbox_enum_context -= 1;
         self.bytecode.append(&mut scrutinee_bc);
+
+        // `Some(x) => x, None => 0`: a unit variant's payload word is `0`, so
+        // the value is the payload whatever the tag. Only a unit variant may
+        // be the `=> 0` arm; `Ok(_) => 0, Err(e) => e` keeps its branch.
+        if wildcard.is_none()
+            && unit_arms == 1
+            && let [(_, a, a_bind), (_, b, b_bind)] = arm_info.as_slice()
+            && let Some((payload_arm, binding)) = match (a_bind, b_bind) {
+                (Some(x), None) => Some((*a, *x)),
+                (None, Some(x)) => Some((*b, *x)),
+                _ => None,
+            }
+            && let zero_arm = if payload_arm == *a { *b } else { *a }
+            && matches!(peel_arm_body(&arms[zero_arm].body), Expression::Integer(0))
+            && matches!(peel_arm_body(&arms[payload_arm].body), Expression::Identifier(n) if *n == binding)
+            && from_ident.is_none()
+        {
+            self.bytecode.push_pop();
+            return true;
+        }
 
         let mut bb = BlockBuilder::new();
         let end = bb.fresh_label(self.bytecode.il_mut());
@@ -968,6 +990,18 @@ impl Compiler {
 
 /// A group arm's payload fields in declaration order (`None` = not matched
 /// on: omitted record field).
+/// An arm body without `( )` / single-item wrappers.
+fn peel_arm_body<'a, 'c>(body: &'a Output<'c>) -> &'a Expression<'c> {
+    let mut body = body;
+    loop {
+        match body.1.as_ref() {
+            Expression::Group(inner) | Expression::Expr(inner) => body = inner,
+            Expression::Fragment(items) if items.len() == 1 => body = &items[0],
+            other => return other,
+        }
+    }
+}
+
 fn payload_fields<'p, 'c>(
     checker: &Checker,
     enum_name: &str,
