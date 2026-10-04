@@ -432,7 +432,10 @@ impl MirBuilder {
             return Err(MirError::msg(format!("call dest is {}", abi.ret)));
         }
         for (i, (&a, &ty)) in args.iter().zip(abi.params.iter()).enumerate() {
-            if self.resolve_ty(a) != ty {
+            // A generic host word is typed `i64` but may hold a heap pointer
+            // (`to_bytes`), as `host_arg_ok` allows; lanes are `Value` slots.
+            let actual = self.resolve_ty(a);
+            if actual != ty && !(actual == MirTy::I64 && ty == MirTy::HeapRef) {
                 return Err(MirError::msg(format!(
                     "call arg {i} is {} vs {ty}",
                     self.resolve_ty(a)
@@ -1348,5 +1351,21 @@ mod tests {
                 .any(|i| matches!(i, MirInst::Alloc { .. }) && i.is_gc_edge())
         }));
         assert!(f.has_gc_edge());
+    }
+
+    /// A generic host word (`i64`, e.g. `to_bytes`) may feed a dense callee's
+    /// heap param; a heap value never feeds an `i64` one.
+    #[test]
+    fn call_accepts_host_word_for_heap_param_only() {
+        let mut b = MirBuilder::new("word");
+        let word = b.add_param(MirTy::I64).unwrap();
+        let heap = b.add_param(MirTy::HeapRef).unwrap();
+        let abi = |p| crate::mir::abi::DenseAbi {
+            params: vec![p],
+            ret: MirTy::I64,
+            ret_hi: None,
+        };
+        assert!(b.ins_call(crate::il::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
+        assert!(b.ins_call(crate::il::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
     }
 }
