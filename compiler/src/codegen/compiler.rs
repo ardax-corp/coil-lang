@@ -5304,6 +5304,11 @@ impl Compiler {
             Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
                 self.expr_may_clobber_operand_stack(recv)
             }
+            // A pair call under `??` stages `[payload, tag]` in temps above
+            // the live operands, which buries a stacked lhs.
+            Expression::Coalesce(a, b) => {
+                self.expr_may_clobber_operand_stack(a) || self.expr_may_clobber_operand_stack(b)
+            }
             Expression::Index(recv, idx) => {
                 self.stack_array_select_index(recv, idx.as_ref())
                     || self.expr_may_clobber_operand_stack(recv)
@@ -12927,16 +12932,24 @@ impl Compiler {
         } else if self.expr_may_clobber_operand_stack(lhs)
             || self.expr_may_clobber_operand_stack(rhs)
         {
-            // HostInvoke / match / tiny-inline / nested calls: stage into *this*
-            // buffer so a stacked lhs cannot be buried by temp STOREs.
-            
-            
-            self.append_with_existential_pack(bytecode, lhs);
+            // HostInvoke / match / tiny-inline / nested calls: stage each
+            // operand in a temp so a stacked lhs cannot be buried by temp
+            // STOREs. `match`, `??` and diamond inlines emit straight onto
+            // `self.bytecode`, so the staging goes there too, in program
+            // order, with the caller's prefix flushed first; only the reloads
+            // stay in `bytecode`. Staging in `bytecode` once ran both operands
+            // before either store and swapped them (`m1 - m2` gave `m2 - m1`).
+            self.bytecode.append(bytecode);
+            let mut lhs_bc = CodeBuf::new();
+            self.append_with_existential_pack(&mut lhs_bc, lhs);
+            self.bytecode.append(&mut lhs_bc);
             let lhs_slot = self.alloc_temp_slot();
-            bytecode.push_store_pop(lhs_slot);
-            self.append_with_existential_pack(bytecode, rhs);
+            self.bytecode.push_store_pop(lhs_slot);
+            let mut rhs_bc = CodeBuf::new();
+            self.append_with_existential_pack(&mut rhs_bc, rhs);
+            self.bytecode.append(&mut rhs_bc);
             let rhs_slot = self.alloc_temp_slot();
-            bytecode.push_store_pop(rhs_slot);
+            self.bytecode.push_store_pop(rhs_slot);
             bytecode.push_load(lhs_slot);
             bytecode.push_load(rhs_slot);
         } else {

@@ -47,6 +47,10 @@ struct Dispatch {
     term_idx: usize,
     /// Scrutinee slot: the cursor before the `LOAD`.
     base: u32,
+    /// Match codegen `Seek`s to `base` first and its arms read the payload
+    /// from slots. Without it (`opt ?? d`) the payload is an operand that the
+    /// join consumes off the stack.
+    seeked: bool,
 }
 
 struct Plan {
@@ -219,12 +223,17 @@ fn parse_dispatch(
             }
         }
     };
+    let seeked = load_idx
+        .checked_sub(1)
+        .and_then(|k| seek_operand(&ops[k]))
+        == Some(base);
     Some(Dispatch {
         load_idx,
         arms,
         term,
         term_idx: j,
         base,
+        seeked,
     })
 }
 
@@ -359,13 +368,20 @@ fn rewrite(ops: &mut Vec<IlOp>, kept: &[(Plan, u32)], next_label: &mut u32) {
         }
         if let Some(&(d, p, t)) = dispatch_at.get(&i) {
             let loc = ops[i].loc();
+            // Either way the payload ends up in `base..` with the cursor
+            // above it, as the VM leaves it. Slot-read arms get explicit
+            // stores; an operand payload is pushed, so the stack height at
+            // the join stays what `JumpIfMatch` gave it and the value is not
+            // a dead store.
             let bind = |out: &mut Vec<IlOp>, n: u32| {
                 for j in 0..n {
                     out.push(IlOp::Load { slot: t + 1 + j, loc });
-                    out.push(IlOp::StorePop {
-                        slot: d.base + j,
-                        loc,
-                    });
+                    if d.seeked {
+                        out.push(IlOp::StorePop {
+                            slot: d.base + j,
+                            loc,
+                        });
+                    }
                 }
             };
             for &(tag, arity, target) in &d.arms {

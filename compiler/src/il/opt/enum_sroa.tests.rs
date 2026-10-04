@@ -145,3 +145,45 @@ fn seek_while_live_keeps_the_heap_enum() {
     let mut next = 100;
     assert_eq!(scalarize_enums(&mut ops, 1, &mut next), 0);
 }
+
+/// `fn(int a) { let x = Some(a); return (x ?? 10) + 1; }`: no `Seek`, so the
+/// hit leaves the payload as an operand for the join.
+fn coalesce_operand() -> Vec<IlOp> {
+    vec![
+        load(0),
+        make(1, 1),
+        store(1),
+        load(1),
+        jim(1, 1, 10),
+        IlOp::Pop { loc: loc() },
+        konst(10),
+        IlOp::jump(IlJumpKind::Unconditional, Label(11), loc()),
+        IlOp::Label(Label(10)),
+        IlOp::Label(Label(11)),
+        konst(1),
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        ret(),
+    ]
+}
+
+#[test]
+fn operand_payload_is_pushed_not_stored() {
+    let mut ops = coalesce_operand();
+    let mut next = 100;
+    assert_eq!(scalarize_enums(&mut ops, 1, &mut next), 1);
+    assert!(!has_make_enum(&ops));
+    // A `StorePop` into the scrutinee slot (2) leaves nothing on the stack
+    // for the `ADD`, and later passes drop it as a dead store.
+    assert!(!ops.contains(&store(2)), "payload must stay on the stack");
+    let hit = ops
+        .iter()
+        .position(|op| matches!(op, IlOp::Jump { kind: IlJumpKind::Unconditional, target, .. } if *target == Label(10)))
+        .expect("hit jumps to the arm");
+    assert!(
+        matches!(ops[hit - 1], IlOp::Load { .. }),
+        "hit pushes the payload before jumping"
+    );
+}
