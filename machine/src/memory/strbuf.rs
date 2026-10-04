@@ -9,9 +9,14 @@
 //! appended past `a`, or the buffer is full) it copies `a + b` into a fresh
 //! buffer with doubled capacity.
 //!
+//! A slice (`slice_bytes`) of a `Shared` string is a view `[start, start +
+//! len)` into the same buffer instead of a copy, so `rest = slice(rest, i,
+//! len(rest))` loops are linear. A view only pins a buffer at most
+//! [`VIEW_RETAIN_MAX`] times its own length; smaller slices are copied.
+//!
 //! Soundness: bytes below `used` are never written again, and every string
-//! that shares a buffer has `len <= used`, so a reader's `&str` never overlaps
-//! a region another thread may be writing. The CAS makes a claimed region
+//! that shares a buffer has `start + len <= used`, so a reader's `&str` never
+//! overlaps a region another thread may be writing. The CAS makes a claimed region
 //! exclusive to one appender, which matters for steal-epoch workers that
 //! share the heap.
 
@@ -23,6 +28,13 @@ use std::{fmt, mem, ptr, slice, str};
 
 /// Smallest capacity of a buffer created by concat.
 const MIN_SHARED_CAP: usize = 32;
+
+/// Slices shorter than this are copied: the copy is as cheap as a view.
+const VIEW_MIN_LEN: usize = 64;
+
+/// A view may pin a buffer at most this many times its own length; a smaller
+/// slice is copied so it does not keep a large buffer alive.
+const VIEW_RETAIN_MAX: usize = 8;
 
 #[repr(C)]
 struct Header {
@@ -129,10 +141,12 @@ impl Drop for SharedBuf {
 pub enum StrData {
     /// Exact-size string (literals, `format`, decoded bytes).
     Owned(String),
-    /// Prefix of a growable buffer (concat results). `accounted` is the part
-    /// of the buffer this string is charged for in heap accounting.
+    /// `[start, start + len)` of a growable buffer (concat results and
+    /// slices of them). `accounted` is the part of the buffer this string is
+    /// charged for in heap accounting.
     Shared {
         buf: SharedBuf,
+        start: usize,
         len: usize,
         accounted: usize,
     },
@@ -143,11 +157,16 @@ impl StrData {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Owned(s) => s,
-            Self::Shared { buf, len, .. } => {
-                // SAFETY: `[0, len)` was written before this string existed,
-                // is never written again, and was valid UTF-8 (built from
-                // `&str` parts).
-                unsafe { str::from_utf8_unchecked(slice::from_raw_parts(buf.bytes_ptr(), *len)) }
+            Self::Shared { buf, start, len, .. } => {
+                // SAFETY: `[start, start + len)` was written before this
+                // string existed, is never written again, and is valid UTF-8
+                // (built from `&str` parts, cut on char boundaries).
+                unsafe {
+                    str::from_utf8_unchecked(slice::from_raw_parts(
+                        buf.bytes_ptr().add(*start),
+                        *len,
+                    ))
+                }
             }
         }
     }
@@ -165,11 +184,12 @@ impl StrData {
     /// tail, otherwise copying both into a new buffer with spare capacity.
     pub fn concat(&self, tail: &str) -> Self {
         let head_len = self.as_str().len();
-        if let Self::Shared { buf, len, .. } = self
-            && buf.try_append_at(*len, tail.as_bytes())
+        if let Self::Shared { buf, start, len, .. } = self
+            && buf.try_append_at(start + len, tail.as_bytes())
         {
             return Self::Shared {
                 buf: buf.clone(),
+                start: *start,
                 len: head_len + tail.len(),
                 accounted: tail.len(),
             };
@@ -179,9 +199,40 @@ impl StrData {
         let buf = SharedBuf::with_parts(cap, &[self.as_str().as_bytes(), tail.as_bytes()]);
         Self::Shared {
             buf,
+            start: 0,
             len: total,
             accounted: cap,
         }
+    }
+
+    /// Bytes `[from, to)`, or `None` when an offset is out of range or not on
+    /// a char boundary. A long enough slice of a `Shared` string is a view
+    /// into the same buffer; anything else is copied. A copy of
+    /// [`VIEW_MIN_LEN`] bytes or more goes into an exact-size shared buffer,
+    /// so slices of the slice are views.
+    pub fn slice(&self, from: usize, to: usize) -> Option<Self> {
+        let part = self.as_str().get(from..to)?;
+        if part.len() < VIEW_MIN_LEN {
+            return Some(Self::Owned(part.to_owned()));
+        }
+        if let Self::Shared { buf, start, .. } = self
+            && part.len().saturating_mul(VIEW_RETAIN_MAX) >= buf.header().cap
+        {
+            return Some(Self::Shared {
+                buf: buf.clone(),
+                start: start + from,
+                len: part.len(),
+                // The buffer is charged to the strings that grew it.
+                accounted: 0,
+            });
+        }
+        let buf = SharedBuf::with_parts(part.len(), &[part.as_bytes()]);
+        Some(Self::Shared {
+            buf,
+            start: 0,
+            len: part.len(),
+            accounted: part.len(),
+        })
     }
 }
 
@@ -299,5 +350,68 @@ mod tests {
             assert_eq!(r, &format!("base:{t}"));
         }
         assert_eq!(base.as_str(), "base:");
+    }
+
+    fn buf_of(s: &StrData) -> *mut Header {
+        match s {
+            StrData::Shared { buf, .. } => buf.0.as_ptr(),
+            StrData::Owned(_) => panic!("expected shared"),
+        }
+    }
+
+    #[test]
+    fn long_slice_of_shared_is_a_view() {
+        let text = "x".repeat(100) + &"y".repeat(100);
+        let a = shared(&text);
+        let b = a.slice(50, 200).unwrap();
+        assert_eq!(buf_of(&a), buf_of(&b), "slice shares the buffer");
+        assert_eq!(b.as_str(), &text[50..200]);
+        assert_eq!(b.accounted_bytes(), 0);
+        // A view of a view stays in the same buffer at the right offset.
+        let c = b.slice(40, 130).unwrap();
+        assert_eq!(buf_of(&a), buf_of(&c));
+        assert_eq!(c.as_str(), &text[90..180]);
+    }
+
+    #[test]
+    fn short_or_small_share_slices_copy() {
+        let a = shared(&"z".repeat(1000));
+        assert!(matches!(a.slice(0, 10).unwrap(), StrData::Owned(_)));
+        // 100 bytes of a 2000-byte buffer would pin 20x its size: copy it.
+        let b = a.slice(0, 100).unwrap();
+        assert_ne!(buf_of(&a), buf_of(&b));
+        assert_eq!(b.as_str(), &"z".repeat(100));
+        // A long slice of an owned string copies into a shared buffer, so
+        // slicing it again is a view.
+        let o = StrData::Owned("w".repeat(300));
+        let p = o.slice(10, 300).unwrap();
+        let q = p.slice(10, 200).unwrap();
+        assert_eq!(buf_of(&p), buf_of(&q));
+        assert_eq!(q.as_str(), &"w".repeat(190));
+    }
+
+    #[test]
+    fn slice_rejects_bad_offsets() {
+        let a = shared(&"é".repeat(100));
+        assert!(a.slice(1, 50).is_none(), "inside a UTF-8 sequence");
+        assert!(a.slice(0, 201).is_none(), "past the end");
+        assert_eq!(a.slice(2, 200).unwrap().as_str(), &"é".repeat(99));
+    }
+
+    #[test]
+    fn concat_onto_a_view_keeps_other_strings_intact() {
+        let a = shared(&"a".repeat(100));
+        // Suffix view ends at the buffer's tail: append in place.
+        let tail = a.slice(10, 100).unwrap();
+        let grown = tail.concat("!");
+        assert_eq!(buf_of(&a), buf_of(&grown));
+        assert_eq!(grown.as_str(), "a".repeat(90) + "!");
+        // Prefix view does not end at the tail: copy, leave `a` alone.
+        let head = a.slice(0, 90).unwrap();
+        let other = head.concat("?");
+        assert_ne!(buf_of(&a), buf_of(&other));
+        assert_eq!(other.as_str(), "a".repeat(90) + "?");
+        assert_eq!(a.as_str(), "a".repeat(100));
+        assert_eq!(head.as_str(), "a".repeat(90));
     }
 }

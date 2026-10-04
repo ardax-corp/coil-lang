@@ -63,16 +63,17 @@ pub fn string_byte_at(heap: &mut Heap, args: &[Value]) -> Value {
 /// offset falls inside a UTF-8 sequence.
 pub fn string_slice_bytes(heap: &mut Heap, args: &[Value]) -> Value {
     let (start, end) = (args[1].as_int(), args[2].as_int());
-    let part = with_str(heap, args[0], |s| {
-        let start = start.clamp(0, s.len() as i64) as usize;
-        let end = end.clamp(start as i64, s.len() as i64) as usize;
-        s.get(start..end).map(str::to_owned)
-    });
-    let r = match part {
-        Some(p) => {
-            let gc = heap.alloc_string(p);
-            Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
+    let part = match heap.find_object_by_addr(peel_one_boxed(heap, args[0]).raw() as u64) {
+        Some(Object::String(gc)) => {
+            let n = gc.as_ref().data.len() as i64;
+            let start = start.clamp(0, n) as usize;
+            let end = end.clamp(start as i64, n) as usize;
+            heap.alloc_slice(gc, start, end)
         }
+        _ => Some(heap.alloc_string(String::new())),
+    };
+    let r = match part {
+        Some(gc) => Ok(Value::from(gc.as_ptr() as *mut u8 as u64)),
         None => Err(IoErrorTag::InvalidInput),
     };
     as_result_value(heap, r)

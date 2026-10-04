@@ -30,6 +30,12 @@
   a new buffer with doubled capacity. `s = s + x` loops, `text::join` and
   `fmt::Buf` are amortized linear. Typed `+` lowers to `FORMAT "%s%s"`, so
   `FORMAT` with a leading `%s` takes the same path.
+- `slice_bytes` of 64 bytes or more is a view `[start, start + len)` into a
+  `Shared` buffer instead of a copy, so `rest = slice(rest, i, len(rest))`
+  loops are linear. A view may pin at most 8x its own length; a shorter or
+  far smaller slice is copied (into an exact-size shared buffer, so slices
+  of it are views). Views are charged no buffer bytes: the strings that grew
+  the buffer were.
 - Stdout/stderr `write`/`write_all` honor `Machine::with_output` via a thread-local redirect (tests keep capturing).
 
 ## Language surface
