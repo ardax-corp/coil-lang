@@ -98,7 +98,8 @@ impl Object {
             // Unit variants are shared immortals.
             Self::Enum(e) if !e.as_ref().payload.is_empty() => Layout::new::<GcData<ObjEnum>>(),
             Self::Boxed(_) => Layout::new::<GcData<ObjBoxed>>(),
-            Self::Tuple(_) => Layout::new::<GcData<ObjTuple>>(),
+            // `()` is a shared immortal.
+            Self::Tuple(t) if !t.as_ref().elements().is_empty() => Layout::new::<GcData<ObjTuple>>(),
             Self::Array(_) => Layout::new::<GcData<ObjArray>>(),
             _ => return None,
         })

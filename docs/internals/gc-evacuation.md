@@ -18,7 +18,8 @@ one of:
 - a must-pointer frame slot (`PRECISE_SLOT_MUST`).
 
 Only instances, payload enums, boxes, tuples and arrays move. Strings,
-closures, coroutines, streams, threads and immortal unit enums stay put.
+closures, coroutines, streams, threads, immortal unit enums and the shared
+empty tuple `()` stay put.
 
 These **pin** the object they reach:
 

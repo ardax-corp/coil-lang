@@ -251,7 +251,7 @@
         let addr = vm.pop().raw() as u64;
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Tuple(gc)) => assert!(gc.as_ref().elements().is_empty()),
-            _ => panic!("arity-0 MakeTuple must still allocate a tuple"),
+            _ => panic!("arity-0 MakeTuple must still push a tuple"),
         }
         assert_eq!(
             vm.pop().as_int(),

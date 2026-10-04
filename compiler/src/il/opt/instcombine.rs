@@ -2,7 +2,7 @@
 //!
 //! Folds obvious adjacent patterns without new opcodes or ABI changes:
 //! const-cond branches, known-tag `EQ`, XOR-1 pairs, and two-slot enum
-//! match diamonds that just keep the payload.
+//! match diamonds whose arms both keep the payload.
 
 use common::Instruction;
 
@@ -141,19 +141,13 @@ fn try_xor1_xor1(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
     Some((4, Vec::new()))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ArmKind {
-    /// `STORE s; LOAD s` — body is the bound payload.
-    Payload,
-    /// `POP; CONST 0` — unit variant dummy payload is ABI 0.
-    UnitZero,
-}
-
 /// Two-slot match `DUP; CONST tag; EQ; JMPF miss; POP; arm; JMP end; miss: POP; arm; end:`.
 ///
-/// Both arms yielding the payload (Result `Ok(v)|Err(e)` → that word), or one
-/// payload arm plus a unit `=> 0` (Option `Some(x)|None => 0`), collapse to
-/// `POP` of the tag.
+/// Both arms yielding the payload (Result `Ok(v)|Err(e)` → that word)
+/// collapse to `POP` of the tag. An arm that drops the payload and yields `0`
+/// is not folded here: that is only the payload when the arm's variant is a
+/// unit variant (`None`), which the IL cannot see (`Ok(_) => 0` is not). The
+/// codegen folds `Some(x) => x, None => 0` where it knows the variants.
 fn try_pair_payload_identity_match(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
     if !matches!(ops.get(i)?, IlOp::Dup { .. }) {
         return None;
@@ -175,7 +169,7 @@ fn try_pair_payload_identity_match(ops: &[IlOp], i: usize) -> Option<(usize, Vec
     if !matches!(ops.get(i + 4)?, IlOp::Pop { .. }) {
         return None;
     }
-    let (hit_end, hit_kind) = consume_identity_arm(ops, i + 5)?;
+    let hit_end = consume_identity_arm(ops, i + 5)?;
     let IlOp::Jump {
         kind: IlJumpKind::Unconditional,
         target: end,
@@ -192,11 +186,8 @@ fn try_pair_payload_identity_match(ops: &[IlOp], i: usize) -> Option<(usize, Vec
     if !matches!(ops.get(miss_lab + 1)?, IlOp::Pop { .. }) {
         return None;
     }
-    let (miss_end, miss_kind) = consume_identity_arm(ops, miss_lab + 2)?;
+    let miss_end = consume_identity_arm(ops, miss_lab + 2)?;
     if !is_label(ops.get(miss_end)?, end.0) {
-        return None;
-    }
-    if !arms_fold_to_payload(hit_kind, miss_kind) {
         return None;
     }
     let loc = match ops[i + 4] {
@@ -213,23 +204,12 @@ fn try_pair_payload_identity_match(ops: &[IlOp], i: usize) -> Option<(usize, Vec
     ))
 }
 
-fn consume_identity_arm(ops: &[IlOp], i: usize) -> Option<(usize, ArmKind)> {
+/// `STORE s; LOAD s`: the arm's value is the bound payload.
+fn consume_identity_arm(ops: &[IlOp], i: usize) -> Option<usize> {
     match (ops.get(i)?, ops.get(i + 1)?) {
-        (IlOp::StorePop { slot: s0, .. }, IlOp::Load { slot: s1, .. }) if s0 == s1 => {
-            Some((i + 2, ArmKind::Payload))
-        }
-        (IlOp::Pop { .. }, IlOp::Const { imm: 0, .. }) => Some((i + 2, ArmKind::UnitZero)),
+        (IlOp::StorePop { slot: s0, .. }, IlOp::Load { slot: s1, .. }) if s0 == s1 => Some(i + 2),
         _ => None,
     }
-}
-
-fn arms_fold_to_payload(a: ArmKind, b: ArmKind) -> bool {
-    matches!(
-        (a, b),
-        (ArmKind::Payload, ArmKind::Payload)
-            | (ArmKind::Payload, ArmKind::UnitZero)
-            | (ArmKind::UnitZero, ArmKind::Payload)
-    )
 }
 
 fn is_label(op: &IlOp, id: u32) -> bool {
@@ -407,12 +387,14 @@ mod tests {
         assert!(ops.iter().any(|op| matches!(op, IlOp::Return { .. })));
     }
 
+    /// `Ok(_) => 0, Err(e) => e` has the same IL as `None => 0, Some(x) =>
+    /// x`, but an `Ok` payload is not `0`: keep the diamond.
     #[test]
-    fn option_pair_match_some_or_zero_pops_tag() {
+    fn pair_match_keeps_payload_or_zero() {
         let mut ops = pair_identity_diamond(true, false);
         instcombine(&mut ops);
-        assert!(matches!(ops[0], IlOp::Pop { .. }));
-        assert!(!ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
+        assert!(ops.iter().any(|op| matches!(op, IlOp::Dup { .. })));
+        assert!(ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
     }
 
     #[test]

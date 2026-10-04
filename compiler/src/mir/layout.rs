@@ -68,7 +68,9 @@ impl MirLayout {
             let Some((ok, err)) = result_ok_err(ty) else {
                 return Self::Word;
             };
-            if is_immediate(&ok) {
+            if is_immediate(&ok)
+                || (crate::typechecking::return_layout::is_unit(&ok) && is_immediate(&err))
+            {
                 return Self::TwoSlot;
             }
             if is_ground_heap(&ok) && is_ground_heap(&err) {
@@ -155,6 +157,18 @@ mod tests {
         assert_eq!(
             MirLayout::from_coil_ty(&result_ty(int(), int())),
             MirLayout::TwoSlot
+        );
+    }
+
+    #[test]
+    fn result_unit_int_is_two_slot_but_unit_string_stays_niche() {
+        assert_eq!(
+            MirLayout::from_coil_ty(&result_ty(Ty::Tuple(vec![]), int())),
+            MirLayout::TwoSlot
+        );
+        assert_eq!(
+            MirLayout::from_coil_ty(&result_ty(Ty::Tuple(vec![]), string())),
+            MirLayout::HeapNiche
         );
     }
 

@@ -1,7 +1,8 @@
 //! Two-slot CALL/RETURN width for known ≤2-word return layouts.
 //!
 //! `Result<int, int>`, `Result<int, heap-object>` (including unit-enum
-//! errors), `Option<int>`, and user payload enums with arity ≤1 fit in
+//! errors), `Result<(), int>` (payload word `0`), `Option<int>`, and user
+//! payload enums with arity ≤1 fit in
 //! `[payload, tag]` without boxing an `ObjEnum`. A closed arity-2 tuple of
 //! immediates (`(int, int)`, `(int, float)`, …) uses the same CALL/RETURN
 //! width as `[a, b]` (second word on top) without boxing an `ObjTuple`.
@@ -13,7 +14,7 @@
 use super::infer::Checker;
 use super::value_layout::ty_is_closed;
 use super::ty::{
-    BOOL, BYTE, FLOAT, INT, Ty, is_option_ty, is_result_ty, option_inner, range_app, result_ok_err,
+    BOOL, BYTE, FLOAT, INT, Ty, UNIT, is_option_ty, is_result_ty, option_inner, range_app, result_ok_err,
     strip_readonly,
 };
 
@@ -99,14 +100,27 @@ pub fn two_word_return_enum(checker: &Checker, ty: &Ty) -> Option<String> {
         return is_immediate(&inner).then(|| common::BUILTIN_OPTION_ENUM.to_string());
     }
     if is_result_ty(ty) {
-        let (ok, _err) = result_ok_err(ty)?;
-        return is_immediate(&ok).then(|| common::BUILTIN_RESULT_ENUM.to_string());
+        let (ok, err) = result_ok_err(ty)?;
+        // `Result<(), E>` with an immediate `E` (`Result<(), int>`) would box
+        // an `ObjEnum` per call; the pair is `[(), tag]`. A heap `E` keeps
+        // its one-word niche.
+        return (is_immediate(&ok) || (is_unit(&ok) && is_immediate(&err)))
+            .then(|| common::BUILTIN_RESULT_ENUM.to_string());
     }
     unary_user_enum_name(checker, ty)
 }
 
 fn is_immediate(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE)
+}
+
+/// `()`: the `unit` constructor or the empty tuple.
+pub(crate) fn is_unit(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Con(n) => n == UNIT,
+        Ty::Tuple(items) => items.is_empty(),
+        _ => false,
+    }
 }
 
 /// A closed, non-scalar, non-FFI/builtin user enum whose every variant has
@@ -198,6 +212,25 @@ mod tests {
             two_word_return_enum(&c, &ty),
             Some(common::BUILTIN_RESULT_ENUM.to_string())
         );
+    }
+
+    #[test]
+    fn result_unit_int_is_two_word() {
+        let c = checker();
+        for unit in [Ty::Con(crate::typechecking::ty::UNIT.into()), Ty::Tuple(vec![])] {
+            let ty = result_ty(unit, Ty::Con(INT.into()));
+            assert_eq!(
+                two_word_return_enum(&c, &ty),
+                Some(common::BUILTIN_RESULT_ENUM.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn result_unit_string_stays_one_word_niche() {
+        let c = checker();
+        let ty = result_ty(Ty::Tuple(vec![]), Ty::Con(STRING.into()));
+        assert_eq!(two_word_return_enum(&c, &ty), None);
     }
 
     #[test]

@@ -700,7 +700,9 @@ impl<const S: usize> Machine<S> {
                         opcode.bytecode(),
                         Instruction::MakeArray | Instruction::MakeArrayK
                     );
-                    let addr = if !array {
+                    let addr = if !array && n == 0 {
+                        self.heap.immortal_empty_tuple().addr()
+                    } else if !array {
                         let tuple = ObjTuple::from_slice(&self.stack[base..base + n])
                             .with_kinds(opcode.make_kinds());
                         let (object, _) = self.heap.alloc(tuple, Object::Tuple);
@@ -1002,6 +1004,8 @@ impl<const S: usize> Machine<S> {
                             Self::dense_enum_payload(&self.stack[lo..lo + arity]);
                         let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
+                    } else if kind == common::dense::MAKE_TUPLE && arity == 0 {
+                        self.heap.immortal_empty_tuple().addr()
                     } else if kind == common::dense::MAKE_TUPLE {
                         let tuple = ObjTuple::from_slice(&self.stack[lo..lo + arity]);
                         let (object, _) = self.heap.alloc(tuple, Object::Tuple);
@@ -1035,6 +1039,8 @@ impl<const S: usize> Machine<S> {
                         let payload = Self::dense_enum_payload(words).with_kinds(kinds);
                         let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
+                    } else if arity == 0 {
+                        self.heap.immortal_empty_tuple().addr()
                     } else {
                         let tuple = ObjTuple::from_slice(words).with_kinds(kinds);
                         let (object, _) = self.heap.alloc(tuple, Object::Tuple);
