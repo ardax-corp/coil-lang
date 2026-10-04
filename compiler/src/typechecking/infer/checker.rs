@@ -3956,6 +3956,9 @@ impl Checker {
                 }
                 Ty::Var(self.counter.fresh())
             }
+            // `s[i]`: the byte at byte offset `i`, like `to_bytes(s)[i]`
+            // without the copy. Out of range panics at runtime.
+            other if Self::is_string_ty(other) => crate::typechecking::ty::byte(),
             _ => {
                 // Non-aggregate target: emit a diagnostic.
                 let _ = self.error_with_help(
@@ -6892,6 +6895,15 @@ impl Checker {
                         "Invalid assignment target".to_string(),
                         range,
                         Some("tuple elements are immutable".to_string()),
+                    ),
+                    other if Self::is_string_ty(other) => self.error_with_help(
+                        ErrorCode::InvalidAssignment,
+                        "Invalid assignment target".to_string(),
+                        range,
+                        Some(
+                            "strings are immutable; build a new one with `+` or `format`"
+                                .to_string(),
+                        ),
                     ),
                     _ => self.error_with_help(
                         ErrorCode::InvalidAssignment,
