@@ -2346,6 +2346,24 @@
     }
 
 
+    /// The listed slots may be the words being popped: `10; 20; STORE
+    /// s0=0,s1=1` writes slot 0 only after reading the `10` it holds.
+    #[test]
+    fn packed_store_pops_all_before_writing_overlapping_slots() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(10),
+            const_int(20), // TOS
+            Byte::new(Instruction::STORE).with_load_store_packed(2, 0, 1, 0),
+            load(0),
+            load(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 10); // slot 1
+        assert_eq!(vm.pop().as_int(), 20); // slot 0 got TOS
+    }
+
+
     /// Reverse slot order (high→low) must still leave the cursor past max slot
     /// so later pushes do not clobber multi-slot fixed-array locals.
     #[test]
