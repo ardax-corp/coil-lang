@@ -1,14 +1,47 @@
-//! Phase-2 HIR lowering: function bodies inside [`crate::hir::lower`]'s
-//! core subset are emitted from HIR instead of the AST walk.
+//! HIR lowering: function bodies inside [`crate::hir::lower`]'s subset are
+//! emitted from HIR instead of the AST walk.
 //!
 //! [`Compiler::compile_function_decl_into`] keeps the prologue, slots for
 //! parameters, the fall-through return and function records; only the body
 //! walk is replaced. Every check runs before the first emit, so a refused
 //! body falls back to the AST codegen with nothing to roll back.
+//!
+//! Each value is emitted in a [`Rep`]: one word in its type's one-word
+//! layout (immediate, heap pointer, boxed `ObjEnum` or pointer niche), or
+//! the `[payload, tag]` pair a two-word `CALL` / `RETURN` carries. A
+//! consumer names the representation it needs; constructors and `match`
+//! build it directly, other producers convert at the edge. The plan walk
+//! ([`Compiler::hir_check_value`]) and the emit walk follow the same rules,
+//! so a body the plan accepts always emits.
 
 use super::*;
-use crate::hir::lower;
-use crate::hir::{BinOp, Callee, HirBody, HirId, HirKind, Lit, LocalId, UnOp};
+use crate::hir::lower::{self, ValueClass};
+use crate::hir::{
+    BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId, MakeKind, UnOp,
+};
+use crate::typechecking::subst::apply_ty_prune;
+use crate::typechecking::value_layout::ValueLayout;
+
+/// How a value sits on the operand stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Rep {
+    /// One word in its type's one-word layout.
+    Word(ValueLayout),
+    /// `[payload, tag]` of the named unary enum (the direct `CALL` /
+    /// `RETURN` ABI of a two-word function).
+    Pair(String),
+}
+
+const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
+
+impl Rep {
+    fn words(&self) -> u32 {
+        match self {
+            Rep::Word(_) => 1,
+            Rep::Pair(_) => 2,
+        }
+    }
+}
 
 /// Labels of one enclosing HIR loop.
 #[derive(Clone, Copy)]
@@ -17,16 +50,41 @@ struct HirLoop {
     exit: IlLabel,
 }
 
+/// A planned direct call.
+struct HirCall {
+    key: String,
+    /// The callee returns `[payload, tag]` of this enum.
+    pair: Option<String>,
+    /// One-word layout of each parameter.
+    params: Vec<ValueLayout>,
+    /// One-word layout of the result (when not a pair).
+    ret: ValueLayout,
+}
+
 /// Per-body lowering state.
 struct HirEmit {
     /// Frame slot of each [`LocalId`], once bound.
     slots: Vec<Option<u32>>,
-    /// Resolved table key of each direct call, by call node.
-    calls: HashMap<u32, String>,
+    /// Each direct call, by call node.
+    calls: HashMap<u32, HirCall>,
     /// Calls in return position that lower to `TailCall`.
     tail_calls: HashSet<u32>,
     loops: Vec<HirLoop>,
+    /// How this function returns its value.
+    ret: Rep,
+    /// First frame slot of the boxed `match` payload being bound: the
+    /// payload words stay where `JumpIfMatch` / `Unpack` pushed them and
+    /// become the bindings' slots.
+    payload_base: Option<u32>,
+    /// `let x = f(..)` of a two-word call that is never reassigned keeps
+    /// `[payload, tag]` in two frame slots (the AST's unboxed enum local):
+    /// local to its pair kind.
+    pair_locals: HashMap<u32, String>,
+    /// Tag slot of each bound pair local (its payload slot is in `slots`).
+    tag_slots: HashMap<u32, u32>,
 }
+
+type Check = Result<(), &'static str>;
 
 impl Compiler {
     /// Build the module's HIR for lowering when `--hir` is on.
@@ -49,11 +107,7 @@ impl Compiler {
     /// leaves the body to the AST walk (lowering off, or the body is outside
     /// the subset).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
-        if !self.hir_lowering
-            || self.compiling_mono_clone
-            || self.compiling_result_mode
-            || self.compiling_two_word_enum.is_some()
-        {
+        if !self.hir_lowering || self.compiling_mono_clone {
             return false;
         }
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
@@ -70,13 +124,19 @@ impl Compiler {
             .walk_id(body, table.ids().get(self.emit_idx).copied())
             .map(|id| id.0 as usize)
             .filter(|&pos| pos >= self.emit_idx && pos < table.len());
-        let plan = if body_pos.is_some() { None } else { Some("emit-cursor") }
-            .or_else(|| lower::refusal(hir)).map_or_else(|| self.plan_hir_body(hir), Err);
+        let plan = if body_pos.is_some() {
+            None
+        } else {
+            Some("emit-cursor")
+        }
+        .or_else(|| lower::refusal(hir, &self.checker))
+        .map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
             Ok(mut emit) => {
                 if let Some(root) = hir.root {
                     self.hir_effect(hir, &mut emit, root);
                 }
+                self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::il::opt::note_hir_lowered();
                 true
@@ -101,14 +161,30 @@ impl Compiler {
         self.emit_idx = (pos + count(body)).min(self.checker.id_table().len());
     }
 
-    /// Bind parameter slots and resolve every call; any refusal here is the
-    /// fallback reason.
+    /// Bind parameter slots, resolve every call and check every value edge;
+    /// any refusal here is the fallback reason.
     fn plan_hir_body(&self, hir: &HirBody) -> Result<HirEmit, &'static str> {
+        let ret = match self.compiling_two_word_enum.clone() {
+            Some(kind) if self.hir_pair_enum(&kind) => Rep::Pair(kind),
+            Some(_) => return Err("return-pair-kind"),
+            None => {
+                let layout = self.return_layout();
+                let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
+                if declared != Some(layout) {
+                    return Err("return-layout");
+                }
+                Rep::Word(layout)
+            }
+        };
         let mut emit = HirEmit {
             slots: vec![None; hir.locals.len()],
             calls: HashMap::new(),
             tail_calls: HashSet::new(),
             loops: Vec::new(),
+            ret,
+            payload_base: None,
+            pair_locals: HashMap::new(),
+            tag_slots: HashMap::new(),
         };
         for &param in &hir.params {
             let slot = self
@@ -122,24 +198,50 @@ impl Compiler {
                 args,
             } = &expr.kind
             {
-                let key = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
-                emit.calls.insert(i as u32, key);
+                let call = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
+                emit.calls.insert(i as u32, call);
+            }
+        }
+        let assigned: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, .. } => match hir.expr(place).kind {
+                    HirKind::Local(local) => Some(local.0),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for expr in &hir.exprs {
+            if let HirKind::Let {
+                local,
+                init: Some(init),
+            } = expr.kind
+                && !assigned.contains(&local.0)
+                && let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep)
+            {
+                emit.pair_locals.insert(local.0, kind);
             }
         }
         for expr in &hir.exprs {
             if let HirKind::Return(Some(value)) = expr.kind
-                && let Some(key) = emit.calls.get(&value.0)
-                && self.hir_tail_call_ok(key)
+                && let Some(call) = emit.calls.get(&value.0)
+                && Self::hir_call_rep(call) == emit.ret
+                && self.hir_tail_call_ok(&call.key)
             {
                 emit.tail_calls.insert(value.0);
             }
         }
+        if let Some(root) = hir.root {
+            self.hir_check_effect(hir, &emit, root)?;
+        }
         Ok(emit)
     }
 
-    /// The table key a direct call to `name` reaches, or why it is not a
-    /// plain `CALL` to a scalar user function. The special forms are checked
-    /// in `compile_call_expr`'s order, so a name those claim is never lowered
+    /// The table key and ABI of a direct call to `name`, or why it is not a
+    /// plain `CALL` to a user function. The special forms are checked in
+    /// `compile_call_expr`'s order, so a name those claim is never lowered
     /// as a user call.
     fn resolve_hir_callee(
         &self,
@@ -147,7 +249,7 @@ impl Compiler {
         call: HirId,
         name: &str,
         argc: usize,
-    ) -> Result<String, &'static str> {
+    ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
         if name == "len" || self.checker.bare_construct_at(start, end).is_some() {
@@ -189,32 +291,53 @@ impl Compiler {
         if self.lookup_extern_runtime(&key).is_some() || self.native.contains_key(&key) {
             return Err("callee-native");
         }
-        let lookup = strip_overload_key(&key);
-        if self.checker.is_overloaded(lookup) || self.checker.is_overloaded(name) {
+        let lookup = strip_overload_key(&key).to_string();
+        if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
         }
-        if self.checker.is_generic_fn(lookup) {
+        if self.checker.is_generic_fn(&lookup) {
             return Err("callee-generic");
         }
-        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) {
+        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup) {
             return Err("callee-coroutine");
         }
-        if self.two_word_return_kind(lookup).is_some() || self.two_word_return_kind(&key).is_some() {
+        let pair = self.two_word_return_kind(&key);
+        if pair != self.two_word_return_kind(&lookup) {
+            return Err("callee-pair");
+        }
+        if pair.as_deref().is_some_and(|k| !self.hir_pair_enum(k)) {
             return Err("callee-pair");
         }
         match self
             .fn_arities
             .get(&key)
-            .or_else(|| self.fn_arities.get(lookup))
+            .or_else(|| self.fn_arities.get(&lookup))
         {
             Some(&(fixed, false)) if fixed as usize == argc => {}
             _ => return Err("callee-arity"),
         }
-        let params = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?;
-        if params.len() != argc || !params.iter().all(lower::is_scalar) {
+        let param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
+        if param_tys.len() != argc {
             return Err("callee-signature");
         }
-        Ok(key)
+        let mut params = Vec::with_capacity(argc);
+        for ty in &param_tys {
+            match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum) => {}
+                _ => return Err("callee-signature"),
+            }
+            params.push(self.value_layout(ty));
+        }
+        let ret_ty = self.checker.fn_return_ty(&lookup).ok_or("callee-signature")?;
+        if lower::classify(&self.checker, &ret_ty).is_none() {
+            return Err("callee-signature");
+        }
+        Ok(HirCall {
+            key,
+            pair,
+            params,
+            ret: self.value_layout(&ret_ty),
+        })
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -228,53 +351,481 @@ impl Compiler {
             && self.tail_call_abi_matches(key)
     }
 
+    /// A two-word kind the lowering builds and matches: a declared enum
+    /// (not a numeric range or a product).
+    fn hir_pair_enum(&self, kind: &str) -> bool {
+        !crate::typechecking::return_layout::is_two_word_product_kind(kind)
+            && crate::typechecking::return_layout::range_kind_inclusive(kind).is_none()
+            && self.checker.enum_variants(kind).is_some_and(|v| {
+                !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
+            })
+    }
+
+    fn hir_call_rep(call: &HirCall) -> Rep {
+        match &call.pair {
+            Some(kind) => Rep::Pair(kind.clone()),
+            None => Rep::Word(call.ret),
+        }
+    }
+
+    fn hir_ty(hir: &HirBody, id: HirId) -> Option<&Ty> {
+        hir.expr(id).ty.as_ref()
+    }
+
+    fn hir_local_rep(&self, hir: &HirBody, emit: &HirEmit, local: LocalId) -> Rep {
+        match emit.pair_locals.get(&local.0) {
+            Some(kind) => Rep::Pair(kind.clone()),
+            None => Rep::Word(self.hir_local_layout(hir, local)),
+        }
+    }
+
+    fn hir_local_layout(&self, hir: &HirBody, local: LocalId) -> ValueLayout {
+        hir.local(local)
+            .ty
+            .as_ref()
+            .map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))
+    }
+
+    /// The enum a type names (through variant and sum types).
+    fn hir_enum_name(&self, ty: &Ty) -> Option<String> {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        fn name(ty: &Ty) -> Option<String> {
+            match crate::typechecking::ty::strip_readonly(ty) {
+                Ty::Constructor { owner, .. } => name(owner),
+                Ty::Con(n) | Ty::Sum { name: n, .. } => Some(n.clone()),
+                Ty::App(head, _) => match head.as_ref() {
+                    Ty::Con(n) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        name(&ty)
+    }
+
+    fn hir_same_enum(a: &str, b: &str) -> bool {
+        a == b || a.rsplit("::").next() == b.rsplit("::").next()
+    }
+
+    /// Payload field types of `variant` in a value of type `ty`, in
+    /// declaration order.
+    fn hir_payload_tys(&self, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        fn go(this: &Compiler, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
+            match crate::typechecking::ty::strip_readonly(ty) {
+                Ty::Constructor { owner, .. } => go(this, owner, variant),
+                Ty::Sum { variants, .. } => variants
+                    .iter()
+                    .find(|(n, _)| n == variant)
+                    .map(|(_, p)| p.field_types().into_iter().cloned().collect()),
+                Ty::App(head, args) => {
+                    let Ty::Con(n) = head.as_ref() else {
+                        return None;
+                    };
+                    if common::is_builtin_option_enum(n) && args.len() == 1 {
+                        match variant {
+                            "Some" => Some(vec![args[0].clone()]),
+                            "None" => Some(Vec::new()),
+                            _ => None,
+                        }
+                    } else if common::is_builtin_result_enum(n) && args.len() == 2 {
+                        match variant {
+                            "Ok" => Some(vec![args[0].clone()]),
+                            "Err" => Some(vec![args[1].clone()]),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Ty::Con(n) => this
+                    .checker
+                    .enum_variants(n)?
+                    .into_iter()
+                    .find(|(v, _, _)| v == variant)
+                    .map(|(_, _, payload)| payload),
+                _ => None,
+            }
+        }
+        go(self, &ty, variant)
+    }
+
+    /// The tag of `variant`, checked against the enum `ty` names.
+    fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
+        let named = self.hir_enum_name(ty)?;
+        if !Self::hir_same_enum(&named, enum_name) {
+            return None;
+        }
+        self.checker.tag_for(enum_name, variant)
+    }
+
+    /// Whether a value in `from` can be re-encoded as `to`.
+    fn hir_convertible(from: &Rep, to: &Rep) -> bool {
+        use ValueLayout as L;
+        match (from, to) {
+            _ if from == to => true,
+            (Rep::Pair(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Pair(_)) => true,
+            (Rep::Word(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Word(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// What a non-adapting producer pushes, or `None` for one that builds
+    /// whatever its consumer wants (constructors, `match`, `if`, blocks,
+    /// jumps).
+    fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
+        match &hir.expr(id).kind {
+            HirKind::Lit(_) | HirKind::Bin { .. } | HirKind::Logic { .. } | HirKind::Un { .. } => {
+                Some(BOXED)
+            }
+            HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
+            HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
+            _ => None,
+        }
+    }
+
+    /// The representation a `match` dispatches on: the pair a two-word call
+    /// leaves when every arm reads at most its one payload word, else the
+    /// scrutinee's one-word layout.
+    fn hir_dispatch_rep(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+    ) -> Rep {
+        if let Some(Rep::Pair(kind)) = self.hir_natural(hir, emit, scrutinee)
+            && arms.iter().all(|arm| match &arm.pat {
+                HirPat::Wild => true,
+                HirPat::Variant { .. } => lower::arm_fields(&arm.pat).is_ok_and(|f| f.len() <= 1),
+                _ => false,
+            })
+        {
+            return Rep::Pair(kind);
+        }
+        let layout = Self::hir_ty(hir, scrutinee).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty));
+        match self.hir_natural(hir, emit, scrutinee) {
+            Some(Rep::Word(natural)) => Rep::Word(natural),
+            _ => Rep::Word(layout),
+        }
+    }
+
+    // ---- plan: the same walk as emission, checking each edge ----
+
+    fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
+        match &hir.expr(id).kind {
+            HirKind::Lit(_) | HirKind::Local(_) => {}
+            HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
+                self.hir_check_value(hir, emit, *lhs, &BOXED)?;
+                self.hir_check_value(hir, emit, *rhs, &BOXED)?;
+            }
+            HirKind::Un { operand, .. } => self.hir_check_value(hir, emit, *operand, &BOXED)?,
+            HirKind::Call { args, .. } => {
+                let call = emit.calls.get(&id.0).ok_or("callee")?;
+                for (&arg, &param) in args.iter().zip(&call.params) {
+                    self.hir_check_value(hir, emit, arg, &Rep::Word(param))?;
+                }
+            }
+            HirKind::Make { .. } => return self.hir_check_make(hir, emit, id, want),
+            HirKind::Match { scrutinee, arms } => {
+                return self.hir_check_match(hir, emit, *scrutinee, arms, Some(want));
+            }
+            HirKind::If {
+                cond,
+                then,
+                els: Some(els),
+            } => {
+                self.hir_check_value(hir, emit, *cond, &BOXED)?;
+                self.hir_check_value(hir, emit, *then, want)?;
+                return self.hir_check_value(hir, emit, *els, want);
+            }
+            HirKind::Block {
+                stmts,
+                tail: Some(tail),
+            } => {
+                for &s in stmts {
+                    self.hir_check_effect(hir, emit, s)?;
+                }
+                return self.hir_check_value(hir, emit, *tail, want);
+            }
+            HirKind::Break | HirKind::Continue | HirKind::Return(_) => {
+                return self.hir_check_effect(hir, emit, id);
+            }
+            _ => return Err("value-shape"),
+        }
+        let natural = self.hir_natural(hir, emit, id).ok_or("value-shape")?;
+        if Self::hir_convertible(&natural, want) {
+            Ok(())
+        } else {
+            Err("repr-mismatch")
+        }
+    }
+
+    fn hir_check_make(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
+        let HirKind::Make {
+            kind: MakeKind::Variant {
+                enum_name, variant, ..
+            },
+            args,
+        } = &hir.expr(id).kind
+        else {
+            return Err("make");
+        };
+        let ty = Self::hir_ty(hir, id).ok_or("make-type")?;
+        self.hir_tag(ty, enum_name, variant).ok_or("make-tag")?;
+        let payload = self.hir_payload_tys(ty, variant).ok_or("make-payload")?;
+        if payload.len() != args.len() {
+            return Err("make-payload");
+        }
+        let option = common::is_builtin_option_enum(enum_name);
+        let result = common::is_builtin_result_enum(enum_name);
+        let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
+        let word_arg = |i: usize| -> Check {
+            if unit_arg(i) {
+                return Err("unit-payload");
+            }
+            self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
+        };
+        use ValueLayout as L;
+        match want {
+            Rep::Word(L::Boxed) => (0..args.len()).try_for_each(word_arg),
+            Rep::Word(L::NicheOption) if option => (0..args.len()).try_for_each(word_arg),
+            Rep::Word(L::NicheUnitResult) if result => match variant.as_str() {
+                "Ok" if args.len() == 1 && unit_arg(0) => Ok(()),
+                "Err" => (0..args.len()).try_for_each(word_arg),
+                _ => Err("make-niche"),
+            },
+            Rep::Word(L::NicheResult) if result => (0..args.len()).try_for_each(word_arg),
+            Rep::Pair(kind) => {
+                let named = self.hir_enum_name(ty).ok_or("make-type")?;
+                if !Self::hir_same_enum(&named, kind) || args.len() > 1 {
+                    return Err("make-pair");
+                }
+                if args.len() == 1 && !unit_arg(0) {
+                    word_arg(0)?;
+                }
+                Ok(())
+            }
+            _ => Err("make-repr"),
+        }
+    }
+
+    fn hir_check_match(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+        want: Option<&Rep>,
+    ) -> Check {
+        let dispatch = self.hir_dispatch_rep(hir, emit, scrutinee, arms);
+        self.hir_check_value(hir, emit, scrutinee, &dispatch)?;
+        let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
+        let scrut_enum = self.hir_enum_name(ty).ok_or("match-type")?;
+        for arm in arms {
+            let fields = lower::arm_fields(&arm.pat)?;
+            match &arm.pat {
+                HirPat::Variant {
+                    enum_name, variant, ..
+                } => {
+                    self.hir_tag(ty, enum_name, variant).ok_or("pattern-tag")?;
+                    let payload = self.hir_payload_tys(ty, variant).ok_or("pattern-payload")?;
+                    if !fields.is_empty() && fields.len() != payload.len() {
+                        return Err("pattern-payload");
+                    }
+                    if let Rep::Word(layout) = &dispatch
+                        && *layout != ValueLayout::Boxed
+                        && !Self::hir_niche_variant(*layout, variant)
+                    {
+                        return Err("pattern-niche");
+                    }
+                    for (field, field_ty) in fields.iter().zip(&payload) {
+                        if let Some(local) = field
+                            && self.hir_local_layout(hir, *local) != self.value_layout(field_ty)
+                        {
+                            return Err("binding-layout");
+                        }
+                    }
+                    if let Rep::Pair(kind) = &dispatch
+                        && !Self::hir_same_enum(&scrut_enum, kind)
+                    {
+                        return Err("match-pair");
+                    }
+                }
+                HirPat::Bind(local) => match &dispatch {
+                    Rep::Word(layout) if self.hir_local_layout(hir, *local) == *layout => {}
+                    _ => return Err("binding-layout"),
+                },
+                _ => {}
+            }
+            match want {
+                Some(want) => self.hir_check_value(hir, emit, arm.body, want)?,
+                None => self.hir_check_effect(hir, emit, arm.body)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `variant` is one of the two sides a niche layout encodes.
+    fn hir_niche_variant(layout: ValueLayout, variant: &str) -> bool {
+        match layout {
+            ValueLayout::NicheOption => matches!(variant, "Some" | "None"),
+            ValueLayout::NicheUnitResult | ValueLayout::NicheResult => {
+                matches!(variant, "Ok" | "Err")
+            }
+            ValueLayout::Boxed => true,
+        }
+    }
+
+    fn hir_check_effect(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
+        match &hir.expr(id).kind {
+            HirKind::Block { stmts, tail } => {
+                for &s in stmts.iter().chain(tail) {
+                    self.hir_check_effect(hir, emit, s)?;
+                }
+                Ok(())
+            }
+            HirKind::Let {
+                local,
+                init: Some(init),
+            } => {
+                let want = self.hir_local_rep(hir, emit, *local);
+                self.hir_check_value(hir, emit, *init, &want)
+            }
+            HirKind::Assign { place, value } => {
+                let HirKind::Local(local) = hir.expr(*place).kind else {
+                    return Err("assign-place");
+                };
+                let want = Rep::Word(self.hir_local_layout(hir, local));
+                self.hir_check_value(hir, emit, *value, &want)
+            }
+            HirKind::If { cond, then, els } => {
+                self.hir_check_value(hir, emit, *cond, &BOXED)?;
+                self.hir_check_effect(hir, emit, *then)?;
+                match els {
+                    Some(e) => self.hir_check_effect(hir, emit, *e),
+                    None => Ok(()),
+                }
+            }
+            HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
+            HirKind::Break | HirKind::Continue => Ok(()),
+            HirKind::Return(value) => match lower::returned_value(hir, *value) {
+                Some(v) => self.hir_check_value(hir, emit, v, &emit.ret),
+                None if emit.ret.words() == 1 => Ok(()),
+                None => Err("return-unit"),
+            },
+            HirKind::Match { scrutinee, arms } => {
+                self.hir_check_match(hir, emit, *scrutinee, arms, None)
+            }
+            HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
+            _ => {
+                let natural = self.hir_natural(hir, emit, id).ok_or("statement")?;
+                self.hir_check_value(hir, emit, id, &natural)
+            }
+        }
+    }
+
+    // ---- emit ----
+
     fn hir_slot(emit: &HirEmit, local: LocalId) -> u32 {
         emit.slots[local.0 as usize].expect("HIR local read before its let")
     }
 
-    /// Push exactly one word for `id`.
-    fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId) {
+    /// Re-encode the value on top of the stack from `from` to `to`, with
+    /// `depth` operands live under it.
+    fn hir_convert(&mut self, from: &Rep, to: &Rep, depth: u32) {
+        use ValueLayout as L;
+        if from == to {
+            return;
+        }
+        match (from, to) {
+            (Rep::Pair(kind), Rep::Word(L::Boxed)) => {
+                self.expr_depth = depth;
+                let mut bc = std::mem::take(&mut self.bytecode);
+                self.emit_box_pair_after_call(&mut bc, kind);
+                self.bytecode = bc;
+            }
+            (Rep::Word(L::Boxed), Rep::Pair(kind)) => {
+                Self::emit_unbox_enum_to_pair(&self.checker, &mut self.bytecode, kind);
+            }
+            (Rep::Word(L::NicheOption), Rep::Word(L::Boxed)) => {
+                Self::emit_niche_option_to_boxed(&mut self.bytecode);
+            }
+            (Rep::Word(L::NicheUnitResult), Rep::Word(L::Boxed)) => {
+                Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
+            }
+            (Rep::Word(L::NicheResult), Rep::Word(L::Boxed)) => {
+                Self::emit_niche_result_to_boxed(&mut self.bytecode);
+            }
+            (Rep::Word(L::Boxed), Rep::Word(L::NicheOption)) => {
+                Self::emit_boxed_option_to_niche(&mut self.bytecode);
+            }
+            (Rep::Word(L::Boxed), Rep::Word(L::NicheUnitResult)) => {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, true);
+            }
+            (Rep::Word(L::Boxed), Rep::Word(L::NicheResult)) => {
+                Self::emit_boxed_result_to_niche(&mut self.bytecode, false);
+            }
+            (from, to) => unreachable!("planned HIR conversion {from:?} -> {to:?}"),
+        }
+    }
+
+    /// Push `id` as `want`, on top of `depth` live operands.
+    fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
         match &hir.expr(id).kind {
-            HirKind::Lit(Lit::Int(n)) => {
-                let n = *n;
-                if (0..=i32::MAX as i64).contains(&n) {
-                    self.bytecode.push_const(n as i32);
-                } else {
-                    let idx = self.intern_constant(Value::from(n).raw() as u64);
-                    self.bytecode.push_const_pool(idx);
-                }
-            }
-            HirKind::Lit(Lit::Float(f)) => {
-                let idx = self.intern_constant(Value::from(*f).raw() as u64);
-                self.bytecode.push_const_pool(idx);
-            }
+            HirKind::Lit(Lit::Int(n)) => self.hir_push_int(*n),
+            HirKind::Lit(Lit::Float(f)) => self.hir_push_float(*f),
             HirKind::Lit(Lit::Bool(b)) => self.bytecode.push(Byte::new_with_value(
                 Instruction::CONST,
                 Value::from(*b).raw() as _,
             )),
+            HirKind::Lit(Lit::Str(raw)) => {
+                let text = unescape_coil_string(raw);
+                let mut bc = CodeBuf::new();
+                self.emit_raw_string_literal(&mut bc, &text);
+                self.bytecode.append(&mut bc);
+            }
+            HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
             HirKind::Local(local) => {
                 let slot = Self::hir_slot(emit, *local);
                 self.bytecode.push_load(slot);
+                if let Some(&tag) = emit.tag_slots.get(&local.0) {
+                    self.bytecode.push_load(tag);
+                }
             }
             HirKind::Bin { op, lhs, rhs } => {
-                let float = hir.expr(*lhs).ty.as_ref().is_some_and(lower::is_float);
-                self.hir_value(hir, emit, *lhs);
-                self.hir_value(hir, emit, *rhs);
-                self.bytecode.push(Byte::new(Self::hir_bin_instruction(*op, float)));
+                let float = Self::hir_ty(hir, *lhs).is_some_and(lower::is_float);
+                if !float && let Some((value, shift, instr)) = Self::hir_strength_reduce(hir, *op, *lhs, *rhs) {
+                    // `x * 2^n` / non-negative `x / 2^n`, as the AST codegen does.
+                    self.hir_value(hir, emit, value, &BOXED, depth);
+                    self.bytecode.push_const(shift as i32);
+                    self.bytecode.push(Byte::new(instr));
+                } else {
+                    self.hir_operands(hir, emit, *lhs, *rhs, depth);
+                    self.bytecode.push(Byte::new(Self::hir_bin_instruction(*op, float)));
+                }
             }
             HirKind::Logic { and, lhs, rhs } => {
                 // The AST codegen evaluates both sides into `AND` / `OR`.
-                self.hir_value(hir, emit, *lhs);
-                self.hir_value(hir, emit, *rhs);
+                self.hir_operands(hir, emit, *lhs, *rhs, depth);
                 self.bytecode.push(Byte::new(if *and {
                     Instruction::AND
                 } else {
                     Instruction::OR
                 }));
             }
+            // A negated literal is one constant, as in the AST codegen (it
+            // keeps small leaves inside the tiny-inline budget).
+            HirKind::Un { op: UnOp::Neg, operand } if matches!(hir.expr(*operand).kind, HirKind::Lit(Lit::Int(_) | Lit::Float(_))) => {
+                match hir.expr(*operand).kind {
+                    HirKind::Lit(Lit::Int(n)) => self.hir_push_int(n.wrapping_neg()),
+                    HirKind::Lit(Lit::Float(f)) => self.hir_push_float(-f),
+                    _ => unreachable!(),
+                }
+            }
             HirKind::Un { op, operand } => {
-                let float = hir.expr(*operand).ty.as_ref().is_some_and(lower::is_float);
-                self.hir_value(hir, emit, *operand);
+                let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
+                self.hir_value(hir, emit, *operand, &BOXED, depth);
                 self.bytecode.push(Byte::new(match op {
                     UnOp::Neg if float => Instruction::NEGF,
                     UnOp::Neg => Instruction::NEG,
@@ -283,17 +834,64 @@ impl Compiler {
                 }));
             }
             HirKind::Call { args, .. } => {
-                for &arg in args {
-                    self.hir_value(hir, emit, arg);
+                let call = &emit.calls[&id.0];
+                let params = call.params.clone();
+                let key = call.key.clone();
+                let natural = Self::hir_call_rep(call);
+                let tail = emit.tail_calls.contains(&id.0);
+                // Only with no operands below: the arg and result temps are
+                // `STORE`s, which would lift the cursor over live operands.
+                let inline = if tail || depth != 0 || self.coroutine_fns.contains(&key) {
+                    None
+                } else {
+                    self.tiny_inline_body(&key, natural.words())
+                };
+                if let Some((start, end, diamond)) = inline {
+                    // Arguments to temps, as the AST tiny-inline does.
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (&arg, param) in args.iter().zip(params) {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
+                        self.expr_depth = depth;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    let mut body = CodeBuf::new();
+                    if self.emit_tiny_inline_body(start, end, diamond, &temps, &mut body, natural.words()) {
+                        self.bytecode.append(&mut body);
+                        self.hir_convert(&natural, want, depth);
+                        return;
+                    }
+                    for &tmp in &temps {
+                        self.bytecode.push_load(tmp);
+                    }
+                } else {
+                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                    }
                 }
-                let key = emit.calls[&id.0].clone();
-                let kind = if emit.tail_calls.contains(&id.0) {
+                let kind = if tail {
                     crate::il::EntryKind::TailCall
                 } else {
                     crate::il::EntryKind::Call
                 };
-                let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32, kind, 1);
+                let ok = self.emit_named_entry_on_module_ret(
+                    &key,
+                    args.len() as u32,
+                    kind,
+                    natural.words(),
+                );
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
+                if tail {
+                    // `TailCall` is the terminator; the callee returns for us.
+                    return;
+                }
+                self.hir_convert(&natural, want, depth);
+                return;
+            }
+            HirKind::Make { .. } => return self.hir_make(hir, emit, id, want, depth),
+            HirKind::Match { scrutinee, arms } => {
+                return self.hir_match(hir, emit, *scrutinee, arms, Some(want), depth);
             }
             HirKind::If {
                 cond,
@@ -302,13 +900,14 @@ impl Compiler {
             } => {
                 let else_l = self.bytecode.fresh_label();
                 let end = self.bytecode.fresh_label();
-                self.hir_value(hir, emit, *cond);
+                self.hir_value(hir, emit, *cond, &BOXED, depth);
                 self.hir_jump(IlJumpKind::JumpIfFalse, else_l);
-                self.hir_value(hir, emit, *then);
+                self.hir_value(hir, emit, *then, want, depth);
                 self.hir_jump(IlJumpKind::Unconditional, end);
                 self.bytecode.bind_label(else_l);
-                self.hir_value(hir, emit, *els);
+                self.hir_value(hir, emit, *els, want, depth);
                 self.bytecode.bind_label(end);
+                return;
             }
             HirKind::Block {
                 stmts,
@@ -317,13 +916,481 @@ impl Compiler {
                 for &s in stmts {
                     self.hir_stmt(hir, emit, s);
                 }
-                self.hir_value(hir, emit, *tail);
+                return self.hir_value(hir, emit, *tail, want, depth);
             }
             HirKind::Break | HirKind::Continue | HirKind::Return(_) => {
-                self.hir_effect(hir, emit, id);
+                return self.hir_effect(hir, emit, id);
             }
             other => unreachable!("HIR lowering admitted {other:?}"),
         }
+        let natural = self
+            .hir_natural(hir, emit, id)
+            .expect("planned HIR producer has a representation");
+        self.hir_convert(&natural, want, depth);
+    }
+
+    /// Build the variant `id` as `want`.
+    fn hir_make(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
+        let HirKind::Make {
+            kind: MakeKind::Variant {
+                enum_name, variant, ..
+            },
+            args,
+        } = &hir.expr(id).kind
+        else {
+            unreachable!("HIR lowering admitted a non-variant make");
+        };
+        let ty = Self::hir_ty(hir, id).expect("planned make has a type").clone();
+        let tag = self
+            .hir_tag(&ty, enum_name, variant)
+            .expect("planned make has a tag");
+        let payload = self
+            .hir_payload_tys(&ty, variant)
+            .expect("planned make has a payload");
+        let wants: Vec<Rep> = payload
+            .iter()
+            .map(|t| Rep::Word(self.value_layout(t)))
+            .collect();
+        use ValueLayout as L;
+        match want {
+            Rep::Word(L::Boxed) => {
+                let n = args.len();
+                // `MakeEnum` pops field 0 first, so field 0 goes on top.
+                let simple = args
+                    .iter()
+                    .all(|&a| matches!(hir.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)));
+                if n <= 1 || simple {
+                    for i in (0..n).rev() {
+                        self.hir_value(hir, emit, args[i], &wants[i], depth + (n - 1 - i) as u32);
+                    }
+                } else {
+                    // Source order through temps, then pushed in reverse.
+                    let mut temps = Vec::with_capacity(n);
+                    for i in 0..n {
+                        self.hir_value(hir, emit, args[i], &wants[i], depth);
+                        self.expr_depth = depth;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    for &tmp in temps.iter().rev() {
+                        self.bytecode.push_load(tmp);
+                    }
+                }
+                let kinds = common::pack_word_kinds(payload.iter().map(|t| {
+                    crate::typechecking::value_layout::word_kind(&self.checker, t)
+                }));
+                self.bytecode
+                    .push_make_enum_kinds(tag as u16, n as u16, kinds);
+                if n > 0 && self.checker.enum_has_drop(enum_name) {
+                    let type_id = self.checker.class_type_id(enum_name);
+                    self.bytecode
+                        .push(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id));
+                }
+            }
+            Rep::Word(L::NicheOption) | Rep::Word(L::NicheResult) | Rep::Word(L::NicheUnitResult) => {
+                match args.first() {
+                    Some(&arg) if !lower::is_unit_make(hir, arg) => {
+                        self.hir_value(hir, emit, arg, &wants[0], depth);
+                        if *want == Rep::Word(L::NicheResult) && variant == "Err" {
+                            Self::push_result_err_bit(&mut self.bytecode);
+                        }
+                    }
+                    // `None` and `Ok(())` are the zero word.
+                    _ => self.bytecode.push_const(0),
+                }
+            }
+            Rep::Pair(_) => {
+                match args.first() {
+                    Some(&arg) if !lower::is_unit_make(hir, arg) => {
+                        self.hir_value(hir, emit, arg, &wants[0], depth);
+                    }
+                    _ => self.bytecode.push_const(0),
+                }
+                self.bytecode.push_const(tag as i32);
+            }
+        }
+    }
+
+    /// Store the payload words on top of the stack (field 0 lowest) into
+    /// the arm's bindings, popping the unbound ones.
+    fn hir_bind_fields(&mut self, hir: &HirBody, emit: &mut HirEmit, fields: &[Option<LocalId>], arity: usize) {
+        if let Some(base) = emit.payload_base {
+            // In place: storing field `k` would pop over field `k - 1`.
+            for (k, field) in fields.iter().enumerate().take(arity) {
+                if let Some(local) = field {
+                    let slot = base + k as u32;
+                    emit.slots[local.0 as usize] = Some(slot);
+                    self.record_debug_local(&hir.local(*local).name, slot);
+                }
+            }
+            return;
+        }
+        for k in (0..arity).rev() {
+            match fields.get(k).copied().flatten() {
+                Some(local) => {
+                    let slot = self.hir_bind_local(hir, local);
+                    emit.slots[local.0 as usize] = Some(slot);
+                    self.bytecode.push_store_pop(slot);
+                }
+                None => self.bytecode.push_pop(),
+            }
+        }
+    }
+
+    /// The arm body, after its payload words (`arity` of them) were pushed.
+    /// An identity arm keeps its one payload word as the value.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_arm(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        arm: &HirArm,
+        arity: usize,
+        payload_rep: Option<Rep>,
+        want: Option<&Rep>,
+        depth: u32,
+    ) {
+        // With in-place payload slots an identity arm reads its slot like
+        // any other binding (the IL passes model the payload as a frame
+        // write there, not as an operand).
+        if let (Some(want), Some(payload_rep)) = (want, payload_rep)
+            && emit.payload_base.is_none()
+            && lower::is_identity_arm(hir, arm)
+        {
+            self.hir_convert(&payload_rep, want, depth);
+            return;
+        }
+        match &arm.pat {
+            HirPat::Bind(local) => {
+                // The scrutinee word itself is the binding.
+                let slot = self.hir_bind_local(hir, *local);
+                emit.slots[local.0 as usize] = Some(slot);
+                self.bytecode.push_store_pop(slot);
+            }
+            pat => {
+                let fields = lower::arm_fields(pat).expect("planned arm pattern");
+                self.hir_bind_fields(hir, emit, &fields, arity);
+            }
+        }
+        match want {
+            Some(want) => self.hir_value(hir, emit, arm.body, want, depth),
+            None => self.hir_effect(hir, emit, arm.body),
+        }
+    }
+
+    /// `match`: push the scrutinee in its dispatch representation, branch
+    /// on the tag, bind each arm's payload and run its body. Every arm
+    /// leaves exactly its value (or nothing, for a statement match).
+    fn hir_match(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+        want: Option<&Rep>,
+        depth: u32,
+    ) {
+        let dispatch = self.hir_dispatch_rep(hir, emit, scrutinee, arms);
+        // Arms up to the first catch-all; later ones never run.
+        let reach = arms
+            .iter()
+            .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
+            .map_or(arms.len(), |i| i + 1);
+        let arms = &arms[..reach];
+        let ty = Self::hir_ty(hir, scrutinee)
+            .expect("planned match has a type")
+            .clone();
+        let in_place = dispatch == Rep::Word(ValueLayout::Boxed) && lower::match_needs_slots(hir, arms);
+        let saved_base = emit.payload_base;
+        if in_place {
+            // Bound payloads stay in the frame at the enum's position, so
+            // the enum must sit right above the live locals (the plan only
+            // admits a binding match with no operands below it).
+            debug_assert_eq!(depth, 0);
+            let base = self.context.variables.len() as u32;
+            self.bytecode.push_seek(base);
+            self.hir_value(hir, emit, scrutinee, &dispatch, depth);
+            if self.context.variables.len() as u32 != base {
+                let tmp = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(tmp);
+                self.bytecode.push_seek(self.context.variables.len() as u32);
+                self.bytecode.push_load(tmp);
+            }
+            let base = self.context.variables.len() as u32;
+            let widest = arms
+                .iter()
+                .filter_map(|arm| match &arm.pat {
+                    HirPat::Variant { variant, .. } => self.hir_payload_tys(&ty, variant).map(|p| p.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            for k in 0..widest {
+                let slot = self.alloc_temp_slot();
+                debug_assert_eq!(slot, base + k as u32);
+            }
+            emit.payload_base = Some(base);
+        } else {
+            self.hir_value(hir, emit, scrutinee, &dispatch, depth);
+            emit.payload_base = None;
+        }
+        let variant_of = |arm: &HirArm| match &arm.pat {
+            HirPat::Variant { variant, .. } => Some(variant.clone()),
+            _ => None,
+        };
+        let payload_rep = |this: &Self, variant: &str| -> Vec<Rep> {
+            this.hir_payload_tys(&ty, variant)
+                .unwrap_or_default()
+                .iter()
+                .map(|t| Rep::Word(this.value_layout(t)))
+                .collect()
+        };
+        let end = self.bytecode.fresh_label();
+        match dispatch.clone() {
+            Rep::Word(ValueLayout::Boxed) => {
+                // `JumpIfMatch` peeks: a hit pops the enum and pushes its
+                // payload; a miss leaves the enum for the next test.
+                let last = arms.len() - 1;
+                let mut hits = Vec::new();
+                for arm in &arms[..last] {
+                    let variant = variant_of(arm).expect("catch-all is last");
+                    let HirPat::Variant { enum_name, .. } = &arm.pat else {
+                        unreachable!()
+                    };
+                    let tag = self
+                        .hir_tag(&ty, enum_name, &variant)
+                        .expect("planned pattern tag");
+                    let arity = payload_rep(self, &variant).len();
+                    let label = self.bytecode.fresh_label();
+                    self.bytecode.push_op(IlOp::Jump {
+                        kind: IlJumpKind::JumpIfMatch {
+                            tag,
+                            arity: arity as u32,
+                        },
+                        target: label,
+                        loc: DebugLoc::unknown(),
+                        hint: Default::default(),
+                    });
+                    hits.push((label, arm, variant));
+                }
+                // Fallthrough: the last arm, with the enum still pushed.
+                let arm = &arms[last];
+                match variant_of(arm) {
+                    Some(variant) => {
+                        let reps = payload_rep(self, &variant);
+                        let reads = lower::is_identity_arm(hir, arm)
+                            || lower::arm_fields(&arm.pat).is_ok_and(|f| f.iter().any(Option::is_some));
+                        if reads {
+                            self.bytecode.push(
+                                Byte::new(Instruction::Unpack).with_operand_u32(reps.len() as u32),
+                            );
+                            self.hir_arm(hir, emit, arm, reps.len(), reps.first().cloned(), want, depth);
+                        } else {
+                            self.bytecode.push_pop();
+                            self.hir_arm(hir, emit, arm, 0, None, want, depth);
+                        }
+                    }
+                    None => {
+                        if matches!(arm.pat, HirPat::Wild) {
+                            self.bytecode.push_pop();
+                        }
+                        self.hir_arm(hir, emit, arm, 0, None, want, depth);
+                    }
+                }
+                for (label, arm, variant) in hits {
+                    self.hir_jump(IlJumpKind::Unconditional, end);
+                    self.bytecode.bind_label(label);
+                    let reps = payload_rep(self, &variant);
+                    self.hir_arm(hir, emit, arm, reps.len(), reps.first().cloned(), want, depth);
+                }
+            }
+            Rep::Pair(kind) => {
+                // A pair reloaded from a local tests its tag like the AST
+                // does (`DUP; tag; EQ`): consuming the tag in the jump lets
+                // load sinking drop the payload from one successor.
+                let consume_tag = !matches!(hir.expr(scrutinee).kind, HirKind::Local(_));
+                self.hir_match_pair(hir, emit, &ty, arms, &kind, want, depth, end, consume_tag)
+            }
+            Rep::Word(layout) => self.hir_match_niche(hir, emit, &ty, arms, layout, want, depth, end),
+        }
+        emit.payload_base = saved_base;
+        self.bytecode.bind_label(end);
+    }
+
+    /// `match` over `[payload, tag]`.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_match_pair(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        ty: &Ty,
+        arms: &[HirArm],
+        kind: &str,
+        want: Option<&Rep>,
+        depth: u32,
+        end: IlLabel,
+        consume_tag: bool,
+    ) {
+        let tag_of = |this: &Self, arm: &HirArm| match &arm.pat {
+            HirPat::Variant {
+                enum_name, variant, ..
+            } => this.hir_tag(ty, enum_name, variant),
+            _ => None,
+        };
+        let payload_rep = |this: &Self, arm: &HirArm| -> (usize, Option<Rep>) {
+            match &arm.pat {
+                HirPat::Variant { variant, .. } => {
+                    let tys = this.hir_payload_tys(ty, variant).unwrap_or_default();
+                    (1, tys.first().map(|t| Rep::Word(this.value_layout(t))))
+                }
+                _ => (1, None),
+            }
+        };
+        // `Some(x) => x, None => 0`: a unit variant's payload word is `0`,
+        // so the value is the payload whatever the tag (as the AST does).
+        if let (Some(want), [a, b]) = (want, arms) {
+            let unit = |arm: &HirArm| match &arm.pat {
+                HirPat::Variant { variant, .. } => {
+                    self.hir_payload_tys(ty, variant).is_some_and(|p| p.is_empty())
+                        && matches!(hir.expr(arm.body).kind, HirKind::Lit(Lit::Int(0)))
+                }
+                _ => false,
+            };
+            let payload = [a, b].into_iter().find(|arm| !unit(arm) && lower::is_identity_arm(hir, arm));
+            if (unit(a) || unit(b))
+                && let Some(arm) = payload
+                && let (_, Some(rep)) = payload_rep(self, arm)
+            {
+                self.bytecode.push_pop();
+                self.hir_convert(&rep, want, depth);
+                return;
+            }
+        }
+        let builtin = consume_tag && common::is_poly_builtin_enum(kind);
+        let last = arms.len() - 1;
+        let mut tag_consumed = false;
+        for (i, arm) in arms.iter().enumerate() {
+            let miss = (i < last).then(|| self.bytecode.fresh_label());
+            if let Some(miss) = miss {
+                let tag = tag_of(self, arm).expect("only the last arm is a catch-all");
+                if builtin && !tag_consumed {
+                    // Tags `0` / `1`: the jump consumes the tag word, so both
+                    // paths keep only the payload.
+                    let kind = if tag == 1 {
+                        IlJumpKind::JumpIfFalse
+                    } else {
+                        IlJumpKind::JumpIfTrue
+                    };
+                    self.hir_jump_under(kind, miss);
+                    tag_consumed = true;
+                } else if !tag_consumed {
+                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    self.bytecode.push_const(tag as i32);
+                    self.bytecode.push(Byte::new(Instruction::EQ));
+                    self.hir_jump_under(IlJumpKind::JumpIfFalse, miss);
+                    self.bytecode.push_pop();
+                }
+            } else if !tag_consumed {
+                self.bytecode.push_pop();
+            }
+            let (arity, rep) = payload_rep(self, arm);
+            if matches!(arm.pat, HirPat::Wild) {
+                self.bytecode.push_pop();
+                self.hir_arm(hir, emit, arm, 0, None, want, depth);
+            } else {
+                self.hir_arm(hir, emit, arm, arity, rep, want, depth);
+            }
+            if let Some(miss) = miss {
+                self.hir_jump(IlJumpKind::Unconditional, end);
+                self.bytecode.bind_label(miss);
+                if builtin {
+                    // The other builtin tag: every later arm sees only the payload.
+                    tag_consumed = true;
+                }
+            }
+        }
+    }
+
+    /// `match` over a pointer-niche word.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_match_niche(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        ty: &Ty,
+        arms: &[HirArm],
+        layout: ValueLayout,
+        want: Option<&Rep>,
+        depth: u32,
+        end: IlLabel,
+    ) {
+        // The side that carries the word as its payload, and the other.
+        let (payload_side, zero_side) = match layout {
+            ValueLayout::NicheOption => ("Some", "None"),
+            ValueLayout::NicheUnitResult => ("Err", "Ok"),
+            ValueLayout::NicheResult => ("Ok", "Err"),
+            ValueLayout::Boxed => unreachable!("boxed dispatch"),
+        };
+        let pick = |side: &str| {
+            arms.iter().find(|a| match &a.pat {
+                HirPat::Variant { variant, .. } => variant == side,
+                _ => true,
+            })
+        };
+        let first = pick(payload_side).expect("exhaustive match");
+        let second = pick(zero_side).expect("exhaustive match");
+        let payload_rep = |this: &Self, side: &str| {
+            this.hir_payload_tys(ty, side)
+                .unwrap_or_default()
+                .first()
+                .map(|t| Rep::Word(this.value_layout(t)))
+        };
+        let arm_on_word = |this: &mut Self, emit: &mut HirEmit, arm: &HirArm, side: &str, decode: bool| {
+            match &arm.pat {
+                HirPat::Wild => {
+                    this.bytecode.push_pop();
+                    this.hir_arm(hir, emit, arm, 0, None, want, depth);
+                }
+                HirPat::Bind(_) => this.hir_arm(hir, emit, arm, 0, None, want, depth),
+                _ => {
+                    let rep = payload_rep(this, side);
+                    let reads = rep.is_some()
+                        && (lower::is_identity_arm(hir, arm)
+                            || lower::arm_fields(&arm.pat).is_ok_and(|f| f.iter().any(Option::is_some)));
+                    if reads {
+                        if decode {
+                            Self::push_result_untag(&mut this.bytecode);
+                        }
+                        this.hir_arm(hir, emit, arm, 1, rep, want, depth);
+                    } else {
+                        this.bytecode.push_pop();
+                        this.hir_arm(hir, emit, arm, 0, None, want, depth);
+                    }
+                }
+            }
+        };
+        if std::ptr::eq(first, second) {
+            arm_on_word(self, emit, first, payload_side, false);
+            return;
+        }
+        let other = self.bytecode.fresh_label();
+        match layout {
+            ValueLayout::NicheResult => {
+                // `Err` is `pointer | 1`.
+                Self::push_result_is_err(&mut self.bytecode);
+                self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
+            }
+            _ => {
+                Self::push_niche_eq_zero(&mut self.bytecode);
+                self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
+            }
+        }
+        arm_on_word(self, emit, first, payload_side, false);
+        self.hir_jump(IlJumpKind::Unconditional, end);
+        self.bytecode.bind_label(other);
+        let decode = layout == ValueLayout::NicheResult;
+        arm_on_word(self, emit, second, zero_side, decode);
     }
 
     /// `id` as a block statement, with the statement's source location on
@@ -351,22 +1418,31 @@ impl Compiler {
                 init: Some(init),
             } => {
                 // Value first: its operands live above every bound slot.
-                self.hir_value(hir, emit, *init);
+                let want = self.hir_local_rep(hir, emit, *local);
+                self.hir_value(hir, emit, *init, &want, 0);
                 let slot = self.hir_bind_local(hir, *local);
                 emit.slots[local.0 as usize] = Some(slot);
+                if let Rep::Pair(_) = &want {
+                    // Tag on top; both stores lower to one packed `STORE`.
+                    let name = &hir.local(*local).name;
+                    let tag = self.context.variables.intern(format!("__unbox_tag_{name}_{}", local.0)) as u32;
+                    emit.tag_slots.insert(local.0, tag);
+                    self.bytecode.push_store_pop(tag);
+                }
                 self.bytecode.push_store_pop(slot);
             }
             HirKind::Assign { place, value } => {
                 let HirKind::Local(local) = hir.expr(*place).kind else {
                     unreachable!("HIR lowering admitted a non-local assignment place");
                 };
-                self.hir_value(hir, emit, *value);
+                let want = Rep::Word(self.hir_local_layout(hir, local));
+                self.hir_value(hir, emit, *value, &want, 0);
                 let slot = Self::hir_slot(emit, local);
                 self.bytecode.push_store_pop(slot);
             }
             HirKind::If { cond, then, els } => {
                 let end = self.bytecode.fresh_label();
-                self.hir_value(hir, emit, *cond);
+                self.hir_value(hir, emit, *cond, &BOXED, 0);
                 match els {
                     Some(els) => {
                         let else_l = self.bytecode.fresh_label();
@@ -390,7 +1466,7 @@ impl Compiler {
                 emit.loops.push(HirLoop { top, exit });
                 // `while c { b }` keeps the AST loop shape: test, body, back edge.
                 if let Some((cond, then)) = lower::while_shape(hir, *body) {
-                    self.hir_value(hir, emit, cond);
+                    self.hir_value(hir, emit, cond, &BOXED, 0);
                     self.hir_jump(IlJumpKind::JumpIfFalse, exit);
                     self.hir_effect(hir, emit, then);
                 } else {
@@ -410,13 +1486,18 @@ impl Compiler {
             }
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
                 Some(v) if emit.tail_calls.contains(&v.0) => {
-                    // `TailCall` is the terminator; the callee returns for us.
-                    self.hir_value(hir, emit, v);
+                    let ret = emit.ret.clone();
+                    self.hir_value(hir, emit, v, &ret, 0);
                 }
                 Some(v) => {
-                    self.hir_value(hir, emit, v);
+                    let ret = emit.ret.clone();
+                    self.hir_value(hir, emit, v, &ret, 0);
                     self.emit_run_defers();
-                    self.bytecode.push_return();
+                    if ret.words() == 2 {
+                        self.push_return_two_word();
+                    } else {
+                        self.bytecode.push_return();
+                    }
                 }
                 None => {
                     self.emit_run_defers();
@@ -424,17 +1505,34 @@ impl Compiler {
                     self.bytecode.push_return();
                 }
             },
-            HirKind::Lit(_)
-            | HirKind::Local(_)
-            | HirKind::Bin { .. }
-            | HirKind::Logic { .. }
-            | HirKind::Un { .. }
-            | HirKind::Call { .. } => {
-                self.hir_value(hir, emit, id);
+            HirKind::Match { scrutinee, arms } => {
+                self.hir_match(hir, emit, *scrutinee, arms, None, 0);
+            }
+            HirKind::Make { .. } => {
+                self.hir_value(hir, emit, id, &BOXED, 0);
                 self.bytecode.push_pop();
             }
-            other => unreachable!("HIR lowering admitted {other:?}"),
+            _ => {
+                let natural = self
+                    .hir_natural(hir, emit, id)
+                    .expect("planned statement has a representation");
+                self.hir_value(hir, emit, id, &natural, 0);
+                for _ in 0..natural.words() {
+                    self.bytecode.push_pop();
+                }
+            }
         }
+    }
+
+    /// A test jump with the scrutinee's payload still under it, hinted as
+    /// the AST's match dispatch is so fusion keeps that operand.
+    fn hir_jump_under(&mut self, kind: IlJumpKind, target: IlLabel) {
+        self.bytecode.il_mut().emit_jump_hinted(
+            kind,
+            target,
+            DebugLoc::unknown(),
+            crate::il::FuseHint::nofuse_value_under_jmp(),
+        );
     }
 
     fn hir_jump(&mut self, kind: IlJumpKind, target: IlLabel) {
@@ -459,6 +1557,57 @@ impl Compiler {
         let slot = self.context.variables.intern(key.clone()) as u32;
         self.record_debug_local(&key, slot);
         slot
+    }
+
+    /// Push `lhs` then `rhs`, staging both through temps when
+    /// [`lower::stages_rhs`] wants the right side at depth zero.
+    fn hir_operands(&mut self, hir: &HirBody, emit: &mut HirEmit, lhs: HirId, rhs: HirId, depth: u32) {
+        if depth != 0 || !lower::stages_rhs(hir, rhs) {
+            self.hir_value(hir, emit, lhs, &BOXED, depth);
+            self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
+            return;
+        }
+        let mut staged = [0; 2];
+        for (side, id) in [lhs, rhs].into_iter().enumerate() {
+            self.hir_value(hir, emit, id, &BOXED, 0);
+            self.expr_depth = 0;
+            staged[side] = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(staged[side]);
+        }
+        self.bytecode.push_load(staged[0]);
+        self.bytecode.push_load(staged[1]);
+    }
+
+    fn hir_push_int(&mut self, n: i64) {
+        if (0..=i32::MAX as i64).contains(&n) {
+            self.bytecode.push_const(n as i32);
+        } else {
+            let idx = self.intern_constant(Value::from(n).raw() as u64);
+            self.bytecode.push_const_pool(idx);
+        }
+    }
+
+    fn hir_push_float(&mut self, f: f64) {
+        let idx = self.intern_constant(Value::from(f).raw() as u64);
+        self.bytecode.push_const_pool(idx);
+    }
+
+    /// `x * 2^n` (either side) as `x << n`, and `x / 2^n` as `x >> n` when
+    /// the checker proved `x` non-negative.
+    fn hir_strength_reduce(hir: &HirBody, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, Instruction)> {
+        let pow2 = |id: HirId| match hir.expr(id).kind {
+            HirKind::Lit(Lit::Int(k)) => crate::const_fold::strength_div_int(k),
+            _ => None,
+        };
+        match op {
+            BinOp::IntMul => pow2(rhs)
+                .map(|n| (lhs, n, Instruction::SHL))
+                .or_else(|| pow2(lhs).map(|n| (rhs, n, Instruction::SHL))),
+            BinOp::IntDiv if hir.expr(lhs).flags.contains(HirFlags::NONNEG) => {
+                pow2(rhs).map(|n| (lhs, n, Instruction::SHR))
+            }
+            _ => None,
+        }
     }
 
     fn hir_bin_instruction(op: BinOp, float: bool) -> Instruction {

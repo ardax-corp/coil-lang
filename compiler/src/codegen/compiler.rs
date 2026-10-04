@@ -2009,38 +2009,9 @@ impl Compiler {
         bytecode: &mut CodeBuf,
         ret_words: u32,
     ) -> bool {
-        // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
-        let Some((start, end, provisional)) = self.resolve_inline_span(fqn) else {
+        let Some((start, end, is_diamond)) = self.tiny_inline_body(fqn, ret_words) else {
             return false;
         };
-        if provisional {
-            return false;
-        }
-        let lookup = strip_overload_key(fqn).to_string();
-        if self.checker.fn_has_rest(&lookup) {
-            return false;
-        }
-        let ops = self.bytecode.code_slice_ops(start, end);
-        let recursive = self.current_function_qualified.as_deref() == Some(fqn)
-            || self.current_function_table_key.as_deref() == Some(fqn)
-            || self.current_function_qualified.as_deref() == Some(lookup.as_str())
-            || self.current_function_table_key.as_deref() == Some(lookup.as_str());
-        let cost = super::inline_cost::estimate_inline_cost(&ops);
-        let site = super::inline_cost::CallInfo {
-            recursive,
-            cross_module: self.callee_is_cross_module(fqn),
-            visible: self.callee_is_visible_for_inline(&lookup),
-            ..Default::default()
-        };
-        let cost_opts = self.inline_cost.clone();
-        if !super::inline_cost::should_inline_function(cost, &site, &cost_opts) {
-            return false;
-        }
-        // A pair callee inlines only as a diamond, which joins both words.
-        let is_diamond = Self::is_tiny_inline_diamond_il_words(&ops, ret_words);
-        if ret_words == 1 && !Self::is_tiny_inline_il(&ops) || ret_words != 1 && !is_diamond {
-            return false;
-        }
         let arg_slice = args.unwrap_or(&[]);
         // Q1: stack-array args box to one heap object. Tiny-inline remaps
         // callee Index as if the arg were scalar slots and breaks `test()`.
@@ -2062,13 +2033,63 @@ impl Compiler {
             bytecode.push_store_pop(tmp);
             temps.push(tmp);
         }
+        self.emit_tiny_inline_body(start, end, is_diamond, &temps, bytecode, ret_words)
+    }
+
+    /// The callee span `(start, end, is_diamond)` when `fqn` is a finished
+    /// body the tiny-inliner accepts at this site with `ret_words` results.
+    pub(super) fn tiny_inline_body(&self, fqn: &str, ret_words: u32) -> Option<(usize, usize, bool)> {
+        // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
+        let (start, end, provisional) = self.resolve_inline_span(fqn)?;
+        if provisional {
+            return None;
+        }
+        let lookup = strip_overload_key(fqn).to_string();
+        if self.checker.fn_has_rest(&lookup) {
+            return None;
+        }
+        let ops = self.bytecode.code_slice_ops(start, end);
+        let recursive = self.current_function_qualified.as_deref() == Some(fqn)
+            || self.current_function_table_key.as_deref() == Some(fqn)
+            || self.current_function_qualified.as_deref() == Some(lookup.as_str())
+            || self.current_function_table_key.as_deref() == Some(lookup.as_str());
+        let cost = super::inline_cost::estimate_inline_cost(&ops);
+        let site = super::inline_cost::CallInfo {
+            recursive,
+            cross_module: self.callee_is_cross_module(fqn),
+            visible: self.callee_is_visible_for_inline(&lookup),
+            ..Default::default()
+        };
+        if !super::inline_cost::should_inline_function(cost, &site, &self.inline_cost) {
+            return None;
+        }
+        // A pair callee inlines only as a diamond, which joins both words.
+        let is_diamond = Self::is_tiny_inline_diamond_il_words(&ops, ret_words);
+        if ret_words == 1 && !Self::is_tiny_inline_il(&ops) || ret_words != 1 && !is_diamond {
+            return None;
+        }
+        Some((start, end, is_diamond))
+    }
+
+    /// Copy the callee body `start..end` with its parameters read from
+    /// `temps`. On refusal `bytecode` may hold a partial copy (callers roll
+    /// it back) and `self.bytecode` is as it was.
+    pub(super) fn emit_tiny_inline_body(
+        &mut self,
+        start: usize,
+        end: usize,
+        is_diamond: bool,
+        temps: &[u32],
+        bytecode: &mut CodeBuf,
+        ret_words: u32,
+    ) -> bool {
         // Diamond CFG into `self.bytecode`, stash result, leave LOAD in `bytecode` for parent order.
         // On failure, roll back: unbound `JMP end_label` resolves to PC 0 and poisons fallbacks.
         if is_diamond {
             let raw = self.bytecode.code_slice_raw_ops(start, end);
             let rollback = self.bytecode.len();
             self.bytecode.append(bytecode);
-            if !self.emit_cfg_inline_body(&raw, &temps, /*allow_calls=*/ false, ret_words) {
+            if !self.emit_cfg_inline_body(&raw, temps, /*allow_calls=*/ false, ret_words) {
                 self.bytecode.truncate(rollback);
                 bytecode.clear();
                 return false;
@@ -2101,14 +2122,14 @@ impl Compiler {
         };
         let mark = bytecode.ops().len();
         if slice.len() == 1
-            && let Some(expanded) = Self::expand_fused_return_for_inline(&slice[0], &temps)
+            && let Some(expanded) = Self::expand_fused_return_for_inline(&slice[0], temps)
         {
             bytecode.push(expanded);
             Self::stamp_inlined_locs(bytecode, mark, callee_locs.first().copied());
             crate::il::opt::note_function_inlined();
             return true;
         }
-        if slice.len() == 1 && Self::expand_bin_return_for_inline(&slice[0], &temps, bytecode) {
+        if slice.len() == 1 && Self::expand_bin_return_for_inline(&slice[0], temps, bytecode) {
             Self::stamp_inlined_locs(bytecode, mark, callee_locs.first().copied());
             crate::il::opt::note_function_inlined();
             return true;
@@ -2141,7 +2162,7 @@ impl Compiler {
                 byte.bytecode(),
                 Instruction::BinSlotImm | Instruction::BinSlotSlot
             ) {
-                let Some(remapped) = Self::remap_bin_slot_for_inline(byte, &temps) else {
+                let Some(remapped) = Self::remap_bin_slot_for_inline(byte, temps) else {
                     return false;
                 };
                 bytecode.push(remapped);
@@ -16515,7 +16536,11 @@ impl Compiler {
             }
             self.active_fn_name = prev_active;
 
-            if !self.region_ends_with_return(body_op_start) {
+            // A lowered body can end on a join label that only unreachable
+            // jumps target; a label at the very end would bind to the next
+            // function's entry, so it still gets the fallthrough return.
+            let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+            if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
             }
             self.emit_shared_try_fail_epilogue();
