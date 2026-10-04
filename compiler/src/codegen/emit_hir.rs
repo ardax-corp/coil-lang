@@ -88,6 +88,9 @@ struct HirEmit {
     /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
     /// local): local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
+    /// `len(x)` calls: the constant length of a fixed-size type, or `None`
+    /// for `ArrayLen`.
+    lens: HashMap<u32, Option<u32>>,
 }
 
 type Check = Result<(), &'static str>;
@@ -198,6 +201,7 @@ impl Compiler {
             pair_locals: HashMap::new(),
             tag_slots: HashMap::new(),
             sroa: HashMap::new(),
+            lens: HashMap::new(),
         };
         for &param in &hir.params {
             let slot = self
@@ -206,6 +210,10 @@ impl Compiler {
             emit.slots[param.0 as usize] = Some(slot);
         }
         for (i, expr) in hir.exprs.iter().enumerate() {
+            if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
+                emit.lens.insert(i as u32, len);
+                continue;
+            }
             if let HirKind::Call {
                 callee: Callee::Named { name, .. },
                 args,
@@ -325,6 +333,9 @@ impl Compiler {
         if self.lookup_extern_runtime(&key).is_some() || self.native.contains_key(&key) {
             return Err("callee-native");
         }
+        if key.starts_with(&format!("{}::", common::BUILTIN_VEC_TYPE)) {
+            return self.resolve_hir_vec_ctor(hir, call, &key, argc);
+        }
         let lookup = strip_overload_key(&key).to_string();
         if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
@@ -354,6 +365,9 @@ impl Compiler {
             return Err("callee-overload");
         }
         let recv = *args.first().ok_or("method-receiver")?;
+        if lower::is_vec(hir, &self.checker, recv) {
+            return self.resolve_hir_vec_method(hir, call, method, args);
+        }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
         let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
         if lower::classify(&self.checker, &recv_ty) != Some(ValueClass::Object) {
@@ -377,6 +391,70 @@ impl Compiler {
         let mut call = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)))?;
         call.method = true;
         Ok(call)
+    }
+
+    /// A builtin `Vec` method (its thunk takes and returns plain words).
+    fn resolve_hir_vec_method(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        method: &str,
+        args: &[HirId],
+    ) -> Result<HirCall, &'static str> {
+        let key = self
+            .context
+            .methods
+            .get(common::BUILTIN_VEC_TYPE)
+            .and_then(|m| m.get(method))
+            .cloned()
+            .ok_or("method-unknown")?;
+        // An overload-keyed entry would be picked over the bare thunk.
+        let keyed = format!("{key}#");
+        if self.functions.keys().any(|k| k.starts_with(&keyed))
+            || self.two_word_return_kind(&key).is_some()
+            || !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key))
+        {
+            return Err("vec-method");
+        }
+        let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+        Ok(HirCall {
+            key,
+            pair: None,
+            params: args.iter().map(|&a| layout(a)).collect(),
+            ret: layout(call),
+            method: true,
+        })
+    }
+
+    /// `Vec::new()` / `Vec::with_capacity(n)`: the thunk, or its
+    /// pointer-element twin when the elements are ground heap words (as
+    /// `pointer_vec_ctor`).
+    fn resolve_hir_vec_ctor(&self, hir: &HirBody, call: HirId, key: &str, argc: usize) -> Result<HirCall, &'static str> {
+        let name = key.strip_prefix(common::BUILTIN_VEC_TYPE).and_then(|k| k.strip_prefix("::"));
+        if !matches!((name, argc), (Some("new"), 0) | (Some("with_capacity"), 1)) {
+            return Err("vec-ctor");
+        }
+        let ty = Self::hir_ty(hir, call).ok_or("vec-ctor")?;
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let elem = crate::typechecking::value_layout::vec_elem_ty(&self.checker, &ty).ok_or("vec-ctor")?;
+        let ptr = Self::pointer_vec_ctor_name(name.unwrap_or_default());
+        let key = if crate::typechecking::value_layout::word_kind(&self.checker, &elem) == common::WORD_POINTER
+            && self.functions.contains_key(&ptr)
+        {
+            ptr
+        } else {
+            key.to_string()
+        };
+        if !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key)) {
+            return Err("vec-ctor");
+        }
+        Ok(HirCall {
+            key,
+            pair: None,
+            params: vec![ValueLayout::Boxed; argc],
+            ret: ValueLayout::Boxed,
+            method: false,
+        })
     }
 
     /// The ABI of a call to `key` with `argc` arguments, of which the first
@@ -432,7 +510,7 @@ impl Compiler {
         };
         for ty in &param_tys {
             match lower::classify(&self.checker, ty) {
-                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => {}
+                Some(class) if lower::is_word(class) => {}
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(ty));
@@ -589,8 +667,14 @@ impl Compiler {
                 Some(BOXED)
             }
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
+            HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
-            HirKind::Field { .. }
+            HirKind::Index { .. }
+            | HirKind::Make {
+                kind: MakeKind::Tuple | MakeKind::Array,
+                ..
+            }
+            | HirKind::Field { .. }
             | HirKind::Make {
                 kind: MakeKind::Class(_),
                 ..
@@ -598,6 +682,73 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             _ => None,
+        }
+    }
+
+    /// `len(x)` / structural `x.len()` the plan admitted: `Some(Some(n))`
+    /// for a fixed-size type, `Some(None)` for `ArrayLen`.
+    fn hir_len_call(&self, hir: &HirBody, id: HirId) -> Option<Option<u32>> {
+        let HirKind::Call { callee, args } = &hir.expr(id).kind else {
+            return None;
+        };
+        let [arg] = args.as_slice() else {
+            return None;
+        };
+        let is_len = match callee {
+            Callee::Named { name, .. } => name == "len",
+            Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
+            Callee::Value(_) => false,
+        };
+        if !is_len || !matches!(hir.expr(*arg).kind, HirKind::Local(_)) {
+            return None;
+        }
+        use crate::typechecking::ty::{ArrayLength, strip_readonly};
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *arg)?);
+        if !Checker::is_structural_len_ty_for_codegen(&ty) {
+            return None;
+        }
+        Some(match strip_readonly(&ty) {
+            Ty::Array {
+                length: ArrayLength::Static(n),
+                ..
+            } => Some(*n as u32),
+            Ty::Tuple(items) => Some(items.len() as u32),
+            Ty::Record { fields } => Some(fields.len() as u32),
+            _ => None,
+        })
+    }
+
+    /// `x % m` with a literal `m` and a dividend not proven non-negative:
+    /// the AST adds a Euclidean fix-up after an array index.
+    fn hir_index_euclid(hir: &HirBody, index: HirId) -> Option<i32> {
+        let HirKind::Bin {
+            op: BinOp::IntRem,
+            lhs,
+            rhs,
+        } = hir.expr(index).kind
+        else {
+            return None;
+        };
+        let HirKind::Lit(Lit::Int(m)) = hir.expr(rhs).kind else {
+            return None;
+        };
+        if m <= 0 || m > i32::MAX as i64 {
+            return None;
+        }
+        let nonneg = match hir.expr(lhs).kind {
+            HirKind::Lit(Lit::Int(n)) => n >= 0,
+            _ => hir.expr(lhs).flags.contains(HirFlags::NONNEG),
+        };
+        (!nonneg).then_some(m as i32)
+    }
+
+    /// An array index, with the AST's Euclidean fix-up for `x % m`.
+    fn hir_index_value(&mut self, hir: &HirBody, emit: &mut HirEmit, index: HirId, depth: u32) {
+        self.hir_value(hir, emit, index, &BOXED, depth);
+        if let Some(m) = Self::hir_index_euclid(hir, index) {
+            let mut bc = CodeBuf::new();
+            self.emit_euclid_rem_fixup(&mut bc, m);
+            self.bytecode.append(&mut bc);
         }
     }
 
@@ -698,6 +849,7 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
             }
             HirKind::Un { operand, .. } => self.hir_check_value(hir, emit, *operand, &BOXED)?,
+            HirKind::Call { .. } if emit.lens.contains_key(&id.0) => {}
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
                 for (&arg, &param) in args.iter().zip(&call.params) {
@@ -717,6 +869,24 @@ impl Compiler {
                 kind: MakeKind::Class(_),
                 ..
             } => self.hir_check_new_args(hir, emit, id)?,
+            HirKind::Make {
+                kind: MakeKind::Tuple | MakeKind::Array,
+                args,
+            } => {
+                for &item in args {
+                    let rep = self.hir_natural(hir, emit, item);
+                    let want = Rep::Word(Self::hir_ty(hir, item).map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+                    if rep.as_ref().is_some_and(|r| !Self::hir_convertible(r, &want)) {
+                        return Err("repr-mismatch");
+                    }
+                    self.hir_check_value(hir, emit, item, &want)?;
+                }
+            }
+            HirKind::Index { base, index, .. } => {
+                let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                self.hir_check_value(hir, emit, *base, &base_rep)?;
+                self.hir_check_value(hir, emit, *index, &BOXED)?;
+            }
             HirKind::Make { .. } => return self.hir_check_make(hir, emit, id, want),
             HirKind::Match { scrutinee, arms } => {
                 return self.hir_check_match(hir, emit, *scrutinee, arms, Some(want));
@@ -900,6 +1070,13 @@ impl Compiler {
                     let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *base, &base_rep)
                 }
+                HirKind::Index { base, index, .. } => {
+                    let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
+                    self.hir_check_value(hir, emit, *value, &want)?;
+                    let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                    self.hir_check_value(hir, emit, *base, &base_rep)?;
+                    self.hir_check_value(hir, emit, *index, &BOXED)
+                }
                 _ => Err("assign-place"),
             },
             HirKind::If { cond, then, els } => {
@@ -1036,6 +1213,100 @@ impl Compiler {
                     UnOp::Not => Instruction::LogNot,
                 }));
             }
+            HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
+                // A fixed size: the local is not read (as in the AST).
+                Some(n) => self.bytecode.push_const(n as i32),
+                None => {
+                    self.hir_value(hir, emit, args[0], &BOXED, depth);
+                    self.bytecode.push(Byte::new(Instruction::ArrayLen));
+                }
+            },
+            HirKind::Index { base, index, .. } => {
+                let proven = hir.expr(id).flags.contains(HirFlags::IN_BOUNDS);
+                let staged = lower::clobbers(hir, *index);
+                let pin = match hir.expr(*base).kind {
+                    HirKind::Local(local) if proven => {
+                        Some(Self::hir_slot(emit, local)).filter(|s| self.pinned_array_slots.contains(s))
+                    }
+                    _ => None,
+                };
+                if let Some(slot) = pin {
+                    self.hir_index_value(hir, emit, *index, depth);
+                    if staged {
+                        self.expr_depth = 0;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        self.bytecode.push_load(tmp);
+                    }
+                    self.bytecode.push_index_pin_unchecked(slot);
+                } else {
+                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned index base");
+                    self.hir_value(hir, emit, *base, &base_rep, depth);
+                    if staged {
+                        // As the AST: base and index through temps.
+                        self.expr_depth = 0;
+                        let t = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(t);
+                        self.hir_index_value(hir, emit, *index, 0);
+                        self.expr_depth = 0;
+                        let i = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(i);
+                        self.bytecode.push_load(t);
+                        self.bytecode.push_load(i);
+                    } else {
+                        self.hir_index_value(hir, emit, *index, depth + 1);
+                    }
+                    if proven {
+                        self.bytecode.push_index_unchecked();
+                    } else {
+                        self.bytecode.push_index();
+                    }
+                }
+            }
+            HirKind::Make {
+                kind: kind @ (MakeKind::Tuple | MakeKind::Array),
+                args,
+            } => {
+                let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, a));
+                let wants: Vec<Rep> = args
+                    .iter()
+                    .map(|&a| Rep::Word(Self::hir_ty(hir, a).map_or(ValueLayout::Boxed, |t| self.value_layout(t))))
+                    .collect();
+                if staged {
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (&item, want) in args.iter().zip(&wants) {
+                        self.hir_value(hir, emit, item, want, 0);
+                        self.expr_depth = 0;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    for tmp in temps {
+                        self.bytecode.push_load(tmp);
+                    }
+                } else {
+                    for (i, (&item, want)) in args.iter().zip(&wants).enumerate() {
+                        self.hir_value(hir, emit, item, want, depth + i as u32);
+                    }
+                }
+                use crate::typechecking::value_layout::{vec_elem_ty, word_kind};
+                if *kind == MakeKind::Tuple {
+                    let kinds = common::pack_word_kinds(args.iter().map(|&a| {
+                        Self::hir_ty(hir, a).map_or(common::WORD_UNKNOWN, |t| word_kind(&self.checker, t))
+                    }));
+                    self.bytecode.push_make_tuple_kinds(args.len() as u32, kinds);
+                } else {
+                    let elem = Self::hir_ty(hir, id).and_then(|ty| match crate::typechecking::ty::strip_readonly(ty) {
+                        Ty::Array { element, .. } => Some(element.as_ref().clone()),
+                        other => vec_elem_ty(&self.checker, other),
+                    });
+                    let kind = match elem.map(|e| word_kind(&self.checker, &e)) {
+                        Some(common::WORD_POINTER) => common::WORD_POINTER,
+                        _ => common::WORD_UNKNOWN,
+                    };
+                    self.bytecode.push_make_array_kind(args.len() as u32, kind);
+                }
+            }
             HirKind::Field { base, name } => {
                 if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
                     self.bytecode.push_load(slot);
@@ -1071,6 +1342,28 @@ impl Compiler {
                     self.bytecode.push_pop();
                 }
                 self.bytecode.push_seek(tmp + 1);
+            }
+            HirKind::Call { args, .. } if emit.calls[&id.0].key == format!("{}::push", common::BUILTIN_VEC_TYPE) => {
+                // Inlined as the AST does: `ArrayPush; POP; CONST 0`.
+                let params = emit.calls[&id.0].params.clone();
+                let (recv, value) = (args[0], args[1]);
+                self.hir_value(hir, emit, recv, &Rep::Word(params[0]), depth);
+                if lower::clobbers(hir, value) {
+                    self.expr_depth = 0;
+                    let r = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(r);
+                    self.hir_value(hir, emit, value, &Rep::Word(params[1]), 0);
+                    self.expr_depth = 0;
+                    let x = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(x);
+                    self.bytecode.push_load(r);
+                    self.bytecode.push_load(x);
+                } else {
+                    self.hir_value(hir, emit, value, &Rep::Word(params[1]), depth + 1);
+                }
+                self.bytecode.push(Byte::new(Instruction::ArrayPush));
+                self.bytecode.push_pop();
+                self.bytecode.push_const(0);
             }
             HirKind::Call { args, .. } if emit.calls[&id.0].method => {
                 let call = &emit.calls[&id.0];
@@ -1751,6 +2044,34 @@ impl Compiler {
                         self.bytecode.push_set_field_slot(idx);
                         self.bytecode.push_pop();
                     }
+                }
+                HirKind::Index { base, index, .. } => {
+                    // As the AST: the value's temp first, then base, index
+                    // (staged unless a bare local or literal), value.
+                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    self.expr_depth = 0;
+                    let tmp_val = self.alloc_temp_slot();
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    self.bytecode.push_store_pop(tmp_val);
+                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned index base");
+                    if matches!(hir.expr(*index).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_))) {
+                        self.hir_value(hir, emit, *base, &base_rep, 0);
+                        self.hir_index_value(hir, emit, *index, 1);
+                        self.bytecode.push_load(tmp_val);
+                    } else {
+                        self.expr_depth = 0;
+                        let tmp_arr = self.alloc_temp_slot();
+                        let tmp_idx = self.alloc_temp_slot();
+                        self.hir_value(hir, emit, *base, &base_rep, 0);
+                        self.bytecode.push_store_pop(tmp_arr);
+                        self.hir_index_value(hir, emit, *index, 0);
+                        self.bytecode.push_store_pop(tmp_idx);
+                        self.bytecode.push_load(tmp_arr);
+                        self.bytecode.push_load(tmp_idx);
+                        self.bytecode.push_load(tmp_val);
+                    }
+                    self.bytecode.push(Byte::new(Instruction::StoreIndex));
+                    self.bytecode.push_pop();
                 }
                 _ => unreachable!("HIR lowering admitted a non-local assignment place"),
             },
