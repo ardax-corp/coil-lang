@@ -19,7 +19,7 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, Lit, LocalId, MakeKind};
+use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
@@ -37,6 +37,14 @@ pub enum ValueClass {
     Enum,
     /// An instance of a non-generic user class: one heap pointer word.
     Object,
+    /// A heap tuple, array or `Vec<T>` with closed element types: one
+    /// pointer word, indexed with `Index` / `StoreIndex`.
+    Aggregate,
+}
+
+/// The classes a local, argument, field or payload word can hold.
+pub fn is_word(class: ValueClass) -> bool {
+    !matches!(class, ValueClass::Unit)
 }
 
 /// The class of `ty`, or `None` when the lowering does not handle it.
@@ -60,6 +68,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             Some(ValueClass::Opaque)
         }
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
+        Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), seen),
+        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
+        Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
+            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
+        }
         Ty::App(head, args) => {
             let Ty::Con(name) = head.as_ref() else {
                 return None;
@@ -96,6 +109,16 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Con(name) => user_enum(checker, name, seen),
         _ => None,
     }
+}
+
+/// A tuple, array or `Vec` whose element types are closed (elements are
+/// classified where they are read).
+fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
+    items
+        .all(|t| {
+            super::layout::ty_is_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
+        })
+        .then_some(ValueClass::Aggregate)
 }
 
 /// A user class the lowering builds and reads: not generic, with every
@@ -151,6 +174,128 @@ pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
             .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
 }
 
+/// `len(x)` / `x.len()` of a plain local: `ArrayLen`, or a constant for a
+/// fixed-size type.
+impl Walk<'_> {
+    /// A `Vec` method: `push` is inlined as `ArrayPush` (its value staged
+    /// with the receiver when it may clobber); the others are `CALL`s to
+    /// the builtin thunks. `pop` / `remove` pick a niche or boxed form by
+    /// the call's layout and keep the AST codegen.
+    fn vec_method(&mut self, name: &str, args: &[HirId], depth: u32) -> Check {
+        match (name, args) {
+            ("push", [recv, value]) => {
+                let staged = clobbers(self.body, *value);
+                if staged && depth != 0 {
+                    return Err("staged-push");
+                }
+                self.value(*recv, depth)?;
+                self.word(*value)?;
+                self.value(*value, if staged { 0 } else { depth + 1 })
+            }
+            ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) => {
+                self.args(args, depth, depth == 0)
+            }
+            _ => Err("vec-method"),
+        }
+    }
+
+    fn len(&mut self, arg: HirId) -> Check {
+        match self.body.expr(arg).kind {
+            HirKind::Local(local)
+                if self.body.local(local).kind != super::LocalKind::Const
+                    && self
+                        .ty(arg)
+                        .is_some_and(|t| crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(self.checker.subst(), t))) =>
+            {
+                Ok(())
+            }
+            _ => Err("len-argument"),
+        }
+    }
+}
+
+/// Whether `id` is a `Vec<T>`.
+pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    body.expr(id)
+        .ty
+        .as_ref()
+        .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
+}
+
+/// Whether `x.len()` is the structural `len(x)` (not a `Vec` method).
+pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
+    body.expr(recv).ty.as_ref().is_some_and(|t| {
+        let t = apply_ty_prune(checker.subst(), t);
+        Checker::is_structural_len_ty_for_codegen(&t) && coil_ty::vec_element_ty(&t).is_none()
+    })
+}
+
+/// Whether evaluating `id` may store into frame slots (the AST's
+/// `expr_may_clobber_operand_stack`): a call, `match`, `new` or string
+/// index anywhere inside it.
+pub fn clobbers(body: &HirBody, id: HirId) -> bool {
+    let mut found = false;
+    visit(body, id, &mut |e| {
+        found |= matches!(
+            &e.kind,
+            HirKind::Call { .. }
+                | HirKind::Match { .. }
+                | HirKind::Make { kind: MakeKind::Class(_), .. }
+                | HirKind::Index { kind: IndexKind::String, .. }
+                | HirKind::Builtin { .. }
+        );
+    });
+    found
+}
+
+/// Every node of `id`'s subtree, `id` first.
+fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
+    let e = body.expr(id);
+    f(e);
+    let mut kids: Vec<HirId> = Vec::new();
+    match &e.kind {
+        HirKind::Field { base, .. } => kids.push(*base),
+        HirKind::Index { base, index, .. } => kids.extend([*base, *index]),
+        HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => kids.extend([*lhs, *rhs]),
+        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => kids.push(*operand),
+        HirKind::Call { callee, args } => {
+            if let Callee::Value(v) = callee {
+                kids.push(*v);
+            }
+            kids.extend(args);
+        }
+        HirKind::Named { value, .. } | HirKind::Spread(value) => kids.push(*value),
+        HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => kids.extend(args),
+        HirKind::Block { stmts, tail } => kids.extend(stmts.iter().chain(tail)),
+        HirKind::Let { init, .. } => kids.extend(init),
+        HirKind::LetPat { init, .. } => kids.push(*init),
+        HirKind::Assign { place, value } | HirKind::Append { base: place, value } => kids.extend([*place, *value]),
+        HirKind::If { cond, then, els } => kids.extend([*cond, *then].into_iter().chain(*els)),
+        HirKind::Loop { body: b } | HirKind::Defer { body: b } => kids.push(*b),
+        HirKind::ForIn { iterable, body: b, .. } => kids.extend([*iterable, *b]),
+        HirKind::Return(v) => kids.extend(v),
+        HirKind::Match { scrutinee, arms } => kids.extend(std::iter::once(*scrutinee).chain(arms.iter().map(|a| a.body))),
+        HirKind::Yield { value, .. } => kids.push(*value),
+        HirKind::Resume { handle, value } => kids.extend(std::iter::once(*handle).chain(*value)),
+        _ => {}
+    }
+    for k in kids {
+        visit(body, k, f);
+    }
+}
+
+/// An index that is safe to evaluate twice (a compound assignment builds
+/// its place twice): locals, literals and arithmetic on them.
+fn pure_index(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Local(_) | HirKind::Lit(_) => true,
+        HirKind::Bin { lhs, rhs, .. } => pure_index(body, *lhs) && pure_index(body, *rhs),
+        HirKind::Un { operand, .. } => pure_index(body, *operand),
+        HirKind::Field { base, .. } => pure_base(body, *base),
+        _ => false,
+    }
+}
+
 /// A place base that reads no state twice: `x` or `x.f.g`. A compound
 /// assignment builds its place twice, so the base must be safe to repeat.
 fn pure_base(body: &HirBody, id: HirId) -> bool {
@@ -183,10 +328,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     let ok = variants.iter().all(|(_, _, payload)| {
         payload.iter().all(|field| {
             super::layout::ty_is_closed(field)
-                && matches!(
-                    classify_in(checker, field, seen),
-                    Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object)
-                )
+                && classify_in(checker, field, seen).is_some_and(is_word)
         })
     });
     seen.pop();
@@ -212,9 +354,9 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     }
     if body.locals.iter().enumerate().any(|(i, l)| {
         match l.ty.as_ref().and_then(|ty| classify(checker, ty)) {
-            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => false,
             // `let _ = f()` of a unit call: run for effect, no slot.
             Some(ValueClass::Unit) => is_read(body, LocalId(i as u32)),
+            Some(_) => false,
             None => true,
         }
     }) {
@@ -393,9 +535,32 @@ impl Walk<'_> {
     /// A value a local, argument or payload can hold.
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
-            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => Ok(()),
+            Some(class) if is_word(class) => Ok(()),
             _ => Err("value-type"),
         }
+    }
+
+    fn aggregate(&self, id: HirId) -> Check {
+        if self.class(id) == Some(ValueClass::Aggregate) {
+            Ok(())
+        } else {
+            Err("index-base-type")
+        }
+    }
+
+    /// `items[i]` at `depth`, each pushed on the ones before it, or every
+    /// item staged through a temp when a later one may clobber (as the
+    /// AST's `emit_literal_items`).
+    fn items(&mut self, items: &[HirId], depth: u32) -> Check {
+        let staged = items.len() >= 2 && items[1..].iter().any(|&i| clobbers(self.body, i));
+        if staged && depth != 0 {
+            return Err("staged-literal");
+        }
+        for (i, &item) in items.iter().enumerate() {
+            self.word(item)?;
+            self.value(item, if staged { 0 } else { depth + i as u32 })?;
+        }
+        Ok(())
     }
 
     fn object(&self, id: HirId) -> Check {
@@ -460,6 +625,14 @@ impl Walk<'_> {
                 self.value(*operand, depth)
             }
             HirKind::Call {
+                callee: Callee::Named { name, .. },
+                args,
+            } if name == "len" && args.len() == 1 => self.len(args[0]),
+            HirKind::Call {
+                callee: Callee::Method { name },
+                args,
+            } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0]),
+            HirKind::Call {
                 callee: Callee::Named { overload: None, .. },
                 args,
             } => {
@@ -471,17 +644,45 @@ impl Walk<'_> {
             // `recv.m(args)` stages the receiver and each argument through
             // temps at depth zero, as the AST codegen does.
             HirKind::Call {
-                callee: Callee::Method { .. },
+                callee: Callee::Method { name },
                 args,
             } => {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
                 let recv = *args.first().ok_or("method-receiver")?;
+                if is_vec(body, self.checker, recv) {
+                    return self.vec_method(name, args, depth);
+                }
                 self.object(recv)?;
                 self.args(args, depth, depth == 0)
             }
             HirKind::Call { .. } => Err("callee"),
+            HirKind::Index { base, index, kind } => {
+                if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
+                    return Err("index-kind");
+                }
+                self.word(id)?;
+                self.aggregate(*base)?;
+                self.scalar(*index)?;
+                if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
+                    return Err("index-of-literal");
+                }
+                // A clobbering index stages base and index through temps.
+                let staged = clobbers(body, *index);
+                if staged && depth != 0 {
+                    return Err("staged-index");
+                }
+                self.value(*base, depth)?;
+                self.value(*index, if staged { 0 } else { depth + 1 })
+            }
+            HirKind::Make {
+                kind: MakeKind::Tuple | MakeKind::Array,
+                args,
+            } if !args.is_empty() || matches!(&body.expr(id).kind, HirKind::Make { kind: MakeKind::Array, .. }) => {
+                self.word(id)?;
+                self.items(args, depth)
+            }
             HirKind::Field { base, .. } => {
                 self.word(id)?;
                 self.object(*base)?;
@@ -611,6 +812,10 @@ impl Walk<'_> {
                 if is_unit_local(body, self.checker, *local) {
                     return self.effect(*init, depth);
                 }
+                // `let a = [..]` keeps the elements in frame slots in the AST.
+                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if !args.is_empty()) {
+                    return Err("stack-array");
+                }
                 if sroa_class(body, self.checker, *init).is_some() {
                     // The AST keeps the fields in slots and boxes on escape;
                     // only the no-escape case is lowered.
@@ -646,6 +851,22 @@ impl Walk<'_> {
                         self.word(*value)?;
                         self.value(*value, depth)?;
                         self.value(*base, depth + 1)
+                    }
+                    // `base[i] = v`: the value to a temp, then base and index.
+                    HirKind::Index { base, index, kind } => {
+                        if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
+                            return Err("index-kind");
+                        }
+                        if !pure_base(body, *base) || !pure_index(body, *index) {
+                            return Err("assign-base");
+                        }
+                        self.word(*place)?;
+                        self.aggregate(*base)?;
+                        self.scalar(*index)?;
+                        self.word(*value)?;
+                        self.value(*value, 0)?;
+                        self.value(*base, 0)?;
+                        self.value(*index, 1)
                     }
                     _ => Err("assign-place"),
                 }
@@ -696,6 +917,7 @@ impl Walk<'_> {
             | HirKind::Un { .. }
             | HirKind::Make { .. }
             | HirKind::Field { .. }
+            | HirKind::Index { .. }
             | HirKind::Call { .. } => self.value(id, depth),
             other => Err(kind_name(other)),
         }
