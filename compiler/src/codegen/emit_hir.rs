@@ -427,7 +427,11 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup) {
             return self.resolve_hir_mono(hir, call, key, &lookup);
         }
-        self.hir_call_abi(key, &lookup, argc, None)
+        // `C::f(..)` on a generic class is its one shared body.
+        let shared = name
+            .rsplit_once("::")
+            .is_some_and(|(owner, _)| self.checker.is_class(owner) && lower::is_generic_class(&self.checker, owner));
+        self.hir_call_abi(key, &lookup, argc, None, shared)
     }
 
     /// A call to generic `key` that the AST sends to an already emitted
@@ -531,10 +535,14 @@ impl Compiler {
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
         let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
-        if lower::classify(&self.checker, &recv_ty) != Some(ValueClass::Object) {
+        let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
+        // A generic class's methods are one shared body (no mono clones):
+        // its open signature types keep the body's own layouts.
+        let shared = lower::is_generic_class(&self.checker, owner)
+            && lower::classify(&self.checker, &recv_ty) == Some(ValueClass::Opaque);
+        if !shared && lower::classify(&self.checker, &recv_ty) != Some(ValueClass::Object) {
             return Err("method-receiver");
         }
-        let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
         let key = self
             .context
             .methods
@@ -549,7 +557,7 @@ impl Compiler {
             return Err("callee-overload");
         }
         let lookup = key.clone();
-        let mut call = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)))?;
+        let mut call = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared)?;
         call.method = true;
         Ok(call)
     }
@@ -721,13 +729,18 @@ impl Compiler {
         })
     }
 
+    /// The callee's ABI from its signature. With `open`, a signature type
+    /// that mentions the owner's type parameters takes the layout the shared
+    /// body uses.
     fn hir_call_abi(
         &self,
         key: String,
         lookup: &str,
         argc: usize,
         self_layout: Option<ValueLayout>,
+        open: bool,
     ) -> Result<HirCall, &'static str> {
+        let open_ty = |ty: &Ty| open && !crate::hir::layout::ty_is_closed(ty);
         let lookup = lookup.to_string();
         if self.checker.is_generic_fn(&lookup) {
             return Err("callee-generic");
@@ -773,12 +786,13 @@ impl Compiler {
         for ty in &param_tys {
             match lower::classify(&self.checker, ty) {
                 Some(class) if lower::is_word(class) => {}
+                _ if open_ty(ty) => {}
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(ty));
         }
         let ret_ty = self.checker.fn_return_ty(&lookup).ok_or("callee-signature")?;
-        if lower::classify(&self.checker, &ret_ty).is_none() {
+        if lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
         Ok(HirCall {

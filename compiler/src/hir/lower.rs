@@ -81,6 +81,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             let Ty::Con(name) = head.as_ref() else {
                 return None;
             };
+            // A generic class instance: one object word, its methods shared
+            // across instances (fields are only read inside them).
+            if is_generic_class(checker, name) {
+                return super::layout::ty_is_closed(ty).then_some(ValueClass::Opaque);
+            }
             let option = common::is_builtin_option_enum(name);
             let result = common::is_builtin_result_enum(name);
             if !(option || result) || args.len() != if option { 1 } else { 2 } {
@@ -123,6 +128,15 @@ fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, see
             super::layout::ty_is_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
         })
         .then_some(ValueClass::Aggregate)
+}
+
+/// A class declared with type parameters (`class HashMap<K, V>`).
+pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
+    if !checker.is_class(name) {
+        return false;
+    }
+    let ctors = &checker.generics().generic_type_ctors;
+    ctors.contains_key(name) || checker.resolve_class_key(name).is_some_and(|key| ctors.contains_key(&key))
 }
 
 /// A user class the lowering builds and reads: not generic, with every
@@ -580,6 +594,13 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// A generic class instance: its methods are one shared body.
+    fn shared_receiver(&self, id: HirId) -> bool {
+        self.class(id) == Some(ValueClass::Opaque)
+            && matches!(self.ty(id).map(strip_readonly), Some(Ty::App(head, _))
+                if matches!(head.as_ref(), Ty::Con(name) if is_generic_class(self.checker, name)))
+    }
+
     fn object(&self, id: HirId) -> Check {
         if self.class(id) == Some(ValueClass::Object) {
             Ok(())
@@ -694,7 +715,9 @@ impl Walk<'_> {
                 if is_vec(body, self.checker, recv) {
                     return self.vec_method(name, args, depth);
                 }
-                self.object(recv)?;
+                if !self.shared_receiver(recv) {
+                    self.object(recv)?;
+                }
                 self.args(args, depth, depth == 0)
             }
             HirKind::Call { .. } => Err("callee"),
