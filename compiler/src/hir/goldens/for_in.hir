@@ -1,0 +1,17 @@
+Function f(n%0: int) -> int
+  block : never
+    let s%1: int : unit
+      lit 0 : int {nonneg}
+    for i%2 in (Range { inclusive: false, float: false }) : unit
+      make range : Range<int> [pair range]
+        lit 0 : int {nonneg}
+        local n%0 : int
+      block : unit
+        assign : int
+          local s%1 : int
+          bin IntAdd : int
+            local s%1 : int
+            local i%2 : int
+    =>
+      return : never
+        local s%1 : int

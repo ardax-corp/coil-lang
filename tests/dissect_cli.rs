@@ -257,6 +257,35 @@ fn dissect_views_source_opt_ilpost_mir_ast() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--hir` prints each body's typed, desugared tree; `while` is a `loop`.
+#[test]
+fn dissect_hir_prints_typed_bodies() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let dir = std::env::temp_dir().join(format!("coil_dissect_hir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("loop.hy");
+    std::fs::write(
+        &entry,
+        "fn total(int n) -> int {\n    let t = 0;\n    let i = 0;\n    while i < n {\n        t += i;\n        i = i + 1;\n    }\n    return t;\n}\n\nfn main() {\n    let r = total(10);\n}\n",
+    )
+    .unwrap();
+    let out = coil_dissect(&bin, Some(&dir), &entry)
+        .args(["--fn", "total", "--hir"])
+        .output()
+        .expect("spawn coil dissect --hir");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("=== hir ==="), "{stdout}");
+    assert!(stdout.contains("Function total(n%0: int) -> int"), "{stdout}");
+    assert!(stdout.contains("loop : unit"), "{stdout}");
+    assert!(stdout.contains("bin IntAdd : int"), "{stdout}");
+    assert!(!stdout.contains("hir problem"), "{stdout}");
+    assert!(!stdout.contains("Function main"), "--fn filters bodies: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A compiled `.hyc` archive dumps its bytecode without recompiling.
 #[test]
 fn dissect_reads_hyc_archive() {

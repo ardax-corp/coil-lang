@@ -1,0 +1,15 @@
+Function f(k%0: int) -> int
+  block : never
+    let add%1: int -> int : unit
+      lambda f::<lambda@31> : int -> int
+    =>
+      return : never
+        call value : int
+          local add%1 : int -> int
+          lit 1 : int {nonneg}
+
+Lambda f::<lambda@31>(x%0: int) -> int
+  captures k%1
+  bin IntAdd : int
+    local x%0 : int
+    local k%1 : int

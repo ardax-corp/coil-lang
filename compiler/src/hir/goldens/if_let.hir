@@ -1,0 +1,14 @@
+Function f(o%0: Option<int>) -> int
+  block : never
+    match : unit
+      local o%0 : Option<int> [pair Option]
+      Option::Some#1(v%1) =>
+        block : never
+          =>
+            return : never
+              local v%1 : int
+      _ =>
+        block : unit
+    =>
+      return : never
+        lit 0 : int {nonneg}

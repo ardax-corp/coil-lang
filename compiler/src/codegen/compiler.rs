@@ -19344,6 +19344,7 @@ impl Compiler {
                 ));
             }
         }
+        crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);

@@ -1,0 +1,20 @@
+Function f(n%0: int) -> int
+  block : never
+    let i%1: int : unit
+      lit 0 : int {nonneg}
+    loop : unit
+      block : unit
+        if : unit
+          bin Lt : bool
+            local i%1 : int
+            local n%0 : int
+          block : unit
+            assign : int
+              local i%1 : int
+              bin IntAdd : int
+                local i%1 : int
+                lit 2 : int {nonneg}
+          break : never
+    =>
+      return : never
+        local i%1 : int

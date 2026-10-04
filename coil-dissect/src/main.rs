@@ -27,7 +27,7 @@ fn print_help() {
     eprintln!(
         "Usage:\n\
          \x20 coil-dissect [--log-json | --log-lsp] [--root DIR]... [--entry FILE] <file.hy>\n\
-         \x20              [--fn <pat>] [--il] [--il-post] [--mir] [--ast] [--expand] [--no-source] [-O LEVEL]\n\
+         \x20              [--fn <pat>] [--il] [--il-post] [--hir] [--mir] [--ast] [--expand] [--no-source] [-O LEVEL]\n\
          \x20              [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
          \x20              [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
          \n\
@@ -36,6 +36,7 @@ fn print_help() {
          \x20 --il               Also print pre-opt stack IL\n\
          \x20 --il-post          Also print the optimized IL (before fuse / lowering)\n\
          \x20 --tests            Compile `test` cases too (`__zs_test_N`), like `coil test`\n\
+         \x20 --hir              Also print each body's HIR (typed, desugared tree)\n\
          \x20 --mir              Also print the MIR of numeric bodies (dense / LIR)\n\
          \x20 --no-source        Do not interleave source lines in the bytecode\n\
          \x20 -O, --opt-level L  none/0, basic/1, standard/2, aggressive/3, size/s, debug/g\n\
@@ -69,6 +70,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
     let mut entry_flag: Option<String> = None;
     let mut grants = HostGrants::deny_all();
     let mut show_mir = false;
+    let mut show_hir = false;
     let mut show_il_post = false;
     let mut include_tests = false;
     let mut source = true;
@@ -90,6 +92,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             "--log-lsp" => log_lsp = true,
             "--il" => show_il = true,
             "--mir" => show_mir = true,
+            "--hir" => show_hir = true,
             "--il-post" => show_il_post = true,
             "--tests" => include_tests = true,
             "--no-source" => source = false,
@@ -192,6 +195,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             extra_roots,
             grants,
             show_mir,
+            show_hir,
             show_il_post,
             source,
             opt_level,

@@ -1,0 +1,16 @@
+Function area(s%0: Shape) -> float
+  block : never
+    =>
+      return : never
+        match : float
+          local s%0 : Shape
+          Shape::Circle#0(r%1) =>
+            bin FloatMul : float
+              local r%1 : float
+              local r%1 : float
+          Shape::Rect#1 { w: w%2, h: h%3 } =>
+            bin FloatMul : float
+              local w%2 : float
+              local h%3 : float
+          Shape::Empty#2 =>
+            lit 0.0 : float
