@@ -8,6 +8,8 @@ const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
 
 #[path = "emit_call.rs"]
 mod emit_call;
+#[path = "emit_hir.rs"]
+mod emit_hir;
 #[path = "emit_match.rs"]
 mod emit_match;
 
@@ -411,6 +413,12 @@ impl Compiler {
     /// Disable automatic fork-join of pure recursive calls and counted loops.
     pub fn set_auto_par(&mut self, on: bool) {
         self.auto_par = on;
+    }
+
+    /// Lower function bodies through HIR where the HIR lowering covers them
+    /// (`--hir`); every other body keeps the AST walk.
+    pub fn set_hir_lowering(&mut self, on: bool) {
+        self.hir_lowering = on;
     }
 
     /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
@@ -16495,9 +16503,17 @@ impl Compiler {
             let prev_active = self.active_fn_name.take();
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             self.active_fn_name = Some(name.to_string());
-            let mut c = self.do_compile(body);
+            let lowered = prev_fn_table_key_was_none
+                && !*is_coro
+                && type_params.is_empty()
+                && dict_arity == 0
+                && !self.compiling_method
+                && self.try_lower_hir_function(span, body);
+            if !lowered {
+                let mut c = self.do_compile(body);
+                self.bytecode.append(&mut c);
+            }
             self.active_fn_name = prev_active;
-            self.bytecode.append(&mut c);
 
             if !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
@@ -19374,6 +19390,7 @@ impl Compiler {
             }
         }
         crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
+        self.build_hir_for_lowering(module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);

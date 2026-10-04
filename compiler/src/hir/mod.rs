@@ -4,7 +4,9 @@
 //! query that decides how a value of a given type is represented, so the
 //! AST codegen, MIR and the future HIR lowering cannot disagree. Phase 1 is
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
-//! --hir`); nothing lowers from HIR yet.
+//! --hir`). Phase 2 is [`lower`]: under `--hir` / `COIL_HIR=1`, codegen
+//! lowers the bodies inside the core subset from HIR and keeps the AST walk
+//! for every other body.
 //!
 //! Each function body is an arena: nodes are [`HirExpr`]s in
 //! [`HirBody::exprs`], children are [`HirId`] indices, and locals are
@@ -15,6 +17,7 @@
 pub mod build;
 pub mod check;
 pub mod layout;
+pub mod lower;
 pub mod print;
 
 use crate::typechecking::def_id::DefId;
@@ -310,6 +313,14 @@ pub enum HirKind {
     Builtin { op: Builtin, args: Vec<HirId> },
     /// A construct this phase does not build yet.
     Unsupported(&'static str),
+}
+
+/// `COIL_HIR=1` (or `true` / `on` / `yes`) turns on HIR lowering.
+pub(crate) fn lowering_from_env() -> bool {
+    matches!(
+        std::env::var("COIL_HIR").as_deref(),
+        Ok("1" | "true" | "on" | "yes")
+    )
 }
 
 thread_local! {

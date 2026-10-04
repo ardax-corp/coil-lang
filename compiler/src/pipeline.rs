@@ -100,6 +100,8 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
+    /// Lower function bodies from HIR where it covers them (`--hir` / `COIL_HIR=1`).
+    hir_lowering: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -283,6 +285,7 @@ impl Pipeline {
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
+            c.set_hir_lowering(self.hir_lowering);
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
             #[cfg(any(test, feature = "vm-wire"))]
@@ -692,6 +695,7 @@ impl Pipeline {
             include_tests: false,
             keep_fns_in: None,
             auto_par: true,
+            hir_lowering: crate::hir::lowering_from_env(),
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -1701,6 +1705,15 @@ impl Pipeline {
         self.auto_par = on;
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_auto_par(on);
+        }
+    }
+
+    /// Lower function bodies from HIR where the HIR lowering covers them
+    /// (`--hir`); the rest keep the AST codegen. Defaults to `COIL_HIR=1`.
+    pub fn set_hir_lowering(&mut self, on: bool) {
+        self.hir_lowering = on;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_hir_lowering(on);
         }
     }
 

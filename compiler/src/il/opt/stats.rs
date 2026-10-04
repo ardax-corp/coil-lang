@@ -76,6 +76,15 @@ pub struct OptStats {
     #[serde(default)]
     pub body_tiers: Vec<BodyTier>,
     pub passes: Vec<PassHit>,
+    /// Function bodies codegen lowered from HIR (`--hir`).
+    #[serde(default)]
+    pub hir_lowered: usize,
+    /// Function bodies `--hir` left to the AST codegen.
+    #[serde(default)]
+    pub hir_fallback: usize,
+    /// Why each fallback body was refused (coarse keys, counted).
+    #[serde(default)]
+    pub hir_fallback_reasons: Vec<PassHit>,
 }
 
 impl OptStats {
@@ -114,6 +123,11 @@ impl OptStats {
             note_reason(&mut self.fuse_reasons, &hit.name, hit.applied);
         }
         self.body_tiers.extend(other.body_tiers.iter().cloned());
+        self.hir_lowered += other.hir_lowered;
+        self.hir_fallback += other.hir_fallback;
+        for hit in &other.hir_fallback_reasons {
+            note_reason(&mut self.hir_fallback_reasons, &hit.name, hit.applied);
+        }
         for hit in &other.passes {
             self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
         }
@@ -159,6 +173,18 @@ impl OptStats {
                 let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
             }
         }
+        if self.hir_lowered + self.hir_fallback > 0 {
+            let _ = writeln!(
+                out,
+                "  hir: {} lowered, {} fallback",
+                self.hir_lowered, self.hir_fallback
+            );
+            let mut ranked = self.hir_fallback_reasons.clone();
+            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
+            for hit in ranked {
+                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+            }
+        }
         if self.passes.is_empty() {
             let _ = writeln!(out, "  passes: (none applied)");
         } else {
@@ -190,7 +216,7 @@ impl OptStats {
             );
         }
         format!(
-            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"passes\":[{}]}}",
+            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"passes\":[{}]}}",
             self.ops_eliminated,
             self.ops_added,
             self.functions_inlined,
@@ -203,6 +229,8 @@ impl OptStats {
             self.bodies_dense,
             self.bodies_lir,
             self.bodies_fuse,
+            self.hir_lowered,
+            self.hir_fallback,
             passes
         )
     }
@@ -243,6 +271,19 @@ fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
 /// Count one body that stayed fuse-IL for `reason`.
 pub(crate) fn note_fuse_reason(reason: &str) {
     with_stats(|s| note_reason(&mut s.fuse_reasons, reason, 1));
+}
+
+/// Count one function body lowered from HIR.
+pub(crate) fn note_hir_lowered() {
+    with_stats(|s| s.hir_lowered += 1);
+}
+
+/// Count one function body `--hir` left to the AST codegen, and why.
+pub(crate) fn note_hir_fallback(reason: &str) {
+    with_stats(|s| {
+        s.hir_fallback += 1;
+        note_reason(&mut s.hir_fallback_reasons, reason, 1);
+    });
 }
 
 /// Record one body's final tier and refusal reasons.
