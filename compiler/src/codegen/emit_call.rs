@@ -92,8 +92,7 @@ impl Compiler {
                             self.emit_format_expression(format, Some(&params));
                         }
                     }
-                    crate::typechecking::StringBuiltin::FromBytes
-                    | crate::typechecking::StringBuiltin::ToBytes => {
+                    _ => {
                         if let Some(native_name) = kind.native_name() {
                             self.emit_host_native_invoke(native_name, arg_slice, Some(ast));
                         }
@@ -112,8 +111,7 @@ impl Compiler {
                             self.emit_format_expression(format, Some(&params));
                         }
                     }
-                    crate::typechecking::StringBuiltin::FromBytes
-                    | crate::typechecking::StringBuiltin::ToBytes => {
+                    _ => {
                         if let Some(native_name) = kind.native_name() {
                             self.emit_host_native_invoke(native_name, arg_slice, Some(ast));
                         }

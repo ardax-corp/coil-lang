@@ -23,6 +23,7 @@ pub mod packed_la;
 pub mod reactor;
 pub mod runtime_wire;
 pub mod shared_heap;
+pub mod str_bytes;
 pub mod stream_attach;
 pub mod thread;
 pub mod value_eq;

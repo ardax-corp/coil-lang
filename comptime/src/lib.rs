@@ -136,7 +136,7 @@ fn run_on(
         return Err(String::new());
     }
     match vm.heap().find_object_by_addr(ret.raw() as u64) {
-        Some(Object::String(s)) => Ok(s.as_ref().data.clone()),
+        Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
         _ => Err("it did not return a string".to_string()),
     }
 }

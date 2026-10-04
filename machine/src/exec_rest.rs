@@ -187,10 +187,18 @@ impl<const S: usize> Machine<S> {
 
                         let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
                         let format_string = (unsafe { &*ptr }).as_ref().data.as_str();
+                        // `a + b` on strings lowers to `FORMAT "%s%s"`. With a
+                        // leading `%s`, format only the rest and append it to
+                        // that first string, in place when it ends at its
+                        // buffer's tail, so `s = s + x` loops stay linear.
+                        let (head, format_rest) = match format_string.strip_prefix("%s") {
+                            Some(rest) => (Some(*params.pop()), rest),
+                            None => (None, format_string),
+                        };
 
                         let mut message = String::default();
 
-                        let mut chars = format_string.chars().peekable();
+                        let mut chars = format_rest.chars().peekable();
                         while let Some(ch) = chars.next() {
                             if ch == '%' {
                                 match chars.peek() {
@@ -261,7 +269,10 @@ impl<const S: usize> Machine<S> {
                             }
                         }
 
-                        self.push_new_string(message, ip);
+                        match head {
+                            Some(head) => self.push_concat_str(head, &message, ip),
+                            None => self.push_new_string(message, ip),
+                        }
                     }
                 }
                 Instruction::STRINGIFY => {
@@ -344,7 +355,7 @@ impl<const S: usize> Machine<S> {
                     let path = {
                         let addr = path_val.raw() as u64;
                         match Self::find_object_by_addr(&self.heap, addr) {
-                            Some(crate::memory::Object::String(gc)) => gc.as_ref().data.clone(),
+                            Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
                             _ => String::new(),
                         }
                     };
@@ -1781,10 +1792,8 @@ impl<const S: usize> Machine<S> {
                         (ValueTag::String, ValueTag::String)
                             if matches!(bc_instr, Instruction::DynAdd) =>
                         {
-                            let sa = Self::object_string_value(&self.heap, &a_inner);
-                            let sb = Self::object_string_value(&self.heap, &b_inner);
                             // Root before any GC (same as FORMAT/STRING).
-                            self.push_new_string(sa + &sb, ip);
+                            self.push_concat(a_inner, b_inner, ip);
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Continue;

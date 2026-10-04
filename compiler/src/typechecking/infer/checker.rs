@@ -987,6 +987,13 @@ impl Checker {
             StringBuiltin::Format => fun(&[string()], string()),
             StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), io_err)),
             StringBuiltin::ToBytes => fun(&[string()], bytes),
+            StringBuiltin::ByteAt => fun(&[string(), int()], int()),
+            StringBuiltin::SliceBytes => {
+                fun(&[string(), int(), int()], result_app_ty(string(), io_err))
+            }
+            StringBuiltin::FindFrom => fun(&[string(), string(), int()], int()),
+            StringBuiltin::Rfind => fun(&[string(), string()], int()),
+            StringBuiltin::MatchAt => fun(&[string(), string(), int()], boolean()),
         };
         Scheme::mono(ty)
     }
@@ -2133,6 +2140,16 @@ impl Checker {
             Box::new(Ty::Con("coroutine".to_string())),
             vec![yield_ty, send_ty],
         )
+    }
+
+    /// Consume the next pre-order id for `node` and resolve it to the node's
+    /// own id. Writing facts under the raw counter id lands them on another
+    /// node once the counter drifts (it typed `lcm`'s int `a` as the float
+    /// param of a later function in coil-stdlib `num.hy`).
+    fn next_walk_id(&mut self, node: &Output) -> NodeId {
+        let seq_id = self.ids.ids()[self.next_id_idx];
+        self.next_id_idx += 1;
+        self.ids.resolve_walk_id(node, seq_id)
     }
 
     fn infer(&mut self, expr: &Output) -> Ty {
@@ -4757,8 +4774,8 @@ impl Checker {
                     StringBuiltin::Format => {
                         self.infer_string_format_call(reordered.as_slice(), range)
                     }
-                    StringBuiltin::FromBytes | StringBuiltin::ToBytes => {
-                        if kind == StringBuiltin::FromBytes
+                    _ => {
+                        if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
                             && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
                         {
                             self.register_builtin_io_error();
@@ -4788,8 +4805,8 @@ impl Checker {
             };
             return match kind {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
-                StringBuiltin::FromBytes | StringBuiltin::ToBytes => {
-                    if kind == StringBuiltin::FromBytes
+                _ => {
+                    if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
                         && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
                     {
                         self.register_builtin_io_error();
@@ -10252,8 +10269,7 @@ impl Checker {
     /// Force-cache `ty` at `expr`'s NodeId (and walk TypeApp children) so
     /// codegen FQNs for instance methods see the same head types.
     fn cache_forced_ty(&mut self, expr: &Output, ty: Ty) {
-        let id = self.ids.ids()[self.next_id_idx];
-        self.next_id_idx += 1;
+        let id = self.next_walk_id(expr);
         self.cache.insert(id, ty);
         if let Expression::TypeApp { args, .. } = expr.1.as_ref() {
             for arg in args {
@@ -11656,22 +11672,19 @@ impl Checker {
         self.require_ffi_type_expr(expr);
         match expr.1.as_ref() {
             Expression::Identifier(_) | Expression::Type(_) => {
-                let id = self.ids.ids()[self.next_id_idx];
-                self.next_id_idx += 1;
+                let id = self.next_walk_id(expr);
                 let ty = self.ty_from_ffi_type_expr(expr);
                 self.cache.insert(id, ty);
             }
             Expression::Tuple(items) => {
-                let id = self.ids.ids()[self.next_id_idx];
-                self.next_id_idx += 1;
+                let id = self.next_walk_id(expr);
                 self.cache.insert(id, unit_ty());
                 for item in items {
                     self.infer_ffi_type_expr(item);
                 }
             }
             Expression::Array(items) => {
-                let id = self.ids.ids()[self.next_id_idx];
-                self.next_id_idx += 1;
+                let id = self.next_walk_id(expr);
                 self.cache.insert(id, unit_ty());
                 for item in items {
                     // Element annotations are `Type` / nested forms.
@@ -12254,8 +12267,7 @@ impl Checker {
                 if self.next_id_idx >= self.ids.ids().len() {
                     return;
                 }
-                let frag_id = self.ids.ids()[self.next_id_idx];
-                self.next_id_idx += 1;
+                let frag_id = self.next_walk_id(args);
                 self.cache.insert(frag_id, unit_ty());
 
                 let mut ty_idx = 0usize;
@@ -12263,8 +12275,7 @@ impl Checker {
                     if self.next_id_idx >= self.ids.ids().len() {
                         break;
                     }
-                    let id = self.ids.ids()[self.next_id_idx];
-                    self.next_id_idx += 1;
+                    let id = self.next_walk_id(child);
                     let ty = if let Expression::Argument { .. } = child.1.as_ref() {
                         let t = arg_tys
                             .get(ty_idx)
@@ -12283,8 +12294,7 @@ impl Checker {
             }
             _ => {
                 if self.next_id_idx < self.ids.ids().len() {
-                    let id = self.ids.ids()[self.next_id_idx];
-                    self.next_id_idx += 1;
+                    let id = self.next_walk_id(args);
                     let ty = arg_tys
                         .first()
                         .map(|(_, t)| t.clone())

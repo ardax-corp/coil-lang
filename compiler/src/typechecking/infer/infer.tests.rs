@@ -1859,6 +1859,38 @@ fn cache_lookup_applies_substitution() {
 }
 
 #[test]
+fn fn_param_ids_do_not_overwrite_other_nodes() {
+    // Parameter types used to be cached under the raw pre-order counter id.
+    // Once the counter drifted, a later `float x` param landed on `lcm`'s
+    // int `a`, and codegen compiled `a * b` to MULF.
+    // Windows checkouts may carry CRLF; spans below assume `\n`.
+    let src = include_str!("../../../../tests/positive/overload_int_mul_after_float.hy")
+        .replace("\r\n", "\n");
+    let src = src.as_str();
+    let mut c = Checker::new();
+    let ast = Pratt::default().parse(src).expect("parse");
+    c.check_program(&ast);
+    let start = src.find("fn lcm").expect("lcm");
+    let end = start + src[start..].find("\n}\n").expect("lcm end");
+    let mut seen = 0;
+    for id in c.id_table().ids() {
+        let Some((s, e)) = c.id_table().span_of(*id) else {
+            continue;
+        };
+        if s >= start && e <= end {
+            seen += 1;
+            assert_ne!(
+                c.lookup_at(*id),
+                Some(float()),
+                "node {id:?} at {s}..{e} (`{}`) in int-only lcm typed float",
+                &src[s..e]
+            );
+        }
+    }
+    assert!(seen > 10, "expected lcm's nodes to be visited, saw {seen}");
+}
+
+#[test]
 fn cache_lookup_returns_none_for_unknown_id() {
     let (c, _) = check("42;");
     assert!(c.lookup_at(NodeId(9999)).is_none());

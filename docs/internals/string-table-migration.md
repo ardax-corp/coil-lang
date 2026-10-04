@@ -22,6 +22,14 @@
   `==` compares content, and dict / field keys are interned on use
   (`intern_key` → `Heap::intern_ref`), so pointer identity only matters for
   intern-table keys.
+- Concat appends in place (`memory/strbuf.rs`). Concat results are
+  `StrData::Shared`: a prefix of a refcounted buffer with spare capacity.
+  When the left operand ends at the buffer's claimed tail, the right operand
+  is copied into the tail (claimed with a CAS, so steal-epoch workers stay
+  disjoint) and the result shares the buffer. Otherwise both are copied into
+  a new buffer with doubled capacity. `s = s + x` loops, `text::join` and
+  `fmt::Buf` are amortized linear. Typed `+` lowers to `FORMAT "%s%s"`, so
+  `FORMAT` with a leading `%s` takes the same path.
 - Stdout/stderr `write`/`write_all` honor `Machine::with_output` via a thread-local redirect (tests keep capturing).
 
 ## Language surface
@@ -37,6 +45,17 @@ let s = format("%s-%i", name, n);
 
 - `string::format` is a compiler intrinsic (same rules as old `format` / `print` specs).
 - `io::{from_bytes,to_bytes}` remain aliases of the string natives for one cycle.
+- Byte-offset helpers read the string in place (HostInvoke **139–143**,
+  archive minor 31; `machine/src/str_bytes.rs`). Offsets are bytes, as
+  `len(s)` is.
+
+  | Function | Result |
+  |---|---|
+  | `byte_at(s, i) -> int` | Byte at `i`, or `-1` out of range |
+  | `slice_bytes(s, start, end) -> Result<string, IoError>` | Offsets clamp to `[0, len(s)]`; `Err` inside a UTF-8 sequence |
+  | `find_from(hay, needle, start) -> int` | First offset `>= start`, or `-1` |
+  | `rfind(hay, needle) -> int` | Last offset, or `-1` |
+  | `match_at(s, needle, at) -> bool` | `needle` occurs at `at` |
 
 ## Opcode policy
 

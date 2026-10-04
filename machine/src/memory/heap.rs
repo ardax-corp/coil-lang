@@ -436,6 +436,13 @@ impl Heap {
         self.alloc(ObjString::new(data), Object::String).1
     }
 
+    /// Allocate `head + tail` without interning, appending in place when
+    /// `head` ends at its buffer's tail (amortized linear `s = s + x`).
+    pub fn alloc_concat(&mut self, head: RefString, tail: &str) -> RefString {
+        let joined = head.as_ref().concat(tail);
+        self.alloc(joined, Object::String).1
+    }
+
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
         crate::vm::note_intern_str();
@@ -1686,7 +1693,7 @@ impl Object {
     /// C string pointer for FFI; non-strings return null.
     pub fn as_cstr(&self) -> *const std::os::raw::c_char {
         match self {
-            Self::String(s) => s.data.data.as_ptr() as *const std::os::raw::c_char,
+            Self::String(s) => s.data.data.as_str().as_ptr() as *const std::os::raw::c_char,
             Self::Instance(_)
             | Self::Enum(_)
             | Self::Library(_)
@@ -2159,7 +2166,7 @@ impl GcSized for ObjEnum {
 /// intern-table keys and `Hash` on `string` need it, so a string built at
 /// runtime (concat, format, `from_bytes`) never pays for a full-length hash.
 pub struct ObjString {
-    pub data: String,
+    pub data: super::StrData,
     /// `HASH_SET | hash` once computed, 0 before. Atomic (relaxed) because
     /// steal-epoch workers may hash the same shared string concurrently.
     hash: AtomicU64,
@@ -2171,15 +2178,25 @@ impl ObjString {
     /// A string whose hash is computed lazily.
     #[must_use]
     pub fn new(data: String) -> Self {
+        Self::from_data(data.into())
+    }
+
+    fn from_data(data: super::StrData) -> Self {
         Self {
             data,
             hash: AtomicU64::new(0),
         }
     }
 
+    /// `self + tail` (see [`super::StrData::concat`]).
+    #[must_use]
+    pub fn concat(&self, tail: &str) -> Self {
+        Self::from_data(self.data.concat(tail))
+    }
+
     fn with_hash(data: String, hash: u32) -> Self {
         Self {
-            data,
+            data: data.into(),
             hash: AtomicU64::new(HASH_SET | u64::from(hash)),
         }
     }
@@ -2209,7 +2226,7 @@ impl ObjString {
 
 impl GcSized for ObjString {
     fn size(&self) -> usize {
-        mem::size_of::<Self>() + mem::size_of_val(&*self.data)
+        mem::size_of::<Self>() + self.data.accounted_bytes()
     }
 }
 

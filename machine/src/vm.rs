@@ -939,7 +939,7 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         Some(match Self::find_object_by_addr(&self.heap, addr)? {
-            Object::String(gc) => DebugObject::Str(gc.as_ref().data.clone()),
+            Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
                 match inst.slots() {
@@ -1351,7 +1351,7 @@ impl<const S: usize> Machine<S> {
         let addr = v.raw() as u64;
         let obj = Self::find_object_by_addr(heap, addr);
         if let Some(crate::memory::Object::String(gc)) = obj {
-            gc.as_ref().data.clone()
+            gc.as_ref().data.to_string()
         } else {
             String::new()
         }
@@ -1405,7 +1405,7 @@ impl<const S: usize> Machine<S> {
                     _ => "?".into(),
                 }
             }
-            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             Some(_) | None => v.as_int().to_string(),
         }
     }
@@ -2258,6 +2258,31 @@ impl<const S: usize> Machine<S> {
         let gc_string = self.heap.alloc_string(data);
         self.stack
             .push(Value::from(gc_string.as_ptr() as *mut u8 as u64));
+        self.maybe_gc_after_alloc(ip);
+    }
+
+    /// Push `a + b` for two heap strings (`DynAdd`).
+    fn push_concat(&mut self, a: Value, b: Value, ip: usize) {
+        let tail = match Self::find_object_by_addr(&self.heap, b.raw() as u64) {
+            Some(Object::String(gb)) => gb,
+            _ => {
+                let joined = Self::object_string_value(&self.heap, &a)
+                    + &Self::object_string_value(&self.heap, &b);
+                return self.push_new_string(joined, ip);
+            }
+        };
+        self.push_concat_str(a, tail.as_ref().data.as_str(), ip);
+    }
+
+    /// Push `head + tail`, appending in place when `head` ends at its
+    /// buffer's tail ([`crate::memory::StrData::concat`]).
+    fn push_concat_str(&mut self, head: Value, tail: &str, ip: usize) {
+        let joined = match Self::find_object_by_addr(&self.heap, head.raw() as u64) {
+            Some(Object::String(gh)) => gh.as_ref().concat(tail),
+            _ => crate::memory::ObjString::new(Self::object_string_value(&self.heap, &head) + tail),
+        };
+        let (obj, _) = self.heap.alloc(joined, Object::String);
+        self.stack.push(Value::from(obj.addr()));
         self.maybe_gc_after_alloc(ip);
     }
 

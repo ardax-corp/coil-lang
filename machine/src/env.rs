@@ -70,7 +70,7 @@ fn contains_nul(s: &str) -> bool {
 
 fn heap_string(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
     match heap.find_object_by_addr(v.raw() as u64) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.clone()),
+        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
         _ => Err(EnvErrorTag::InvalidInput),
     }
 }

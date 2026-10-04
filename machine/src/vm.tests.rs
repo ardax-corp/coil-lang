@@ -438,7 +438,7 @@
         assert!(!vm.panicked(), "stale STRING cache must not UAF mid-sweep");
         let keep = vm.pop();
         let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
-            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             _ => panic!("STRING after incremental sweep must be a live string"),
         };
         assert_eq!(text, "keep");
@@ -484,7 +484,7 @@
         let keep = vm.pop();
         assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
         let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
-            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             _ => panic!("expected interned keep string on the stack after GC"),
         };
         assert_eq!(text, "keep");

@@ -450,6 +450,11 @@ fn host_is_length_stable(name: &str) -> bool {
                 | "format"
                 | "to_bytes"
                 | "from_bytes"
+                | "byte_at"
+                | "slice_bytes"
+                | "find_from"
+                | "rfind"
+                | "match_at"
                 | "stdout"
                 | "stderr"
                 | "write"
@@ -484,7 +489,8 @@ pub fn classify_host_name(name: &str) -> EffectFlags {
         | "await_readable" | "await_writable" | "drive" | "wait_ready" | "from_bytes"
         | "to_bytes" | "connect" | "connect_timeout" | "listen" | "accept" | "peer_addr"
         | "local_addr" | "set_nodelay" | "shutdown" | "bind" | "send_to" | "recv_from"
-        | "local_port" | "format" => flags.insert(EffectFlags::IO),
+        | "local_port" | "format" | "byte_at" | "slice_bytes" | "find_from" | "rfind"
+        | "match_at" => flags.insert(EffectFlags::IO),
         "wall_nanos" | "mono_nanos" | "sleep_ms" => flags.insert(EffectFlags::HOST),
         _ => match host_name_prefix(short) {
             Some(bits) => flags.insert(bits),
@@ -546,6 +552,9 @@ fn host_name_prefix(short: &str) -> Option<u16> {
     }
     if short.starts_with("vec_") {
         return Some(EffectFlags::HEAP_MUT);
+    }
+    if short.starts_with("string_") {
+        return Some(EffectFlags::IO);
     }
     None
 }
