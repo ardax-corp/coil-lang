@@ -12,11 +12,9 @@
 //! tuples keep the boxed ABI.
 
 use super::infer::Checker;
-use super::value_layout::ty_is_closed;
-use super::ty::{
-    BOOL, BYTE, FLOAT, INT, Ty, UNIT, is_option_ty, is_result_ty, option_inner, range_app, result_ok_err,
-    strip_readonly,
-};
+use super::ty::{Ty, range_app};
+use crate::hir::layout::{self, Layout, PairKind, is_immediate};
+pub(crate) use crate::hir::layout::is_unit;
 
 /// Kind string for a two-slot arity-2 immediate product. Not a user enum;
 /// boxing uses `MakeTuple(2)` instead of the enum cascade.
@@ -81,97 +79,29 @@ pub fn two_word_range_kind(ty: &Ty) -> Option<&'static str> {
 /// (`[payload, tag]`); [`TWO_WORD_PRODUCT_KIND`] is an arity-2 immediate
 /// tuple (`[a, b]`). The kind is used when the pair must be boxed at a
 /// boundary that still needs one word (`CallIndirect`, FFI, coroutines).
+/// The two-slot view of [`crate::hir::layout::of_resolved`].
 pub fn two_word_return_enum(checker: &Checker, ty: &Ty) -> Option<String> {
-    let ty = strip_readonly(ty);
-    if !ty_is_closed(ty) {
-        return None;
-    }
-    if let Some(kind) = two_word_range_kind(ty) {
-        return Some(kind.to_string());
-    }
-    if let Ty::Tuple(items) = ty {
-        if items.len() == 2 && items.iter().all(is_immediate) {
-            return Some(TWO_WORD_PRODUCT_KIND.to_string());
-        }
-        return None;
-    }
-    if is_option_ty(ty) {
-        let inner = option_inner(ty)?;
-        return is_immediate(&inner).then(|| common::BUILTIN_OPTION_ENUM.to_string());
-    }
-    if is_result_ty(ty) {
-        let (ok, err) = result_ok_err(ty)?;
-        // `Result<(), E>` with an immediate `E` (`Result<(), int>`) would box
-        // an `ObjEnum` per call; the pair is `[(), tag]`. A heap `E` keeps
-        // its one-word niche.
-        return (is_immediate(&ok) || (is_unit(&ok) && is_immediate(&err)))
-            .then(|| common::BUILTIN_RESULT_ENUM.to_string());
-    }
-    unary_user_enum_name(checker, ty)
-}
-
-fn is_immediate(ty: &Ty) -> bool {
-    matches!(strip_readonly(ty), Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE)
-}
-
-/// `()`: the `unit` constructor or the empty tuple.
-pub(crate) fn is_unit(ty: &Ty) -> bool {
-    match strip_readonly(ty) {
-        Ty::Con(n) => n == UNIT,
-        Ty::Tuple(items) => items.is_empty(),
-        _ => false,
-    }
-}
-
-/// A closed, non-scalar, non-FFI/builtin user enum whose every variant has
-/// payload arity `<= 1` — the same shape [`super::local_escape`] unboxes into
-/// frame slots, generalized to a call boundary.
-fn unary_user_enum_name(checker: &Checker, ty: &Ty) -> Option<String> {
-    let name = enum_name(ty)?;
-    if common::is_builtin_option_enum(name)
-        || common::is_builtin_result_enum(name)
-        || common::is_builtin_ffi_enum(name)
-    {
-        return None;
-    }
-    if checker.is_scalar_enum(name) || checker.is_class(name) {
-        return None;
-    }
-    let vars = checker.enum_variants(name)?;
-    if vars.is_empty() {
-        return None;
-    }
-    let mut any_payload = false;
-    for (_, _, payload) in &vars {
-        if payload.len() > 1 {
-            return None;
-        }
-        if let Some(p) = payload.first() {
-            if !ty_is_closed(p) {
-                return None;
-            }
-            any_payload = true;
-        }
-    }
-    any_payload.then(|| name.to_string())
-}
-
-fn enum_name(ty: &Ty) -> Option<&str> {
-    match ty {
-        Ty::Con(n) | Ty::Sum { name: n, .. } => Some(n.as_str()),
-        Ty::App(head, _) => match head.as_ref() {
-            Ty::Con(n) => Some(n.as_str()),
-            _ => None,
-        },
-        Ty::Constructor { owner, .. } => enum_name(owner),
+    match layout::of_resolved(checker, ty) {
+        Layout::Pair(kind) => Some(pair_kind_name(kind)),
         _ => None,
+    }
+}
+
+/// The `two_word_return_enum` kind string of a pair.
+pub fn pair_kind_name(kind: PairKind) -> String {
+    match kind {
+        PairKind::Option => common::BUILTIN_OPTION_ENUM.to_string(),
+        PairKind::Result => common::BUILTIN_RESULT_ENUM.to_string(),
+        PairKind::Product => TWO_WORD_PRODUCT_KIND.to_string(),
+        PairKind::Range { inclusive } => range_kind(inclusive).to_string(),
+        PairKind::Enum(name) => name,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{STRING, option_ty, range_inclusive_ty, range_ty, result_ty};
+    use crate::typechecking::ty::{FLOAT, INT, STRING, option_ty, range_inclusive_ty, range_ty, result_ty};
 
     fn checker() -> Checker {
         Checker::new()

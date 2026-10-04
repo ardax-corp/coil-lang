@@ -1,13 +1,15 @@
-//! One layout query for `Option` / `Result` / enum values.
+//! One-word layout of `Option` / `Result` / enum values.
 //!
-//! [`value_layout`] decides the one-word encoding of a value (boxed `ObjEnum`
+//! [`value_layout`] is the one-word view of [`crate::hir::layout::of`]. It decides the one-word encoding of a value (boxed `ObjEnum`
 //! or a pointer niche). Codegen, `HostInvoke` packing and FFI repacking all
 //! ask here so producers and consumers cannot disagree. The two-word direct
 //! `CALL`/`RETURN` width is [`super::return_layout::two_word_return_enum`].
 
 use super::infer::Checker;
 use super::subst::apply_ty_prune;
-use super::ty::{Ty, UNIT, is_option_ty, option_inner, result_ok_err, strip_readonly};
+use super::ty::{Ty, UNIT, strip_readonly};
+use crate::hir::layout::{self, Layout, is_scalar_enum_ty};
+pub use crate::hir::layout::{niche_heap_only, ty_is_closed};
 
 /// One-word representation of a value of some type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,25 +48,21 @@ impl ValueLayout {
 }
 
 /// Layout of a value of type `ty` (resolved through the checker's substitution).
+/// The one-word view of [`crate::hir::layout::of`]: a two-slot pair is boxed.
 pub fn value_layout(checker: &Checker, ty: &Ty) -> ValueLayout {
     let ty = apply_ty_prune(checker.subst(), ty);
-    let ty = strip_readonly(&ty);
-    if is_option_ty(ty) {
-        return match option_inner(ty) {
-            Some(inner) if niche_heap_only(checker, &inner) => ValueLayout::NicheOption,
-            _ => ValueLayout::Boxed,
-        };
-    }
-    if let Some((ok, err)) = result_ok_err(ty) {
-        let err_heap = niche_heap_only(checker, &err);
-        if matches!(strip_readonly(&ok), Ty::Con(n) if n == UNIT) && err_heap {
-            return ValueLayout::NicheUnitResult;
-        }
-        if err_heap && niche_heap_only(checker, &ok) {
-            return ValueLayout::NicheResult;
+    ValueLayout::from(&layout::niche_of(checker, &ty))
+}
+
+impl From<&Layout> for ValueLayout {
+    fn from(layout: &Layout) -> Self {
+        match layout {
+            Layout::NicheOption => Self::NicheOption,
+            Layout::NicheUnitResult => Self::NicheUnitResult,
+            Layout::NicheResult => Self::NicheResult,
+            Layout::Word | Layout::Pair(_) => Self::Boxed,
         }
     }
-    ValueLayout::Boxed
 }
 
 /// How a heap word of static type `ty` reads (`common::WORD_*`): a number /
@@ -110,91 +108,6 @@ pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
             Some(args[0].clone())
         }
         _ => None,
-    }
-}
-
-/// A scalar-backed enum (`#[repr(int)]`), named or as a variant /
-/// sum type (`Level::High` types as `Constructor { owner: Sum }`).
-fn is_scalar_enum_ty(checker: &Checker, ty: &Ty) -> bool {
-    match strip_readonly(ty) {
-        Ty::Con(name) | Ty::Sum { name, .. } => checker.is_scalar_enum(name),
-        Ty::Constructor { owner, .. } => is_scalar_enum_ty(checker, owner),
-        _ => false,
-    }
-}
-
-/// True when `ty` is a ground heap object, so a niche can use `0` / bit 0.
-pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    if is_scalar_enum_ty(checker, ty) {
-        return false;
-    }
-    match ty {
-        Ty::Constructor { owner, .. } => niche_heap_only(checker, owner),
-        Ty::Con(name) => {
-            if name == "string" || checker.is_class(name) {
-                true
-            } else if common::is_builtin_io_error_enum(name)
-                || common::is_builtin_thread_error_enum(name)
-                || common::is_builtin_env_error_enum(name)
-            {
-                // Virtual unit-error enums stay heap even if this file
-                // never imported the tags (per-file `check_program` reset).
-                true
-            } else if common::is_builtin_option_enum(name)
-                || common::is_builtin_result_enum(name)
-                || checker.is_scalar_enum(name)
-            {
-                false
-            } else {
-                // Unit / closed user enums are heap `ObjEnum` (IoError, …).
-                checker.enum_variants(name).is_some_and(|vars| {
-                    !vars.is_empty()
-                        && vars
-                            .iter()
-                            .all(|(_, _, payload)| payload.iter().all(ty_is_closed))
-                })
-            }
-        }
-        Ty::App(head, args) => {
-            let Ty::Con(name) = head.as_ref() else {
-                return false;
-            };
-            if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
-                return false;
-            }
-            checker.is_class(name) && args.iter().all(ty_is_closed)
-        }
-        Ty::Sum { name, .. }
-            if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) =>
-        {
-            false
-        }
-        Ty::List(inner) => ty_is_closed(inner),
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, field)| ty_is_closed(field)),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, payload)| payload.field_types().into_iter().all(ty_is_closed)),
-        _ => false,
-    }
-}
-
-/// No unresolved type variables anywhere in `ty`.
-pub fn ty_is_closed(ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    match ty {
-        Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::List(inner) | Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
-        Ty::App(_, args) => args.iter().all(ty_is_closed),
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),
-        Ty::Array { element, .. } => ty_is_closed(element),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, p)| p.field_types().into_iter().all(ty_is_closed)),
-        Ty::Con(_) | Ty::Never => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
     }
 }
 
