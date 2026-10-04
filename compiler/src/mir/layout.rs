@@ -6,10 +6,9 @@
 //! nursery: two-slot is `[payload, tag]` (or `[a, b]`) on direct
 //! `CALL`/`RETURN`; heap niches are one `Value` word.
 
-use crate::typechecking::ty::{
-    is_option_ty, is_result_ty, option_inner, result_ok_err, strip_readonly, Ty, BOOL, BYTE, FLOAT,
-    INT,
-};
+use crate::hir::layout::Layout;
+use crate::typechecking::infer::Checker;
+use crate::typechecking::ty::Ty;
 
 /// How a Result/Option (or arity-2 immediate product) crosses a call edge.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -41,44 +40,20 @@ impl MirLayout {
         matches!(self, Self::HeapNiche)
     }
 
-    /// Builtin Option/Result / arity-2 immediate product only. User payload
-    /// enums stay [`MirLayout::Word`] here — codegen still classifies them
-    /// via [`crate::typechecking::return_layout::two_word_return_enum`].
-    pub fn from_coil_ty(ty: &Ty) -> Self {
-        let ty = strip_readonly(ty);
-        if let Ty::Tuple(items) = ty {
-            if items.len() == 2 && items.iter().all(is_immediate) {
-                return Self::TwoSlot;
-            }
-            return Self::Word;
+    /// The MIR view of [`crate::hir::layout::of_resolved`]. Codegen pins
+    /// user payload enum pairs from the same query.
+    pub fn from_coil_ty(checker: &Checker, ty: &Ty) -> Self {
+        Self::from(&crate::hir::layout::of_resolved(checker, ty))
+    }
+}
+
+impl From<&Layout> for MirLayout {
+    fn from(layout: &Layout) -> Self {
+        match layout {
+            Layout::Word => Self::Word,
+            Layout::Pair(_) => Self::TwoSlot,
+            Layout::NicheOption | Layout::NicheUnitResult | Layout::NicheResult => Self::HeapNiche,
         }
-        if is_option_ty(ty) {
-            let Some(inner) = option_inner(ty) else {
-                return Self::Word;
-            };
-            if is_immediate(&inner) {
-                return Self::TwoSlot;
-            }
-            if is_ground_heap(&inner) {
-                return Self::HeapNiche;
-            }
-            return Self::Word;
-        }
-        if is_result_ty(ty) {
-            let Some((ok, err)) = result_ok_err(ty) else {
-                return Self::Word;
-            };
-            if is_immediate(&ok)
-                || (crate::typechecking::return_layout::is_unit(&ok) && is_immediate(&err))
-            {
-                return Self::TwoSlot;
-            }
-            if is_ground_heap(&ok) && is_ground_heap(&err) {
-                return Self::HeapNiche;
-            }
-            return Self::Word;
-        }
-        Self::Word
     }
 }
 
@@ -92,39 +67,14 @@ impl std::fmt::Display for MirLayout {
     }
 }
 
-fn is_immediate(ty: &Ty) -> bool {
-    matches!(
-        strip_readonly(ty),
-        Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE
-    )
-}
-
-/// Ground heap object, not a nested Option/Result (those stay boxed).
-pub(crate) fn is_ground_heap(ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    if is_immediate(ty) || is_option_ty(ty) || is_result_ty(ty) {
-        return false;
-    }
-    match ty {
-        Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } | Ty::Never => {
-            false
-        }
-        Ty::Con(_)
-        | Ty::List(_)
-        | Ty::Tuple(_)
-        | Ty::Record { .. }
-        | Ty::Array { .. }
-        | Ty::Sum { .. }
-        | Ty::App(_, _)
-        | Ty::Constructor { .. } => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{option_ty, result_ty, STRING};
+    use crate::typechecking::ty::{option_ty, result_ty, INT, STRING};
+
+    fn layout(ty: &Ty) -> MirLayout {
+        MirLayout::from_coil_ty(&Checker::new(), ty)
+    }
 
     fn int() -> Ty {
         Ty::Con(INT.into())
@@ -135,13 +85,13 @@ mod tests {
 
     #[test]
     fn option_int_is_two_slot() {
-        assert_eq!(MirLayout::from_coil_ty(&option_ty(int())), MirLayout::TwoSlot);
+        assert_eq!(layout(&option_ty(int())), MirLayout::TwoSlot);
     }
 
     #[test]
     fn option_string_is_heap_niche() {
         assert_eq!(
-            MirLayout::from_coil_ty(&option_ty(string())),
+            layout(&option_ty(string())),
             MirLayout::HeapNiche
         );
     }
@@ -149,13 +99,13 @@ mod tests {
     #[test]
     fn nested_option_stays_word() {
         let ty = option_ty(option_ty(int()));
-        assert_eq!(MirLayout::from_coil_ty(&ty), MirLayout::Word);
+        assert_eq!(layout(&ty), MirLayout::Word);
     }
 
     #[test]
     fn result_int_int_is_two_slot() {
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(int(), int())),
+            layout(&result_ty(int(), int())),
             MirLayout::TwoSlot
         );
     }
@@ -163,11 +113,11 @@ mod tests {
     #[test]
     fn result_unit_int_is_two_slot_but_unit_string_stays_niche() {
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(Ty::Tuple(vec![]), int())),
+            layout(&result_ty(Ty::Tuple(vec![]), int())),
             MirLayout::TwoSlot
         );
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(Ty::Tuple(vec![]), string())),
+            layout(&result_ty(Ty::Tuple(vec![]), string())),
             MirLayout::HeapNiche
         );
     }
@@ -175,7 +125,7 @@ mod tests {
     #[test]
     fn result_int_string_is_two_slot() {
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(int(), string())),
+            layout(&result_ty(int(), string())),
             MirLayout::TwoSlot
         );
     }
@@ -183,7 +133,7 @@ mod tests {
     #[test]
     fn result_string_string_is_heap_niche() {
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(string(), string())),
+            layout(&result_ty(string(), string())),
             MirLayout::HeapNiche
         );
     }
@@ -191,7 +141,7 @@ mod tests {
     #[test]
     fn result_string_int_stays_boxed() {
         assert_eq!(
-            MirLayout::from_coil_ty(&result_ty(string(), int())),
+            layout(&result_ty(string(), int())),
             MirLayout::Word
         );
     }
@@ -199,7 +149,7 @@ mod tests {
     #[test]
     fn product_int_int_is_two_slot() {
         assert_eq!(
-            MirLayout::from_coil_ty(&Ty::Tuple(vec![int(), int()])),
+            layout(&Ty::Tuple(vec![int(), int()])),
             MirLayout::TwoSlot
         );
     }

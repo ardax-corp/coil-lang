@@ -6,6 +6,7 @@
 //! `HeapRef`, and niche Option/Result words). Two-slot CALL/RETURN may
 //! dense or LIR (B3 / C1); keep/refuse is the cost gate.
 
+use crate::typechecking::infer::Checker;
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
 use super::layout::MirLayout;
@@ -171,21 +172,21 @@ impl MirTy {
     /// objects are [`Self::HeapRef`]. Shipped niche Option/Result words are
     /// [`Self::NicheOpt`] / [`Self::NicheRes`]. Two-slot pairs and boxed /
     /// unsure shapes stay [`Self::Value`] (not one SSA word).
-    pub fn from_coil_ty(ty: &Ty) -> Self {
+    pub fn from_coil_ty(checker: &Checker, ty: &Ty) -> Self {
         match ty {
-            Ty::Readonly(inner) => return Self::from_coil_ty(inner),
+            Ty::Readonly(inner) => return Self::from_coil_ty(checker, inner),
             Ty::Con(n) if n == coil_ty::INT || n == coil_ty::BYTE => return Self::I64,
             Ty::Con(n) if n == coil_ty::FLOAT => return Self::F64,
             Ty::Con(n) if n == coil_ty::BOOL => return Self::Bool,
             Ty::Con(n) if n == coil_ty::UNIT => return Self::Value,
             _ => {}
         }
-        match MirLayout::from_coil_ty(ty) {
+        match MirLayout::from_coil_ty(checker, ty) {
             MirLayout::HeapNiche if is_option_ty(ty) => Self::NicheOpt,
             MirLayout::HeapNiche => Self::NicheRes,
             MirLayout::TwoSlot => Self::Value,
             MirLayout::Word => {
-                if super::layout::is_ground_heap(ty) {
+                if crate::hir::layout::niche_heap_only(checker, ty) {
                     Self::HeapRef
                 } else {
                     match ty {
@@ -235,11 +236,11 @@ mod tests {
 
     #[test]
     fn language_types_map_to_wide_lanes() {
-        assert_eq!(MirTy::from_coil_ty(&coil_ty::int()), MirTy::I64);
-        assert_eq!(MirTy::from_coil_ty(&coil_ty::float()), MirTy::F64);
-        assert_eq!(MirTy::from_coil_ty(&coil_ty::boolean()), MirTy::Bool);
-        assert_eq!(MirTy::from_coil_ty(&Ty::Con("string".into())), MirTy::HeapRef);
-        assert_eq!(MirTy::from_coil_ty(&coil_ty::byte()), MirTy::I64);
+        assert_eq!(MirTy::from_coil_ty(&Checker::new(), &coil_ty::int()), MirTy::I64);
+        assert_eq!(MirTy::from_coil_ty(&Checker::new(), &coil_ty::float()), MirTy::F64);
+        assert_eq!(MirTy::from_coil_ty(&Checker::new(), &coil_ty::boolean()), MirTy::Bool);
+        assert_eq!(MirTy::from_coil_ty(&Checker::new(), &Ty::Con("string".into())), MirTy::HeapRef);
+        assert_eq!(MirTy::from_coil_ty(&Checker::new(), &coil_ty::byte()), MirTy::I64);
     }
 
     #[test]
@@ -267,23 +268,23 @@ mod tests {
     fn shipped_option_result_map_to_niche_words() {
         use crate::typechecking::ty::{option_ty, result_ty, string};
         assert_eq!(
-            MirTy::from_coil_ty(&option_ty(string())),
+            MirTy::from_coil_ty(&Checker::new(), &option_ty(string())),
             MirTy::NicheOpt
         );
         assert_eq!(
-            MirTy::from_coil_ty(&result_ty(string(), string())),
+            MirTy::from_coil_ty(&Checker::new(), &result_ty(string(), string())),
             MirTy::NicheRes
         );
         assert_eq!(
-            MirTy::from_coil_ty(&option_ty(coil_ty::int())),
+            MirTy::from_coil_ty(&Checker::new(), &option_ty(coil_ty::int())),
             MirTy::Value
         );
         assert_eq!(
-            MirTy::from_coil_ty(&option_ty(option_ty(coil_ty::int()))),
+            MirTy::from_coil_ty(&Checker::new(), &option_ty(option_ty(coil_ty::int()))),
             MirTy::Value
         );
         assert_eq!(
-            MirTy::from_coil_ty(&result_ty(string(), coil_ty::int())),
+            MirTy::from_coil_ty(&Checker::new(), &result_ty(string(), coil_ty::int())),
             MirTy::Value
         );
     }
