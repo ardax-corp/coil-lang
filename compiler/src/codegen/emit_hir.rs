@@ -65,6 +65,17 @@ struct HirCall {
     /// A mono clone of a generic function: never tiny-inlined (as in the
     /// AST codegen).
     mono: bool,
+    /// A compiler builtin emitted in place of a `CALL`.
+    builtin: Option<HirBuiltin>,
+}
+
+/// Builtin calls the lowering emits inline, as `compile_call_expr` does.
+#[derive(Clone, Copy)]
+enum HirBuiltin {
+    /// `assert(cond)` / `assert(cond, msg)`: the `Result<(), string>` niche word.
+    Assert,
+    /// `HostInvoke` of a registered native.
+    Host(usize),
 }
 
 /// Per-body lowering state.
@@ -167,6 +178,7 @@ impl Compiler {
         }
         .or_else(|| lower::refusal(hir, &self.checker))
         .map_or_else(|| self.plan_hir_body(hir), Err);
+        let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
                 if let Some(root) = hir.root {
@@ -262,7 +274,9 @@ impl Compiler {
             None => {
                 let layout = self.return_layout();
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
-                if declared != Some(layout) {
+                // Tests return their `Result<(), string>` boxed, as the AST does.
+                let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
+                if declared != Some(layout) && !boxed_test {
                     return Err("return-layout");
                 }
                 Rep::Word(layout)
@@ -342,6 +356,7 @@ impl Compiler {
             if let HirKind::Return(Some(value)) = expr.kind
                 && let Some(call) = emit.calls.get(&value.0)
                 && !call.method
+                && call.builtin.is_none()
                 && Self::hir_call_rep(call) == emit.ret
                 && self.hir_tail_call_ok(&call.key)
             {
@@ -370,19 +385,8 @@ impl Compiler {
         if name == "len" || self.checker.bare_construct_at(start, end).is_some() {
             return Err("callee-builtin");
         }
-        if !name.contains("::")
-            && (self.string_builtin_for_call(name).is_some()
-                || self.checker.prelude_fn_in_scope(name).is_some()
-                || self.checker.ffi_fn_in_scope(name).is_some()
-                || self.checker.io_fn_in_scope(name).is_some()
-                || self.checker.thread_fn_in_scope(name).is_some()
-                || self.checker.gc_fn_in_scope(name).is_some()
-                || self.checker.host_fn_in_scope(name).is_some())
-        {
-            return Err("callee-builtin");
-        }
-        if name.contains("::") && self.string_builtin_for_call(name).is_some() {
-            return Err("callee-builtin");
+        if let Some(builtin) = self.hir_builtin(name) {
+            return self.hir_builtin_abi(hir, call, builtin?);
         }
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
@@ -493,6 +497,7 @@ impl Compiler {
             ret: self.value_layout(&ret),
             method: false,
             mono: true,
+            builtin: None,
         })
     }
 
@@ -577,6 +582,7 @@ impl Compiler {
             ret: layout(call),
             method: true,
             mono: false,
+            builtin: None,
         })
     }
 
@@ -609,11 +615,93 @@ impl Compiler {
             ret: ValueLayout::Boxed,
             method: false,
             mono: false,
+            builtin: None,
         })
     }
 
     /// The ABI of a call to `key` with `argc` arguments, of which the first
     /// is `self` (in `self_layout`) for a method call.
+    /// The builtin `name` resolves to, checked in `compile_call_expr`'s
+    /// order: `None` for a user function, `Err` for a builtin the lowering
+    /// does not emit.
+    fn hir_builtin(&self, name: &str) -> Option<Result<HirBuiltin, &'static str>> {
+        use crate::typechecking::{PreludeFn, StringBuiltin};
+        let host = |native: Option<&str>| {
+            native
+                .and_then(|n| self.native_id(n))
+                .map(HirBuiltin::Host)
+                .ok_or("callee-builtin")
+        };
+        if let Some(kind) = self.string_builtin_for_call(name) {
+            return Some(match kind {
+                StringBuiltin::Format => Err("callee-builtin"),
+                _ => host(kind.native_name()),
+            });
+        }
+        if name.contains("::") {
+            return None;
+        }
+        if let Some(kind) = self.checker.prelude_fn_in_scope(name) {
+            return Some(match kind {
+                PreludeFn::Assert => Ok(HirBuiltin::Assert),
+                PreludeFn::Ord | PreludeFn::Char => host(Some(kind.as_str())),
+                _ => match kind.math_native_name() {
+                    Some(native) => host(Some(native)),
+                    None => Err("callee-builtin"),
+                },
+            });
+        }
+        if self.checker.ffi_fn_in_scope(name).is_some() {
+            return Some(Err("callee-builtin"));
+        }
+        if let Some(kind) = self.checker.io_fn_in_scope(name) {
+            return Some(host(Some(kind.native_name())));
+        }
+        if let Some(kind) = self.checker.thread_fn_in_scope(name) {
+            return Some(host(Some(kind.native_name())));
+        }
+        if let Some(kind) = self.checker.gc_fn_in_scope(name) {
+            return Some(host(Some(kind.native_name())));
+        }
+        self.checker.host_fn_in_scope(name).map(|registry| host(Some(registry)))
+    }
+
+    /// Argument and result layouts of a builtin call. `HostInvoke` takes a
+    /// `Result` argument boxed and packs its result in the call's layout.
+    fn hir_builtin_abi(&self, hir: &HirBody, call: HirId, builtin: HirBuiltin) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        if matches!(builtin, HirBuiltin::Assert) && !(1..=2).contains(&args.len()) {
+            return Err("callee-arity");
+        }
+        let mut params = Vec::with_capacity(args.len());
+        for &arg in args {
+            let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
+            match lower::classify(&self.checker, ty) {
+                Some(class) if lower::is_word(class) => {}
+                _ => return Err("callee-signature"),
+            }
+            params.push(match self.value_layout(ty) {
+                ValueLayout::NicheUnitResult | ValueLayout::NicheResult => ValueLayout::Boxed,
+                layout => layout,
+            });
+        }
+        let ret_ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
+        if lower::classify(&self.checker, ret_ty).is_none() {
+            return Err("callee-signature");
+        }
+        Ok(HirCall {
+            key: String::new(),
+            pair: None,
+            params,
+            ret: self.value_layout(ret_ty),
+            method: false,
+            mono: false,
+            builtin: Some(builtin),
+        })
+    }
+
     fn hir_call_abi(
         &self,
         key: String,
@@ -681,6 +769,7 @@ impl Compiler {
             ret: self.value_layout(&ret_ty),
             method: false,
             mono: false,
+            builtin: None,
         })
     }
 
@@ -1102,7 +1191,8 @@ impl Compiler {
         let result = common::is_builtin_result_enum(enum_name);
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
         let word_arg = |i: usize| -> Check {
-            if unit_arg(i) {
+            // A boxed `Ok(())` carries the empty tuple, as in the AST.
+            if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
                 return Err("unit-payload");
             }
             self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
@@ -1282,12 +1372,15 @@ impl Compiler {
             return;
         }
         match (from, to) {
-            (Rep::Pair(kind), Rep::Word(L::Boxed)) => {
+            (Rep::Pair(kind), Rep::Word(L::Boxed)) if depth == 0 => {
                 self.expr_depth = depth;
                 let mut bc = std::mem::take(&mut self.bytecode);
                 self.emit_box_pair_after_call(&mut bc, kind);
                 self.bytecode = bc;
             }
+            // Above live operands the pair is boxed on the stack: the AST's
+            // temps are `STORE`s, which would lift the cursor over them.
+            (Rep::Pair(kind), Rep::Word(L::Boxed)) => self.hir_box_pair_on_stack(kind),
             (Rep::Word(L::Boxed), Rep::Pair(kind)) => {
                 Self::emit_unbox_enum_to_pair(&self.checker, &mut self.bytecode, kind);
             }
@@ -1311,6 +1404,37 @@ impl Compiler {
             }
             (from, to) => unreachable!("planned HIR conversion {from:?} -> {to:?}"),
         }
+    }
+
+    /// `[payload, tag]` to the boxed enum without frame slots: test the
+    /// tag under the payload (`DUP; tag; EQ`), then drop it and wrap.
+    fn hir_box_pair_on_stack(&mut self, kind: &str) {
+        let mut variants = self
+            .checker
+            .enum_variants(kind)
+            .filter(|v| !v.is_empty())
+            .expect("a pair kind is a declared enum");
+        let last = variants.pop().expect("checked non-empty");
+        let end = self.bytecode.fresh_label();
+        let make = |this: &mut Self, tag: u32, payload: &[Ty]| {
+            this.bytecode.push_pop();
+            if payload.is_empty() {
+                this.bytecode.push_pop();
+            }
+            this.bytecode.push_make_enum(tag as u16, payload.len() as u16);
+        };
+        for (_, tag, payload) in &variants {
+            let miss = self.bytecode.fresh_label();
+            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+            self.bytecode.push_const(*tag as i32);
+            self.bytecode.push(Byte::new(Instruction::EQ));
+            self.hir_jump_under(IlJumpKind::JumpIfFalse, miss);
+            make(self, *tag, payload);
+            self.hir_jump(IlJumpKind::Unconditional, end);
+            self.bytecode.bind_label(miss);
+        }
+        make(self, last.1, &last.2);
+        self.bytecode.bind_label(end);
     }
 
     /// Push `id` as `want`, on top of `depth` live operands.
@@ -1520,6 +1644,48 @@ impl Compiler {
                     self.bytecode.push_pop();
                 }
                 self.bytecode.push_seek(tmp + 1);
+            }
+            HirKind::Call { args, .. } if emit.calls[&id.0].builtin.is_some() => {
+                let call = &emit.calls[&id.0];
+                let params = call.params.clone();
+                let natural = Self::hir_call_rep(call);
+                match call.builtin.expect("builtin call") {
+                    HirBuiltin::Assert => {
+                        let fail = self.bytecode.fresh_label();
+                        let end = self.bytecode.fresh_label();
+                        self.hir_value(hir, emit, args[0], &Rep::Word(params[0]), depth);
+                        self.hir_jump(IlJumpKind::JumpIfFalse, fail);
+                        // `Ok(())` is the zero word.
+                        self.bytecode.push_const(0);
+                        self.hir_jump(IlJumpKind::Unconditional, end);
+                        self.bytecode.bind_label(fail);
+                        match args.get(1) {
+                            Some(&msg) => self.hir_value(hir, emit, msg, &Rep::Word(params[1]), depth),
+                            None => self.emit_string_literal("assertion failed"),
+                        }
+                        self.bytecode.bind_label(end);
+                    }
+                    HirBuiltin::Host(native) => {
+                        // The native id goes under the arguments.
+                        self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+                        for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
+                        }
+                        let layout = Self::hir_call_rep(&emit.calls[&id.0]);
+                        let Rep::Word(layout) = layout else {
+                            unreachable!("builtin calls return one word")
+                        };
+                        let layout = layout.host_enum_layout();
+                        if layout == common::HOST_ENUM_LAYOUT_BOXED {
+                            self.bytecode.push_host_invoke(args.len() as u32);
+                        } else {
+                            self.bytecode.push_host_invoke_layout(args.len() as u32, layout);
+                        }
+                    }
+                }
+                self.expr_depth = depth;
+                self.hir_convert(&natural, want, depth);
+                return;
             }
             HirKind::Call { args, .. } if emit.calls[&id.0].key == format!("{}::push", common::BUILTIN_VEC_TYPE) => {
                 // Inlined as the AST does: `ArrayPush; POP; CONST 0`.
@@ -2474,4 +2640,19 @@ impl Compiler {
             }
         }
     }
+}
+
+/// `COIL_HIR_BISECT=N` lowers only the first `N` bodies the plan admits
+/// (per process) and names the `N`th on stderr, to bisect a miscompile.
+fn hir_bisect(name: &str) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    let Some(limit) = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok()) else {
+        return true;
+    };
+    let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == limit {
+        eprintln!("hir bisect: body {n} is `{name}`");
+    }
+    n <= limit
 }
