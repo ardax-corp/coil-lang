@@ -8775,7 +8775,7 @@ impl Compiler {
     ///
     /// Used by [`emit_call_site_dicts`] so `F<A>` against `Option<int>` records
     /// both `F = Option` and `A = int` (Phase 5).
-    fn bind_scheme_vars(
+    pub(super) fn bind_scheme_vars(
         pattern: &Ty,
         concrete: &Ty,
         map: &mut HashMap<crate::typechecking::ty::TyVarId, Ty>,
@@ -12709,7 +12709,7 @@ impl Compiler {
         Some(Self::apply_ty_var_map(current, &map))
     }
 
-    fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
+    pub(super) fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
         match ty {
             Ty::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
             Ty::Fun(a, r) => Ty::Fun(
@@ -12745,6 +12745,7 @@ impl Compiler {
         args: &Output<'compiler>,
         body: Option<&Output<'compiler>>,
         source_name: &str,
+        span: &SimpleSpan,
     ) {
         let Some(body) = body else {
             return;
@@ -12831,10 +12832,16 @@ impl Compiler {
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
-            let mut c = self.do_compile(body);
-            self.bytecode.append(&mut c);
+            // One HIR per instance: the generic body's HIR at this clone's
+            // type arguments.
+            let lowered = self.try_lower_hir_function(span, body);
+            if !lowered {
+                let mut c = self.do_compile(body);
+                self.bytecode.append(&mut c);
+            }
 
-            if !self.region_ends_with_return(body_op_start) {
+            let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+            if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
             // Its own IL function: a clone left as trailing glue of the source
@@ -16593,6 +16600,7 @@ impl Compiler {
                 args,
                 Some(body),
                 name,
+                span,
             );
             self.emit_par_specializations_for(name, &table_key);
     }

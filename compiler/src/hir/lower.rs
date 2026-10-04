@@ -9,7 +9,8 @@
 //! and static calls, method and test bodies, and `let p = new C(..)` kept in
 //! frame slots when `p` only ever has its fields read or written; then
 //! tuples, arrays and `Vec`; then `byte` scalars (on the int lane, one-byte
-//! string literals included) and casts between scalars. Any other node, type
+//! string literals included) and casts between scalars; then each mono
+//! clone of a generic function, at its instance's types. Any other node, type
 //! or body shape keeps the AST codegen for the whole function,
 //! and the reason it was refused is counted in `--opt-stats`.
 //!

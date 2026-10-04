@@ -62,6 +62,9 @@ struct HirCall {
     /// `recv.m(args)`: the receiver is argument 0; never inlined or a
     /// tail call (as in the AST codegen).
     method: bool,
+    /// A mono clone of a generic function: never tiny-inlined (as in the
+    /// AST codegen).
+    mono: bool,
 }
 
 /// Per-body lowering state.
@@ -117,7 +120,7 @@ impl Compiler {
     /// leaves the body to the AST walk (lowering off, or the body is outside
     /// the subset).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
-        if !self.hir_lowering || self.compiling_mono_clone {
+        if !self.hir_lowering {
             return false;
         }
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
@@ -126,7 +129,25 @@ impl Compiler {
         let Some(module) = self.hir_module.take() else {
             return false;
         };
-        let hir = &module.bodies[index];
+        // A mono clone lowers the generic body's HIR at its type arguments.
+        let instance = self
+            .compiling_mono_clone
+            .then(|| self.mono_var_tys.last().map(|map| self.hir_instance(&module.bodies[index], map)))
+            .flatten();
+        if self.compiling_mono_clone && instance.is_none() {
+            self.hir_module = Some(module);
+            return false;
+        }
+        // An enum whose generic type mentions a type parameter keeps the
+        // boxed boundary layout in the AST's clone; those stay there.
+        if let Some(inst) = &instance
+            && self.hir_mono_enum_boundary(&module.bodies[index], inst)
+        {
+            crate::il::opt::note_hir_fallback("mono-enum");
+            self.hir_module = Some(module);
+            return false;
+        }
+        let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         // Where the AST walk would start the body: the body's pre-order
         // position when the emit cursor still sits on parameter nodes before
         // it, else the cursor itself (it can run ahead of the pre-order ids
@@ -163,6 +184,62 @@ impl Compiler {
         };
         self.hir_module = Some(module);
         lowered
+    }
+
+    /// Whether some value of `generic` has a type that mentions a type
+    /// variable and is an enum at the instance's types.
+    fn hir_mono_enum_boundary(&self, generic: &HirBody, inst: &HirBody) -> bool {
+        let open = |ty: &Option<Ty>| {
+            ty.as_ref()
+                .is_some_and(|t| !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), t)))
+        };
+        let is_enum = |ty: &Option<Ty>| {
+            ty.as_ref()
+                .is_some_and(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum))
+        };
+        let exprs = generic.exprs.iter().zip(&inst.exprs).map(|(g, i)| (&g.ty, &i.ty));
+        let locals = generic.locals.iter().zip(&inst.locals).map(|(g, i)| (&g.ty, &i.ty));
+        exprs
+            .chain(locals)
+            .chain(std::iter::once((&generic.ret, &inst.ret)))
+            .any(|(g, i)| open(g) && is_enum(i))
+    }
+
+    /// `body` with each type variable of the instance being compiled bound
+    /// to its concrete type.
+    fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {
+        use crate::typechecking::subst::{Subst, apply_ty};
+        let mut subst = Subst::empty();
+        for (var, ty) in map {
+            subst.insert(*var, ty.clone());
+        }
+        let at = |ty: &Option<Ty>| {
+            ty.as_ref()
+                .map(|t| apply_ty(&subst, &apply_ty_prune(self.checker.subst(), t)))
+        };
+        HirBody {
+            name: body.name.clone(),
+            kind: body.kind,
+            span: body.span,
+            params: body.params.clone(),
+            ret: at(&body.ret),
+            ret_layout: body.ret_layout.clone(),
+            result_mode: body.result_mode,
+            is_coro: body.is_coro,
+            is_generic: false,
+            captures: body.captures.clone(),
+            locals: body
+                .locals
+                .iter()
+                .map(|l| crate::hir::HirLocal { ty: at(&l.ty), ..l.clone() })
+                .collect(),
+            exprs: body
+                .exprs
+                .iter()
+                .map(|e| crate::hir::HirExpr { ty: at(&e.ty), ..e.clone() })
+                .collect(),
+            root: body.root,
+        }
     }
 
     /// Move the emit-order id cursor past `body`'s subtree (which starts at
@@ -340,7 +417,83 @@ impl Compiler {
         if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
         }
+        if self.checker.is_generic_fn(&lookup) {
+            return self.resolve_hir_mono(hir, call, key, &lookup);
+        }
         self.hir_call_abi(key, &lookup, argc, None)
+    }
+
+    /// A call to generic `key` that the AST sends to an already emitted
+    /// mono clone (keyed by the ground argument types, as
+    /// `mono_call_offset`), with the clone's ABI at those types. A call
+    /// left on the shared body (boxed `T`, dictionaries) is refused.
+    fn resolve_hir_mono(&self, hir: &HirBody, call: HirId, key: String, lookup: &str) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        if self.checker.fn_has_rest(lookup) {
+            return Err("callee-generic");
+        }
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            let ty = Self::hir_ty(hir, arg).ok_or("callee-generic")?;
+            let ty = apply_ty_prune(self.checker.subst(), ty);
+            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+                return Err("callee-generic");
+            }
+            arg_tys.push(ty);
+        }
+        let spec = self
+            .mono_plan
+            .specialization_for_call(&key, &arg_tys)
+            .ok_or("callee-generic")?;
+        if !self.mono_offsets.contains_key(&spec.key) {
+            return Err("callee-generic");
+        }
+        let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
+        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) || self.two_word_return_kind(lookup).is_some() {
+            return Err("callee-generic");
+        }
+        let param_tys = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?;
+        if param_tys.len() != arg_tys.len() {
+            return Err("callee-signature");
+        }
+        let mut map = HashMap::new();
+        for (param, arg) in param_tys.iter().zip(&arg_tys) {
+            Self::bind_scheme_vars(param, arg, &mut map);
+        }
+        let ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
+        let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
+        // A generic `Option` / `Result` boundary is boxed even in a clone.
+        let enum_boundary = |generic: &Ty, concrete: &Ty| {
+            !matches!(generic, Ty::Var(_))
+                && !crate::hir::layout::ty_is_closed(generic)
+                && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
+        };
+        let mut params = Vec::with_capacity(args.len());
+        for param in &param_tys {
+            let ty = at(param);
+            match lower::classify(&self.checker, &ty) {
+                Some(class) if lower::is_word(class) && !enum_boundary(param, &ty) => {}
+                _ => return Err("callee-signature"),
+            }
+            params.push(self.value_layout(&ty));
+        }
+        let ret = at(&ret_ty);
+        if !crate::hir::layout::ty_is_closed(&ret)
+            || lower::classify(&self.checker, &ret).is_none()
+            || lower::classify(&self.checker, &ret) == Some(ValueClass::Enum)
+        {
+            return Err("callee-signature");
+        }
+        Ok(HirCall {
+            key: mono,
+            pair: None,
+            params,
+            ret: self.value_layout(&ret),
+            method: false,
+            mono: true,
+        })
     }
 
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
@@ -423,6 +576,7 @@ impl Compiler {
             params: args.iter().map(|&a| layout(a)).collect(),
             ret: layout(call),
             method: true,
+            mono: false,
         })
     }
 
@@ -454,6 +608,7 @@ impl Compiler {
             params: vec![ValueLayout::Boxed; argc],
             ret: ValueLayout::Boxed,
             method: false,
+            mono: false,
         })
     }
 
@@ -525,6 +680,7 @@ impl Compiler {
             params,
             ret: self.value_layout(&ret_ty),
             method: false,
+            mono: false,
         })
     }
 
@@ -1428,7 +1584,8 @@ impl Compiler {
                 let tail = emit.tail_calls.contains(&id.0);
                 // Only with no operands below: the arg and result temps are
                 // `STORE`s, which would lift the cursor over live operands.
-                let inline = if tail || depth != 0 || self.coroutine_fns.contains(&key) {
+                let mono = call.mono;
+                let inline = if tail || depth != 0 || mono || self.coroutine_fns.contains(&key) {
                     None
                 } else {
                     self.tiny_inline_body(&key, natural.words())
