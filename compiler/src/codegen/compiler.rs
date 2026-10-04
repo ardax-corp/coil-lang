@@ -5198,8 +5198,10 @@ impl Compiler {
         // `e?` lowers straight onto `self.bytecode` (its value, then the
         // early-return test) and returns an empty local vec. Left in a
         // pure-first / local-vec arg list, its value sits on the stack while
-        // the other args' temps are stored over it (#593).
-        if Self::expr_contains_try(expr) {
+        // the other args' temps are stored over it (#593). `match`, `??` and
+        // `?.` lower the same way: `s - (o ?? 1)` ran the `??` ahead of the
+        // `s` load in the parent's vec and computed `(o ?? 1) - s`.
+        if Self::expr_emits_branching(expr) {
             return true;
         }
         match expr.1.as_ref() {
@@ -5252,15 +5254,20 @@ impl Compiler {
     }
 
     /// Whether `expr` has a `?` outside any nested function literal.
-    fn expr_contains_try(expr: &Output<'_>) -> bool {
+    /// `expr` holds a `?`, `match`, `??` or `?.` outside a lambda: each
+    /// lowers with its own labels straight onto `self.bytecode`. A lambda's
+    /// body is compiled on its own.
+    fn expr_emits_branching(expr: &Output<'_>) -> bool {
         match expr.1.as_ref() {
-            Expression::Try(_) => true,
-            // A lambda's `?` returns from the lambda, compiled on its own.
+            Expression::Try(_)
+            | Expression::Match { .. }
+            | Expression::Coalesce(..)
+            | Expression::OptionalAccess(..) => true,
             Expression::Lambda { .. } | Expression::Function { .. } => false,
             other => {
                 let mut found = false;
                 other.for_each_child(&mut |child| {
-                    found = found || Self::expr_contains_try(child);
+                    found = found || Self::expr_emits_branching(child);
                 });
                 found
             }
@@ -14543,7 +14550,7 @@ impl Compiler {
                 && let Some(box_slot) = self.stack_array_boxed_slot(name)
             {
                 self.emit_boxed_array_load(bytecode, box_slot, idx);
-                bytecode.append(&mut self.do_compile(rhs));
+                self.append_compound_rhs(bytecode, rhs);
                 bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
                 self.emit_boxed_array_store(bytecode, box_slot, idx, false);
                 return;
@@ -14560,7 +14567,7 @@ impl Compiler {
                 let slot = base + *i as u32;
                 let is_float = self.is_float_ty(target);
                 bytecode.push_load(slot);
-                bytecode.append(&mut self.do_compile(rhs));
+                self.append_compound_rhs(bytecode, rhs);
                 bytecode.push(Byte::new(Self::binop_for_assign_op(op, is_float)));
                 bytecode.push_store_pop(slot);
                 return;
@@ -14575,7 +14582,7 @@ impl Compiler {
                 let tmp_idx = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_idx);
                 self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
-                bytecode.append(&mut self.do_compile(rhs));
+                self.append_compound_rhs(bytecode, rhs);
                 bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
                 let tmp_val = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_val);
@@ -14599,7 +14606,7 @@ impl Compiler {
             bytecode.push_load(tmp_arr);
             bytecode.push_load(tmp_idx);
             bytecode.push_index();
-            bytecode.append(&mut self.do_compile(rhs));
+            self.append_compound_rhs(bytecode, rhs);
             bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
             let tmp_val = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp_val);
@@ -14615,9 +14622,31 @@ impl Compiler {
         }
 
         let is_float = self.emit_read_lvalue(bytecode, target);
-        bytecode.append(&mut self.do_compile(rhs));
+        self.append_compound_rhs(bytecode, rhs);
         bytecode.push(Byte::new(Self::binop_for_assign_op(op, is_float)));
         self.emit_write_lvalue(bytecode, target, false);
+    }
+
+    /// Append `x op= rhs`'s `rhs` above the target's current value, which is
+    /// the top word of `bytecode`.
+    ///
+    /// A call (tiny-inline temps), `match`, `??` or `?` on the rhs emits onto
+    /// `self.bytecode` and binds slots from `variables.len()`, so a target
+    /// value left in `bytecode` was either overwritten or ordered after the
+    /// rhs (`s -= match o {..}` computed `rhs - s`). Such an rhs stages the
+    /// target value, then itself, into temps, as the string `+=` path does.
+    fn append_compound_rhs(&mut self, bytecode: &mut CodeBuf, rhs: &Output<'_>) {
+        if !self.expr_may_clobber_operand_stack(rhs) {
+            bytecode.append(&mut self.do_compile(rhs));
+            return;
+        }
+        self.bytecode.append(bytecode);
+        let lhs_slot = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(lhs_slot);
+        let mut rhs_slot = 0;
+        self.stage_call_arg_to_temp(rhs, false, &mut rhs_slot);
+        bytecode.push_load(lhs_slot);
+        bytecode.push_load(rhs_slot);
     }
 
     fn emit_adjust(
