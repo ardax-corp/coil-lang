@@ -1220,7 +1220,149 @@ impl<'c, 'm> Cx<'c, 'm> {
             b.scopes.pop();
             out.push(HirArm { pat, body });
         }
+        let out = self.split_nested(b, span_of(node), sty.as_ref(), self.ty_of(node), out);
         self.emit(b, node, HirKind::Match { scrutinee, arms: out })
+    }
+
+    /// Regroup arms with nested payload patterns into one arm per outer
+    /// variant over an inner `match` on the payload:
+    /// `Ok(None) => a, Ok(Some(n)) => b, Err(e) => c` becomes
+    /// `Ok(t) => match t { None => a, Some(n) => b }, Err(e) => c`.
+    /// Outer variants are disjoint, so only arm order within a variant
+    /// matters. Left as is unless every regrouped variant is exhaustive on
+    /// its own (a trailing catch-all would have to be copied into it).
+    fn split_nested(&self, b: &mut BodyBuilder, span: Span, sty: Option<&Ty>, ty: Option<Ty>, mut arms: Vec<HirArm>) -> Vec<HirArm> {
+        if !arms.iter().any(|a| nested_payload(&a.pat).is_some_and(|p| !irrefutable(p))) {
+            return arms;
+        }
+        if let Some(i) = arms.iter().position(|a| irrefutable(&a.pat)) {
+            arms.truncate(i + 1);
+        }
+        let catch_all = arms.last().is_some_and(|a| irrefutable(&a.pat)).then(|| arms.pop()).flatten();
+        // Arm indices per outer variant, in first-appearance order.
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, arm) in arms.iter().enumerate() {
+            let HirPat::Variant { variant, .. } = &arm.pat else {
+                return restore(arms, catch_all);
+            };
+            match groups.iter_mut().find(|(v, _)| v == variant) {
+                Some((_, idx)) => idx.push(i),
+                None => groups.push((variant.clone(), vec![i])),
+            }
+        }
+        let Some(sty) = sty else {
+            return restore(arms, catch_all);
+        };
+        let mut plan = Vec::with_capacity(groups.len());
+        for (variant, idx) in &groups {
+            let first = &arms[idx[0]].pat;
+            let split = idx.len() > 1 || nested_payload(first).is_some_and(|p| !irrefutable(p));
+            if !split {
+                plan.push(None);
+                continue;
+            }
+            let HirPat::Variant { enum_name, .. } = first else {
+                unreachable!("grouped arms are variants")
+            };
+            let Some(subs) = idx.iter().map(|&i| nested_payload(&arms[i].pat)).collect::<Option<Vec<_>>>() else {
+                return restore(arms, catch_all);
+            };
+            let Some(field_ty) = self.variant_field_tys(enum_name, variant, Some(sty)).into_iter().next() else {
+                return restore(arms, catch_all);
+            };
+            if !self.exhaustive(&subs, &field_ty) {
+                return restore(arms, catch_all);
+            }
+            plan.push(Some(field_ty));
+        }
+        let mut slots: Vec<Option<HirArm>> = arms.into_iter().map(Some).collect();
+        let mut out = Vec::with_capacity(groups.len() + 1);
+        for ((variant, idx), field_ty) in groups.iter().zip(plan) {
+            let Some(field_ty) = field_ty else {
+                out.push(slots[idx[0]].take().expect("each arm is used once"));
+                continue;
+            };
+            let mut inner = Vec::with_capacity(idx.len());
+            let mut outer = None;
+            for &i in idx {
+                let arm = slots[i].take().expect("each arm is used once");
+                let HirPat::Variant {
+                    enum_name,
+                    tag,
+                    fields: HirPatFields::Tuple(mut parts),
+                    ..
+                } = arm.pat
+                else {
+                    unreachable!("split arms carry one payload pattern")
+                };
+                outer.get_or_insert((enum_name, tag));
+                inner.push(HirArm {
+                    pat: parts.pop().expect("one payload pattern"),
+                    body: arm.body,
+                });
+            }
+            let (enum_name, tag) = outer.expect("a group has an arm");
+            let t = b.temp("nest", Some(field_ty.clone()));
+            let scrutinee = self.synth(b, span, HirKind::Local(t), Some(field_ty.clone()));
+            let inner = self.split_nested(b, span, Some(&field_ty), ty.clone(), inner);
+            let body = self.synth(b, span, HirKind::Match { scrutinee, arms: inner }, ty.clone());
+            out.push(HirArm {
+                pat: HirPat::Variant {
+                    enum_name,
+                    variant: variant.clone(),
+                    tag,
+                    fields: HirPatFields::Tuple(vec![HirPat::Bind(t)]),
+                },
+                body,
+            });
+        }
+        out.extend(catch_all);
+        out
+    }
+
+    /// Whether `pats`, tried in order on a value of type `ty`, match every
+    /// value: a catch-all, or each variant covered (recursively for its
+    /// one payload).
+    fn exhaustive(&self, pats: &[&HirPat], ty: &Ty) -> bool {
+        if pats.iter().any(|p| irrefutable(p)) {
+            return true;
+        }
+        let Some(HirPat::Variant { enum_name, .. }) = pats.first() else {
+            return false;
+        };
+        let t = strip_readonly(ty);
+        let variants: Vec<String> = if is_option_ty(t) {
+            vec!["Some".into(), "None".into()]
+        } else if result_ok_err(t).is_some() {
+            vec!["Ok".into(), "Err".into()]
+        } else {
+            match self.checker.enum_variants(enum_name) {
+                Some(vars) => vars.into_iter().map(|(n, _, _)| n).collect(),
+                None => return false,
+            }
+        };
+        variants.iter().all(|v| {
+            let mut subs = Vec::new();
+            for p in pats {
+                let HirPat::Variant { variant, fields, .. } = p else {
+                    return false;
+                };
+                if variant != v {
+                    continue;
+                }
+                match fields {
+                    HirPatFields::Unit => return true,
+                    HirPatFields::Tuple(parts) if parts.iter().all(irrefutable) => return true,
+                    HirPatFields::Tuple(parts) if parts.len() == 1 => subs.push(&parts[0]),
+                    _ => return false,
+                }
+            }
+            !subs.is_empty()
+                && self
+                    .variant_field_tys(enum_name, v, Some(ty))
+                    .first()
+                    .is_some_and(|field| self.exhaustive(&subs, field))
+        })
     }
 
     fn variant_pat(&self, enum_name: &str, variant: &str, fields: HirPatFields) -> HirPat {
@@ -1486,6 +1628,28 @@ fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> BinOp {
     BinOp::Overloaded(op)
 }
 
+/// A pattern that matches every value.
+fn irrefutable(pat: &HirPat) -> bool {
+    matches!(pat, HirPat::Wild | HirPat::Bind(_))
+}
+
+/// The one payload pattern of a single-field variant pattern.
+fn nested_payload(pat: &HirPat) -> Option<&HirPat> {
+    match pat {
+        HirPat::Variant {
+            fields: HirPatFields::Tuple(parts),
+            ..
+        } if parts.len() == 1 => parts.first(),
+        _ => None,
+    }
+}
+
+fn restore(mut arms: Vec<HirArm>, catch_all: Option<HirArm>) -> Vec<HirArm> {
+    arms.extend(catch_all);
+    arms
+}
+
 #[cfg(test)]
 #[path = "build.tests.rs"]
 mod tests;
+
