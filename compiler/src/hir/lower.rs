@@ -621,8 +621,20 @@ impl Walk<'_> {
             HirKind::Lit(_) => Err("literal"),
             HirKind::Local(_) => self.word(id),
             HirKind::Bin { op, lhs, rhs } => {
-                if matches!(op, BinOp::StrConcat | BinOp::Overloaded(_)) {
+                if matches!(op, BinOp::Overloaded(_)) {
                     return Err("operator");
+                }
+                // `a + b` is `FORMAT "%s%s"` over both (the format string
+                // sits under them); `==` / `!=` compare strings with `EQ`.
+                let string = |id: HirId| matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING);
+                let concat = matches!(op, BinOp::StrConcat);
+                if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
+                    if !string(*lhs) || !string(*rhs) {
+                        return Err("operand-type");
+                    }
+                    let base = depth + u32::from(concat);
+                    self.value(*lhs, base)?;
+                    return self.value(*rhs, rhs_depth(body, *rhs, base));
                 }
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;

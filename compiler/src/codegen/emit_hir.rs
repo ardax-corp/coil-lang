@@ -76,6 +76,9 @@ enum HirBuiltin {
     Assert,
     /// `HostInvoke` of a registered native.
     Host(usize),
+    /// `format("..", args)` with a literal format and no `%v`: the format
+    /// string, then each argument, then `FORMAT`.
+    Format,
 }
 
 /// Per-body lowering state.
@@ -634,7 +637,7 @@ impl Compiler {
         };
         if let Some(kind) = self.string_builtin_for_call(name) {
             return Some(match kind {
-                StringBuiltin::Format => Err("callee-builtin"),
+                StringBuiltin::Format => Ok(HirBuiltin::Format),
                 _ => host(kind.native_name()),
             });
         }
@@ -674,6 +677,22 @@ impl Compiler {
         };
         if matches!(builtin, HirBuiltin::Assert) && !(1..=2).contains(&args.len()) {
             return Err("callee-arity");
+        }
+        if matches!(builtin, HirBuiltin::Format) {
+            let Some(HirKind::Lit(Lit::Str(fmt))) = args.first().map(|&a| &hir.expr(a).kind) else {
+                return Err("format-literal");
+            };
+            // `%v` goes through `Show`; other arguments print as words.
+            if Self::format_consuming_specs(fmt).contains(&'v') {
+                return Err("format-show");
+            }
+            for &arg in &args[1..] {
+                let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
+                let string = matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING);
+                if !string && lower::primitive(ty).is_none() {
+                    return Err("format-argument");
+                }
+            }
         }
         let mut params = Vec::with_capacity(args.len());
         for &arg in args {
@@ -1464,6 +1483,17 @@ impl Compiler {
                     self.bytecode.push_load(tag);
                 }
             }
+            HirKind::Bin {
+                op: BinOp::StrConcat,
+                lhs,
+                rhs,
+            } => {
+                let mut fmt = CodeBuf::new();
+                self.emit_raw_string_literal(&mut fmt, "%s%s");
+                self.bytecode.append(&mut fmt);
+                self.hir_operands(hir, emit, *lhs, *rhs, depth + 1);
+                self.bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
+            }
             HirKind::Bin { op, lhs, rhs } => {
                 let float = Self::hir_ty(hir, *lhs).is_some_and(lower::is_float);
                 if !float && let Some((value, shift, instr)) = Self::hir_strength_reduce(hir, *op, *lhs, *rhs) {
@@ -1664,6 +1694,18 @@ impl Compiler {
                             None => self.emit_string_literal("assertion failed"),
                         }
                         self.bytecode.bind_label(end);
+                    }
+                    HirBuiltin::Format => {
+                        let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
+                            unreachable!("planned format literal")
+                        };
+                        let fmt = Self::rewrite_format_v_to_s(fmt);
+                        self.emit_string_literal(&fmt);
+                        for (i, (&arg, param)) in args.iter().zip(params).enumerate().skip(1) {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        }
+                        self.bytecode
+                            .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments.
