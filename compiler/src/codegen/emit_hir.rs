@@ -67,6 +67,25 @@ struct HirCall {
     mono: bool,
     /// A compiler builtin emitted in place of a `CALL`.
     builtin: Option<HirBuiltin>,
+    /// A bounded generic's shared body: boxed type-parameter arguments,
+    /// trailing dictionaries and an unboxed result.
+    generic: Option<Box<HirGeneric>>,
+}
+
+/// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
+#[derive(Clone)]
+struct HirGeneric {
+    /// The scheme the dictionaries are resolved from.
+    lookup: String,
+    /// Per argument: the type to `BoxValue` it as (a bare type parameter).
+    boxed: Vec<Option<Ty>>,
+    /// Ground argument types (receiver first) and result type.
+    arg_tys: Vec<Ty>,
+    ret_ty: Ty,
+    /// How many dictionaries the call appends.
+    dicts: usize,
+    /// The result type to `UnboxValue` (a bare type parameter result).
+    unbox: Option<Ty>,
 }
 
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
@@ -194,6 +213,9 @@ impl Compiler {
             }
             Err(reason) => {
                 crate::il::opt::note_hir_fallback(reason);
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("hir fallback `{}`: {reason}", hir.name);
+                }
                 false
             }
         };
@@ -360,6 +382,7 @@ impl Compiler {
                 && let Some(call) = emit.calls.get(&value.0)
                 && !call.method
                 && call.builtin.is_none()
+                && call.generic.is_none()
                 && Self::hir_call_rep(call) == emit.ret
                 && self.hir_tail_call_ok(&call.key)
             {
@@ -391,9 +414,11 @@ impl Compiler {
         if let Some(builtin) = self.hir_builtin(name) {
             return self.hir_builtin_abi(hir, call, builtin?);
         }
+        // Ground dictionaries (`sidecar_dicts`) are re-derived from the
+        // argument types; trait-object and bound dispatch stay on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
-            || self.sidecar_dicts(node.node, start, end).is_some_and(|d| !d.is_empty())
+            || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
         {
             return Err("callee-trait");
         }
@@ -424,14 +449,42 @@ impl Compiler {
         if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
         }
-        if self.checker.is_generic_fn(&lookup) {
+        // The AST sends a call to an emitted mono clone, else to the shared
+        // body with boxed arguments and dictionaries.
+        if self.checker.is_generic_fn(&lookup) && self.hir_has_mono_clone(hir, call, &key) {
             return self.resolve_hir_mono(hir, call, key, &lookup);
         }
         // `C::f(..)` on a generic class is its one shared body.
         let shared = name
             .rsplit_once("::")
             .is_some_and(|(owner, _)| self.checker.is_class(owner) && lower::is_generic_class(&self.checker, owner));
-        self.hir_call_abi(key, &lookup, argc, None, shared)
+        let generic = self.checker.is_generic_fn(&lookup);
+        let mut abi = self.hir_call_abi(key, &lookup, argc, None, shared || generic)?;
+        if generic {
+            let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+                return Err("callee");
+            };
+            abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
+        }
+        Ok(abi)
+    }
+
+    /// Whether the AST's `mono_call_offset` finds an emitted clone of `key`
+    /// for `call`'s ground argument types.
+    fn hir_has_mono_clone(&self, hir: &HirBody, call: HirId, key: &str) -> bool {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return false;
+        };
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(ty) = Self::hir_ty(hir, arg) else {
+                return false;
+            };
+            arg_tys.push(apply_ty_prune(self.checker.subst(), ty));
+        }
+        self.mono_plan
+            .specialization_for_call(key, &arg_tys)
+            .is_some_and(|spec| self.mono_offsets.contains_key(&spec.key))
     }
 
     /// A call to generic `key` that the AST sends to an already emitted
@@ -505,6 +558,7 @@ impl Compiler {
             method: false,
             mono: true,
             builtin: None,
+            generic: None,
         })
     }
 
@@ -520,9 +574,11 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
+        // Ground dictionaries (`sidecar_dicts`) are re-derived from the
+        // argument types; trait-object and bound dispatch stay on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
-            || self.sidecar_dicts(node.node, start, end).is_some_and(|d| !d.is_empty())
+            || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
         {
             return Err("callee-trait");
         }
@@ -557,7 +613,12 @@ impl Compiler {
             return Err("callee-overload");
         }
         let lookup = key.clone();
-        let mut call = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared)?;
+        let generic = self.checker.is_generic_fn(&lookup);
+        let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
+        if generic {
+            abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
+        }
+        let mut call = abi;
         call.method = true;
         Ok(call)
     }
@@ -594,6 +655,7 @@ impl Compiler {
             method: true,
             mono: false,
             builtin: None,
+            generic: None,
         })
     }
 
@@ -627,6 +689,7 @@ impl Compiler {
             method: false,
             mono: false,
             builtin: None,
+            generic: None,
         })
     }
 
@@ -726,6 +789,7 @@ impl Compiler {
             method: false,
             mono: false,
             builtin: Some(builtin),
+            generic: None,
         })
     }
 
@@ -742,7 +806,7 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let open_ty = |ty: &Ty| open && !crate::hir::layout::ty_is_closed(ty);
         let lookup = lookup.to_string();
-        if self.checker.is_generic_fn(&lookup) {
+        if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
         }
         if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup) {
@@ -803,7 +867,91 @@ impl Compiler {
             method: false,
             mono: false,
             builtin: None,
+            generic: None,
         })
+    }
+
+    /// The bounded-generic ABI of `call` (`args[..receivers]` are not boxed):
+    /// bare type-parameter arguments boxed, one ground dictionary per
+    /// constraint, a bare type-parameter result unboxed.
+    fn hir_generic_abi(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        lookup: &str,
+        args: &[HirId],
+        receivers: usize,
+    ) -> Result<HirGeneric, &'static str> {
+        let scheme = self.checker.env().lookup(lookup).ok_or("callee-signature")?;
+        let mut params = Vec::new();
+        let mut cur = &scheme.ty;
+        while let Ty::Fun(p, r) = cur {
+            params.push(p.as_ref().clone());
+            cur = r;
+        }
+        let ground = |id: HirId| {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+            crate::hir::layout::ty_is_closed(&ty).then_some(ty)
+        };
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            arg_tys.push(ground(arg).ok_or("callee-generic")?);
+        }
+        let ret_ty = ground(call).ok_or("callee-generic")?;
+        let explicit = args.len() - receivers;
+        let skip = params.len().saturating_sub(explicit);
+        let mut boxed = vec![None; receivers];
+        for (i, ty) in arg_tys[receivers..].iter().enumerate() {
+            let bare = params
+                .get(skip + i)
+                .is_some_and(|p| matches!(p, Ty::Var(v) if scheme.bounds.contains(v)));
+            if !bare {
+                boxed.push(None);
+                continue;
+            }
+            // Only immediates and plain objects box to a tagged word.
+            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) {
+                return Err("callee-generic");
+            }
+            boxed.push(Some(ty.clone()));
+        }
+        // Every constraint needs a ground instance (the AST would emit fewer
+        // dictionaries than the body unpacks otherwise).
+        let mut vars = HashMap::new();
+        for (param, ty) in params.iter().zip(&arg_tys) {
+            Self::bind_scheme_vars(param, ty, &mut vars);
+        }
+        Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
+        for constraint in &scheme.constraints {
+            let lookup_tys =
+                Self::resolve_constraint_lookup(constraint, &vars, &self.checker).ok_or("callee-trait")?;
+            if lookup_tys.iter().any(Self::ty_has_var)
+                || self.checker.generics().find_instance_relaxed(&constraint.class, &lookup_tys).is_none()
+            {
+                return Err("callee-trait");
+            }
+        }
+        let unbox = self.generic_return_is_boxed(lookup).then(|| ret_ty.clone());
+        if unbox.is_some() && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum) {
+            return Err("callee-generic");
+        }
+        Ok(HirGeneric {
+            lookup: lookup.to_string(),
+            boxed,
+            arg_tys,
+            ret_ty,
+            dicts: scheme.constraints.len(),
+            unbox,
+        })
+    }
+
+    /// Push `generic`'s dictionaries after the arguments; their count.
+    fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
+        let mut dicts = CodeBuf::new();
+        let n = self.emit_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+        debug_assert_eq!(n, generic.dicts, "planned dictionaries for `{}`", generic.lookup);
+        self.bytecode.append(&mut dicts);
+        n as u32
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -1770,11 +1918,16 @@ impl Compiler {
                 let params = call.params.clone();
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
+                let generic = call.generic.clone();
+                let boxed = |i: usize| generic.as_ref().and_then(|g| g.boxed[i].clone());
                 if depth == 0 {
                     // Receiver and arguments through temps, as the AST does.
                     let mut temps = Vec::with_capacity(args.len());
-                    for (&arg, param) in args.iter().zip(params) {
+                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
+                        if let Some(ty) = boxed(i) {
+                            Self::emit_box_if_needed(&mut self.bytecode, &ty);
+                        }
                         self.expr_depth = 0;
                         let tmp = self.alloc_temp_slot();
                         self.bytecode.push_store_pop(tmp);
@@ -1786,15 +1939,22 @@ impl Compiler {
                 } else {
                     for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        if let Some(ty) = boxed(i) {
+                            Self::emit_box_if_needed(&mut self.bytecode, &ty);
+                        }
                     }
                 }
+                let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
                 let ok = self.emit_named_entry_on_module_ret(
                     &key,
-                    args.len() as u32,
+                    args.len() as u32 + dicts,
                     crate::il::EntryKind::Call,
                     natural.words(),
                 );
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
+                if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
+                    Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+                }
                 self.hir_convert(&natural, want, depth);
                 return;
             }
@@ -1807,7 +1967,8 @@ impl Compiler {
                 // Only with no operands below: the arg and result temps are
                 // `STORE`s, which would lift the cursor over live operands.
                 let mono = call.mono;
-                let inline = if tail || depth != 0 || mono || self.coroutine_fns.contains(&key) {
+                let generic = call.generic.clone();
+                let inline = if tail || depth != 0 || mono || generic.is_some() || self.coroutine_fns.contains(&key) {
                     None
                 } else {
                     self.tiny_inline_body(&key, natural.words())
@@ -1835,7 +1996,11 @@ impl Compiler {
                 }
                 for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                     self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                    if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
+                        Self::emit_box_if_needed(&mut self.bytecode, ty);
+                    }
                 }
+                let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
                 let kind = if tail {
                     crate::il::EntryKind::TailCall
                 } else {
@@ -1843,7 +2008,7 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(
                     &key,
-                    args.len() as u32,
+                    args.len() as u32 + dicts,
                     kind,
                     natural.words(),
                 );
@@ -1851,6 +2016,9 @@ impl Compiler {
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.
                     return;
+                }
+                if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
+                    Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
                 self.hir_convert(&natural, want, depth);
                 return;
