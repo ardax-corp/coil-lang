@@ -663,9 +663,11 @@ impl Compiler {
     /// jumps).
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
-            HirKind::Lit(_) | HirKind::Bin { .. } | HirKind::Logic { .. } | HirKind::Un { .. } => {
-                Some(BOXED)
-            }
+            HirKind::Lit(_)
+            | HirKind::Bin { .. }
+            | HirKind::Logic { .. }
+            | HirKind::Un { .. }
+            | HirKind::Cast { .. } => Some(BOXED),
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
@@ -826,7 +828,7 @@ impl Compiler {
         if let Some(Rep::Pair(kind)) = self.hir_natural(hir, emit, scrutinee)
             && arms.iter().all(|arm| match &arm.pat {
                 HirPat::Wild => true,
-                HirPat::Variant { .. } => lower::arm_fields(&arm.pat).is_ok_and(|f| f.len() <= 1),
+                HirPat::Variant { .. } => lower::arm_fields(hir, &arm.pat).is_ok_and(|f| f.len() <= 1),
                 _ => false,
             })
         {
@@ -848,7 +850,9 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
             }
-            HirKind::Un { operand, .. } => self.hir_check_value(hir, emit, *operand, &BOXED)?,
+            HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => {
+                self.hir_check_value(hir, emit, *operand, &BOXED)?
+            }
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => {}
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
@@ -956,6 +960,8 @@ impl Compiler {
                 "Err" => (0..args.len()).try_for_each(word_arg),
                 _ => Err("make-niche"),
             },
+            // `Ok(())` carries the empty tuple, as in the AST.
+            Rep::Word(L::NicheResult) if result && variant == "Ok" && args.len() == 1 && unit_arg(0) => Ok(()),
             Rep::Word(L::NicheResult) if result => (0..args.len()).try_for_each(word_arg),
             Rep::Pair(kind) => {
                 let named = self.hir_enum_name(ty).ok_or("make-type")?;
@@ -984,7 +990,7 @@ impl Compiler {
         let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
         let scrut_enum = self.hir_enum_name(ty).ok_or("match-type")?;
         for arm in arms {
-            let fields = lower::arm_fields(&arm.pat)?;
+            let fields = lower::arm_fields(hir, &arm.pat)?;
             match &arm.pat {
                 HirPat::Variant {
                     enum_name, variant, ..
@@ -1098,6 +1104,7 @@ impl Compiler {
                 self.hir_check_match(hir, emit, *scrutinee, arms, None)
             }
             HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
+            HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => Ok(()),
             _ => {
                 let natural = self.hir_natural(hir, emit, id).ok_or("statement")?;
                 self.hir_check_value(hir, emit, id, &natural)
@@ -1159,6 +1166,10 @@ impl Compiler {
                 Instruction::CONST,
                 Value::from(*b).raw() as _,
             )),
+            HirKind::Lit(Lit::Str(raw)) if Self::hir_ty(hir, id).and_then(lower::primitive) == Some(crate::typechecking::ty::BYTE) => {
+                let byte = lower::byte_literal(raw).expect("planned byte literal");
+                self.bytecode.push_const(byte as i32);
+            }
             HirKind::Lit(Lit::Str(raw)) => {
                 let text = unescape_coil_string(raw);
                 let mut bc = CodeBuf::new();
@@ -1201,6 +1212,17 @@ impl Compiler {
                     HirKind::Lit(Lit::Int(n)) => self.hir_push_int(n.wrapping_neg()),
                     HirKind::Lit(Lit::Float(f)) => self.hir_push_float(-f),
                     _ => unreachable!(),
+                }
+            }
+            HirKind::Cast { value } => {
+                self.hir_value(hir, emit, *value, &BOXED, depth);
+                let from = Self::hir_ty(hir, *value).and_then(lower::primitive);
+                let to = Self::hir_ty(hir, id).and_then(lower::primitive);
+                if let (Some(from), Some(to)) = (from, to)
+                    && !Self::hir_byte_range_literal(hir, *value)
+                    && let Some(op) = primitive_cast_opcode(from, to)
+                {
+                    self.bytecode.push(Byte::new(op));
                 }
             }
             HirKind::Un { op, operand } => {
@@ -1413,8 +1435,9 @@ impl Compiler {
                 };
                 if let Some((start, end, diamond)) = inline {
                     // Arguments to temps, as the AST tiny-inline does.
+                    let mark = self.bytecode.len();
                     let mut temps = Vec::with_capacity(args.len());
-                    for (&arg, param) in args.iter().zip(params) {
+                    for (&arg, &param) in args.iter().zip(&params) {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
                         self.expr_depth = depth;
                         let tmp = self.alloc_temp_slot();
@@ -1427,13 +1450,12 @@ impl Compiler {
                         self.hir_convert(&natural, want, depth);
                         return;
                     }
-                    for &tmp in &temps {
-                        self.bytecode.push_load(tmp);
-                    }
-                } else {
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
-                    }
+                    // A refused inline drops the staging, as the AST rolls
+                    // its attempt back (the temps stay allocated).
+                    self.bytecode.truncate(mark);
+                }
+                for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
                 }
                 let kind = if tail {
                     crate::il::EntryKind::TailCall
@@ -1561,6 +1583,7 @@ impl Compiler {
                             Self::push_result_err_bit(&mut self.bytecode);
                         }
                     }
+                    Some(_) if *want == Rep::Word(L::NicheResult) => self.bytecode.push_make_tuple(0),
                     // `None` and `Ok(())` are the zero word.
                     _ => self.bytecode.push_const(0),
                 }
@@ -1634,7 +1657,7 @@ impl Compiler {
                 self.bytecode.push_store_pop(slot);
             }
             pat => {
-                let fields = lower::arm_fields(pat).expect("planned arm pattern");
+                let fields = lower::arm_fields(hir, pat).expect("planned arm pattern");
                 self.hir_bind_fields(hir, emit, &fields, arity);
             }
         }
@@ -1745,7 +1768,7 @@ impl Compiler {
                     Some(variant) => {
                         let reps = payload_rep(self, &variant);
                         let reads = lower::is_identity_arm(hir, arm)
-                            || lower::arm_fields(&arm.pat).is_ok_and(|f| f.iter().any(Option::is_some));
+                            || lower::arm_fields(hir, &arm.pat).is_ok_and(|f| f.iter().any(Option::is_some));
                         if reads {
                             self.bytecode.push(
                                 Byte::new(Instruction::Unpack).with_operand_u32(reps.len() as u32),
@@ -1922,7 +1945,7 @@ impl Compiler {
                     let rep = payload_rep(this, side);
                     let reads = rep.is_some()
                         && (lower::is_identity_arm(hir, arm)
-                            || lower::arm_fields(&arm.pat).is_ok_and(|f| f.iter().any(Option::is_some)));
+                            || lower::arm_fields(hir, &arm.pat).is_ok_and(|f| f.iter().any(Option::is_some)));
                     if reads {
                         if decode {
                             Self::push_result_untag(&mut this.bytecode);
@@ -2147,6 +2170,8 @@ impl Compiler {
                 self.hir_value(hir, emit, id, &BOXED, 0);
                 self.bytecode.push_pop();
             }
+            // A `()` binding has no slot and its read pushes nothing.
+            HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => {}
             _ => {
                 let natural = self
                     .hir_natural(hir, emit, id)
@@ -2211,6 +2236,17 @@ impl Compiler {
         }
         self.bytecode.push_load(staged[0]);
         self.bytecode.push_load(staged[1]);
+    }
+
+    /// A literal (under casts) already in `0..=255`: an int / byte cast of
+    /// it is the same word, and the AST folds it away.
+    fn hir_byte_range_literal(hir: &HirBody, id: HirId) -> bool {
+        match &hir.expr(id).kind {
+            HirKind::Cast { value } => Self::hir_byte_range_literal(hir, *value),
+            HirKind::Lit(Lit::Int(n)) => (0..=255).contains(n),
+            HirKind::Lit(Lit::Str(raw)) => lower::byte_literal(raw).is_some(),
+            _ => false,
+        }
     }
 
     fn hir_push_int(&mut self, n: i64) {

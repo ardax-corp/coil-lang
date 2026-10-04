@@ -191,7 +191,7 @@ fn primitive_type_name(ty: &Ty) -> Option<&'static str> {
     }
 }
 
-fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction> {
+pub(crate) fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction> {
     match (from, to) {
         ("int", "float") => Some(Instruction::CastIntToFloat),
         ("float", "int") => Some(Instruction::CastFloatToInt),

@@ -86,3 +86,26 @@ fn constructs_outside_the_subset_name_their_kind() {
     let src = "fn id<T>(T x) -> T { return x; }";
     assert_eq!(refusal_of(src, "id"), Some("generic"));
 }
+
+#[test]
+fn bytes_casts_and_unit_tries_are_in_the_subset() {
+    let src = "fn f(byte c) -> int {
+            let z: byte = \"0\";
+            if c >= z && c <= \"9\" {
+                return (c as int) - (z as int);
+            }
+            return ((c as int) as float) as int;
+        }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn check(int n) -> Result<(), string> {
+            if n < 0 {
+                raise \"negative\";
+            }
+            return Result::Ok(());
+        }
+        fn twice(int n) -> Result<int, string> {
+            check(n)?;
+            return Result::Ok(n * 2);
+        }";
+    assert_eq!(refusal_of(src, "twice"), None);
+}

@@ -7,8 +7,10 @@
 //! literals as opaque values, and Result-mode bodies. Phase 4 adds
 //! non-generic user classes: `new`, field reads and writes, inherent method
 //! and static calls, method and test bodies, and `let p = new C(..)` kept in
-//! frame slots when `p` only ever has its fields read or written. Any other
-//! node, type or body shape keeps the AST codegen for the whole function,
+//! frame slots when `p` only ever has its fields read or written; then
+//! tuples, arrays and `Vec`; then `byte` scalars (on the int lane, one-byte
+//! string literals included) and casts between scalars. Any other node, type
+//! or body shape keeps the AST codegen for the whole function,
 //! and the reason it was refused is counted in `--opt-stats`.
 //!
 //! The VM shares one stack between locals and operands, so a store to a new
@@ -20,6 +22,7 @@
 //! AST codegen does), so that right side runs at depth zero.
 
 use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind};
+use crate::codegen::primitive_cast_opcode as cast_opcode;
 use crate::typechecking::infer::Checker;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
@@ -290,7 +293,7 @@ fn pure_index(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         HirKind::Local(_) | HirKind::Lit(_) => true,
         HirKind::Bin { lhs, rhs, .. } => pure_index(body, *lhs) && pure_index(body, *rhs),
-        HirKind::Un { operand, .. } => pure_index(body, *operand),
+        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => pure_index(body, *operand),
         HirKind::Field { base, .. } => pure_base(body, *base),
         _ => false,
     }
@@ -352,14 +355,10 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     if body.ret.as_ref().and_then(|ty| classify(checker, ty)).is_none() {
         return Some("return-type");
     }
-    if body.locals.iter().enumerate().any(|(i, l)| {
-        match l.ty.as_ref().and_then(|ty| classify(checker, ty)) {
-            // `let _ = f()` of a unit call: run for effect, no slot.
-            Some(ValueClass::Unit) => is_read(body, LocalId(i as u32)),
-            Some(_) => false,
-            None => true,
-        }
-    }) {
+    // A `()` local (`let _ = f()`, the `Ok(ok)` of a `?`) has no slot: it
+    // is only read as a statement, and a value read is refused as a value
+    // type.
+    if body.locals.iter().any(|l| l.ty.as_ref().and_then(|ty| classify(checker, ty)).is_none()) {
         return Some("local-type");
     }
     let root = body.root?;
@@ -376,11 +375,6 @@ fn is_host_handle(name: &str) -> bool {
     matches!(name, coil_ty::STREAM | "Thread" | "Sender" | "Receiver" | "Mutex" | "RwLock")
 }
 
-/// Whether any node reads `local`.
-fn is_read(body: &HirBody, local: LocalId) -> bool {
-    body.exprs.iter().any(|e| e.kind == HirKind::Local(local))
-}
-
 /// A `()`-typed local: bound by `let` for its initializer's effect only.
 pub fn is_unit_local(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
     body.local(local)
@@ -390,12 +384,29 @@ pub fn is_unit_local(body: &HirBody, checker: &Checker, local: LocalId) -> bool 
         == Some(ValueClass::Unit)
 }
 
-/// `int`, `float` or `bool`: one immediate word with a primitive lane.
+/// `int`, `float`, `bool` or `byte`: one immediate word with a primitive
+/// lane (`byte` shares the int lane).
 pub fn is_scalar(ty: &Ty) -> bool {
-    matches!(
-        strip_readonly(ty),
-        Ty::Con(n) if n == coil_ty::INT || n == coil_ty::FLOAT || n == coil_ty::BOOL
-    )
+    primitive(ty).is_some()
+}
+
+/// The primitive name of a scalar type, as the cast opcodes key it.
+pub fn primitive(ty: &Ty) -> Option<&'static str> {
+    match strip_readonly(ty) {
+        Ty::Con(n) if n == coil_ty::INT => Some(coil_ty::INT),
+        Ty::Con(n) if n == coil_ty::FLOAT => Some(coil_ty::FLOAT),
+        Ty::Con(n) if n == coil_ty::BOOL => Some(coil_ty::BOOL),
+        Ty::Con(n) if n == coil_ty::BYTE => Some(coil_ty::BYTE),
+        _ => None,
+    }
+}
+
+/// A one-byte string literal typed `byte`: pushed as its code.
+pub fn byte_literal(raw: &str) -> Option<u8> {
+    match crate::codegen::unescape_coil_string(raw).as_bytes() {
+        [b] => Some(*b),
+        _ => None,
+    }
 }
 
 /// `float` (the lane picks the `*F` opcodes).
@@ -440,9 +451,11 @@ pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
 /// Payload fields an arm's pattern names, in declaration order: `Some(l)`
 /// for a binding, `None` for `_`. `Err` for a pattern that tests more than
 /// the outer tag.
-pub fn arm_fields(pat: &HirPat) -> Result<Vec<Option<super::LocalId>>, &'static str> {
+pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::LocalId>>, &'static str> {
     let field = |p: &HirPat| match p {
         HirPat::Wild => Ok(None),
+        // A `()` payload (`Ok(ok)` of the `?` desugaring) binds no word.
+        HirPat::Bind(l) if body.local(*l).ty.as_ref().is_some_and(super::layout::is_unit) => Ok(None),
         HirPat::Bind(l) => Ok(Some(*l)),
         _ => Err("pattern-nested"),
     };
@@ -466,7 +479,10 @@ pub fn is_identity_arm(body: &HirBody, arm: &HirArm) -> bool {
             fields: HirPatFields::Tuple(parts),
             ..
         } => match parts.as_slice() {
-            [HirPat::Bind(l)] => matches!(body.expr(arm.body).kind, HirKind::Local(r) if r == *l),
+            [HirPat::Bind(l)] => {
+                !body.local(*l).ty.as_ref().is_some_and(super::layout::is_unit)
+                    && matches!(body.expr(arm.body).kind, HirKind::Local(r) if r == *l)
+            }
             _ => false,
         },
         _ => false,
@@ -483,7 +499,7 @@ pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
         }
         match &arm.pat {
             HirPat::Bind(_) => true,
-            pat => arm_fields(pat).is_ok_and(|f| f.iter().any(Option::is_some)),
+            pat => arm_fields(body, pat).is_ok_and(|f| f.iter().any(Option::is_some)),
         }
     })
 }
@@ -498,7 +514,7 @@ pub fn stages_rhs(body: &HirBody, rhs: HirId) -> bool {
         HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
             stages_rhs(body, *lhs) || stages_rhs(body, *rhs)
         }
-        HirKind::Un { operand, .. } => stages_rhs(body, *operand),
+        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => stages_rhs(body, *operand),
         _ => false,
     }
 }
@@ -592,8 +608,10 @@ impl Walk<'_> {
         let body = self.body;
         match &body.expr(id).kind {
             HirKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Bool(_)) => self.scalar(id),
-            HirKind::Lit(Lit::Str(_)) => {
-                if matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING) {
+            HirKind::Lit(Lit::Str(raw)) => {
+                if matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING)
+                    || (self.ty(id).and_then(primitive) == Some(coil_ty::BYTE) && byte_literal(raw).is_some())
+                {
                     Ok(())
                 } else {
                     Err("literal")
@@ -623,6 +641,15 @@ impl Walk<'_> {
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
                 self.value(*operand, depth)
+            }
+            // Between scalars: one cast opcode (none for a same-type cast).
+            HirKind::Cast { value } => {
+                let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
+                let to = self.ty(id).and_then(primitive).ok_or("cast")?;
+                if from != to && cast_opcode(from, to).is_none() {
+                    return Err("cast");
+                }
+                self.value(*value, depth)
             }
             HirKind::Call {
                 callee: Callee::Named { name, .. },
@@ -773,7 +800,7 @@ impl Walk<'_> {
             self.word(id)?;
         }
         for arm in arms {
-            arm_fields(&arm.pat)?;
+            arm_fields(self.body, &arm.pat)?;
         }
         if depth != 0 && match_needs_slots(self.body, arms) {
             return Err("nested-match");
@@ -910,11 +937,13 @@ impl Walk<'_> {
                 }
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
+            HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }
+            | HirKind::Cast { .. }
             | HirKind::Make { .. }
             | HirKind::Field { .. }
             | HirKind::Index { .. }
