@@ -46,7 +46,8 @@ impl Rep {
 /// Labels of one enclosing HIR loop.
 #[derive(Clone, Copy)]
 struct HirLoop {
-    top: IlLabel,
+    /// Where `continue` jumps: the loop top, or a counted loop's latch.
+    cont: IlLabel,
     exit: IlLabel,
 }
 
@@ -1521,6 +1522,22 @@ impl Compiler {
                 }
             }
             HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
+            HirKind::ForIn { iterable, body, .. } => {
+                let (start, end) = hir.expr(id).span;
+                // A parallel-loop site keeps the AST's `try_emit_par_loop`.
+                if self.loop_par_sites.contains_key(&(start, end)) {
+                    return Err("for-in-par");
+                }
+                match lower::range_bounds(hir, *iterable) {
+                    Some(bounds) => {
+                        for b in bounds {
+                            self.hir_check_value(hir, emit, b, &BOXED)?;
+                        }
+                    }
+                    None => self.hir_check_value(hir, emit, *iterable, &BOXED)?,
+                }
+                self.hir_check_effect(hir, emit, *body)
+            }
             HirKind::Break | HirKind::Continue => Ok(()),
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
                 Some(v) => self.hir_check_value(hir, emit, v, &emit.ret),
@@ -2668,7 +2685,7 @@ impl Compiler {
                 let top = self.bytecode.fresh_label();
                 let exit = self.bytecode.fresh_label();
                 self.bytecode.bind_label(top);
-                emit.loops.push(HirLoop { top, exit });
+                emit.loops.push(HirLoop { cont: top, exit });
                 // `while c { b }` keeps the AST loop shape: test, body, back edge.
                 if let Some((cond, then)) = lower::while_shape(hir, *body) {
                     self.hir_value(hir, emit, cond, &BOXED, 0);
@@ -2681,12 +2698,18 @@ impl Compiler {
                 self.hir_jump(IlJumpKind::Unconditional, top);
                 self.bytecode.bind_label(exit);
             }
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(kind),
+            } => self.hir_for_in(hir, emit, id, *local, *iterable, *body, kind),
             HirKind::Break => {
                 let target = emit.loops.last().expect("break inside a loop").exit;
                 self.hir_jump(IlJumpKind::Unconditional, target);
             }
             HirKind::Continue => {
-                let target = emit.loops.last().expect("continue inside a loop").top;
+                let target = emit.loops.last().expect("continue inside a loop").cont;
                 self.hir_jump(IlJumpKind::Unconditional, target);
             }
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
@@ -2740,6 +2763,127 @@ impl Compiler {
             DebugLoc::unknown(),
             crate::il::FuseHint::nofuse_value_under_jmp(),
         );
+    }
+
+    /// `for x in a..b` / `for x in arr`, in the AST's counted-loop shapes
+    /// (`emit_for_in_range_latch` / `emit_for_in_array_loop`).
+    #[allow(clippy::too_many_arguments)]
+    fn hir_for_in(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        id: HirId,
+        local: LocalId,
+        iterable: HirId,
+        body: HirId,
+        kind: &ForInKind,
+    ) {
+        // The counter the latch steps by one, and whether it is a float.
+        let (step_slot, step_float): (u32, bool);
+        let top = self.bytecode.fresh_label();
+        // No `continue`: the latch is the body's end (the while shape MIR
+        // vectorize / dense match).
+        let cont = lower::has_own_continue(hir, body).then(|| self.bytecode.fresh_label());
+        let exit = self.bytecode.fresh_label();
+        match *kind {
+            ForInKind::Range { inclusive, float } => {
+                let [lo, hi] = lower::range_bounds(hir, iterable).expect("planned range bounds");
+                let cur = self.alloc_temp_slot();
+                let end = self.alloc_temp_slot();
+                self.hir_value(hir, emit, lo, &BOXED, 0);
+                self.expr_depth = 0;
+                self.bytecode.push_store_pop(cur);
+                self.hir_value(hir, emit, hi, &BOXED, 0);
+                self.expr_depth = 0;
+                self.bytecode.push_store_pop(end);
+                let alias = !lower::assigns_local(hir, body, local);
+                let x = self.hir_bind_local(hir, local);
+                emit.slots[local.0 as usize] = Some(x);
+                if alias {
+                    // `x` is the IV; a copy would let DestProp kill the step.
+                    self.bytecode.push_load(cur);
+                    self.bytecode.push_store_pop(x);
+                }
+                let iv = if alias { x } else { cur };
+                self.bytecode.bind_label(top);
+                self.bytecode.push_load(iv);
+                self.bytecode.push_load(end);
+                self.bytecode.push(Byte::new(match (float, inclusive) {
+                    (true, true) => Instruction::LEQF,
+                    (true, false) => Instruction::LEF,
+                    (false, true) => Instruction::LEQ,
+                    (false, false) => Instruction::LE,
+                }));
+                self.hir_jump(IlJumpKind::JumpIfFalse, exit);
+                if !alias {
+                    self.bytecode.push_load(cur);
+                    self.bytecode.push_store_pop(x);
+                }
+                (step_slot, step_float) = (iv, float);
+            }
+            ForInKind::Array => {
+                let node = hir.expr(id);
+                let (start, end) = node.span;
+                let pin = node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n))
+                    || self.typed_sidecar.is_for_in_pin_span(start, end);
+                let arr = self.alloc_temp_slot();
+                let idx = self.alloc_temp_slot();
+                self.hir_value(hir, emit, iterable, &BOXED, 0);
+                self.expr_depth = 0;
+                self.bytecode.push_store_pop(arr);
+                self.bytecode.push_const(0);
+                self.bytecode.push_store_pop(idx);
+                let len = self.alloc_temp_slot();
+                self.bytecode.push_load(arr);
+                self.bytecode.push(Byte::new(Instruction::ArrayLen));
+                self.bytecode.push_store_pop(len);
+                if pin {
+                    self.bytecode.push_load(arr);
+                    self.bytecode.push_array_pin(arr);
+                    self.pinned_array_slots.insert(arr);
+                }
+                let x = self.hir_bind_local(hir, local);
+                emit.slots[local.0 as usize] = Some(x);
+                self.bytecode.bind_label(top);
+                self.bytecode.push_load(idx);
+                self.bytecode.push_load(len);
+                self.bytecode.push(Byte::new(Instruction::LE));
+                self.hir_jump(IlJumpKind::JumpIfFalse, exit);
+                if pin {
+                    self.bytecode.push_load(idx);
+                    self.bytecode.push_index_pin_unchecked(arr);
+                } else {
+                    self.bytecode.push_load(arr);
+                    self.bytecode.push_load(idx);
+                    self.bytecode.push_index();
+                }
+                self.bytecode.push_store_pop(x);
+                (step_slot, step_float) = (idx, false);
+            }
+            _ => unreachable!("HIR lowering admitted for-in {kind:?}"),
+        }
+        emit.loops.push(HirLoop {
+            cont: cont.unwrap_or(top),
+            exit,
+        });
+        self.hir_effect(hir, emit, body);
+        emit.loops.pop();
+        if let Some(cont) = cont {
+            self.bytecode.bind_label(cont);
+        }
+        self.bytecode.push_load(step_slot);
+        if step_float {
+            let bits = Value::from(1.0_f64).raw() as u64;
+            let one = self.intern_constant(bits);
+            self.bytecode.push_const_pool(one);
+            self.bytecode.push(Byte::new(Instruction::ADDF));
+        } else {
+            self.bytecode.push_const(1);
+            self.bytecode.push(Byte::new(Instruction::ADD));
+        }
+        self.bytecode.push_store_pop(step_slot);
+        self.hir_jump(IlJumpKind::Unconditional, top);
+        self.bytecode.bind_label(exit);
     }
 
     fn hir_jump(&mut self, kind: IlJumpKind, target: IlLabel) {
