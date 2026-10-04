@@ -16528,7 +16528,6 @@ impl Compiler {
                 && !*is_coro
                 && type_params.is_empty()
                 && dict_arity == 0
-                && !self.compiling_method
                 && self.try_lower_hir_function(span, body);
             if !lowered {
                 let mut c = self.do_compile(body);
@@ -18657,10 +18656,15 @@ impl Compiler {
                 let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
-                let mut body_bc = self.do_compile(body);
-                self.bytecode.append(&mut body_bc);
+                let lowered = self.try_lower_hir_function(span, body);
+                if !lowered {
+                    let mut body_bc = self.do_compile(body);
+                    self.bytecode.append(&mut body_bc);
+                }
 
-                if !self.region_ends_with_return(body_op_start) {
+                // A lowered body can end on an unreachable join label.
+                let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+                if ends_on_label || !self.region_ends_with_return(body_op_start) {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }

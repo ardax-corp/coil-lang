@@ -4,9 +4,12 @@
 //! operators, direct calls, `if`, loops, `break` / `continue` and `return`.
 //! Phase 3 adds enums: `Make` of a variant, `match` on an enum (so the `?`
 //! and `??` desugarings), `Option` / `Result` in every layout, string
-//! literals as opaque values, and Result-mode bodies. Any other node, type
-//! or body shape keeps the AST codegen for the whole function, and the
-//! reason it was refused is counted in `--opt-stats`.
+//! literals as opaque values, and Result-mode bodies. Phase 4 adds
+//! non-generic user classes: `new`, field reads and writes, inherent method
+//! and static calls, method and test bodies, and `let p = new C(..)` kept in
+//! frame slots when `p` only ever has its fields read or written. Any other
+//! node, type or body shape keeps the AST codegen for the whole function,
+//! and the reason it was refused is counted in `--opt-stats`.
 //!
 //! The VM shares one stack between locals and operands, so a store to a new
 //! slot is only safe with no operand live below it. [`refusal`] therefore
@@ -16,7 +19,7 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind};
+use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, Lit, LocalId, MakeKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
@@ -32,6 +35,8 @@ pub enum ValueClass {
     Opaque,
     /// `Option`, `Result` or a closed, non-generic user enum.
     Enum,
+    /// An instance of a non-generic user class: one heap pointer word.
+    Object,
 }
 
 /// The class of `ty`, or `None` when the lowering does not handle it.
@@ -50,6 +55,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
     }
     match ty {
         Ty::Con(n) if n == coil_ty::STRING => Some(ValueClass::Opaque),
+        // Host handles (`io` streams, threads, channels, locks): one word.
+        Ty::Con(n) if is_host_handle(n) && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
+            Some(ValueClass::Opaque)
+        }
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
         Ty::App(head, args) => {
             let Ty::Con(name) = head.as_ref() else {
@@ -83,8 +92,72 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             user_enum(checker, name, seen)
         }
+        Ty::Con(name) if checker.is_class(name) => object_class(checker, name),
         Ty::Con(name) => user_enum(checker, name, seen),
         _ => None,
+    }
+}
+
+/// A user class the lowering builds and reads: not generic, with every
+/// field type closed.
+fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
+    let key = checker.resolve_class_key(name)?;
+    let ctors = &checker.generics().generic_type_ctors;
+    if ctors.contains_key(&key) || ctors.contains_key(name) {
+        return None;
+    }
+    let fields = checker.class_fields(&key)?;
+    fields
+        .iter()
+        .all(|(_, ty)| super::layout::ty_is_closed(ty))
+        .then_some(ValueClass::Object)
+}
+
+/// The class `let x = new C(..)` keeps in frame slots instead of a heap
+/// object (as the AST codegen does): no `fn drop()` and 1 to 32 fields.
+pub fn sroa_class(body: &HirBody, checker: &Checker, init: HirId) -> Option<String> {
+    let HirKind::Make {
+        kind: MakeKind::Class(name),
+        ..
+    } = &body.expr(init).kind
+    else {
+        return None;
+    };
+    let key = checker.resolve_class_key(name)?;
+    let n = checker.class_fields(&key)?.len();
+    (!checker.class_has_drop(&key) && (1..=32).contains(&n)).then_some(key)
+}
+
+/// Whether `local` is only ever the base of a field read or write (so its
+/// fields can live in frame slots with no object behind them).
+pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
+    let bases: std::collections::HashSet<u32> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            HirKind::Field { base, .. } => Some(base.0),
+            _ => None,
+        })
+        .collect();
+    let assigned = body.exprs.iter().any(|e| match e.kind {
+        HirKind::Assign { place, .. } => body.expr(place).kind == HirKind::Local(local),
+        _ => false,
+    });
+    !assigned
+        && body
+            .exprs
+            .iter()
+            .enumerate()
+            .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
+}
+
+/// A place base that reads no state twice: `x` or `x.f.g`. A compound
+/// assignment builds its place twice, so the base must be safe to repeat.
+fn pure_base(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Local(_) => true,
+        HirKind::Field { base, .. } => pure_base(body, *base),
+        _ => false,
     }
 }
 
@@ -112,7 +185,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
             super::layout::ty_is_closed(field)
                 && matches!(
                     classify_in(checker, field, seen),
-                    Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum)
+                    Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object)
                 )
         })
     });
@@ -122,7 +195,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
-    if body.kind != BodyKind::Function {
+    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test) {
         return Some("body-kind");
     }
     if body.is_coro {
@@ -137,11 +210,13 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     if body.ret.as_ref().and_then(|ty| classify(checker, ty)).is_none() {
         return Some("return-type");
     }
-    if body.locals.iter().any(|l| {
-        !matches!(
-            l.ty.as_ref().and_then(|ty| classify(checker, ty)),
-            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum)
-        )
+    if body.locals.iter().enumerate().any(|(i, l)| {
+        match l.ty.as_ref().and_then(|ty| classify(checker, ty)) {
+            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => false,
+            // `let _ = f()` of a unit call: run for effect, no slot.
+            Some(ValueClass::Unit) => is_read(body, LocalId(i as u32)),
+            None => true,
+        }
     }) {
         return Some("local-type");
     }
@@ -152,6 +227,25 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         loops: 0,
     };
     walk.effect(root, 0).err()
+}
+
+/// The builtin opaque types the `io` and `thread` modules export.
+fn is_host_handle(name: &str) -> bool {
+    matches!(name, coil_ty::STREAM | "Thread" | "Sender" | "Receiver" | "Mutex" | "RwLock")
+}
+
+/// Whether any node reads `local`.
+fn is_read(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| e.kind == HirKind::Local(local))
+}
+
+/// A `()`-typed local: bound by `let` for its initializer's effect only.
+pub fn is_unit_local(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
+    body.local(local)
+        .ty
+        .as_ref()
+        .and_then(|ty| classify(checker, ty))
+        == Some(ValueClass::Unit)
 }
 
 /// `int`, `float` or `bool`: one immediate word with a primitive lane.
@@ -299,9 +393,33 @@ impl Walk<'_> {
     /// A value a local, argument or payload can hold.
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
-            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum) => Ok(()),
+            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => Ok(()),
             _ => Err("value-type"),
         }
+    }
+
+    fn object(&self, id: HirId) -> Check {
+        if self.class(id) == Some(ValueClass::Object) {
+            Ok(())
+        } else {
+            Err("receiver-type")
+        }
+    }
+
+    /// Call arguments: plain values (no `name:` or `...`), each staged at
+    /// depth zero when `staged`, else pushed on the ones before it.
+    fn args(&mut self, args: &[HirId], depth: u32, staged: bool) -> Check {
+        for (i, &arg) in args.iter().enumerate() {
+            if matches!(
+                self.body.expr(arg).kind,
+                HirKind::Named { .. } | HirKind::Spread(_)
+            ) {
+                return Err("call-argument");
+            }
+            self.word(arg)?;
+            self.value(arg, if staged { 0 } else { depth + i as u32 })?;
+        }
+        Ok(())
     }
 
     /// `id` pushes its value on top of `depth` live operands.
@@ -348,19 +466,42 @@ impl Walk<'_> {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
-                for (i, &arg) in args.iter().enumerate() {
-                    if matches!(
-                        body.expr(arg).kind,
-                        HirKind::Named { .. } | HirKind::Spread(_)
-                    ) {
-                        return Err("call-argument");
-                    }
-                    self.word(arg)?;
-                    self.value(arg, depth + i as u32)?;
+                self.args(args, depth, false)
+            }
+            // `recv.m(args)` stages the receiver and each argument through
+            // temps at depth zero, as the AST codegen does.
+            HirKind::Call {
+                callee: Callee::Method { .. },
+                args,
+            } => {
+                if self.class(id).is_none() {
+                    return Err("call-type");
                 }
-                Ok(())
+                let recv = *args.first().ok_or("method-receiver")?;
+                self.object(recv)?;
+                self.args(args, depth, depth == 0)
             }
             HirKind::Call { .. } => Err("callee"),
+            HirKind::Field { base, .. } => {
+                self.word(id)?;
+                self.object(*base)?;
+                // `new C(..).f` reads the argument directly in the AST.
+                if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
+                    return Err("field-of-new");
+                }
+                self.value(*base, depth)
+            }
+            HirKind::Make {
+                kind: MakeKind::Class(_),
+                args,
+            } => {
+                // The object stays in a temp that must be the top of stack.
+                if depth != 0 {
+                    return Err("nested-new");
+                }
+                self.object(id)?;
+                self.args(args, 0, true)
+            }
             HirKind::Make {
                 kind: MakeKind::Variant { .. },
                 args,
@@ -461,10 +602,26 @@ impl Walk<'_> {
                 }
             }
             HirKind::Let {
-                init: Some(init), ..
+                local,
+                init: Some(init),
             } => {
                 if depth != 0 {
                     return Err("nested-let");
+                }
+                if is_unit_local(body, self.checker, *local) {
+                    return self.effect(*init, depth);
+                }
+                if sroa_class(body, self.checker, *init).is_some() {
+                    // The AST keeps the fields in slots and boxes on escape;
+                    // only the no-escape case is lowered.
+                    if !only_field_base(body, *local) {
+                        return Err("class-escape");
+                    }
+                    let HirKind::Make { args, .. } = &body.expr(*init).kind else {
+                        unreachable!()
+                    };
+                    self.object(*init)?;
+                    return self.args(args, 0, true);
                 }
                 self.word(*init)?;
                 self.value(*init, depth)
@@ -474,11 +631,24 @@ impl Walk<'_> {
                 if depth != 0 {
                     return Err("nested-assign");
                 }
-                if !matches!(body.expr(*place).kind, HirKind::Local(_)) {
-                    return Err("assign-place");
+                match &body.expr(*place).kind {
+                    HirKind::Local(_) => {
+                        self.word(*value)?;
+                        self.value(*value, depth)
+                    }
+                    // `base.f = v`: the value, then the base on top of it.
+                    HirKind::Field { base, .. } => {
+                        if !pure_base(body, *base) {
+                            return Err("assign-base");
+                        }
+                        self.word(*place)?;
+                        self.object(*base)?;
+                        self.word(*value)?;
+                        self.value(*value, depth)?;
+                        self.value(*base, depth + 1)
+                    }
+                    _ => Err("assign-place"),
                 }
-                self.word(*value)?;
-                self.value(*value, depth)
             }
             HirKind::If { cond, then, els } => {
                 self.scalar(*cond)?;
@@ -525,6 +695,7 @@ impl Walk<'_> {
             | HirKind::Logic { .. }
             | HirKind::Un { .. }
             | HirKind::Make { .. }
+            | HirKind::Field { .. }
             | HirKind::Call { .. } => self.value(id, depth),
             other => Err(kind_name(other)),
         }

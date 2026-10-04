@@ -59,6 +59,9 @@ struct HirCall {
     params: Vec<ValueLayout>,
     /// One-word layout of the result (when not a pair).
     ret: ValueLayout,
+    /// `recv.m(args)`: the receiver is argument 0; never inlined or a
+    /// tail call (as in the AST codegen).
+    method: bool,
 }
 
 /// Per-body lowering state.
@@ -82,6 +85,9 @@ struct HirEmit {
     pair_locals: HashMap<u32, String>,
     /// Tag slot of each bound pair local (its payload slot is in `slots`).
     tag_slots: HashMap<u32, u32>,
+    /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
+    /// local): local to its resolved class; field `i` is slot `slot + i`.
+    sroa: HashMap<u32, String>,
 }
 
 type Check = Result<(), &'static str>;
@@ -96,7 +102,8 @@ impl Compiler {
         }
         let hir = crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast);
         for (i, body) in hir.bodies.iter().enumerate() {
-            if body.kind == crate::hir::BodyKind::Function {
+            use crate::hir::BodyKind;
+            if matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test) {
                 self.hir_fns.insert(body.span, i);
             }
         }
@@ -117,17 +124,22 @@ impl Compiler {
             return false;
         };
         let hir = &module.bodies[index];
-        // The body's pre-order position; the emit cursor may still sit on
-        // parameter nodes before it, never past it.
+        // Where the AST walk would start the body: the body's pre-order
+        // position when the emit cursor still sits on parameter nodes before
+        // it, else the cursor itself (it can run ahead of the pre-order ids
+        // in `impl` blocks, and the walk takes one id per node from there).
         let table = self.checker.id_table();
         let body_pos = table
             .walk_id(body, table.ids().get(self.emit_idx).copied())
-            .map(|id| id.0 as usize)
-            .filter(|&pos| pos >= self.emit_idx && pos < table.len());
-        let plan = if body_pos.is_some() {
-            None
-        } else {
+            .map(|id| (id.0 as usize).max(self.emit_idx))
+            .filter(|&pos| pos < table.len());
+        let plan = if body_pos.is_none() {
             Some("emit-cursor")
+        } else if hir.result_mode != self.compiling_result_mode {
+            // Method result mode is keyed by the bare name in the AST.
+            Some("result-mode")
+        } else {
+            None
         }
         .or_else(|| lower::refusal(hir, &self.checker))
         .map_or_else(|| self.plan_hir_body(hir), Err);
@@ -185,6 +197,7 @@ impl Compiler {
             payload_base: None,
             pair_locals: HashMap::new(),
             tag_slots: HashMap::new(),
+            sroa: HashMap::new(),
         };
         for &param in &hir.params {
             let slot = self
@@ -200,6 +213,22 @@ impl Compiler {
             {
                 let call = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
                 emit.calls.insert(i as u32, call);
+            }
+            if let HirKind::Call {
+                callee: Callee::Method { name },
+                args,
+            } = &expr.kind
+            {
+                let call = self.resolve_hir_method(hir, HirId(i as u32), name, args)?;
+                emit.calls.insert(i as u32, call);
+            }
+            if let HirKind::Let {
+                local,
+                init: Some(init),
+            } = expr.kind
+                && let Some(class) = lower::sroa_class(hir, &self.checker, init)
+            {
+                emit.sroa.insert(local.0, class);
             }
         }
         let assigned: HashSet<u32> = hir
@@ -227,6 +256,7 @@ impl Compiler {
         for expr in &hir.exprs {
             if let HirKind::Return(Some(value)) = expr.kind
                 && let Some(call) = emit.calls.get(&value.0)
+                && !call.method
                 && Self::hir_call_rep(call) == emit.ret
                 && self.hir_tail_call_ok(&call.key)
             {
@@ -280,8 +310,12 @@ impl Compiler {
         {
             return Err("callee-overload");
         }
-        let mut key = self.resolve_free_fn(name);
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let mut key = match name.rsplit_once("::") {
+            // `C::f(..)`: the static method, keyed like `compile_construct_expr`.
+            Some((owner, member)) if self.checker.is_class(owner) => self.class_member_fqn(owner, member),
+            _ => self.resolve_free_fn(name),
+        };
         if !known(&key) && !self.namespace.is_empty() && !key.contains("::") {
             key = format!("{}::{}", self.namespace, key);
         }
@@ -295,6 +329,66 @@ impl Compiler {
         if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
         }
+        self.hir_call_abi(key, &lookup, argc, None)
+    }
+
+    /// The table key and ABI of `recv.method(args)` (`args[0]` is the
+    /// receiver), when it is a plain `CALL` to an inherent method of a user
+    /// class; checked in `compile_call_expr`'s order.
+    fn resolve_hir_method(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        method: &str,
+        args: &[HirId],
+    ) -> Result<HirCall, &'static str> {
+        let node = hir.expr(call);
+        let (start, end) = node.span;
+        if self.existential_method_hint(node.node, start, end).is_some()
+            || self.bound_method_hint(node.node, start, end).is_some()
+            || self.sidecar_dicts(node.node, start, end).is_some_and(|d| !d.is_empty())
+        {
+            return Err("callee-trait");
+        }
+        if self.sidecar_overload(node.node, start, end).is_some() {
+            return Err("callee-overload");
+        }
+        let recv = *args.first().ok_or("method-receiver")?;
+        let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
+        let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
+        if lower::classify(&self.checker, &recv_ty) != Some(ValueClass::Object) {
+            return Err("method-receiver");
+        }
+        let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
+        let key = self
+            .context
+            .methods
+            .get(owner)
+            .and_then(|m| m.get(method))
+            .cloned()
+            .ok_or("method-unknown")?;
+        if !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key)) {
+            return Err("method-unknown");
+        }
+        if self.checker.is_overloaded(&key) {
+            return Err("callee-overload");
+        }
+        let lookup = key.clone();
+        let mut call = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)))?;
+        call.method = true;
+        Ok(call)
+    }
+
+    /// The ABI of a call to `key` with `argc` arguments, of which the first
+    /// is `self` (in `self_layout`) for a method call.
+    fn hir_call_abi(
+        &self,
+        key: String,
+        lookup: &str,
+        argc: usize,
+        self_layout: Option<ValueLayout>,
+    ) -> Result<HirCall, &'static str> {
+        let lookup = lookup.to_string();
         if self.checker.is_generic_fn(&lookup) {
             return Err("callee-generic");
         }
@@ -308,22 +402,37 @@ impl Compiler {
         if pair.as_deref().is_some_and(|k| !self.hir_pair_enum(k)) {
             return Err("callee-pair");
         }
+        let explicit = argc - usize::from(self_layout.is_some());
         match self
             .fn_arities
             .get(&key)
             .or_else(|| self.fn_arities.get(&lookup))
         {
-            Some(&(fixed, false)) if fixed as usize == argc => {}
+            Some(&(fixed, false)) if fixed as usize == explicit => {}
             _ => return Err("callee-arity"),
         }
-        let param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
-        if param_tys.len() != argc {
-            return Err("callee-signature");
+        let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
+        // A signature with no declared parameters is `() -> T`.
+        if explicit == 0 && param_tys.last().is_some_and(crate::hir::layout::is_unit) {
+            param_tys.pop();
         }
         let mut params = Vec::with_capacity(argc);
+        let param_tys = match self_layout {
+            // The scheme may or may not list `self`.
+            Some(layout) if param_tys.len() == explicit => {
+                params.push(layout);
+                param_tys
+            }
+            Some(layout) if param_tys.len() == argc => {
+                params.push(layout);
+                param_tys[1..].to_vec()
+            }
+            None if param_tys.len() == argc => param_tys,
+            _ => return Err("callee-signature"),
+        };
         for ty in &param_tys {
             match lower::classify(&self.checker, ty) {
-                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum) => {}
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Enum | ValueClass::Object) => {}
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(ty));
@@ -337,6 +446,7 @@ impl Compiler {
             pair,
             params,
             ret: self.value_layout(&ret_ty),
+            method: false,
         })
     }
 
@@ -480,8 +590,76 @@ impl Compiler {
             }
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
+            HirKind::Field { .. }
+            | HirKind::Make {
+                kind: MakeKind::Class(_),
+                ..
+            } => Some(Rep::Word(
+                Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
+            )),
             _ => None,
         }
+    }
+
+    /// The resolved class of an object-typed node.
+    fn hir_class_of(&self, hir: &HirBody, id: HirId) -> Option<String> {
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        let name = Checker::class_name_of_ty(&ty)?;
+        self.checker.resolve_class_key(name)
+    }
+
+    /// Slot index and declared type of field `name` of the object `base`.
+    fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(u32, Ty)> {
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
+        let idx = self.class_field_slot_of_ty(&ty, name)?;
+        let class = self.hir_class_of(hir, base)?;
+        let fields = self.checker.class_fields(&class)?;
+        let (fname, fty) = fields.get(idx as usize)?;
+        (fname == name).then(|| (idx, fty.clone()))
+    }
+
+    /// `new C(..)`'s class, instance field count and declared field types,
+    /// when the codegen's layout of `C` matches the checker's.
+    fn hir_new_layout(&self, hir: &HirBody, id: HirId) -> Option<(String, Vec<Ty>)> {
+        let HirKind::Make {
+            kind: MakeKind::Class(name),
+            args,
+        } = &hir.expr(id).kind
+        else {
+            return None;
+        };
+        let class = self.resolve_class_ident(name);
+        let fields = self.checker.class_fields(&class)?;
+        let codegen = self.context.classes.get(&class)?;
+        if codegen.len() != fields.len()
+            || args.len() != fields.len()
+            || codegen.iter().zip(&fields).any(|((a, _), (b, _))| a != b)
+        {
+            return None;
+        }
+        Some((class, fields.into_iter().map(|(_, ty)| ty).collect()))
+    }
+
+    /// The field-slot words of a planned `new C(args)`.
+    fn hir_check_new_args(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
+        let (_, tys) = self.hir_new_layout(hir, id).ok_or("class-layout")?;
+        let HirKind::Make { args, .. } = &hir.expr(id).kind else {
+            unreachable!()
+        };
+        for (&arg, ty) in args.iter().zip(&tys) {
+            self.hir_check_value(hir, emit, arg, &Rep::Word(self.value_layout(ty)))?;
+        }
+        Ok(())
+    }
+
+    /// `base.name` as a field of a frame-slot class local: its slot.
+    fn hir_sroa_slot(&self, hir: &HirBody, emit: &HirEmit, base: HirId, name: &str) -> Option<u32> {
+        let HirKind::Local(local) = hir.expr(base).kind else {
+            return None;
+        };
+        emit.sroa.get(&local.0)?;
+        let (idx, _) = self.hir_field(hir, base, name)?;
+        Some(Self::hir_slot(emit, local) + idx)
     }
 
     /// The representation a `match` dispatches on: the pair a two-word call
@@ -526,6 +704,19 @@ impl Compiler {
                     self.hir_check_value(hir, emit, arg, &Rep::Word(param))?;
                 }
             }
+            HirKind::Field { base, name } => {
+                let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
+                let layout = Self::hir_ty(hir, id).map(|ty| self.value_layout(ty));
+                if layout != Some(self.value_layout(&fty)) {
+                    return Err("field-layout");
+                }
+                let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                self.hir_check_value(hir, emit, *base, &base_rep)?;
+            }
+            HirKind::Make {
+                kind: MakeKind::Class(_),
+                ..
+            } => self.hir_check_new_args(hir, emit, id)?,
             HirKind::Make { .. } => return self.hir_check_make(hir, emit, id, want),
             HirKind::Match { scrutinee, arms } => {
                 return self.hir_check_match(hir, emit, *scrutinee, arms, Some(want));
@@ -689,16 +880,28 @@ impl Compiler {
                 local,
                 init: Some(init),
             } => {
+                if lower::is_unit_local(hir, &self.checker, *local) {
+                    return self.hir_check_effect(hir, emit, *init);
+                }
+                if emit.sroa.contains_key(&local.0) {
+                    return self.hir_check_new_args(hir, emit, *init);
+                }
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
             }
-            HirKind::Assign { place, value } => {
-                let HirKind::Local(local) = hir.expr(*place).kind else {
-                    return Err("assign-place");
-                };
-                let want = Rep::Word(self.hir_local_layout(hir, local));
-                self.hir_check_value(hir, emit, *value, &want)
-            }
+            HirKind::Assign { place, value } => match &hir.expr(*place).kind {
+                HirKind::Local(local) => {
+                    let want = Rep::Word(self.hir_local_layout(hir, *local));
+                    self.hir_check_value(hir, emit, *value, &want)
+                }
+                HirKind::Field { base, name } => {
+                    let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
+                    self.hir_check_value(hir, emit, *value, &Rep::Word(self.value_layout(&fty)))?;
+                    let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                    self.hir_check_value(hir, emit, *base, &base_rep)
+                }
+                _ => Err("assign-place"),
+            },
             HirKind::If { cond, then, els } => {
                 self.hir_check_value(hir, emit, *cond, &BOXED)?;
                 self.hir_check_effect(hir, emit, *then)?;
@@ -832,6 +1035,75 @@ impl Compiler {
                     UnOp::BitNot => Instruction::NOT,
                     UnOp::Not => Instruction::LogNot,
                 }));
+            }
+            HirKind::Field { base, name } => {
+                if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
+                    self.bytecode.push_load(slot);
+                } else {
+                    let (idx, _) = self.hir_field(hir, *base, name).expect("planned field");
+                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned field base");
+                    self.hir_value(hir, emit, *base, &base_rep, depth);
+                    self.bytecode.push_load_field(idx);
+                }
+            }
+            HirKind::Make {
+                kind: MakeKind::Class(_),
+                args,
+            } => {
+                // As the AST codegen: the object sits in a temp that is the
+                // top of stack, each argument is stored through it, and the
+                // cursor returns to just above it.
+                debug_assert_eq!(depth, 0);
+                let (class, tys) = self.hir_new_layout(hir, id).expect("planned new");
+                let type_id = self.checker.class_type_id(&class);
+                self.bytecode.push(
+                    Byte::new(Instruction::InitTyped)
+                        .with_operand_u32(common::pack_init_typed(type_id, tys.len() as u32)),
+                );
+                self.expr_depth = depth;
+                let tmp = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(tmp);
+                for (i, (&arg, ty)) in args.iter().zip(&tys).enumerate() {
+                    let want = Rep::Word(self.value_layout(ty));
+                    self.hir_value(hir, emit, arg, &want, 0);
+                    self.bytecode.push_load(tmp);
+                    self.bytecode.push_set_field_slot(i as u32);
+                    self.bytecode.push_pop();
+                }
+                self.bytecode.push_seek(tmp + 1);
+            }
+            HirKind::Call { args, .. } if emit.calls[&id.0].method => {
+                let call = &emit.calls[&id.0];
+                let params = call.params.clone();
+                let key = call.key.clone();
+                let natural = Self::hir_call_rep(call);
+                if depth == 0 {
+                    // Receiver and arguments through temps, as the AST does.
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (&arg, param) in args.iter().zip(params) {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
+                        self.expr_depth = 0;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    for &tmp in &temps {
+                        self.bytecode.push_load(tmp);
+                    }
+                } else {
+                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                    }
+                }
+                let ok = self.emit_named_entry_on_module_ret(
+                    &key,
+                    args.len() as u32,
+                    crate::il::EntryKind::Call,
+                    natural.words(),
+                );
+                debug_assert!(ok, "planned HIR method `{key}` has an entry");
+                self.hir_convert(&natural, want, depth);
+                return;
             }
             HirKind::Call { args, .. } => {
                 let call = &emit.calls[&id.0];
@@ -1417,6 +1689,34 @@ impl Compiler {
                 local,
                 init: Some(init),
             } => {
+                if lower::is_unit_local(hir, &self.checker, *local) {
+                    self.hir_effect(hir, emit, *init);
+                    return;
+                }
+                if let Some(class) = emit.sroa.get(&local.0).cloned() {
+                    // Slots first, then each field stored into its own, as
+                    // the AST's unboxed class local.
+                    let (_, tys) = self.hir_new_layout(hir, *init).expect("planned new");
+                    let HirKind::Make { args, .. } = &hir.expr(*init).kind else {
+                        unreachable!()
+                    };
+                    let base = self.hir_bind_local(hir, *local);
+                    let key = self.context.variables.resolve(base as usize).clone();
+                    for i in 1..tys.len() {
+                        let slot = self.context.variables.intern(format!("__unbox_cls_{key}_{i}")) as u32;
+                        debug_assert_eq!(slot, base + i as u32);
+                    }
+                    self.context
+                        .unboxed_class_locals
+                        .insert(key, (base, tys.len(), class));
+                    emit.slots[local.0 as usize] = Some(base);
+                    for (i, (&arg, ty)) in args.iter().zip(&tys).enumerate() {
+                        let want = Rep::Word(self.value_layout(ty));
+                        self.hir_value(hir, emit, arg, &want, 0);
+                        self.bytecode.push_store_pop(base + i as u32);
+                    }
+                    return;
+                }
                 // Value first: its operands live above every bound slot.
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_value(hir, emit, *init, &want, 0);
@@ -1431,15 +1731,29 @@ impl Compiler {
                 }
                 self.bytecode.push_store_pop(slot);
             }
-            HirKind::Assign { place, value } => {
-                let HirKind::Local(local) = hir.expr(*place).kind else {
-                    unreachable!("HIR lowering admitted a non-local assignment place");
-                };
-                let want = Rep::Word(self.hir_local_layout(hir, local));
-                self.hir_value(hir, emit, *value, &want, 0);
-                let slot = Self::hir_slot(emit, local);
-                self.bytecode.push_store_pop(slot);
-            }
+            HirKind::Assign { place, value } => match &hir.expr(*place).kind {
+                HirKind::Local(local) => {
+                    let want = Rep::Word(self.hir_local_layout(hir, *local));
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    let slot = Self::hir_slot(emit, *local);
+                    self.bytecode.push_store_pop(slot);
+                }
+                HirKind::Field { base, name } => {
+                    let (idx, fty) = self.hir_field(hir, *base, name).expect("planned field");
+                    let want = Rep::Word(self.value_layout(&fty));
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
+                        self.bytecode.push_store_pop(slot);
+                    } else {
+                        // `SetField` pops the object and value, pushes the value.
+                        let base_rep = self.hir_natural(hir, emit, *base).expect("planned field base");
+                        self.hir_value(hir, emit, *base, &base_rep, 1);
+                        self.bytecode.push_set_field_slot(idx);
+                        self.bytecode.push_pop();
+                    }
+                }
+                _ => unreachable!("HIR lowering admitted a non-local assignment place"),
+            },
             HirKind::If { cond, then, els } => {
                 let end = self.bytecode.fresh_label();
                 self.hir_value(hir, emit, *cond, &BOXED, 0);

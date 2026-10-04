@@ -636,6 +636,29 @@ impl<'c, 'm> Cx<'c, 'm> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
+            // `C::f(args)` on a class is a static method call (a bare
+            // `C::f` names a static field first, as in codegen).
+            E::Construct {
+                enum_name,
+                variant_name,
+                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
+            } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit)) => {
+                let id = self.node_id(node);
+                let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
+                let def = id.and_then(|i| self.sidecar.def_id(i));
+                let args = match fields {
+                    EnumConstructPayload::Tuple(items) => self.exprs(b, items),
+                    _ => Vec::new(),
+                };
+                self.emit(
+                    b,
+                    node,
+                    HirKind::Call {
+                        callee: Callee::Named { name: format!("{enum_name}::{variant_name}"), def, overload },
+                        args,
+                    },
+                )
+            }
             E::Construct { enum_name, variant_name, fields } => {
                 let (args, names) = match fields {
                     EnumConstructPayload::Unit => (Vec::new(), None),
@@ -974,6 +997,15 @@ impl<'c, 'm> Cx<'c, 'm> {
                 self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
             }
         }
+    }
+
+    /// `Owner::member` in construct form calls a class's static method.
+    fn static_call(&self, owner: &str, member: &str, bare: bool) -> bool {
+        if self.checker.tag_for(owner, member).is_some() || !self.checker.is_class(owner) {
+            return false;
+        }
+        let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
+        !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
     }
 
     fn make_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, args: Vec<HirId>, fields: Option<Vec<String>>) -> HirId {
