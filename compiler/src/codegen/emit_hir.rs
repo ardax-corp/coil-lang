@@ -123,6 +123,10 @@ enum HirBuiltin {
     /// `format("..", args)` with a literal format and no `%v`: the format
     /// string, then each argument, then `FORMAT`.
     Format,
+    /// A trait method on a bound type parameter in a shared generic body:
+    /// the arguments, the hidden dictionary, then its method slot's code
+    /// pointer through `CallIndirect`.
+    Bound { dict: u32, method: u32 },
 }
 
 /// Per-body lowering state.
@@ -573,8 +577,11 @@ impl Compiler {
         if let Some(builtin) = self.hir_builtin(name) {
             return self.hir_builtin_abi(hir, call, builtin?);
         }
+        if let Some(call) = self.hir_bound_call(hir, call, false)? {
+            return Ok(call);
+        }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object and bound dispatch stay on the AST.
+        // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
             || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
@@ -807,8 +814,11 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
+        if let Some(call) = self.hir_bound_call(hir, call, true)? {
+            return Ok(call);
+        }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object and bound dispatch stay on the AST.
+        // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
             || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
@@ -1089,6 +1099,50 @@ impl Compiler {
             return Some(host(Some(kind.native_name())));
         }
         self.checker.host_fn_in_scope(name).map(|registry| host(Some(registry)))
+    }
+
+    /// A call the typechecker dispatches through a bound's dictionary in a
+    /// shared generic body, as `compile_call_expr`. `None` when it is not
+    /// one; a mono clone (no dictionary slot) stays on the AST.
+    fn hir_bound_call(&self, hir: &HirBody, call: HirId, method: bool) -> Result<Option<HirCall>, &'static str> {
+        let node = hir.expr(call);
+        let (start, end) = node.span;
+        let Some(hint) = self.bound_method_hint(node.node, start, end) else {
+            return Ok(None);
+        };
+        let HirKind::Call { args, .. } = &node.kind else {
+            return Err("callee");
+        };
+        let dict = self.lookup_slot(&format!("__dict{}", hint.dict_index)).ok_or("callee-trait")?;
+        // `recv.m(..)` without a receiver slot drops the receiver.
+        if args.len() != hint.arity || (method && !hint.has_receiver) {
+            return Err("callee-trait");
+        }
+        // Words pass as the AST compiles them; enum layouts may differ.
+        let word = |id: HirId| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Enum) | None => Err("callee-trait"),
+                Some(_) => Ok(self.value_layout(ty)),
+            }
+        };
+        let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
+        let ret = word(call)?;
+        Ok(Some(HirCall {
+            key: String::new(),
+            pair: None,
+            params,
+            ret,
+            method: false,
+            mono: false,
+            builtin: Some(HirBuiltin::Bound {
+                dict,
+                method: hint.method_slot as u32,
+            }),
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        }))
     }
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
@@ -2861,6 +2915,17 @@ impl Compiler {
                         }
                         self.bytecode
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
+                    }
+                    HirBuiltin::Bound { dict, method } => {
+                        for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        }
+                        self.bytecode.push_load(dict);
+                        self.bytecode.push_load(dict);
+                        self.bytecode.push_const(method as i32);
+                        self.bytecode.push_index();
+                        self.bytecode
+                            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments.
