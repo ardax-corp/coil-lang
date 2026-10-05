@@ -92,6 +92,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             if name == "coroutine" && args.len() == 2 {
                 return Some(ValueClass::Opaque);
             }
+            // A GC `Root<T>` / `Weak<T>` handle: one host word, only moved
+            // and passed to the `gc` natives.
+            if matches!(name.as_str(), coil_ty::ROOT | coil_ty::WEAK) && args.len() == 1 && !checker.is_class(name) {
+                return Some(ValueClass::Opaque);
+            }
             // A generic class instance: one object word, its methods shared
             // across instances (fields are only read inside them).
             if is_generic_class(checker, name) {
