@@ -81,8 +81,6 @@ fn result_mode_bodies_are_in_the_subset() {
 
 #[test]
 fn constructs_outside_the_subset_name_their_kind() {
-    let src = "fn f(Vec<(int, int)> xs) -> int { let s = 0; for (a, b) in xs { s += a + b; } return s; }";
-    assert_eq!(refusal_of(src, "f"), Some("for-in-pattern"));
     let src = "fn id<T>(T x) -> T { return x; }";
     assert_eq!(refusal_of(src, "id"), Some("generic"));
 }
@@ -92,6 +90,8 @@ fn counted_for_in_is_in_the_subset() {
     let src = "fn f(int n) -> int { let s = 0; for i in 0..n { s += i; } return s; }";
     assert_eq!(refusal_of(src, "f"), None);
     let src = "fn f(Vec<int> xs) -> int { let s = 0; for x in xs { s += x; } return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Vec<(int, int)> xs) -> int { let s = 0; for (a, b) in xs { s += a + b; } return s; }";
     assert_eq!(refusal_of(src, "f"), None);
     let src = "fn f() -> int { let s = 0; for i in 0..4 { s += i; } return s; }";
     assert_eq!(refusal_of(src, "f"), Some("for-in-unroll"));
