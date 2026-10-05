@@ -1575,7 +1575,7 @@ fn index_kind(ty: Option<&Ty>) -> IndexKind {
 }
 
 /// The primitive lane of `l op r`, or [`BinOp::Overloaded`].
-fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> BinOp {
+pub(crate) fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> BinOp {
     #[derive(PartialEq)]
     enum Lane {
         Int,

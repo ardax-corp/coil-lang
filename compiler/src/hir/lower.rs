@@ -732,8 +732,27 @@ impl Walk<'_> {
                 _ => Err("global"),
             },
             HirKind::Bin { op, lhs, rhs } => {
-                if matches!(op, BinOp::Overloaded(_)) {
-                    return Err("operator");
+                // A user type's operator: a call of its trait instance, or
+                // (`==` / `!=` without one) the VM's structural `EQ` /
+                // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
+                // Either stages through temps, so it runs at depth zero.
+                if let BinOp::Overloaded(sym) = op {
+                    if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
+                        return Err("operator");
+                    }
+                    let elementwise = |id: HirId| {
+                        matches!(
+                            self.ty(id).map(strip_readonly),
+                            Some(Ty::Tuple(_) | Ty::Array { .. } | Ty::List(_))
+                        ) || self.class(id) == Some(ValueClass::Aggregate)
+                    };
+                    if depth != 0 || elementwise(*lhs) || elementwise(*rhs) {
+                        return Err("operator");
+                    }
+                    self.word(*lhs)?;
+                    self.word(*rhs)?;
+                    self.value(*lhs, 0)?;
+                    return self.value(*rhs, rhs_depth(body, *rhs, 0));
                 }
                 // `a + b` is `FORMAT "%s%s"` over both (the format string
                 // sits under them); `==` / `!=` compare strings with `EQ`.

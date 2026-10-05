@@ -130,6 +130,21 @@ struct HirEmit {
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
     /// for `ArrayLen`.
     lens: HashMap<u32, Option<u32>>,
+    /// Each user-type operator, by node.
+    ops: HashMap<u32, HirOp>,
+}
+
+/// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
+enum HirOp {
+    /// `CALL` of the operand type's trait instance method (`emit_concrete_operator_call`).
+    Call {
+        lookup: Ty,
+        fqn: String,
+        class: &'static str,
+        method: &'static str,
+    },
+    /// `EQ` / `NEQ` of the two words.
+    Prim(Instruction),
 }
 
 type Check = Result<(), &'static str>;
@@ -270,6 +285,24 @@ impl Compiler {
             ty.as_ref()
                 .map(|t| apply_ty(&subst, &apply_ty_prune(self.checker.subst(), t)))
         };
+        let mut exprs: Vec<crate::hir::HirExpr> = body
+            .exprs
+            .iter()
+            .map(|e| crate::hir::HirExpr { ty: at(&e.ty), ..e.clone() })
+            .collect();
+        // An operator over a type parameter resolves to its primitive lane
+        // once the instance's types are known (`a + b` at `T = int`).
+        for i in 0..exprs.len() {
+            if let HirKind::Bin {
+                op: BinOp::Overloaded(sym),
+                lhs,
+                rhs,
+            } = exprs[i].kind
+            {
+                let op = crate::hir::build::resolve_bin(sym, exprs[lhs.0 as usize].ty.as_ref(), exprs[rhs.0 as usize].ty.as_ref());
+                exprs[i].kind = HirKind::Bin { op, lhs, rhs };
+            }
+        }
         HirBody {
             name: body.name.clone(),
             kind: body.kind,
@@ -286,11 +319,7 @@ impl Compiler {
                 .iter()
                 .map(|l| crate::hir::HirLocal { ty: at(&l.ty), ..l.clone() })
                 .collect(),
-            exprs: body
-                .exprs
-                .iter()
-                .map(|e| crate::hir::HirExpr { ty: at(&e.ty), ..e.clone() })
-                .collect(),
+            exprs,
             root: body.root,
         }
     }
@@ -335,6 +364,7 @@ impl Compiler {
             sroa: HashMap::new(),
             lens: HashMap::new(),
             consts: HashMap::new(),
+            ops: HashMap::new(),
         };
         for &param in &hir.params {
             let slot = self
@@ -346,6 +376,16 @@ impl Compiler {
             if let HirKind::Global { name, .. } = &expr.kind {
                 let value = self.hir_global_const(hir, HirId(i as u32), name).ok_or("global")?;
                 emit.consts.insert(i as u32, value);
+                continue;
+            }
+            if let HirKind::Bin {
+                op: BinOp::Overloaded(sym),
+                lhs,
+                rhs,
+            } = expr.kind
+            {
+                let op = self.hir_operator(hir, sym, lhs, rhs).ok_or("operator")?;
+                emit.ops.insert(i as u32, op);
                 continue;
             }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
@@ -1278,6 +1318,51 @@ impl Compiler {
         (fname == name).then(|| (idx, fty.clone()))
     }
 
+    /// How `lhs sym rhs` over a user type lowers: its trait instance's
+    /// method when there is one (a one-word result, no dictionary), else
+    /// `EQ` / `NEQ` for `==` / `!=`.
+    fn hir_operator(&self, hir: &HirBody, sym: &'static str, lhs: HirId, rhs: HirId) -> Option<HirOp> {
+        let (class, method) = match sym {
+            "==" => ("Eq", "eq"),
+            "!=" => ("Eq", "ne"),
+            "<" => ("Lt", "lt"),
+            ">" => ("Gt", "gt"),
+            "<=" => ("Le", "le"),
+            ">=" => ("Ge", "ge"),
+            "+" => ("Add", "add"),
+            "-" => ("Sub", "sub"),
+            "*" => ("Mul", "mul"),
+            "/" => ("Div", "div"),
+            _ => return None,
+        };
+        let ty = Self::hir_ty(hir, lhs).or_else(|| Self::hir_ty(hir, rhs))?;
+        match self.concrete_operator_target_ty(ty, class, method) {
+            Some((lookup, fqn)) => {
+                if self.instance_call_takes_dict(class, method, &fqn) {
+                    return None;
+                }
+                let ret = self.checker.fn_return_ty(&fqn)?;
+                if !matches!(
+                    lower::classify(&self.checker, &ret),
+                    Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
+                ) {
+                    return None;
+                }
+                Some(HirOp::Call {
+                    lookup,
+                    fqn,
+                    class,
+                    method,
+                })
+            }
+            None => match sym {
+                "==" => Some(HirOp::Prim(Instruction::EQ)),
+                "!=" => Some(HirOp::Prim(Instruction::NEQ)),
+                _ => None,
+            },
+        }
+    }
+
     /// `class`'s fields with their declared types. A generic class's type
     /// parameters are open there: its one shared body holds them boxed, and
     /// the AST codegen lays a field out by its open type (`Option<Node<T>>`
@@ -1781,6 +1866,46 @@ impl Compiler {
                 self.hir_operands(hir, emit, *lhs, *rhs, depth + 1);
                 self.bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
             }
+            HirKind::Bin {
+                op: BinOp::Overloaded(_),
+                lhs,
+                rhs,
+            } => match &emit.ops[&id.0] {
+                HirOp::Prim(instr) => {
+                    let instr = *instr;
+                    self.hir_operands(hir, emit, *lhs, *rhs, depth);
+                    self.bytecode.push(Byte::new(instr));
+                }
+                HirOp::Call {
+                    lookup,
+                    fqn,
+                    class,
+                    method,
+                } => {
+                    // As `emit_concrete_operator_call`: each operand boxed
+                    // for the instance and stashed in a temp, then the call.
+                    debug_assert_eq!(depth, 0);
+                    let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                    let mut temps = [0u32; 2];
+                    for (temp, operand) in temps.iter_mut().zip([*lhs, *rhs]) {
+                        self.hir_value(hir, emit, operand, &BOXED, 0);
+                        Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                        self.expr_depth = 0;
+                        *temp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(*temp);
+                    }
+                    self.bytecode.push_load(temps[0]);
+                    self.bytecode.push_load(temps[1]);
+                    let mut call = CodeBuf::new();
+                    let span = hir.expr(id).span;
+                    let mut arity = 2;
+                    if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
+                        arity += 1;
+                    }
+                    self.emit_direct_fn_call(&mut call, &fqn, arity);
+                    self.bytecode.append(&mut call);
+                }
+            },
             HirKind::Bin { op, lhs, rhs } => {
                 let float = Self::hir_ty(hir, *lhs).is_some_and(lower::is_float);
                 if !float && let Some((value, shift, instr)) = Self::hir_strength_reduce(hir, *op, *lhs, *rhs) {
