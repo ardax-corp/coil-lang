@@ -73,6 +73,9 @@ struct HirCall {
     generic: Option<Box<HirGeneric>>,
     /// `recv.m(args)` to a ground trait instance's method.
     instance: Option<Box<HirInstanceCall>>,
+    /// Per parameter of a free function taking numeric ranges unboxed: the
+    /// `[start, end]` kind it takes as two words (empty when none does).
+    ranges: Vec<Option<&'static str>>,
 }
 
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
@@ -362,7 +365,7 @@ impl Compiler {
     /// any refusal here is the fallback reason.
     fn plan_hir_body(&self, hir: &HirBody) -> Result<HirEmit, &'static str> {
         let ret = match self.compiling_two_word_enum.clone() {
-            Some(kind) if self.hir_pair_enum(&kind) => Rep::Pair(kind),
+            Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
             None => {
                 let layout = self.return_layout();
@@ -396,10 +399,24 @@ impl Compiler {
         let stacks = lower::stack_arrays(hir);
         emit.stacks = stacks.len;
         emit.box_at = stacks.box_at;
+        let unboxed_ranges = self.current_fn_unboxes_range_params();
         for &param in &hir.params {
-            let slot = self
-                .lookup_slot(&hir.local(param).name)
-                .ok_or("parameter-slot")?;
+            let local = hir.local(param);
+            // A free function's numeric range parameter is `[start, end]`
+            // (`argument_unboxed_range_kind`).
+            let range = local
+                .ty
+                .as_ref()
+                .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                .filter(|_| unboxed_ranges);
+            if let Some(kind) = range {
+                let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
+                emit.slots[param.0 as usize] = Some(start);
+                emit.tag_slots.insert(param.0, end);
+                emit.pair_locals.insert(param.0, kind.to_string());
+                continue;
+            }
+            let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
             emit.slots[param.0 as usize] = Some(slot);
         }
         for (i, expr) in hir.exprs.iter().enumerate() {
@@ -464,15 +481,42 @@ impl Compiler {
             })
             .collect();
         for expr in &hir.exprs {
-            if let HirKind::Let {
+            let HirKind::Let {
                 local,
                 init: Some(init),
             } = expr.kind
-                && !assigned.contains(&local.0)
-                && let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep)
-            {
+            else {
+                continue;
+            };
+            if assigned.contains(&local.0) {
+                continue;
+            }
+            if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {
+                emit.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            // `let r = a..b` or a copy of an unboxed range local, as
+            // `expr_unboxed_range_kind`.
+            let range = match &hir.expr(init).kind {
+                HirKind::Make {
+                    kind: MakeKind::Range { inclusive },
+                    ..
+                } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
+                HirKind::Local(from) => emit
+                    .pair_locals
+                    .get(&from.0)
+                    .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
+                    .cloned(),
+                _ => None,
+            };
+            if let Some(kind) = range {
                 emit.pair_locals.insert(local.0, kind);
             }
+        }
+        // A call passing `[start, end]` pairs is neither a tail call nor
+        // staged above stack-array boxes (`emit_call_args_range_pairs`).
+        if emit.calls.values().any(|c| !c.ranges.is_empty()) && !emit.box_at.is_empty() {
+            return Err("range-args-boxes");
         }
         for expr in &hir.exprs {
             if let HirKind::Return(Some(value)) = expr.kind
@@ -480,6 +524,7 @@ impl Compiler {
                 && !call.method
                 && call.builtin.is_none()
                 && call.generic.is_none()
+                && call.ranges.is_empty()
                 && Self::hir_call_rep(call) == emit.ret
                 && self.hir_tail_call_ok(&call.key)
             {
@@ -657,6 +702,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
+            ranges: Vec::new(),
         })
     }
 
@@ -693,6 +739,31 @@ impl Compiler {
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
         let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
+        // A numeric range's `to_vec` thunk takes the boxed range (as
+        // `compile_call_expr`, the float thunk for a float range).
+        if matches!(owner, "Range" | "RangeInclusive") && method == "to_vec" && args.len() == 1 {
+            let key = if self.range_to_vec_elem_is_float(Some(&recv_ty)) {
+                format!("{owner}::__float_to_vec")
+            } else {
+                format!("{owner}::to_vec")
+            };
+            if !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key)) {
+                return Err("method-unknown");
+            }
+            let ret = Self::hir_ty(hir, call).ok_or("call-type")?;
+            return Ok(HirCall {
+                key,
+                pair: None,
+                params: vec![ValueLayout::Boxed],
+                ret: self.value_layout(ret),
+                method: true,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+            });
+        }
         // A generic class's methods are one shared body (no mono clones):
         // its open signature types keep the body's own layouts.
         let shared = lower::is_generic_class(&self.checker, owner)
@@ -782,6 +853,7 @@ impl Compiler {
                 args: inst_args,
                 recv_box,
             })),
+            ranges: Vec::new(),
         }))
     }
 
@@ -819,6 +891,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
+            ranges: Vec::new(),
         })
     }
 
@@ -854,6 +927,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
+            ranges: Vec::new(),
         })
     }
 
@@ -955,6 +1029,7 @@ impl Compiler {
             builtin: Some(builtin),
             generic: None,
             instance: None,
+            ranges: Vec::new(),
         })
     }
 
@@ -981,7 +1056,7 @@ impl Compiler {
         if pair != self.two_word_return_kind(&lookup) {
             return Err("callee-pair");
         }
-        if pair.as_deref().is_some_and(|k| !self.hir_pair_enum(k)) {
+        if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
             return Err("callee-pair");
         }
         let explicit = argc - usize::from(self_layout.is_some());
@@ -1038,6 +1113,15 @@ impl Compiler {
         if lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
+        // As `emit_call_args_range_pairs`: a plain free function takes its
+        // numeric range parameters as `[start, end]`.
+        let ranges = if self_layout.is_none()
+            && (self.callee_has_unboxed_range_params(&key) || self.callee_has_unboxed_range_params(&lookup))
+        {
+            param_tys.iter().map(crate::typechecking::return_layout::two_word_range_kind).collect()
+        } else {
+            Vec::new()
+        };
         Ok(HirCall {
             key,
             pair,
@@ -1048,6 +1132,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
+            ranges,
         })
     }
 
@@ -1147,12 +1232,29 @@ impl Compiler {
 
     /// A two-word kind the lowering builds and matches: a declared enum
     /// (not a numeric range or a product).
+    fn hir_pair_kind(&self, kind: &str) -> bool {
+        crate::typechecking::return_layout::is_range_kind(kind) || self.hir_pair_enum(kind)
+    }
+
     fn hir_pair_enum(&self, kind: &str) -> bool {
         !crate::typechecking::return_layout::is_two_word_product_kind(kind)
             && crate::typechecking::return_layout::range_kind_inclusive(kind).is_none()
             && self.checker.enum_variants(kind).is_some_and(|v| {
                 !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
             })
+    }
+
+    /// How argument `i` of `call` is passed.
+    fn hir_arg_rep(call: &HirCall, i: usize) -> Rep {
+        match call.ranges.get(i).copied().flatten() {
+            Some(kind) => Rep::Pair(kind.to_string()),
+            None => Rep::Word(call.params[i]),
+        }
+    }
+
+    /// The words `call`'s arguments take on the stack.
+    fn hir_arg_words(call: &HirCall, argc: usize) -> u32 {
+        (0..argc).map(|i| Self::hir_arg_rep(call, i).words()).sum()
     }
 
     fn hir_call_rep(call: &HirCall) -> Rep {
@@ -1668,8 +1770,8 @@ impl Compiler {
             }
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
-                for (&arg, &param) in args.iter().zip(&call.params) {
-                    self.hir_check_value(hir, emit, arg, &Rep::Word(param))?;
+                for (i, &arg) in args.iter().enumerate().take(call.params.len()) {
+                    self.hir_check_value(hir, emit, arg, &Self::hir_arg_rep(call, i))?;
                 }
             }
             HirKind::Field { base, name } => {
@@ -1746,6 +1848,20 @@ impl Compiler {
     }
 
     fn hir_check_make(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
+        if let HirKind::Make {
+            kind: MakeKind::Range { inclusive },
+            args,
+        } = &hir.expr(id).kind
+        {
+            for &bound in args {
+                self.hir_check_value(hir, emit, bound, &BOXED)?;
+            }
+            return match want {
+                Rep::Word(ValueLayout::Boxed) => Ok(()),
+                Rep::Pair(kind) if crate::typechecking::return_layout::range_kind_inclusive(kind) == Some(*inclusive) => Ok(()),
+                _ => Err("make-repr"),
+            };
+        }
         let HirKind::Make {
             kind: MakeKind::Variant {
                 enum_name, variant, ..
@@ -1896,6 +2012,7 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *init, &want)
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
+                HirKind::Local(local) if emit.pair_locals.contains_key(&local.0) => Err("assign-pair"),
                 HirKind::Local(local) => {
                     let want = Rep::Word(self.hir_local_layout(hir, *local));
                     self.hir_check_value(hir, emit, *value, &want)
@@ -1932,19 +2049,23 @@ impl Compiler {
                 }
             }
             HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
-            HirKind::ForIn { iterable, body, .. } => {
+            HirKind::ForIn { iterable, body, kind, .. } => {
                 let (start, end) = hir.expr(id).span;
                 // A parallel-loop site keeps the AST's `try_emit_par_loop`.
                 if self.loop_par_sites.contains_key(&(start, end)) {
                     return Err("for-in-par");
                 }
-                match lower::range_bounds(hir, *iterable) {
-                    Some(bounds) => {
+                match (lower::range_bounds(hir, *iterable), kind) {
+                    (Some(bounds), _) => {
                         for b in bounds {
                             self.hir_check_value(hir, emit, b, &BOXED)?;
                         }
                     }
-                    None => self.hir_check_value(hir, emit, *iterable, &BOXED)?,
+                    (None, Some(ForInKind::Range { inclusive, .. })) => {
+                        let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(*inclusive).to_string());
+                        self.hir_check_value(hir, emit, *iterable, &pair)?
+                    }
+                    (None, _) => self.hir_check_value(hir, emit, *iterable, &BOXED)?,
                 }
                 self.hir_check_effect(hir, emit, *body)
             }
@@ -1993,6 +2114,14 @@ impl Compiler {
             // Above live operands the pair is boxed on the stack: the AST's
             // temps are `STORE`s, which would lift the cursor over them.
             (Rep::Pair(kind), Rep::Word(L::Boxed)) => self.hir_box_pair_on_stack(kind),
+            // A range runs at depth zero (`lower`), where the AST's temps
+            // are safe.
+            (Rep::Word(L::Boxed), Rep::Pair(kind)) if crate::typechecking::return_layout::is_range_kind(kind) => {
+                self.expr_depth = depth;
+                let mut bc = std::mem::take(&mut self.bytecode);
+                self.emit_unbox_range_dict_to_pair(&mut bc);
+                self.bytecode = bc;
+            }
             (Rep::Word(L::Boxed), Rep::Pair(kind)) => {
                 Self::emit_unbox_enum_to_pair(&self.checker, &mut self.bytecode, kind);
             }
@@ -2495,7 +2624,9 @@ impl Compiler {
                 // `STORE`s, which would lift the cursor over live operands.
                 let mono = call.mono;
                 let generic = call.generic.clone();
-                let inline = if tail || depth != 0 || mono || generic.is_some() || self.coroutine_fns.contains(&key) {
+                let ranges = !call.ranges.is_empty();
+                let words = Self::hir_arg_words(call, args.len());
+                let inline = if tail || depth != 0 || mono || ranges || generic.is_some() || self.coroutine_fns.contains(&key) {
                     None
                 } else {
                     self.tiny_inline_body(&key, natural.words())
@@ -2522,8 +2653,11 @@ impl Compiler {
                     self.bytecode.truncate(mark);
                 }
                 if emit.boxes.is_empty() {
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                    let mut at = depth;
+                    for (i, &arg) in args.iter().enumerate() {
+                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        self.hir_value(hir, emit, arg, &rep, at);
+                        at += rep.words();
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
                         }
@@ -2558,12 +2692,7 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
-                let ok = self.emit_named_entry_on_module_ret(
-                    &key,
-                    args.len() as u32 + dicts,
-                    kind,
-                    natural.words(),
-                );
+                let ok = self.emit_named_entry_on_module_ret(&key, words + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.
@@ -2573,6 +2702,30 @@ impl Compiler {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
                 self.hir_convert(&natural, want, depth);
+                return;
+            }
+            HirKind::Make {
+                kind: MakeKind::Range { inclusive },
+                args,
+            } => {
+                let (inclusive, lo, hi) = (*inclusive, args[0], args[1]);
+                if let Rep::Pair(_) = want {
+                    self.hir_value(hir, emit, lo, &BOXED, depth);
+                    self.hir_value(hir, emit, hi, &BOXED, depth + 1);
+                    return;
+                }
+                // As the AST: each bound to a temp, then the slotted object.
+                let mut bounds = [0; 2];
+                for (i, bound) in [lo, hi].into_iter().enumerate() {
+                    self.hir_value(hir, emit, bound, &BOXED, depth);
+                    self.expr_depth = depth + 1;
+                    bounds[i] = self.alloc_temp_slot();
+                    self.expr_depth = depth;
+                    self.bytecode.push_store_pop(bounds[i]);
+                }
+                let mut bc = std::mem::take(&mut self.bytecode);
+                self.emit_box_range_slots(&mut bc, bounds[0], bounds[1], inclusive);
+                self.bytecode = bc;
                 return;
             }
             HirKind::Make { .. } => return self.hir_make(hir, emit, id, want, depth),
@@ -3420,15 +3573,23 @@ impl Compiler {
         let exit = self.bytecode.fresh_label();
         match *kind {
             ForInKind::Range { inclusive, float } => {
-                let [lo, hi] = lower::range_bounds(hir, iterable).expect("planned range bounds");
                 let cur = self.alloc_temp_slot();
                 let end = self.alloc_temp_slot();
-                self.hir_value(hir, emit, lo, &BOXED, 0);
-                self.expr_depth = 0;
-                self.bytecode.push_store_pop(cur);
-                self.hir_value(hir, emit, hi, &BOXED, 0);
-                self.expr_depth = 0;
-                self.bytecode.push_store_pop(end);
+                if let Some([lo, hi]) = lower::range_bounds(hir, iterable) {
+                    self.hir_value(hir, emit, lo, &BOXED, 0);
+                    self.expr_depth = 0;
+                    self.bytecode.push_store_pop(cur);
+                    self.hir_value(hir, emit, hi, &BOXED, 0);
+                    self.expr_depth = 0;
+                    self.bytecode.push_store_pop(end);
+                } else {
+                    // A range value's `[start, end]`, as `emit_for_in_range`.
+                    let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(inclusive).to_string());
+                    self.hir_value(hir, emit, iterable, &pair, 0);
+                    self.expr_depth = 0;
+                    self.bytecode.push_store_pop(end);
+                    self.bytecode.push_store_pop(cur);
+                }
                 let alias = !lower::assigns_local(hir, body, local);
                 let x = self.hir_bind_local(hir, local);
                 emit.slots[local.0 as usize] = Some(x);
