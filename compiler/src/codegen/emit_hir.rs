@@ -71,6 +71,19 @@ struct HirCall {
     /// A bounded generic's shared body: boxed type-parameter arguments,
     /// trailing dictionaries and an unboxed result.
     generic: Option<Box<HirGeneric>>,
+    /// `recv.m(args)` to a ground trait instance's method.
+    instance: Option<Box<HirInstanceCall>>,
+}
+
+/// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
+/// over a discharged instance: the receiver boxed for the instance, then a
+/// trailing dictionary when the instance has one.
+#[derive(Clone)]
+struct HirInstanceCall {
+    class: String,
+    args: Vec<Ty>,
+    /// The type the receiver is `BoxValue`d as.
+    recv_box: Option<Ty>,
 }
 
 /// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
@@ -643,6 +656,7 @@ impl Compiler {
             mono: true,
             builtin: None,
             generic: None,
+            instance: None,
         })
     }
 
@@ -668,6 +682,9 @@ impl Compiler {
         }
         if self.sidecar_overload(node.node, start, end).is_some() {
             return Err("callee-overload");
+        }
+        if let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
+            return Ok(call);
         }
         let recv = *args.first().ok_or("method-receiver")?;
         if lower::is_vec(hir, &self.checker, recv) {
@@ -707,6 +724,67 @@ impl Compiler {
         Ok(call)
     }
 
+    /// `recv.method(args)` the typechecker discharged to a ground trait
+    /// instance (`call_dicts_at`), checked before inherent methods as in
+    /// `compile_call_expr`.
+    fn resolve_hir_instance_method(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        method: &str,
+        args: &[HirId],
+    ) -> Result<Option<HirCall>, &'static str> {
+        let node = hir.expr(call);
+        let (start, end) = node.span;
+        let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let Some((class, inst_args, fqn)) = self
+            .sidecar_dicts(node.node, start, end)
+            .and_then(|dicts| dicts.first())
+            .and_then(|instance| {
+                let fqn = instance.method_fqns.get(method)?.clone();
+                known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
+            })
+        else {
+            return Ok(None);
+        };
+        // An open goal resolves its dictionary from scope; a pair return
+        // has its own ABI.
+        if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
+            return Err("callee-trait");
+        }
+        let recv = *args.first().ok_or("method-receiver")?;
+        let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, recv).ok_or("method-receiver")?);
+        let is_default = Self::is_default_method_fqn(&class, method, &fqn);
+        let sig = self.trait_method_boundary_sig(&class, method, &inst_args, is_default);
+        let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+        let params = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| {
+                sig.as_ref()
+                    .and_then(|s| s.params.get(i).copied().flatten())
+                    .unwrap_or_else(|| layout(arg))
+            })
+            .collect();
+        let ret = sig.as_ref().and_then(|s| s.ret).unwrap_or_else(|| layout(call));
+        let recv_box = (class != "Iterator" && class != "IntoIterator").then(|| Self::show_lookup_ty_for_instance(&recv_ty));
+        Ok(Some(HirCall {
+            key: fqn,
+            pair: None,
+            params,
+            ret,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: Some(Box::new(HirInstanceCall {
+                class,
+                args: inst_args,
+                recv_box,
+            })),
+        }))
+    }
+
     /// A builtin `Vec` method (its thunk takes and returns plain words).
     fn resolve_hir_vec_method(
         &self,
@@ -740,6 +818,7 @@ impl Compiler {
             mono: false,
             builtin: None,
             generic: None,
+            instance: None,
         })
     }
 
@@ -774,6 +853,7 @@ impl Compiler {
             mono: false,
             builtin: None,
             generic: None,
+            instance: None,
         })
     }
 
@@ -874,6 +954,7 @@ impl Compiler {
             mono: false,
             builtin: Some(builtin),
             generic: None,
+            instance: None,
         })
     }
 
@@ -966,6 +1047,7 @@ impl Compiler {
             mono: false,
             builtin: None,
             generic: None,
+            instance: None,
         })
     }
 
@@ -2352,7 +2434,12 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let generic = call.generic.clone();
-                let boxed = |i: usize| generic.as_ref().and_then(|g| g.boxed[i].clone());
+                let instance = call.instance.clone();
+                let boxed = |i: usize| {
+                    generic.as_ref().and_then(|g| g.boxed[i].clone()).or_else(|| {
+                        instance.as_ref().filter(|_| i == 0).and_then(|inst| inst.recv_box.clone())
+                    })
+                };
                 if depth == 0 {
                     // Receiver and arguments through temps, as the AST does.
                     let mut temps = Vec::with_capacity(args.len());
@@ -2377,7 +2464,14 @@ impl Compiler {
                         }
                     }
                 }
-                let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
+                let mut dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
+                if let Some(inst) = &instance {
+                    let mut bc = CodeBuf::new();
+                    if self.emit_instance_dict(&mut bc, &inst.class, &inst.args) {
+                        dicts += 1;
+                    }
+                    self.bytecode.append(&mut bc);
+                }
                 let ok = self.emit_named_entry_on_module_ret(
                     &key,
                     args.len() as u32 + dicts,
@@ -2980,8 +3074,10 @@ impl Compiler {
                 self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
             }
             _ => {
+                // An unhinted jump, as `try_compile_niche_option_match`: the test
+                // runs on a duplicate, so `LogNot; JMPT` may fuse.
                 Self::push_niche_eq_zero(&mut self.bytecode);
-                self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
+                self.hir_jump(IlJumpKind::JumpIfTrue, other);
             }
         }
         arm_on_word(self, emit, first, payload_side, false);
