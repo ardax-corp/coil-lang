@@ -1391,6 +1391,10 @@ impl Compiler {
             HirKind::Make { .. } if self.hir_scalar_variant(hir, id).is_some() => Some(BOXED),
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
+            HirKind::Call {
+                callee: Callee::Value(_),
+                ..
+            } => Some(BOXED),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
             HirKind::Index { .. }
             | HirKind::Make {
@@ -1813,6 +1817,14 @@ impl Compiler {
             }
             HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => {
                 self.hir_check_value(hir, emit, args[0], &BOXED)?
+            }
+            HirKind::Call {
+                callee: Callee::Value(f),
+                args,
+            } => {
+                for &arg in args.iter().chain([f]) {
+                    self.hir_check_value(hir, emit, arg, &BOXED)?;
+                }
             }
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
@@ -2402,6 +2414,16 @@ impl Compiler {
                     UnOp::BitNot => Instruction::NOT,
                     UnOp::Not => Instruction::LogNot,
                 }));
+            }
+            HirKind::Call {
+                callee: Callee::Value(f),
+                args,
+            } => {
+                for (i, &arg) in args.iter().chain([f]).enumerate() {
+                    self.hir_value(hir, emit, arg, &BOXED, depth + i as u32);
+                }
+                self.bytecode
+                    .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
             }
             HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
