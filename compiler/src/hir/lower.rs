@@ -854,12 +854,9 @@ impl Walk<'_> {
             }
             HirKind::Lit(_) => Err("literal"),
             HirKind::Local(_) => self.word(id),
-            // A `const` read: the codegen plan checks it folds to a value
-            // (`Compiler::hir_global_const`); other globals stay on the AST.
-            HirKind::Global { .. } => match self.class(id) {
-                Some(ValueClass::Scalar | ValueClass::Opaque) => Ok(()),
-                _ => Err("global"),
-            },
+            // A `const` read or a `static let` load: the codegen plan finds
+            // which (`Compiler::hir_global_const` / `hir_global_static`).
+            HirKind::Global { .. } => self.word(id),
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
                 // (`==` / `!=` without one) the VM's structural `EQ` /
@@ -1210,6 +1207,12 @@ impl Walk<'_> {
                         }
                         self.value(*base, 0)?;
                         self.value(*index, 1)
+                    }
+                    // `STATIC = v`: the value, then `StoreStatic`.
+                    HirKind::Global { .. } => {
+                        self.word(*place)?;
+                        self.word(*value)?;
+                        self.value(*value, 0)
                     }
                     _ => Err("assign-place"),
                 }

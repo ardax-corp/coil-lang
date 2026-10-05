@@ -127,6 +127,8 @@ struct HirEmit {
     sroa: HashMap<u32, String>,
     /// Each `const` read, by node, with the value the AST folds it to.
     consts: HashMap<u32, crate::const_fold::ConstValue>,
+    /// Each `static let` read or write, by node: its static slot.
+    statics: HashMap<u32, u32>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
     /// for `ArrayLen`.
     lens: HashMap<u32, Option<u32>>,
@@ -372,6 +374,7 @@ impl Compiler {
             sroa: HashMap::new(),
             lens: HashMap::new(),
             consts: HashMap::new(),
+            statics: HashMap::new(),
             ops: HashMap::new(),
             stacks: HashMap::new(),
             box_at: HashMap::new(),
@@ -388,6 +391,10 @@ impl Compiler {
         }
         for (i, expr) in hir.exprs.iter().enumerate() {
             if let HirKind::Global { name, .. } = &expr.kind {
+                if let Some(slot) = self.hir_global_static(hir, HirId(i as u32), name) {
+                    emit.statics.insert(i as u32, slot);
+                    continue;
+                }
                 let value = self.hir_global_const(hir, HirId(i as u32), name).ok_or("global")?;
                 emit.consts.insert(i as u32, value);
                 continue;
@@ -1180,6 +1187,9 @@ impl Compiler {
     /// jumps).
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
+            HirKind::Global { .. } if emit.statics.contains_key(&id.0) => Some(Rep::Word(
+                Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
+            )),
             HirKind::Lit(_)
             | HirKind::Global { .. }
             | HirKind::Bin { .. }
@@ -1282,6 +1292,33 @@ impl Compiler {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
         let name = Checker::class_name_of_ty(&ty)?;
         self.checker.resolve_class_key(name)
+    }
+
+    /// The slot of a `static let` identifier, looked up as
+    /// `compile_identifier_into` does: only when no `const` claims the
+    /// name first and no local shadows it.
+    fn hir_global_static(&self, hir: &HirBody, id: HirId, name: &str) -> Option<u32> {
+        // `Owner::member`: a class static, as the AST's qualified read.
+        if let Some((owner, member)) = name.rsplit_once("::") {
+            return self.checker.static_slot_index(&self.class_member_fqn(owner, member));
+        }
+        let expr = hir.expr(id);
+        let resolved = self.resolve_free_fn(name);
+        let shadows = self
+            .checker
+            .ident_shadows_static_name((expr.span.0, expr.span.1), name, &resolved);
+        let qualified = self.qualify_static_fqn(name);
+        let is_const = self.const_env().contains_key(&resolved)
+            || self.const_env().contains_key(name)
+            || (!shadows
+                && (self.static_const_values.contains_key(&resolved) && self.checker.is_static_const_fqn(&resolved)
+                    || self.static_const_values.contains_key(&qualified) && self.checker.is_static_const_fqn(&qualified)));
+        if is_const || shadows {
+            return None;
+        }
+        self.checker
+            .static_slot_index(&resolved)
+            .or_else(|| self.checker.static_slot_for_module_name(name))
     }
 
     /// The value a `const` identifier folds to, looked up as
@@ -1781,6 +1818,11 @@ impl Compiler {
                     let want = Rep::Word(self.hir_local_layout(hir, *local));
                     self.hir_check_value(hir, emit, *value, &want)
                 }
+                HirKind::Global { .. } => {
+                    emit.statics.get(&place.0).ok_or("assign-global")?;
+                    let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
+                    self.hir_check_value(hir, emit, *value, &want)
+                }
                 HirKind::Field { base, name } => {
                     let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
                     self.hir_check_value(hir, emit, *value, &Rep::Word(self.value_layout(&fty)))?;
@@ -1945,6 +1987,9 @@ impl Compiler {
                 self.bytecode.append(&mut bc);
             }
             HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
+            HirKind::Global { .. } if let Some(&slot) = emit.statics.get(&id.0) => {
+                self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+            }
             HirKind::Global { .. } => {
                 let value = emit.consts[&id.0].clone();
                 let mut bc = CodeBuf::new();
@@ -3044,6 +3089,13 @@ impl Compiler {
                     self.hir_value(hir, emit, *value, &want, 0);
                     let slot = Self::hir_slot(emit, *local);
                     self.bytecode.push_store_pop(slot);
+                }
+                HirKind::Global { .. } => {
+                    // As the AST: the value, then `StoreStatic`.
+                    let want = self.hir_natural(hir, emit, *place).expect("planned static");
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    let slot = emit.statics[&place.0];
+                    self.bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
                 }
                 HirKind::Field { base, name } => {
                     let (idx, fty) = self.hir_field(hir, *base, name).expect("planned field");

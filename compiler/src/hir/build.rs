@@ -678,6 +678,15 @@ impl<'c, 'm> Cx<'c, 'm> {
                     },
                 )
             }
+            // `Class::field` of a class `static`: a static read.
+            E::Construct {
+                enum_name,
+                variant_name,
+                fields: EnumConstructPayload::Unit,
+            } if self.class_static(enum_name, variant_name) => {
+                let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
+                self.emit(b, node, HirKind::Global { name: format!("{enum_name}::{variant_name}"), def })
+            }
             E::Construct { enum_name, variant_name, fields } => {
                 let (args, names) = match fields {
                     EnumConstructPayload::Unit => (Vec::new(), None),
@@ -1019,6 +1028,15 @@ impl<'c, 'm> Cx<'c, 'm> {
     }
 
     /// `Owner::member` in construct form calls a class's static method.
+    /// `owner::member` names a static field of class `owner`.
+    fn class_static(&self, owner: &str, member: &str) -> bool {
+        if self.checker.tag_for(owner, member).is_some() || !self.checker.is_class(owner) {
+            return false;
+        }
+        let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
+        self.checker.static_slot_index(&format!("{key}::{member}")).is_some()
+    }
+
     fn static_call(&self, owner: &str, member: &str, bare: bool) -> bool {
         if self.checker.tag_for(owner, member).is_some() || !self.checker.is_class(owner) {
             return false;
