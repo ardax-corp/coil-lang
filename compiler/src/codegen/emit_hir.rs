@@ -2266,6 +2266,12 @@ impl Compiler {
                 if !matches!(pat, HirPat::Bind(_)) {
                     self.hir_check_let_pat(hir, pat)?;
                 }
+                // The resumed word is stored as it comes back.
+                if let (Some(ForInKind::Coroutine), HirPat::Bind(local)) = (kind, pat)
+                    && self.hir_local_layout(hir, *local) != ValueLayout::Boxed
+                {
+                    return Err("for-in-coroutine");
+                }
                 let (start, end) = hir.expr(id).span;
                 // A parallel-loop site keeps the AST's `try_emit_par_loop`.
                 if self.loop_par_sites.contains_key(&(start, end)) {
@@ -3950,6 +3956,39 @@ impl Compiler {
             this.repr.unbox_enum_context -= 1;
             debug_assert!(called, "planned into_iter entry");
         };
+        // As `emit_for_in_coro`: resume into the item, stop once the
+        // handle is done (its completion value is never bound).
+        if matches!(kind, ForInKind::Coroutine) {
+            let handle = self.alloc_temp_slot();
+            self.hir_value(hir, emit, iterable, &BOXED, 0);
+            self.expr_depth = 0;
+            self.bytecode.push_store_pop(handle);
+            let HirPat::Bind(local) = *pat else {
+                unreachable!("planned coroutine for-in binds a name")
+            };
+            let x = self.hir_bind_local(hir, local);
+            emit.slots[local.0 as usize] = Some(x);
+            self.bytecode.bind_label(top);
+            self.bytecode.push_load(handle);
+            self.bytecode.push(Byte::new(Instruction::ResumeCoro).with_operand_u32(0));
+            self.bytecode.push_store_pop(x);
+            self.bytecode.push_load(handle);
+            self.bytecode.push(Byte::new(Instruction::DoneCoro));
+            self.bytecode.push(Byte::new(Instruction::LogNot));
+            self.hir_jump(IlJumpKind::JumpIfFalse, exit);
+            emit.loops.push(HirLoop {
+                cont: cont.unwrap_or(top),
+                exit,
+            });
+            self.hir_effect(hir, emit, body);
+            emit.loops.pop();
+            if let Some(cont) = cont {
+                self.bytecode.bind_label(cont);
+            }
+            self.hir_jump(IlJumpKind::Unconditional, top);
+            self.bytecode.bind_label(exit);
+            return;
+        }
         match kind {
             ForInKind::Range { inclusive, float } => {
                 let HirPat::Bind(local) = *pat else {

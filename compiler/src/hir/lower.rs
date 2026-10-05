@@ -1524,6 +1524,11 @@ impl Walk<'_> {
                         self.aggregate(*iterable)?;
                         self.value(*iterable, 0)?;
                     }
+                    // `ResumeCoro` / `DoneCoro` on the handle in a temp.
+                    Some(ForInKind::Coroutine) => {
+                        self.word(*iterable)?;
+                        self.value(*iterable, 0)?;
+                    }
                     // `DictEntries`, then the array loop over `(key, value)`.
                     Some(ForInKind::Dict) => {
                         self.word(*iterable)?;
