@@ -363,6 +363,7 @@ impl Compiler {
                 init: Some(init),
             } = expr.kind
                 && let Some(class) = lower::sroa_class(hir, &self.checker, init)
+                && lower::only_field_base(hir, local)
             {
                 emit.sroa.insert(local.0, class);
             }

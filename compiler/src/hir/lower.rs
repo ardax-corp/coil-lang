@@ -192,6 +192,15 @@ pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
             .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
 }
 
+/// Whether some `local.field = ..` writes a field of `local`.
+fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| match e.kind {
+        HirKind::Assign { place, .. } => matches!(body.expr(place).kind,
+            HirKind::Field { base, .. } if body.expr(base).kind == HirKind::Local(local)),
+        _ => false,
+    })
+}
+
 /// `len(x)` / `x.len()` of a plain local: `ArrayLen`, or a constant for a
 /// fixed-size type.
 impl Walk<'_> {
@@ -920,12 +929,14 @@ impl Walk<'_> {
                 if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if !args.is_empty()) {
                     return Err("stack-array");
                 }
-                if sroa_class(body, self.checker, *init).is_some() {
-                    // The AST keeps the fields in slots and boxes on escape;
-                    // only the no-escape case is lowered.
-                    if !only_field_base(body, *local) {
-                        return Err("class-escape");
-                    }
+                // With no escape the fields live in frame slots (as the AST's
+                // unboxed class local); an escaping one is an object from the
+                // start, unless its fields are written first (the AST stores
+                // those into slots and builds the object once, at the escape).
+                if sroa_class(body, self.checker, *init).is_some() && !only_field_base(body, *local) && writes_field_of(body, *local) {
+                    return Err("class-escape");
+                }
+                if sroa_class(body, self.checker, *init).is_some() && only_field_base(body, *local) {
                     let HirKind::Make { args, .. } = &body.expr(*init).kind else {
                         unreachable!()
                     };
