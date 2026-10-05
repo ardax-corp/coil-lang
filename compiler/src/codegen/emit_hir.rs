@@ -954,8 +954,11 @@ impl Compiler {
             .ok_or("method-unknown")?;
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
         // `pop` / `remove` returning a niche `Option` call the host natives
-        // directly, as `compile_call_expr` does; the boxed form stays AST.
-        if let Some(native) = Self::vec_option_host_native(&key) {
+        // directly, as `compile_call_expr` does; a boxed `Option` is the
+        // thunk's own result, and any other layout stays AST.
+        if let Some(native) = Self::vec_option_host_native(&key)
+            && layout(call) != ValueLayout::Boxed
+        {
             let ret = layout(call);
             if ret.host_enum_layout() != common::HOST_ENUM_LAYOUT_OPTION_NICHE {
                 return Err("vec-method");

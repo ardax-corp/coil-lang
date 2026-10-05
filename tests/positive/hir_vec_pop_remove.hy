@@ -7,10 +7,10 @@ fn drain_sum(Vec<int> v) -> int {
         match v.pop() {
             Option::Some(x) => {
                 acc = acc + x;
-            }
+            },
             Option::None => {
                 more = false;
-            }
+            },
         }
     }
     return acc;
