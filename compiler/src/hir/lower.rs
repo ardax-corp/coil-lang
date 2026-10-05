@@ -703,6 +703,12 @@ impl Walk<'_> {
             }
             HirKind::Lit(_) => Err("literal"),
             HirKind::Local(_) => self.word(id),
+            // A `const` read: the codegen plan checks it folds to a value
+            // (`Compiler::hir_global_const`); other globals stay on the AST.
+            HirKind::Global { .. } => match self.class(id) {
+                Some(ValueClass::Scalar | ValueClass::Opaque) => Ok(()),
+                _ => Err("global"),
+            },
             HirKind::Bin { op, lhs, rhs } => {
                 if matches!(op, BinOp::Overloaded(_)) {
                     return Err("operator");
