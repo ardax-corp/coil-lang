@@ -22,7 +22,7 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
+use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
 use std::collections::HashMap;
 use crate::codegen::primitive_cast_opcode as cast_opcode;
 use crate::typechecking::infer::{Checker, ForInKind};
@@ -1015,7 +1015,12 @@ impl Walk<'_> {
                 self.value(*tail, depth)
             }
             // Leaves control flow, so it never pushes on the fall-through path.
-            HirKind::Break | HirKind::Continue | HirKind::Return(_) => self.effect(id, depth),
+            HirKind::Break
+            | HirKind::Continue
+            | HirKind::Return(_)
+            | HirKind::Builtin {
+                op: Builtin::Panic, ..
+            } => self.effect(id, depth),
             _ => Err(kind_name(&body.expr(id).kind)),
         }
     }
@@ -1213,6 +1218,20 @@ impl Walk<'_> {
                     return Err("jump");
                 }
                 Ok(())
+            }
+            // `panic msg`: the message, then `Panic`.
+            HirKind::Builtin {
+                op: Builtin::Panic,
+                args,
+            } => {
+                if depth != 0 {
+                    return Err("nested-panic");
+                }
+                let [msg] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(*msg)?;
+                self.value(*msg, 0)
             }
             HirKind::Return(value) => {
                 if depth != 0 {
