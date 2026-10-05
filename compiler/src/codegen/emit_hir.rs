@@ -151,6 +151,9 @@ struct HirEmit {
     sroa: HashMap<u32, String>,
     /// Each `const` read, by node, with the value the AST folds it to.
     consts: HashMap<u32, crate::const_fold::ConstValue>,
+    /// Each named function read as a value, by node: its entry offset,
+    /// arity and rest flag for `MakeFn`.
+    fn_refs: HashMap<u32, (usize, u32, bool)>,
     /// Each `static let` read or write, by node: its static slot.
     statics: HashMap<u32, u32>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
@@ -398,6 +401,7 @@ impl Compiler {
             sroa: HashMap::new(),
             lens: HashMap::new(),
             consts: HashMap::new(),
+            fn_refs: HashMap::new(),
             statics: HashMap::new(),
             ops: HashMap::new(),
             stacks: HashMap::new(),
@@ -433,8 +437,12 @@ impl Compiler {
                     emit.statics.insert(i as u32, slot);
                     continue;
                 }
-                let value = self.hir_global_const(hir, HirId(i as u32), name).ok_or("global")?;
-                emit.consts.insert(i as u32, value);
+                if let Some(value) = self.hir_global_const(hir, HirId(i as u32), name) {
+                    emit.consts.insert(i as u32, value);
+                    continue;
+                }
+                let fn_ref = self.hir_global_fn(hir, HirId(i as u32), name).ok_or("global")?;
+                emit.fn_refs.insert(i as u32, fn_ref);
                 continue;
             }
             if let HirKind::Bin {
@@ -1637,6 +1645,31 @@ impl Compiler {
 
     /// The value a `const` identifier folds to, looked up as
     /// `compile_identifier_into` does, when its kind matches the read's type.
+    /// A monomorphic, non-overloaded function already emitted, read as a
+    /// value: `compile_identifier_into`'s `MakeFn` (a later function has
+    /// no entry offset yet, so it stays AST).
+    fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool)> {
+        if name.contains("::") {
+            return None;
+        }
+        let expr = hir.expr(id);
+        let resolved = self.resolve_free_fn(name);
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if !matches!(lower::classify(&self.checker, &ty), Some(ValueClass::Opaque))
+            || !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..))
+            || self.checker.is_generic_fn(&resolved)
+            || self.checker.is_overloaded(&resolved)
+            || self.lookup_slot(name).is_some()
+            || self.checker.bare_construct_at(expr.span.0, expr.span.1).is_some()
+            || self.sidecar_overload(expr.node, expr.span.0, expr.span.1).is_some()
+        {
+            return None;
+        }
+        let entry = *self.functions.get(&resolved)?;
+        let (arity, rest) = self.fn_arities.get(&resolved).copied()?;
+        Some((entry, arity, rest))
+    }
+
     fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
         use crate::const_fold::ConstValue;
         if name.contains("::") {
@@ -2443,6 +2476,13 @@ impl Compiler {
             HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
             HirKind::Global { .. } if let Some(&slot) = emit.statics.get(&id.0) => {
                 self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+            }
+            HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.fn_refs.get(&id.0) => {
+                self.bytecode.push_const(0);
+                self.bytecode
+                    .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry as u32));
+                self.bytecode
+                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, rest)));
             }
             HirKind::Global { .. } => {
                 let value = emit.consts[&id.0].clone();
