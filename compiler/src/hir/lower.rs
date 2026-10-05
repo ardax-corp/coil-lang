@@ -217,15 +217,17 @@ impl Walk<'_> {
         }
     }
 
-    fn len(&mut self, arg: HirId) -> Check {
+    fn len(&mut self, arg: HirId, depth: u32) -> Check {
+        let structural = self
+            .ty(arg)
+            .is_some_and(|t| crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(self.checker.subst(), t)));
         match self.body.expr(arg).kind {
-            HirKind::Local(local)
-                if self.body.local(local).kind != super::LocalKind::Const
-                    && self
-                        .ty(arg)
-                        .is_some_and(|t| crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(self.checker.subst(), t))) =>
-            {
-                Ok(())
+            HirKind::Local(local) if structural && self.body.local(local).kind != super::LocalKind::Const => Ok(()),
+            // Not const-foldable (the AST folds only literals and const
+            // names): the value is pushed, then measured or popped.
+            HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } if structural => {
+                self.word(arg)?;
+                self.value(arg, depth)
             }
             _ => Err("len-argument"),
         }
@@ -727,11 +729,11 @@ impl Walk<'_> {
             HirKind::Call {
                 callee: Callee::Named { name, .. },
                 args,
-            } if name == "len" && args.len() == 1 => self.len(args[0]),
+            } if name == "len" && args.len() == 1 => self.len(args[0], depth),
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,
-            } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0]),
+            } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0], depth),
             HirKind::Call {
                 callee: Callee::Named { overload: None, .. },
                 args,
