@@ -952,6 +952,28 @@ impl Compiler {
             .and_then(|m| m.get(method))
             .cloned()
             .ok_or("method-unknown")?;
+        let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+        // `pop` / `remove` returning a niche `Option` call the host natives
+        // directly, as `compile_call_expr` does; the boxed form stays AST.
+        if let Some(native) = Self::vec_option_host_native(&key) {
+            let ret = layout(call);
+            if ret.host_enum_layout() != common::HOST_ENUM_LAYOUT_OPTION_NICHE {
+                return Err("vec-method");
+            }
+            let native = self.native_id(native).ok_or("vec-method")?;
+            return Ok(HirCall {
+                key,
+                pair: None,
+                params: args.iter().map(|&a| layout(a)).collect(),
+                ret,
+                method: true,
+                mono: false,
+                builtin: Some(HirBuiltin::Host(native)),
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+            });
+        }
         // An overload-keyed entry would be picked over the bare thunk.
         let keyed = format!("{key}#");
         if self.functions.keys().any(|k| k.starts_with(&keyed))
@@ -960,7 +982,6 @@ impl Compiler {
         {
             return Err("vec-method");
         }
-        let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
         Ok(HirCall {
             key,
             pair: None,

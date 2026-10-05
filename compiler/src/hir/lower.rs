@@ -361,8 +361,8 @@ fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
 impl Walk<'_> {
     /// A `Vec` method: `push` is inlined as `ArrayPush` (its value staged
     /// with the receiver when it may clobber); the others are `CALL`s to
-    /// the builtin thunks. `pop` / `remove` pick a niche or boxed form by
-    /// the call's layout and keep the AST codegen.
+    /// the builtin thunks. `pop` / `remove` are `HostInvoke`s when the call's
+    /// `Option` is niche-packed (codegen refuses the boxed form).
     fn vec_method(&mut self, name: &str, args: &[HirId], depth: u32) -> Check {
         match (name, args) {
             ("push", [recv, value]) => {
@@ -377,6 +377,8 @@ impl Walk<'_> {
             ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) => {
                 self.args(args, depth, depth == 0)
             }
+            // The host native's id goes under the arguments.
+            ("pop", [_]) | ("remove", [_, _]) => self.args(args, depth + 1, false),
             _ => Err("vec-method"),
         }
     }
