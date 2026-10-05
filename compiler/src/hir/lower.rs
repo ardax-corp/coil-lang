@@ -492,6 +492,12 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     ok.then_some(ValueClass::Enum)
 }
 
+/// A numeric `Range` / `RangeInclusive`: `[start, end]` in a direct
+/// call's arguments and result and in an unboxed local, else one boxed word.
+pub fn is_range_pair(ty: &Ty) -> bool {
+    crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
+}
+
 /// `[start, end]` of a `for` over a range literal.
 pub fn range_bounds(body: &HirBody, iterable: HirId) -> Option<[HirId; 2]> {
     match &body.expr(iterable).kind {
@@ -841,6 +847,12 @@ impl Walk<'_> {
     /// `id` pushes its value on top of `depth` live operands.
     fn value(&mut self, id: HirId, depth: u32) -> Check {
         let body = self.body;
+        // A numeric range moves as `[start, end]` or a boxed object; the
+        // re-encodings between them stage through temps, so a range value
+        // runs with no operand below it.
+        if depth != 0 && self.ty(id).is_some_and(is_range_pair) {
+            return Err("range-depth");
+        }
         match &body.expr(id).kind {
             HirKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Bool(_)) => self.scalar(id),
             HirKind::Lit(Lit::Str(raw)) => {
@@ -1001,6 +1013,19 @@ impl Walk<'_> {
                     return Err("field-of-new");
                 }
                 self.value(*base, depth)
+            }
+            HirKind::Make {
+                kind: MakeKind::Range { .. },
+                args,
+            } => {
+                if !self.ty(id).is_some_and(is_range_pair) {
+                    return Err("make-range");
+                }
+                let [lo, hi] = <[HirId; 2]>::try_from(args.as_slice()).map_err(|_| "make-range")?;
+                self.scalar(lo)?;
+                self.scalar(hi)?;
+                self.value(lo, 0)?;
+                self.value(hi, 1)
             }
             HirKind::Make {
                 kind: MakeKind::Class(_),
@@ -1252,7 +1277,15 @@ impl Walk<'_> {
                 match kind {
                     Some(ForInKind::Range { .. }) => {
                         let Some(args) = range_bounds(body, *iterable) else {
-                            return Err("for-in-range");
+                            // A range value: its `[start, end]` seeds the latch.
+                            if !self.ty(*iterable).is_some_and(is_range_pair) {
+                                return Err("for-in-range");
+                            }
+                            self.value(*iterable, 0)?;
+                            self.loops += 1;
+                            let r = self.effect(*inner, depth);
+                            self.loops -= 1;
+                            return r;
                         };
                         // A short literal range is unrolled by the AST.
                         if args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(Lit::Int(_)))) {
