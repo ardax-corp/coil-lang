@@ -421,8 +421,12 @@ impl<'c, 'm> Cx<'c, 'm> {
             .as_ref()
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
         b.body.ret = ret;
-        b.body.result_mode = keys.iter().any(|k| self.checker.fn_is_result_mode(k));
-        b.ok_is_result = keys.iter().any(|k| self.checker.fn_result_ok_is_result(k));
+        // Inherent methods take their result mode from the bare method name,
+        // as the AST's `compile_function_decl_into` reads it.
+        let bare = full.rsplit("::").next().unwrap_or(full).to_string();
+        let mode_keys = if owner.is_some() { std::slice::from_ref(&bare) } else { keys };
+        b.body.result_mode = mode_keys.iter().any(|k| self.checker.fn_is_result_mode(k));
+        b.ok_is_result = mode_keys.iter().any(|k| self.checker.fn_result_ok_is_result(k));
         if let Some(owner) = owner
             && !is_static
         {

@@ -216,6 +216,17 @@ impl Compiler {
                 crate::il::opt::note_hir_fallback(reason);
                 if std::env::var_os("COIL_HIR_WHY").is_some() {
                     eprintln!("hir fallback `{}`: {reason}", hir.name);
+                    if reason == "result-mode" {
+                        eprintln!("    hir {} ast {}", hir.result_mode, self.compiling_result_mode);
+                    }
+                    if reason == "local-type" {
+                        for l in &hir.locals {
+                            if l.ty.as_ref().and_then(|t| lower::classify(&self.checker, t)).is_none() {
+                                let t = l.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+                                eprintln!("    local `{}`: {:?}", l.name, t);
+                            }
+                        }
+                    }
                 }
                 false
             }

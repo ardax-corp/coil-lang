@@ -163,6 +163,9 @@ impl EmitPlan {
                     def_block[d.index()] = Some(block.id);
                 }
                 if inst.is_phi() {
+                    // A φ dest is written by the edge moves, so it lives in
+                    // its slot: never an inline (tree) operand.
+                    phi_in[inst.dest().index()] = true;
                     for v in inst.operands() {
                         phi_in[v.index()] = true;
                     }

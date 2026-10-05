@@ -67,20 +67,20 @@ fn joined(Vec<string> words) -> string {
 }
 
 test("for-in over ranges and arrays lowers") {
-    assert(sum_to(5) == 10);
-    assert(sum_incl(2, 4) == 9);
-    assert(odd_sum(6) == 9);
+    assert(sum_to(5) == 10)?;
+    assert(sum_incl(2, 4) == 9)?;
+    assert(odd_sum(6) == 9)?;
     let xs: Vec<int> = [];
     xs.push(1);
     xs.push(7);
     xs.push(9);
-    assert(first_over(xs, 5) == 7);
-    assert(first_over(xs, 20) == -1);
-    assert(reassigned(3) == 6);
-    assert(float_steps(3.0) == 3.0);
+    assert(first_over(xs, 5) == 7)?;
+    assert(first_over(xs, 20) == -1)?;
+    assert(reassigned(3) == 6)?;
+    assert(float_steps(3.0) == 3.0)?;
     let words: Vec<string> = [];
     words.push("a");
     words.push("skip");
     words.push("b");
-    assert(joined(words) == "ab");
+    assert(joined(words) == "ab")?;
 }

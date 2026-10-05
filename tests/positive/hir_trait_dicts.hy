@@ -71,9 +71,9 @@ fn fill(Bag<string> bag) -> int {
 }
 
 test("bounded generic calls lower with dictionaries") {
-    assert(pick(3, 5) == 21);
-    assert(longest("ab", "abc") == "abc!");
+    assert(pick(3, 5) == 21)?;
+    assert(longest("ab", "abc") == "abc!")?;
     let items: Vec<string> = [];
     let bag = new Bag(items);
-    assert(fill(bag) == 6);
+    assert(fill(bag) == 6)?;
 }
