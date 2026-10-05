@@ -118,10 +118,15 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
                 }
                 return params_closed(ty).then_some(ValueClass::Enum);
             }
+            if checker.is_scalar_enum(name) {
+                return Some(ValueClass::Opaque);
+            }
             user_enum(checker, name, seen)
         }
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
+        // A scalar-backed enum is its backing word, only moved and matched.
+        Ty::Con(name) if checker.is_scalar_enum(name) => Some(ValueClass::Opaque),
         Ty::Con(name) if checker.is_class(name) => object_class(checker, name),
         Ty::Con(name) => user_enum(checker, name, seen),
         // A type parameter inside a generic class's shared method body: one
@@ -688,13 +693,41 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     }
 }
 
-/// A match of an `int` on integer literals, closed by `default` or a
-/// binding: compare-and-branch arms like the AST's scalar match.
-pub fn is_int_match(body: &HirBody, scrutinee: HirId, arms: &[HirArm]) -> bool {
-    body.expr(scrutinee).ty.as_ref().and_then(primitive) == Some(coil_ty::INT)
-        && arms
+/// A match of an `int` on integer literals, or of a scalar-backed enum on
+/// its unit variants, closed by `default` or a binding: compare-and-branch
+/// arms on the backing word like the AST's scalar match.
+pub fn is_scalar_match(checker: &Checker, body: &HirBody, scrutinee: HirId, arms: &[HirArm]) -> bool {
+    let Some(ty) = body.expr(scrutinee).ty.as_ref() else {
+        return false;
+    };
+    if primitive(ty) == Some(coil_ty::INT) {
+        return arms
             .iter()
-            .all(|arm| matches!(arm.pat, HirPat::Int(_) | HirPat::Wild | HirPat::Bind(_)))
+            .all(|arm| matches!(arm.pat, HirPat::Int(_) | HirPat::Wild | HirPat::Bind(_)));
+    }
+    let scalar_enum = match strip_readonly(ty) {
+        Ty::Constructor { owner, .. } => matches!(owner.as_ref(), Ty::Con(name) | Ty::Sum { name, .. } if checker.is_scalar_enum(name)),
+        Ty::Con(name) | Ty::Sum { name, .. } => checker.is_scalar_enum(name),
+        _ => false,
+    };
+    scalar_enum
+        && arms.iter().all(|arm| match &arm.pat {
+            HirPat::Wild | HirPat::Bind(_) => true,
+            HirPat::Variant {
+                enum_name,
+                variant,
+                fields,
+                ..
+            } => {
+                let unit = match fields {
+                    HirPatFields::Unit => true,
+                    HirPatFields::Tuple(parts) => parts.is_empty(),
+                    HirPatFields::Record(_) => false,
+                };
+                unit && checker.scalar_for(enum_name, variant).is_some()
+            }
+            _ => false,
+        })
 }
 
 /// `Variant(x) => x`: the payload word is the arm's value, so the arm needs
@@ -1087,9 +1120,13 @@ impl Walk<'_> {
                 self.args(args, 0, true)
             }
             HirKind::Make {
-                kind: MakeKind::Variant { .. },
+                kind: MakeKind::Variant { enum_name, variant, .. },
                 args,
             } => {
+                // A scalar enum's variant pushes its backing constant.
+                if args.is_empty() && self.checker.scalar_for(enum_name, variant).is_some() {
+                    return self.word(id);
+                }
                 if self.class(id) != Some(ValueClass::Enum) {
                     return Err("make-type");
                 }
@@ -1158,7 +1195,7 @@ impl Walk<'_> {
         if arms.is_empty() {
             return Err("match-empty");
         }
-        if is_int_match(self.body, scrutinee, arms) {
+        if is_scalar_match(self.checker, self.body, scrutinee, arms) {
             if value {
                 self.word(id)?;
             }

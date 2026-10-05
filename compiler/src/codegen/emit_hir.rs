@@ -1388,6 +1388,7 @@ impl Compiler {
             | HirKind::Logic { .. }
             | HirKind::Un { .. }
             | HirKind::Cast { .. } => Some(BOXED),
+            HirKind::Make { .. } if self.hir_scalar_variant(hir, id).is_some() => Some(BOXED),
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
@@ -1403,6 +1404,17 @@ impl Compiler {
             } => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
+            _ => None,
+        }
+    }
+
+    /// A scalar-backed enum's variant: its backing constant.
+    fn hir_scalar_variant(&self, hir: &HirBody, id: HirId) -> Option<crate::typechecking::ty::ScalarBacking> {
+        match &hir.expr(id).kind {
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, .. },
+                args,
+            } if args.is_empty() => self.checker.scalar_for(enum_name, variant).cloned(),
             _ => None,
         }
     }
@@ -1908,6 +1920,9 @@ impl Compiler {
                 _ => Err("make-repr"),
             };
         }
+        if self.hir_scalar_variant(hir, id).is_some() {
+            return if *want == BOXED { Ok(()) } else { Err("make-repr") };
+        }
         let HirKind::Make {
             kind: MakeKind::Variant {
                 enum_name, variant, ..
@@ -1967,7 +1982,7 @@ impl Compiler {
         arms: &[HirArm],
         want: Option<&Rep>,
     ) -> Check {
-        if lower::is_int_match(hir, scrutinee, arms) {
+        if lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
             for arm in arms {
                 if let HirPat::Bind(local) = &arm.pat
@@ -2866,6 +2881,11 @@ impl Compiler {
         else {
             unreachable!("HIR lowering admitted a non-variant make");
         };
+        if let Some(backing) = self.hir_scalar_variant(hir, id) {
+            debug_assert_eq!(*want, BOXED);
+            self.hir_push_scalar(&backing);
+            return;
+        }
         let ty = Self::hir_ty(hir, id).expect("planned make has a type").clone();
         let tag = self
             .hir_tag(&ty, enum_name, variant)
@@ -3025,8 +3045,8 @@ impl Compiler {
             .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
             .map_or(arms.len(), |i| i + 1);
         let arms = &arms[..reach];
-        if lower::is_int_match(hir, scrutinee, arms) {
-            return self.hir_match_int(hir, emit, scrutinee, arms, want, depth);
+        if lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
+            return self.hir_match_scalar(hir, emit, scrutinee, arms, want, depth);
         }
         let ty = Self::hir_ty(hir, scrutinee)
             .expect("planned match has a type")
@@ -3148,10 +3168,10 @@ impl Compiler {
         self.bytecode.bind_label(end);
     }
 
-    /// `match` of an `int` on literals: `DUP; <literal>; EQ; JMPF miss`
-    /// per arm, as the AST's scalar match. The last arm needs no test:
-    /// the checker proved the match exhaustive.
-    fn hir_match_int(
+    /// `match` of an `int` on literals or of a scalar enum on its variants:
+    /// `DUP; <backing>; EQ; JMPF miss` per arm, as the AST's scalar match.
+    /// The last arm needs no test: the checker proved the match exhaustive.
+    fn hir_match_scalar(
         &mut self,
         hir: &HirBody,
         emit: &mut HirEmit,
@@ -3164,11 +3184,16 @@ impl Compiler {
         let end = self.bytecode.fresh_label();
         let last = arms.len() - 1;
         for (i, arm) in arms.iter().enumerate() {
-            let miss = match arm.pat {
-                HirPat::Int(n) if i != last => {
+            let backing = match &arm.pat {
+                HirPat::Int(n) => Some(crate::typechecking::ty::ScalarBacking::Int(*n)),
+                HirPat::Variant { enum_name, variant, .. } => self.checker.scalar_for(enum_name, variant).cloned(),
+                _ => None,
+            };
+            let miss = match backing {
+                Some(backing) if i != last => {
                     let miss = self.bytecode.fresh_label();
                     self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                    self.hir_push_int(n);
+                    self.hir_push_scalar(&backing);
                     self.bytecode.push(Byte::new(Instruction::EQ));
                     self.bytecode.push_op(IlOp::Jump {
                         kind: IlJumpKind::JumpIfFalse,
@@ -3958,6 +3983,18 @@ impl Compiler {
             HirKind::Lit(Lit::Int(n)) => (0..=255).contains(n),
             HirKind::Lit(Lit::Str(raw)) => lower::byte_literal(raw).is_some(),
             _ => false,
+        }
+    }
+
+    /// A scalar enum variant's backing constant (or an `int` pattern's).
+    fn hir_push_scalar(&mut self, backing: &crate::typechecking::ty::ScalarBacking) {
+        match backing {
+            crate::typechecking::ty::ScalarBacking::Int(n) => self.hir_push_int(*n),
+            _ => {
+                let mut code = CodeBuf::new();
+                self.emit_scalar_backing(backing, &mut code);
+                self.bytecode.append(&mut code);
+            }
         }
     }
 
