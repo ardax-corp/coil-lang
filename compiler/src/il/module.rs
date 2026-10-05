@@ -1539,7 +1539,15 @@ mod tests {
 
         let funcs = vec![IlFunc::new("f", None, 1, body_emit_end)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
+        // Stack IL only: the LIR tier would take this body and fold both
+        // `slot0 + 1` arms into one.
+        let (flat, _, _) = m.optimize_and_flatten(
+            &OptimizeOptions {
+                mir_specialize: false,
+                ..OptimizeOptions::default()
+            },
+            &mut Vec::new(),
+        );
         let loads = flat
             .iter()
             .filter(|op| matches!(op, IlOp::Load { .. }))
