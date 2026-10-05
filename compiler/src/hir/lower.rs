@@ -87,6 +87,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             let Ty::Con(name) = head.as_ref() else {
                 return None;
             };
+            // A coroutine handle: one heap word, only moved, resumed and
+            // tested with `done`.
+            if name == "coroutine" && args.len() == 2 {
+                return Some(ValueClass::Opaque);
+            }
             // A generic class instance: one object word, its methods shared
             // across instances (fields are only read inside them).
             if is_generic_class(checker, name) {
@@ -429,6 +434,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
                 | HirKind::Make { kind: MakeKind::Class(_), .. }
                 | HirKind::Index { kind: IndexKind::String, .. }
                 | HirKind::Builtin { .. }
+                | HirKind::Resume { .. }
         );
     });
     found
@@ -1242,6 +1248,27 @@ impl Walk<'_> {
                 }
                 self.value(*tail, depth)
             }
+            // `resume h [with v]`: the sent value, the handle, `ResumeCoro`.
+            HirKind::Resume { handle, value } => {
+                self.word(id)?;
+                if let Some(v) = value {
+                    self.word(*v)?;
+                    self.value(*v, depth)?;
+                }
+                self.word(*handle)?;
+                self.value(*handle, depth + u32::from(value.is_some()))
+            }
+            // `done(h)`: the handle, `DoneCoro`.
+            HirKind::Builtin {
+                op: Builtin::Done,
+                args,
+            } => {
+                let [handle] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(*handle)?;
+                self.value(*handle, depth)
+            }
             // Leaves control flow, so it never pushes on the fall-through path.
             HirKind::Break
             | HirKind::Continue
@@ -1561,7 +1588,11 @@ impl Walk<'_> {
             | HirKind::Make { .. }
             | HirKind::Field { .. }
             | HirKind::Index { .. }
-            | HirKind::Call { .. } => self.value(id, depth),
+            | HirKind::Call { .. }
+            | HirKind::Resume { .. }
+            | HirKind::Builtin {
+                op: Builtin::Done, ..
+            } => self.value(id, depth),
             other => Err(kind_name(other)),
         }
     }
