@@ -612,6 +612,17 @@ impl Compiler {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // A generic class method is one shared body: an `Option` /
+                    // `Result` of a type parameter crosses as the boxed enum.
+                    let generic_sig = self
+                        .checker
+                        .env()
+                        .lookup(&lookup_name)
+                        .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty));
+                    if let Some((params, _)) = generic_sig.as_ref() {
+                        let skip = params.len().saturating_sub(fixed.len());
+                        self.queue_generic_arg_convs(&params[skip..], &fixed);
+                    }
                     let mut arg_temps: Vec<u32> = Vec::new();
                     for (i, arg) in fixed.iter().enumerate() {
                         self.append_with_existential_pack(&mut bytecode, arg);
@@ -710,10 +721,15 @@ impl Compiler {
                     } else if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
                     }
-                    if is_generic && self.generic_return_is_boxed(&lookup_name)
-                        && let Some(call_ty) = self.codegen_expr_ty(ast) {
+                    if is_generic && self.generic_return_is_boxed(&lookup_name) {
+                        if let Some(call_ty) = self.codegen_expr_ty(ast) {
                             Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                         }
+                    } else if let Some((_, ret)) = generic_sig.as_ref()
+                        && let Some(generic) = self.generic_enum_layout(ret)
+                    {
+                        Self::emit_layout_convert(&mut bytecode, generic, self.expr_layout(ast));
+                    }
                 } else {
                     let mut message = Message::error(
                         ErrorCode::UnknownFunction,
