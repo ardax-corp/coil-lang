@@ -822,12 +822,12 @@ impl Compiler {
         })
     }
 
-    /// `Vec::new()` / `Vec::with_capacity(n)`: the thunk, or its
+    /// `Vec::new()` / `Vec::with_capacity(n)` / `Vec::from(a)`: the thunk, or its
     /// pointer-element twin when the elements are ground heap words (as
     /// `pointer_vec_ctor`).
     fn resolve_hir_vec_ctor(&self, hir: &HirBody, call: HirId, key: &str, argc: usize) -> Result<HirCall, &'static str> {
         let name = key.strip_prefix(common::BUILTIN_VEC_TYPE).and_then(|k| k.strip_prefix("::"));
-        if !matches!((name, argc), (Some("new"), 0) | (Some("with_capacity"), 1)) {
+        if !matches!((name, argc), (Some("new"), 0) | (Some("with_capacity" | "from"), 1)) {
             return Err("vec-ctor");
         }
         let ty = Self::hir_ty(hir, call).ok_or("vec-ctor")?;
