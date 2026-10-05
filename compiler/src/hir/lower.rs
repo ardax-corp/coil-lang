@@ -25,7 +25,7 @@
 use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
 use std::collections::HashMap;
 use crate::codegen::primitive_cast_opcode as cast_opcode;
-use crate::typechecking::infer::{Checker, ForInKind};
+use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
 
@@ -1450,7 +1450,17 @@ impl Walk<'_> {
                     return Err("nested-loop");
                 }
                 // A destructuring pattern binds from each array element.
-                let array = matches!(kind, Some(ForInKind::Array | ForInKind::Dict));
+                let array = matches!(
+                    kind,
+                    Some(
+                        ForInKind::Array
+                            | ForInKind::Dict
+                            | ForInKind::Custom {
+                                counted: Some(ForInCounted::Array | ForInCounted::Dict),
+                                ..
+                            }
+                    )
+                );
                 if !matches!(pat, HirPat::Bind(_)) && !(array && let_pat_shape(pat)) {
                     return Err("for-in-pattern");
                 }
@@ -1482,6 +1492,18 @@ impl Walk<'_> {
                     }
                     // `DictEntries`, then the array loop over `(key, value)`.
                     Some(ForInKind::Dict) => {
+                        self.word(*iterable)?;
+                        self.value(*iterable, 0)?;
+                    }
+                    // A user `into_iter` returning an array, dict or numeric
+                    // range: the iterable as is, the `CALL`, then that loop.
+                    Some(ForInKind::Custom {
+                        counted: Some(ForInCounted::Array | ForInCounted::Dict | ForInCounted::Range { .. }),
+                        ..
+                    }) => {
+                        if self.class(*iterable) == Some(ValueClass::Enum) {
+                            return Err("for-in-custom");
+                        }
                         self.word(*iterable)?;
                         self.value(*iterable, 0)?;
                     }
