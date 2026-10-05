@@ -34,6 +34,14 @@ enum Rep {
 
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 
+/// Where a field lives: a class slot (`LoadField` / `SetField` slot form)
+/// or a record key (`GetField` / `SetField` by name).
+#[derive(Clone, Copy)]
+enum FieldAt {
+    Slot(u32),
+    Name,
+}
+
 impl Rep {
     fn words(&self) -> u32 {
         match self {
@@ -1385,7 +1393,7 @@ impl Compiler {
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
             HirKind::Index { .. }
             | HirKind::Make {
-                kind: MakeKind::Tuple | MakeKind::Array,
+                kind: MakeKind::Tuple | MakeKind::Array | MakeKind::Record(_),
                 ..
             }
             | HirKind::Field { .. }
@@ -1544,13 +1552,37 @@ impl Compiler {
     }
 
     /// Slot index and declared type of field `name` of the object `base`.
-    fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(u32, Ty)> {
+    fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(FieldAt, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
+        // A record's fields go by name, each one boxed word as the AST's
+        // `MakeDict` stores it.
+        if let Ty::Record { fields } = crate::typechecking::ty::strip_readonly(&ty) {
+            let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
+            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Name, fty.clone()));
+        }
         let idx = self.class_field_slot_of_ty(&ty, name)?;
         let class = self.hir_class_of(hir, base)?;
         let fields = self.hir_class_fields(&class)?;
         let (fname, fty) = fields.get(idx as usize)?;
-        (fname == name).then(|| (idx, fty.clone()))
+        (fname == name).then(|| (FieldAt::Slot(idx), fty.clone()))
+    }
+
+    /// `SetField` / read of field `at` of the object on top of the stack.
+    fn hir_field_op(&mut self, at: FieldAt, name: &str, set: bool) {
+        match (at, set) {
+            (FieldAt::Slot(idx), false) => self.bytecode.push_load_field(idx),
+            (FieldAt::Slot(idx), true) => self.bytecode.push_set_field_slot(idx),
+            (FieldAt::Name, set) => {
+                let mut bc = std::mem::take(&mut self.bytecode);
+                self.emit_field_name(&mut bc, name);
+                self.bytecode = bc;
+                if set {
+                    self.bytecode.push_set_field();
+                } else {
+                    self.bytecode.push_get_field();
+                }
+            }
+        }
     }
 
     /// How `lhs sym rhs` over a user type lowers: its trait instance's
@@ -1723,7 +1755,9 @@ impl Compiler {
             return None;
         };
         emit.sroa.get(&local.0)?;
-        let (idx, _) = self.hir_field(hir, base, name)?;
+        let (FieldAt::Slot(idx), _) = self.hir_field(hir, base, name)? else {
+            return None;
+        };
         Some(Self::hir_slot(emit, local) + idx)
     }
 
@@ -1787,6 +1821,18 @@ impl Compiler {
                 kind: MakeKind::Class(_),
                 ..
             } => self.hir_check_new_args(hir, emit, id)?,
+            HirKind::Make {
+                kind: MakeKind::Record(_),
+                args,
+            } => {
+                for &item in args {
+                    let ty = Self::hir_ty(hir, item).ok_or("value-type")?;
+                    if self.value_layout(ty) != ValueLayout::Boxed {
+                        return Err("record-field-layout");
+                    }
+                    self.hir_check_value(hir, emit, item, &BOXED)?;
+                }
+            }
             HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array,
                 args,
@@ -2445,14 +2491,28 @@ impl Compiler {
                     self.bytecode.push_make_array_kind(args.len() as u32, kind);
                 }
             }
+            HirKind::Make {
+                kind: MakeKind::Record(names),
+                args,
+            } => {
+                // As the AST's dict literal: each value, then its name.
+                for (i, (&arg, name)) in args.iter().zip(names).enumerate() {
+                    self.hir_value(hir, emit, arg, &BOXED, depth + 2 * i as u32);
+                    let mut bc = std::mem::take(&mut self.bytecode);
+                    self.emit_raw_string_literal(&mut bc, name);
+                    self.bytecode = bc;
+                }
+                self.bytecode
+                    .push(Byte::new(Instruction::MakeDict).with_operand_u32(args.len() as u32));
+            }
             HirKind::Field { base, name } => {
                 if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
                     self.bytecode.push_load(slot);
                 } else {
-                    let (idx, _) = self.hir_field(hir, *base, name).expect("planned field");
+                    let (at, _) = self.hir_field(hir, *base, name).expect("planned field");
                     let base_rep = self.hir_natural(hir, emit, *base).expect("planned field base");
                     self.hir_value(hir, emit, *base, &base_rep, depth);
-                    self.bytecode.push_load_field(idx);
+                    self.hir_field_op(at, name, false);
                 }
             }
             HirKind::Make {
@@ -3347,7 +3407,7 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
                 }
                 HirKind::Field { base, name } => {
-                    let (idx, fty) = self.hir_field(hir, *base, name).expect("planned field");
+                    let (at, fty) = self.hir_field(hir, *base, name).expect("planned field");
                     let want = Rep::Word(self.value_layout(&fty));
                     self.hir_value(hir, emit, *value, &want, 0);
                     if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
@@ -3356,7 +3416,7 @@ impl Compiler {
                         // `SetField` pops the object and value, pushes the value.
                         let base_rep = self.hir_natural(hir, emit, *base).expect("planned field base");
                         self.hir_value(hir, emit, *base, &base_rep, 1);
-                        self.bytecode.push_set_field_slot(idx);
+                        self.hir_field_op(at, name, true);
                         self.bytecode.push_pop();
                     }
                 }

@@ -74,6 +74,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         }
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
         Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), seen),
+        // A record: one dict word, its fields read and written by name.
+        Ty::Record { fields } if !fields.is_empty() => fields
+            .iter()
+            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
+            .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
             aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
@@ -820,8 +825,13 @@ impl Walk<'_> {
     /// A receiver whose fields are read and written in place: a plain
     /// object, or a generic class instance (its fields typed open in the
     /// class's parameters, as the shared body lays them out).
+    /// A record value: fields by name (`GetField` / `SetField`).
+    fn record(&self, id: HirId) -> bool {
+        matches!(self.ty(id).map(strip_readonly), Some(Ty::Record { .. }))
+    }
+
     fn object(&self, id: HirId) -> Check {
-        if self.class(id) == Some(ValueClass::Object) || self.shared_receiver(id) {
+        if self.class(id) == Some(ValueClass::Object) || self.shared_receiver(id) || self.record(id) {
             Ok(())
         } else {
             Err("receiver-type")
@@ -1013,6 +1023,18 @@ impl Walk<'_> {
                     return Err("field-of-new");
                 }
                 self.value(*base, depth)
+            }
+            // `{a: x, b: y}`: each value then its name, then `MakeDict`.
+            HirKind::Make {
+                kind: MakeKind::Record(_),
+                args,
+            } => {
+                self.word(id)?;
+                for (i, &arg) in args.iter().enumerate() {
+                    self.word(arg)?;
+                    self.value(arg, depth + 2 * i as u32)?;
+                }
+                Ok(())
             }
             HirKind::Make {
                 kind: MakeKind::Range { .. },
