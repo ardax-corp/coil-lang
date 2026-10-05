@@ -16493,6 +16493,14 @@ impl Checker {
         self.static_slots.get(fqn).map(|(id, _)| *id)
     }
 
+    /// Declared type of the static in `slot`.
+    pub fn static_slot_ty(&self, slot: u32) -> Option<&Ty> {
+        self.static_slots
+            .iter()
+            .find(|(_, (id, _))| *id == slot)
+            .and_then(|(fqn, _)| self.static_slot_types.get(fqn))
+    }
+
     /// Whether a static slot is declared `static const` / class static const.
     pub fn is_static_const_fqn(&self, fqn: &str) -> bool {
         self.static_slots.get(fqn).map(|(_, c)| *c).unwrap_or(false)

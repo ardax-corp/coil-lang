@@ -14114,6 +14114,16 @@ impl Compiler {
         )
     }
 
+    /// Whether the field access `node` reads a `float`: the id-table type,
+    /// else the declared field type.
+    fn is_float_field(&self, node: &Output) -> bool {
+        self.is_float_ty(node)
+            || matches!(
+                self.codegen_expr_ty(node),
+                Some(Ty::Con(ref name)) if name == crate::typechecking::ty::FLOAT
+            )
+    }
+
     fn is_string_expr(&self, node: &Output) -> bool {
         matches!(
             self.codegen_expr_ty(node),
@@ -14326,7 +14336,44 @@ impl Compiler {
         }
     }
 
+    /// The static slot an assignment target names: a module static not
+    /// shadowed by a local, or a class static `Owner::member`.
+    fn lvalue_static_slot(&self, target: &Output) -> Option<u32> {
+        match target.1.as_ref() {
+            Expression::Identifier(name) => {
+                let resolved = self.resolve_free_fn(name);
+                let site = target.0.into_range();
+                let shadows_static =
+                    self.checker
+                        .ident_shadows_static_name((site.start, site.end), name, &resolved);
+                self.checker
+                    .static_slot_index(&resolved)
+                    .or_else(|| self.checker.static_slot_for_module_name(name))
+                    .filter(|_| !shadows_static)
+            }
+            Expression::QualifiedAccess { owner, member } => self
+                .checker
+                .static_slot_index(&self.class_member_fqn(owner, member)),
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields: parser::ast::EnumConstructPayload::Unit,
+            } => self
+                .checker
+                .static_slot_index(&self.class_member_fqn(enum_name, variant_name)),
+            _ => None,
+        }
+    }
+
     fn emit_read_lvalue(&mut self, bytecode: &mut CodeBuf, target: &Output) -> bool {
+        if let Some(slot) = self.lvalue_static_slot(target) {
+            bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+            return self.is_float_ty(target)
+                || matches!(
+                    self.checker.static_slot_ty(slot),
+                    Some(Ty::Con(name)) if name == crate::typechecking::ty::FLOAT
+                );
+        }
         match target.1.as_ref() {
             Expression::Identifier(name) => {
                 if let Some(slot) = self.variable_slot(name) {
@@ -14339,7 +14386,7 @@ impl Compiler {
             Expression::Access(receiver, field) => {
                 if let Some(slot) = self.unboxed_class_field_slot(receiver, field) {
                     bytecode.push_load(slot);
-                    return self.is_float_ty(target);
+                    return self.is_float_field(target);
                 }
                 bytecode.append(&mut self.do_compile(receiver));
                 if let Some(idx) = self.class_field_slot(receiver, field) {
@@ -14348,11 +14395,7 @@ impl Compiler {
                     self.emit_field_name(bytecode, field);
                     bytecode.push_get_field();
                 }
-                matches!(
-                    self.receiver_type(receiver),
-                    Some(crate::typechecking::Ty::Con(ref n))
-                        if n == crate::typechecking::ty::FLOAT
-                )
+                self.is_float_field(target)
             }
             Expression::Index(arr, Some(idx)) => {
                 if let Expression::Identifier(name) = arr.1.as_ref()
@@ -14392,6 +14435,13 @@ impl Compiler {
         target: &Output,
         leave_value_on_stack: bool,
     ) {
+        if let Some(slot) = self.lvalue_static_slot(target) {
+            if leave_value_on_stack {
+                bytecode.push(Byte::new(Instruction::DUPLICATE));
+            }
+            bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+            return;
+        }
         match target.1.as_ref() {
             Expression::Identifier(name) => {
                 if let Some(slot) = self.variable_slot(name) {
@@ -14708,11 +14758,6 @@ impl Compiler {
                 return;
             }
 
-        let delta: i64 = match op {
-            parser::ast::AdjustOp::Inc => 1,
-            parser::ast::AdjustOp::Dec => -1,
-        };
-
         if let Expression::Index(arr, Some(idx)) = target.1.as_ref() {
             if let Expression::Identifier(name) = arr.1.as_ref()
                 && let Some(box_slot) = self.stack_array_boxed_slot(name)
@@ -14720,17 +14765,13 @@ impl Compiler {
                 self.emit_boxed_array_load(bytecode, box_slot, idx);
                 let tmp_old = if !prefix {
                     let t = self.alloc_temp_slot();
-                    bytecode.push(Byte::new(Instruction::DUPLICATE));
                     bytecode.push_store_pop(t);
+                    bytecode.push_load(t);
                     t
                 } else {
                     0
                 };
-                bytecode.push(Byte::new_with_value(
-                    Instruction::CONST,
-                    Value::from(delta).raw() as _,
-                ));
-                bytecode.push(Byte::new(Instruction::ADD));
+                self.emit_adjust_step(bytecode, op, false);
                 self.emit_boxed_array_store(bytecode, box_slot, idx, prefix);
                 if !prefix {
                     bytecode.push_load(tmp_old);
@@ -14763,17 +14804,13 @@ impl Compiler {
                 self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
                 let tmp_old = if !prefix {
                     let t = self.alloc_temp_slot();
-                    bytecode.push(Byte::new(Instruction::DUPLICATE));
                     bytecode.push_store_pop(t);
+                    bytecode.push_load(t);
                     t
                 } else {
                     0
                 };
-                bytecode.push(Byte::new_with_value(
-                    Instruction::CONST,
-                    Value::from(delta).raw() as _,
-                ));
-                bytecode.push(Byte::new(Instruction::ADD));
+                self.emit_adjust_step(bytecode, op, false);
                 let tmp_val = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_val);
                 self.emit_stack_array_select_store(EmitStackArraySelectStoreArgs {
@@ -14811,11 +14848,7 @@ impl Compiler {
             } else {
                 0
             };
-            bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(delta).raw() as _,
-            ));
-            bytecode.push(Byte::new(Instruction::ADD));
+            self.emit_adjust_step(bytecode, op, false);
             let tmp_val = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp_val);
             bytecode.push_load(tmp_arr);
@@ -14832,31 +14865,39 @@ impl Compiler {
 
         let is_float = self.emit_read_lvalue(bytecode, target);
         let tmp_old = if !prefix {
+            // Reload rather than DUPLICATE: the temp can sit at the operand
+            // stack's own position, where the `+ 1` would overwrite it.
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
+            bytecode.push_load(tmp);
             tmp
         } else {
             0
         };
-        if is_float {
-            bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(delta as f64).raw() as _,
-            ));
-            bytecode.push(Byte::new(Instruction::ADDF));
-        } else {
-            bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(delta).raw() as _,
-            ));
-            bytecode.push(Byte::new(Instruction::ADD));
-        }
+        self.emit_adjust_step(bytecode, op, is_float);
         self.emit_write_lvalue(bytecode, target, false);
         if prefix {
             self.emit_read_lvalue(bytecode, target);
         } else {
             bytecode.push_load(tmp_old);
         }
+    }
+
+    /// `++` / `--` on the value on top of the stack: add or subtract one.
+    /// `CONST` takes only small inline ints, so `1.0` goes through the pool.
+    fn emit_adjust_step(&mut self, bytecode: &mut CodeBuf, op: parser::ast::AdjustOp, is_float: bool) {
+        if is_float {
+            self.emit_const_value(&ConstValue::Float(1.0), bytecode);
+        } else {
+            bytecode.push_const(1);
+        }
+        let instr = match (op, is_float) {
+            (parser::ast::AdjustOp::Inc, false) => Instruction::ADD,
+            (parser::ast::AdjustOp::Dec, false) => Instruction::SUB,
+            (parser::ast::AdjustOp::Inc, true) => Instruction::ADDF,
+            (parser::ast::AdjustOp::Dec, true) => Instruction::SUBF,
+        };
+        bytecode.push(Byte::new(instr));
     }
 
     fn qualify_static_fqn(&self, name: &str) -> String {
