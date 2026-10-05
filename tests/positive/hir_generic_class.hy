@@ -58,10 +58,8 @@ test("generic class locals and methods lower") {
     assert(drain(s) == 43)?;
     let t = names();
     assert(t.size() == 2)?;
-    // The popped payload itself is checked once the AST's niche `Option`
-    // return from a shared generic body is fixed.
     match t.pop() {
-        Option::Some(_) => {},
+        Option::Some(top) => assert(top == "bc")?,
         Option::None => assert(false)?,
     }
     assert(t.size() == 1)?;
