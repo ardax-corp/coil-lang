@@ -950,8 +950,10 @@ impl Walk<'_> {
                 if is_vec(body, self.checker, recv) {
                     return self.vec_method(name, args, depth);
                 }
-                if !self.shared_receiver(recv) {
-                    self.object(recv)?;
+                // Any one-word receiver may name a ground trait instance's
+                // method; codegen resolves inherent methods on objects only.
+                if !self.shared_receiver(recv) && self.object(recv).is_err() {
+                    self.word(recv).map_err(|_| "receiver-type")?;
                 }
                 self.args(args, depth, depth == 0)
             }
