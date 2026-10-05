@@ -29,6 +29,7 @@ use super::{
     UnOp,
 };
 use crate::typechecking::infer::{Checker, TypedSidecar};
+use crate::typechecking::def_id::DefId;
 use crate::typechecking::ty::{
     self as coil_ty, Ty, is_option_ty, option_inner, result_ok_err, result_ty, strip_readonly,
 };
@@ -552,7 +553,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                 } else {
                     let name = format!("{owner}::{member}");
                     let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
-                    self.emit(b, node, HirKind::Global { name, def })
+                    self.global(b, node, name, def)
                 }
             }
 
@@ -685,7 +686,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                 fields: EnumConstructPayload::Unit,
             } if self.class_static(enum_name, variant_name) => {
                 let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
-                self.emit(b, node, HirKind::Global { name: format!("{enum_name}::{variant_name}"), def })
+                self.global(b, node, format!("{enum_name}::{variant_name}"), def)
             }
             E::Construct { enum_name, variant_name, fields } => {
                 let (args, names) = match fields {
@@ -839,7 +840,28 @@ impl<'c, 'm> Cx<'c, 'm> {
             return self.make_variant(b, node, common::BUILTIN_OPTION_ENUM, "None", Vec::new(), None);
         }
         let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
-        self.emit(b, node, HirKind::Global { name: name.to_string(), def })
+        self.global(b, node, name.to_string(), def)
+    }
+
+    /// A global read. An assignment or `++` target has no type of its own:
+    /// a static takes its declared one.
+    fn global(&self, b: &mut BodyBuilder, node: &Output<'_>, name: String, def: Option<DefId>) -> HirId {
+        let ty = self.ty_of(node).or_else(|| self.static_ty(&name));
+        self.emit_ty(b, node, HirKind::Global { name, def }, ty)
+    }
+
+    fn static_ty(&self, name: &str) -> Option<Ty> {
+        let slot = match name.rsplit_once("::") {
+            Some((owner, member)) if self.checker.is_class(owner) => {
+                let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
+                self.checker.static_slot_index(&format!("{key}::{member}"))
+            }
+            _ => self
+                .checker
+                .static_slot_index(name)
+                .or_else(|| self.checker.static_slot_for_module_name(name)),
+        }?;
+        self.checker.static_slot_ty(slot).cloned()
     }
 
     fn block(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>], scoped: bool) -> HirId {
