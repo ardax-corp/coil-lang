@@ -639,7 +639,7 @@ fn try_fuse_load_const_op_store(window: &[Slot], pool: &mut Vec<u64>) -> Option<
     }
     let dest = store_slot_u32(&b3)?;
     let idx = pool.len();
-    pool.push(((dest as u64) << 32) | (imm as u16 as u32 as u64));
+    pool.push(((dest as u64) << 32) | (imm as i32 as u32 as u64));
     Some(Slot::Byte(
         Byte::new(Instruction::BinSlotImmStore).with_bin_slot_imm_store(
             *b2.bytecode() as u8,
@@ -792,7 +792,7 @@ fn encode_slot(
         } => {
             let pc = resolve(labels, *target)?;
             let idx = pool.len();
-            pool.push(((pc as u64) << 32) | (*imm as u16 as u32 as u64));
+            pool.push(((pc as u64) << 32) | (*imm as i32 as u32 as u64));
             let insn = if *if_true {
                 Instruction::BinSlotImmJmpt
             } else {
@@ -1065,7 +1065,7 @@ fn try_fuse_bin_slot_imm_store_local(b0: &Byte, b1: &Byte, pool: &mut Vec<u64>) 
     }
     let dest = store_slot_u32(b1)?;
     let idx = pool.len();
-    pool.push(((dest as u64) << 32) | (imm as i16 as u16 as u32 as u64));
+    pool.push(((dest as u64) << 32) | (imm as i16 as i32 as u32 as u64));
     Some(Byte::new(Instruction::BinSlotImmStore).with_bin_slot_imm_store(op, src as u8, idx as u16))
 }
 
