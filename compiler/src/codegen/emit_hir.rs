@@ -2222,6 +2222,27 @@ impl Compiler {
                 if self.loop_par_sites.contains_key(&(start, end)) {
                     return Err("for-in-par");
                 }
+                // `into_iter` is called as the AST calls it: a range comes
+                // back as `[start, end]`, anything else as one word.
+                if let Some(ForInKind::Custom {
+                    into_iter_fqn,
+                    counted: Some(counted),
+                    ..
+                }) = kind
+                {
+                    if !self.functions.contains_key(into_iter_fqn) && !self.fn_entry_labels.contains_key(into_iter_fqn) {
+                        return Err("for-in-custom");
+                    }
+                    let want = match counted {
+                        crate::typechecking::infer::ForInCounted::Range { inclusive, .. } => {
+                            Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string())
+                        }
+                        _ => None,
+                    };
+                    if self.two_word_return_kind(into_iter_fqn) != want {
+                        return Err("for-in-custom");
+                    }
+                }
                 match (lower::range_bounds(hir, *iterable), kind) {
                     (Some(bounds), _) => {
                         for b in bounds {
@@ -3838,7 +3859,33 @@ impl Compiler {
         // vectorize / dense match).
         let cont = lower::has_own_continue(hir, body).then(|| self.bytecode.fresh_label());
         let exit = self.bytecode.fresh_label();
-        match *kind {
+        // A user `into_iter` with a counted result runs that result's loop.
+        let (custom, kind) = match kind {
+            ForInKind::Custom {
+                into_iter_fqn,
+                counted: Some(counted),
+                ..
+            } => {
+                use crate::typechecking::infer::ForInCounted as C;
+                let as_kind = match *counted {
+                    C::Range { inclusive, float } => ForInKind::Range { inclusive, float },
+                    C::Dict => ForInKind::Dict,
+                    _ => ForInKind::Array,
+                };
+                (Some(into_iter_fqn.clone()), as_kind)
+            }
+            _ => (None, kind.clone()),
+        };
+        // As `emit_for_in_custom`: the raw iterable, then `into_iter` with a
+        // pair result left unboxed.
+        let into_iter = |this: &mut Self, emit: &mut HirEmit, fqn: &str| {
+            this.hir_value(hir, emit, iterable, &BOXED, 0);
+            this.repr.unbox_enum_context += 1;
+            let called = this.emit_named_entry_on_module(fqn, 1, crate::il::EntryKind::Call);
+            this.repr.unbox_enum_context -= 1;
+            debug_assert!(called, "planned into_iter entry");
+        };
+        match kind {
             ForInKind::Range { inclusive, float } => {
                 let HirPat::Bind(local) = *pat else {
                     unreachable!("planned range for-in binds a name")
@@ -3852,6 +3899,11 @@ impl Compiler {
                     self.hir_value(hir, emit, hi, &BOXED, 0);
                     self.expr_depth = 0;
                     self.bytecode.push_store_pop(end);
+                } else if let Some(fqn) = &custom {
+                    into_iter(self, emit, fqn);
+                    self.expr_depth = 0;
+                    self.bytecode.push_store_pop(end);
+                    self.bytecode.push_store_pop(cur);
                 } else {
                     // A range value's `[start, end]`, as `emit_for_in_range`.
                     let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(inclusive).to_string());
@@ -3890,11 +3942,15 @@ impl Compiler {
                 let node = hir.expr(id);
                 let (start, end) = node.span;
                 let pin = !dict
+                    && custom.is_none()
                     && (node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n))
                         || self.typed_sidecar.is_for_in_pin_span(start, end));
                 let arr = self.alloc_temp_slot();
                 let idx = self.alloc_temp_slot();
-                self.hir_value(hir, emit, iterable, &BOXED, 0);
+                match &custom {
+                    Some(fqn) => into_iter(self, emit, fqn),
+                    None => self.hir_value(hir, emit, iterable, &BOXED, 0),
+                }
                 if dict {
                     // As `emit_for_in_dict`: the entries array of `(key, value)`.
                     self.bytecode.push(Byte::new(Instruction::DictEntries));
