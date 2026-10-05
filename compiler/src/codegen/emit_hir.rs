@@ -3156,7 +3156,7 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(open).collect()),
         Ty::Array { element, length } => Ty::Array {
             element: Box::new(open(element)),
-            length: length.clone(),
+            length: *length,
         },
         Ty::Record { fields } => Ty::Record {
             fields: fields.iter().map(|(n, f)| (n.clone(), open(f))).collect(),
