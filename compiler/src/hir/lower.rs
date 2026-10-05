@@ -123,6 +123,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             user_enum(checker, name, seen)
         }
+        // A monomorphic function value (closure, partial, `fn` object):
+        // one word, only moved and called through `CallIndirect`.
+        Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
@@ -133,6 +136,22 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         // boxed word, only moved.
         Ty::Var(_) => Some(ValueClass::Opaque),
         _ => None,
+    }
+}
+
+/// A closed function type whose parameters and result are plain words:
+/// no enum (its layout may be niche or a pair), no unit, no type variable.
+fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    let plain = |t: &Ty, seen: &mut Vec<String>| {
+        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
+            && matches!(
+                classify_in(checker, t, seen),
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
+            )
+    };
+    match strip_readonly(ty) {
+        Ty::Fun(param, ret) => plain(param, seen) && plain(ret, seen),
+        _ => false,
     }
 }
 
@@ -693,6 +712,42 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     }
 }
 
+/// A callee the AST calls with a plain `CallIndirect`: a parameter of a
+/// monomorphic function type (a rank-n one is a `Forall`), or a `let` of
+/// one from another indirect call, never reassigned. A `let` naming a
+/// generic function, or a call returning a captured `PolyFn`, boxes its
+/// arguments in the AST and stays there.
+pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    let HirKind::Local(local) = body.expr(f).kind else {
+        return false;
+    };
+    let info = body.local(local);
+    if !info
+        .ty
+        .as_ref()
+        .is_some_and(|t| matches!(strip_readonly(t), Ty::Fun(..)) && classify(checker, t).is_some())
+    {
+        return false;
+    }
+    let assigned = body.exprs.iter().any(|e| {
+        matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
+    });
+    if assigned {
+        return false;
+    }
+    match info.kind {
+        LocalKind::Param => true,
+        LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
+            HirKind::Let { local: l, init: Some(init) } if *l == local => matches!(
+                &body.expr(*init).kind,
+                HirKind::Call { callee: Callee::Value(g), .. } if indirect_callee(body, checker, *g)
+            ),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 /// A match of an `int` on integer literals, or of a scalar-backed enum on
 /// its unit variants, closed by `default` or a binding: compare-and-branch
 /// arms on the backing word like the AST's scalar match.
@@ -1033,6 +1088,19 @@ impl Walk<'_> {
                     self.word(recv).map_err(|_| "receiver-type")?;
                 }
                 self.args(args, depth, depth == 0)
+            }
+            // `f(args)` through a function-value local: the args, the
+            // function word, then `CallIndirect`, as the AST does.
+            HirKind::Call {
+                callee: Callee::Value(f),
+                args,
+            } => {
+                if !indirect_callee(body, self.checker, *f) {
+                    return Err("callee-value");
+                }
+                self.word(id)?;
+                self.args(args, depth, false)?;
+                self.value(*f, depth + args.len() as u32)
             }
             HirKind::Call { .. } => Err("callee"),
             HirKind::Index { base, index, kind } => {
