@@ -132,6 +132,9 @@ struct HirEmit {
     lens: HashMap<u32, Option<u32>>,
     /// Each user-type operator, by node.
     ops: HashMap<u32, HirOp>,
+    /// `let a = [..]` kept in frame slots (the AST's multi-slot stack
+    /// array): local to its length; element `i` is slot `slot + i`.
+    stacks: HashMap<u32, usize>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -365,6 +368,7 @@ impl Compiler {
             lens: HashMap::new(),
             consts: HashMap::new(),
             ops: HashMap::new(),
+            stacks: lower::stack_arrays(hir),
         };
         for &param in &hir.params {
             let slot = self
@@ -1417,6 +1421,47 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether `base` names a frame-slot stack array.
+    fn hir_is_stack(hir: &HirBody, emit: &HirEmit, base: HirId) -> bool {
+        matches!(hir.expr(base).kind, HirKind::Local(local) if emit.stacks.contains_key(&local.0))
+    }
+
+    /// `base` as a bound frame-slot stack array: its first slot and length.
+    fn hir_stack_base(hir: &HirBody, emit: &HirEmit, base: HirId) -> Option<(u32, usize)> {
+        let HirKind::Local(local) = hir.expr(base).kind else {
+            return None;
+        };
+        let &n = emit.stacks.get(&local.0)?;
+        Some((Self::hir_slot(emit, local), n))
+    }
+
+    /// The representation of a stack array's elements: one word each.
+    fn hir_stack_rep(&self, hir: &HirBody, local: LocalId) -> Rep {
+        let elem = hir.local(local).ty.as_ref().map(|ty| apply_ty_prune(self.checker.subst(), ty));
+        Rep::Word(match elem.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            Some(Ty::Array { element, .. }) => self.value_layout(element),
+            _ => ValueLayout::Boxed,
+        })
+    }
+
+    /// Whether a stack-array index needs no bounds check, as the AST's
+    /// `stack_array_index_proven`: the checker proved it, or it is
+    /// `i % m` with `0 < m <= n`.
+    fn hir_stack_proven(hir: &HirBody, node: HirId, index: HirId, n: usize) -> bool {
+        if hir.expr(node).flags.contains(HirFlags::IN_BOUNDS) {
+            return true;
+        }
+        let HirKind::Bin {
+            op: BinOp::IntRem,
+            rhs,
+            ..
+        } = hir.expr(index).kind
+        else {
+            return false;
+        };
+        matches!(hir.expr(rhs).kind, HirKind::Lit(Lit::Int(m)) if m > 0 && m as usize <= n)
+    }
+
     /// `base.name` as a field of a frame-slot class local: its slot.
     fn hir_sroa_slot(&self, hir: &HirBody, emit: &HirEmit, base: HirId, name: &str) -> Option<u32> {
         let HirKind::Local(local) = hir.expr(base).kind else {
@@ -1501,8 +1546,10 @@ impl Compiler {
                 }
             }
             HirKind::Index { base, index, .. } => {
-                let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
-                self.hir_check_value(hir, emit, *base, &base_rep)?;
+                if !Self::hir_is_stack(hir, emit, *base) {
+                    let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                    self.hir_check_value(hir, emit, *base, &base_rep)?;
+                }
                 self.hir_check_value(hir, emit, *index, &BOXED)?;
             }
             HirKind::Make { .. } => return self.hir_check_make(hir, emit, id, want),
@@ -1677,6 +1724,16 @@ impl Compiler {
                 if emit.sroa.contains_key(&local.0) {
                     return self.hir_check_new_args(hir, emit, *init);
                 }
+                if emit.stacks.contains_key(&local.0) {
+                    let HirKind::Make { args, .. } = &hir.expr(*init).kind else {
+                        unreachable!()
+                    };
+                    let want = self.hir_stack_rep(hir, *local);
+                    for &arg in args {
+                        self.hir_check_value(hir, emit, arg, &want)?;
+                    }
+                    return Ok(());
+                }
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
             }
@@ -1694,6 +1751,9 @@ impl Compiler {
                 HirKind::Index { base, index, .. } => {
                     let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *value, &want)?;
+                    if Self::hir_is_stack(hir, emit, *base) {
+                        return self.hir_check_value(hir, emit, *index, &BOXED);
+                    }
                     let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *base, &base_rep)?;
                     self.hir_check_value(hir, emit, *index, &BOXED)
@@ -1972,9 +2032,27 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::ArrayLen));
                 }
             },
+            HirKind::Index { base, index, .. } if let Some((slot, n)) = Self::hir_stack_base(hir, emit, *base) => {
+                // As the AST: a literal in-range index is the slot; any
+                // other goes to a temp and selects its slot.
+                if let HirKind::Lit(Lit::Int(i)) = hir.expr(*index).kind
+                    && (0..n as i64).contains(&i)
+                {
+                    self.bytecode.push_load(slot + i as u32);
+                } else {
+                    let proven = Self::hir_stack_proven(hir, id, *index, n);
+                    self.hir_index_value(hir, emit, *index, depth);
+                    self.expr_depth = depth;
+                    let idx = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(idx);
+                    let mut bc = std::mem::take(&mut self.bytecode);
+                    self.emit_stack_array_select_load(&mut bc, slot, n, idx, proven);
+                    self.bytecode = bc;
+                }
+            }
             HirKind::Index { base, index, .. } => {
                 let proven = hir.expr(id).flags.contains(HirFlags::IN_BOUNDS);
-                let staged = lower::clobbers(hir, *index);
+                let staged = lower::clobbers(hir, &emit.stacks, *index);
                 let pin = match hir.expr(*base).kind {
                     HirKind::Local(local) if proven => {
                         Some(Self::hir_slot(emit, local)).filter(|s| self.pinned_array_slots.contains(s))
@@ -2018,7 +2096,7 @@ impl Compiler {
                 kind: kind @ (MakeKind::Tuple | MakeKind::Array),
                 args,
             } => {
-                let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, a));
+                let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
                 let wants: Vec<Rep> = args
                     .iter()
                     .map(|&a| Rep::Word(Self::hir_ty(hir, a).map_or(ValueLayout::Boxed, |t| self.value_layout(t))))
@@ -2153,7 +2231,7 @@ impl Compiler {
                 let params = emit.calls[&id.0].params.clone();
                 let (recv, value) = (args[0], args[1]);
                 self.hir_value(hir, emit, recv, &Rep::Word(params[0]), depth);
-                if lower::clobbers(hir, value) {
+                if lower::clobbers(hir, &emit.stacks, value) {
                     self.expr_depth = 0;
                     let r = self.alloc_temp_slot();
                     self.bytecode.push_store_pop(r);
@@ -2837,6 +2915,27 @@ impl Compiler {
                     }
                     return;
                 }
+                if let Some(&n) = emit.stacks.get(&local.0) {
+                    // Slots first, then each element stored into its own, as
+                    // the AST's `try_emit_stack_array_init`.
+                    let HirKind::Make { args, .. } = &hir.expr(*init).kind else {
+                        unreachable!()
+                    };
+                    let base = self.hir_bind_local(hir, *local);
+                    let key = self.context.variables.resolve(base as usize).clone();
+                    for i in 1..n {
+                        let slot = self.context.variables.intern(format!("__arrpad_{key}_{i}")) as u32;
+                        debug_assert_eq!(slot, base + i as u32);
+                    }
+                    self.context.stack_array_locals.insert(key, (base, n));
+                    emit.slots[local.0 as usize] = Some(base);
+                    let want = self.hir_stack_rep(hir, *local);
+                    for (i, &arg) in args.iter().enumerate() {
+                        self.hir_value(hir, emit, arg, &want, 0);
+                        self.bytecode.push_store_pop(base + i as u32);
+                    }
+                    return;
+                }
                 // Value first: its operands live above every bound slot.
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_value(hir, emit, *init, &want, 0);
@@ -2870,6 +2969,36 @@ impl Compiler {
                         self.hir_value(hir, emit, *base, &base_rep, 1);
                         self.bytecode.push_set_field_slot(idx);
                         self.bytecode.push_pop();
+                    }
+                }
+                HirKind::Index { base, index, .. } if let Some((slot, n)) = Self::hir_stack_base(hir, emit, *base) => {
+                    // As the AST: a literal in-range index stores the slot;
+                    // any other stages value and index and selects the slot.
+                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    if let HirKind::Lit(Lit::Int(i)) = hir.expr(*index).kind
+                        && (0..n as i64).contains(&i)
+                    {
+                        self.bytecode.push_store_pop(slot + i as u32);
+                    } else {
+                        let proven = Self::hir_stack_proven(hir, *place, *index, n);
+                        self.expr_depth = 0;
+                        let val = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(val);
+                        let idx = self.alloc_temp_slot();
+                        self.hir_index_value(hir, emit, *index, 0);
+                        self.bytecode.push_store_pop(idx);
+                        let mut bc = std::mem::take(&mut self.bytecode);
+                        self.emit_stack_array_select_store(EmitStackArraySelectStoreArgs {
+                            bytecode: &mut bc,
+                            base: slot,
+                            n,
+                            idx_slot: idx,
+                            val_slot: val,
+                            leave_value: false,
+                            proven,
+                        });
+                        self.bytecode = bc;
                     }
                 }
                 HirKind::Index { base, index, .. } => {
@@ -3153,7 +3282,7 @@ impl Compiler {
     /// Push `lhs` then `rhs`, staging both through temps when
     /// [`lower::stages_rhs`] wants the right side at depth zero.
     fn hir_operands(&mut self, hir: &HirBody, emit: &mut HirEmit, lhs: HirId, rhs: HirId, depth: u32) {
-        if depth != 0 || !lower::stages_rhs(hir, rhs) {
+        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) {
             self.hir_value(hir, emit, lhs, &BOXED, depth);
             self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
             return;

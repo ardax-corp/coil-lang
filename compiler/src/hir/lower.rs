@@ -22,7 +22,8 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind};
+use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
+use std::collections::HashMap;
 use crate::codegen::primitive_cast_opcode as cast_opcode;
 use crate::typechecking::infer::{Checker, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
@@ -217,6 +218,61 @@ pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
             .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
 }
 
+/// `let a = [e1, .., en]` with 1..=32 items whose local is only ever
+/// indexed: the elements live in `n` frame slots (the AST's multi-slot
+/// stack array) and never escape, so no array object is built.
+pub fn stack_array(body: &HirBody, local: LocalId, init: HirId) -> Option<usize> {
+    let HirKind::Make {
+        kind: MakeKind::Array,
+        args,
+    } = &body.expr(init).kind
+    else {
+        return None;
+    };
+    let n = args.len();
+    ((1..=32).contains(&n) && body.local(local).kind == LocalKind::Let && only_index_base(body, local)).then_some(n)
+}
+
+/// Whether `local` is only ever the base of an array index read or write.
+fn only_index_base(body: &HirBody, local: LocalId) -> bool {
+    let bases: std::collections::HashSet<u32> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            HirKind::Index {
+                base,
+                kind: IndexKind::Array,
+                ..
+            } => Some(base.0),
+            _ => None,
+        })
+        .collect();
+    let assigned = body.exprs.iter().any(|e| match e.kind {
+        HirKind::Assign { place, .. } => body.expr(place).kind == HirKind::Local(local),
+        _ => false,
+    });
+    !assigned
+        && body
+            .exprs
+            .iter()
+            .enumerate()
+            .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
+}
+
+/// The frame-slot stack arrays of `body`: local to its length.
+pub fn stack_arrays(body: &HirBody) -> HashMap<u32, usize> {
+    body.exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            HirKind::Let {
+                local,
+                init: Some(init),
+            } => stack_array(body, local, init).map(|n| (local.0, n)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether some `local.field = ..` writes a field of `local`.
 fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
     body.exprs.iter().any(|e| match e.kind {
@@ -236,7 +292,7 @@ impl Walk<'_> {
     fn vec_method(&mut self, name: &str, args: &[HirId], depth: u32) -> Check {
         match (name, args) {
             ("push", [recv, value]) => {
-                let staged = clobbers(self.body, *value);
+                let staged = clobbers(self.body, &self.stack, *value);
                 if staged && depth != 0 {
                     return Err("staged-push");
                 }
@@ -287,10 +343,10 @@ pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
 /// Whether evaluating `id` may store into frame slots (the AST's
 /// `expr_may_clobber_operand_stack`): a call, `match`, `new` or string
 /// index anywhere inside it.
-pub fn clobbers(body: &HirBody, id: HirId) -> bool {
+pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool {
     let mut found = false;
     visit(body, id, &mut |e| {
-        found |= matches!(
+        found |= stack_select(body, stack, e) || matches!(
             &e.kind,
             HirKind::Call { .. }
                 | HirKind::Match { .. }
@@ -456,6 +512,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         body,
         checker,
         loops: 0,
+        stack: stack_arrays(body),
     };
     walk.effect(root, 0).err()
 }
@@ -598,19 +655,36 @@ pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
 /// when the right one calls, matches or builds a variant, so the right one
 /// runs with no operand below it (as the AST codegen does): it can then
 /// inline, bind payload slots and stage args.
-pub fn stages_rhs(body: &HirBody, rhs: HirId) -> bool {
+pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bool {
     match &body.expr(rhs).kind {
         HirKind::Call { .. } | HirKind::Match { .. } | HirKind::Make { .. } => true,
+        HirKind::Index { .. } => stack_select(body, stack, body.expr(rhs)),
         HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
-            stages_rhs(body, *lhs) || stages_rhs(body, *rhs)
+            stages_rhs(body, stack, *lhs) || stages_rhs(body, stack, *rhs)
         }
-        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => stages_rhs(body, *operand),
+        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => stages_rhs(body, stack, *operand),
         _ => false,
     }
 }
 
-fn rhs_depth(body: &HirBody, rhs: HirId, depth: u32) -> u32 {
-    if depth == 0 && stages_rhs(body, rhs) { 0 } else { depth + 1 }
+/// A stack-array read the AST lowers as a select over the slots (any index
+/// but an in-range literal): it stores temps, so it counts as a call for
+/// staging (`expr_may_clobber_operand_stack`).
+pub fn stack_select(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirExpr) -> bool {
+    let HirKind::Index { base, index, .. } = e.kind else {
+        return false;
+    };
+    let HirKind::Local(local) = body.expr(base).kind else {
+        return false;
+    };
+    let Some(&n) = stack.get(&local.0) else {
+        return false;
+    };
+    !matches!(body.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i))
+}
+
+fn rhs_depth(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId, depth: u32) -> u32 {
+    if depth == 0 && stages_rhs(body, stack, rhs) { 0 } else { depth + 1 }
 }
 
 type Check = Result<(), &'static str>;
@@ -619,6 +693,8 @@ struct Walk<'b> {
     body: &'b HirBody,
     checker: &'b Checker,
     loops: u32,
+    /// Frame-slot stack arrays: local to length.
+    stack: HashMap<u32, usize>,
 }
 
 impl Walk<'_> {
@@ -639,6 +715,11 @@ impl Walk<'_> {
     }
 
     /// A value a local, argument or payload can hold.
+    /// Whether `base` names a frame-slot stack array.
+    fn stack_base(&self, base: HirId) -> bool {
+        matches!(self.body.expr(base).kind, HirKind::Local(local) if self.stack.contains_key(&local.0))
+    }
+
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
             Some(class) if is_word(class) => Ok(()),
@@ -658,7 +739,7 @@ impl Walk<'_> {
     /// item staged through a temp when a later one may clobber (as the
     /// AST's `emit_literal_items`).
     fn items(&mut self, items: &[HirId], depth: u32) -> Check {
-        let staged = items.len() >= 2 && items[1..].iter().any(|&i| clobbers(self.body, i));
+        let staged = items.len() >= 2 && items[1..].iter().any(|&i| clobbers(self.body, &self.stack, i));
         if staged && depth != 0 {
             return Err("staged-literal");
         }
@@ -752,7 +833,7 @@ impl Walk<'_> {
                     self.word(*lhs)?;
                     self.word(*rhs)?;
                     self.value(*lhs, 0)?;
-                    return self.value(*rhs, rhs_depth(body, *rhs, 0));
+                    return self.value(*rhs, rhs_depth(body, &self.stack, *rhs, 0));
                 }
                 // `a + b` is `FORMAT "%s%s"` over both (the format string
                 // sits under them); `==` / `!=` compare strings with `EQ`.
@@ -764,7 +845,7 @@ impl Walk<'_> {
                     }
                     let base = depth + u32::from(concat);
                     self.value(*lhs, base)?;
-                    return self.value(*rhs, rhs_depth(body, *rhs, base));
+                    return self.value(*rhs, rhs_depth(body, &self.stack, *rhs, base));
                 }
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;
@@ -773,13 +854,13 @@ impl Walk<'_> {
                     return Err("mixed-operands");
                 }
                 self.value(*lhs, depth)?;
-                self.value(*rhs, rhs_depth(body, *rhs, depth))
+                self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
             }
             HirKind::Logic { lhs, rhs, .. } => {
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;
                 self.value(*lhs, depth)?;
-                self.value(*rhs, rhs_depth(body, *rhs, depth))
+                self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
             }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
@@ -837,11 +918,19 @@ impl Walk<'_> {
                 self.word(id)?;
                 self.aggregate(*base)?;
                 self.scalar(*index)?;
+                if self.stack_base(*base) {
+                    // A slot `LOAD`, or the index to a temp and a select,
+                    // which runs with no operand below it.
+                    if depth != 0 && stack_select(body, &self.stack, body.expr(id)) {
+                        return Err("stack-select-depth");
+                    }
+                    return self.value(*index, depth);
+                }
                 if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
                     return Err("index-of-literal");
                 }
                 // A clobbering index stages base and index through temps.
-                let staged = clobbers(body, *index);
+                let staged = clobbers(body, &self.stack, *index);
                 if staged && depth != 0 {
                     return Err("staged-index");
                 }
@@ -988,7 +1077,18 @@ impl Walk<'_> {
                 if is_unit_local(body, self.checker, *local) {
                     return self.effect(*init, depth);
                 }
-                // `let a = [..]` keeps the elements in frame slots in the AST.
+                // `let a = [..]` keeps the elements in frame slots in the AST;
+                // only one that is never more than indexed lowers.
+                if self.stack.contains_key(&local.0) {
+                    let HirKind::Make { args, .. } = &body.expr(*init).kind else {
+                        unreachable!()
+                    };
+                    for &arg in args {
+                        self.word(arg)?;
+                        self.value(arg, 0)?;
+                    }
+                    return Ok(());
+                }
                 if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if !args.is_empty()) {
                     return Err("stack-array");
                 }
@@ -1043,6 +1143,10 @@ impl Walk<'_> {
                         self.scalar(*index)?;
                         self.word(*value)?;
                         self.value(*value, 0)?;
+                        if self.stack_base(*base) {
+                            // The value to a temp, then the index.
+                            return self.value(*index, 0);
+                        }
                         self.value(*base, 0)?;
                         self.value(*index, 1)
                     }
