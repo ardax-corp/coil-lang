@@ -841,6 +841,20 @@ impl Compiler {
             .or_else(|| self.fn_arities.get(&lookup))
         {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
+            // Declared later in the file: its entry is reserved but its
+            // arity not yet recorded, so read it from the signature as the
+            // AST call does. Its two-word return kind is not known yet, so
+            // only a callee returning no enum qualifies.
+            None if key == lookup
+                && self.fn_entry_labels.contains_key(&key)
+                && self.checker.fn_return_ty(&lookup).is_some_and(|ret| {
+                    matches!(
+                        lower::classify(&self.checker, &ret),
+                        Some(ValueClass::Scalar | ValueClass::Unit | ValueClass::Opaque | ValueClass::Object)
+                    )
+                })
+                && !self.checker.fn_has_rest(&lookup)
+                && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == explicit) => {}
             _ => return Err("callee-arity"),
         }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
