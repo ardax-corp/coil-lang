@@ -17,7 +17,7 @@
 use super::*;
 use crate::hir::lower::{self, ValueClass};
 use crate::hir::{
-    BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId, MakeKind, UnOp,
+    BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId, MakeKind, UnOp,
 };
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::value_layout::ValueLayout;
@@ -1574,7 +1574,12 @@ impl Compiler {
                 }
                 return self.hir_check_value(hir, emit, *tail, want);
             }
-            HirKind::Break | HirKind::Continue | HirKind::Return(_) => {
+            HirKind::Break
+            | HirKind::Continue
+            | HirKind::Return(_)
+            | HirKind::Builtin {
+                op: Builtin::Panic, ..
+            } => {
                 return self.hir_check_effect(hir, emit, id);
             }
             _ => return Err("value-shape"),
@@ -1786,6 +1791,10 @@ impl Compiler {
                 self.hir_check_effect(hir, emit, *body)
             }
             HirKind::Break | HirKind::Continue => Ok(()),
+            HirKind::Builtin {
+                op: Builtin::Panic,
+                args,
+            } => self.hir_check_value(hir, emit, args[0], &BOXED),
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
                 Some(v) => self.hir_check_value(hir, emit, v, &emit.ret),
                 None if emit.ret.words() == 1 => Ok(()),
@@ -2387,7 +2396,12 @@ impl Compiler {
                 }
                 return self.hir_value(hir, emit, *tail, want, depth);
             }
-            HirKind::Break | HirKind::Continue | HirKind::Return(_) => {
+            HirKind::Break
+            | HirKind::Continue
+            | HirKind::Return(_)
+            | HirKind::Builtin {
+                op: Builtin::Panic, ..
+            } => {
                 return self.hir_effect(hir, emit, id);
             }
             other => unreachable!("HIR lowering admitted {other:?}"),
@@ -3080,6 +3094,21 @@ impl Compiler {
             HirKind::Continue => {
                 let target = emit.loops.last().expect("continue inside a loop").cont;
                 self.hir_jump(IlJumpKind::Unconditional, target);
+            }
+            HirKind::Builtin {
+                op: Builtin::Panic,
+                args,
+            } => {
+                // As the AST: the message and `Panic`, all at the panic's
+                // own location.
+                let il_start = self.bytecode.il_mut().raw_len();
+                self.hir_value(hir, emit, args[0], &BOXED, 0);
+                self.bytecode.push(Byte::new(Instruction::Panic));
+                let (start, end) = hir.expr(id).span;
+                let loc = self.loc_from_span(SimpleSpan::from(start..end));
+                for op in &mut self.bytecode.il_mut().ops_slice_mut()[il_start..] {
+                    op.set_loc(loc);
+                }
             }
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
                 Some(v) if emit.tail_calls.contains(&v.0) => {
