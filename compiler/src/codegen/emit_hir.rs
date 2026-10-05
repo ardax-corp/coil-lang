@@ -125,6 +125,8 @@ struct HirEmit {
     /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
     /// local): local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
+    /// Each `const` read, by node, with the value the AST folds it to.
+    consts: HashMap<u32, crate::const_fold::ConstValue>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
     /// for `ArrayLen`.
     lens: HashMap<u32, Option<u32>>,
@@ -332,6 +334,7 @@ impl Compiler {
             tag_slots: HashMap::new(),
             sroa: HashMap::new(),
             lens: HashMap::new(),
+            consts: HashMap::new(),
         };
         for &param in &hir.params {
             let slot = self
@@ -340,6 +343,11 @@ impl Compiler {
             emit.slots[param.0 as usize] = Some(slot);
         }
         for (i, expr) in hir.exprs.iter().enumerate() {
+            if let HirKind::Global { name, .. } = &expr.kind {
+                let value = self.hir_global_const(hir, HirId(i as u32), name).ok_or("global")?;
+                emit.consts.insert(i as u32, value);
+                continue;
+            }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
                 emit.lens.insert(i as u32, len);
                 continue;
@@ -1119,6 +1127,7 @@ impl Compiler {
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
             HirKind::Lit(_)
+            | HirKind::Global { .. }
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }
@@ -1221,6 +1230,44 @@ impl Compiler {
         self.checker.resolve_class_key(name)
     }
 
+    /// The value a `const` identifier folds to, looked up as
+    /// `compile_identifier_into` does, when its kind matches the read's type.
+    fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
+        use crate::const_fold::ConstValue;
+        if name.contains("::") {
+            return None;
+        }
+        let expr = hir.expr(id);
+        let resolved = self.resolve_free_fn(name);
+        let shadows = self
+            .checker
+            .ident_shadows_static_name((expr.span.0, expr.span.1), name, &resolved);
+        let qualified = self.qualify_static_fqn(name);
+        let value = self
+            .const_env()
+            .get(&resolved)
+            .or_else(|| self.const_env().get(name))
+            .or_else(|| {
+                self.static_const_values
+                    .get(&resolved)
+                    .filter(|_| !shadows && self.checker.is_static_const_fqn(&resolved))
+            })
+            .or_else(|| {
+                self.static_const_values
+                    .get(&qualified)
+                    .filter(|_| !shadows && self.checker.is_static_const_fqn(&qualified))
+            })?;
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        let prim = lower::primitive(&ty);
+        let fits = match value {
+            ConstValue::Int(_) => prim == Some(crate::typechecking::ty::INT),
+            ConstValue::Float(_) => prim == Some(crate::typechecking::ty::FLOAT),
+            ConstValue::Bool(_) => prim == Some(crate::typechecking::ty::BOOL),
+            ConstValue::Str(_) => matches!(&ty, Ty::Con(n) if n == crate::typechecking::ty::STRING),
+        };
+        fits.then(|| value.clone())
+    }
+
     /// Slot index and declared type of field `name` of the object `base`.
     fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(u32, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
@@ -1305,7 +1352,7 @@ impl Compiler {
 
     fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
-            HirKind::Lit(_) | HirKind::Local(_) => {}
+            HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } => {}
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
@@ -1690,6 +1737,12 @@ impl Compiler {
                 self.bytecode.append(&mut bc);
             }
             HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
+            HirKind::Global { .. } => {
+                let value = emit.consts[&id.0].clone();
+                let mut bc = CodeBuf::new();
+                self.emit_const_value(&value, &mut bc);
+                self.bytecode.append(&mut bc);
+            }
             HirKind::Local(local) => {
                 let slot = Self::hir_slot(emit, *local);
                 self.bytecode.push_load(slot);
