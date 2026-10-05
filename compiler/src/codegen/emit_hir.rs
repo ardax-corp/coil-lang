@@ -3074,8 +3074,10 @@ impl Compiler {
                 self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
             }
             _ => {
+                // An unhinted jump, as `try_compile_niche_option_match`: the test
+                // runs on a duplicate, so `LogNot; JMPT` may fuse.
                 Self::push_niche_eq_zero(&mut self.bytecode);
-                self.hir_jump_under(IlJumpKind::JumpIfTrue, other);
+                self.hir_jump(IlJumpKind::JumpIfTrue, other);
             }
         }
         arm_on_word(self, emit, first, payload_side, false);
