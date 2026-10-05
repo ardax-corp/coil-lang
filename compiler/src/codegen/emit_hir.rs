@@ -534,6 +534,7 @@ impl Compiler {
                 && call.generic.is_none()
                 && call.ranges.is_empty()
                 && Self::hir_call_rep(call) == emit.ret
+                && !self.coroutine_fns.contains(&call.key)
                 && self.hir_tail_call_ok(&call.key)
             {
                 emit.tail_calls.insert(value.0);
@@ -1153,11 +1154,13 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
         }
-        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup) {
+        // An `async fn` call is `MakeCoro`: its result is the handle word.
+        let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
+        if coro && (self_layout.is_some() || open || !self.coroutine_fns.contains(&key)) {
             return Err("callee-coroutine");
         }
-        let pair = self.two_word_return_kind(&key);
-        if pair != self.two_word_return_kind(&lookup) {
+        let pair = if coro { None } else { self.two_word_return_kind(&key) };
+        if !coro && pair != self.two_word_return_kind(&lookup) {
             return Err("callee-pair");
         }
         if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
@@ -1214,7 +1217,7 @@ impl Compiler {
             params.push(self.value_layout(ty));
         }
         let ret_ty = self.checker.fn_return_ty(&lookup).ok_or("callee-signature")?;
-        if lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
+        if !coro && lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
         // As `emit_call_args_range_pairs`: a plain free function takes its
@@ -1226,11 +1229,14 @@ impl Compiler {
         } else {
             Vec::new()
         };
+        if coro && !ranges.is_empty() {
+            return Err("callee-coroutine");
+        }
         Ok(HirCall {
             key,
             pair,
             params,
-            ret: self.value_layout(&ret_ty),
+            ret: if coro { ValueLayout::Boxed } else { self.value_layout(&ret_ty) },
             method: false,
             mono: false,
             builtin: None,
@@ -1490,6 +1496,10 @@ impl Compiler {
             HirKind::Call {
                 callee: Callee::Value(_),
                 ..
+            }
+            | HirKind::Resume { .. }
+            | HirKind::Builtin {
+                op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
             HirKind::Index { .. }
@@ -1922,6 +1932,21 @@ impl Compiler {
                     self.hir_check_value(hir, emit, arg, &BOXED)?;
                 }
             }
+            // As the AST: the yielded and sent words move as they are, so
+            // only a boxed-layout type is taken.
+            HirKind::Resume { handle, value } => {
+                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
+                if !boxed(id) || value.is_some_and(|v| !boxed(v)) {
+                    return Err("resume-layout");
+                }
+                for &v in value.iter().chain([handle]) {
+                    self.hir_check_value(hir, emit, v, &BOXED)?;
+                }
+            }
+            HirKind::Builtin {
+                op: Builtin::Done,
+                args,
+            } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
                 for (i, &arg) in args.iter().enumerate().take(call.params.len()) {
@@ -2542,6 +2567,20 @@ impl Compiler {
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
             }
+            HirKind::Resume { handle, value } => {
+                for (i, &v) in value.iter().chain([handle]).enumerate() {
+                    self.hir_value(hir, emit, v, &BOXED, depth + i as u32);
+                }
+                self.bytecode
+                    .push(Byte::new(Instruction::ResumeCoro).with_operand_u32(u32::from(value.is_some())));
+            }
+            HirKind::Builtin {
+                op: Builtin::Done,
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                self.bytecode.push(Byte::new(Instruction::DoneCoro));
+            }
             HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
                 // evaluated and dropped (as in the AST).
@@ -2925,6 +2964,8 @@ impl Compiler {
                 let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
                 let kind = if tail {
                     crate::il::EntryKind::TailCall
+                } else if self.coroutine_fns.contains(&key) {
+                    crate::il::EntryKind::MakeCoro
                 } else {
                     crate::il::EntryKind::Call
                 };
