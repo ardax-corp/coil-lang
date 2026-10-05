@@ -84,7 +84,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             // A generic class instance: one object word, its methods shared
             // across instances (fields are only read inside them).
             if is_generic_class(checker, name) {
-                return super::layout::ty_is_closed(ty).then_some(ValueClass::Opaque);
+                return Some(ValueClass::Opaque);
             }
             let option = common::is_builtin_option_enum(name);
             let result = common::is_builtin_result_enum(name);
@@ -98,7 +98,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
                     _ => {}
                 }
             }
-            super::layout::ty_is_closed(ty).then_some(ValueClass::Enum)
+            params_closed(ty).then_some(ValueClass::Enum)
         }
         Ty::Sum { name, variants } => {
             if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
@@ -110,7 +110,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
                         }
                     }
                 }
-                return super::layout::ty_is_closed(ty).then_some(ValueClass::Enum);
+                return params_closed(ty).then_some(ValueClass::Enum);
             }
             user_enum(checker, name, seen)
         }
@@ -118,16 +118,39 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         Ty::Con(name) if checker.is_class(name) => object_class(checker, name),
         Ty::Con(name) => user_enum(checker, name, seen),
+        // A type parameter inside a generic class's shared method body: one
+        // boxed word, only moved.
+        Ty::Var(_) => Some(ValueClass::Opaque),
         _ => None,
     }
 }
 
-/// A tuple, array or `Vec` whose element types are closed (elements are
-/// classified where they are read).
+/// Closed but for type parameters (a generic class's shared method body):
+/// each parameter is one boxed word, and [`super::layout::of`] gives a type
+/// open in one the same layout the AST codegen uses.
+fn params_closed(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Var(_) => true,
+        Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+        Ty::List(inner) | Ty::Constructor { owner: inner, .. } => params_closed(inner),
+        Ty::App(_, args) => args.iter().all(params_closed),
+        Ty::Tuple(items) => items.iter().all(params_closed),
+        Ty::Record { fields } => fields.iter().all(|(_, f)| params_closed(f)),
+        Ty::Array { element, .. } => params_closed(element),
+        Ty::Sum { variants, .. } => variants
+            .iter()
+            .all(|(_, p)| p.field_types().into_iter().all(params_closed)),
+        Ty::Con(_) | Ty::Never => true,
+        Ty::Readonly(_) => unreachable!("stripped"),
+    }
+}
+
+/// A tuple, array or `Vec` whose element types are closed but for type
+/// parameters (elements are classified where they are read).
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            super::layout::ty_is_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
+            params_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
         })
         .then_some(ValueClass::Aggregate)
 }
@@ -831,7 +854,11 @@ impl Walk<'_> {
                 if depth != 0 {
                     return Err("nested-new");
                 }
-                self.object(id)?;
+                // A generic class's instance is built like any object, its
+                // type-parameter fields boxed.
+                if !self.shared_receiver(id) {
+                    self.object(id)?;
+                }
                 self.args(args, 0, true)
             }
             HirKind::Make {
