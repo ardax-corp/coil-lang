@@ -1273,9 +1273,29 @@ impl Compiler {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
         let idx = self.class_field_slot_of_ty(&ty, name)?;
         let class = self.hir_class_of(hir, base)?;
-        let fields = self.checker.class_fields(&class)?;
+        let fields = self.hir_class_fields(&class)?;
         let (fname, fty) = fields.get(idx as usize)?;
         (fname == name).then(|| (idx, fty.clone()))
+    }
+
+    /// `class`'s fields with their declared types. A generic class's type
+    /// parameters are open there: its one shared body holds them boxed, and
+    /// the AST codegen lays a field out by its open type (`Option<Node<T>>`
+    /// is a boxed enum, never the niche a closed `Node<int>` would get).
+    fn hir_class_fields(&self, class: &str) -> Option<Vec<(String, Ty)>> {
+        let fields = self.checker.class_fields(class)?;
+        let ctors = &self.checker.generics().generic_type_ctors;
+        let Some(params) = ctors.get(class).or_else(|| {
+            self.checker.resolve_class_key(class).and_then(|key| ctors.get(&key))
+        }) else {
+            return Some(fields);
+        };
+        Some(
+            fields
+                .into_iter()
+                .map(|(name, ty)| (name, open_params(&ty, params)))
+                .collect(),
+        )
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,
@@ -1289,7 +1309,7 @@ impl Compiler {
             return None;
         };
         let class = self.resolve_class_ident(name);
-        let fields = self.checker.class_fields(&class)?;
+        let fields = self.hir_class_fields(&class)?;
         let codegen = self.context.classes.get(&class)?;
         if codegen.len() != fields.len()
             || args.len() != fields.len()
@@ -3118,4 +3138,29 @@ fn hir_bisect(name: &str) -> bool {
         eprintln!("hir bisect: body {n} is `{name}`");
     }
     n <= limit
+}
+
+/// `ty` with each named type parameter in `params` replaced by a type
+/// variable (a distinct one per parameter).
+fn open_params(ty: &Ty, params: &[String]) -> Ty {
+    let open = |t: &Ty| open_params(t, params);
+    match ty {
+        Ty::Con(name) => match params.iter().position(|p| p == name) {
+            Some(i) => Ty::Var(crate::typechecking::ty::TyVarId(u32::MAX - i as u32)),
+            None => ty.clone(),
+        },
+        Ty::App(head, args) => Ty::App(Box::new(open(head)), args.iter().map(open).collect()),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(open(a)), Box::new(open(b))),
+        Ty::List(inner) => Ty::List(Box::new(open(inner))),
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(open(inner))),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(open).collect()),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(open(element)),
+            length: length.clone(),
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, f)| (n.clone(), open(f))).collect(),
+        },
+        _ => ty.clone(),
+    }
 }

@@ -115,3 +115,42 @@ test("string holder") {
     )?;
     assert(b.spare_or("y") == "y")?;
 }
+
+// A field open in the parameter (`Option<Link<T>>`) is a boxed enum in the
+// shared body, not the niche a closed `Option<Link<int>>` would be.
+class Link<T> {
+    pub value: T,
+    pub next: Option<Link<T>>,
+}
+
+class Chain<T> {
+    head: Option<Link<T>>,
+    pub len: int,
+}
+
+impl Chain<T> {
+    pub static fn new() -> Chain<T> {
+        return new Chain(Option::None, 0);
+    }
+
+    pub fn push(T v) {
+        self.head = Option::Some(new Link(v, self.head));
+        self.len = self.len + 1;
+    }
+
+    pub fn peek() -> Option<T> {
+        return match self.head {
+            Option::None => Option::None,
+            Option::Some(n) => Option::Some(n.value),
+        };
+    }
+}
+
+test("open field layouts") {
+    let c = Chain::new();
+    assert((c.peek() ?? -7) == -7)?;
+    c.push(4);
+    c.push(9);
+    assert((c.peek() ?? 0) == 9)?;
+    assert(c.len == 2)?;
+}

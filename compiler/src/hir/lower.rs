@@ -683,11 +683,10 @@ impl Walk<'_> {
     }
 
     /// A receiver whose fields are read and written in place: a plain
-    /// object, or `self` in a generic class's shared method body (only its
-    /// closed-type fields pass the field's own value check).
+    /// object, or a generic class instance (its fields typed open in the
+    /// class's parameters, as the shared body lays them out).
     fn object(&self, id: HirId) -> Check {
-        let shared_self = matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(name)) if is_generic_class(self.checker, name));
-        if self.class(id) == Some(ValueClass::Object) || shared_self {
+        if self.class(id) == Some(ValueClass::Object) || self.shared_receiver(id) {
             Ok(())
         } else {
             Err("receiver-type")
