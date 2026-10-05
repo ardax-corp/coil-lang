@@ -186,11 +186,13 @@ impl Compiler {
         // position when the emit cursor still sits on parameter nodes before
         // it, else the cursor itself (it can run ahead of the pre-order ids
         // in `impl` blocks, and the walk takes one id per node from there).
+        // A file that emits a trailing `impl` first leaves the cursor at the
+        // end; the AST walk then takes no ids, and neither does this body.
         let table = self.checker.id_table();
         let body_pos = table
             .walk_id(body, table.ids().get(self.emit_idx).copied())
             .map(|id| (id.0 as usize).max(self.emit_idx))
-            .filter(|&pos| pos < table.len());
+            .filter(|&pos| pos <= table.len());
         let plan = if body_pos.is_none() {
             Some("emit-cursor")
         } else if hir.result_mode != self.compiling_result_mode {
