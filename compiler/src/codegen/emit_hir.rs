@@ -572,12 +572,14 @@ impl Compiler {
         {
             return Err("callee-trait");
         }
-        if self.sidecar_overload(node.node, start, end).is_some()
-            || self.checker.partial_fill_at(start, end).is_some()
-        {
+        let overload = self.sidecar_overload(node.node, start, end);
+        if overload.is_some_and(|(_, rest, _)| rest) || self.checker.partial_fill_at(start, end).is_some() {
             return Err("callee-overload");
         }
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        if let Some((fixed, _, id)) = overload {
+            return self.resolve_hir_overload(hir, call, name, fixed, id);
+        }
         let mut key = match name.rsplit_once("::") {
             // `C::f(..)`: the static method, keyed like `compile_construct_expr`.
             Some((owner, member)) if self.checker.is_class(owner) => self.class_member_fqn(owner, member),
@@ -617,6 +619,76 @@ impl Compiler {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
         }
         Ok(abi)
+    }
+
+    /// A call the checker resolved to one arity overload, keyed as
+    /// `compile_call_expr` keys it (`name#arity.id`, namespace-qualified
+    /// when bare). Its layouts are read off the call's own argument and
+    /// result types, so only plain words (no enum, no range) qualify.
+    fn resolve_hir_overload(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        name: &str,
+        fixed: usize,
+        id: u32,
+    ) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        if name.contains("::") || fixed != args.len() {
+            return Err("callee-overload");
+        }
+        let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let mut base = self.resolve_free_fn(name);
+        if !known(&base) && !self.native.contains_key(&base) && !self.namespace.is_empty() && !base.contains("::") {
+            base = format!("{}::{}", self.namespace, base);
+        }
+        let mut key = overload_fn_key(&base, fixed, false, id);
+        if !self.functions.contains_key(&key) {
+            let simple = base.rsplit("::").next().unwrap_or(&base);
+            key = overload_fn_key(simple, fixed, false, id);
+        }
+        if !self.functions.contains_key(&key) {
+            return Err("callee-overload");
+        }
+        let lookup = strip_overload_key(&key).to_string();
+        if self.checker.is_generic_fn(&lookup)
+            || self.coroutine_fns.contains(&key)
+            || self.coroutine_fns.contains(&lookup)
+            || self.two_word_return_kind(&key).is_some()
+            || self.callee_has_unboxed_range_params(&key)
+        {
+            return Err("callee-overload");
+        }
+        if self.fn_arities.get(&key) != Some(&(fixed as u32, false)) {
+            return Err("callee-arity");
+        }
+        let plain = |id: HirId, unit: bool| -> Result<ValueLayout, &'static str> {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
+            match lower::classify(&self.checker, &ty) {
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
+                    if crate::hir::layout::ty_is_closed(&ty) =>
+                {
+                    Ok(self.value_layout(&ty))
+                }
+                Some(ValueClass::Unit) if unit => Ok(ValueLayout::Boxed),
+                _ => Err("callee-signature"),
+            }
+        };
+        let params = args.iter().map(|&a| plain(a, false)).collect::<Result<Vec<_>, _>>()?;
+        Ok(HirCall {
+            key,
+            pair: None,
+            params,
+            ret: plain(call, true)?,
+            method: false,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        })
     }
 
     /// Whether the AST's `mono_call_offset` finds an emitted clone of `key`
