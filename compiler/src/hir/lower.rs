@@ -24,7 +24,7 @@
 
 use super::{BinOp, BodyKind, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind};
 use crate::codegen::primitive_cast_opcode as cast_opcode;
-use crate::typechecking::infer::Checker;
+use crate::typechecking::infer::{Checker, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
 
@@ -268,8 +268,15 @@ pub fn clobbers(body: &HirBody, id: HirId) -> bool {
 
 /// Every node of `id`'s subtree, `id` first.
 fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
+    f(body.expr(id));
+    for k in children(body, id) {
+        visit(body, k, f);
+    }
+}
+
+/// The direct subexpressions of `id`.
+fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
     let e = body.expr(id);
-    f(e);
     let mut kids: Vec<HirId> = Vec::new();
     match &e.kind {
         HirKind::Field { base, .. } => kids.push(*base),
@@ -297,9 +304,7 @@ fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
         HirKind::Resume { handle, value } => kids.extend(std::iter::once(*handle).chain(*value)),
         _ => {}
     }
-    for k in kids {
-        visit(body, k, f);
-    }
+    kids
 }
 
 /// An index that is safe to evaluate twice (a compound assignment builds
@@ -351,6 +356,40 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     });
     seen.pop();
     ok.then_some(ValueClass::Enum)
+}
+
+/// `[start, end]` of a `for` over a range literal.
+pub fn range_bounds(body: &HirBody, iterable: HirId) -> Option<[HirId; 2]> {
+    match &body.expr(iterable).kind {
+        HirKind::Make {
+            kind: MakeKind::Range { .. },
+            args,
+        } => <[HirId; 2]>::try_from(args.as_slice()).ok(),
+        _ => None,
+    }
+}
+
+/// Whether `body` holds a `continue` of its own loop (nested loops' are
+/// theirs), as `const_fold::body_has_continue`.
+pub fn has_own_continue(hir: &HirBody, body: HirId) -> bool {
+    match &hir.expr(body).kind {
+        HirKind::Continue => true,
+        HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
+        _ => children(hir, body).into_iter().any(|k| has_own_continue(hir, k)),
+    }
+}
+
+/// Whether `local` is assigned anywhere in `body`.
+pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
+    let mut found = false;
+    visit(hir, body, &mut |e| {
+        if let HirKind::Assign { place, .. } = &e.kind
+            && matches!(hir.expr(*place).kind, HirKind::Local(l) if l == local)
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
@@ -946,6 +985,43 @@ impl Walk<'_> {
             HirKind::Loop { body: inner } => {
                 if depth != 0 {
                     return Err("nested-loop");
+                }
+                self.loops += 1;
+                let r = self.effect(*inner, depth);
+                self.loops -= 1;
+                r
+            }
+            HirKind::ForIn {
+                pat,
+                iterable,
+                body: inner,
+                kind,
+            } => {
+                if depth != 0 {
+                    return Err("nested-loop");
+                }
+                let HirPat::Bind(_) = pat else {
+                    return Err("for-in-pattern");
+                };
+                match kind {
+                    Some(ForInKind::Range { .. }) => {
+                        let Some(args) = range_bounds(body, *iterable) else {
+                            return Err("for-in-range");
+                        };
+                        // A short literal range is unrolled by the AST.
+                        if args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(Lit::Int(_)))) {
+                            return Err("for-in-unroll");
+                        }
+                        for &a in &args {
+                            self.scalar(a)?;
+                            self.value(a, 0)?;
+                        }
+                    }
+                    Some(ForInKind::Array) => {
+                        self.aggregate(*iterable)?;
+                        self.value(*iterable, 0)?;
+                    }
+                    _ => return Err("for-in"),
                 }
                 self.loops += 1;
                 let r = self.effect(*inner, depth);
