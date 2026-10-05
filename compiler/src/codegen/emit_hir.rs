@@ -135,6 +135,11 @@ struct HirEmit {
     /// `let a = [..]` kept in frame slots (the AST's multi-slot stack
     /// array): local to its length; element `i` is slot `slot + i`.
     stacks: HashMap<u32, usize>,
+    /// Block statements that box escaping stack arrays before they run.
+    box_at: HashMap<u32, Vec<u32>>,
+    /// The array object of each boxed stack array, once boxed: from its
+    /// escape on, the local is that object.
+    boxes: HashMap<u32, u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -368,8 +373,13 @@ impl Compiler {
             lens: HashMap::new(),
             consts: HashMap::new(),
             ops: HashMap::new(),
-            stacks: lower::stack_arrays(hir),
+            stacks: HashMap::new(),
+            box_at: HashMap::new(),
+            boxes: HashMap::new(),
         };
+        let stacks = lower::stack_arrays(hir);
+        emit.stacks = stacks.len;
+        emit.box_at = stacks.box_at;
         for &param in &hir.params {
             let slot = self
                 .lookup_slot(&hir.local(param).name)
@@ -1426,6 +1436,30 @@ impl Compiler {
         matches!(hir.expr(base).kind, HirKind::Local(local) if emit.stacks.contains_key(&local.0))
     }
 
+    /// `base` as a boxed stack array: the slot of its array object.
+    fn hir_stack_box(hir: &HirBody, emit: &HirEmit, base: HirId) -> Option<u32> {
+        let HirKind::Local(local) = hir.expr(base).kind else {
+            return None;
+        };
+        emit.boxes.get(&local.0).copied()
+    }
+
+    /// Box a stack array's slots into one array object at a statement
+    /// start, as the AST's `emit_hoisted_escape_box`.
+    fn hir_box_stack_array(&mut self, emit: &mut HirEmit, local: LocalId) {
+        let base = Self::hir_slot(emit, local);
+        let n = emit.stacks[&local.0];
+        let mut bc = CodeBuf::new();
+        self.emit_box_stack_array(&mut bc, base, n);
+        self.bytecode.append(&mut bc);
+        self.expr_depth = 0;
+        let slot = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(slot);
+        emit.boxes.insert(local.0, slot);
+        let key = self.context.variables.resolve(base as usize).clone();
+        self.context.stack_array_box.insert(key, slot);
+    }
+
     /// `base` as a bound frame-slot stack array: its first slot and length.
     fn hir_stack_base(hir: &HirBody, emit: &HirEmit, base: HirId) -> Option<(u32, usize)> {
         let HirKind::Local(local) = hir.expr(base).kind else {
@@ -1917,6 +1951,10 @@ impl Compiler {
                 self.emit_const_value(&value, &mut bc);
                 self.bytecode.append(&mut bc);
             }
+            HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
+                let slot = *emit.boxes.get(&local.0).expect("stack array boxed before its escape");
+                self.bytecode.push_load(slot);
+            }
             HirKind::Local(local) => {
                 let slot = Self::hir_slot(emit, *local);
                 self.bytecode.push_load(slot);
@@ -2041,6 +2079,12 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::ArrayLen));
                 }
             },
+            HirKind::Index { base, index, .. } if let Some(boxed) = Self::hir_stack_box(hir, emit, *base) => {
+                // As the AST's `emit_boxed_array_load`.
+                self.bytecode.push_load(boxed);
+                self.hir_index_value(hir, emit, *index, depth + 1);
+                self.bytecode.push_index();
+            }
             HirKind::Index { base, index, .. } if let Some((slot, n)) = Self::hir_stack_base(hir, emit, *base) => {
                 // As the AST: a literal in-range index is the slot; any
                 // other goes to a temp and selects its slot.
@@ -2338,11 +2382,36 @@ impl Compiler {
                     // its attempt back (the temps stay allocated).
                     self.bytecode.truncate(mark);
                 }
-                for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                    self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
-                    if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
-                        Self::emit_box_if_needed(&mut self.bytecode, ty);
+                if emit.boxes.is_empty() {
+                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
+                            Self::emit_box_if_needed(&mut self.bytecode, ty);
+                        }
                     }
+                } else {
+                    // A stack array's box lives in a frame slot: as the
+                    // AST, each argument to a temp, then all of them
+                    // parked above the boxes so the callee's frame cannot
+                    // overwrite one.
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
+                        if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
+                            Self::emit_box_if_needed(&mut self.bytecode, ty);
+                        }
+                        self.expr_depth = depth;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    for &tmp in &temps {
+                        self.bytecode.push_load(tmp);
+                    }
+                    self.expr_depth = depth;
+                    let mut bc = std::mem::take(&mut self.bytecode);
+                    self.park_args_above_stack_array_boxes(&mut bc, args.len() as u32);
+                    self.bytecode = bc;
                 }
                 let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));
                 let kind = if tail {
@@ -2881,6 +2950,11 @@ impl Compiler {
     /// every op it emits (line breakpoints, backtraces).
     fn hir_stmt(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId) {
         let il_start = self.bytecode.il_mut().raw_len();
+        if let Some(locals) = emit.box_at.get(&id.0).cloned() {
+            for local in locals {
+                self.hir_box_stack_array(emit, LocalId(local));
+            }
+        }
         self.hir_effect(hir, emit, id);
         let (start, end) = hir.expr(id).span;
         self.fill_statement_locs(il_start, SimpleSpan::from(start..end));
@@ -2984,6 +3058,19 @@ impl Compiler {
                         self.bytecode.push_set_field_slot(idx);
                         self.bytecode.push_pop();
                     }
+                }
+                HirKind::Index { base, index, .. } if let Some(boxed) = Self::hir_stack_box(hir, emit, *base) => {
+                    // As the AST's `emit_boxed_array_store`.
+                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    self.hir_value(hir, emit, *value, &want, 0);
+                    self.expr_depth = 0;
+                    let val = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(val);
+                    self.bytecode.push_load(boxed);
+                    self.hir_index_value(hir, emit, *index, 1);
+                    self.bytecode.push_load(val);
+                    self.bytecode.push(Byte::new(Instruction::StoreIndex));
+                    self.bytecode.push_pop();
                 }
                 HirKind::Index { base, index, .. } if let Some((slot, n)) = Self::hir_stack_base(hir, emit, *base) => {
                     // As the AST: a literal in-range index stores the slot;
