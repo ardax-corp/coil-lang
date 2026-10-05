@@ -218,24 +218,30 @@ pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
             .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
 }
 
-/// `let a = [e1, .., en]` with 1..=32 items whose local is only ever
-/// indexed: the elements live in `n` frame slots (the AST's multi-slot
-/// stack array) and never escape, so no array object is built.
-pub fn stack_array(body: &HirBody, local: LocalId, init: HirId) -> Option<usize> {
-    let HirKind::Make {
-        kind: MakeKind::Array,
-        args,
-    } = &body.expr(init).kind
-    else {
-        return None;
-    };
-    let n = args.len();
-    ((1..=32).contains(&n) && body.local(local).kind == LocalKind::Let && only_index_base(body, local)).then_some(n)
+/// `let a = [e1, .., en]` locals kept in `n` frame slots (the AST's
+/// multi-slot stack array).
+#[derive(Default)]
+pub struct StackArrays {
+    /// Local to its length.
+    pub len: HashMap<u32, usize>,
+    /// A block statement to the locals whose slots are boxed into one
+    /// array object just before it: the first statement after the `let`
+    /// that uses the local other than through an index (its escape). From
+    /// there on the local is that object, as the AST's hoisted Q1 box.
+    pub box_at: HashMap<u32, Vec<u32>>,
 }
 
-/// Whether `local` is only ever the base of an array index read or write.
-fn only_index_base(body: &HirBody, local: LocalId) -> bool {
-    let bases: std::collections::HashSet<u32> = body
+/// Whether some node of `id`'s subtree satisfies `f`.
+fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
+    f(id) || children(body, id).into_iter().any(|k| any_id(body, k, f))
+}
+
+/// The stack arrays of `body`: each `let a = [..]` with 1..=32 items that
+/// is never reassigned, copied by another `let` or iterated, and whose
+/// escape, if any, is a later statement of the block that binds it.
+pub fn stack_arrays(body: &HirBody) -> StackArrays {
+    use std::collections::HashSet;
+    let bases: HashSet<u32> = body
         .exprs
         .iter()
         .filter_map(|e| match e.kind {
@@ -247,30 +253,66 @@ fn only_index_base(body: &HirBody, local: LocalId) -> bool {
             _ => None,
         })
         .collect();
-    let assigned = body.exprs.iter().any(|e| match e.kind {
-        HirKind::Assign { place, .. } => body.expr(place).kind == HirKind::Local(local),
-        _ => false,
-    });
-    !assigned
-        && body
-            .exprs
-            .iter()
-            .enumerate()
-            .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
-}
-
-/// The frame-slot stack arrays of `body`: local to its length.
-pub fn stack_arrays(body: &HirBody) -> HashMap<u32, usize> {
-    body.exprs
-        .iter()
-        .filter_map(|e| match e.kind {
-            HirKind::Let {
+    // Reads of the local that are not an index base, and forms the AST
+    // reads from the slots even after an escape (a copy, a loop).
+    let mut escapes: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut refused: HashSet<u32> = HashSet::new();
+    for (i, e) in body.exprs.iter().enumerate() {
+        match e.kind {
+            HirKind::Local(local) if !bases.contains(&(i as u32)) => escapes.entry(local.0).or_default().push(i as u32),
+            HirKind::Assign { place, .. } => {
+                if let HirKind::Local(local) = body.expr(place).kind {
+                    refused.insert(local.0);
+                }
+            }
+            HirKind::Let { init: Some(init), .. } | HirKind::ForIn { iterable: init, .. } | HirKind::Spread(init) => {
+                if let HirKind::Local(local) = body.expr(init).kind {
+                    refused.insert(local.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = StackArrays::default();
+    for e in &body.exprs {
+        let HirKind::Block { stmts, tail } = &e.kind else {
+            continue;
+        };
+        for (k, &stmt) in stmts.iter().enumerate() {
+            let HirKind::Let {
                 local,
                 init: Some(init),
-            } => stack_array(body, local, init).map(|n| (local.0, n)),
-            _ => None,
-        })
-        .collect()
+            } = body.expr(stmt).kind
+            else {
+                continue;
+            };
+            let HirKind::Make {
+                kind: MakeKind::Array,
+                args,
+            } = &body.expr(init).kind
+            else {
+                continue;
+            };
+            let n = args.len();
+            if !(1..=32).contains(&n) || body.local(local).kind != LocalKind::Let || refused.contains(&local.0) {
+                continue;
+            }
+            if let Some(uses) = escapes.get(&local.0) {
+                let uses: HashSet<u32> = uses.iter().copied().collect();
+                let first = stmts[k + 1..]
+                    .iter()
+                    .chain(tail)
+                    .copied()
+                    .find(|&s| any_id(body, s, &|id| uses.contains(&id.0)));
+                let Some(first) = first else {
+                    continue;
+                };
+                out.box_at.entry(first.0).or_default().push(local.0);
+            }
+            out.len.insert(local.0, n);
+        }
+    }
+    out
 }
 
 /// Whether some `local.field = ..` writes a field of `local`.
@@ -512,8 +554,12 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         body,
         checker,
         loops: 0,
-        stack: stack_arrays(body),
+        stack: HashMap::new(),
+        box_at: HashMap::new(),
     };
+    let stacks = stack_arrays(body);
+    walk.stack = stacks.len;
+    walk.box_at = stacks.box_at;
     walk.effect(root, 0).err()
 }
 
@@ -695,6 +741,8 @@ struct Walk<'b> {
     loops: u32,
     /// Frame-slot stack arrays: local to length.
     stack: HashMap<u32, usize>,
+    /// Block statements an escaping stack array is boxed before.
+    box_at: HashMap<u32, Vec<u32>>,
 }
 
 impl Walk<'_> {
@@ -924,6 +972,8 @@ impl Walk<'_> {
                     if depth != 0 && stack_select(body, &self.stack, body.expr(id)) {
                         return Err("stack-select-depth");
                     }
+                    // Once boxed: the box, then the index above it.
+                    self.value(*index, depth + 1)?;
                     return self.value(*index, depth);
                 }
                 if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
@@ -1011,6 +1061,10 @@ impl Walk<'_> {
             } => {
                 for &s in stmts {
                     self.effect(s, depth)?;
+                }
+                // An escape boxes before a statement, not a value.
+                if self.box_at.contains_key(&tail.0) {
+                    return Err("stack-escape-tail");
                 }
                 self.value(*tail, depth)
             }
@@ -1149,7 +1203,9 @@ impl Walk<'_> {
                         self.word(*value)?;
                         self.value(*value, 0)?;
                         if self.stack_base(*base) {
-                            // The value to a temp, then the index.
+                            // The value to a temp, then the index (above
+                            // the box once boxed).
+                            self.value(*index, 1)?;
                             return self.value(*index, 0);
                         }
                         self.value(*base, 0)?;
