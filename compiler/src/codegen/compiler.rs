@@ -7708,7 +7708,12 @@ impl Compiler {
         let ty = self
             .codegen_expr_ty(lhs)
             .or_else(|| self.codegen_expr_ty(rhs))?;
-        let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &ty);
+        self.concrete_operator_target_ty(&ty, class, method)
+    }
+
+    /// [`Self::concrete_operator_target`] for an operand of type `ty`.
+    pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
+        let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
         let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
