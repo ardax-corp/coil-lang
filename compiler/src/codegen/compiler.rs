@@ -17038,6 +17038,11 @@ impl Compiler {
                                 is_binding = true;
                             }
                         }
+                        // A `let` (after its RHS) shadows a module `const` of the
+                        // same name for the rest of its scope.
+                        if !is_const {
+                            self.const_env_mut().remove(&name);
+                        }
                     }
                 }
                 if !is_binding {
@@ -17096,6 +17101,9 @@ impl Compiler {
                 for cap in captures {
                     self.context.variables.intern((*cap).to_string());
                 }
+                // Own const scope so a parameter shadowing a module `const`
+                // does not unshadow it in the enclosing function.
+                self.push_const_env();
                 let mut a = self.do_compile(args);
                 self.bytecode.append(&mut a);
                 let (arity, is_rest) = fn_arity_from_args(args);
@@ -17103,6 +17111,7 @@ impl Compiler {
                 self.emit_field_key_prologue(body);
                 let mut b = self.do_compile(body);
                 self.bytecode.append(&mut b);
+                self.pop_const_env();
                 // Expr-bodied lambda: bare RETURN (not CONST 0; RETURN) or peephole returns 0.
                 if !matches!(
                     self.bytecode.last_byte().map(|b| *b.bytecode()),
@@ -17638,6 +17647,8 @@ impl Compiler {
                 bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span))
             }
             Expression::Argument { ty, name: n, .. } => {
+                // A parameter shadows a module `const` of the same name.
+                self.const_env_mut().remove(*n);
                 if let Some(kind) = self.argument_unboxed_range_kind(ast) {
                     let (start, _) = self.alloc_unboxed_enum_slots(n, &kind);
                     self.record_debug_param(n, start);
