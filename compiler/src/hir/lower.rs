@@ -1061,7 +1061,7 @@ impl Walk<'_> {
                 args,
             } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0], depth),
             HirKind::Call {
-                callee: Callee::Named { overload: None, .. },
+                callee: Callee::Named { .. },
                 args,
             } => {
                 if self.class(id).is_none() {
@@ -1102,7 +1102,6 @@ impl Walk<'_> {
                 self.args(args, depth, false)?;
                 self.value(*f, depth + args.len() as u32)
             }
-            HirKind::Call { .. } => Err("callee"),
             HirKind::Index { base, index, kind } => {
                 if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                     return Err("index-kind");
