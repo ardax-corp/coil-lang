@@ -688,6 +688,15 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     }
 }
 
+/// A match of an `int` on integer literals, closed by `default` or a
+/// binding: compare-and-branch arms like the AST's scalar match.
+pub fn is_int_match(body: &HirBody, scrutinee: HirId, arms: &[HirArm]) -> bool {
+    body.expr(scrutinee).ty.as_ref().and_then(primitive) == Some(coil_ty::INT)
+        && arms
+            .iter()
+            .all(|arm| matches!(arm.pat, HirPat::Int(_) | HirPat::Wild | HirPat::Bind(_)))
+}
+
 /// `Variant(x) => x`: the payload word is the arm's value, so the arm needs
 /// no slot.
 pub fn is_identity_arm(body: &HirBody, arm: &HirArm) -> bool {
@@ -1148,6 +1157,24 @@ impl Walk<'_> {
     ) -> Check {
         if arms.is_empty() {
             return Err("match-empty");
+        }
+        if is_int_match(self.body, scrutinee, arms) {
+            if value {
+                self.word(id)?;
+            }
+            // A binding arm stores the scrutinee into a fresh slot.
+            if depth != 0 && arms.iter().any(|a| matches!(a.pat, HirPat::Bind(_))) {
+                return Err("nested-match");
+            }
+            self.value(scrutinee, depth)?;
+            for arm in arms {
+                if value {
+                    self.value(arm.body, depth)?;
+                } else {
+                    self.effect(arm.body, depth)?;
+                }
+            }
+            return Ok(());
         }
         if self.class(scrutinee) != Some(ValueClass::Enum) {
             return Err("match-type");

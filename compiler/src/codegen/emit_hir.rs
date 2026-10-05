@@ -1967,6 +1967,21 @@ impl Compiler {
         arms: &[HirArm],
         want: Option<&Rep>,
     ) -> Check {
+        if lower::is_int_match(hir, scrutinee, arms) {
+            self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
+            for arm in arms {
+                if let HirPat::Bind(local) = &arm.pat
+                    && self.hir_local_layout(hir, *local) != ValueLayout::Boxed
+                {
+                    return Err("binding-layout");
+                }
+                match want {
+                    Some(want) => self.hir_check_value(hir, emit, arm.body, want)?,
+                    None => self.hir_check_effect(hir, emit, arm.body)?,
+                }
+            }
+            return Ok(());
+        }
         let dispatch = self.hir_dispatch_rep(hir, emit, scrutinee, arms);
         self.hir_check_value(hir, emit, scrutinee, &dispatch)?;
         let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
@@ -3010,6 +3025,9 @@ impl Compiler {
             .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
             .map_or(arms.len(), |i| i + 1);
         let arms = &arms[..reach];
+        if lower::is_int_match(hir, scrutinee, arms) {
+            return self.hir_match_int(hir, emit, scrutinee, arms, want, depth);
+        }
         let ty = Self::hir_ty(hir, scrutinee)
             .expect("planned match has a type")
             .clone();
@@ -3127,6 +3145,60 @@ impl Compiler {
             Rep::Word(layout) => self.hir_match_niche(hir, emit, &ty, arms, layout, want, depth, end),
         }
         emit.payload_base = saved_base;
+        self.bytecode.bind_label(end);
+    }
+
+    /// `match` of an `int` on literals: `DUP; <literal>; EQ; JMPF miss`
+    /// per arm, as the AST's scalar match. The last arm needs no test:
+    /// the checker proved the match exhaustive.
+    fn hir_match_int(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+        want: Option<&Rep>,
+        depth: u32,
+    ) {
+        self.hir_value(hir, emit, scrutinee, &BOXED, depth);
+        let end = self.bytecode.fresh_label();
+        let last = arms.len() - 1;
+        for (i, arm) in arms.iter().enumerate() {
+            let miss = match arm.pat {
+                HirPat::Int(n) if i != last => {
+                    let miss = self.bytecode.fresh_label();
+                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    self.hir_push_int(n);
+                    self.bytecode.push(Byte::new(Instruction::EQ));
+                    self.bytecode.push_op(IlOp::Jump {
+                        kind: IlJumpKind::JumpIfFalse,
+                        target: miss,
+                        loc: DebugLoc::unknown(),
+                        hint: crate::il::FuseHint::nofuse_value_under_jmp(),
+                    });
+                    Some(miss)
+                }
+                _ => None,
+            };
+            match &arm.pat {
+                HirPat::Bind(local) => {
+                    let slot = self.hir_bind_local(hir, *local);
+                    emit.slots[local.0 as usize] = Some(slot);
+                    self.bytecode.push_store_pop(slot);
+                }
+                _ => self.bytecode.push_pop(),
+            }
+            match want {
+                Some(want) => self.hir_value(hir, emit, arm.body, want, depth),
+                None => self.hir_effect(hir, emit, arm.body),
+            }
+            if i != last {
+                self.hir_jump(IlJumpKind::Unconditional, end);
+            }
+            if let Some(miss) = miss {
+                self.bytecode.bind_label(miss);
+            }
+        }
         self.bytecode.bind_label(end);
     }
 
