@@ -160,7 +160,11 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
             )
     };
     match strip_readonly(ty) {
-        Ty::Fun(param, ret) => plain(param, seen) && plain(ret, seen),
+        // `() -> T` takes a unit parameter, and `T -> ()` returns one.
+        Ty::Fun(param, ret) => {
+            let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
+            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen))
+        }
         _ => false,
     }
 }
@@ -751,10 +755,15 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     match info.kind {
         LocalKind::Param => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
-            HirKind::Let { local: l, init: Some(init) } if *l == local => matches!(
-                &body.expr(*init).kind,
-                HirKind::Call { callee: Callee::Value(g), .. } if indirect_callee(body, checker, *g)
-            ),
+            // A named function read as a value is `MakeFn` (codegen refuses
+            // a generic one, whose `MakePolyFn` calls differently).
+            HirKind::Let { local: l, init: Some(init) } if *l == local => match &body.expr(*init).kind {
+                HirKind::Call {
+                    callee: Callee::Value(g), ..
+                } => indirect_callee(body, checker, *g),
+                HirKind::Global { .. } => true,
+                _ => false,
+            },
             _ => false,
         }),
         _ => false,
