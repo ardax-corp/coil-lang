@@ -2057,6 +2057,10 @@ impl Compiler {
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
             }
+            HirKind::LetPat { pat, init } => {
+                self.hir_check_let_pat(hir, pat)?;
+                self.hir_check_value(hir, emit, *init, &BOXED)
+            }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
                 HirKind::Local(local) if emit.pair_locals.contains_key(&local.0) => Err("assign-pair"),
                 HirKind::Local(local) => {
@@ -2095,7 +2099,10 @@ impl Compiler {
                 }
             }
             HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
-            HirKind::ForIn { iterable, body, kind, .. } => {
+            HirKind::ForIn { pat, iterable, body, kind } => {
+                if !matches!(pat, HirPat::Bind(_)) {
+                    self.hir_check_let_pat(hir, pat)?;
+                }
                 let (start, end) = hir.expr(id).span;
                 // A parallel-loop site keeps the AST's `try_emit_par_loop`.
                 if self.loop_par_sites.contains_key(&(start, end)) {
@@ -3325,6 +3332,15 @@ impl Compiler {
                     self.hir_stmt(hir, emit, *t);
                 }
             }
+            HirKind::LetPat { pat, init } => {
+                // As `LetDestructure`'s heap path: the value to a temp, then
+                // `emit_let_pattern_binds`.
+                self.hir_value(hir, emit, *init, &BOXED, 0);
+                self.expr_depth = 0;
+                let tmp = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(tmp);
+                self.hir_let_pat_binds(hir, emit, pat, tmp);
+            }
             HirKind::Let {
                 local,
                 init: Some(init),
@@ -3530,11 +3546,11 @@ impl Compiler {
                 self.bytecode.bind_label(exit);
             }
             HirKind::ForIn {
-                pat: HirPat::Bind(local),
+                pat,
                 iterable,
                 body,
                 kind: Some(kind),
-            } => self.hir_for_in(hir, emit, id, *local, *iterable, *body, kind),
+            } => self.hir_for_in(hir, emit, id, pat, *iterable, *body, kind),
             HirKind::Break => {
                 let target = emit.loops.last().expect("break inside a loop").exit;
                 self.hir_jump(IlJumpKind::Unconditional, target);
@@ -3619,7 +3635,7 @@ impl Compiler {
         hir: &HirBody,
         emit: &mut HirEmit,
         id: HirId,
-        local: LocalId,
+        pat: &HirPat,
         iterable: HirId,
         body: HirId,
         kind: &ForInKind,
@@ -3633,6 +3649,9 @@ impl Compiler {
         let exit = self.bytecode.fresh_label();
         match *kind {
             ForInKind::Range { inclusive, float } => {
+                let HirPat::Bind(local) = *pat else {
+                    unreachable!("planned range for-in binds a name")
+                };
                 let cur = self.alloc_temp_slot();
                 let end = self.alloc_temp_slot();
                 if let Some([lo, hi]) = lower::range_bounds(hir, iterable) {
@@ -3675,14 +3694,20 @@ impl Compiler {
                 }
                 (step_slot, step_float) = (iv, float);
             }
-            ForInKind::Array => {
+            ForInKind::Array | ForInKind::Dict => {
+                let dict = matches!(kind, ForInKind::Dict);
                 let node = hir.expr(id);
                 let (start, end) = node.span;
-                let pin = node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n))
-                    || self.typed_sidecar.is_for_in_pin_span(start, end);
+                let pin = !dict
+                    && (node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n))
+                        || self.typed_sidecar.is_for_in_pin_span(start, end));
                 let arr = self.alloc_temp_slot();
                 let idx = self.alloc_temp_slot();
                 self.hir_value(hir, emit, iterable, &BOXED, 0);
+                if dict {
+                    // As `emit_for_in_dict`: the entries array of `(key, value)`.
+                    self.bytecode.push(Byte::new(Instruction::DictEntries));
+                }
                 self.expr_depth = 0;
                 self.bytecode.push_store_pop(arr);
                 self.bytecode.push_const(0);
@@ -3696,8 +3721,14 @@ impl Compiler {
                     self.bytecode.push_array_pin(arr);
                     self.pinned_array_slots.insert(arr);
                 }
-                let x = self.hir_bind_local(hir, local);
-                emit.slots[local.0 as usize] = Some(x);
+                let x = match *pat {
+                    HirPat::Bind(local) => {
+                        let x = self.hir_bind_local(hir, local);
+                        emit.slots[local.0 as usize] = Some(x);
+                        x
+                    }
+                    _ => self.alloc_temp_slot(),
+                };
                 self.bytecode.bind_label(top);
                 self.bytecode.push_load(idx);
                 self.bytecode.push_load(len);
@@ -3712,6 +3743,10 @@ impl Compiler {
                     self.bytecode.push_index();
                 }
                 self.bytecode.push_store_pop(x);
+                // As `emit_for_in_pattern_binds`: names from the element.
+                if !matches!(pat, HirPat::Bind(_)) {
+                    self.hir_let_pat_binds(hir, emit, pat, x);
+                }
                 (step_slot, step_float) = (idx, false);
             }
             _ => unreachable!("HIR lowering admitted for-in {kind:?}"),
@@ -3752,6 +3787,66 @@ impl Compiler {
     /// A fresh slot for `local`. HIR locals are distinct even when their
     /// names repeat, so a shadowing `let` gets its own `__shadow_` slot
     /// (the debugger shows it under the source name).
+    /// Every name a `let` pattern binds is one boxed word, as the AST
+    /// stores the raw `Index` / `GetField` result.
+    fn hir_check_let_pat(&self, hir: &HirBody, pat: &HirPat) -> Check {
+        match pat {
+            HirPat::Wild => Ok(()),
+            HirPat::Bind(local) if self.hir_local_layout(hir, *local) == ValueLayout::Boxed => Ok(()),
+            HirPat::Bind(_) => Err("let-pattern-layout"),
+            HirPat::Tuple(items) => items.iter().try_for_each(|p| self.hir_check_let_pat(hir, p)),
+            HirPat::Record(fields) => fields.iter().try_for_each(|(_, p)| self.hir_check_let_pat(hir, p)),
+            _ => Err("let-pattern"),
+        }
+    }
+
+    /// Bind `pat`'s names from the value in `src`, as `emit_let_pattern_binds`.
+    fn hir_let_pat_binds(&mut self, hir: &HirBody, emit: &mut HirEmit, pat: &HirPat, src: u32) {
+        let parts: Vec<(Option<&str>, usize, &HirPat)> = match pat {
+            HirPat::Tuple(items) => items.iter().enumerate().map(|(i, p)| (None, i, p)).collect(),
+            HirPat::Record(fields) => fields.iter().map(|(n, p)| (Some(n.as_str()), 0, p)).collect(),
+            HirPat::Bind(local) => {
+                self.bytecode.push_load(src);
+                let slot = self.hir_bind_local(hir, *local);
+                emit.slots[local.0 as usize] = Some(slot);
+                self.bytecode.push_store_pop(slot);
+                return;
+            }
+            _ => return,
+        };
+        for (name, idx, part) in parts {
+            if matches!(part, HirPat::Wild) {
+                continue;
+            }
+            self.bytecode.push_load(src);
+            match name {
+                Some(name) => {
+                    let mut bc = std::mem::take(&mut self.bytecode);
+                    self.emit_raw_string_literal(&mut bc, name);
+                    self.bytecode = bc;
+                    self.bytecode.push_get_field();
+                }
+                None => {
+                    self.bytecode.push_const(idx as i32);
+                    self.bytecode.push_index();
+                }
+            }
+            match part {
+                HirPat::Bind(local) => {
+                    let slot = self.hir_bind_local(hir, *local);
+                    emit.slots[local.0 as usize] = Some(slot);
+                    self.bytecode.push_store_pop(slot);
+                }
+                nested => {
+                    self.expr_depth = 0;
+                    let tmp = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(tmp);
+                    self.hir_let_pat_binds(hir, emit, nested, tmp);
+                }
+            }
+        }
+    }
+
     fn hir_bind_local(&mut self, hir: &HirBody, local: LocalId) -> u32 {
         let name = &hir.local(local).name;
         let key = if self.context.variables.key(name).is_some() {

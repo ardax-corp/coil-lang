@@ -270,7 +270,10 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
                     refused.insert(local.0);
                 }
             }
-            HirKind::Let { init: Some(init), .. } | HirKind::ForIn { iterable: init, .. } | HirKind::Spread(init) => {
+            HirKind::Let { init: Some(init), .. }
+            | HirKind::LetPat { init, .. }
+            | HirKind::ForIn { iterable: init, .. }
+            | HirKind::Spread(init) => {
                 if let HirKind::Local(local) = body.expr(init).kind {
                     refused.insert(local.0);
                 }
@@ -501,6 +504,16 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
 /// call's arguments and result and in an unboxed local, else one boxed word.
 pub fn is_range_pair(ty: &Ty) -> bool {
     crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
+}
+
+/// An irrefutable `let` pattern of tuples, records, names and `_`.
+pub fn let_pat_shape(pat: &HirPat) -> bool {
+    match pat {
+        HirPat::Wild | HirPat::Bind(_) => true,
+        HirPat::Tuple(items) => items.iter().all(let_pat_shape),
+        HirPat::Record(fields) => fields.iter().all(|(_, p)| let_pat_shape(p)),
+        HirPat::Int(_) | HirPat::Variant { .. } => false,
+    }
 }
 
 /// `[start, end]` of a `for` over a range literal.
@@ -1215,6 +1228,18 @@ impl Walk<'_> {
                 self.value(*init, depth)
             }
             HirKind::Let { init: None, .. } => Err("uninitialized-let"),
+            // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
+            // each name read from it (`Index` / `GetField`).
+            HirKind::LetPat { pat, init } => {
+                if depth != 0 {
+                    return Err("nested-let");
+                }
+                if !let_pat_shape(pat) {
+                    return Err("let-pattern");
+                }
+                self.word(*init)?;
+                self.value(*init, 0)
+            }
             HirKind::Assign { place, value } => {
                 if depth != 0 {
                     return Err("nested-assign");
@@ -1293,9 +1318,11 @@ impl Walk<'_> {
                 if depth != 0 {
                     return Err("nested-loop");
                 }
-                let HirPat::Bind(_) = pat else {
+                // A destructuring pattern binds from each array element.
+                let array = matches!(kind, Some(ForInKind::Array | ForInKind::Dict));
+                if !matches!(pat, HirPat::Bind(_)) && !(array && let_pat_shape(pat)) {
                     return Err("for-in-pattern");
-                };
+                }
                 match kind {
                     Some(ForInKind::Range { .. }) => {
                         let Some(args) = range_bounds(body, *iterable) else {
@@ -1320,6 +1347,11 @@ impl Walk<'_> {
                     }
                     Some(ForInKind::Array) => {
                         self.aggregate(*iterable)?;
+                        self.value(*iterable, 0)?;
+                    }
+                    // `DictEntries`, then the array loop over `(key, value)`.
+                    Some(ForInKind::Dict) => {
+                        self.word(*iterable)?;
                         self.value(*iterable, 0)?;
                     }
                     _ => return Err("for-in"),
