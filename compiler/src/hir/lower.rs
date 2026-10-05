@@ -114,6 +114,8 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             user_enum(checker, name, seen)
         }
+        // `self` inside a generic class's shared method body.
+        Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         Ty::Con(name) if checker.is_class(name) => object_class(checker, name),
         Ty::Con(name) => user_enum(checker, name, seen),
         _ => None,
@@ -647,12 +649,22 @@ impl Walk<'_> {
     /// A generic class instance: its methods are one shared body.
     fn shared_receiver(&self, id: HirId) -> bool {
         self.class(id) == Some(ValueClass::Opaque)
-            && matches!(self.ty(id).map(strip_readonly), Some(Ty::App(head, _))
-                if matches!(head.as_ref(), Ty::Con(name) if is_generic_class(self.checker, name)))
+            && match self.ty(id).map(strip_readonly) {
+                Some(Ty::App(head, _)) => {
+                    matches!(head.as_ref(), Ty::Con(name) if is_generic_class(self.checker, name))
+                }
+                // `self` in a shared method body.
+                Some(Ty::Con(name)) => is_generic_class(self.checker, name),
+                _ => false,
+            }
     }
 
+    /// A receiver whose fields are read and written in place: a plain
+    /// object, or `self` in a generic class's shared method body (only its
+    /// closed-type fields pass the field's own value check).
     fn object(&self, id: HirId) -> Check {
-        if self.class(id) == Some(ValueClass::Object) {
+        let shared_self = matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(name)) if is_generic_class(self.checker, name));
+        if self.class(id) == Some(ValueClass::Object) || shared_self {
             Ok(())
         } else {
             Err("receiver-type")
