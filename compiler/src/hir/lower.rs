@@ -468,7 +468,7 @@ pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
 }
 
 /// Every node of `id`'s subtree, `id` first.
-fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
+pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
     f(body.expr(id));
     for k in children(body, id) {
         visit(body, k, f);
