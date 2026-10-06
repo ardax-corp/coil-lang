@@ -4,7 +4,18 @@ Statically typed scripting language with explicit generics and constraint-based 
 
 ## Install
 
-Download a binary from [GitHub Releases](https://github.com/ardax-corp/coil-lang/releases) (latest when a version is tagged) or from the latest [`release-binaries`](https://github.com/ardax-corp/coil-lang/actions/workflows/release-binaries.yml) workflow artifact. No tagged release is published yet.
+Download a binary from [GitHub Releases](https://github.com/ardax-corp/coil-lang/releases). No tagged release is published yet; until one is, the rolling [`edge`](https://github.com/ardax-corp/coil-lang/releases/tag/edge) pre-release has the toolkit for Linux (x86_64 glibc and musl, aarch64 glibc), macOS (aarch64) and Windows (x86_64 MinGW). It is rebuilt from `main` after every green CI run, so it is a snapshot, not a stable release. `SHA256SUMS` lists the checksums.
+
+In GitHub Actions, install the snapshot instead of building coil from source:
+
+```yaml
+- uses: ardax-corp/coil-lang/.github/actions/setup-coil@main
+  with:
+    stdlib: true   # optional: also clone coil-stdlib, exported as COIL_STDLIB_DIR
+- run: coil test
+```
+
+With [spool](https://github.com/ardax-corp/spool), `./bootstrap.sh --channel edge --install` installs the snapshot into `~/.coil`.
 
 Build from source:
 

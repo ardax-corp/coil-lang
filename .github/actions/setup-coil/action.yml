@@ -1,0 +1,126 @@
+name: Setup coil
+description: >-
+  Install the coil toolchain (coil, coil-test, coil-fmt, coil-lsp, coil-debug,
+  coil-dissect, coil-embed) from a coil-lang release, instead of building it
+  from source. Defaults to the rolling `edge` snapshot of main. Linux and macOS
+  runners only.
+
+inputs:
+  channel:
+    description: >-
+      Release to install: `edge` (rolling snapshot of coil-lang main, rebuilt
+      after every green CI run) or a release tag such as `v0.2.0`.
+    default: edge
+  stdlib:
+    description: Also clone coil-stdlib and export COIL_STDLIB_DIR (`true` or `false`).
+    default: "false"
+  stdlib-ref:
+    description: coil-stdlib branch, tag or commit to clone (empty = default branch).
+    default: ""
+
+outputs:
+  coil:
+    description: Absolute path of the installed coil binary.
+    value: ${{ steps.install.outputs.coil }}
+  bin-dir:
+    description: Directory holding coil and its tools (also added to PATH).
+    value: ${{ steps.install.outputs.bin-dir }}
+  stdlib:
+    description: The coil-stdlib `src` directory (empty unless `stdlib` is true).
+    value: ${{ steps.stdlib.outputs.src }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install coil (${{ inputs.channel }})
+      id: install
+      shell: bash
+      env:
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        set -euo pipefail
+
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) arch=x86_64 ;;
+          aarch64|arm64) arch=aarch64 ;;
+          *) echo "::error::setup-coil: unsupported architecture '$arch'"; exit 1 ;;
+        esac
+        case "$os" in
+          Linux)
+            if ldd --version 2>&1 | grep -qi musl; then
+              triple="$arch-unknown-linux-musl"
+            else
+              triple="$arch-unknown-linux-gnu"
+            fi
+            ;;
+          Darwin) triple="$arch-apple-darwin" ;;
+          *) echo "::error::setup-coil: unsupported OS '$os' (Linux and macOS only)"; exit 1 ;;
+        esac
+
+        base="https://github.com/ardax-corp/coil-lang/releases/download/$CHANNEL"
+        asset="coil-$triple.tar.gz"
+        tmp="$(mktemp -d)"
+        dest="$RUNNER_TEMP/coil/$CHANNEL"
+
+        fetch() {
+          curl -fsSL --retry 3 --retry-delay 2 --proto '=https' --proto-redir '=https' -o "$2" "$1"
+        }
+        sha256_of() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | cut -d' ' -f1
+          else
+            shasum -a 256 "$1" | cut -d' ' -f1
+          fi
+        }
+
+        echo "setup-coil: $CHANNEL / $triple"
+        fetch "$base/$asset" "$tmp/$asset" \
+          || { echo "::error::setup-coil: no $asset in the coil-lang '$CHANNEL' release"; exit 1; }
+
+        # The edge release always publishes SHA256SUMS; a tagged one may not.
+        if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+          want="$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
+          have="$(sha256_of "$tmp/$asset")"
+          if [[ -z "$want" ]]; then
+            echo "::error::setup-coil: SHA256SUMS does not list $asset"; exit 1
+          fi
+          if [[ "$want" != "$have" ]]; then
+            echo "::error::setup-coil: checksum mismatch for $asset (want $want, got $have)"; exit 1
+          fi
+          echo "setup-coil: checksum ok"
+        elif [[ "$CHANNEL" == edge ]]; then
+          echo "::error::setup-coil: the edge release has no SHA256SUMS"; exit 1
+        else
+          echo "setup-coil: no SHA256SUMS in the release; skipping checksum"
+        fi
+
+        rm -rf "$dest"
+        mkdir -p "$dest"
+        tar -xzf "$tmp/$asset" -C "$dest" --strip-components=1
+        rm -rf "$tmp"
+
+        "$dest/coil" --version
+        echo "$dest" >> "$GITHUB_PATH"
+        echo "COIL=$dest/coil" >> "$GITHUB_ENV"
+        echo "coil=$dest/coil" >> "$GITHUB_OUTPUT"
+        echo "bin-dir=$dest" >> "$GITHUB_OUTPUT"
+
+    - name: Fetch coil-stdlib
+      id: stdlib
+      if: inputs.stdlib == 'true'
+      shell: bash
+      env:
+        STDLIB_REF: ${{ inputs.stdlib-ref }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/coil-stdlib"
+        rm -rf "$dir"
+        git init -q "$dir"
+        git -C "$dir" remote add origin https://github.com/ardax-corp/coil-stdlib.git
+        git -C "$dir" fetch -q --depth 1 origin "${STDLIB_REF:-HEAD}"
+        git -C "$dir" checkout -q --detach FETCH_HEAD
+        echo "coil-stdlib $(git -C "$dir" rev-parse --short HEAD)"
+        echo "COIL_STDLIB_DIR=$dir" >> "$GITHUB_ENV"
+        echo "src=$dir/src" >> "$GITHUB_OUTPUT"
