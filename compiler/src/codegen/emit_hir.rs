@@ -3201,7 +3201,33 @@ impl Compiler {
                     // its attempt back (the temps stay allocated).
                     self.bytecode.truncate(mark);
                 }
-                if emit.boxes.is_empty() {
+                if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                    // Each argument (one or two words) to temps, then
+                    // reloaded in order, as the AST's `emit_call_args_stage_all`.
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (i, &arg) in args.iter().enumerate() {
+                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        self.hir_value(hir, emit, arg, &rep, 0);
+                        if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
+                            Self::emit_box_if_needed(&mut self.bytecode, ty);
+                        }
+                        let mut words = Vec::with_capacity(rep.words() as usize);
+                        // Above every word but the top one, which `StorePop`
+                        // moves first.
+                        self.expr_depth = rep.words() - 1;
+                        for _ in 0..rep.words() {
+                            words.push(self.alloc_temp_slot());
+                        }
+                        for &tmp in words.iter().rev() {
+                            self.bytecode.push_store_pop(tmp);
+                        }
+                        temps.extend(words);
+                    }
+                    for &tmp in &temps {
+                        self.bytecode.push_load(tmp);
+                    }
+                    self.expr_depth = depth;
+                } else if emit.boxes.is_empty() {
                     let mut at = depth;
                     for (i, &arg) in args.iter().enumerate() {
                         let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);

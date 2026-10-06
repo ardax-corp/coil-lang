@@ -449,6 +449,19 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
     found
 }
 
+/// Whether a call at `depth` stages its arguments through temps: at the
+/// top of the stack, when one of them builds an object.
+pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
+    depth == 0
+        && args.iter().any(|&arg| {
+            let mut found = false;
+            visit(body, arg, &mut |e| {
+                found |= matches!(&e.kind, HirKind::Make { kind: MakeKind::Class(_), .. });
+            });
+            found
+        })
+}
+
 /// Every node of `id`'s subtree, `id` first.
 fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
     f(body.expr(id));
@@ -1089,7 +1102,10 @@ impl Walk<'_> {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
-                self.args(args, depth, false)
+                // A `new` argument leaves its object in a temp on top of the
+                // stack, so every argument stages through a temp, as the AST
+                // does when one may clobber the operand stack.
+                self.args(args, depth, stages_args(body, args, depth))
             }
             // `recv.m(args)` stages the receiver and each argument through
             // temps at depth zero, as the AST codegen does.
