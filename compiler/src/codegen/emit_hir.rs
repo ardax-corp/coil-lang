@@ -1747,10 +1747,60 @@ impl Compiler {
             && self.tail_call_abi_matches(key)
     }
 
-    /// A two-word kind the lowering builds and matches: a declared enum
-    /// (not a numeric range or a product).
+    /// A two-word kind the lowering builds and matches: a numeric range,
+    /// an arity-2 immediate product, or a declared enum.
     fn hir_pair_kind(&self, kind: &str) -> bool {
-        crate::typechecking::return_layout::is_range_kind(kind) || self.hir_pair_enum(kind)
+        crate::typechecking::return_layout::is_range_kind(kind)
+            || Self::hir_product(kind)
+            || self.hir_pair_enum(kind)
+    }
+
+    /// `(a, b)` of immediates moved as `[a, b]`, second on top.
+    fn hir_product(kind: &str) -> bool {
+        crate::typechecking::return_layout::is_two_word_product_kind(kind)
+    }
+
+    /// How an indexed base is pushed: a pair boxes into its tuple.
+    fn hir_index_base_rep(natural: Rep) -> Rep {
+        match natural {
+            Rep::Pair(_) => BOXED,
+            word => word,
+        }
+    }
+
+    /// `p[0]` / `p[1]` of a product pair local: the slot holding that
+    /// element (`p[1]` lives in the second slot).
+    fn hir_product_index(hir: &HirBody, emit: &HirEmit, base: HirId, index: HirId) -> Option<(LocalId, bool)> {
+        let HirKind::Local(local) = hir.expr(base).kind else {
+            return None;
+        };
+        if !emit.pair_locals.get(&local.0).is_some_and(|k| Self::hir_product(k)) {
+            return None;
+        }
+        match hir.expr(index).kind {
+            HirKind::Lit(Lit::Int(i @ (0 | 1))) => Some((local, i == 1)),
+            _ => None,
+        }
+    }
+
+    /// `let (a, b) = e` where `e` pushes a product pair: the two names to
+    /// bind, `None` for `_`.
+    fn hir_product_let(&self, hir: &HirBody, emit: &HirEmit, pat: &HirPat, init: HirId) -> Option<[Option<LocalId>; 2]> {
+        let HirPat::Tuple(items) = pat else {
+            return None;
+        };
+        let [a, b] = items.as_slice() else {
+            return None;
+        };
+        if !self.hir_natural(hir, emit, init).is_some_and(|r| matches!(&r, Rep::Pair(k) if Self::hir_product(k))) {
+            return None;
+        }
+        let name = |p: &HirPat| match p {
+            HirPat::Wild => Some(None),
+            HirPat::Bind(l) => Some(Some(*l)),
+            _ => None,
+        };
+        Some([name(a)?, name(b)?])
     }
 
     fn hir_pair_enum(&self, kind: &str) -> bool {
@@ -2479,9 +2529,10 @@ impl Compiler {
                     self.hir_check_value(hir, emit, item, &want)?;
                 }
             }
+            HirKind::Index { base, index, .. } if Self::hir_product_index(hir, emit, *base, *index).is_some() => {}
             HirKind::Index { base, index, .. } => {
                 if !Self::hir_is_stack(hir, emit, *base) {
-                    let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                    let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
                     self.hir_check_value(hir, emit, *base, &base_rep)?;
                 }
                 self.hir_check_value(hir, emit, *index, &BOXED)?;
@@ -2710,6 +2761,10 @@ impl Compiler {
             }
             HirKind::LetPat { pat, init } => {
                 self.hir_check_let_pat(hir, pat)?;
+                if self.hir_product_let(hir, emit, pat, *init).is_some() {
+                    let want = self.hir_natural(hir, emit, *init).ok_or("value-shape")?;
+                    return self.hir_check_value(hir, emit, *init, &want);
+                }
                 self.hir_check_value(hir, emit, *init, &BOXED)
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
@@ -2735,7 +2790,7 @@ impl Compiler {
                     if Self::hir_is_stack(hir, emit, *base) {
                         return self.hir_check_value(hir, emit, *index, &BOXED);
                     }
-                    let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                    let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
                     self.hir_check_value(hir, emit, *base, &base_rep)?;
                     self.hir_check_value(hir, emit, *index, &BOXED)
                 }
@@ -2836,6 +2891,14 @@ impl Compiler {
             return;
         }
         match (from, to) {
+            // `[a, b]` is the tuple's fields in order.
+            (Rep::Pair(kind), Rep::Word(L::Boxed)) if Self::hir_product(kind) => self.bytecode.push_make_tuple(2),
+            (Rep::Word(L::Boxed), Rep::Pair(kind)) if Self::hir_product(kind) => {
+                self.expr_depth = depth;
+                let mut bc = std::mem::take(&mut self.bytecode);
+                self.emit_unbox_product_to_pair(&mut bc);
+                self.bytecode = bc;
+            }
             (Rep::Pair(kind), Rep::Word(L::Boxed)) if depth == 0 => {
                 self.expr_depth = depth;
                 let mut bc = std::mem::take(&mut self.bytecode);
@@ -3133,6 +3196,14 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::ArrayLen));
                 }
             },
+            HirKind::Index { base, index, .. } if let Some((local, second)) = Self::hir_product_index(hir, emit, *base, *index) => {
+                let slot = if second {
+                    emit.tag_slots[&local.0]
+                } else {
+                    Self::hir_slot(emit, local)
+                };
+                self.bytecode.push_load(slot);
+            }
             HirKind::Index { base, index, .. } if let Some(boxed) = Self::hir_stack_box(hir, emit, *base) => {
                 // As the AST's `emit_boxed_array_load`.
                 self.bytecode.push_load(boxed);
@@ -3176,7 +3247,7 @@ impl Compiler {
                     }
                     self.bytecode.push_index_pin_unchecked(slot);
                 } else {
-                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned index base");
+                    let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).expect("planned index base"));
                     self.hir_value(hir, emit, *base, &base_rep, depth);
                     if staged {
                         // As the AST: base and index through temps.
@@ -3204,6 +3275,20 @@ impl Compiler {
                 args,
             } => {
                 let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
+                if let Rep::Pair(kind) = want
+                    && Self::hir_product(kind)
+                    && args.len() == 2
+                    && !staged
+                {
+                    // As the AST's two-slot return of a tuple literal: the
+                    // components only.
+                    for (i, &item) in args.iter().enumerate() {
+                        let item_want =
+                            Rep::Word(Self::hir_ty(hir, item).map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+                        self.hir_value(hir, emit, item, &item_want, depth + i as u32);
+                    }
+                    return;
+                }
                 let wants: Vec<Rep> = args
                     .iter()
                     .map(|&a| Rep::Word(Self::hir_ty(hir, a).map_or(ValueLayout::Boxed, |t| self.value_layout(t))))
@@ -4230,6 +4315,22 @@ impl Compiler {
                     self.hir_stmt(hir, emit, *t);
                 }
             }
+            HirKind::LetPat { pat, init } if let Some(names) = self.hir_product_let(hir, emit, pat, *init) => {
+                // As the AST's two-slot destructure: `[a, b]`, then `b`
+                // stored first.
+                let want = self.hir_natural(hir, emit, *init).expect("planned product");
+                self.hir_value(hir, emit, *init, &want, 0);
+                for name in names.iter().rev() {
+                    match name {
+                        Some(local) => {
+                            let slot = self.hir_bind_local(hir, *local);
+                            emit.slots[local.0 as usize] = Some(slot);
+                            self.bytecode.push_store_pop(slot);
+                        }
+                        None => self.bytecode.push_pop(),
+                    }
+                }
+            }
             HirKind::LetPat { pat, init } => {
                 // As `LetDestructure`'s heap path: the value to a temp, then
                 // `emit_let_pattern_binds`.
@@ -4385,7 +4486,7 @@ impl Compiler {
                     let tmp_val = self.alloc_temp_slot();
                     self.hir_value(hir, emit, *value, &want, 0);
                     self.bytecode.push_store_pop(tmp_val);
-                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned index base");
+                    let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).expect("planned index base"));
                     if matches!(hir.expr(*index).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_))) {
                         self.hir_value(hir, emit, *base, &base_rep, 0);
                         self.hir_index_value(hir, emit, *index, 1);
