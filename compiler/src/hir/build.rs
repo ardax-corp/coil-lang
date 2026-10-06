@@ -1315,8 +1315,10 @@ impl<'c, 'm> Cx<'c, 'm> {
     /// `Ok(None) => a, Ok(Some(n)) => b, Err(e) => c` becomes
     /// `Ok(t) => match t { None => a, Some(n) => b }, Err(e) => c`.
     /// Outer variants are disjoint, so only arm order within a variant
-    /// matters. Left as is unless every regrouped variant is exhaustive on
-    /// its own (a trailing catch-all would have to be copied into it).
+    /// matters. A regrouped variant that is not exhaustive on its own takes
+    /// the trailing catch-all as its last inner arm, sharing the body (the
+    /// arm runs from either match), when that body is shareable; else the
+    /// arms are left as is.
     fn split_nested(&self, b: &mut BodyBuilder, span: Span, sty: Option<&Ty>, ty: Option<Ty>, mut arms: Vec<HirArm>) -> Vec<HirArm> {
         if !arms.iter().any(|a| nested_payload(&a.pat).is_some_and(|p| !irrefutable(p))) {
             return arms;
@@ -1356,15 +1358,16 @@ impl<'c, 'm> Cx<'c, 'm> {
             let Some(field_ty) = self.variant_field_tys(enum_name, variant, Some(sty)).into_iter().next() else {
                 return restore(arms, catch_all);
             };
-            if !self.exhaustive(&subs, &field_ty) {
+            let fallthrough = !self.exhaustive(&subs, &field_ty);
+            if fallthrough && !catch_all.as_ref().is_some_and(|c| shareable_catch_all(&b.body, c)) {
                 return restore(arms, catch_all);
             }
-            plan.push(Some(field_ty));
+            plan.push(Some((field_ty, fallthrough)));
         }
         let mut slots: Vec<Option<HirArm>> = arms.into_iter().map(Some).collect();
         let mut out = Vec::with_capacity(groups.len() + 1);
         for ((variant, idx), field_ty) in groups.iter().zip(plan) {
-            let Some(field_ty) = field_ty else {
+            let Some((field_ty, fallthrough)) = field_ty else {
                 out.push(slots[idx[0]].take().expect("each arm is used once"));
                 continue;
             };
@@ -1385,6 +1388,13 @@ impl<'c, 'm> Cx<'c, 'm> {
                 inner.push(HirArm {
                     pat: parts.pop().expect("one payload pattern"),
                     body: arm.body,
+                });
+            }
+            if fallthrough {
+                let shared = catch_all.as_ref().expect("checked shareable catch-all");
+                inner.push(HirArm {
+                    pat: HirPat::Wild,
+                    body: shared.body,
                 });
             }
             let (enum_name, tag) = outer.expect("a group has an arm");
@@ -1757,6 +1767,32 @@ fn nested_payload(pat: &HirPat) -> Option<&HirPat> {
         } if parts.len() == 1 => parts.first(),
         _ => None,
     }
+}
+
+/// A catch-all whose body may also run as an inner match's last arm: it
+/// binds nothing the body reads, and the body plans nothing per node that
+/// two emissions would clash on (lambdas, nested matches, lets, loops).
+fn shareable_catch_all(body: &HirBody, arm: &HirArm) -> bool {
+    let bound = match arm.pat {
+        HirPat::Wild => None,
+        HirPat::Bind(l) => Some(l),
+        _ => return false,
+    };
+    let mut ok = true;
+    super::lower::visit(body, arm.body, &mut |e| {
+        ok &= !matches!(
+            &e.kind,
+            HirKind::Lambda { .. }
+                | HirKind::Match { .. }
+                | HirKind::Let { .. }
+                | HirKind::LetPat { .. }
+                | HirKind::Loop { .. }
+                | HirKind::ForIn { .. }
+                | HirKind::Defer { .. }
+                | HirKind::Yield { .. }
+        ) && !matches!(e.kind, HirKind::Local(l) if Some(l) == bound);
+    });
+    ok
 }
 
 fn restore(mut arms: Vec<HirArm>, catch_all: Option<HirArm>) -> Vec<HirArm> {
