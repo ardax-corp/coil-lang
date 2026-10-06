@@ -309,12 +309,38 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             _ => None,
         })
         .collect();
+    // An element-wise operand reads the slots (the AST's
+    // `prepare_aggregate_src`) unless the op takes the packed path, which
+    // needs the array object: a static length of at least 8, for `+ - * /`
+    // and negation. The value is that minimum length, or 0 for any.
+    let mut slot_reads: HashMap<u32, usize> = HashMap::new();
+    for e in &body.exprs {
+        match e.kind {
+            HirKind::Bin {
+                op: BinOp::Overloaded(sym @ ("+" | "-" | "*" | "/" | "%" | "**")),
+                lhs,
+                rhs,
+            } => {
+                let packed = if matches!(sym, "%" | "**") { 0 } else { 8 };
+                slot_reads.insert(lhs.0, packed);
+                slot_reads.insert(rhs.0, packed);
+            }
+            HirKind::Un { op: UnOp::Neg, operand } => {
+                slot_reads.insert(operand.0, 8);
+            }
+            _ => {}
+        }
+    }
     // Reads of the local that are not an index base, and forms the AST
     // reads from the slots even after an escape (a copy, a loop).
     let mut escapes: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut slot_uses: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
     let mut refused: HashSet<u32> = HashSet::new();
     for (i, e) in body.exprs.iter().enumerate() {
         match e.kind {
+            HirKind::Local(local) if slot_reads.contains_key(&(i as u32)) => {
+                slot_uses.entry(local.0).or_default().push((i as u32, slot_reads[&(i as u32)]))
+            }
             HirKind::Local(local) if !bases.contains(&(i as u32)) => escapes.entry(local.0).or_default().push(i as u32),
             HirKind::Assign { place, .. } => {
                 if let HirKind::Local(local) = body.expr(place).kind {
@@ -356,8 +382,9 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             if !(1..=32).contains(&n) || body.local(local).kind != LocalKind::Let || refused.contains(&local.0) {
                 continue;
             }
-            if let Some(uses) = escapes.get(&local.0) {
-                let uses: HashSet<u32> = uses.iter().copied().collect();
+            let packed = slot_uses.get(&local.0).into_iter().flatten().filter(|&&(_, min)| min != 0 && n >= min).map(|&(id, _)| id);
+            let uses: HashSet<u32> = escapes.get(&local.0).into_iter().flatten().copied().chain(packed).collect();
+            if !uses.is_empty() {
                 let first = stmts[k + 1..]
                     .iter()
                     .chain(tail)
@@ -1176,6 +1203,10 @@ impl Walk<'_> {
                     need_rhs(rhs)?;
                 }
                 for &operand in &operands {
+                    // A stack array's slots are not boxed for this use.
+                    if self.stack_base(operand) {
+                        return Err("operator-elementwise");
+                    }
                     self.word(operand)?;
                     self.value(operand, 0)?;
                 }
