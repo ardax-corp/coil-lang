@@ -104,7 +104,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             let option = common::is_builtin_option_enum(name);
             let result = common::is_builtin_result_enum(name);
-            if !(option || result) || args.len() != if option { 1 } else { 2 } {
+            if !(option || result) {
+                return generic_user_enum(checker, name, args, seen);
+            }
+            if args.len() != if option { 1 } else { 2 } {
                 return None;
             }
             for (i, arg) in args.iter().enumerate() {
@@ -549,6 +552,46 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
         payload.iter().all(|field| {
             super::layout::ty_is_closed(field)
                 && classify_in(checker, field, seen).is_some_and(is_word)
+        })
+    });
+    seen.pop();
+    ok.then_some(ValueClass::Enum)
+}
+
+/// `enum_name::variant`'s payload types at a ground instance of a generic
+/// user enum (`Tree<int>`): the declared types with its parameters bound.
+pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, args: &[Ty]) -> Option<Vec<Ty>> {
+    let params = checker.generics().generic_type_ctors.get(enum_name)?;
+    if params.len() != args.len() {
+        return None;
+    }
+    let (_, _, payload) = checker.enum_variants(enum_name)?.into_iter().find(|(n, _, _)| n == variant)?;
+    Some(payload.iter().map(|t| super::layout::bind_params(t, params, args)).collect())
+}
+
+/// A ground instance of a generic user enum (`Tree<int>`): laid out as a
+/// closed enum with its parameters bound, as the AST's instance is.
+fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<String>) -> Option<ValueClass> {
+    if checker.is_class(name) && checker.enum_variants(name).is_none() {
+        return None;
+    }
+    if !args.iter().all(super::layout::ty_is_closed) {
+        return None;
+    }
+    let key = format!("{name}<{args:?}>");
+    if seen.contains(&key) {
+        return Some(ValueClass::Enum);
+    }
+    let variants = checker.enum_variants(name)?;
+    if variants.is_empty() {
+        return None;
+    }
+    seen.push(key);
+    let ok = variants.iter().all(|(variant, _, _)| {
+        generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
+            payload.iter().all(|field| {
+                super::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some_and(is_word)
+            })
         })
     });
     seen.pop();

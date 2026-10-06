@@ -1497,6 +1497,12 @@ impl<'c, 'm> Cx<'c, 'm> {
                 };
             }
         }
+        // A ground instance of a generic user enum binds its parameters.
+        if let Some(Ty::App(_, args)) = scrut
+            && let Some(payload) = super::lower::generic_enum_payload(self.checker, enum_name, variant, args)
+        {
+            return payload.into_iter().filter(layout::ty_is_closed).collect();
+        }
         self.checker
             .enum_variants(enum_name)
             .and_then(|vars| vars.into_iter().find(|(n, _, _)| n == variant))
