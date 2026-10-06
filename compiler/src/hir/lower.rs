@@ -140,7 +140,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
         Ty::Con(name) if checker.is_scalar_enum(name) => Some(ValueClass::Opaque),
-        Ty::Con(name) if checker.is_class(name) => object_class(checker, name),
+        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name),
         Ty::Con(name) => user_enum(checker, name, seen),
         // A type parameter inside a generic class's shared method body: one
         // boxed word, only moved.
@@ -532,7 +532,8 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
         || common::is_builtin_result_enum(name)
         || common::is_builtin_ffi_enum(name)
         || checker.is_scalar_enum(name)
-        || checker.is_class(name)
+        // An enum with an `impl` also has a class key; it is still an enum.
+        || (checker.is_class(name) && checker.enum_variants(name).is_none())
     {
         return None;
     }
