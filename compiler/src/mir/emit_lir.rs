@@ -32,6 +32,19 @@ pub fn emit_lir(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
+    emit_lir_with_aliases(func, entry_label, &[], pool, across_alloc)
+}
+
+/// [`emit_lir`] for a body whose entry is also bound under `aliases` (the
+/// other labels leading the source body): they stay bound at the entry, so
+/// a self call through one of them still lands there.
+pub fn emit_lir_with_aliases(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+    aliases: &[Label],
+    pool: &mut Vec<u64>,
+    across_alloc: bool,
+) -> Result<Vec<IlOp>, LowerError> {
     if func.has_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
@@ -49,7 +62,10 @@ pub fn emit_lir(
         .max()
         .unwrap_or(0);
     // As `emit_mir`: block labels skip the entries this body calls.
-    let reserved = foreign_targets(func, entry_label);
+    let mut reserved = foreign_targets(func, entry_label);
+    for alias in aliases {
+        reserved.remove(&alias.0);
+    }
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
@@ -62,6 +78,7 @@ pub fn emit_lir(
 
     let mut out = Vec::new();
     out.push(IlOp::Label(block_lab[func.entry.index()]));
+    out.extend(aliases.iter().map(|&l| IlOp::Label(l)));
     let frame = u32::from(max_reg) + 1;
     if frame > func.params.len() as u32 {
         out.push(IlOp::byte(
