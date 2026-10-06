@@ -339,6 +339,8 @@ dependencies = [
 name = "coil-dissect"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-cli",
  "common",
  "compiler",
