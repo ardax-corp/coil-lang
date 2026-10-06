@@ -1520,7 +1520,7 @@ impl Compiler {
             }
             // A `%v` argument stays in its own layout: `Show` boxes it as
             // the AST's `emit_show_for_stack_value` does.
-            let show = params.len() >= 1 && shows.get(params.len() - 1) == Some(&'v');
+            let show = !params.is_empty() && shows.get(params.len() - 1) == Some(&'v');
             params.push(match self.value_layout(ty) {
                 ValueLayout::NicheUnitResult | ValueLayout::NicheResult if !show => ValueLayout::Boxed,
                 layout => layout,
