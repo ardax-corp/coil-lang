@@ -420,7 +420,7 @@ impl Compiler {
             }
             let lam = &module.bodies[body];
             let root = lam.root.ok_or("lambda")?;
-            if lam.is_coro || lam.result_mode || matches!(hir.expr(root).kind, HirKind::Block { .. }) {
+            if lam.is_coro || lam.result_mode || matches!(lam.expr(root).kind, HirKind::Block { .. }) {
                 return Err("lambda-body");
             }
             if lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
@@ -1644,6 +1644,7 @@ impl Compiler {
             param_tys.pop();
         }
         let mut params = Vec::with_capacity(argc);
+        let mut returned = Vec::new();
         let param_tys = match self_layout {
             // The scheme may or may not list `self`.
             Some(layout) if param_tys.len() == explicit => {
@@ -1655,6 +1656,14 @@ impl Compiler {
                 param_tys[1..].to_vec()
             }
             None if param_tys.len() == argc => param_tys,
+            // `fn mk(..) -> fn(..) -> T`: the scheme's curried peel also took
+            // the returned function's params; they belong to the result.
+            None if param_tys.len() > argc
+                && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == argc) =>
+            {
+                returned = param_tys.split_off(argc);
+                param_tys
+            }
             _ => return Err("callee-signature"),
         };
         for ty in &param_tys {
@@ -1665,7 +1674,10 @@ impl Compiler {
             }
             params.push(self.value_layout(ty));
         }
-        let ret_ty = self.checker.fn_return_ty(&lookup).ok_or("callee-signature")?;
+        let mut ret_ty = self.checker.fn_return_ty(&lookup).ok_or("callee-signature")?;
+        for param in returned.into_iter().rev() {
+            ret_ty = Ty::Fun(Box::new(param), Box::new(ret_ty));
+        }
         if !coro && lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
@@ -3662,7 +3674,7 @@ impl Compiler {
                 let params = emit.calls[&id.0].params.clone();
                 let (recv, value) = (args[0], args[1]);
                 self.hir_value(hir, emit, recv, &Rep::Word(params[0]), depth);
-                if lower::clobbers(hir, &emit.stacks, value) {
+                if lower::push_stages(hir, &emit.stacks, value) {
                     self.expr_depth = 0;
                     let r = self.alloc_temp_slot();
                     self.bytecode.push_store_pop(r);
