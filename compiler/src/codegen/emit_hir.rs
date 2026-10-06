@@ -2740,9 +2740,13 @@ impl Compiler {
         let option = common::is_builtin_option_enum(enum_name);
         let result = common::is_builtin_result_enum(enum_name);
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
+        let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
             // A boxed `Ok(())` carries the empty tuple, as in the AST.
             if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
+                return Err("unit-payload");
+            }
+            if unit_value(i) {
                 return Err("unit-payload");
             }
             self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
@@ -2753,11 +2757,16 @@ impl Compiler {
             Rep::Word(L::NicheOption) if option => (0..args.len()).try_for_each(word_arg),
             Rep::Word(L::NicheUnitResult) if result => match variant.as_str() {
                 "Ok" if args.len() == 1 && unit_arg(0) => Ok(()),
+                // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then zero.
+                "Ok" if args.len() == 1 && unit_value(0) => self.hir_check_effect(hir, emit, args[0]),
                 "Err" => (0..args.len()).try_for_each(word_arg),
                 _ => Err("make-niche"),
             },
             // `Ok(())` carries the empty tuple, as in the AST.
             Rep::Word(L::NicheResult) if result && variant == "Ok" && args.len() == 1 && unit_arg(0) => Ok(()),
+            Rep::Word(L::NicheResult) if result && variant == "Ok" && args.len() == 1 && unit_value(0) => {
+                self.hir_check_effect(hir, emit, args[0])
+            }
             Rep::Word(L::NicheResult) if result => (0..args.len()).try_for_each(word_arg),
             Rep::Pair(kind) => {
                 let named = self.hir_enum_name(ty).ok_or("make-type")?;
@@ -3006,6 +3015,10 @@ impl Compiler {
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED),
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
+                Some(v) if lower::is_unit_value(hir, &self.checker, v) => {
+                    self.hir_check_effect(hir, emit, v)?;
+                    if emit.ret.words() == 1 { Ok(()) } else { Err("return-unit") }
+                }
                 Some(v) => self.hir_check_value(hir, emit, v, &emit.ret),
                 None if emit.ret.words() == 1 => Ok(()),
                 None => Err("return-unit"),
@@ -3013,6 +3026,7 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_check_match(hir, emit, *scrutinee, arms, None)
             }
+            _ if lower::is_unit_make(hir, id) => Ok(()),
             HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
             HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => Ok(()),
             _ => {
@@ -4040,6 +4054,16 @@ impl Compiler {
             }
             Rep::Word(L::NicheOption) | Rep::Word(L::NicheResult) | Rep::Word(L::NicheUnitResult) => {
                 match args.first() {
+                    // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then
+                    // `Ok(())`.
+                    Some(&arg) if !lower::is_unit_make(hir, arg) && lower::is_unit_value(hir, &self.checker, arg) => {
+                        self.hir_effect(hir, emit, arg);
+                        if *want == Rep::Word(L::NicheResult) {
+                            self.bytecode.push_make_tuple(0);
+                        } else {
+                            self.bytecode.push_const(0);
+                        }
+                    }
                     Some(&arg) if !lower::is_unit_make(hir, arg) => {
                         self.hir_value(hir, emit, arg, &wants[0], depth);
                         if *want == Rep::Word(L::NicheResult) && variant == "Err" {
@@ -4792,6 +4816,12 @@ impl Compiler {
                 }
             }
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
+                Some(v) if lower::is_unit_value(hir, &self.checker, v) => {
+                    self.hir_effect(hir, emit, v);
+                    self.emit_run_defers();
+                    self.bytecode.push_const(0);
+                    self.bytecode.push_return();
+                }
                 Some(v) if emit.tail_calls.contains(&v.0) => {
                     let ret = emit.ret.clone();
                     self.hir_value(hir, emit, v, &ret, 0);
@@ -4815,6 +4845,7 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_match(hir, emit, *scrutinee, arms, None, 0);
             }
+            _ if lower::is_unit_make(hir, id) => {}
             HirKind::Make { .. } => {
                 self.hir_value(hir, emit, id, &BOXED, 0);
                 self.bytecode.push_pop();

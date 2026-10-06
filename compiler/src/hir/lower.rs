@@ -138,7 +138,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         }
         // A monomorphic function value (closure, partial, `fn` object):
         // one word, only moved and called through `CallIndirect`.
-        Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
+        Ty::Fun(..) if fun_words(checker, ty, seen, true) => Some(ValueClass::Opaque),
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
@@ -154,7 +154,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
 
 /// A closed function type whose parameters and result are plain words:
 /// no enum (its layout may be niche or a pair), no unit, no type variable.
-fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+/// With `enum_ret`, the result may also be a closed one-word enum: the
+/// function is still one word, but a call through it is not
+/// ([`indirect_callee`] asks without it).
+fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, enum_ret: bool) -> bool {
     let plain = |t: &Ty, seen: &mut Vec<String>| {
         (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
             && matches!(
@@ -166,7 +169,13 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
         // `() -> T` takes a unit parameter, and `T -> ()` returns one.
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
-            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen))
+            let one_word_enum = |t: &Ty, seen: &mut Vec<String>| {
+                enum_ret
+                    && super::layout::ty_is_closed(t)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Enum)
+                    && super::layout::of(checker, t).words() == 1
+            };
+            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen) || one_word_enum(ret, seen))
         }
         _ => false,
     }
@@ -823,6 +832,15 @@ pub fn returned_value(body: &HirBody, value: Option<HirId>) -> Option<HirId> {
     value.filter(|v| !is_unit_make(body, *v))
 }
 
+/// A `()`-typed returned value (`return check(x)?`, a unit `match`): it runs
+/// for its effect, then the `return` is a bare one.
+pub fn is_unit_value(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    body.expr(id)
+        .ty
+        .as_ref()
+        .is_some_and(|t| super::layout::is_unit(&apply_ty_prune(checker.subst(), t)))
+}
+
 /// The `while` shape the builder desugars to: `Loop { Block { If(c, b, Break) } }`.
 /// Returns `(cond, body)` so lowering can emit the test at the loop head.
 pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
@@ -879,7 +897,10 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     if !info
         .ty
         .as_ref()
-        .is_some_and(|t| matches!(strip_readonly(t), Ty::Fun(..)) && classify(checker, t).is_some())
+        .is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new(), false)
+        })
     {
         return false;
     }
@@ -1436,6 +1457,12 @@ impl Walk<'_> {
                     if is_unit_make(body, arg) {
                         continue;
                     }
+                    // `Ok(check(x)?)`: a `()` payload runs for its effect
+                    // (codegen takes it into a niche unit `Result` only).
+                    if depth == 0 && args.len() == 1 && is_unit_value(body, self.checker, arg) {
+                        self.effect(arg, 0)?;
+                        continue;
+                    }
                     self.word(arg)?;
                     // Staged args each run at depth zero into a temp.
                     let staged = args.len() > 1 && !simple;
@@ -1819,6 +1846,7 @@ impl Walk<'_> {
                     return Err("nested-return");
                 }
                 match returned_value(body, *value) {
+                    Some(v) if is_unit_value(body, self.checker, v) => self.effect(v, 0),
                     Some(v) => {
                         if self.class(v).is_none() {
                             return Err("return-type");
@@ -1830,6 +1858,8 @@ impl Walk<'_> {
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
+            // A `()` statement (a unit `match` arm) does nothing.
+            _ if is_unit_make(body, id) => Ok(()),
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Bin { .. }
