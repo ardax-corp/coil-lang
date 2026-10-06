@@ -17,7 +17,7 @@
 use super::*;
 use crate::hir::lower::{self, ValueClass};
 use crate::hir::{
-    BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId, MakeKind, UnOp,
+    BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind, UnOp,
 };
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::value_layout::ValueLayout;
@@ -2596,6 +2596,15 @@ impl Compiler {
                 }
             }
             HirKind::Index { base, index, .. } if Self::hir_product_index(hir, emit, *base, *index).is_some() => {}
+            HirKind::Index {
+                base,
+                index,
+                kind: IndexKind::String,
+            } => {
+                self.native_id("string_byte_at").ok_or("index-kind")?;
+                self.hir_check_value(hir, emit, *base, &BOXED)?;
+                self.hir_check_value(hir, emit, *index, &BOXED)?;
+            }
             HirKind::Index { base, index, .. } => {
                 if !Self::hir_is_stack(hir, emit, *base) {
                     let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
@@ -3287,6 +3296,33 @@ impl Compiler {
                     Self::hir_slot(emit, local)
                 };
                 self.bytecode.push_load(slot);
+            }
+            HirKind::Index {
+                base,
+                index,
+                kind: IndexKind::String,
+            } => {
+                // As the AST's `emit_string_index`: `string_byte_at`, which
+                // answers `-1` out of range, then the array index panic.
+                let native = self.native_id("string_byte_at").expect("checked string index");
+                self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+                self.hir_value(hir, emit, *base, &BOXED, depth + 1);
+                self.hir_value(hir, emit, *index, &BOXED, depth + 2);
+                self.bytecode.push_host_invoke(2);
+                self.expr_depth = depth;
+                // The byte stays on the stack under its own check (a temp
+                // would need an empty operand stack).
+                let ok = self.bytecode.fresh_label();
+                let mut bb = BlockBuilder::new();
+                self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                self.bytecode.push_const(0);
+                self.bytecode.push(Byte::new(Instruction::GEQ));
+                bb.emit_jump_to(ok, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+                let mut msg = CodeBuf::new();
+                self.emit_raw_string_literal(&mut msg, "index out of bounds");
+                self.bytecode.append(&mut msg);
+                self.bytecode.push(Byte::new(Instruction::Panic));
+                bb.bind_label(ok, self.bytecode.il_mut());
             }
             HirKind::Index { base, index, .. } if let Some(boxed) = Self::hir_stack_box(hir, emit, *base) => {
                 // As the AST's `emit_boxed_array_load`.
