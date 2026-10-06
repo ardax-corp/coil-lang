@@ -1648,9 +1648,11 @@ impl Compiler {
             params.push(p.as_ref().clone());
             cur = r;
         }
+        // A function argument (`map(xs, fn (int x) => ..)`) is one closure
+        // word whose own types are ground.
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            crate::hir::layout::ty_is_closed(&ty).then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty)).then_some(ty)
         };
         let mut arg_tys = Vec::with_capacity(args.len());
         for &arg in args {
@@ -4919,6 +4921,17 @@ fn hir_bisect(name: &str) -> bool {
         eprintln!("hir bisect: body {n} is `{name}`");
     }
     n <= limit
+}
+
+/// A function type whose parameter and result types are all ground.
+fn ground_fun(ty: &Ty) -> bool {
+    match crate::typechecking::ty::strip_readonly(ty) {
+        Ty::Fun(param, ret) => {
+            let ground = |t: &Ty| crate::hir::layout::ty_is_closed(t) || ground_fun(t);
+            ground(param) && ground(ret)
+        }
+        _ => false,
+    }
 }
 
 /// `ty` with each named type parameter in `params` replaced by a type
