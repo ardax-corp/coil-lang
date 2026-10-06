@@ -8,51 +8,37 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
+use clap::{CommandFactory, FromArgMatches, Parser};
 use parser::format_source;
 use reporting::{Message, ReportConfig, SourceMap, create_sink};
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "coil-fmt",
+    about = "Format coil source files",
+    disable_help_subcommand = true,
+    after_help = "Directories are walked recursively for `*.hy`.\n\
+Preserves `//` comments and `///` doc comments on declarations."
+)]
 struct FmtArgs {
-    paths: Vec<PathBuf>,
+    /// Exit 1 if any file would change (no writes)
+    #[arg(long)]
     check: bool,
+    /// Files or directories to format
+    #[arg(required = true, value_name = "PATH")]
+    paths: Vec<PathBuf>,
 }
 
-fn print_help() {
-    eprintln!(
-        "Usage:\n\
-         \x20 coil-fmt [--check] <file.hy|dir>...\n\
-         \n\
-         Format coil source files. Directories are walked recursively for `*.hy`.\n\
-         Preserves `//` comments and `///` doc comments on declarations.\n\
-         \n\
-         Options:\n\
-         \x20 --check     Exit 1 if any file would change (no writes)\n\
-         \x20 -h, --help  Show this help"
-    );
-}
-
-fn parse_args(args: &[String]) -> Result<FmtArgs, String> {
-    let mut check = false;
-    let mut paths = Vec::new();
-    let mut i = 1usize;
-    while i < args.len() {
-        let a = &args[i];
-        match a.as_str() {
-            "-h" | "--help" => {
-                print_help();
-                exit(0);
-            }
-            "--check" => check = true,
-            s if s.starts_with('-') => {
-                return Err(format!("unrecognized flag `{s}`"));
-            }
-            _ => paths.push(PathBuf::from(a)),
-        }
-        i += 1;
+fn parse_args(args: &[String]) -> Result<Option<FmtArgs>, String> {
+    let mut command = FmtArgs::command();
+    command.set_bin_name("coil-fmt");
+    match command.try_get_matches_from(args) {
+        Ok(matches) => FmtArgs::from_arg_matches(&matches)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => Ok(None),
+        Err(error) => Err(error.to_string()),
     }
-    if paths.is_empty() {
-        return Err("fmt requires at least one file or directory".into());
-    }
-    Ok(FmtArgs { paths, check })
 }
 
 fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -60,10 +46,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         if root.extension().and_then(|e| e.to_str()) == Some("hy") {
             out.push(root.to_path_buf());
         } else {
-            return Err(format!(
-                "`{}` is not a `.hy` file",
-                root.display()
-            ));
+            return Err(format!("`{}` is not a `.hy` file", root.display()));
         }
         return Ok(());
     }
@@ -71,9 +54,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         return Err(format!("path not found: {}", root.display()));
     }
     let entries = fs::read_dir(root).map_err(|e| format!("read {}: {e}", root.display()))?;
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     children.sort();
     for child in children {
         if child.is_dir() {
@@ -128,10 +109,20 @@ fn format_one(path: &Path, check: bool) -> Result<bool, String> {
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     let args = match parse_args(&raw) {
-        Ok(a) => a,
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            let mut command = FmtArgs::command();
+            command.set_bin_name("coil-fmt");
+            let _ = command.print_long_help();
+            println!();
+            return;
+        }
         Err(msg) => {
-            eprintln!("coil-fmt: {msg}");
-            print_help();
+            if msg.ends_with('\n') {
+                eprint!("{msg}");
+            } else {
+                eprintln!("{msg}");
+            }
             exit(1);
         }
     };
