@@ -60,6 +60,14 @@ pub fn build_module(checker: &Checker, sidecar: &TypedSidecar, module_path: &str
         top.body.root = Some(root);
         let body = top.finish();
         module.bodies.insert(0, body);
+        // Lambdas name their body by index; the top body now comes first.
+        for body in &mut module.bodies {
+            for expr in &mut body.exprs {
+                if let HirKind::Lambda { body } = &mut expr.kind {
+                    *body += 1;
+                }
+            }
+        }
     }
     module
 }

@@ -142,6 +142,13 @@ enum HirBuiltin {
     Bound { dict: u32, method: u32 },
 }
 
+/// A planned anonymous `fn`: its body lowers in a frame of its own, with
+/// the captures in the first slots, then the parameters.
+struct HirLambda {
+    body: HirBody,
+    emit: HirEmit,
+}
+
 /// Per-body lowering state.
 struct HirEmit {
     /// Frame slot of each [`LocalId`], once bound.
@@ -171,6 +178,8 @@ struct HirEmit {
     /// Each named function read as a value, by node: its entry offset,
     /// arity and rest flag for `MakeFn`.
     fn_refs: HashMap<u32, (usize, u32, bool)>,
+    /// Each anonymous `fn`, by node: its body and that body's plan.
+    lambdas: HashMap<u32, Box<HirLambda>>,
     /// Each `static let` read or write, by node: its static slot.
     statics: HashMap<u32, u32>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
@@ -273,7 +282,8 @@ impl Compiler {
             None
         }
         .or_else(|| lower::refusal(hir, &self.checker))
-        .map_or_else(|| self.plan_hir_body(hir), Err);
+        .map_or_else(|| self.plan_hir_body(hir), Err)
+        .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
@@ -392,7 +402,81 @@ impl Compiler {
     /// Bind parameter slots, resolve every call and check every value edge;
     /// any refusal here is the fallback reason.
     fn plan_hir_body(&self, hir: &HirBody) -> Result<HirEmit, &'static str> {
-        let ret = match self.compiling_two_word_enum.clone() {
+        let ret = self.hir_body_ret(hir)?;
+        self.plan_hir_body_ret(hir, ret)
+    }
+
+    /// Plan each anonymous `fn` in `hir`, as `do_compile`'s `Lambda`: an
+    /// expression body in a fresh frame (captures, then parameters),
+    /// returning its value in the `fn` type's result layout.
+    fn plan_hir_lambdas(&mut self, module: &crate::hir::HirModule, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
+        for (i, expr) in hir.exprs.iter().enumerate() {
+            let HirKind::Lambda { body } = expr.kind else {
+                continue;
+            };
+            // A clone's lambdas keep the generic body's types.
+            if self.compiling_mono_clone {
+                return Err("lambda-mono");
+            }
+            let lam = &module.bodies[body];
+            let root = lam.root.ok_or("lambda")?;
+            if lam.is_coro || lam.result_mode || matches!(hir.expr(root).kind, HirKind::Block { .. }) {
+                return Err("lambda-body");
+            }
+            if lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
+                return Err("lambda-nested");
+            }
+            // Captures are plain one-word locals of this body.
+            for &(outer, _) in &lam.captures {
+                let plain = (outer.0 as usize) < hir.locals.len()
+                    && !emit.sroa.contains_key(&outer.0)
+                    && !emit.pair_locals.contains_key(&outer.0)
+                    && !emit.stacks.contains_key(&outer.0)
+                    && hir
+                        .local(outer)
+                        .ty
+                        .as_ref()
+                        .and_then(|t| lower::classify(&self.checker, t))
+                        .is_some_and(lower::is_word);
+                if !plain {
+                    return Err("lambda-capture");
+                }
+            }
+            for &param in &lam.params {
+                let ty = lam.local(param).ty.as_ref().ok_or("lambda-param")?;
+                if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
+                    return Err("lambda-param");
+                }
+            }
+            let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
+            let ret = Rep::Word(self.value_layout(ret_ty));
+            if let Some(reason) = lower::refusal(lam, &self.checker) {
+                return Err(reason);
+            }
+            let prev_vars = std::mem::take(&mut self.context.variables);
+            let prev_two_word = self.compiling_two_word_enum.take();
+            Self::hir_lambda_frame(&mut self.context.variables, lam);
+            let plan = self.plan_hir_body_ret(lam, ret);
+            self.context.variables = prev_vars;
+            self.compiling_two_word_enum = prev_two_word;
+            let mut plan = plan?;
+            for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
+                plan.slots[inner.0 as usize] = Some(slot as u32);
+            }
+            emit.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan }));
+        }
+        Ok(())
+    }
+
+    /// A lambda's frame: each capture's name, then each parameter's.
+    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody) -> Vec<u32> {
+        let names = lam.captures.iter().map(|&(_, inner)| inner).chain(lam.params.iter().copied());
+        names.map(|local| vars.intern(lam.local(local).name.clone()) as u32).collect()
+    }
+
+    /// How the function being compiled returns `hir`'s result.
+    fn hir_body_ret(&self, hir: &HirBody) -> Result<Rep, &'static str> {
+        Ok(match self.compiling_two_word_enum.clone() {
             Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
             None => {
@@ -405,7 +489,10 @@ impl Compiler {
                 }
                 Rep::Word(layout)
             }
-        };
+        })
+    }
+
+    fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
         let mut emit = HirEmit {
             slots: vec![None; hir.locals.len()],
             calls: HashMap::new(),
@@ -419,6 +506,7 @@ impl Compiler {
             lens: HashMap::new(),
             consts: HashMap::new(),
             fn_refs: HashMap::new(),
+            lambdas: HashMap::new(),
             statics: HashMap::new(),
             ops: HashMap::new(),
             stacks: HashMap::new(),
@@ -1782,6 +1870,7 @@ impl Compiler {
             )),
             HirKind::Lit(_)
             | HirKind::Global { .. }
+            | HirKind::Lambda { .. }
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }
@@ -2262,7 +2351,7 @@ impl Compiler {
 
     fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
-            HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } => {}
+            HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
@@ -2792,6 +2881,42 @@ impl Compiler {
             HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
             HirKind::Global { .. } if let Some(&slot) = emit.statics.get(&id.0) => {
                 self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+            }
+            HirKind::Lambda { .. } => {
+                // `JMP after`, the body in its own frame, then the captures,
+                // `CodePtr` and `MakeFn`, as `do_compile`'s `Lambda`.
+                let mut lam = emit.lambdas.remove(&id.0).expect("planned lambda");
+                let after = self.bytecode.fresh_label();
+                self.hir_jump(IlJumpKind::Unconditional, after);
+                self.bytecode.bind_fresh_entry();
+                let entry = self.bytecode.len() as u32;
+                let prev_vars = std::mem::take(&mut self.context.variables);
+                let prev_keys = std::mem::take(&mut self.field_key_slots);
+                let slots = Self::hir_lambda_frame(&mut self.context.variables, &lam.body);
+                for (&param, &slot) in lam.body.params.iter().zip(&slots[lam.body.captures.len()..]) {
+                    let name = lam.body.local(param).name.clone();
+                    self.record_debug_param(&name, slot);
+                }
+                self.expr_depth = 0;
+                let root = lam.body.root.expect("planned lambda body");
+                let ret = lam.emit.ret.clone();
+                self.hir_value(&lam.body, &mut lam.emit, root, &ret, 0);
+                self.bytecode.push_return();
+                self.field_key_slots = prev_keys;
+                self.context.variables = prev_vars;
+                self.expr_depth = depth;
+                self.bytecode.bind_label(after);
+                for &(outer, _) in &lam.body.captures {
+                    let slot = Self::hir_slot(emit, outer);
+                    self.bytecode.push_load(slot);
+                }
+                self.bytecode.push_const(0);
+                self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
+                let arity = lam.body.params.len() as u32;
+                let captures = lam.body.captures.len() as u32;
+                self.bytecode
+                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(captures, 0, arity, false)));
+                emit.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);

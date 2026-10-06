@@ -606,7 +606,7 @@ pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
-    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test) {
+    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda) {
         return Some("body-kind");
     }
     if body.is_coro {
@@ -615,7 +615,8 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     if body.is_generic {
         return Some("generic");
     }
-    if !body.captures.is_empty() {
+    // A lambda's captures sit in its frame's first slots.
+    if !body.captures.is_empty() && body.kind != BodyKind::Lambda {
         return Some("captures");
     }
     if body.ret.as_ref().and_then(|ty| classify(checker, ty)).is_none() {
@@ -774,7 +775,7 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                 HirKind::Call {
                     callee: Callee::Value(g), ..
                 } => indirect_callee(body, checker, *g),
-                HirKind::Global { .. } => true,
+                HirKind::Global { .. } | HirKind::Lambda { .. } => true,
                 _ => false,
             },
             _ => false,
@@ -1024,6 +1025,9 @@ impl Walk<'_> {
             // A `const` read or a `static let` load: the codegen plan finds
             // which (`Compiler::hir_global_const` / `hir_global_static`).
             HirKind::Global { .. } => self.word(id),
+            // An anonymous `fn`: its captures, then `MakeFn` (codegen plans
+            // the body).
+            HirKind::Lambda { .. } => self.word(id),
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
                 // (`==` / `!=` without one) the VM's structural `EQ` /

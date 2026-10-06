@@ -59,7 +59,7 @@ pub enum BodyKind {
 }
 
 /// One function, method, lambda or test body.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirBody {
     pub name: String,
     pub kind: BodyKind,
