@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use super::abi::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
-use super::emit_lir::emit_lir;
 use super::entry::lir_refuse_with;
 use super::gc::refuses_alloc;
 use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc, infer_numeric_with};
