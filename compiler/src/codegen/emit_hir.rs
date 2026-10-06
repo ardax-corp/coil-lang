@@ -2091,6 +2091,13 @@ impl Compiler {
     }
 
     /// An array index, with the AST's Euclidean fix-up for `x % m`.
+    /// `s as [byte]` on a string, which the AST compiles to `to_bytes(s)`.
+    fn hir_string_to_bytes(&self, hir: &HirBody, id: HirId, value: HirId) -> bool {
+        Self::hir_ty(hir, value)
+            .zip(Self::hir_ty(hir, id))
+            .is_some_and(|(from, to)| lower::string_to_bytes(&self.checker, from, to))
+    }
+
     fn hir_index_value(&mut self, hir: &HirBody, emit: &mut HirEmit, index: HirId, depth: u32) {
         self.hir_value(hir, emit, index, &BOXED, depth);
         if let Some(m) = Self::hir_index_euclid(hir, index) {
@@ -2528,6 +2535,10 @@ impl Compiler {
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
+            }
+            HirKind::Cast { value } if self.hir_string_to_bytes(hir, id, *value) => {
+                self.native_id("to_bytes").ok_or("cast")?;
+                self.hir_check_value(hir, emit, *value, &BOXED)?
             }
             HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => {
                 self.hir_check_value(hir, emit, *operand, &BOXED)?
@@ -3085,6 +3096,14 @@ impl Compiler {
                 let byte = lower::byte_literal(raw).expect("planned byte literal");
                 self.bytecode.push_const(byte as i32);
             }
+            HirKind::Lit(Lit::Str(raw)) if Self::hir_ty(hir, id).is_some_and(lower::is_byte_array) => {
+                // As the AST: each byte, then `MakeArray`.
+                let text = unescape_coil_string(raw);
+                for &b in text.as_bytes() {
+                    self.bytecode.push(Byte::new_with_value(Instruction::CONST, Value::from(b as i64).raw() as _));
+                }
+                self.bytecode.push_make_array(text.len() as u32);
+            }
             HirKind::Lit(Lit::Str(raw)) => {
                 let text = unescape_coil_string(raw);
                 let mut bc = CodeBuf::new();
@@ -3249,6 +3268,13 @@ impl Compiler {
                     HirKind::Lit(Lit::Float(f)) => self.hir_push_float(-f),
                     _ => unreachable!(),
                 }
+            }
+            HirKind::Cast { value } if self.hir_string_to_bytes(hir, id, *value) => {
+                // As the AST: `to_bytes` on the string.
+                let native = self.native_id("to_bytes").expect("checked string cast");
+                self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+                self.hir_value(hir, emit, *value, &BOXED, depth + 1);
+                self.bytecode.push_host_invoke(1);
             }
             HirKind::Cast { value } => {
                 self.hir_value(hir, emit, *value, &BOXED, depth);
