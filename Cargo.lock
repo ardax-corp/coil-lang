@@ -302,6 +302,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coil-args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "compiler",
+]
+
+[[package]]
 name = "coil-cli"
 version = "0.1.0"
 dependencies = [

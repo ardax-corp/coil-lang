@@ -6,6 +6,7 @@ members = [
     "machine",
     "parser",
     "reporting",
+    "coil-args",
     "coil-cli",
     "coil-embed",
     "coil-host",
