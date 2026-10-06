@@ -408,7 +408,9 @@ impl Walk<'_> {
             HirKind::Local(local) if structural && self.body.local(local).kind != super::LocalKind::Const => Ok(()),
             // Not const-foldable (the AST folds only literals and const
             // names): the value is pushed, then measured or popped.
-            HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } if structural => {
+            // Folded to its byte length, as the AST's `eval_len_operand`.
+            HirKind::Lit(Lit::Str(_)) if structural => Ok(()),
+            HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if structural => {
                 self.word(arg)?;
                 self.value(arg, depth)
             }

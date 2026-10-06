@@ -2004,10 +2004,25 @@ impl Compiler {
         if !is_len
             || !matches!(
                 hir.expr(*arg).kind,
-                HirKind::Local(_) | HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. }
+                HirKind::Local(_)
+                    | HirKind::Call { .. }
+                    | HirKind::Field { .. }
+                    | HirKind::Index { .. }
+                    | HirKind::Global { .. }
+                    | HirKind::Lit(Lit::Str(_))
             )
         {
             return None;
+        }
+        // A string literal folds to its byte length, with the escapes
+        // `const_fold::eval_len_operand` undoes.
+        if let HirKind::Lit(Lit::Str(raw)) = &hir.expr(*arg).kind {
+            let text = raw
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace("\\0", "\0");
+            return u32::try_from(text.len()).ok().map(Some);
         }
         use crate::typechecking::ty::{ArrayLength, strip_readonly};
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *arg)?);
@@ -3203,7 +3218,7 @@ impl Compiler {
                 // A fixed size: a local is not read, anything else is
                 // evaluated and dropped (as in the AST).
                 Some(n) => {
-                    if !matches!(hir.expr(args[0]).kind, HirKind::Local(_)) {
+                    if !matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_)) {
                         self.hir_value(hir, emit, args[0], &BOXED, depth);
                         self.bytecode.push_pop();
                     }
