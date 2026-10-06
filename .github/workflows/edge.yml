@@ -16,10 +16,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# A newer main build supersedes one still running.
+# One edge build at a time, and none is cancelled: a build in flight finishes
+# and publishes, then only the newest waiting main build runs (GitHub keeps one
+# pending run per group). Cancelling the running build for every newer commit
+# starves edge whenever main moves faster than the build takes.
 concurrency:
   group: edge
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
