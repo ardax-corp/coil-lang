@@ -118,6 +118,10 @@ impl HirFlags {
     pub const LAST_USE: Self = Self(2);
     pub const IN_BOUNDS: Self = Self(4);
     pub const NONNEG: Self = Self(8);
+    /// An `Assign` built from `x++` / `--x`: its value is the old or new `x`.
+    pub const ADJUST: Self = Self(16);
+    /// With `ADJUST`: the prefix form, whose value is the new `x`.
+    pub const PREFIX: Self = Self(32);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

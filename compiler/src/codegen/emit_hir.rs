@@ -1973,6 +1973,9 @@ impl Compiler {
             | HirKind::Cast { .. } => Some(BOXED),
             HirKind::Make { .. } if self.hir_scalar_variant(hir, id).is_some() => Some(BOXED),
             HirKind::Local(local) => Some(self.hir_local_rep(hir, emit, *local)),
+            HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
+                self.hir_natural(hir, emit, *place)
+            }
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
             HirKind::Call {
                 callee: Callee::Value(_),
@@ -2518,6 +2521,10 @@ impl Compiler {
     fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
             HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
+            HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => match hir.expr(*place).kind {
+                HirKind::Local(local) if !emit.pair_locals.contains_key(&local.0) => {}
+                _ => return Err("assign"),
+            },
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
@@ -3085,6 +3092,20 @@ impl Compiler {
                 self.bytecode.append(&mut bc);
             }
             HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
+            HirKind::Assign { place, value } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
+                // As the AST's `emit_adjust` on a local: one `INC` / `DEC`.
+                let HirKind::Local(local) = hir.expr(*place).kind else {
+                    unreachable!("planned adjust of a local")
+                };
+                let slot = Self::hir_slot(emit, local);
+                let is_float = Self::hir_ty(hir, id).is_some_and(lower::is_float);
+                let instr = match hir.expr(*value).kind {
+                    HirKind::Bin { op: BinOp::IntSub | BinOp::FloatSub, .. } => Instruction::DEC,
+                    _ => Instruction::INC,
+                };
+                let prefix = hir.expr(id).flags.contains(HirFlags::PREFIX);
+                self.bytecode.push(Byte::new(instr).with_inc_dec(slot, prefix, is_float));
+            }
             HirKind::Global { .. } if let Some(&slot) = emit.statics.get(&id.0) => {
                 self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
             }
