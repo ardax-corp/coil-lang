@@ -323,6 +323,8 @@ dependencies = [
 name = "coil-debug"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-cli",
  "common",
  "compiler",
@@ -394,6 +396,8 @@ dependencies = [
 name = "coil-test"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-host",
  "common",
  "compiler",
