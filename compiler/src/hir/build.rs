@@ -527,7 +527,32 @@ impl<'c, 'm> Cx<'c, 'm> {
             E::Integer(n) => self.emit_ty(b, node, HirKind::Lit(Lit::Int(*n)), self.ty_of(node).or(Some(coil_ty::int()))),
             E::Float(f) => self.emit_ty(b, node, HirKind::Lit(Lit::Float(*f)), Some(coil_ty::float())),
             E::Bool(v) => self.emit_ty(b, node, HirKind::Lit(Lit::Bool(*v)), Some(coil_ty::boolean())),
-            E::String(s) => self.emit_ty(b, node, HirKind::Lit(Lit::Str(s.to_string())), self.ty_of(node).or(Some(coil_ty::string()))),
+            E::String(s) => {
+                let ty = self.ty_of(node).or(Some(coil_ty::string()));
+                // A literal typed `[byte; N]` is its bytes, an array literal
+                // (the AST keeps it in frame slots, as `let a = [..]`).
+                if let Some(Ty::Array {
+                    element,
+                    length: coil_ty::ArrayLength::Static(n),
+                }) = ty.as_ref().map(strip_readonly)
+                    && matches!(strip_readonly(element), Ty::Con(e) if e == coil_ty::BYTE)
+                {
+                    let bytes = crate::codegen::unescape_coil_string(s).into_bytes();
+                    if bytes.len() == *n {
+                        let span = span_of(node);
+                        let args = bytes
+                            .iter()
+                            .map(|&byte| {
+                                let item = b.push(HirKind::Lit(Lit::Int(i64::from(byte))), Some(Ty::Con(coil_ty::BYTE.into())), span, None);
+                                self.stamp(b, item);
+                                item
+                            })
+                            .collect();
+                        return self.emit_ty(b, node, HirKind::Make { kind: MakeKind::Array, args }, ty);
+                    }
+                }
+                self.emit_ty(b, node, HirKind::Lit(Lit::Str(s.to_string())), ty)
+            }
             E::Noop(_) => self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
 
             E::Expr(inner) | E::Group(inner) | E::Statement(inner) => self.expr(b, inner),

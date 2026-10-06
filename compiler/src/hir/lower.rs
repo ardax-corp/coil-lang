@@ -1458,6 +1458,15 @@ impl Walk<'_> {
             {
                 Ok(())
             }
+            // `"ab" as Vec<byte>` of a literal typed `[byte; N]`: its bytes'
+            // array, unchanged.
+            HirKind::Cast { value }
+                if matches!(body.expr(*value).kind, HirKind::Make { kind: MakeKind::Array, .. })
+                    && self.ty(*value).is_some_and(is_byte_array)
+                    && self.ty(id).is_some_and(|t| is_byte_array(t) || is_byte_vec(t)) =>
+            {
+                self.value(*value, depth)
+            }
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
                 let to = self.ty(id).and_then(primitive).ok_or("cast")?;
