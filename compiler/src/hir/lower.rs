@@ -455,13 +455,16 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
 }
 
 /// Whether a call at `depth` stages its arguments through temps: at the
-/// top of the stack, when one of them builds an object.
+/// top of the stack, when one of them builds an object, or one after the
+/// first holds a `match` (`?`, `??`), which binds slots with no operand
+/// below it.
 pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
     depth == 0
-        && args.iter().any(|&arg| {
+        && args.iter().enumerate().any(|(i, &arg)| {
             let mut found = false;
             visit(body, arg, &mut |e| {
-                found |= matches!(&e.kind, HirKind::Make { kind: MakeKind::Class(_), .. });
+                found |= matches!(&e.kind, HirKind::Make { kind: MakeKind::Class(_), .. })
+                    || (i != 0 && matches!(&e.kind, HirKind::Match { .. }));
             });
             found
         })
