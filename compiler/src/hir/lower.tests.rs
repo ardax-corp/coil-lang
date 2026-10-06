@@ -94,7 +94,7 @@ fn counted_for_in_is_in_the_subset() {
     let src = "fn f(Vec<(int, int)> xs) -> int { let s = 0; for (a, b) in xs { s += a + b; } return s; }";
     assert_eq!(refusal_of(src, "f"), None);
     let src = "fn f() -> int { let s = 0; for i in 0..4 { s += i; } return s; }";
-    assert_eq!(refusal_of(src, "f"), Some("for-in-unroll"));
+    assert_eq!(refusal_of(src, "f"), None);
 }
 
 #[test]

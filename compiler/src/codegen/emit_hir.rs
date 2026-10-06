@@ -4639,6 +4639,21 @@ impl Compiler {
         body: HirId,
         kind: &ForInKind,
     ) {
+        if let ForInKind::Range { inclusive, float: false } = kind
+            && let HirPat::Bind(local) = *pat
+            && let Some((start, trips)) = lower::unrolled_range(hir, iterable, body, *inclusive)
+        {
+            // As `emit_for_in_range`'s unroll: each value into the binding,
+            // then the body.
+            let x = self.hir_bind_local(hir, local);
+            emit.slots[local.0 as usize] = Some(x);
+            for k in 0..trips {
+                self.hir_push_int(start + i64::from(k));
+                self.bytecode.push_store_pop(x);
+                self.hir_effect(hir, emit, body);
+            }
+            return;
+        }
         // The counter the latch steps by one, and whether it is a float.
         let (step_slot, step_float): (u32, bool);
         let top = self.bytecode.fresh_label();

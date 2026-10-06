@@ -625,6 +625,39 @@ pub fn range_bounds(body: &HirBody, iterable: HirId) -> Option<[HirId; 2]> {
     }
 }
 
+/// `for x in a..b` over int literals with at most eight trips, no
+/// `break` or `continue` of its own and no lambda: the first value and the
+/// trip count, for the body emitted once per value as the AST's
+/// `emit_for_in_range` does.
+pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bool) -> Option<(i64, u32)> {
+    let [lo, hi] = range_bounds(hir, iterable)?;
+    let (HirKind::Lit(Lit::Int(s)), HirKind::Lit(Lit::Int(e))) = (&hir.expr(lo).kind, &hir.expr(hi).kind) else {
+        return None;
+    };
+    let count = if inclusive {
+        e.saturating_sub(*s).saturating_add(1)
+    } else {
+        e.saturating_sub(*s)
+    };
+    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) {
+        return None;
+    }
+    Some((*s, count as u32))
+}
+
+fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
+    match &hir.expr(id).kind {
+        HirKind::Break | HirKind::Continue => true,
+        HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
+        _ => children(hir, id).into_iter().any(|k| has_own_jump(hir, k)),
+    }
+}
+
+/// A lambda is planned for one emission, so its body cannot repeat.
+fn has_lambda(hir: &HirBody, id: HirId) -> bool {
+    matches!(hir.expr(id).kind, HirKind::Lambda { .. }) || children(hir, id).into_iter().any(|k| has_lambda(hir, k))
+}
+
 /// Whether `body` holds a `continue` of its own loop (nested loops' are
 /// theirs), as `const_fold::body_has_continue`.
 pub fn has_own_continue(hir: &HirBody, body: HirId) -> bool {
@@ -1587,10 +1620,6 @@ impl Walk<'_> {
                             self.loops -= 1;
                             return r;
                         };
-                        // A short literal range is unrolled by the AST.
-                        if args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(Lit::Int(_)))) {
-                            return Err("for-in-unroll");
-                        }
                         for &a in &args {
                             self.scalar(a)?;
                             self.value(a, 0)?;
