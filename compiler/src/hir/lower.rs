@@ -552,16 +552,19 @@ pub fn push_stages(body: &HirBody, stack: &HashMap<u32, usize>, value: HirId) ->
 }
 
 /// Whether a call at `depth` stages its arguments through temps: at the
-/// top of the stack, when one of them builds an object, or one after the
-/// first holds a `match` (`?`, `??`), which binds slots with no operand
-/// below it.
+/// top of the stack, when one of them builds an object or applies an
+/// operator through temps (a user type's instance, an aggregate), or one
+/// after the first holds a `match` (`?`, `??`), which binds slots with no
+/// operand below it.
 pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
     depth == 0
         && args.iter().enumerate().any(|(i, &arg)| {
             let mut found = false;
             visit(body, arg, &mut |e| {
-                found |= matches!(&e.kind, HirKind::Make { kind: MakeKind::Class(_), .. })
-                    || (i != 0 && matches!(&e.kind, HirKind::Match { .. }));
+                found |= matches!(
+                    &e.kind,
+                    HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
+                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }));
             });
             found
         })
@@ -1091,6 +1094,10 @@ pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bo
     match &body.expr(rhs).kind {
         HirKind::Call { .. } | HirKind::Match { .. } | HirKind::Make { .. } => true,
         HirKind::Index { .. } => stack_select(body, stack, body.expr(rhs)),
+        // An operator on a user type or aggregate stages through temps.
+        HirKind::Bin {
+            op: BinOp::Overloaded(_), ..
+        } => true,
         HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
             stages_rhs(body, stack, *lhs) || stages_rhs(body, stack, *rhs)
         }
@@ -1457,6 +1464,15 @@ impl Walk<'_> {
                     && self.ty(id).is_some_and(is_byte_vec) =>
             {
                 Ok(())
+            }
+            // `"ab" as Vec<byte>` of a literal typed `[byte; N]`: its bytes'
+            // array, unchanged.
+            HirKind::Cast { value }
+                if matches!(body.expr(*value).kind, HirKind::Make { kind: MakeKind::Array, .. })
+                    && self.ty(*value).is_some_and(is_byte_array)
+                    && self.ty(id).is_some_and(|t| is_byte_array(t) || is_byte_vec(t)) =>
+            {
+                self.value(*value, depth)
             }
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
@@ -2045,8 +2061,8 @@ impl Walk<'_> {
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
-            // A `()` statement (a unit `match` arm) does nothing.
-            _ if is_unit_make(body, id) => Ok(()),
+            // A `()` statement (a unit `match` arm, a nested item) does nothing.
+            _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Bin { .. }
