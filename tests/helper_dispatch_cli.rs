@@ -6,15 +6,13 @@ use std::time::Duration;
 
 fn coil_bin() -> PathBuf {
     PathBuf::from(
-        std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)"),
+        std::env::var("CARGO_BIN_EXE_coil")
+            .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)"),
     )
 }
 
 fn scratch_dir(suffix: &str) -> PathBuf {
-    let cwd = std::env::temp_dir().join(format!(
-        "coil_dispatch_{suffix}_{}",
-        std::process::id()
-    ));
+    let cwd = std::env::temp_dir().join(format!("coil_dispatch_{suffix}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
     cwd
@@ -67,7 +65,10 @@ fn missing_helper_reports_required_binary() {
     );
 
     let lsp = run(&isolated, &["lsp"]);
-    assert!(!lsp.status.success(), "expected failure when coil-lsp is absent");
+    assert!(
+        !lsp.status.success(),
+        "expected failure when coil-lsp is absent"
+    );
     let err = String::from_utf8_lossy(&lsp.stderr);
     assert!(
         err.contains("requires `coil-lsp`") || err.contains("coil-lsp"),
@@ -82,7 +83,10 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
     let cwd = scratch_dir("test_missing");
     let isolated = isolated_coil(&cwd);
     let out = run(&isolated, &["test", "--fail-fast"]);
-    assert!(!out.status.success(), "expected failure when coil-test is absent");
+    assert!(
+        !out.status.success(),
+        "expected failure when coil-test is absent"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("requires `coil-test`"), "stderr={err}");
     let _ = std::fs::remove_dir_all(&cwd);
@@ -94,7 +98,11 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
             .args(["build", "-q", "-p", "coil-test"])
             .status()
             .expect("spawn cargo build -p coil-test");
-        assert!(status.success() && helper.is_file(), "coil-test missing at {}", helper.display());
+        assert!(
+            status.success() && helper.is_file(),
+            "coil-test missing at {}",
+            helper.display()
+        );
     }
     let out = Command::new(coil_bin())
         .args(["test", "--definitely-not-a-flag"])
@@ -102,7 +110,7 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
         .expect("spawn coil test");
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("coil-test: unrecognized flag"), "stderr={err}");
+    assert!(err.contains("unexpected argument"), "stderr={err}");
 
     // `coil mutate` is `coil-test mutate`.
     let out = Command::new(coil_bin())
@@ -111,6 +119,9 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
         .expect("spawn coil mutate");
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("unknown mutation operator `nope`"), "stderr={err}");
-    assert!(err.contains("coil mutate [OPTIONS]"), "mutate help follows: {err}");
+    assert!(
+        err.contains("unknown mutation operator `nope`"),
+        "stderr={err}"
+    );
+    assert!(err.contains("coil mutate"), "mutate usage follows: {err}");
 }

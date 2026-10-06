@@ -2,7 +2,11 @@
 
 use std::path::PathBuf;
 
-use compiler::{HostGrants, OptLevel};
+use clap::{Command, CommandFactory, Parser};
+use coil_args::{
+    HirFlags, HostGrantFlags, LogFlags, OptLevelFlags, RootFlags, expand_o_shorts, parse_with,
+    print_command_help,
+};
 use reporting::ReportConfig;
 
 use crate::coverage::{CoverageOptions, DEFAULT_LCOV_OUT};
@@ -34,306 +38,252 @@ pub const DEFAULT_TIMEOUT_FACTOR: u64 = 10;
 /// Default `--wall-timeout` (seconds per mutant).
 pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
 
-pub fn print_mutate_help() {
-    eprintln!(
-        "Mutation testing: change project sources one small edit at a time and\n\
-         check that some test fails (default test root: ./tests)\n\
-         \n\
-         Usage:\n\
-         \x20 coil mutate [OPTIONS] [PATH]\n\
-         \n\
-         Runs the suite once with coverage (it must pass), then each mutant against\n\
-         only the cases that cover its line. Sources under the test root are not\n\
-         mutated unless --files selects them. `// coil:no-mutate` on a line (or on /\n\
-         above a `fn` header) skips it.\n\
-         \n\
-         Options:\n\
-         \x20 --files GLOB       Only mutate sources matching GLOB (relative path; `*`,\n\
-         \x20                    `**`, `?`; repeatable)\n\
-         \x20 --operators LIST   Comma-separated subset of: boundary, negate, arith,\n\
-         \x20                    logic, cond, bool, int (default: all)\n\
-         \x20 --timeout-factor N Step budget per case = N x its baseline steps (default 10)\n\
-         \x20 --wall-timeout S   Kill a mutant's worker process after S seconds (default 60)\n\
-         \x20 --min-score P      Exit 1 when the mutation score is below P percent\n\
-         \x20 --json             NDJSON events on stdout (plan, mutant, summary, error)\n\
-         \x20 --seed N, --no-shuffle, -j N, -O L, --root DIR, --allow-*, --log-*\n\
-         \x20                    As for `coil test`\n\
-         \x20 -h, --help         Show this help"
-    );
+#[derive(Parser, Debug)]
+#[command(
+    name = "coil-test",
+    about = "Compile and run every test under [PATH] (default: ./tests)",
+    disable_help_subcommand = true,
+    after_help = "Files under a `compile_fail/` directory must be rejected by the compiler\n\
+with an error code their header declares (`// Expected: E0209 — why`).\n\
+\n\
+`--seed N` shuffles files and cases (decimal or 0x hex; default: random,\n\
+or $COIL_TEST_SEED; the header prints the seed). `--no-shuffle` keeps\n\
+sorted path order and source order."
+)]
+struct TestCli {
+    #[command(flatten)]
+    log: LogFlags,
+    #[command(flatten)]
+    opt: OptLevelFlags,
+    #[command(flatten)]
+    hir: HirFlags,
+    #[command(flatten)]
+    grants: HostGrantFlags,
+    #[command(flatten)]
+    roots: RootFlags,
+    /// Stop after the first failed case
+    #[arg(long)]
+    fail_fast: bool,
+    /// Shuffle files and cases with seed N (decimal or 0x hex)
+    #[arg(long, value_name = "N", value_parser = parse_seed)]
+    seed: Option<u64>,
+    /// Run files in sorted path order and cases in source order
+    #[arg(long)]
+    no_shuffle: bool,
+    /// Run cases on N reactor workers (default: available CPUs)
+    #[arg(short = 'j', long = "jobs", value_name = "N", value_parser = parse_jobs)]
+    jobs: Option<usize>,
+    /// Also print passing cases' output (failures always show it)
+    #[arg(long)]
+    show_output: bool,
+    /// Line coverage of project sources: lcov + summary
+    #[arg(long)]
+    coverage: bool,
+    /// lcov path (default target/coverage/lcov.info; implies --coverage)
+    #[arg(long, value_name = "FILE")]
+    coverage_out: Option<PathBuf>,
+    /// Also write test -> file -> lines JSON (implies --coverage)
+    #[arg(long, value_name = "FILE")]
+    coverage_per_test: Option<PathBuf>,
+    /// NDJSON events on stdout (start, file, summary, error)
+    #[arg(long)]
+    json: bool,
+    /// Test root (default: ./tests)
+    #[arg(value_name = "PATH")]
+    path: Option<String>,
 }
 
-/// Split `coil mutate` flags from the shared test flags.
-fn parse_mutate(args: &[String]) -> Result<Parsed, String> {
-    let mut files = Vec::new();
-    let mut operators: Option<Vec<Operator>> = None;
-    let mut timeout_factor = DEFAULT_TIMEOUT_FACTOR;
-    let mut json = false;
-    let mut min_score = None;
-    let mut wall = DEFAULT_WALL_TIMEOUT;
-    let mut rest = vec![args[0].clone()];
-    let mut i = 2usize;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let (flag, inline) = match a.split_once('=') {
-            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
-            _ => (a, None),
-        };
-        let mut value = |what: &str| -> Result<String, String> {
-            if let Some(v) = inline.clone() {
-                return Ok(v);
-            }
-            i += 1;
-            args.get(i)
-                .cloned()
-                .ok_or_else(|| format!("missing {what} after {flag}"))
-        };
-        match flag {
-            "-h" | "--help" => return Ok(Parsed::MutateHelp),
-            "--files" => files.push(value("GLOB")?),
-            "--operators" => {
-                let list = value("LIST")?;
-                let mut ops = Vec::new();
-                for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-                    ops.push(Operator::parse(name).ok_or_else(|| {
-                        format!("unknown mutation operator `{name}` (see `coil mutate --help`)")
-                    })?);
-                }
-                operators = Some(ops);
-            }
-            "--timeout-factor" => {
-                let v = value("N")?;
-                timeout_factor = match v.trim().parse::<u64>() {
-                    Ok(n) if n >= 1 => n,
-                    _ => {
-                        return Err(format!(
-                            "invalid --timeout-factor `{v}` (expected at least 1)"
-                        ));
-                    }
-                };
-            }
-            "--wall-timeout" => {
-                let v = value("S")?;
-                wall = match v.trim().parse::<u64>() {
-                    Ok(n) if n >= 1 => n,
-                    _ => {
-                        return Err(format!(
-                            "invalid --wall-timeout `{v}` (expected seconds >= 1)"
-                        ));
-                    }
-                };
-            }
-            "--min-score" => {
-                let v = value("P")?;
-                min_score = Some(
-                    v.trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|p| (0.0..=100.0).contains(p))
-                        .ok_or_else(|| format!("invalid --min-score `{v}` (expected 0..=100)"))?,
-                );
-            }
-            "--json" => json = true,
-            "--fail-fast"
-            | "--show-output"
-            | "--coverage"
-            | "--coverage-out"
-            | "--coverage-per-test" => {
-                return Err(format!("`{flag}` is not a `coil mutate` flag"));
-            }
-            _ => rest.push(args[i].clone()),
-        }
-        i += 1;
-    }
-    match parse_args(&rest)? {
-        Parsed::Run(config, test) => Ok(Parsed::Mutate(
-            config,
-            Box::new(MutateOptions {
-                test: *test,
-                files,
-                operators: operators.unwrap_or_else(|| Operator::ALL.to_vec()),
-                timeout_factor,
-                json,
-                min_score,
-                project_root: std::env::current_dir().unwrap_or_default(),
-                // Each mutant in a child `coil-test`, with the same flags.
-                isolation: Isolation::Child {
-                    exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("coil-test")),
-                    args: args[2..].to_vec(),
-                    wall: std::time::Duration::from_secs(wall),
-                },
-            }),
-        )),
-        _ => Ok(Parsed::MutateHelp),
-    }
+#[derive(Parser, Debug)]
+#[command(
+    name = "coil-test",
+    about = "Change project sources one small edit at a time and check that some test fails",
+    disable_help_subcommand = true,
+    after_help = "Runs the suite once with coverage (it must pass), then each mutant against\n\
+only the cases that cover its line. Sources under the test root are not\n\
+mutated unless --files selects them. `// coil:no-mutate` on a line (or on /\n\
+above a `fn` header) skips it.\n\
+\n\
+`--operators` is a comma-separated subset of: boundary, negate, arith,\n\
+logic, cond, bool, int (default: all). `--seed`, `-j`, `-O`, `--root`,\n\
+`--allow-*`, and `--log-*` match `coil test`."
+)]
+struct MutateCli {
+    #[command(flatten)]
+    log: LogFlags,
+    #[command(flatten)]
+    opt: OptLevelFlags,
+    #[command(flatten)]
+    hir: HirFlags,
+    #[command(flatten)]
+    grants: HostGrantFlags,
+    #[command(flatten)]
+    roots: RootFlags,
+    /// Only mutate sources matching GLOB (relative path; `*`, `**`, `?`; repeatable)
+    #[arg(long = "files", value_name = "GLOB", action = clap::ArgAction::Append)]
+    files: Vec<String>,
+    /// Comma-separated subset of boundary, negate, arith, logic, cond, bool, int
+    #[arg(long, value_name = "LIST")]
+    operators: Option<String>,
+    /// Step budget per case = N x its baseline steps (default 10)
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = DEFAULT_TIMEOUT_FACTOR,
+        value_parser = parse_timeout_factor
+    )]
+    timeout_factor: u64,
+    /// Kill a mutant's worker process after S seconds (default 60)
+    #[arg(
+        long,
+        value_name = "S",
+        default_value_t = DEFAULT_WALL_TIMEOUT,
+        value_parser = parse_wall_timeout
+    )]
+    wall_timeout: u64,
+    /// Exit 1 when the mutation score is below P percent
+    #[arg(long, value_name = "P", value_parser = parse_min_score)]
+    min_score: Option<f64>,
+    /// NDJSON events on stdout (plan, mutant, summary, error)
+    #[arg(long)]
+    json: bool,
+    /// Shuffle files and cases with seed N (decimal or 0x hex)
+    #[arg(long, value_name = "N", value_parser = parse_seed)]
+    seed: Option<u64>,
+    /// Run files in sorted path order and cases in source order
+    #[arg(long)]
+    no_shuffle: bool,
+    /// Run cases on N reactor workers (default: available CPUs)
+    #[arg(short = 'j', long = "jobs", value_name = "N", value_parser = parse_jobs)]
+    jobs: Option<usize>,
+    /// Test root (default: ./tests)
+    #[arg(value_name = "PATH")]
+    path: Option<String>,
+}
+
+fn named(mut command: Command, bin_name: &str) -> Command {
+    command.set_bin_name(bin_name);
+    command
+}
+
+pub fn print_mutate_help() {
+    print_command_help(named(MutateCli::command(), "coil mutate"), "coil mutate");
 }
 
 pub fn print_help() {
-    eprintln!(
-        "Compile and run every test under [PATH] (default: ./tests)\n\
-         \n\
-         Usage:\n\
-         \x20 coil test [OPTIONS] [PATH]\n\
-         \n\
-         Files under a `compile_fail/` directory must be rejected by the compiler\n\
-         with an error code their header declares (`// Expected: E0209 — why`).\n\
-         \n\
-         Options:\n\
-         \x20 --fail-fast        Stop after the first failed case\n\
-         \x20 --seed N           Shuffle files and cases with seed N (decimal or 0x hex;\n\
-         \x20                    default: random, or $COIL_TEST_SEED; printed in the header)\n\
-         \x20 --no-shuffle       Run files in sorted path order and cases in source order\n\
-         \x20 -j, --jobs N       Run cases on N reactor workers (default: available CPUs)\n\
-         \x20 --show-output      Also print passing cases' output (failures always show it)\n\
-         \x20 --coverage         Line coverage of project sources: lcov + summary\n\
-         \x20 --coverage-out F   lcov path (default target/coverage/lcov.info; implies --coverage)\n\
-         \x20 --coverage-per-test F  Also write test -> file -> lines JSON (implies --coverage)\n\
-         \x20 -O, --opt-level L  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
-         \x20 --hir             Lower function bodies from HIR where it covers them (also COIL_HIR=1)\n\
-         \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
-         \x20 --allow-attach     Allow Stream.attach (default deny)\n\
-         \x20 --allow-exit       Allow env::exit (default deny)\n\
-         \x20 --allow-exec       Allow env::exec (default deny)\n\
-         \x20 --allow-ffi-exec   Allow FFI process-exec symbols (default deny)\n\
-         \x20 --allow-dload STEM Allow dload of STEM (repeatable; libc still denied)\n\
-         \x20 --ffi-search-path  Extra FFI lookup directory (repeatable; not a grant)\n\
-         \x20 --json             NDJSON events on stdout (start, file, summary, error)\n\
-         \x20                    instead of the text report\n\
-         \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
-         \x20 --log-lsp          Emit LSP Diagnostic NDJSON on stdout\n\
-         \x20 -h, --help         Show this help"
-    );
+    print_command_help(named(TestCli::command(), "coil test"), "coil test");
 }
 
 /// Parse argv (including argv0). A first argument of [`MUTATE`] selects
 /// `coil mutate`.
 pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
-    if args.get(1).map(String::as_str) == Some(MUTATE) {
-        return parse_mutate(args);
+    let expanded = expand_o_shorts(args);
+    if expanded.get(1).map(String::as_str) == Some(MUTATE) {
+        return parse_mutate(&expanded, args);
     }
-    let mut log_json = false;
-    let mut log_lsp = false;
-    let mut json = false;
-    let mut fail_fast = false;
-    let mut seed: Option<u64> = None;
-    let mut no_shuffle = false;
-    let mut jobs: Option<usize> = None;
-    let mut show_output = false;
-    let mut coverage = false;
-    let mut coverage_out: Option<PathBuf> = None;
-    let mut per_test_out: Option<PathBuf> = None;
-    let mut path: Option<String> = None;
-    let mut extra_roots: Vec<PathBuf> = Vec::new();
-    let mut grants = HostGrants::deny_all();
-    let mut opt_level = OptLevel::default();
-    let mut hir = false;
-    let parse_level = |v: &str| {
-        OptLevel::parse(v).map_err(|_| {
-            format!(
-                "invalid --opt-level `{v}` (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)"
-            )
-        })
-    };
-    let value = |i: usize, what: &str, flag: &str| -> Result<String, String> {
-        args.get(i)
-            .cloned()
-            .ok_or_else(|| format!("missing {what} after {flag}"))
-    };
+    parse_test(&expanded)
+}
 
-    let mut i = 1usize;
-    while i < args.len() {
-        let a = args[i].as_str();
-        match a {
-            "-h" | "--help" => return Ok(Parsed::Help),
-            "--log-json" => log_json = true,
-            "--log-lsp" => log_lsp = true,
-            "--json" => json = true,
-            "--fail-fast" => fail_fast = true,
-            "--no-shuffle" => no_shuffle = true,
-            "--show-output" => show_output = true,
-            "--hir" => hir = true,
-            "--coverage" => coverage = true,
-            "--coverage-out" => {
-                i += 1;
-                coverage_out = Some(PathBuf::from(value(i, "FILE", a)?));
-            }
-            s if s.starts_with("--coverage-out=") => {
-                coverage_out = Some(PathBuf::from(s.trim_start_matches("--coverage-out=")));
-            }
-            "--coverage-per-test" => {
-                i += 1;
-                per_test_out = Some(PathBuf::from(value(i, "FILE", a)?));
-            }
-            s if s.starts_with("--coverage-per-test=") => {
-                per_test_out = Some(PathBuf::from(s.trim_start_matches("--coverage-per-test=")));
-            }
-            "-j" | "--jobs" => {
-                i += 1;
-                jobs = Some(parse_jobs(&value(i, "N", a)?)?);
-            }
-            s if s.starts_with("--jobs=") => {
-                jobs = Some(parse_jobs(s.trim_start_matches("--jobs="))?);
-            }
-            "--seed" => {
-                i += 1;
-                seed = Some(parse_seed(&value(i, "N", a)?)?);
-            }
-            s if s.starts_with("--seed=") => {
-                seed = Some(parse_seed(s.trim_start_matches("--seed="))?);
-            }
-            "-O" | "--opt-level" => {
-                i += 1;
-                opt_level = parse_level(&value(i, "LEVEL", a)?)?;
-            }
-            s if s.starts_with("--opt-level=") => {
-                opt_level = parse_level(s.trim_start_matches("--opt-level="))?;
-            }
-            s if s.starts_with("-O") && s.len() > 2 => opt_level = parse_level(&s[2..])?,
-            "--allow-attach" => grants.allow_attach = true,
-            "--allow-exit" => grants.allow_exit = true,
-            "--allow-exec" => grants.allow_exec = true,
-            "--allow-ffi-exec" => grants.allow_ffi_exec = true,
-            "--allow-dload" => {
-                i += 1;
-                grants.grant_dload_allow(value(i, "STEM", a)?);
-            }
-            s if s.starts_with("--allow-dload=") => {
-                grants.grant_dload_allow(s.trim_start_matches("--allow-dload="));
-            }
-            "--ffi-search-path" => {
-                i += 1;
-                grants.add_ffi_search_path(PathBuf::from(value(i, "DIR", a)?));
-            }
-            s if s.starts_with("--ffi-search-path=") => {
-                grants
-                    .add_ffi_search_path(PathBuf::from(s.trim_start_matches("--ffi-search-path=")));
-            }
-            "--root" => {
-                i += 1;
-                extra_roots.push(PathBuf::from(value(i, "DIR", a)?));
-            }
-            s if s.starts_with("--root=") => {
-                extra_roots.push(PathBuf::from(s.trim_start_matches("--root=")));
-            }
-            s if s.starts_with('-') && s.len() > 1 => {
-                return Err(format!("unrecognized flag `{s}`"));
-            }
-            _ => {
-                if path.is_some() {
-                    return Err(format!("unexpected extra argument `{a}`"));
-                }
-                path = Some(a.to_string());
-            }
-        }
-        i += 1;
-    }
+fn parse_test(args: &[String]) -> Result<Parsed, String> {
+    let Some(cli) = parse_with::<TestCli>(named(TestCli::command(), "coil test"), args)? else {
+        return Ok(Parsed::Help);
+    };
+    let (config, test) = assemble(
+        cli.log,
+        cli.opt,
+        cli.hir,
+        cli.grants,
+        cli.roots,
+        cli.seed,
+        cli.no_shuffle,
+        cli.jobs,
+        cli.json,
+        cli.path,
+        cli.fail_fast,
+        cli.show_output,
+        cli.coverage,
+        cli.coverage_out,
+        cli.coverage_per_test,
+    )?;
+    Ok(Parsed::Run(config, test))
+}
 
-    if json && (log_json || log_lsp) {
-        return Err("--json cannot be combined with --log-json or --log-lsp".to_string());
+fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, String> {
+    let mut clap_args = Vec::with_capacity(expanded.len().saturating_sub(1));
+    if let Some(argv0) = expanded.first() {
+        clap_args.push(argv0.clone());
     }
-    let config = ReportConfig::from_cli_flags(log_json, log_lsp).map_err(|e| e.to_string())?;
+    clap_args.extend_from_slice(&expanded[2..]);
+    let Some(cli) =
+        parse_with::<MutateCli>(named(MutateCli::command(), "coil mutate"), &clap_args)?
+    else {
+        return Ok(Parsed::MutateHelp);
+    };
+    let (config, test) = assemble(
+        cli.log,
+        cli.opt,
+        cli.hir,
+        cli.grants,
+        cli.roots,
+        cli.seed,
+        cli.no_shuffle,
+        cli.jobs,
+        cli.json,
+        cli.path,
+        false,
+        false,
+        false,
+        None,
+        None,
+    )?;
+    let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
+    let operators = match cli.operators {
+        Some(list) => parse_operators(&list)?,
+        None => Operator::ALL.to_vec(),
+    };
+    Ok(Parsed::Mutate(
+        config,
+        Box::new(MutateOptions {
+            test: *test,
+            files: cli.files,
+            operators,
+            timeout_factor: cli.timeout_factor,
+            json: cli.json,
+            min_score: cli.min_score,
+            project_root: std::env::current_dir().unwrap_or_default(),
+            isolation: Isolation::Child {
+                exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("coil-test")),
+                args: forwarded,
+                wall: std::time::Duration::from_secs(cli.wall_timeout),
+            },
+        }),
+    ))
+}
+
+fn assemble(
+    log: LogFlags,
+    opt: OptLevelFlags,
+    hir: HirFlags,
+    grants: HostGrantFlags,
+    roots: RootFlags,
+    seed: Option<u64>,
+    no_shuffle: bool,
+    jobs: Option<usize>,
+    json: bool,
+    path: Option<String>,
+    fail_fast: bool,
+    show_output: bool,
+    coverage: bool,
+    coverage_out: Option<PathBuf>,
+    per_test_out: Option<PathBuf>,
+) -> Result<(ReportConfig, Box<TestOptions>), String> {
+    if json && (log.log_json || log.log_lsp) {
+        return Err("--json cannot be combined with --log-json or --log-lsp".into());
+    }
+    let config =
+        ReportConfig::from_cli_flags(log.log_json, log.log_lsp).map_err(|e| e.to_string())?;
     let env_seed = std::env::var(SEED_ENV).ok();
     let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
-    Ok(Parsed::Run(
+    Ok((
         config,
         Box::new(TestOptions {
             root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
@@ -348,10 +298,10 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
                     project_root: std::env::current_dir().unwrap_or_default(),
                 }
             }),
-            opt_level,
-            hir,
-            grants,
-            extra_roots,
+            opt_level: opt.level(),
+            hir: hir.hir,
+            grants: grants.into_grants(),
+            extra_roots: roots.root,
             report: if json { Report::Json } else { Report::Human },
         }),
     ))
@@ -364,6 +314,42 @@ fn parse_jobs(text: &str) -> Result<usize, String> {
             "invalid --jobs `{text}` (expected a count of at least 1)"
         )),
     }
+}
+
+fn parse_operators(list: &str) -> Result<Vec<Operator>, String> {
+    let mut ops = Vec::new();
+    for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        ops.push(Operator::parse(name).ok_or_else(|| {
+            format!("unknown mutation operator `{name}` (see `coil mutate --help`)")
+        })?);
+    }
+    Ok(ops)
+}
+
+fn parse_timeout_factor(v: &str) -> Result<u64, String> {
+    match v.trim().parse::<u64>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "invalid --timeout-factor `{v}` (expected at least 1)"
+        )),
+    }
+}
+
+fn parse_wall_timeout(v: &str) -> Result<u64, String> {
+    match v.trim().parse::<u64>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "invalid --wall-timeout `{v}` (expected seconds >= 1)"
+        )),
+    }
+}
+
+fn parse_min_score(v: &str) -> Result<f64, String> {
+    v.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|p| (0.0..=100.0).contains(p))
+        .ok_or_else(|| format!("invalid --min-score `{v}` (expected 0..=100)"))
 }
 
 /// One reactor worker per available CPU.
@@ -397,6 +383,8 @@ fn resolve_order(
 
 #[cfg(test)]
 mod tests {
+    use compiler::{HostGrants, OptLevel};
+
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
