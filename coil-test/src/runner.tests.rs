@@ -109,7 +109,10 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
     assert_eq!(passed, 2, "bad compile_fail + positive ok");
-    assert_eq!(failed, 2, "unexpected_ok and wrong_reason under compile_fail must fail");
+    assert_eq!(
+        failed, 2,
+        "unexpected_ok and wrong_reason under compile_fail must fail"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -372,10 +375,16 @@ fn compile_fail_header_declares_error_codes() {
 #[test]
 fn compile_fail_passes_only_on_a_declared_code() {
     let src = "// Expected: E0209 — x.\n";
-    assert_eq!(compile_fail_verdict(src, "Error: [E0209] Non-exhaustive"), (true, None));
+    assert_eq!(
+        compile_fail_verdict(src, "Error: [E0209] Non-exhaustive"),
+        (true, None)
+    );
     let (ok, why) = compile_fail_verdict(src, "Error: [E0001] unexpected `@`");
     assert!(!ok);
-    assert_eq!(why.as_deref(), Some("expected E0209, compiler reported E0001"));
+    assert_eq!(
+        why.as_deref(),
+        Some("expected E0209, compiler reported E0001")
+    );
     let (ok, why) = compile_fail_verdict("fn main() {}\n", "Error: [E0209] x");
     assert!(!ok);
     assert!(why.unwrap().contains("no expected error code"));
