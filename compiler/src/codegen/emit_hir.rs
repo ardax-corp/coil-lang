@@ -528,6 +528,12 @@ impl Compiler {
         let stacks = lower::stack_arrays(hir);
         emit.stacks = stacks.len;
         emit.box_at = stacks.box_at;
+        // Escaping frame-slot class locals box before their escape too.
+        let class_boxes = lower::class_boxes(hir, &self.checker);
+        let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
+        for (stmt, locals) in class_boxes {
+            emit.box_at.entry(stmt).or_default().extend(locals);
+        }
         let unboxed_ranges = self.current_fn_unboxes_range_params();
         for &param in &hir.params {
             let local = hir.local(param);
@@ -603,8 +609,8 @@ impl Compiler {
                 local,
                 init: Some(init),
             } = expr.kind
+                && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
                 && let Some(class) = lower::sroa_class(hir, &self.checker, init)
-                && lower::only_field_base(hir, local)
             {
                 emit.sroa.insert(local.0, class);
             }
@@ -2745,6 +2751,25 @@ impl Compiler {
         self.context.stack_array_box.insert(key, slot);
     }
 
+    /// Box a frame-slot class local's fields into one object at a statement
+    /// start, as the AST's `emit_hoisted_escape_box`; its field reads and
+    /// writes and whole uses go through the object from there on.
+    fn hir_box_sroa_class(&mut self, emit: &mut HirEmit, local: LocalId) {
+        let base = Self::hir_slot(emit, local);
+        let class = emit.sroa[&local.0].clone();
+        let n = self.checker.class_fields(&class).map_or(0, |f| f.len());
+        self.expr_depth = 0;
+        let mut bc = CodeBuf::new();
+        self.emit_box_unboxed_class(&mut bc, &class, base, n);
+        self.bytecode.append(&mut bc);
+        self.expr_depth = 0;
+        let slot = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(slot);
+        emit.boxes.insert(local.0, slot);
+        let key = self.context.variables.resolve(base as usize).clone();
+        self.context.unboxed_class_box.insert(key, slot);
+    }
+
     /// `base` as a bound frame-slot stack array: its first slot and length.
     fn hir_stack_base(hir: &HirBody, emit: &HirEmit, base: HirId) -> Option<(u32, usize)> {
         let HirKind::Local(local) = hir.expr(base).kind else {
@@ -2787,6 +2812,9 @@ impl Compiler {
             return None;
         };
         emit.sroa.get(&local.0)?;
+        if emit.boxes.contains_key(&local.0) {
+            return None;
+        }
         let (FieldAt::Slot(idx), _) = self.hir_field(hir, base, name)? else {
             return None;
         };
@@ -3492,8 +3520,8 @@ impl Compiler {
                 self.emit_const_value(&value, &mut bc);
                 self.bytecode.append(&mut bc);
             }
-            HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
-                let slot = *emit.boxes.get(&local.0).expect("stack array boxed before its escape");
+            HirKind::Local(local) if emit.stacks.contains_key(&local.0) || emit.sroa.contains_key(&local.0) => {
+                let slot = *emit.boxes.get(&local.0).expect("frame-slot local boxed before its escape");
                 self.bytecode.push_load(slot);
             }
             HirKind::Local(local) => {
@@ -4850,7 +4878,11 @@ impl Compiler {
         let il_start = self.bytecode.il_mut().raw_len();
         if let Some(locals) = emit.box_at.get(&id.0).cloned() {
             for local in locals {
-                self.hir_box_stack_array(emit, LocalId(local));
+                if emit.stacks.contains_key(&local) {
+                    self.hir_box_stack_array(emit, LocalId(local));
+                } else {
+                    self.hir_box_sroa_class(emit, LocalId(local));
+                }
             }
         }
         self.hir_effect(hir, emit, id);

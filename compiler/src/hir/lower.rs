@@ -402,6 +402,59 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
 }
 
 /// Whether some `local.field = ..` writes a field of `local`.
+/// Frame-slot class locals that escape: each `let x = new C(..)` (a
+/// [`sroa_class`], never reassigned) whose fields are written and that is
+/// also used whole, first by a later statement of the block that binds it.
+/// It is boxed into one object just before that statement (the AST's
+/// hoisted Q2 box) and is that object from there on. Maps the statement to
+/// the locals boxed before it.
+pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> {
+    let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
+    for e in &body.exprs {
+        let HirKind::Block { stmts, .. } = &e.kind else {
+            continue;
+        };
+        for (k, &stmt) in stmts.iter().enumerate() {
+            let HirKind::Let {
+                local,
+                init: Some(init),
+            } = body.expr(stmt).kind
+            else {
+                continue;
+            };
+            if sroa_class(body, checker, init).is_none()
+                || body.local(local).kind != LocalKind::Let
+                || only_field_base(body, local)
+                || !writes_field_of(body, local)
+                || reassigned(body, local)
+            {
+                continue;
+            }
+            let whole = |id: HirId| {
+                matches!(body.expr(id).kind, HirKind::Local(l) if l == local)
+                    && !body.exprs.iter().any(|f| matches!(f.kind, HirKind::Field { base, .. } if base == id))
+            };
+            if let Some(&first) = stmts[k + 1..].iter().find(|&&s| any_id(body, s, &whole)) {
+                out.entry(first.0).or_default().push(local.0);
+            }
+        }
+    }
+    out
+}
+
+fn reassigned(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| match e.kind {
+        HirKind::Assign { place, .. } => body.expr(place).kind == HirKind::Local(local),
+        _ => false,
+    })
+}
+
+/// Whether `let local = init` keeps its fields in frame slots: a
+/// [`sroa_class`] that is only a field base, or one [`class_boxes`] boxes.
+pub fn sroa_local(body: &HirBody, checker: &Checker, boxed: &std::collections::HashSet<u32>, local: LocalId, init: HirId) -> bool {
+    sroa_class(body, checker, init).is_some() && (only_field_base(body, local) || boxed.contains(&local.0))
+}
+
 fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
     body.exprs.iter().any(|e| match e.kind {
         HirKind::Assign { place, .. } => matches!(body.expr(place).kind,
@@ -817,6 +870,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         loops: 0,
         stack: HashMap::new(),
         box_at: HashMap::new(),
+        class_boxed: class_boxes(body, checker).into_values().flatten().collect(),
     };
     let stacks = stack_arrays(body);
     walk.stack = stacks.len;
@@ -1147,6 +1201,8 @@ struct Walk<'b> {
     stack: HashMap<u32, usize>,
     /// Block statements an escaping stack array is boxed before.
     box_at: HashMap<u32, Vec<u32>>,
+    /// Frame-slot class locals boxed at their escape ([`class_boxes`]).
+    class_boxed: std::collections::HashSet<u32>,
 }
 
 impl Walk<'_> {
@@ -1833,12 +1889,17 @@ impl Walk<'_> {
                 }
                 // With no escape the fields live in frame slots (as the AST's
                 // unboxed class local); an escaping one is an object from the
-                // start, unless its fields are written first (the AST stores
-                // those into slots and builds the object once, at the escape).
-                if sroa_class(body, self.checker, *init).is_some() && !only_field_base(body, *local) && writes_field_of(body, *local) {
+                // start, unless its fields are written first: the AST stores
+                // those into slots and builds the object once, at the escape
+                // ([`class_boxes`]).
+                if sroa_class(body, self.checker, *init).is_some()
+                    && !only_field_base(body, *local)
+                    && writes_field_of(body, *local)
+                    && !self.class_boxed.contains(&local.0)
+                {
                     return Err("class-escape");
                 }
-                if sroa_class(body, self.checker, *init).is_some() && only_field_base(body, *local) {
+                if sroa_local(body, self.checker, &self.class_boxed, *local, *init) {
                     let HirKind::Make { args, .. } = &body.expr(*init).kind else {
                         unreachable!()
                     };
