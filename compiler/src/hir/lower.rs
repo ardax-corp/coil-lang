@@ -898,6 +898,12 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                 HirKind::Call {
                     callee: Callee::Value(g), ..
                 } => indirect_callee(body, checker, *g),
+                // A non-generic function's returned closure (a generic one
+                // may return a `PolyFn`, called with boxed args).
+                HirKind::Call {
+                    callee: Callee::Named { name, .. },
+                    ..
+                } => !checker.is_generic_fn(name) && !checker.is_overloaded(name),
                 HirKind::Global { .. } | HirKind::Lambda { .. } => true,
                 _ => false,
             },
