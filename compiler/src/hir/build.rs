@@ -974,9 +974,9 @@ impl<'c, 'm> Cx<'c, 'm> {
         self.emit(b, node, HirKind::Assign { place, value: bin })
     }
 
-    /// `x++` / `--x` as `x = x ± 1`. The node's value (old or new) is the
-    /// assign's: lowering reads `prefix` from the span when it matters.
-    fn adjust(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: AdjustOp, _prefix: bool, target: &Output<'_>) -> HirId {
+    /// `x++` / `--x` as `x = x ± 1`, flagged `ADJUST` (and `PREFIX`): the
+    /// node's value is the old or new `x`.
+    fn adjust(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: AdjustOp, prefix: bool, target: &Output<'_>) -> HirId {
         let read = self.expr(b, target);
         let ty = self.ty_at(b, read);
         let is_float = matches!(ty.as_ref().map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::FLOAT);
@@ -993,7 +993,13 @@ impl<'c, 'm> Cx<'c, 'm> {
         let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs: one }, ty.clone());
         let place = self.expr(b, target);
         self.fill_ty(b, place, bin);
-        self.emit_ty(b, node, HirKind::Assign { place, value: bin }, ty)
+        let id = self.emit_ty(b, node, HirKind::Assign { place, value: bin }, ty);
+        let flags = &mut b.body.exprs[id.0 as usize].flags;
+        flags.insert(HirFlags::ADJUST);
+        if prefix {
+            flags.insert(HirFlags::PREFIX);
+        }
+        id
     }
 
     fn call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &Output<'_>, args: &[Output<'_>]) -> HirId {

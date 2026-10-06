@@ -22,7 +22,7 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
+use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
 use std::collections::HashMap;
 use crate::codegen::primitive_cast_opcode as cast_opcode;
 use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
@@ -1409,6 +1409,17 @@ impl Walk<'_> {
             | HirKind::Builtin {
                 op: Builtin::Panic, ..
             } => self.effect(id, depth),
+            // `x++` / `--x` on an int or float local: one `INC` / `DEC`,
+            // which leaves the old or new value, as the AST.
+            HirKind::Assign { place, .. } if body.expr(id).flags.contains(HirFlags::ADJUST) => {
+                if !matches!(body.expr(*place).kind, HirKind::Local(_)) || self.stack_base(*place) {
+                    return Err("assign");
+                }
+                match self.ty(id).and_then(primitive) {
+                    Some(coil_ty::INT | coil_ty::FLOAT) => Ok(()),
+                    _ => Err("assign"),
+                }
+            }
             _ => Err(kind_name(&body.expr(id).kind)),
         }
     }
