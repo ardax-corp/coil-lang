@@ -2537,6 +2537,19 @@ impl Compiler {
         }
     }
 
+    /// Each one-word argument run at depth zero into a fresh temp.
+    fn hir_stage_words(&mut self, hir: &HirBody, emit: &mut HirEmit, args: &[HirId], params: &[ValueLayout]) -> Vec<u32> {
+        let mut temps = Vec::with_capacity(args.len());
+        for (&arg, &param) in args.iter().zip(params) {
+            self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
+            self.expr_depth = 0;
+            let tmp = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(tmp);
+            temps.push(tmp);
+        }
+        temps
+    }
+
     /// `operand` run at depth zero into a fresh temp.
     fn hir_agg_temp(&mut self, hir: &HirBody, emit: &mut HirEmit, operand: HirId) -> u32 {
         self.hir_value(hir, emit, operand, &BOXED, 0);
@@ -3898,8 +3911,30 @@ impl Compiler {
                         };
                         let specs = Self::format_consuming_specs(fmt);
                         let fmt = Self::rewrite_format_v_to_s(fmt);
+                        // Staged arguments (`lower::stages_args`) run into
+                        // temps first, then the format string goes under
+                        // them, as the AST's `emit_call_args_stage_all`.
+                        let staged = emit.boxes.is_empty() && lower::stages_args(hir, args, depth);
+                        let mut temps = Vec::new();
+                        if staged {
+                            for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
+                                self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
+                                if specs.get(i - 1) == Some(&'v') {
+                                    let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).expect("planned show"));
+                                    self.expr_depth = 0;
+                                    self.emit_show_for_stack_value(&ty);
+                                }
+                                self.expr_depth = 0;
+                                let tmp = self.alloc_temp_slot();
+                                self.bytecode.push_store_pop(tmp);
+                                temps.push(tmp);
+                            }
+                        }
                         self.emit_string_literal(&fmt);
-                        for (i, (&arg, param)) in args.iter().zip(params).enumerate().skip(1) {
+                        for &tmp in &temps {
+                            self.bytecode.push_load(tmp);
+                        }
+                        for (i, (&arg, param)) in args.iter().zip(params).enumerate().skip(1).filter(|_| !staged) {
                             self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
                             if specs.get(i - 1) == Some(&'v') {
                                 // `Show::show` on the value: a call, so it
@@ -3913,8 +3948,14 @@ impl Compiler {
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
                     }
                     HirBuiltin::Bound { dict, method } => {
-                        for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                            for tmp in self.hir_stage_words(hir, emit, args, &params) {
+                                self.bytecode.push_load(tmp);
+                            }
+                        } else {
+                            for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                            }
                         }
                         self.bytecode.push_load(dict);
                         self.bytecode.push_load(dict);
@@ -3924,10 +3965,19 @@ impl Compiler {
                             .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
                     }
                     HirBuiltin::Host(native) => {
-                        // The native id goes under the arguments.
-                        self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
-                        for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
+                        // The native id goes under the arguments; staged
+                        // ones run into temps before it.
+                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                            let temps = self.hir_stage_words(hir, emit, args, &params);
+                            self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+                            for &tmp in &temps {
+                                self.bytecode.push_load(tmp);
+                            }
+                        } else {
+                            self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+                            for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
+                            }
                         }
                         let layout = Self::hir_call_rep(&emit.calls[&id.0]);
                         let Rep::Word(layout) = layout else {
