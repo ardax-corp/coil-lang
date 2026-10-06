@@ -1,5 +1,17 @@
 // Expression-bodied anonymous functions: no captures, a captured local
 // and parameter, string results, and one passed to a higher-order fn.
+const STEP = 2;
+
+// A function ahead of a lambda, in a file with top-level statements.
+fn step(int n) -> int {
+    return n + 40;
+}
+
+fn stepped(int n) -> int {
+    let f = fn (int x) => x * 3;
+    return f(n) + STEP;
+}
+
 fn apply(int -> int f, int x) -> int {
     return f(x);
 }
@@ -23,4 +35,9 @@ test("expression lambdas") {
     assert(both(3, 4) == 7)?;
     let label = fn (int x) => x.show();
     assert(label(9) == "9")?;
+}
+
+test("lambda in a file with a module const") {
+    assert(stepped(5) == 17)?;
+    assert(step(2) == 42)?;
 }
