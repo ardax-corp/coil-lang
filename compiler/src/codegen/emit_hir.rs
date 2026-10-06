@@ -2995,6 +2995,11 @@ impl Compiler {
             if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
                 return Err("unit-payload");
             }
+            // The implicit `Ok(())` closing a boxed result-mode body: a zero
+            // word, as the AST's `emit_fallthrough_return`.
+            if matches!(hir.expr(args[i]).kind, HirKind::Lit(Lit::Unit)) && result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed) {
+                return Ok(());
+            }
             if unit_value(i) {
                 return Err("unit-payload");
             }
@@ -3275,7 +3280,7 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_check_match(hir, emit, *scrutinee, arms, None)
             }
-            _ if lower::is_unit_make(hir, id) => Ok(()),
+            _ if lower::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
             HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => Ok(()),
             _ => {
@@ -3407,7 +3412,7 @@ impl Compiler {
                 self.emit_raw_string_literal(&mut bc, &text);
                 self.bytecode.append(&mut bc);
             }
-            HirKind::Lit(Lit::Unit) => unreachable!("HIR lowering admitted a unit literal"),
+            HirKind::Lit(Lit::Unit) => self.bytecode.push_const(0),
             HirKind::Assign { place, value } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
                 // As the AST's `emit_adjust` on a local: one `INC` / `DEC`.
                 let HirKind::Local(local) = hir.expr(*place).kind else {
@@ -5102,7 +5107,7 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_match(hir, emit, *scrutinee, arms, None, 0);
             }
-            _ if lower::is_unit_make(hir, id) => {}
+            _ if lower::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => {}
             HirKind::Make { .. } => {
                 self.hir_value(hir, emit, id, &BOXED, 0);
                 self.bytecode.push_pop();

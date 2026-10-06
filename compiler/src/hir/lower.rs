@@ -2045,8 +2045,8 @@ impl Walk<'_> {
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
-            // A `()` statement (a unit `match` arm) does nothing.
-            _ if is_unit_make(body, id) => Ok(()),
+            // A `()` statement (a unit `match` arm, a nested item) does nothing.
+            _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Bin { .. }
