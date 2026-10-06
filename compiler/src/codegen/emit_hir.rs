@@ -1431,10 +1431,32 @@ impl Compiler {
             }
         };
         let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
-        let ret = word(call)?;
+        // A niche enum result is the instance entry's own return word when
+        // its declared return type lays out the same.
+        let ret = match word(call) {
+            Ok(ret) => ret,
+            Err(_) => {
+                let ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
+                let layout = self.value_layout(ty);
+                let declared = self.checker.fn_return_ty(&fqn).ok_or("callee-trait")?;
+                if !(layout.is_niche_option() || layout.is_niche_result())
+                    || Self::ty_has_var(&declared)
+                    || self.value_layout(&declared) != layout
+                {
+                    return Err("callee-trait");
+                }
+                layout
+            }
+        };
         // Box the positions the instance entry unboxes, except heap words.
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
-        if self.trait_method_boundary_sig(&class, method, &inst_args, is_default).is_some() {
+        // A boundary signature that lays each word out as the call site
+        // already does needs no conversion.
+        if let Some(sig) = self.trait_method_boundary_sig(&class, method, &inst_args, is_default)
+            && (sig.ret.is_some_and(|l| l != ret)
+                || sig.params.len() != params.len()
+                || sig.params.iter().zip(&params).any(|(s, p)| s.is_some_and(|l| l != *p)))
+        {
             return Err("callee-trait");
         }
         let unbox = self.instance_method_unbox_tys(&class, method, &inst_args);
