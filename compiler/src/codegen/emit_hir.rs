@@ -3215,10 +3215,27 @@ impl Compiler {
                 lhs,
                 rhs,
             } => {
+                // Either side holds a `match`: both run at depth zero into
+                // temps, then the format string goes under them.
+                let staged = depth == 0 && lower::concat_stages(hir, *lhs, *rhs);
+                let mut temps = [0u32; 2];
+                if staged {
+                    for (temp, operand) in temps.iter_mut().zip([*lhs, *rhs]) {
+                        self.hir_value(hir, emit, operand, &BOXED, 0);
+                        self.expr_depth = 0;
+                        *temp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(*temp);
+                    }
+                }
                 let mut fmt = CodeBuf::new();
                 self.emit_raw_string_literal(&mut fmt, "%s%s");
                 self.bytecode.append(&mut fmt);
-                self.hir_operands(hir, emit, *lhs, *rhs, depth + 1);
+                if staged {
+                    self.bytecode.push_load(temps[0]);
+                    self.bytecode.push_load(temps[1]);
+                } else {
+                    self.hir_operands(hir, emit, *lhs, *rhs, depth + 1);
+                }
                 self.bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
             }
             HirKind::Bin {
