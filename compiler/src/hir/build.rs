@@ -1470,12 +1470,35 @@ impl<'c, 'm> Cx<'c, 'm> {
                             })
                             .collect(),
                     ),
-                    PatternPayload::Record(fields) => HirPatFields::Record(
-                        fields
-                            .iter()
-                            .map(|f| (f.name.to_string(), self.pattern(b, &f.pattern.1, None)))
-                            .collect(),
-                    ),
+                    // Named fields become positional ones in declaration
+                    // order (`_` for a field the pattern leaves out), so a
+                    // record arm binds its payload like a tuple arm.
+                    PatternPayload::Record(fields) => {
+                        let decl = self.checker.payload_tys_for(enum_name, variant_name);
+                        let known = !decl.is_empty()
+                            && fields.iter().all(|f| decl.iter().any(|(n, _)| n == f.name));
+                        if known {
+                            HirPatFields::Tuple(
+                                decl.iter()
+                                    .enumerate()
+                                    .map(|(i, (name, _))| match fields.iter().find(|f| f.name == name.as_str()) {
+                                        Some(f) => {
+                                            let ty = field_tys.get(i).cloned();
+                                            self.pattern(b, &f.pattern.1, ty.as_ref())
+                                        }
+                                        None => HirPat::Wild,
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            HirPatFields::Record(
+                                fields
+                                    .iter()
+                                    .map(|f| (f.name.to_string(), self.pattern(b, &f.pattern.1, None)))
+                                    .collect(),
+                            )
+                        }
+                    }
                 };
                 self.variant_pat(enum_name, variant_name, fields)
             }

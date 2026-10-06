@@ -8,7 +8,7 @@ Function area(s%0: Shape) -> float
             bin FloatMul : float
               local r%1 : float
               local r%1 : float
-          Shape::Rect#1 { w: w%2, h: h%3 } =>
+          Shape::Rect#1(w%2, h%3) =>
             bin FloatMul : float
               local w%2 : float
               local h%3 : float
