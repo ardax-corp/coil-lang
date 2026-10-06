@@ -1548,6 +1548,7 @@ impl Walk<'_> {
                 if depth != 0 {
                     return Err("nested-assign");
                 }
+                let compound = body.expr(id).flags.contains(HirFlags::COMPOUND);
                 match &body.expr(*place).kind {
                     HirKind::Local(_) => {
                         self.word(*value)?;
@@ -1555,6 +1556,7 @@ impl Walk<'_> {
                     }
                     // `base.f = v`: the value, then the base on top of it.
                     HirKind::Field { base, .. } => {
+                        // The AST runs an impure base before the value.
                         if !pure_base(body, *base) {
                             return Err("assign-base");
                         }
@@ -1569,7 +1571,7 @@ impl Walk<'_> {
                         if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                             return Err("index-kind");
                         }
-                        if !pure_base(body, *base) || !pure_index(body, *index) {
+                        if compound && (!pure_base(body, *base) || !pure_index(body, *index)) {
                             return Err("assign-base");
                         }
                         self.word(*place)?;
@@ -1583,8 +1585,11 @@ impl Walk<'_> {
                             self.value(*index, 1)?;
                             return self.value(*index, 0);
                         }
+                        // Codegen stages base and index through temps unless
+                        // the index is a local or an int literal.
+                        let bare = matches!(body.expr(*index).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_)));
                         self.value(*base, 0)?;
-                        self.value(*index, 1)
+                        self.value(*index, u32::from(bare))
                     }
                     // `STATIC = v`: the value, then `StoreStatic`.
                     HirKind::Global { .. } => {

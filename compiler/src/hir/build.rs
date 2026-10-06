@@ -971,7 +971,9 @@ impl<'c, 'm> Cx<'c, 'm> {
         let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs }, lhs_ty);
         let place = self.expr(b, target);
         self.fill_ty(b, place, bin);
-        self.emit(b, node, HirKind::Assign { place, value: bin })
+        let id = self.emit(b, node, HirKind::Assign { place, value: bin });
+        b.body.exprs[id.0 as usize].flags.insert(HirFlags::COMPOUND);
+        id
     }
 
     /// `x++` / `--x` as `x = x ± 1`, flagged `ADJUST` (and `PREFIX`): the
@@ -996,6 +998,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         let id = self.emit_ty(b, node, HirKind::Assign { place, value: bin }, ty);
         let flags = &mut b.body.exprs[id.0 as usize].flags;
         flags.insert(HirFlags::ADJUST);
+        flags.insert(HirFlags::COMPOUND);
         if prefix {
             flags.insert(HirFlags::PREFIX);
         }

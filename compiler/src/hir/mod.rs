@@ -122,6 +122,9 @@ impl HirFlags {
     pub const ADJUST: Self = Self(16);
     /// With `ADJUST`: the prefix form, whose value is the new `x`.
     pub const PREFIX: Self = Self(32);
+    /// An `Assign` from `x op= e` or `x++`: its place is also read, so
+    /// the place's base and index are built twice.
+    pub const COMPOUND: Self = Self(64);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
