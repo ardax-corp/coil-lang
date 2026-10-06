@@ -1825,7 +1825,7 @@ impl Compiler {
                             _ => None,
                         }
                     } else {
-                        None
+                        lower::generic_enum_payload(&this.checker, n, variant, args)
                     }
                 }
                 Ty::Con(n) => this

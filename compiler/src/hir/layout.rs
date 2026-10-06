@@ -279,6 +279,31 @@ pub fn ty_is_closed(ty: &Ty) -> bool {
     }
 }
 
+/// `ty` with each named type parameter in `params` replaced by the matching
+/// type in `args` (a generic declaration's field at one instance).
+pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
+    let bind = |t: &Ty| bind_params(t, params, args);
+    match ty {
+        Ty::Con(name) => match params.iter().position(|p| p == name) {
+            Some(i) => args.get(i).cloned().unwrap_or_else(|| ty.clone()),
+            None => ty.clone(),
+        },
+        Ty::App(head, items) => Ty::App(Box::new(bind(head)), items.iter().map(bind).collect()),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(bind(a)), Box::new(bind(b))),
+        Ty::List(inner) => Ty::List(Box::new(bind(inner))),
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(bind(inner))),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(bind).collect()),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(bind(element)),
+            length: *length,
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, f)| (n.clone(), bind(f))).collect(),
+        },
+        _ => ty.clone(),
+    }
+}
+
 #[cfg(test)]
 #[path = "layout.tests.rs"]
 mod tests;
