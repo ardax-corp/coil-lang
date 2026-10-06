@@ -832,6 +832,15 @@ pub fn returned_value(body: &HirBody, value: Option<HirId>) -> Option<HirId> {
     value.filter(|v| !is_unit_make(body, *v))
 }
 
+/// A `()`-typed returned value (`return check(x)?`, a unit `match`): it runs
+/// for its effect, then the `return` is a bare one.
+pub fn is_unit_value(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    body.expr(id)
+        .ty
+        .as_ref()
+        .is_some_and(|t| super::layout::is_unit(&apply_ty_prune(checker.subst(), t)))
+}
+
 /// The `while` shape the builder desugars to: `Loop { Block { If(c, b, Break) } }`.
 /// Returns `(cond, body)` so lowering can emit the test at the loop head.
 pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
@@ -1448,6 +1457,12 @@ impl Walk<'_> {
                     if is_unit_make(body, arg) {
                         continue;
                     }
+                    // `Ok(check(x)?)`: a `()` payload runs for its effect
+                    // (codegen takes it into a niche unit `Result` only).
+                    if depth == 0 && args.len() == 1 && is_unit_value(body, self.checker, arg) {
+                        self.effect(arg, 0)?;
+                        continue;
+                    }
                     self.word(arg)?;
                     // Staged args each run at depth zero into a temp.
                     let staged = args.len() > 1 && !simple;
@@ -1831,6 +1846,7 @@ impl Walk<'_> {
                     return Err("nested-return");
                 }
                 match returned_value(body, *value) {
+                    Some(v) if is_unit_value(body, self.checker, v) => self.effect(v, 0),
                     Some(v) => {
                         if self.class(v).is_none() {
                             return Err("return-type");
@@ -1842,6 +1858,8 @@ impl Walk<'_> {
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
+            // A `()` statement (a unit `match` arm) does nothing.
+            _ if is_unit_make(body, id) => Ok(()),
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Bin { .. }
