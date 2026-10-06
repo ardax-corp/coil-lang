@@ -208,6 +208,18 @@ enum HirOp {
     },
     /// `EQ` / `NEQ` of the two words.
     Prim(Instruction),
+    /// An element-wise op (`Compiler::hir_aggregate`).
+    Aggregate(crate::typechecking::AggregateArithInfo),
+}
+
+/// Where an element-wise operand's elements are read.
+enum AggSrc {
+    /// The literal's items, compiled in place.
+    Items(Vec<HirId>),
+    /// A stack array's frame slots from this one.
+    Slots(u32),
+    /// A temp holding the value, read with `Index`.
+    Heap(u32),
 }
 
 type Check = Result<(), &'static str>;
@@ -558,6 +570,13 @@ impl Compiler {
             {
                 let op = self.hir_operator_at(hir, HirId(i as u32), sym, lhs, rhs)?;
                 emit.ops.insert(i as u32, op);
+                continue;
+            }
+            if let HirKind::Un { op: UnOp::Neg, .. } = expr.kind
+                && let Some(info) = lower::aggregate_info(&self.checker, hir, HirId(i as u32))
+            {
+                self.hir_check_aggregate(&info)?;
+                emit.ops.insert(i as u32, HirOp::Aggregate(info));
                 continue;
             }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
@@ -2314,6 +2333,12 @@ impl Compiler {
     ) -> Result<HirOp, &'static str> {
         let node = hir.expr(id);
         let (start, end) = node.span;
+        if !matches!(sym, "==" | "!=")
+            && let Some(info) = lower::aggregate_info(&self.checker, hir, id)
+        {
+            self.hir_check_aggregate(&info)?;
+            return Ok(HirOp::Aggregate(info));
+        }
         if node.node.is_some_and(|n| {
             self.checker.linear_algebra_at(n).is_some() || self.checker.aggregate_arith_at(n).is_some()
         }) || self.checker.linear_algebra_span(start, end).is_some()
@@ -2327,6 +2352,230 @@ impl Compiler {
             return Err("operator-bound");
         }
         self.hir_operator(hir, sym, lhs, rhs).ok_or("operator")
+    }
+
+    /// The packed path needs its host kernel.
+    fn hir_check_aggregate(&self, info: &crate::typechecking::AggregateArithInfo) -> Check {
+        if lower::aggregate_packed(info).is_some() && self.native_id(common::PACKED_VEC_ARITH).is_none() {
+            return Err("operator-packed");
+        }
+        Ok(())
+    }
+
+    /// An element-wise `lhs op rhs` / `-lhs` at depth zero, as the AST's
+    /// `try_emit_aggregate_arith`: the packed `HostInvoke` for a static
+    /// shape of at least 8; else each element (literal items and unboxed
+    /// stack-array slots read in place, other operands from temps) above
+    /// the results so far, then `MakeTuple` / `MakeArray`; or, for a
+    /// dynamic length, the AST's loop over the temps.
+    fn hir_aggregate(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        info: &crate::typechecking::AggregateArithInfo,
+        lhs: HirId,
+        rhs: Option<HirId>,
+    ) {
+        use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
+        if let Some(len) = lower::aggregate_packed(info) {
+            let op_code: u32 = match info.op {
+                AggregateOp::Add => 0,
+                AggregateOp::Sub => 1,
+                AggregateOp::Mul => 2,
+                AggregateOp::Div => 3,
+                _ => 4,
+            };
+            let (tuple, float, scalar_on) = match info.kind {
+                K::ZipTuple { elem_is_float, .. } | K::NegTuple { elem_is_float, .. } => (true, elem_is_float, None),
+                K::BroadcastTuple {
+                    elem_is_float, scalar_on, ..
+                } => (true, elem_is_float, Some(scalar_on)),
+                K::BroadcastArray {
+                    elem_is_float, scalar_on, ..
+                } => (false, elem_is_float, Some(scalar_on)),
+                K::ZipArray { elem_is_float, .. } | K::NegArray { elem_is_float, .. } => (false, elem_is_float, None),
+            };
+            let mut meta = (len as u32) & 0xFFFF | op_code << 16;
+            meta |= u32::from(float) << 24 | u32::from(tuple) << 25 | u32::from(scalar_on.is_some()) << 26;
+            meta |= u32::from(matches!(scalar_on, Some(ScalarSide::Left))) << 27;
+            let native = self.native_id(common::PACKED_VEC_ARITH).expect("checked packed kernel");
+            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native as u32));
+            self.hir_value(hir, emit, lhs, &BOXED, 1);
+            if let Some(rhs) = rhs {
+                self.hir_value(hir, emit, rhs, &BOXED, 2);
+            }
+            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
+            self.bytecode.push_host_invoke(2 + u32::from(rhs.is_some()));
+            return;
+        }
+        let instr = |float: bool| match (info.op, float) {
+            (AggregateOp::Add, false) => Instruction::ADD,
+            (AggregateOp::Add, true) => Instruction::ADDF,
+            (AggregateOp::Sub, false) => Instruction::SUB,
+            (AggregateOp::Sub, true) => Instruction::SUBF,
+            (AggregateOp::Mul, false) => Instruction::MUL,
+            (AggregateOp::Mul, true) => Instruction::MULF,
+            (AggregateOp::Div, false) => Instruction::DIV,
+            (AggregateOp::Div, true) => Instruction::DIVF,
+            (AggregateOp::Mod, false) => Instruction::MOD,
+            (AggregateOp::Mod, true) => Instruction::MODF,
+            (AggregateOp::Pow, false) => Instruction::Pow,
+            (AggregateOp::Pow, true) => Instruction::PowF,
+            (AggregateOp::Neg, false) => Instruction::NEG,
+            (AggregateOp::Neg, true) => Instruction::NEGF,
+        };
+        let rhs_or = |rhs: Option<HirId>| rhs.expect("checked aggregate rhs");
+        match info.kind {
+            K::NegTuple { arity, elem_is_float } => {
+                let t = self.hir_agg_temp(hir, emit, lhs);
+                for i in 0..arity {
+                    Self::hir_agg_index(&mut self.bytecode, t, i);
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_tuple(arity as u32);
+            }
+            K::NegArray {
+                length: Some(n),
+                elem_is_float,
+            } => {
+                let src = self.hir_agg_src(hir, emit, lhs);
+                for i in 0..n {
+                    self.hir_agg_elem(hir, emit, &src, i, i as u32);
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_array(n as u32);
+            }
+            K::NegArray {
+                length: None,
+                elem_is_float,
+            } => {
+                let t = self.hir_agg_temp(hir, emit, lhs);
+                self.emit_dynamic_unary_array(t, elem_is_float);
+            }
+            K::ZipTuple { arity, elem_is_float } => {
+                let t0 = self.hir_agg_temp(hir, emit, lhs);
+                let t1 = self.hir_agg_temp(hir, emit, rhs_or(rhs));
+                for i in 0..arity {
+                    Self::hir_agg_index(&mut self.bytecode, t0, i);
+                    Self::hir_agg_index(&mut self.bytecode, t1, i);
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_tuple(arity as u32);
+            }
+            K::ZipArray { length, elem_is_float } => {
+                let s0 = self.hir_agg_src(hir, emit, lhs);
+                let s1 = self.hir_agg_src(hir, emit, rhs_or(rhs));
+                for i in 0..length {
+                    self.hir_agg_elem(hir, emit, &s0, i, i as u32);
+                    self.hir_agg_elem(hir, emit, &s1, i, i as u32 + 1);
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_array(length as u32);
+            }
+            K::BroadcastTuple {
+                arity,
+                scalar_on,
+                elem_is_float,
+            } => {
+                let first = self.hir_agg_temp(hir, emit, lhs);
+                let second = self.hir_agg_temp(hir, emit, rhs_or(rhs));
+                for i in 0..arity {
+                    match scalar_on {
+                        ScalarSide::Right => {
+                            Self::hir_agg_index(&mut self.bytecode, first, i);
+                            self.bytecode.push_load(second);
+                        }
+                        ScalarSide::Left => {
+                            self.bytecode.push_load(first);
+                            Self::hir_agg_index(&mut self.bytecode, second, i);
+                        }
+                    }
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_tuple(arity as u32);
+            }
+            K::BroadcastArray {
+                length: Some(n),
+                scalar_on,
+                elem_is_float,
+            } => {
+                let rhs = rhs_or(rhs);
+                let (vec, scalar) = match scalar_on {
+                    ScalarSide::Right => (lhs, rhs),
+                    ScalarSide::Left => (rhs, lhs),
+                };
+                let src = self.hir_agg_src(hir, emit, vec);
+                let t = self.hir_agg_temp(hir, emit, scalar);
+                for i in 0..n {
+                    match scalar_on {
+                        ScalarSide::Right => {
+                            self.hir_agg_elem(hir, emit, &src, i, i as u32);
+                            self.bytecode.push_load(t);
+                        }
+                        ScalarSide::Left => {
+                            self.bytecode.push_load(t);
+                            self.hir_agg_elem(hir, emit, &src, i, i as u32 + 1);
+                        }
+                    }
+                    self.bytecode.push(Byte::new(instr(elem_is_float)));
+                }
+                self.bytecode.push_make_array(n as u32);
+            }
+            K::BroadcastArray {
+                length: None,
+                scalar_on,
+                elem_is_float,
+            } => {
+                let first = self.hir_agg_temp(hir, emit, lhs);
+                let second = self.hir_agg_temp(hir, emit, rhs_or(rhs));
+                let (t_vec, t_sc) = match scalar_on {
+                    ScalarSide::Right => (first, second),
+                    ScalarSide::Left => (second, first),
+                };
+                self.emit_dynamic_broadcast_array(t_vec, t_sc, scalar_on, info.op, elem_is_float);
+            }
+        }
+    }
+
+    /// `operand` run at depth zero into a fresh temp.
+    fn hir_agg_temp(&mut self, hir: &HirBody, emit: &mut HirEmit, operand: HirId) -> u32 {
+        self.hir_value(hir, emit, operand, &BOXED, 0);
+        self.expr_depth = 0;
+        let temp = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(temp);
+        temp
+    }
+
+    fn hir_agg_index(bytecode: &mut CodeBuf, temp: u32, i: usize) {
+        bytecode.push_load(temp);
+        bytecode.push_const(i as i32);
+        bytecode.push_index();
+    }
+
+    /// How `operand`'s elements are read; a boxed stack array reads its box
+    /// (its slots may be stale after an index write).
+    fn hir_agg_src(&mut self, hir: &HirBody, emit: &mut HirEmit, operand: HirId) -> AggSrc {
+        match lower::aggregate_src(hir, &emit.stacks, operand) {
+            Some(lower::AggregateSrc::Items(items)) => AggSrc::Items(items),
+            Some(lower::AggregateSrc::Slots(local)) => match emit.boxes.get(&local.0) {
+                Some(&slot) => AggSrc::Heap(slot),
+                None => AggSrc::Slots(Self::hir_slot(emit, local)),
+            },
+            None => AggSrc::Heap(self.hir_agg_temp(hir, emit, operand)),
+        }
+    }
+
+    /// Element `i` of `src`, pushed on `depth` values.
+    fn hir_agg_elem(&mut self, hir: &HirBody, emit: &mut HirEmit, src: &AggSrc, i: usize, depth: u32) {
+        match src {
+            AggSrc::Items(items) => {
+                let item = items[i];
+                let want = Rep::Word(Self::hir_ty(hir, item).map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+                self.hir_value(hir, emit, item, &want, depth);
+            }
+            AggSrc::Slots(base) => self.bytecode.push_load(base + i as u32),
+            AggSrc::Heap(temp) => Self::hir_agg_index(&mut self.bytecode, *temp, i),
+        }
     }
 
     /// How `lhs sym rhs` over a user type lowers: its trait instance's
@@ -3269,6 +3518,10 @@ impl Compiler {
                 lhs,
                 rhs,
             } => match &emit.ops[&id.0] {
+                HirOp::Aggregate(info) => {
+                    let info = info.clone();
+                    self.hir_aggregate(hir, emit, &info, *lhs, Some(*rhs));
+                }
                 HirOp::Prim(instr) => {
                     let instr = *instr;
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
@@ -3351,6 +3604,10 @@ impl Compiler {
                 {
                     self.bytecode.push(Byte::new(op));
                 }
+            }
+            HirKind::Un { operand, .. } if let Some(HirOp::Aggregate(info)) = emit.ops.get(&id.0) => {
+                let info = info.clone();
+                self.hir_aggregate(hir, emit, &info, *operand, None);
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);

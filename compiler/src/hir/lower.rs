@@ -22,12 +22,13 @@
 //! matches or builds a variant stages its left side through a temp (as the
 //! AST codegen does), so that right side runs at depth zero.
 
-use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind};
+use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, UnOp};
 use std::collections::HashMap;
 use crate::codegen::primitive_cast_opcode as cast_opcode;
 use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
+use crate::typechecking::AggregateArithInfo;
 
 /// What the lowering may do with a value of some type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,12 +309,38 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             _ => None,
         })
         .collect();
+    // An element-wise operand reads the slots (the AST's
+    // `prepare_aggregate_src`) unless the op takes the packed path, which
+    // needs the array object: a static length of at least 8, for `+ - * /`
+    // and negation. The value is that minimum length, or 0 for any.
+    let mut slot_reads: HashMap<u32, usize> = HashMap::new();
+    for e in &body.exprs {
+        match e.kind {
+            HirKind::Bin {
+                op: BinOp::Overloaded(sym @ ("+" | "-" | "*" | "/" | "%" | "**")),
+                lhs,
+                rhs,
+            } => {
+                let packed = if matches!(sym, "%" | "**") { 0 } else { 8 };
+                slot_reads.insert(lhs.0, packed);
+                slot_reads.insert(rhs.0, packed);
+            }
+            HirKind::Un { op: UnOp::Neg, operand } => {
+                slot_reads.insert(operand.0, 8);
+            }
+            _ => {}
+        }
+    }
     // Reads of the local that are not an index base, and forms the AST
     // reads from the slots even after an escape (a copy, a loop).
     let mut escapes: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut slot_uses: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
     let mut refused: HashSet<u32> = HashSet::new();
     for (i, e) in body.exprs.iter().enumerate() {
         match e.kind {
+            HirKind::Local(local) if slot_reads.contains_key(&(i as u32)) => {
+                slot_uses.entry(local.0).or_default().push((i as u32, slot_reads[&(i as u32)]))
+            }
             HirKind::Local(local) if !bases.contains(&(i as u32)) => escapes.entry(local.0).or_default().push(i as u32),
             HirKind::Assign { place, .. } => {
                 if let HirKind::Local(local) = body.expr(place).kind {
@@ -355,8 +382,9 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             if !(1..=32).contains(&n) || body.local(local).kind != LocalKind::Let || refused.contains(&local.0) {
                 continue;
             }
-            if let Some(uses) = escapes.get(&local.0) {
-                let uses: HashSet<u32> = uses.iter().copied().collect();
+            let packed = slot_uses.get(&local.0).into_iter().flatten().filter(|&&(_, min)| min != 0 && n >= min).map(|&(id, _)| id);
+            let uses: HashSet<u32> = escapes.get(&local.0).into_iter().flatten().copied().chain(packed).collect();
+            if !uses.is_empty() {
                 let first = stmts[k + 1..]
                     .iter()
                     .chain(tail)
@@ -461,6 +489,57 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
         );
     });
     found
+}
+
+/// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`
+/// (the AST's `try_emit_aggregate_arith`); `None` for a matrix op, which the
+/// AST emits first and HIR leaves to it.
+pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
+    let e = body.expr(id);
+    let (start, end) = e.span;
+    if e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some() {
+        return None;
+    }
+    e.node
+        .and_then(|n| checker.aggregate_arith_at(n))
+        .or_else(|| checker.aggregate_arith_span(start, end))
+        .cloned()
+}
+
+/// How an element-wise operand's elements are read, as the AST's
+/// `aggregate_src_is_direct_elems`: a non-empty array or tuple literal's
+/// items, a frame-slot stack array's slots, else (`None`) a heap value
+/// in a temp read with `Index`.
+pub enum AggregateSrc {
+    Items(Vec<HirId>),
+    Slots(LocalId),
+}
+
+pub fn aggregate_src(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> Option<AggregateSrc> {
+    match &body.expr(id).kind {
+        HirKind::Make {
+            kind: MakeKind::Array | MakeKind::Tuple,
+            args,
+        } if !args.is_empty() => Some(AggregateSrc::Items(args.clone())),
+        HirKind::Local(local) if stack.contains_key(&local.0) => Some(AggregateSrc::Slots(*local)),
+        _ => None,
+    }
+}
+
+/// The packed `HostInvoke` path (`try_emit_packed_aggregate_arith`): a static
+/// shape of at least 8 elements, for `+ - * /` and negation.
+pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
+    use crate::typechecking::{AggregateArithKind as K, AggregateOp};
+    if matches!(info.op, AggregateOp::Mod | AggregateOp::Pow) {
+        return None;
+    }
+    let len = match info.kind {
+        K::ZipTuple { arity, .. } | K::BroadcastTuple { arity, .. } | K::NegTuple { arity, .. } => arity,
+        K::ZipArray { length, .. } => length,
+        K::BroadcastArray { length: Some(n), .. } | K::NegArray { length: Some(n), .. } => n,
+        K::BroadcastArray { length: None, .. } | K::NegArray { length: None, .. } => return None,
+    };
+    (8..=u16::MAX as usize).contains(&len).then_some(len)
 }
 
 /// A `Vec` push stages its receiver and value through temps when the value
@@ -1086,6 +1165,117 @@ impl Walk<'_> {
         matches!(self.body.expr(base).kind, HirKind::Local(local) if self.stack.contains_key(&local.0))
     }
 
+    fn elementwise(&self, id: HirId) -> bool {
+        matches!(
+            self.ty(id).map(strip_readonly),
+            Some(Ty::Tuple(_) | Ty::Array { .. } | Ty::List(_))
+        ) || self.class(id) == Some(ValueClass::Aggregate)
+    }
+
+    /// An element-wise `lhs op rhs` / `-lhs`, as the AST's
+    /// `try_emit_aggregate_arith` emits it at the top of the stack: heap
+    /// operands to temps, then each element (literal items and stack-array
+    /// slots read directly) with the results so far below it, then
+    /// `MakeTuple` / `MakeArray`; or the packed `HostInvoke`.
+    fn aggregate_arith(&mut self, id: HirId, lhs: HirId, rhs: Option<HirId>, depth: u32) -> Check {
+        use crate::typechecking::{AggregateArithKind as K, ScalarSide};
+        let info = aggregate_info(self.checker, self.body, id).ok_or("operator-elementwise")?;
+        if depth != 0 {
+            return Err("operator-depth");
+        }
+        self.word(id)?;
+        let operands: Vec<HirId> = std::iter::once(lhs).chain(rhs).collect();
+        if aggregate_packed(&info).is_some() {
+            if !matches!(info.kind, K::NegTuple { .. } | K::NegArray { .. }) && rhs.is_none() {
+                return Err("operator-elementwise");
+            }
+            for (i, &operand) in operands.iter().enumerate() {
+                self.word(operand)?;
+                self.value(operand, 1 + i as u32)?;
+            }
+            return Ok(());
+        }
+        let need_rhs = |rhs: Option<HirId>| rhs.ok_or("operator-elementwise");
+        match info.kind {
+            // Tuples, and arrays of dynamic length: every operand to a temp.
+            K::NegTuple { .. } | K::ZipTuple { .. } | K::BroadcastTuple { .. } | K::NegArray { length: None, .. } | K::BroadcastArray { length: None, .. } => {
+                if !matches!(info.kind, K::NegTuple { .. } | K::NegArray { .. }) {
+                    need_rhs(rhs)?;
+                }
+                for &operand in &operands {
+                    // A stack array's slots are not boxed for this use.
+                    if self.stack_base(operand) {
+                        return Err("operator-elementwise");
+                    }
+                    self.word(operand)?;
+                    self.value(operand, 0)?;
+                }
+                Ok(())
+            }
+            K::ZipArray { length, .. } => {
+                let rhs = need_rhs(rhs)?;
+                self.aggregate_src(lhs)?;
+                self.aggregate_src(rhs)?;
+                for i in 0..length {
+                    self.aggregate_elem(lhs, i, i as u32)?;
+                    self.aggregate_elem(rhs, i, i as u32 + 1)?;
+                }
+                Ok(())
+            }
+            K::BroadcastArray { length: Some(n), scalar_on, .. } => {
+                let rhs = need_rhs(rhs)?;
+                let (vec, scalar) = match scalar_on {
+                    ScalarSide::Right => (lhs, rhs),
+                    ScalarSide::Left => (rhs, lhs),
+                };
+                self.aggregate_src(vec)?;
+                self.scalar(scalar)?;
+                self.value(scalar, 0)?;
+                let first = u32::from(matches!(scalar_on, ScalarSide::Left));
+                for i in 0..n {
+                    self.aggregate_elem(vec, i, i as u32 + first)?;
+                }
+                Ok(())
+            }
+            K::NegArray { length: Some(n), .. } => {
+                self.aggregate_src(lhs)?;
+                for i in 0..n {
+                    self.aggregate_elem(lhs, i, i as u32)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// A heap operand runs at depth zero into a temp; a direct one later.
+    fn aggregate_src(&mut self, id: HirId) -> Check {
+        match aggregate_src(self.body, &self.stack, id) {
+            Some(_) => Ok(()),
+            None => {
+                self.word(id)?;
+                self.value(id, 0)
+            }
+        }
+    }
+
+    /// Element `i` of `src`, pushed on `depth` results: a literal item must
+    /// not store into frame slots (the AST compiles it in place).
+    fn aggregate_elem(&mut self, src: HirId, i: usize, depth: u32) -> Check {
+        match aggregate_src(self.body, &self.stack, src) {
+            Some(AggregateSrc::Items(items)) => {
+                let &item = items.get(i).ok_or("operator-elementwise")?;
+                if clobbers(self.body, &self.stack, item) {
+                    return Err("operator-elementwise");
+                }
+                self.scalar(item)?;
+                self.value(item, depth)
+            }
+            Some(AggregateSrc::Slots(local)) if i < self.stack[&local.0] => Ok(()),
+            Some(AggregateSrc::Slots(_)) => Err("operator-elementwise"),
+            None => Ok(()),
+        }
+    }
+
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
             Some(class) if is_word(class) => Ok(()),
@@ -1196,19 +1386,13 @@ impl Walk<'_> {
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 // Either stages through temps, so it runs at depth zero.
                 if let BinOp::Overloaded(sym) = op {
+                    // `==` / `!=` on arrays compare structurally (`EQ`), as
+                    // the AST; other operators on them are element-wise.
+                    if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
+                        return self.aggregate_arith(id, *lhs, Some(*rhs), depth);
+                    }
                     if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
                         return Err("operator");
-                    }
-                    let elementwise = |id: HirId| {
-                        matches!(
-                            self.ty(id).map(strip_readonly),
-                            Some(Ty::Tuple(_) | Ty::Array { .. } | Ty::List(_))
-                        ) || self.class(id) == Some(ValueClass::Aggregate)
-                    };
-                    // `==` / `!=` on arrays compare structurally (`EQ`), as
-                    // the AST; codegen refuses checker-planned aggregate ops.
-                    if !matches!(*sym, "==" | "!=") && (elementwise(*lhs) || elementwise(*rhs)) {
-                        return Err("operator-elementwise");
                     }
                     if depth != 0 {
                         return Err("operator-depth");
@@ -1248,6 +1432,9 @@ impl Walk<'_> {
                 self.scalar(*rhs)?;
                 self.value(*lhs, depth)?;
                 self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
+            }
+            HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
+                self.aggregate_arith(id, *operand, None, depth)
             }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
