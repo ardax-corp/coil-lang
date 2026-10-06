@@ -3662,7 +3662,7 @@ impl Compiler {
                 let params = emit.calls[&id.0].params.clone();
                 let (recv, value) = (args[0], args[1]);
                 self.hir_value(hir, emit, recv, &Rep::Word(params[0]), depth);
-                if lower::clobbers(hir, &emit.stacks, value) {
+                if lower::push_stages(hir, &emit.stacks, value) {
                     self.expr_depth = 0;
                     let r = self.alloc_temp_slot();
                     self.bytecode.push_store_pop(r);

@@ -383,7 +383,7 @@ impl Walk<'_> {
     fn vec_method(&mut self, name: &str, args: &[HirId], depth: u32) -> Check {
         match (name, args) {
             ("push", [recv, value]) => {
-                let staged = clobbers(self.body, &self.stack, *value);
+                let staged = push_stages(self.body, &self.stack, *value);
                 if staged && depth != 0 {
                     return Err("staged-push");
                 }
@@ -452,6 +452,15 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
         );
     });
     found
+}
+
+/// A `Vec` push stages its receiver and value through temps when the value
+/// may clobber or is a boxed variant make that stages its own arguments
+/// (more than one, not all literals or locals).
+pub fn push_stages(body: &HirBody, stack: &HashMap<u32, usize>, value: HirId) -> bool {
+    clobbers(body, stack, value)
+        || matches!(&body.expr(value).kind, HirKind::Make { kind: MakeKind::Variant { .. }, args }
+            if args.len() > 1 && !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_))))
 }
 
 /// Whether a call at `depth` stages its arguments through temps: at the
@@ -1422,7 +1431,9 @@ impl Walk<'_> {
                         continue;
                     }
                     self.word(arg)?;
-                    self.value(arg, depth + i as u32)?;
+                    // Staged args each run at depth zero into a temp.
+                    let staged = args.len() > 1 && !simple;
+                    self.value(arg, if staged { 0 } else { depth + i as u32 })?;
                 }
                 Ok(())
             }
