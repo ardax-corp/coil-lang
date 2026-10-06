@@ -411,7 +411,7 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
 pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> {
     let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
     for e in &body.exprs {
-        let HirKind::Block { stmts, .. } = &e.kind else {
+        let HirKind::Block { stmts, tail } = &e.kind else {
             continue;
         };
         for (k, &stmt) in stmts.iter().enumerate() {
@@ -434,7 +434,7 @@ pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> 
                 matches!(body.expr(id).kind, HirKind::Local(l) if l == local)
                     && !body.exprs.iter().any(|f| matches!(f.kind, HirKind::Field { base, .. } if base == id))
             };
-            if let Some(&first) = stmts[k + 1..].iter().find(|&&s| any_id(body, s, &whole)) {
+            if let Some(&first) = stmts[k + 1..].iter().chain(tail).find(|&&s| any_id(body, s, &whole)) {
                 out.entry(first.0).or_default().push(local.0);
             }
         }
@@ -870,8 +870,12 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         loops: 0,
         stack: HashMap::new(),
         box_at: HashMap::new(),
-        class_boxed: class_boxes(body, checker).into_values().flatten().collect(),
+        class_boxed: std::collections::HashSet::new(),
+        class_box_at: std::collections::HashSet::new(),
     };
+    let boxes = class_boxes(body, checker);
+    walk.class_box_at = boxes.keys().copied().collect();
+    walk.class_boxed = boxes.into_values().flatten().collect();
     let stacks = stack_arrays(body);
     walk.stack = stacks.len;
     walk.box_at = stacks.box_at;
@@ -1203,6 +1207,8 @@ struct Walk<'b> {
     box_at: HashMap<u32, Vec<u32>>,
     /// Frame-slot class locals boxed at their escape ([`class_boxes`]).
     class_boxed: std::collections::HashSet<u32>,
+    /// The statements (or block tails) [`class_boxes`] boxes before.
+    class_box_at: std::collections::HashSet<u32>,
 }
 
 impl Walk<'_> {
@@ -1751,6 +1757,11 @@ impl Walk<'_> {
                 // An escape boxes before a statement, not a value.
                 if self.box_at.contains_key(&tail.0) {
                     return Err("stack-escape-tail");
+                }
+                // A class local boxes before a value tail as before a
+                // statement: through a temp, so only on an empty stack.
+                if self.class_box_at.contains(&tail.0) && depth != 0 {
+                    return Err("class-escape-tail");
                 }
                 self.value(*tail, depth)
             }

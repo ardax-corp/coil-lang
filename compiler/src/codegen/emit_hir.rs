@@ -4310,6 +4310,7 @@ impl Compiler {
                 for &s in stmts {
                     self.hir_stmt(hir, emit, s);
                 }
+                self.hir_box_before(emit, *tail);
                 return self.hir_value(hir, emit, *tail, want, depth);
             }
             HirKind::Break
@@ -4876,6 +4877,15 @@ impl Compiler {
     /// every op it emits (line breakpoints, backtraces).
     fn hir_stmt(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId) {
         let il_start = self.bytecode.il_mut().raw_len();
+        self.hir_box_before(emit, id);
+        self.hir_effect(hir, emit, id);
+        let (start, end) = hir.expr(id).span;
+        self.fill_statement_locs(il_start, SimpleSpan::from(start..end));
+    }
+
+    /// Box the frame-slot locals that escape first in statement (or block
+    /// tail) `id`.
+    fn hir_box_before(&mut self, emit: &mut HirEmit, id: HirId) {
         if let Some(locals) = emit.box_at.get(&id.0).cloned() {
             for local in locals {
                 if emit.stacks.contains_key(&local) {
@@ -4885,9 +4895,6 @@ impl Compiler {
                 }
             }
         }
-        self.hir_effect(hir, emit, id);
-        let (start, end) = hir.expr(id).span;
-        self.fill_statement_locs(il_start, SimpleSpan::from(start..end));
     }
 
     /// Run `id` for its effect; the operand stack is left as found.
