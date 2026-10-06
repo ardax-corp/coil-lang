@@ -3,7 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use coil_args::{
+    CompileProfileFlags, EntryFlag, HirFlags, HostGrantFlags, LogFlags, OptLevelFlags, RootFlags,
+    expand_o_shorts, merge_entry,
+};
 use compiler::{HostGrants, OptLevel};
 
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
@@ -76,122 +80,6 @@ pub(crate) struct CliArgs {
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
-}
-
-/// SARIF / LSP diagnostic stream (commands that report through the compiler).
-#[derive(Args, Clone, Debug, Default)]
-struct LogFlags {
-    /// Emit SARIF 2.1 diagnostics on stdout
-    #[arg(long)]
-    log_json: bool,
-    /// Emit LSP Diagnostic NDJSON on stdout
-    #[arg(long)]
-    log_lsp: bool,
-}
-
-/// `-O` / `--opt-level` for commands that compile Coil source.
-#[derive(Args, Clone, Debug, Default)]
-struct OptLevelFlags {
-    /// none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g
-    #[arg(short = 'O', long = "opt-level", value_name = "LEVEL", value_parser = parse_opt_level)]
-    opt_level: Option<OptLevel>,
-}
-
-/// `--hir` for commands that compile and run (`coil FILE`, `coil compile`).
-#[derive(Args, Clone, Debug, Default)]
-struct HirFlags {
-    /// Lower function bodies from HIR where it covers them (also `COIL_HIR=1`)
-    #[arg(long)]
-    hir: bool,
-}
-
-/// Opt-stat dump (need a compile, not `run` / `test` / `debug`).
-#[derive(Args, Clone, Debug, Default)]
-struct CompileProfileFlags {
-    /// Print IL optimization counters after compile (stderr)
-    #[arg(long)]
-    opt_stats: bool,
-    /// Print the same counters as one JSON object (stderr)
-    #[arg(long)]
-    opt_stats_json: bool,
-}
-
-/// Host capabilities. Default deny (same as a missing coil.toml).
-///
-/// Not read from Manifest. Used for **compile/typecheck** (`E0406`–`E0411`).
-/// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
-/// is the grant. `--ffi-search-path` is lookup, not a dload grant.
-/// `dload("c")` stays denied even with `--allow-dload c`.
-#[derive(Args, Clone, Debug, Default)]
-struct HostGrantFlags {
-    /// Allow Stream.attach
-    #[arg(long)]
-    allow_attach: bool,
-    /// Allow env::exit
-    #[arg(long)]
-    allow_exit: bool,
-    /// Allow env::exec
-    #[arg(long)]
-    allow_exec: bool,
-    /// Allow FFI process-exec symbols (system, execve, …)
-    #[arg(long)]
-    allow_ffi_exec: bool,
-    /// Allow dload of STEM (repeatable). Still needs lock hash or trusted.
-    #[arg(long = "allow-dload", value_name = "STEM", action = clap::ArgAction::Append)]
-    allow_dload: Vec<String>,
-    /// Extra FFI library search directory (repeatable; lookup only)
-    #[arg(long = "ffi-search-path", value_name = "DIR", action = clap::ArgAction::Append)]
-    ffi_search_path: Vec<PathBuf>,
-}
-
-impl HostGrantFlags {
-    fn is_set(&self) -> bool {
-        self.allow_attach
-            || self.allow_exit
-            || self.allow_exec
-            || self.allow_ffi_exec
-            || !self.allow_dload.is_empty()
-            || !self.ffi_search_path.is_empty()
-    }
-
-    fn into_grants(self) -> HostGrants {
-        HostGrants {
-            allow_attach: self.allow_attach,
-            allow_exec: self.allow_exec,
-            allow_exit: self.allow_exit,
-            allow_ffi_exec: self.allow_ffi_exec,
-            allow_dload: self.allow_dload,
-            ffi_search_paths: self.ffi_search_path,
-        }
-    }
-}
-
-/// Extra `use`/`mod` search directories (`--root`, repeatable).
-#[derive(Args, Clone, Debug, Default)]
-struct RootFlags {
-    /// Extra module search directory (repeatable). Default is `src` under cwd.
-    #[arg(long = "root", value_name = "DIR", action = clap::ArgAction::Append)]
-    root: Vec<PathBuf>,
-}
-
-impl RootFlags {
-    fn is_set(&self) -> bool {
-        !self.root.is_empty()
-    }
-}
-
-/// `--entry` as an alternative to a positional `.hy` file.
-#[derive(Args, Clone, Debug, Default)]
-struct EntryFlag {
-    /// Entry `.hy` (instead of the positional file)
-    #[arg(long = "entry", value_name = "FILE")]
-    entry: Option<String>,
-}
-
-impl EntryFlag {
-    fn is_set(&self) -> bool {
-        self.entry.is_some()
-    }
 }
 
 #[derive(Parser, Debug)]
@@ -412,26 +300,6 @@ enum NativesAction {
     },
 }
 
-fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
-    OptLevel::parse(s).map_err(|_| {
-        "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)"
-            .into()
-    })
-}
-
-fn expand_o_shorts(args: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    for a in args {
-        if a.starts_with("-O") && a.len() > 2 && !a.starts_with("--") {
-            out.push("-O".into());
-            out.push(a[2..].into());
-        } else {
-            out.push(a.clone());
-        }
-    }
-    out
-}
-
 fn is_reserved(name: &str) -> bool {
     RESERVED.contains(&name)
 }
@@ -487,24 +355,6 @@ fn format_clap_error(e: clap::Error) -> String {
     }
 }
 
-impl LogFlags {
-    fn is_set(&self) -> bool {
-        self.log_json || self.log_lsp
-    }
-}
-
-impl OptLevelFlags {
-    fn is_set(&self) -> bool {
-        self.opt_level.is_some()
-    }
-}
-
-impl CompileProfileFlags {
-    fn is_set(&self) -> bool {
-        self.opt_stats || self.opt_stats_json
-    }
-}
-
 fn cli_from(
     command: Command,
     log: LogFlags,
@@ -525,19 +375,6 @@ fn cli_from(
         hir: false,
         host_grants: grants.into_grants(),
         module_roots: roots,
-    }
-}
-
-fn merge_entry(positional: Option<String>, flag: Option<String>) -> Result<String, String> {
-    let pos = positional.filter(|s| !s.is_empty());
-    let flag = flag.filter(|s| !s.is_empty());
-    match (pos, flag) {
-        (Some(a), Some(b)) if a != b => {
-            Err("pass the entry as a positional file or `--entry`, not both".into())
-        }
-        (Some(a), _) => Ok(a),
-        (_, Some(b)) => Ok(b),
-        (None, None) => Ok(String::new()),
     }
 }
 
@@ -907,13 +744,7 @@ mod tests {
 
     #[test]
     fn parse_debug_dap_with_host_grants() {
-        let cli = parse_args(&args(&[
-            "debug",
-            "--dap",
-            "--allow-attach",
-            "--allow-exit",
-        ]))
-        .unwrap();
+        let cli = parse_args(&args(&["debug", "--dap", "--allow-attach", "--allow-exit"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Debug {
@@ -1197,8 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_reserved_test_path_names() {
-    }
+    fn parse_rejects_reserved_test_path_names() {}
 
     #[test]
     fn parse_rejects_unrecognized_flag() {
