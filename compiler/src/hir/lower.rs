@@ -1226,6 +1226,19 @@ impl Walk<'_> {
                 self.args(args, depth, false)?;
                 self.value(*f, depth + args.len() as u32)
             }
+            // `s[i]`: the `string_byte_at` native id, then string and
+            // index above it (codegen checks the byte against `-1`).
+            HirKind::Index {
+                base,
+                index,
+                kind: IndexKind::String,
+            } => {
+                self.word(id)?;
+                self.word(*base)?;
+                self.scalar(*index)?;
+                self.value(*base, depth + 1)?;
+                self.value(*index, depth + 2)
+            }
             HirKind::Index { base, index, kind } => {
                 if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                     return Err("index-kind");
