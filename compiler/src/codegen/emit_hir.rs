@@ -1467,6 +1467,12 @@ impl Compiler {
         })
     }
 
+    /// Whether `%v` formats `ty` inline (a tuple or record), not with a
+    /// `Show::show` call.
+    fn show_through_temps(ty: &Ty) -> bool {
+        matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Tuple(_) | Ty::Record { .. })
+    }
+
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
     /// `Result` argument boxed and packs its result in the call's layout.
     fn hir_builtin_abi(&self, hir: &HirBody, call: HirId, builtin: HirBuiltin) -> Result<HirCall, &'static str> {
@@ -1480,18 +1486,31 @@ impl Compiler {
             let Some(HirKind::Lit(Lit::Str(fmt))) = args.first().map(|&a| &hir.expr(a).kind) else {
                 return Err("format-literal");
             };
-            // `%v` goes through `Show`; other arguments print as words.
-            if Self::format_consuming_specs(fmt).contains(&'v') {
-                return Err("format-show");
-            }
-            for &arg in &args[1..] {
+            // `%v` goes through `Show` at a ground type (a type parameter's
+            // `Show` is a dictionary call the HIR does not plan); other
+            // arguments print as words.
+            let specs = Self::format_consuming_specs(fmt);
+            for (i, &arg) in args[1..].iter().enumerate() {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
+                if specs.get(i) == Some(&'v') {
+                    let ty = apply_ty_prune(self.checker.subst(), ty);
+                    // A tuple or record shows through temps, which need an
+                    // empty operand stack below them.
+                    if !crate::hir::layout::ty_is_closed(&ty) || Self::show_through_temps(&ty) {
+                        return Err("format-show");
+                    }
+                    continue;
+                }
                 let string = matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING);
                 if !string && lower::primitive(ty).is_none() {
                     return Err("format-argument");
                 }
             }
         }
+        let shows = match (builtin, args.first().map(|&a| &hir.expr(a).kind)) {
+            (HirBuiltin::Format, Some(HirKind::Lit(Lit::Str(fmt)))) => Self::format_consuming_specs(fmt),
+            _ => Vec::new(),
+        };
         let mut params = Vec::with_capacity(args.len());
         for &arg in args {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
@@ -1499,8 +1518,11 @@ impl Compiler {
                 Some(class) if lower::is_word(class) => {}
                 _ => return Err("callee-signature"),
             }
+            // A `%v` argument stays in its own layout: `Show` boxes it as
+            // the AST's `emit_show_for_stack_value` does.
+            let show = !params.is_empty() && shows.get(params.len() - 1) == Some(&'v');
             params.push(match self.value_layout(ty) {
-                ValueLayout::NicheUnitResult | ValueLayout::NicheResult => ValueLayout::Boxed,
+                ValueLayout::NicheUnitResult | ValueLayout::NicheResult if !show => ValueLayout::Boxed,
                 layout => layout,
             });
         }
@@ -3290,10 +3312,18 @@ impl Compiler {
                         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
                             unreachable!("planned format literal")
                         };
+                        let specs = Self::format_consuming_specs(fmt);
                         let fmt = Self::rewrite_format_v_to_s(fmt);
                         self.emit_string_literal(&fmt);
                         for (i, (&arg, param)) in args.iter().zip(params).enumerate().skip(1) {
                             self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                            if specs.get(i - 1) == Some(&'v') {
+                                // `Show::show` on the value: a call, so it
+                                // keeps the operands below it.
+                                let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).expect("planned show"));
+                                self.expr_depth = depth + i as u32;
+                                self.emit_show_for_stack_value(&ty);
+                            }
                         }
                         self.bytecode
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
