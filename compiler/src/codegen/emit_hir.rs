@@ -1559,16 +1559,10 @@ impl Compiler {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature as the
-            // AST call does. Its two-word return kind is not known yet, so
-            // only a callee returning no enum qualifies.
+            // AST call does. Its two-word return kind comes from the
+            // signature too, so it agrees with the definition.
             None if key == lookup
                 && self.fn_entry_labels.contains_key(&key)
-                && self.checker.fn_return_ty(&lookup).is_some_and(|ret| {
-                    matches!(
-                        lower::classify(&self.checker, &ret),
-                        Some(ValueClass::Scalar | ValueClass::Unit | ValueClass::Opaque | ValueClass::Object)
-                    )
-                })
                 && !self.checker.fn_has_rest(&lookup)
                 && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == explicit) => {}
             _ => return Err("callee-arity"),
