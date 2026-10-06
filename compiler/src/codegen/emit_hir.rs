@@ -95,6 +95,10 @@ struct HirInstanceCall {
     args: Vec<Ty>,
     /// The type the receiver is `BoxValue`d as.
     recv_box: Option<Ty>,
+    /// A bound method call in a mono clone, as `try_emit_ground_bound_method`:
+    /// the method, and per argument the type to `BoxValue` it as; every
+    /// argument goes through a temp.
+    ground: Option<(String, Vec<Option<Ty>>)>,
 }
 
 /// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
@@ -123,6 +127,10 @@ enum HirBuiltin {
     /// `format("..", args)` with a literal format and no `%v`: the format
     /// string, then each argument, then `FORMAT`.
     Format,
+    /// A trait method on a bound type parameter in a shared generic body:
+    /// the arguments, the hidden dictionary, then its method slot's code
+    /// pointer through `CallIndirect`.
+    Bound { dict: u32, method: u32 },
 }
 
 /// Per-body lowering state.
@@ -573,8 +581,11 @@ impl Compiler {
         if let Some(builtin) = self.hir_builtin(name) {
             return self.hir_builtin_abi(hir, call, builtin?);
         }
+        if let Some(call) = self.hir_bound_call(hir, call, name, false)? {
+            return Ok(call);
+        }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object and bound dispatch stay on the AST.
+        // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
             || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
@@ -807,8 +818,11 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
+        if let Some(call) = self.hir_bound_call(hir, call, method, true)? {
+            return Ok(call);
+        }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object and bound dispatch stay on the AST.
+        // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
             || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
@@ -941,6 +955,7 @@ impl Compiler {
                 class,
                 args: inst_args,
                 recv_box,
+                ground: None,
             })),
             ranges: Vec::new(),
         }))
@@ -1089,6 +1104,144 @@ impl Compiler {
             return Some(host(Some(kind.native_name())));
         }
         self.checker.host_fn_in_scope(name).map(|registry| host(Some(registry)))
+    }
+
+    /// A call the typechecker dispatches through a bound's dictionary in a
+    /// shared generic body, as `compile_call_expr`. `None` when it is not
+    /// one; a mono clone (no dictionary slot) stays on the AST.
+    fn hir_bound_call(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        name: &str,
+        method: bool,
+    ) -> Result<Option<HirCall>, &'static str> {
+        let node = hir.expr(call);
+        let (start, end) = node.span;
+        let Some(hint) = self.bound_method_hint(node.node, start, end) else {
+            return Ok(None);
+        };
+        let HirKind::Call { args, .. } = &node.kind else {
+            return Err("callee");
+        };
+        // `recv.m(..)` without a receiver slot drops the receiver.
+        if args.len() != hint.arity || (method && !hint.has_receiver) {
+            return Err("callee-trait");
+        }
+        // Words pass as the AST compiles them; enum layouts may differ.
+        let word = |id: HirId| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Enum) | None => Err("callee-trait"),
+                Some(_) => Ok(self.value_layout(ty)),
+            }
+        };
+        let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
+        let ret = word(call)?;
+        let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index)) else {
+            return self.hir_ground_bound_call(hir, call, name, &hint, params, ret).map(Some);
+        };
+        Ok(Some(HirCall {
+            key: String::new(),
+            pair: None,
+            params,
+            ret,
+            method: false,
+            mono: false,
+            builtin: Some(HirBuiltin::Bound {
+                dict,
+                method: hint.method_slot as u32,
+            }),
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        }))
+    }
+
+    /// A bound method call in a mono clone: `T` is concrete here, so the
+    /// instance is looked up from the ground argument types and called
+    /// directly, as `try_emit_ground_bound_method_nodes`.
+    fn hir_ground_bound_call(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        name: &str,
+        hint: &crate::typechecking::infer::BoundMethodCall,
+        params: Vec<ValueLayout>,
+        ret: ValueLayout,
+    ) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        // `T::m(..)` looks its instance up from the type parameter; `len`
+        // may be structural.
+        let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
+        if !self.compiling_mono_clone || name.contains("::") || method == "len" {
+            return Err("callee-trait");
+        }
+        let arg_tys = args
+            .iter()
+            .map(|&arg| Self::hir_ty(hir, arg).map(|t| apply_ty_prune(self.checker.subst(), t)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("callee-signature")?;
+        let class_def = self.checker.generics().typeclass(&hint.class).ok_or("callee-trait")?;
+        let lookup_n = class_def.type_params.len().max(1).min(arg_tys.len());
+        if lookup_n == 0 {
+            return Err("callee-trait");
+        }
+        let lookup: Vec<Ty> = arg_tys[..lookup_n].iter().map(Self::show_lookup_ty_for_instance).collect();
+        // Constructed values carry `Sum` types; retry with their `App` head.
+        let instance = self
+            .checker
+            .generics()
+            .find_instance_relaxed(&hint.class, &lookup)
+            .cloned()
+            .or_else(|| {
+                let heads: Option<Vec<Ty>> = arg_tys[..lookup_n]
+                    .iter()
+                    .map(|t| self.sum_instance_head(t).or_else(|| Some(t.clone())))
+                    .collect();
+                self.checker.generics().find_instance_relaxed(&hint.class, &heads?).cloned()
+            })
+            .ok_or("callee-trait")?;
+        let lookup = if instance.args.iter().any(Self::ty_has_var) {
+            lookup
+        } else {
+            instance.args.clone()
+        };
+        let fqn = instance.method_fqns.get(method).cloned().ok_or("callee-trait")?;
+        if !(self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
+            || self.two_word_return_kind(&fqn).is_some()
+        {
+            return Err("callee-trait");
+        }
+        let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
+        if self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default).is_some() {
+            return Err("callee-trait");
+        }
+        let unbox = self
+            .instance_method_unbox_tys(&instance.class, method, &lookup)
+            .into_iter()
+            .zip(&arg_tys)
+            .map(|(u, ty)| u.map(|_| ty.clone()))
+            .collect();
+        Ok(HirCall {
+            key: fqn,
+            pair: None,
+            params,
+            ret,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: Some(Box::new(HirInstanceCall {
+                class: instance.class.clone(),
+                args: lookup,
+                recv_box: None,
+                ground: Some((method.to_string(), unbox)),
+            })),
+            ranges: Vec::new(),
+        })
     }
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
@@ -2862,6 +3015,17 @@ impl Compiler {
                         self.bytecode
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
                     }
+                    HirBuiltin::Bound { dict, method } => {
+                        for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        }
+                        self.bytecode.push_load(dict);
+                        self.bytecode.push_load(dict);
+                        self.bytecode.push_const(method as i32);
+                        self.bytecode.push_index();
+                        self.bytecode
+                            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
+                    }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments.
                         self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
@@ -2905,6 +3069,42 @@ impl Compiler {
                 self.bytecode.push(Byte::new(Instruction::ArrayPush));
                 self.bytecode.push_pop();
                 self.bytecode.push_const(0);
+            }
+            HirKind::Call { args, .. }
+                if emit.calls[&id.0].instance.as_ref().is_some_and(|i| i.ground.is_some()) =>
+            {
+                let call = &emit.calls[&id.0];
+                let params = call.params.clone();
+                let key = call.key.clone();
+                let natural = Self::hir_call_rep(call);
+                let inst = call.instance.clone().expect("ground call");
+                let (method, unbox) = inst.ground.clone().expect("ground call");
+                let mut temps = Vec::with_capacity(args.len());
+                for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
+                    if let Some(Some(ty)) = unbox.get(i) {
+                        Self::emit_box_if_needed(&mut self.bytecode, ty);
+                    }
+                    self.expr_depth = depth;
+                    let tmp = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(tmp);
+                    temps.push(tmp);
+                }
+                for &tmp in &temps {
+                    self.bytecode.push_load(tmp);
+                }
+                let mut arity = temps.len() as u32;
+                let (start, end) = hir.expr(id).span;
+                let mut bc = CodeBuf::new();
+                if self.emit_call_instance_dict(&mut bc, (&inst.class, &method, &key), &inst.args, start..end) {
+                    arity += 1;
+                }
+                self.bytecode.append(&mut bc);
+                let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
+                debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
+                self.expr_depth = depth;
+                self.hir_convert(&natural, want, depth);
+                return;
             }
             HirKind::Call { args, .. } if emit.calls[&id.0].method => {
                 let call = &emit.calls[&id.0];
