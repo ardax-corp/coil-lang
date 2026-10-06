@@ -378,6 +378,8 @@ dependencies = [
 name = "coil-lsp"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "compiler",
  "comptime",
  "lsp-server",

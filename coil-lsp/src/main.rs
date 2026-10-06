@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::Command as ClapCommand;
+use clap::{CommandFactory, Parser};
+use coil_args::{HostGrantFlags, RootFlags, parse_with, print_cli_error, print_command_help};
 use compiler::{
     BuiltinExport, Checker, HostGrants, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
     format_ty_for_diag,
@@ -75,57 +78,51 @@ struct LspOptions {
     grants: HostGrants,
 }
 
-const USAGE: &str = "\
-Start the Coil language server over stdin/stdout
+#[derive(Parser, Debug)]
+#[command(
+    name = "coil-lsp",
+    about = "Start the Coil language server over stdin/stdout",
+    disable_help_subcommand = true,
+    after_help = "`--root` is searched after `src`, `.` and `.deps/*/src`.\n\
+`--stdio` is accepted for LSP clients; stdio is the only transport."
+)]
+struct LspCli {
+    #[command(flatten)]
+    grants: HostGrantFlags,
+    #[command(flatten)]
+    roots: RootFlags,
+    /// Accepted for LSP clients; stdio is the only transport
+    #[arg(long)]
+    stdio: bool,
+}
 
-Usage:
-  coil lsp [OPTIONS]
-
-Options:
-  --root DIR          Extra module search directory (repeatable), searched
-                      after `src`, `.` and `.deps/*/src`
-  --allow-attach      Allow Stream.attach (default deny)
-  --allow-exit        Allow env::exit (default deny)
-  --allow-exec        Allow env::exec (default deny)
-  --allow-ffi-exec    Allow FFI process-exec symbols (default deny)
-  --allow-dload STEM  Allow dload of STEM (repeatable)
-  --ffi-search-path DIR
-                      Extra FFI lookup directory (repeatable; not a grant)
-  --stdio             Accepted for LSP clients; stdio is the only transport
-  -h, --help          Show this help";
+fn lsp_command() -> ClapCommand {
+    let mut command = LspCli::command();
+    command.set_bin_name("coil lsp");
+    command
+}
 
 /// `Ok(None)` when help was asked for.
 fn parse_options(
     args: impl IntoIterator<Item = String>,
     cwd: &Path,
 ) -> Result<Option<LspOptions>, String> {
-    let mut options = LspOptions::default();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        let (flag, inline) = match arg.split_once('=') {
-            Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
-            _ => (arg.clone(), None),
-        };
-        let mut value = |what: &str| -> Result<String, String> {
-            inline
-                .clone()
-                .or_else(|| args.next())
-                .ok_or_else(|| format!("missing {what} after {flag}"))
-        };
-        match flag.as_str() {
-            "-h" | "--help" => return Ok(None),
-            "--stdio" => {}
-            "--allow-attach" => options.grants.allow_attach = true,
-            "--allow-exit" => options.grants.allow_exit = true,
-            "--allow-exec" => options.grants.allow_exec = true,
-            "--allow-ffi-exec" => options.grants.allow_ffi_exec = true,
-            "--allow-dload" => options.grants.grant_dload_allow(value("STEM")?),
-            "--ffi-search-path" => options.grants.add_ffi_search_path(cwd.join(value("DIR")?)),
-            "--root" => options.extra_roots.push(cwd.join(value("DIR")?)),
-            _ => return Err(format!("unrecognized argument `{arg}`")),
-        }
-    }
-    Ok(Some(options))
+    let mut argv = vec!["coil-lsp".to_string()];
+    argv.extend(args);
+    let Some(cli) = parse_with::<LspCli>(lsp_command(), &argv)? else {
+        return Ok(None);
+    };
+    let _ = cli.stdio;
+    let mut grants = cli.grants.into_grants();
+    grants.ffi_search_paths = grants
+        .ffi_search_paths
+        .into_iter()
+        .map(|path| cwd.join(path))
+        .collect();
+    Ok(Some(LspOptions {
+        extra_roots: cli.roots.root.into_iter().map(|path| cwd.join(path)).collect(),
+        grants,
+    }))
 }
 
 fn main() {
@@ -134,11 +131,11 @@ fn main() {
     let options = match parse_options(std::env::args().skip(1), &cwd) {
         Ok(Some(options)) => options,
         Ok(None) => {
-            println!("{USAGE}");
+            print_command_help(lsp_command(), "coil lsp");
             return;
         }
         Err(error) => {
-            eprintln!("coil-lsp: {error}\n\n{USAGE}");
+            print_cli_error(&error);
             std::process::exit(2);
         }
     };
