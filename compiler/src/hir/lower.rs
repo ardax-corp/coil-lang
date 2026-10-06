@@ -1043,8 +1043,11 @@ impl Walk<'_> {
                             Some(Ty::Tuple(_) | Ty::Array { .. } | Ty::List(_))
                         ) || self.class(id) == Some(ValueClass::Aggregate)
                     };
-                    if depth != 0 || elementwise(*lhs) || elementwise(*rhs) {
-                        return Err("operator");
+                    if elementwise(*lhs) || elementwise(*rhs) {
+                        return Err("operator-elementwise");
+                    }
+                    if depth != 0 {
+                        return Err("operator-depth");
                     }
                     self.word(*lhs)?;
                     self.word(*rhs)?;

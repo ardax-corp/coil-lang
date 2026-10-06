@@ -556,7 +556,7 @@ impl Compiler {
                 rhs,
             } = expr.kind
             {
-                let op = self.hir_operator(hir, sym, lhs, rhs).ok_or("operator")?;
+                let op = self.hir_operator_at(hir, HirId(i as u32), sym, lhs, rhs)?;
                 emit.ops.insert(i as u32, op);
                 continue;
             }
@@ -2117,9 +2117,39 @@ impl Compiler {
         }
     }
 
+    /// The operator at `id`. Element-wise matrix and aggregate forms stay on
+    /// the AST, as does a bound's dictionary call in a shared generic body
+    /// (`emit_bound_operator_call`); otherwise the operand type's instance
+    /// or the raw opcode.
+    fn hir_operator_at(
+        &self,
+        hir: &HirBody,
+        id: HirId,
+        sym: &'static str,
+        lhs: HirId,
+        rhs: HirId,
+    ) -> Result<HirOp, &'static str> {
+        let node = hir.expr(id);
+        let (start, end) = node.span;
+        if node.node.is_some_and(|n| {
+            self.checker.linear_algebra_at(n).is_some() || self.checker.aggregate_arith_at(n).is_some()
+        }) || self.checker.linear_algebra_span(start, end).is_some()
+            || self.checker.aggregate_arith_span(start, end).is_some()
+        {
+            return Err("operator-aggregate");
+        }
+        if let Some(hint) = self.bound_operator_hint(node.node, start, end)
+            && self.lookup_slot(&format!("__dict{}", hint.dict_index)).is_some()
+        {
+            return Err("operator-bound");
+        }
+        self.hir_operator(hir, sym, lhs, rhs).ok_or("operator")
+    }
+
     /// How `lhs sym rhs` over a user type lowers: its trait instance's
-    /// method when there is one (a one-word result, no dictionary), else
-    /// `EQ` / `NEQ` for `==` / `!=`.
+    /// method when there is one (a one-word result; a generic instance gets
+    /// its dictionary as the AST passes it), else `EQ` / `NEQ` for `==` /
+    /// `!=`.
     fn hir_operator(&self, hir: &HirBody, sym: &'static str, lhs: HirId, rhs: HirId) -> Option<HirOp> {
         let (class, method) = match sym {
             "==" => ("Eq", "eq"),
@@ -2137,9 +2167,6 @@ impl Compiler {
         let ty = Self::hir_ty(hir, lhs).or_else(|| Self::hir_ty(hir, rhs))?;
         match self.concrete_operator_target_ty(ty, class, method) {
             Some((lookup, fqn)) => {
-                if self.instance_call_takes_dict(class, method, &fqn) {
-                    return None;
-                }
                 let ret = self.checker.fn_return_ty(&fqn)?;
                 if !matches!(
                     lower::classify(&self.checker, &ret),
