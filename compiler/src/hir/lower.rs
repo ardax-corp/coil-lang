@@ -1629,6 +1629,14 @@ impl Walk<'_> {
                         self.aggregate(*iterable)?;
                         self.value(*iterable, 0)?;
                     }
+                    // Its elements to an array, then the array loop.
+                    Some(ForInKind::Tuple { .. }) => {
+                        if !matches!(self.ty(*iterable).map(strip_readonly), Some(Ty::Tuple(_))) {
+                            return Err("for-in-tuple");
+                        }
+                        self.word(*iterable)?;
+                        self.value(*iterable, 0)?;
+                    }
                     // `ResumeCoro` / `DoneCoro` on the handle in a temp.
                     Some(ForInKind::Coroutine) => {
                         self.word(*iterable)?;
@@ -1643,6 +1651,12 @@ impl Walk<'_> {
                     // range: the iterable as is, the `CALL`, then that loop.
                     Some(ForInKind::Custom {
                         counted: Some(ForInCounted::Array | ForInCounted::Dict | ForInCounted::Range { .. }),
+                        ..
+                    })
+                    // Or an iterator: `into_iter`, then `next` until `None`.
+                    | Some(ForInKind::Custom {
+                        next_fqn: Some(_),
+                        counted: None,
                         ..
                     }) => {
                         if self.class(*iterable) == Some(ValueClass::Enum) {

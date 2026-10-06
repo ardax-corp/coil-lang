@@ -2822,6 +2822,24 @@ impl Compiler {
                 }
                 // `into_iter` is called as the AST calls it: a range comes
                 // back as `[start, end]`, anything else as one word.
+                if let (
+                    Some(ForInKind::Custom {
+                        into_iter_fqn,
+                        next_fqn: Some(next_fqn),
+                        counted: None,
+                    }),
+                    HirPat::Bind(local),
+                ) = (kind, pat)
+                {
+                    let known = |f: &str| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f);
+                    if !known(into_iter_fqn) || !known(next_fqn) || self.two_word_return_kind(into_iter_fqn).is_some() {
+                        return Err("for-in-iterator");
+                    }
+                    // The item is stored as `next` leaves it.
+                    if self.hir_local_layout(hir, *local) != ValueLayout::Boxed {
+                        return Err("for-in-iterator");
+                    }
+                }
                 if let Some(ForInKind::Custom {
                     into_iter_fqn,
                     counted: Some(counted),
@@ -4687,6 +4705,62 @@ impl Compiler {
             this.repr.unbox_enum_context -= 1;
             debug_assert!(called, "planned into_iter entry");
         };
+        // As `emit_for_in_custom`'s iterator protocol: `into_iter` into a
+        // temp, then `next` until it returns `None`.
+        if let ForInKind::Custom {
+            into_iter_fqn,
+            next_fqn: Some(next_fqn),
+            counted: None,
+        } = &kind
+        {
+            let HirPat::Bind(local) = *pat else {
+                unreachable!("planned iterator for-in binds a name")
+            };
+            let item = hir.local(local).ty.clone();
+            let niche = item
+                .as_ref()
+                .is_some_and(|ty| crate::typechecking::value_layout::niche_heap_only(&self.checker, ty));
+            // Pin `Option<Item>` as the AST does, so the `CALL` agrees.
+            if let Some(item) = &item {
+                let opt = crate::typechecking::ty::option_ty(item.clone());
+                let pair = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
+                self.pin_two_word_return_kind(next_fqn, pair);
+            }
+            let two_slot = self.two_word_return_kind(next_fqn).is_some();
+            into_iter(self, emit, into_iter_fqn);
+            self.expr_depth = 0;
+            let it = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(it);
+            let x = self.hir_bind_local(hir, local);
+            emit.slots[local.0 as usize] = Some(x);
+            self.bytecode.bind_label(top);
+            self.bytecode.push_load(it);
+            self.repr.unbox_enum_context += 1;
+            let called = self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call);
+            self.repr.unbox_enum_context -= 1;
+            debug_assert!(called, "planned next entry");
+            if niche {
+                Self::push_niche_eq_zero(&mut self.bytecode);
+                self.hir_jump(IlJumpKind::JumpIfTrue, exit);
+            } else if two_slot {
+                // `[payload, tag]`: `None` is tag zero.
+                self.hir_jump_under(IlJumpKind::JumpIfFalse, exit);
+            } else {
+                let none = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "None").unwrap_or(0);
+                self.hir_jump(IlJumpKind::JumpIfMatch { tag: none, arity: 0 }, exit);
+                self.bytecode.push(Byte::new(Instruction::Unpack).with_operand_u32(1));
+            }
+            self.bytecode.push_store_pop(x);
+            emit.loops.push(HirLoop { cont: top, exit });
+            self.hir_effect(hir, emit, body);
+            emit.loops.pop();
+            self.hir_jump(IlJumpKind::Unconditional, top);
+            self.bytecode.bind_label(exit);
+            if niche || two_slot {
+                self.bytecode.push_pop();
+            }
+            return;
+        }
         // As `emit_for_in_coro`: resume into the item, stop once the
         // handle is done (its completion value is never bound).
         if matches!(kind, ForInKind::Coroutine) {
@@ -4772,11 +4846,16 @@ impl Compiler {
                 }
                 (step_slot, step_float) = (iv, float);
             }
-            ForInKind::Array | ForInKind::Dict => {
+            ForInKind::Array | ForInKind::Dict | ForInKind::Tuple { .. } => {
                 let dict = matches!(kind, ForInKind::Dict);
+                let tuple = match kind {
+                    ForInKind::Tuple { arity } => Some(arity),
+                    _ => None,
+                };
                 let node = hir.expr(id);
                 let (start, end) = node.span;
                 let pin = !dict
+                    && tuple.is_none()
                     && custom.is_none()
                     && (node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n))
                         || self.typed_sidecar.is_for_in_pin_span(start, end));
@@ -4789,6 +4868,18 @@ impl Compiler {
                 if dict {
                     // As `emit_for_in_dict`: the entries array of `(key, value)`.
                     self.bytecode.push(Byte::new(Instruction::DictEntries));
+                }
+                if let Some(arity) = tuple {
+                    // As `emit_for_in_tuple`: the elements gathered into an array.
+                    self.expr_depth = 0;
+                    let tup = self.alloc_temp_slot();
+                    self.bytecode.push_store_pop(tup);
+                    for i in 0..arity {
+                        self.bytecode.push_load(tup);
+                        self.bytecode.push_const(i as i32);
+                        self.bytecode.push_index();
+                    }
+                    self.bytecode.push_make_array(arity as u32);
                 }
                 self.expr_depth = 0;
                 self.bytecode.push_store_pop(arr);
