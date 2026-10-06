@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use super::abi::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
-use super::emit_lir::emit_lir;
 use super::entry::lir_refuse_with;
 use super::gc::refuses_alloc;
 use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc, infer_numeric_with};
@@ -626,11 +625,20 @@ pub fn try_lower_abi_body_side(
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
     });
+    // Every label leading the body binds the entry; a self call may name any.
+    let aliases: Vec<Label> = ops
+        .iter()
+        .map_while(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
+            _ => None,
+        })
+        .filter(|&l| Some(l) != entry)
+        .collect();
     let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
     capture_mir(name, "lir", &func);
-    let out = match emit_lir(&func, entry, pool, has_alloc) {
+    let out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),
     };

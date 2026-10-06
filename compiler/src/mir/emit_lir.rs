@@ -11,8 +11,8 @@ use common::{Byte, DebugLoc, Instruction};
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
-    coalesce_latch_overwrite, emit_cond_jumps, il_for_alloc, is_fallthrough, max_label_hint,
-    paired_alloc_dest, term_cmp_dest,
+    coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
+    max_label_hint, paired_alloc_dest, take_label, term_cmp_dest,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -32,6 +32,19 @@ pub fn emit_lir(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
+    emit_lir_with_aliases(func, entry_label, &[], pool, across_alloc)
+}
+
+/// [`emit_lir`] for a body whose entry is also bound under `aliases` (the
+/// other labels leading the source body): they stay bound at the entry, so
+/// a self call through one of them still lands there.
+pub fn emit_lir_with_aliases(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+    aliases: &[Label],
+    pool: &mut Vec<u64>,
+    across_alloc: bool,
+) -> Result<Vec<IlOp>, LowerError> {
     if func.has_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
@@ -48,23 +61,24 @@ pub fn emit_lir(
         .map(|(i, _)| regs[i])
         .max()
         .unwrap_or(0);
+    // As `emit_mir`: block labels skip the entries this body calls.
+    let mut reserved = foreign_targets(func, entry_label);
+    for alias in aliases {
+        reserved.remove(&alias.0);
+    }
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
         if b.id == func.entry {
-            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| {
-                let l = Label(next_label);
-                next_label += 1;
-                l
-            });
+            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| take_label(&mut next_label, &reserved));
         } else {
-            block_lab[b.id.index()] = Label(next_label);
-            next_label += 1;
+            block_lab[b.id.index()] = take_label(&mut next_label, &reserved);
         }
     }
 
     let mut out = Vec::new();
     out.push(IlOp::Label(block_lab[func.entry.index()]));
+    out.extend(aliases.iter().map(|&l| IlOp::Label(l)));
     let frame = u32::from(max_reg) + 1;
     if frame > func.params.len() as u32 {
         out.push(IlOp::byte(
@@ -119,6 +133,7 @@ pub fn emit_lir(
             scratch,
             block_lab: &block_lab,
             next_label: &mut next_label,
+            reserved: &reserved,
             pool,
             loc: term_loc,
         })?;
@@ -1461,6 +1476,7 @@ struct EmitTermArgs<'args> {
     scratch: u8,
     block_lab: &'args [Label],
     next_label: &'args mut u32,
+    reserved: &'args std::collections::HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
 }
@@ -1475,6 +1491,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         scratch,
         block_lab,
         next_label,
+        reserved,
         pool,
         loc,
     } = args;
@@ -1537,8 +1554,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 // emitted one, so the taken path always jumps over them, even
                 // when `taken` is the layout successor (#548: the true path
                 // fell into the false edge's moves and reached `not_taken`).
-                let f_lab = Label(*next_label);
-                *next_label += 1;
+                let f_lab = take_label(next_label, reserved);
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: f_lab,
