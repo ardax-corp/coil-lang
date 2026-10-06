@@ -662,7 +662,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                 enum_name,
                 variant_name,
                 fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
-            } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit)) => {
+            } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit), node) => {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = id.and_then(|i| self.sidecar.def_id(i));
@@ -1059,9 +1059,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         self.checker.static_slot_index(&format!("{key}::{member}")).is_some()
     }
 
-    fn static_call(&self, owner: &str, member: &str, bare: bool) -> bool {
-        if self.checker.tag_for(owner, member).is_some() || !self.checker.is_class(owner) {
+    fn static_call(&self, owner: &str, member: &str, bare: bool, node: &Output<'_>) -> bool {
+        if self.checker.tag_for(owner, member).is_some() {
             return false;
+        }
+        // `T::m(..)` / `int::m(..)` on a non-class owner (no static fields,
+        // so even the bare form): a static trait method the typechecker
+        // dispatched through a bound or a ground instance.
+        if !self.checker.is_class(owner) {
+            let (start, end) = (node.0.start, node.0.end);
+            return self.node_id(node).is_some_and(|id| {
+                self.checker.bound_method_call_at(id).is_some() || self.checker.call_dicts_at(id).is_some()
+            }) || self.checker.bound_method_call_span(start, end).is_some()
+                || self.checker.call_dicts_span(start, end).is_some();
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
