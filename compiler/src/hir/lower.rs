@@ -1263,7 +1263,11 @@ impl Walk<'_> {
             }
             HirKind::Field { base, .. } => {
                 self.word(id)?;
-                self.object(*base)?;
+                // A record variant's field reads `LoadField` on the boxed
+                // enum (codegen checks the field resolves).
+                if self.class(*base) != Some(ValueClass::Enum) {
+                    self.object(*base)?;
+                }
                 // `new C(..).f` reads the argument directly in the AST.
                 if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
                     return Err("field-of-new");

@@ -1760,7 +1760,8 @@ impl Compiler {
         crate::typechecking::return_layout::is_two_word_product_kind(kind)
     }
 
-    /// How an indexed base is pushed: a pair boxes into its tuple.
+    /// How an indexed or field-read base is pushed: a pair boxes into its
+    /// tuple or enum.
     fn hir_index_base_rep(natural: Rep) -> Rep {
         match natural {
             Rep::Pair(_) => BOXED,
@@ -2180,11 +2181,39 @@ impl Compiler {
             let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
             return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Name, fty.clone()));
         }
+        if let Some(found) = self.hir_variant_field(&ty, name) {
+            return Some(found);
+        }
         let idx = self.class_field_slot_of_ty(&ty, name)?;
         let class = self.hir_class_of(hir, base)?;
         let fields = self.hir_class_fields(&class)?;
         let (fname, fty) = fields.get(idx as usize)?;
         (fname == name).then(|| (FieldAt::Slot(idx), fty.clone()))
+    }
+
+    /// `e.f` of a boxed user enum whose record variant names `f`: its
+    /// payload slot, as the AST's `field_index_for` `LoadField`.
+    fn hir_variant_field(&self, ty: &Ty, name: &str) -> Option<(FieldAt, Ty)> {
+        // Inside an arm the scrutinee is narrowed to its variant.
+        let (enum_name, tag) = match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Con(n) | Ty::Sum { name: n, .. } => (n.clone(), None),
+            Ty::Constructor { tag, owner, .. } => match owner.as_ref() {
+                Ty::Con(n) | Ty::Sum { name: n, .. } => (n.clone(), Some(*tag)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if self.checker.ty_is_class(ty)
+            || self.checker.is_class(&enum_name)
+            || self.value_layout(ty) != ValueLayout::Boxed
+            || self.checker.enum_variants(&enum_name).is_none()
+        {
+            return None;
+        }
+        let (variant, idx) = self.checker.field_index_for_tagged(&enum_name, name, tag)?;
+        let (_, fty) = self.checker.payload_tys_for(&enum_name, &variant).get(idx as usize)?.clone();
+        (crate::hir::layout::ty_is_closed(&fty) && self.value_layout(&fty) == ValueLayout::Boxed)
+            .then_some((FieldAt::Slot(u32::from(idx)), fty))
     }
 
     /// `SetField` / read of field `at` of the object on top of the stack.
@@ -2512,7 +2541,7 @@ impl Compiler {
                 if layout != Some(self.value_layout(&fty)) {
                     return Err("field-layout");
                 }
-                let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
+                let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
                 self.hir_check_value(hir, emit, *base, &base_rep)?;
             }
             HirKind::Make {
@@ -3380,7 +3409,7 @@ impl Compiler {
                     self.bytecode.push_load(slot);
                 } else {
                     let (at, _) = self.hir_field(hir, *base, name).expect("planned field");
-                    let base_rep = self.hir_natural(hir, emit, *base).expect("planned field base");
+                    let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).expect("planned field base"));
                     self.hir_value(hir, emit, *base, &base_rep, depth);
                     self.hir_field_op(at, name, false);
                 }
