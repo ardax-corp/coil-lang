@@ -981,6 +981,17 @@ pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bo
     }
 }
 
+/// String `a + b` at depth zero stages both operands through temps when
+/// either holds a `match` (`?`, `??`): it then runs with no operand below
+/// it, as the AST does (`arg_emits_on_self_bytecode`).
+pub fn concat_stages(body: &HirBody, lhs: HirId, rhs: HirId) -> bool {
+    let mut found = false;
+    for id in [lhs, rhs] {
+        visit(body, id, &mut |e| found |= matches!(e.kind, HirKind::Match { .. }));
+    }
+    found
+}
+
 /// A stack-array read the AST lowers as a select over the slots (any index
 /// but an in-range literal): it stores temps, so it counts as a call for
 /// staging (`expr_may_clobber_operand_stack`).
@@ -1175,6 +1186,10 @@ impl Walk<'_> {
                 if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
+                    }
+                    if concat && depth == 0 && concat_stages(body, *lhs, *rhs) {
+                        self.value(*lhs, 0)?;
+                        return self.value(*rhs, 0);
                     }
                     let base = depth + u32::from(concat);
                     self.value(*lhs, base)?;
