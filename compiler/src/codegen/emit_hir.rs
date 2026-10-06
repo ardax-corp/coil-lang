@@ -1594,6 +1594,28 @@ impl Compiler {
                 && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == explicit) => {}
             _ => return Err("callee-arity"),
         }
+        // `Stream.fd()`: the inherent `HostInvoke` thunk takes the stream
+        // and returns the boxed `Result<int, IoError>` (no scheme lists it).
+        if lookup == format!("{}::fd", crate::typechecking::ty::STREAM)
+            && self_layout == Some(ValueLayout::Boxed)
+            && explicit == 0
+            && pair.is_none()
+            && !coro
+            && self.checker.fn_param_tys(&lookup).is_none()
+        {
+            return Ok(HirCall {
+                key,
+                pair,
+                params: vec![ValueLayout::Boxed],
+                ret: ValueLayout::Boxed,
+                method: false,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+            });
+        }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
         // A signature with no declared parameters is `() -> T`.
         if explicit == 0 && param_tys.last().is_some_and(crate::hir::layout::is_unit) {
