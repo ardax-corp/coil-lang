@@ -187,23 +187,23 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let Some(cli) = parse_with::<TestCli>(named(TestCli::command(), "coil test"), args)? else {
         return Ok(Parsed::Help);
     };
-    let (config, test) = assemble(
-        cli.log,
-        cli.opt,
-        cli.hir,
-        cli.grants,
-        cli.roots,
-        cli.seed,
-        cli.no_shuffle,
-        cli.jobs,
-        cli.json,
-        cli.path,
-        cli.fail_fast,
-        cli.show_output,
-        cli.coverage,
-        cli.coverage_out,
-        cli.coverage_per_test,
-    )?;
+    let (config, test) = assemble(RunParts {
+        log: cli.log,
+        opt: cli.opt,
+        hir: cli.hir,
+        grants: cli.grants,
+        roots: cli.roots,
+        seed: cli.seed,
+        no_shuffle: cli.no_shuffle,
+        jobs: cli.jobs,
+        json: cli.json,
+        path: cli.path,
+        fail_fast: cli.fail_fast,
+        show_output: cli.show_output,
+        coverage: cli.coverage,
+        coverage_out: cli.coverage_out,
+        per_test_out: cli.coverage_per_test,
+    })?;
     Ok(Parsed::Run(config, test))
 }
 
@@ -218,23 +218,23 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
     else {
         return Ok(Parsed::MutateHelp);
     };
-    let (config, test) = assemble(
-        cli.log,
-        cli.opt,
-        cli.hir,
-        cli.grants,
-        cli.roots,
-        cli.seed,
-        cli.no_shuffle,
-        cli.jobs,
-        cli.json,
-        cli.path,
-        false,
-        false,
-        false,
-        None,
-        None,
-    )?;
+    let (config, test) = assemble(RunParts {
+        log: cli.log,
+        opt: cli.opt,
+        hir: cli.hir,
+        grants: cli.grants,
+        roots: cli.roots,
+        seed: cli.seed,
+        no_shuffle: cli.no_shuffle,
+        jobs: cli.jobs,
+        json: cli.json,
+        path: cli.path,
+        fail_fast: false,
+        show_output: false,
+        coverage: false,
+        coverage_out: None,
+        per_test_out: None,
+    })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
         Some(list) => parse_operators(&list)?,
@@ -259,7 +259,8 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
     ))
 }
 
-fn assemble(
+/// Shared `coil test` / `coil mutate` options after clap has parsed them.
+struct RunParts {
     log: LogFlags,
     opt: OptLevelFlags,
     hir: HirFlags,
@@ -275,34 +276,48 @@ fn assemble(
     coverage: bool,
     coverage_out: Option<PathBuf>,
     per_test_out: Option<PathBuf>,
-) -> Result<(ReportConfig, Box<TestOptions>), String> {
-    if json && (log.log_json || log.log_lsp) {
+}
+
+fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
+    if parts.json && (parts.log.log_json || parts.log.log_lsp) {
         return Err("--json cannot be combined with --log-json or --log-lsp".into());
     }
-    let config =
-        ReportConfig::from_cli_flags(log.log_json, log.log_lsp).map_err(|e| e.to_string())?;
+    let config = ReportConfig::from_cli_flags(parts.log.log_json, parts.log.log_lsp)
+        .map_err(|e| e.to_string())?;
     let env_seed = std::env::var(SEED_ENV).ok();
-    let order = resolve_order(seed, no_shuffle, env_seed.as_deref(), fresh_seed)?;
+    let order = resolve_order(
+        parts.seed,
+        parts.no_shuffle,
+        env_seed.as_deref(),
+        fresh_seed,
+    )?;
     Ok((
         config,
         Box::new(TestOptions {
-            root: PathBuf::from(path.unwrap_or_else(|| TESTS_DIR.to_string())),
-            fail_fast,
+            root: PathBuf::from(parts.path.unwrap_or_else(|| TESTS_DIR.to_string())),
+            fail_fast: parts.fail_fast,
             order,
-            jobs: jobs.unwrap_or_else(default_jobs),
-            show_output,
-            coverage: (coverage || coverage_out.is_some() || per_test_out.is_some()).then(|| {
-                CoverageOptions {
-                    lcov_out: coverage_out.unwrap_or_else(|| PathBuf::from(DEFAULT_LCOV_OUT)),
-                    per_test_out,
-                    project_root: std::env::current_dir().unwrap_or_default(),
-                }
+            jobs: parts.jobs.unwrap_or_else(default_jobs),
+            show_output: parts.show_output,
+            coverage: (parts.coverage
+                || parts.coverage_out.is_some()
+                || parts.per_test_out.is_some())
+            .then(|| CoverageOptions {
+                lcov_out: parts
+                    .coverage_out
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_LCOV_OUT)),
+                per_test_out: parts.per_test_out,
+                project_root: std::env::current_dir().unwrap_or_default(),
             }),
-            opt_level: opt.level(),
-            hir: hir.hir,
-            grants: grants.into_grants(),
-            extra_roots: roots.root,
-            report: if json { Report::Json } else { Report::Human },
+            opt_level: parts.opt.level(),
+            hir: parts.hir.hir,
+            grants: parts.grants.into_grants(),
+            extra_roots: parts.roots.root,
+            report: if parts.json {
+                Report::Json
+            } else {
+                Report::Human
+            },
         }),
     ))
 }
