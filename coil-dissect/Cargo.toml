@@ -14,6 +14,8 @@ parser = { path = "../parser" }
 compiler = { path = "../compiler", default-features = false, features = ["dissect"] }
 reporting = { path = "../reporting" }
 coil-cli = { path = "../coil-cli", default-features = false }
+coil-args = { path = "../coil-args" }
+clap = { version = "4.5", features = ["derive"] }
 
 [features]
 default = []
