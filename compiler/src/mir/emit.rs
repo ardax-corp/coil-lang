@@ -64,15 +64,7 @@ pub fn emit_dense(
     // Sibling / mutual CALL targets keep their official entry ids. Local
     // SSA labels must not reuse those ids or to_flat treats the TailCall
     // as intra-body (B2 even/odd break).
-    let reserved: HashSet<u32> = func
-        .blocks
-        .iter()
-        .flat_map(|b| b.insts.iter())
-        .filter_map(|inst| match inst {
-            MirInst::Call { target, .. } if Some(*target) != entry_label => Some(target.0),
-            _ => None,
-        })
-        .collect();
+    let reserved = foreign_targets(func, entry_label);
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
@@ -267,7 +259,24 @@ pub(super) fn dense_sidecars(
     )
 }
 
-fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
+/// Labels of other functions this body calls or starts. A forward callee's
+/// entry can be any id above this body's own, so block labels skip them.
+pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> HashSet<u32> {
+    func.blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter_map(|inst| match inst {
+            MirInst::Call { target, .. }
+            | MirInst::Alloc {
+                kind: MirAllocKind::Coro { target },
+                ..
+            } if Some(*target) != entry_label => Some(target.0),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
     while reserved.contains(next) {
         *next = next.saturating_add(1);
     }

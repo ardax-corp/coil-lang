@@ -11,8 +11,8 @@ use common::{Byte, DebugLoc, Instruction};
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
-    coalesce_latch_overwrite, emit_cond_jumps, il_for_alloc, is_fallthrough, max_label_hint,
-    paired_alloc_dest, term_cmp_dest,
+    coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
+    max_label_hint, paired_alloc_dest, take_label, term_cmp_dest,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -48,18 +48,15 @@ pub fn emit_lir(
         .map(|(i, _)| regs[i])
         .max()
         .unwrap_or(0);
+    // As `emit_mir`: block labels skip the entries this body calls.
+    let reserved = foreign_targets(func, entry_label);
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
         if b.id == func.entry {
-            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| {
-                let l = Label(next_label);
-                next_label += 1;
-                l
-            });
+            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| take_label(&mut next_label, &reserved));
         } else {
-            block_lab[b.id.index()] = Label(next_label);
-            next_label += 1;
+            block_lab[b.id.index()] = take_label(&mut next_label, &reserved);
         }
     }
 
@@ -119,6 +116,7 @@ pub fn emit_lir(
             scratch,
             block_lab: &block_lab,
             next_label: &mut next_label,
+            reserved: &reserved,
             pool,
             loc: term_loc,
         })?;
@@ -1461,6 +1459,7 @@ struct EmitTermArgs<'args> {
     scratch: u8,
     block_lab: &'args [Label],
     next_label: &'args mut u32,
+    reserved: &'args std::collections::HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
 }
@@ -1475,6 +1474,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         scratch,
         block_lab,
         next_label,
+        reserved,
         pool,
         loc,
     } = args;
@@ -1537,8 +1537,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 // emitted one, so the taken path always jumps over them, even
                 // when `taken` is the layout successor (#548: the true path
                 // fell into the false edge's moves and reached `not_taken`).
-                let f_lab = Label(*next_label);
-                *next_label += 1;
+                let f_lab = take_label(next_label, reserved);
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: f_lab,
