@@ -95,10 +95,19 @@ struct HirInstanceCall {
     args: Vec<Ty>,
     /// The type the receiver is `BoxValue`d as.
     recv_box: Option<Ty>,
-    /// A bound method call in a mono clone, as `try_emit_ground_bound_method`:
-    /// the method, and per argument the type to `BoxValue` it as; every
-    /// argument goes through a temp.
-    ground: Option<(String, Vec<Option<Ty>>)>,
+    /// A direct call to a ground instance's method from a bound call in a
+    /// mono clone or a function-style `m(x, ..)`.
+    ground: Option<HirGround>,
+}
+
+/// The arguments of a ground instance call, as the AST pushes them.
+#[derive(Clone)]
+struct HirGround {
+    method: String,
+    /// Per argument: the type to `BoxValue` it as.
+    boxed: Vec<Option<Ty>>,
+    /// Every argument goes through a temp.
+    stage: bool,
 }
 
 /// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
@@ -591,6 +600,9 @@ impl Compiler {
             || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
         {
             return Err("callee-trait");
+        }
+        if let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
+            return Ok(call);
         }
         let overload = self.sidecar_overload(node.node, start, end);
         if overload.is_some_and(|(_, rest, _)| rest) || self.checker.partial_fill_at(start, end).is_some() {
@@ -1238,10 +1250,86 @@ impl Compiler {
                 class: instance.class.clone(),
                 args: lookup,
                 recv_box: None,
-                ground: Some((method.to_string(), unbox)),
+                ground: Some(HirGround {
+                    method: method.to_string(),
+                    boxed: unbox,
+                    stage: true,
+                }),
             })),
             ranges: Vec::new(),
         })
+    }
+
+    /// A ground function-style trait call `m(x, ..)`: the typechecker
+    /// discharged the instance into `sidecar_dicts` (only when no function or
+    /// local has that name), called directly as `compile_call_expr` does.
+    fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str) -> Result<Option<HirCall>, &'static str> {
+        let node = hir.expr(call);
+        let (start, end) = node.span;
+        if name.contains("::") || self.lookup_slot(name).is_some() || self.functions.contains_key(name) {
+            return Ok(None);
+        }
+        let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let Some((class, inst_args, fqn)) = self
+            .sidecar_dicts(node.node, start, end)
+            .and_then(|dicts| dicts.first())
+            .and_then(|instance| {
+                let fqn = instance.method_fqns.get(name)?.clone();
+                known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
+            })
+        else {
+            return Ok(None);
+        };
+        let HirKind::Call { args, .. } = &node.kind else {
+            return Err("callee");
+        };
+        if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
+            return Err("callee-trait");
+        }
+        // Words pass as the AST compiles them; enum layouts may differ.
+        let word = |id: HirId| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Enum) | None => Err("callee-trait"),
+                Some(_) => Ok(self.value_layout(ty)),
+            }
+        };
+        let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
+        let ret = word(call)?;
+        // Box the positions the instance entry unboxes, except heap words.
+        let unbox = self.instance_method_unbox_tys(&class, name, &inst_args);
+        let boxed = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| {
+                let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+                (unbox.get(i).is_some_and(Option::is_some)
+                    && crate::typechecking::value_layout::word_kind(&self.checker, &ty) != common::WORD_POINTER)
+                    .then(|| Self::show_lookup_ty_for_instance(&ty))
+            })
+            .collect();
+        let stage = args.iter().any(|&arg| lower::clobbers(hir, &HashMap::new(), arg));
+        Ok(Some(HirCall {
+            key: fqn,
+            pair: None,
+            params,
+            ret,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: Some(Box::new(HirInstanceCall {
+                class,
+                args: inst_args,
+                recv_box: None,
+                ground: Some(HirGround {
+                    method: name.to_string(),
+                    boxed,
+                    stage,
+                }),
+            })),
+            ranges: Vec::new(),
+        }))
     }
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
@@ -3078,22 +3166,25 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
-                let (method, unbox) = inst.ground.clone().expect("ground call");
+                let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
                 let mut temps = Vec::with_capacity(args.len());
                 for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                    self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
-                    if let Some(Some(ty)) = unbox.get(i) {
+                    let at = if stage { depth } else { depth + i as u32 };
+                    self.hir_value(hir, emit, arg, &Rep::Word(param), at);
+                    if let Some(Some(ty)) = boxed.get(i) {
                         Self::emit_box_if_needed(&mut self.bytecode, ty);
                     }
-                    self.expr_depth = depth;
-                    let tmp = self.alloc_temp_slot();
-                    self.bytecode.push_store_pop(tmp);
-                    temps.push(tmp);
+                    if stage {
+                        self.expr_depth = depth;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
                 }
                 for &tmp in &temps {
                     self.bytecode.push_load(tmp);
                 }
-                let mut arity = temps.len() as u32;
+                let mut arity = args.len() as u32;
                 let (start, end) = hir.expr(id).span;
                 let mut bc = CodeBuf::new();
                 if self.emit_call_instance_dict(&mut bc, (&inst.class, &method, &key), &inst.args, start..end) {
