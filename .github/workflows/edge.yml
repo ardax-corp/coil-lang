@@ -1,0 +1,98 @@
+name: Edge
+
+# One rolling pre-release, `edge`, with the coil toolkit per host triple (the
+# same archives release-binaries builds for v* tags). It is rebuilt after every
+# green CI run on main: the `edge` tag moves to that commit and every asset is
+# replaced. No other tags or releases are made.
+#
+# Consumers: spool (`./bootstrap.sh --channel edge`) and package CI
+# (`.github/actions/setup-coil`) install from this release instead of building
+# coil from source.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# A newer main build supersedes one still running.
+concurrency:
+  group: edge
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The CI run's commit (workflow_run), or the dispatched ref's.
+  EDGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  build:
+    # Only pushes to main: a pull request whose head branch is named `main`
+    # also reports branch `main` here.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+    # release-binaries' tag-only `release` job asks for contents: write; a
+    # called workflow cannot ask for more than its caller grants, even for a
+    # job that is skipped here.
+    permissions:
+      contents: write
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EDGE_SHA }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Move the edge tag
+        run: |
+          git tag -f edge "$EDGE_SHA"
+          git push -f origin refs/tags/edge
+
+      - name: Update the edge release
+        run: |
+          notes="Rolling pre-release of coil, rebuilt from main after every green CI run.
+
+          Commit: ${EDGE_SHA}
+          Built: $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          Not a stable release: the binaries and this tag are replaced on every build.
+          \`coil-<triple>.tar.gz\` (\`.zip\` on Windows) holds the whole toolkit (coil, coil-test, coil-fmt, coil-lsp, coil-debug, coil-dissect, coil-embed) under one directory; \`coil-embed-<triple>\` is the standalone packaging runner. \`SHA256SUMS\` lists their checksums."
+          if gh release view edge >/dev/null 2>&1; then
+            gh release edit edge --prerelease --title "edge" --notes "$notes"
+          else
+            gh release create edge --prerelease --verify-tag --title "edge" --notes "$notes"
+          fi
+          gh release upload edge dist/* --clobber
+          # Drop assets this build did not produce (e.g. a removed target).
+          gh release view edge --json assets -q '.assets[].name' | while read -r name; do
+            if [[ ! -e "dist/$name" ]]; then
+              gh release delete-asset edge "$name" --yes
+            fi
+          done
