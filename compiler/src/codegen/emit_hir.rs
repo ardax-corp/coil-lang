@@ -1417,11 +1417,16 @@ impl Compiler {
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
-        // Words pass as the AST compiles them; enum layouts may differ.
+        // Words pass as the AST compiles them. An enum passes boxed as the
+        // instance entry takes it; a niche layout may differ.
         let word = |id: HirId| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
-                Some(ValueClass::Enum) | None => Err("callee-trait"),
+                None => Err("callee-trait"),
+                Some(ValueClass::Enum) => match self.value_layout(ty) {
+                    ValueLayout::Boxed => Ok(ValueLayout::Boxed),
+                    _ => Err("callee-trait"),
+                },
                 Some(_) => Ok(self.value_layout(ty)),
             }
         };
