@@ -1185,10 +1185,25 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        // `T::m(..)` looks its instance up from the type parameter; `len`
-        // may be structural.
+        if !self.compiling_mono_clone {
+            return Err("callee-trait");
+        }
+        // `T::m(..)` in a clone: `T` is concrete here, so its instance is
+        // called directly (the class parameter may be return-only).
+        if let Some((owner, member)) = name.rsplit_once("::")
+            && let Some(concrete) = self.mono_type_param_ty(owner)
+        {
+            let lookup = vec![Self::show_lookup_ty_for_instance(&concrete)];
+            let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+            if let Some(inst) = self.checker.generics().find_instance_relaxed(&hint.class, &lookup)
+                && let Some(fqn) = inst.method_fqns.get(member).filter(|f| known(f))
+            {
+                return self.hir_ground_direct(hir, call, inst.class.clone(), lookup, fqn.clone(), member);
+            }
+        }
+        // `len` may be structural.
         let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
-        if !self.compiling_mono_clone || name.contains("::") || method == "len" {
+        if name.contains("::") || method == "len" {
             return Err("callee-trait");
         }
         let arg_tys = args
@@ -1266,21 +1281,49 @@ impl Compiler {
     fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str) -> Result<Option<HirCall>, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if name.contains("::") || self.lookup_slot(name).is_some() || self.functions.contains_key(name) {
-            return Ok(None);
-        }
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        // `Owner::m(..)` reaches a static trait method only when it names
+        // no variant, static field or static method (`compile_construct_expr`).
+        let method = match name.rsplit_once("::") {
+            Some((owner, member)) => {
+                let fqn = self.class_member_fqn(owner, member);
+                if self.checker.tag_for(owner, member).is_some()
+                    || self.checker.static_slot_index(&fqn).is_some()
+                    || known(&fqn)
+                {
+                    return Ok(None);
+                }
+                member
+            }
+            None if self.lookup_slot(name).is_some() || self.functions.contains_key(name) => return Ok(None),
+            None => name,
+        };
         let Some((class, inst_args, fqn)) = self
             .sidecar_dicts(node.node, start, end)
             .and_then(|dicts| dicts.first())
             .and_then(|instance| {
-                let fqn = instance.method_fqns.get(name)?.clone();
+                let fqn = instance.method_fqns.get(method)?.clone();
                 known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
             })
         else {
             return Ok(None);
         };
-        let HirKind::Call { args, .. } = &node.kind else {
+        self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
+    }
+
+    /// A direct call to instance method `fqn`, as the AST's function-style
+    /// and static trait calls: arguments in order, the positions the entry
+    /// unboxes boxed, staged only when one may clobber the operand stack.
+    fn hir_ground_direct(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        class: String,
+        inst_args: Vec<Ty>,
+        fqn: String,
+        method: &str,
+    ) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
@@ -1297,7 +1340,11 @@ impl Compiler {
         let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
         let ret = word(call)?;
         // Box the positions the instance entry unboxes, except heap words.
-        let unbox = self.instance_method_unbox_tys(&class, name, &inst_args);
+        let is_default = Self::is_default_method_fqn(&class, method, &fqn);
+        if self.trait_method_boundary_sig(&class, method, &inst_args, is_default).is_some() {
+            return Err("callee-trait");
+        }
+        let unbox = self.instance_method_unbox_tys(&class, method, &inst_args);
         let boxed = args
             .iter()
             .enumerate()
@@ -1309,7 +1356,7 @@ impl Compiler {
             })
             .collect();
         let stage = args.iter().any(|&arg| lower::clobbers(hir, &HashMap::new(), arg));
-        Ok(Some(HirCall {
+        Ok(HirCall {
             key: fqn,
             pair: None,
             params,
@@ -1323,13 +1370,13 @@ impl Compiler {
                 args: inst_args,
                 recv_box: None,
                 ground: Some(HirGround {
-                    method: name.to_string(),
+                    method: method.to_string(),
                     boxed,
                     stage,
                 }),
             })),
             ranges: Vec::new(),
-        }))
+        })
     }
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
