@@ -1823,8 +1823,10 @@ impl Compiler {
                 boxed.push(None);
                 continue;
             }
-            // Only immediates and plain objects box to a tagged word.
-            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) {
+            // Immediates, plain objects and heap enums box to a tagged
+            // word (`BoxValue Instance` for an enum); a niche or pair enum
+            // word does not.
+            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
@@ -1850,7 +1852,10 @@ impl Compiler {
             }
         }
         let unbox = (self.generic_return_is_boxed(lookup) && !open(&ret_ty)).then(|| ret_ty.clone());
-        if unbox.is_some() && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum) {
+        if unbox.is_some()
+            && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
+            && !self.hir_boxed_enum_word(&ret_ty)
+        {
             return Err("callee-generic");
         }
         Ok(HirGeneric {
@@ -1862,6 +1867,11 @@ impl Compiler {
             unbox,
             forwarded,
         })
+    }
+
+    /// An enum whose word is the heap object (no pointer niche).
+    fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
+        self.value_layout(ty) == ValueLayout::Boxed
     }
 
     /// Push `generic`'s dictionaries after the arguments; their count.
