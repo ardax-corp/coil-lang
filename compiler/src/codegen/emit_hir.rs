@@ -849,6 +849,11 @@ impl Compiler {
         if emit.calls.values().any(|c| !c.ranges.is_empty()) && !emit.box_at.is_empty() {
             return Err("range-args-boxes");
         }
+        // Calls above stack-array boxes do not stage, so a `format` that
+        // shows through temps could run above live operands.
+        if !emit.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
+            return Err("format-show");
+        }
         for expr in &hir.exprs {
             if let HirKind::Return(Some(value)) = expr.kind
                 && let Some(call) = emit.calls.get(&value.0)
@@ -883,7 +888,8 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if name == "len" || self.checker.bare_construct_at(start, end).is_some() {
+        let user_len = name == "len" && matches!(&node.kind, HirKind::Call { args, .. } if args.len() == 1 && lower::user_len(hir, &self.checker, args[0]));
+        if (name == "len" && !user_len) || self.checker.bare_construct_at(start, end).is_some() {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
@@ -1885,12 +1891,6 @@ impl Compiler {
         })
     }
 
-    /// Whether `%v` formats `ty` inline (a tuple or record), not with a
-    /// `Show::show` call.
-    fn show_through_temps(ty: &Ty) -> bool {
-        matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Tuple(_) | Ty::Record { .. })
-    }
-
     /// The typechecker's linear-algebra record for call `call`.
     fn hir_linear_algebra(&self, hir: &HirBody, call: HirId) -> Option<crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
         let node = hir.expr(call);
@@ -1929,9 +1929,9 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows through temps, which need an
-                    // empty operand stack below them.
-                    if !crate::hir::layout::ty_is_closed(&ty) || Self::show_through_temps(&ty) {
+                    // A tuple or record shows through temps at depth zero
+                    // ([`lower::shows_through_temps`]).
+                    if !crate::hir::layout::ty_is_closed(&ty) {
                         return Err("format-show");
                     }
                     continue;
@@ -2524,7 +2524,7 @@ impl Compiler {
             return None;
         };
         let is_len = match callee {
-            Callee::Named { name, .. } => name == "len",
+            Callee::Named { name, .. } => name == "len" && !lower::user_len(hir, &self.checker, *arg),
             Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
             Callee::Value(_) => false,
         };
@@ -3166,6 +3166,24 @@ impl Compiler {
             return None;
         }
         Some((class, fields.into_iter().map(|(_, ty)| ty).collect()))
+    }
+
+    /// `new C(args).f` of a class with no `drop`: the arguments, their
+    /// field types, and the index of `f`.
+    fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
+        let HirKind::Make {
+            kind: MakeKind::Class(name),
+            args,
+        } = &hir.expr(base).kind
+        else {
+            return None;
+        };
+        if self.checker.class_has_drop(name) {
+            return None;
+        }
+        let (class, tys) = self.hir_new_layout(hir, base)?;
+        let at = self.context.classes.get(&class)?.iter().position(|(f, _)| f == field)?;
+        Some((args.clone(), tys, at))
     }
 
     /// The field-slot words of a planned `new C(args)`.
@@ -4483,6 +4501,21 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
                     self.bytecode.push_load(slot);
+                } else if let Some((args, tys, at)) = self.hir_field_of_new(hir, *base, name) {
+                    // As the AST's `try_emit_direct_class_field_access`: the
+                    // object is never observed, so each argument runs in
+                    // order into a temp and the field's is read back.
+                    debug_assert_eq!(depth, 0);
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (&arg, ty) in args.iter().zip(&tys) {
+                        let want = Rep::Word(self.value_layout(ty));
+                        self.hir_value(hir, emit, arg, &want, 0);
+                        self.expr_depth = 0;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    self.bytecode.push_load(temps[at]);
                 } else {
                     let (at, _) = self.hir_field(hir, *base, name).expect("planned field");
                     let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).expect("planned field base"));
@@ -4545,7 +4578,8 @@ impl Compiler {
                         // Staged arguments (`lower::stages_args`) run into
                         // temps first, then the format string goes under
                         // them, as the AST's `emit_call_args_stage_all`.
-                        let staged = emit.boxes.is_empty() && lower::stages_args(hir, args, depth);
+                        let staged = lower::shows_through_temps(hir, &self.checker, hir.expr(id))
+                            || (emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth));
                         let mut temps = Vec::new();
                         if staged {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
@@ -4579,7 +4613,7 @@ impl Compiler {
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
                     }
                     HirBuiltin::Bound { dict, method } => {
-                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
                             for tmp in self.hir_stage_words(hir, emit, args, &params) {
                                 self.bytecode.push_load(tmp);
                             }
@@ -4596,7 +4630,7 @@ impl Compiler {
                             .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
                     }
                     HirBuiltin::Partial { entry, mask, operand } => {
-                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
                             for tmp in self.hir_stage_words(hir, emit, args, &params) {
                                 self.bytecode.push_load(tmp);
                             }
@@ -4637,7 +4671,7 @@ impl Compiler {
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
                         // ones run into temps before it.
-                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
                             for &tmp in &temps {
@@ -4821,7 +4855,7 @@ impl Compiler {
                     // its attempt back (the temps stay allocated).
                     self.bytecode.truncate(mark);
                 }
-                if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
                     // Each argument (one or two words) to temps, then
                     // reloaded in order, as the AST's `emit_call_args_stage_all`.
                     let mut temps = Vec::with_capacity(args.len());

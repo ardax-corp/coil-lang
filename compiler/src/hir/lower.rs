@@ -658,6 +658,15 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
 }
 
+/// Whether `len(x)` dispatches to a user `Length` instance: `x` has a
+/// known type that is not structural, so it is a plain call.
+pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
+    body.expr(arg).ty.as_ref().is_some_and(|t| {
+        let t = apply_ty_prune(checker.subst(), t);
+        super::layout::ty_is_closed(&t) && !Checker::is_structural_len_ty_for_codegen(&t)
+    })
+}
+
 /// Whether `x.len()` is the structural `len(x)` (not a `Vec` method).
 pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
     body.expr(recv).ty.as_ref().is_some_and(|t| {
@@ -750,7 +759,7 @@ pub fn push_stages(body: &HirBody, stack: &HashMap<u32, usize>, value: HirId) ->
 /// operator through temps (a user type's instance, an aggregate), or one
 /// after the first holds a `match` (`?`, `??`), which binds slots with no
 /// operand below it.
-pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
+pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32) -> bool {
     depth == 0
         && args.iter().enumerate().any(|(i, &arg)| {
             let mut found = false;
@@ -758,9 +767,34 @@ pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
                 found |= matches!(
                     &e.kind,
                     HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
-                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }));
+                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }))
+                    || shows_through_temps(body, checker, e);
             });
             found
+        })
+}
+
+/// Whether `e` is a `format` call with a tuple or record argument: `%v`
+/// shows it field by field through temps, which need an empty operand
+/// stack below them, so the call stages its arguments and runs at depth
+/// zero (the AST stages around every call).
+pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr) -> bool {
+    use crate::typechecking::StringBuiltin;
+    let HirKind::Call {
+        callee: Callee::Named { name, .. },
+        args,
+    } = &e.kind
+    else {
+        return false;
+    };
+    let format = checker
+        .string_fn_in_scope(name)
+        .or_else(|| name.strip_prefix("string::").and_then(StringBuiltin::from_name));
+    matches!(format, Some(StringBuiltin::Format))
+        && args.iter().skip(1).any(|&a| {
+            body.expr(a).ty.as_ref().is_some_and(|t| {
+                matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Tuple(_) | Ty::Record { .. })
+            })
         })
 }
 
@@ -823,6 +857,22 @@ fn pure_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         HirKind::Local(_) => true,
         HirKind::Field { base, .. } => pure_base(body, *base),
+        _ => false,
+    }
+}
+
+/// A field store's base that only reads: `x`, `x.f`, or `x[i]` of such a
+/// base with a [`pure_index`] (`xs[0].b`). The AST pushes it above the
+/// value, and a compound store builds it twice.
+fn read_base(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Local(_) => true,
+        HirKind::Field { base, .. } => read_base(body, *base),
+        HirKind::Index {
+            base,
+            index,
+            kind: IndexKind::Array | IndexKind::Tuple,
+        } => read_base(body, *base) && pure_index(body, *index),
         _ => false,
     }
 }
@@ -1324,7 +1374,11 @@ pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
 pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bool {
     match &body.expr(rhs).kind {
         HirKind::Call { .. } | HirKind::Match { .. } | HirKind::Make { .. } => true,
-        HirKind::Index { .. } => stack_select(body, stack, body.expr(rhs)),
+        // Through field and index reads, as `expr_may_clobber_operand_stack`.
+        HirKind::Index { base, index, .. } => {
+            stack_select(body, stack, body.expr(rhs)) || stages_rhs(body, stack, *base) || stages_rhs(body, stack, *index)
+        }
+        HirKind::Field { base, .. } => stages_rhs(body, stack, *base),
         // An operator on a user type or aggregate stages through temps.
         HirKind::Bin {
             op: BinOp::Overloaded(_), ..
@@ -1720,7 +1774,7 @@ impl Walk<'_> {
             HirKind::Call {
                 callee: Callee::Named { name, .. },
                 args,
-            } if name == "len" && args.len() == 1 => self.len(args[0], depth),
+            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0], depth),
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,
@@ -1735,7 +1789,11 @@ impl Walk<'_> {
                 // A `new` argument leaves its object in a temp on top of the
                 // stack, so every argument stages through a temp, as the AST
                 // does when one may clobber the operand stack.
-                self.args(args, depth, stages_args(body, args, depth))
+                let shows = shows_through_temps(body, self.checker, body.expr(id));
+                if shows && depth != 0 {
+                    return Err("format-show");
+                }
+                self.args(args, depth, shows || stages_args(body, self.checker, args, depth))
             }
             // `recv.m(args)` stages the receiver and each argument through
             // temps at depth zero, as the AST codegen does.
@@ -1825,8 +1883,10 @@ impl Walk<'_> {
                 if self.class(*base) != Some(ValueClass::Enum) {
                     self.object(*base)?;
                 }
-                // `new C(..).f` reads the argument directly in the AST.
-                if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
+                // `new C(..).f` stages each argument through a temp and
+                // reads the field's (codegen), or builds the object, which
+                // runs at depth zero either way.
+                if depth != 0 && matches!(body.expr(*base).kind, HirKind::Make { .. }) {
                     return Err("field-of-new");
                 }
                 self.value(*base, depth)
@@ -2171,8 +2231,7 @@ impl Walk<'_> {
                     }
                     // `base.f = v`: the value, then the base on top of it.
                     HirKind::Field { base, .. } => {
-                        // The AST runs an impure base before the value.
-                        if !pure_base(body, *base) {
+                        if !read_base(body, *base) {
                             return Err("assign-base");
                         }
                         self.word(*place)?;
