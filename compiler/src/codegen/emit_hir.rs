@@ -710,10 +710,15 @@ impl Compiler {
                 // Tests return their `Result<(), string>` boxed, as the AST does.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
                 // A mono clone returns a generic `Option` / `Result` in the
-                // open type's layout; each `return` converts to it.
+                // open type's layout; each `return` converts to it. A bare
+                // `T` result is the concrete layout at its callers.
                 let boundary = self.compiling_mono_clone
                     && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
-                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum);
+                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
+                    && self
+                        .compiling_fn_return_ty()
+                        .and_then(|ty| self.generic_enum_layout(&ty))
+                        == Some(layout);
                 if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
