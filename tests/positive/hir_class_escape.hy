@@ -1,56 +1,50 @@
-// A class local that escapes (passed on, returned, a method receiver or
-// reassigned) lowers from HIR as an object from the start, unless its
-// fields are written first (`passed` stays on the AST).
-
-class Point {
-    pub x: int,
-    pub y: int,
+// A class local whose fields are written before it escapes keeps them in
+// frame slots and is boxed once, at the statement (or block tail) where it
+// first escapes, as the AST's unboxed class local.
+class Pair {
+    pub a: int,
+    pub b: int,
 }
 
-impl Point {
-    pub fn sum() -> int {
-        return self.x + self.y;
+fn sum(Pair p) -> int {
+    return p.a + p.b;
+}
+
+fn bump(Pair p) {
+    p.a = p.a + 100;
+}
+
+fn chain(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        let p = new Pair(i, 0);
+        p.b = i * 2;
+        acc = acc + sum(p);
+        i = i + 1;
     }
-
-    pub fn shift(int d) {
-        self.x = self.x + d;
-    }
+    return acc;
 }
 
-fn norm1(Point p) -> int {
-    return p.x + p.y;
+fn shared() -> int {
+    let p = new Pair(1, 2);
+    p.a = 10;
+    bump(p);
+    p.b = p.b + 5;
+    return p.a + p.b;
 }
 
-fn passed(int a) -> int {
-    let p = new Point(a, 2);
-    p.y = p.y * 10;
-    return norm1(p);
+// The last statement of a test body is its block tail.
+test("fields written before an escape in the tail") {
+    let p = new Pair(1, 2);
+    p.a = 5;
+    assert(sum(p) == 7)?;
 }
 
-fn returned(int a) -> Point {
-    let p = new Point(a, a + 1);
-    return p;
+test("writes after the escape go through the box") {
+    assert(shared() == 117)?;
 }
 
-fn receiver(int a) -> int {
-    let p = new Point(a, 1);
-    p.shift(5);
-    return p.sum() + p.x;
-}
-
-fn reassigned(int a) -> int {
-    let p = new Point(a, 0);
-    if a > 2 {
-        p = new Point(100, 1);
-    }
-    return p.x + p.y;
-}
-
-test("escaping class locals lower") {
-    assert(passed(3) == 23)?;
-    let r = returned(4);
-    assert(r.x == 4 && r.y == 5)?;
-    assert(receiver(2) == 15)?;
-    assert(reassigned(1) == 1)?;
-    assert(reassigned(5) == 101)?;
+test("escape in a loop") {
+    assert(chain(4) == 18)?;
 }
