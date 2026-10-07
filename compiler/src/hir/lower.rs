@@ -141,7 +141,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         }
         // A monomorphic function value (closure, partial, `fn` object):
         // one word, only moved and called through `CallIndirect`.
-        Ty::Fun(..) if fun_words(checker, ty, seen, true) => Some(ValueClass::Opaque),
+        Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
@@ -157,10 +157,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
 
 /// A closed function type whose parameters and result are plain words:
 /// no enum (its layout may be niche or a pair), no unit, no type variable.
-/// With `enum_ret`, the result may also be a closed one-word enum: the
-/// function is still one word, but a call through it is not
-/// ([`indirect_callee`] asks without it).
-fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, enum_ret: bool) -> bool {
+/// The result may also be a closed one-word enum, which a call through the
+/// function returns as that word.
+fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
     let plain = |t: &Ty, seen: &mut Vec<String>| {
         (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
             && matches!(
@@ -173,8 +172,7 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, enum_ret: bool)
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
             let one_word_enum = |t: &Ty, seen: &mut Vec<String>| {
-                enum_ret
-                    && super::layout::ty_is_closed(t)
+                super::layout::ty_is_closed(t)
                     && classify_in(checker, t, seen) == Some(ValueClass::Enum)
                     && super::layout::of(checker, t).words() == 1
             };
@@ -1182,7 +1180,7 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         .as_ref()
         .is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
-            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new(), false)
+            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new())
         })
     {
         return false;
