@@ -2174,11 +2174,17 @@ impl Compiler {
                 return Err("callee-arity");
             }
         }
-        // `Stream.fd()`: the inherent `HostInvoke` thunk takes the stream
-        // and returns the boxed `Result<int, IoError>` (no scheme lists it).
-        if lookup == format!("{}::fd", crate::typechecking::ty::STREAM)
+        // `Stream.fd()` / `.park()` / `.attach(ptr, read, write, shutdown,
+        // free)`: the inherent `HostInvoke` thunks (`emit_stream_method_thunks`)
+        // take the stream and `int` words and return the boxed
+        // `Result<int, IoError>`, the unit niche or the heap niche (no
+        // scheme lists them).
+        let stream_thunk = [("fd", 0, ValueLayout::Boxed), ("park", 0, ValueLayout::NicheUnitResult), ("attach", 5, ValueLayout::NicheResult)]
+            .into_iter()
+            .find(|(method, _, _)| lookup == format!("{}::{method}", crate::typechecking::ty::STREAM));
+        if let Some((_, words, ret)) = stream_thunk
             && self_layout == Some(ValueLayout::Boxed)
-            && explicit == 0
+            && explicit == words
             && pair.is_none()
             && !coro
             && self.checker.fn_param_tys(&lookup).is_none()
