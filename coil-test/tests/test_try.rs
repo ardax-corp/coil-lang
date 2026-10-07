@@ -32,18 +32,22 @@ test("none") {
 "#,
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_coil-test"))
-        .args(["--no-shuffle", "-j", "1"])
-        .arg(&root)
-        .output()
-        .expect("spawn coil-test");
-    let err = String::from_utf8_lossy(&out.stderr);
-    for want in [
-        "> Test \"io\" failed: `?` got Err(NotFound)",
-        "> Test \"none\" failed: `?` got None",
-    ] {
-        assert!(err.contains(want), "expected {want:?} in stderr: {err}");
+    // The HIR lowering fails the case the same way.
+    for mode in [&[][..], &["--hir"][..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_coil-test"))
+            .args(mode)
+            .args(["--no-shuffle", "-j", "1"])
+            .arg(&root)
+            .output()
+            .expect("spawn coil-test");
+        let err = String::from_utf8_lossy(&out.stderr);
+        for want in [
+            "> Test \"io\" failed: `?` got Err(NotFound)",
+            "> Test \"none\" failed: `?` got None",
+        ] {
+            assert!(err.contains(want), "expected {want:?} in stderr ({mode:?}): {err}");
+        }
+        assert_eq!(out.status.code(), Some(1));
     }
-    assert_eq!(out.status.code(), Some(1));
     let _ = std::fs::remove_dir_all(&root);
 }

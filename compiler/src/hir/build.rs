@@ -1264,8 +1264,29 @@ impl<'c, 'm> Cx<'c, 'm> {
         let x = b.temp("ok", ok_ty.clone());
         let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
         let hit_body = self.synth(b, span, HirKind::Local(x), ok_ty);
+        // In a test body the miss arm fails the case with a message, as
+        // the AST's `emit_test_try` (#628).
+        let test_try = self.checker.test_try_at(span.0, span.1).cloned();
         // The miss arm re-wraps the error in the function's own return type.
-        let (miss_pat, miss_val) = if enum_name == common::BUILTIN_OPTION_ENUM {
+        let (miss_pat, miss_val) = if let Some(kind) = test_try {
+            use crate::typechecking::TestTry;
+            let ret = b.body.ret.clone();
+            let (pat, text) = match kind {
+                TestTry::NoneValue => (
+                    self.variant_pat(enum_name, miss, HirPatFields::Unit),
+                    self.synth(b, span, HirKind::Lit(Lit::Str("`?` got None".into())), Some(coil_ty::string())),
+                ),
+                TestTry::ShowErr(err_ty) => {
+                    let e = b.temp("err", Some(err_ty.clone()));
+                    let read = self.synth(b, span, HirKind::Local(e), Some(err_ty));
+                    let fmt = self.synth(b, span, HirKind::Lit(Lit::Str("`?` got Err(%v)".into())), Some(coil_ty::string()));
+                    let callee = Callee::Named { name: "string::format".into(), def: None, overload: None };
+                    let text = self.synth(b, span, HirKind::Call { callee, args: vec![fmt, read] }, Some(coil_ty::string()));
+                    (self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)])), text)
+                }
+            };
+            (pat, self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Err", vec![text], ret))
+        } else if enum_name == common::BUILTIN_OPTION_ENUM {
             let ret = b.body.ret.clone();
             (
                 self.variant_pat(enum_name, miss, HirPatFields::Unit),
