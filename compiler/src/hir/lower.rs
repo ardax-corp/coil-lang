@@ -81,6 +81,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
             .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
+        // A bare-class existential (`Show x`): one `[value, dictionary]`
+        // tuple word, only moved and called through its dictionary.
+        Ty::Existential { .. } => Some(ValueClass::Opaque),
         // `Matrix<D>` is its data at run time.
         Ty::App(..) if crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty).is_some() => {
             classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
@@ -821,6 +824,19 @@ pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32
             });
             found
         })
+}
+
+/// A trait method call on an existential pack that is not a local: the
+/// pack goes to a temp, which needs an empty operand stack below it (a
+/// local pack is just loaded once per use).
+pub fn existential_staged(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    let e = body.expr(id);
+    let HirKind::Call { args, .. } = &e.kind else {
+        return false;
+    };
+    let hinted = e.node.and_then(|n| checker.existential_method_call_at(n)).is_some()
+        || checker.existential_method_call_span(e.span.0, e.span.1).is_some();
+    hinted && !args.first().is_some_and(|&a| matches!(body.expr(a).kind, HirKind::Local(_)))
 }
 
 /// A variant make whose several arguments are not all literals or locals:
@@ -1874,6 +1890,9 @@ impl Walk<'_> {
                 // A `new` argument leaves its object in a temp on top of the
                 // stack, so every argument stages through a temp, as the AST
                 // does when one may clobber the operand stack.
+                if depth != 0 && existential_staged(body, self.checker, id) {
+                    return Err("existential-depth");
+                }
                 let shows = shows_through_temps(body, self.checker, body.expr(id));
                 if shows && depth != 0 {
                     return Err("format-show");
@@ -1888,6 +1907,9 @@ impl Walk<'_> {
             } => {
                 if self.class(id).is_none() {
                     return Err("call-type");
+                }
+                if depth != 0 && existential_staged(body, self.checker, id) {
+                    return Err("existential-depth");
                 }
                 let recv = *args.first().ok_or("method-receiver")?;
                 if is_vec(body, self.checker, recv) {
