@@ -3163,6 +3163,42 @@ impl Compiler {
 
     /// Box a stack array's slots into one array object at a statement
     /// start, as the AST's `emit_hoisted_escape_box`.
+    fn hir_check_stack_array_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Check {
+        let HirKind::Make { args, .. } = &hir.expr(init).kind else {
+            // A copy of another stack array's slots.
+            return Ok(());
+        };
+        let want = self.hir_stack_rep(hir, local);
+        for &arg in args {
+            self.hir_check_value(hir, emit, arg, &want)?;
+        }
+        Ok(())
+    }
+
+    /// Fill stack array `local`'s slots from `init`: each literal item
+    /// stored into its own slot, or a copy of another stack array's slots,
+    /// as the AST's `try_emit_stack_array_init`.
+    fn hir_stack_array_init(&mut self, hir: &HirBody, emit: &mut HirEmit, local: LocalId, init: HirId) {
+        let base = Self::hir_slot(emit, local);
+        match &hir.expr(init).kind {
+            HirKind::Make { args, .. } => {
+                let want = self.hir_stack_rep(hir, local);
+                for (i, &arg) in args.iter().enumerate() {
+                    self.hir_value(hir, emit, arg, &want, 0);
+                    self.bytecode.push_store_pop(base + i as u32);
+                }
+            }
+            HirKind::Local(src) => {
+                let src_base = Self::hir_slot(emit, *src);
+                for i in 0..emit.stacks[&local.0] as u32 {
+                    self.bytecode.push_load(src_base + i);
+                    self.bytecode.push_store_pop(base + i);
+                }
+            }
+            _ => unreachable!("planned stack array init"),
+        }
+    }
+
     fn hir_box_stack_array(&mut self, emit: &mut HirEmit, local: LocalId) {
         let base = Self::hir_slot(emit, local);
         let n = emit.stacks[&local.0];
@@ -3691,14 +3727,7 @@ impl Compiler {
                     return self.hir_check_new_args(hir, emit, *init);
                 }
                 if emit.stacks.contains_key(&local.0) {
-                    let HirKind::Make { args, .. } = &hir.expr(*init).kind else {
-                        unreachable!()
-                    };
-                    let want = self.hir_stack_rep(hir, *local);
-                    for &arg in args {
-                        self.hir_check_value(hir, emit, arg, &want)?;
-                    }
-                    return Ok(());
+                    return self.hir_check_stack_array_init(hir, emit, *local, *init);
                 }
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
@@ -3713,6 +3742,9 @@ impl Compiler {
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
                 HirKind::Local(local) if emit.pair_locals.contains_key(&local.0) => Err("assign-pair"),
+                HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
+                    self.hir_check_stack_array_init(hir, emit, *local, *value)
+                }
                 HirKind::Local(local) => {
                     let want = Rep::Word(self.hir_local_layout(hir, *local));
                     self.hir_check_value(hir, emit, *value, &want)
@@ -5749,9 +5781,6 @@ impl Compiler {
                 if let Some(&n) = emit.stacks.get(&local.0) {
                     // Slots first, then each element stored into its own, as
                     // the AST's `try_emit_stack_array_init`.
-                    let HirKind::Make { args, .. } = &hir.expr(*init).kind else {
-                        unreachable!()
-                    };
                     let base = self.hir_bind_local(hir, *local);
                     let key = self.context.variables.resolve(base as usize).clone();
                     for i in 1..n {
@@ -5760,11 +5789,7 @@ impl Compiler {
                     }
                     self.context.stack_array_locals.insert(key, (base, n));
                     emit.slots[local.0 as usize] = Some(base);
-                    let want = self.hir_stack_rep(hir, *local);
-                    for (i, &arg) in args.iter().enumerate() {
-                        self.hir_value(hir, emit, arg, &want, 0);
-                        self.bytecode.push_store_pop(base + i as u32);
-                    }
+                    self.hir_stack_array_init(hir, emit, *local, *init);
                     return;
                 }
                 // Value first: its operands live above every bound slot.
@@ -5782,6 +5807,9 @@ impl Compiler {
                 self.bytecode.push_store_pop(slot);
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
+                HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
+                    self.hir_stack_array_init(hir, emit, *local, *value);
+                }
                 HirKind::Local(local) => {
                     let want = Rep::Word(self.hir_local_layout(hir, *local));
                     self.hir_value(hir, emit, *value, &want, 0);
