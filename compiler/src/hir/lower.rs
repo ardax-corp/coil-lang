@@ -149,6 +149,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         // A monomorphic function value (closure, partial, `fn` object):
         // one word, only moved and called through `CallIndirect`.
         Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
+        // A polymorphic function value (`let f = id`, a `forall` parameter):
+        // one `PolyFn` word, called with boxed arguments.
+        Ty::Fun(..) | Ty::Forall { .. } if poly_fun(ty) => Some(ValueClass::Opaque),
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
@@ -159,6 +162,16 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         // boxed word, only moved.
         Ty::Var(_) => Some(ValueClass::Opaque),
         _ => None,
+    }
+}
+
+/// A function type still open in a type parameter, or a rank-n `forall`:
+/// a `PolyFn` value, whose calls box their arguments.
+pub fn poly_fun(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Forall { .. } => true,
+        t @ Ty::Fun(..) => !crate::typechecking::subst::ftv(t).is_empty(),
+        _ => false,
     }
 }
 
@@ -1299,6 +1312,41 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
 /// one from another indirect call, never reassigned. A `let` naming a
 /// generic function, or a call returning a captured `PolyFn`, boxes its
 /// arguments in the AST and stays there.
+/// A never-reassigned parameter or `let` local holding a `PolyFn`: its
+/// calls box each argument and may pass dictionaries
+/// (`Compiler::hir_polyfn_call`).
+pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    let HirKind::Local(local) = body.expr(f).kind else {
+        return false;
+    };
+    let info = body.local(local);
+    // A parameter is one only when declared `forall` (an open `T -> U`
+    // parameter of a shared generic body is the AST's plain closure).
+    let ty = info.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
+    ty.as_ref().is_some_and(|t| match info.kind {
+        LocalKind::Param => matches!(strip_readonly(t), Ty::Forall { .. }),
+        // A generic function's returned function the checker saw open at
+        // the binding is a `PolyFn` too (`let f = capture_show(0)`),
+        // whatever the local settles to (`maybe_record_polyfn_binding`).
+        LocalKind::Let => {
+            poly_fun(t)
+                || matches!(strip_readonly(t), Ty::Fun(..))
+                    && body.exprs.iter().any(|e| match &e.kind {
+                        HirKind::Let { local: l, init: Some(init) } if *l == local => {
+                            let init = body.expr(*init);
+                            matches!(&init.kind, HirKind::Call { callee: Callee::Named { name, .. }, .. } if checker.is_generic_fn(name))
+                                && checker.is_polyfn_binding_at(e.span.0, e.span.1)
+                        }
+                        _ => false,
+                    })
+        }
+        _ => false,
+    })
+        && !body.exprs.iter().any(|e| {
+            matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
+        })
+}
+
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
@@ -1928,7 +1976,7 @@ impl Walk<'_> {
                 callee: Callee::Value(f),
                 args,
             } => {
-                if !indirect_callee(body, self.checker, *f) {
+                if !indirect_callee(body, self.checker, *f) && !polyfn_callee(body, self.checker, *f) {
                     return Err("callee-value");
                 }
                 self.word(id)?;
