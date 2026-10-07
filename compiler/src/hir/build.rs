@@ -873,6 +873,12 @@ impl<'c, 'm> Cx<'c, 'm> {
         if name == "None" {
             return self.make_variant(b, node, common::BUILTIN_OPTION_ENUM, "None", Vec::new(), None);
         }
+        // A bare unit variant (`Empty` for `ParseError::Empty`).
+        let (start, end) = span_of(node);
+        if let Some((enum_name, variant)) = self.checker.bare_construct_at(start, end) {
+            let (enum_name, variant) = (enum_name.clone(), variant.clone());
+            return self.make_variant(b, node, &enum_name, &variant, Vec::new(), None);
+        }
         let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
         self.global(b, node, name.to_string(), def)
     }
@@ -1043,6 +1049,13 @@ impl<'c, 'm> Cx<'c, 'm> {
                 if matches!(*n, "Ok" | "Err") {
                     let args = self.exprs(b, args);
                     return self.make_variant(b, node, common::BUILTIN_RESULT_ENUM, n, args, None);
+                }
+                // A bare variant constructor (`Bad(s)` for `ParseError::Bad`).
+                let (start, end) = span_of(node);
+                if let Some((enum_name, variant)) = self.checker.bare_construct_at(start, end) {
+                    let (enum_name, variant) = (enum_name.clone(), variant.clone());
+                    let args = self.exprs(b, args);
+                    return self.make_variant(b, node, &enum_name, &variant, args, None);
                 }
                 let id = self.node_id(node);
                 let def = self
