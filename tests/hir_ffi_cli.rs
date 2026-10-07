@@ -1,12 +1,53 @@
-//! `extern` calls under `--hir`: the HIR path emits them itself (no AST
-//! fallback) and runs them as the AST path does.
+//! `extern` calls and `dload` / `declare` / `invoke` under `--hir`: the
+//! HIR path emits them itself (no AST fallback) and runs them as the AST
+//! path does.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Compiles `src` under `--hir` with no fallback, then runs it in each mode.
+fn check(bin: &str, tmp: &Path, src: &Path) {
+    let why = Command::new(bin)
+        .env("COIL_HIR_WHY", "1")
+        .args([
+            "compile",
+            "--hir",
+            "--allow-dload",
+            "sum",
+            "--ffi-search-path",
+        ])
+        .arg(tmp)
+        .arg(src)
+        .arg("-o")
+        .arg(tmp.join("main.hyc"))
+        .output()
+        .expect("coil compile --hir");
+    let why_err = String::from_utf8_lossy(&why.stderr);
+    assert!(why.status.success(), "compile failed: {why_err}");
+    assert!(
+        !why_err.contains("hir fallback"),
+        "FFI calls fell back: {why_err}"
+    );
+
+    for mode in [&[][..], &["--hir"][..], &["--hir", "-O", "0"][..]] {
+        let run = Command::new(bin)
+            .args(mode)
+            .args(["--allow-dload", "sum", "--ffi-search-path"])
+            .arg(tmp)
+            .arg(src)
+            .output()
+            .expect("coil run");
+        assert!(
+            run.status.success(),
+            "{mode:?} failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
 
 #[cfg(unix)]
 #[test]
-fn hir_lowers_and_runs_extern_calls() {
+fn hir_lowers_and_runs_ffi_calls() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -64,42 +105,52 @@ fn main() {
 "#,
     )
     .unwrap();
+    check(&bin, &tmp, &src);
 
-    let why = Command::new(&bin)
-        .env("COIL_HIR_WHY", "1")
-        .args([
-            "compile",
-            "--hir",
-            "--allow-dload",
-            "sum",
-            "--ffi-search-path",
-        ])
-        .arg(&tmp)
-        .arg(&src)
-        .arg("-o")
-        .arg(tmp.join("main.hyc"))
-        .output()
-        .expect("coil compile --hir");
-    let why_err = String::from_utf8_lossy(&why.stderr);
-    assert!(why.status.success(), "compile failed: {why_err}");
-    assert!(
-        !why_err.contains("hir fallback"),
-        "extern calls fell back: {why_err}"
-    );
+    // Dynamic FFI: a signature's tags are constants, a function named in
+    // the argument tuple is its code pointer.
+    let dynamic = tmp.join("dynamic.hy");
+    std::fs::write(
+        &dynamic,
+        r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::{Callback, Int};
 
-    for mode in [&[][..], &["--hir"][..], &["--hir", "-O", "0"][..]] {
-        let run = Command::new(&bin)
-            .args(mode)
-            .args(["--allow-dload", "sum", "--ffi-search-path"])
-            .arg(&tmp)
-            .arg(&src)
-            .output()
-            .expect("coil run");
-        assert!(
-            run.status.success(),
-            "{mode:?} failed: {}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+fn doubler(int x) -> int {
+    return x * 2;
+}
+
+fn main() {
+    let lib = match dload("sum") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let n = match invoke(lib, sum_id, (40, 2)) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if n != 42 {
+        panic "invoke failed";
     }
+    let cb_id = match declare(lib, "apply_cb", (Callback, Int), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let m = match invoke(lib, cb_id, (doubler, 21)) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if 1 + m != 43 {
+        panic "callback failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &dynamic);
     let _ = std::fs::remove_dir_all(&tmp);
 }

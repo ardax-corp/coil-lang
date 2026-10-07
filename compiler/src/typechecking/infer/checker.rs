@@ -11599,46 +11599,59 @@ impl Checker {
 
     /// Resolve an FFI type expression to `(tag, aux)` for codegen.
     pub fn ffi_type_tag_from_output(&self, expr: &Output) -> Option<(u32, u32)> {
-        use common::{tag, tag_from_type_name, tag_from_variant_name};
+        use common::tag;
         match expr.1.as_ref() {
             Expression::Construct {
                 enum_name,
                 variant_name,
                 ..
-            } if common::is_builtin_ffi_enum(enum_name) => {
-                // Qualified `ffi::types::Int` is always allowed. Legacy
-                // `FFIType::Int` requires an explicit import binding.
-                if *enum_name == common::BUILTIN_FFI_TYPE_ENUM
-                    && !self.builtin_name_in_scope(common::BUILTIN_FFI_TYPE_ENUM)
-                    && !self.ffi_tag_in_scope(variant_name)
-                {
-                    return None;
-                }
-                let tag = tag_from_variant_name(variant_name)?;
-                Some((tag, 0))
-            }
-            Expression::Type(name) | Expression::Identifier(name) => {
-                if let Some(id) = self.c_struct_id(name) {
-                    return Some((tag::STRUCT, id));
-                }
-                // In-scope `use ffi::types::{…}` tags (`Int`, `Ptr`, …).
-                if self.ffi_tag_in_scope(name) {
-                    return tag_from_variant_name(name).map(|t| (t, 0));
-                }
-                // Bare lowercase primitives (`int`, `void`, …) stay
-                // available without importing `ffi::types`.
-                if name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-                {
-                    return tag_from_type_name(name).map(|t| (t, 0));
-                }
-                None
-            }
+            } if common::is_builtin_ffi_enum(enum_name) => self.ffi_type_tag_from_variant(enum_name, variant_name),
+            Expression::Type(name) | Expression::Identifier(name) => self.ffi_type_tag_from_name(name),
             Expression::Array(items) if items.len() == 1 => Some((tag::PTR, 0)),
             Expression::Tuple(_) => Some((tag::PTR, 0)),
             _ => None,
         }
+    }
+
+    /// The tag of a builtin FFI enum variant (`ffi::types::Int`). Legacy
+    /// `FFIType::Int` needs an explicit import binding.
+    pub fn ffi_type_tag_from_variant(&self, enum_name: &str, variant_name: &str) -> Option<(u32, u32)> {
+        if enum_name == common::BUILTIN_FFI_TYPE_ENUM
+            && !self.builtin_name_in_scope(common::BUILTIN_FFI_TYPE_ENUM)
+            && !self.ffi_tag_in_scope(variant_name)
+        {
+            return None;
+        }
+        common::tag_from_variant_name(variant_name).map(|tag| (tag, 0))
+    }
+
+    /// The tag a bare name stands for in a `declare` signature: a declared
+    /// extern struct, an in-scope `use ffi::types::{…}` tag (`Int`, `Ptr`,
+    /// …), or a bare lowercase primitive (`int`, `void`, …), which stays
+    /// available without importing `ffi::types`.
+    pub fn ffi_type_tag_from_name(&self, name: &str) -> Option<(u32, u32)> {
+        use common::{tag, tag_from_type_name, tag_from_variant_name};
+        if let Some(id) = self.c_struct_id(name) {
+            return Some((tag::STRUCT, id));
+        }
+        if self.ffi_tag_in_scope(name) {
+            return tag_from_variant_name(name).map(|t| (t, 0));
+        }
+        if name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return tag_from_type_name(name).map(|t| (t, 0));
+        }
+        None
+    }
+
+    /// Whether a function-id local named `name` was declared variadic, as
+    /// [`Self::is_ffi_declare_variadic_for_fn_id`] decides for an identifier.
+    pub fn ffi_fn_id_variadic(&self, name: &str) -> Option<bool> {
+        if self.ffi_fn_ret_tys.contains_key(name) {
+            return Some(self.ffi_fn_variadic.get(name).copied().unwrap_or(false));
+        }
+        let fn_name = self.current_function.as_ref()?;
+        let key = Self::ffi_param_invoke_key(fn_name, name);
+        self.ffi_fn_param_invoke_ret.get(&key).map(|&(_, variadic, _)| variadic)
     }
 
     pub fn c_struct_id(&self, name: &str) -> Option<u32> {

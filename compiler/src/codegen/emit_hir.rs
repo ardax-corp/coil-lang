@@ -160,6 +160,11 @@ enum HirBuiltin {
     /// the arguments, the arguments packed in a tuple, `FfiInvoke`, then
     /// the `Result` unwrapped or panicked, as `compile_call_expr`.
     Ffi { lib: u32, func: u32 },
+    /// `dload` / `declare` / `invoke` after `use ffi::{…}`: the value
+    /// operands ([`Compiler::hir_ffi_operands`]), a `declare` signature's
+    /// tags as constants, `invoke`'s arguments packed in a tuple, then the
+    /// opcode, as `emit_ffi_declare` / `emit_ffi_invoke`.
+    FfiDyn(crate::typechecking::FfiBuiltin),
 }
 
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
@@ -756,8 +761,35 @@ impl Compiler {
             let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
             emit.slots[param.0 as usize] = Some(slot);
         }
+        // A `declare` signature's tag names are constants and an `invoke`
+        // callback is a `CodePtr`, not values.
+        let tags: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Call { callee, args } => match lower::ffi_builtin(&self.checker, callee) {
+                    Some(crate::typechecking::FfiBuiltin::Declare) if args.len() == 4 => {
+                        Some(lower::tuple_items(hir, args[2]).unwrap_or(&[]).iter().chain([&args[3]]).map(|t| t.0).collect::<Vec<_>>())
+                    }
+                    Some(crate::typechecking::FfiBuiltin::Invoke) if args.len() == 3 => Some(
+                        lower::tuple_items(hir, args[2])
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter(|t| matches!(hir.expr(**t).kind, HirKind::Global { .. }))
+                            .map(|t| t.0)
+                            .collect(),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flatten()
+            .collect();
         for (i, expr) in hir.exprs.iter().enumerate() {
             if let HirKind::Global { name, .. } = &expr.kind {
+                if tags.contains(&(i as u32)) {
+                    continue;
+                }
                 if let Some(slot) = self.hir_global_static(hir, HirId(i as u32), name) {
                     emit.statics.insert(i as u32, slot);
                     continue;
@@ -1646,8 +1678,8 @@ impl Compiler {
                 },
             });
         }
-        if self.checker.ffi_fn_in_scope(name).is_some() {
-            return Some(Err("callee-builtin"));
+        if let Some(kind) = self.checker.ffi_fn_in_scope(name) {
+            return Some(Ok(HirBuiltin::FfiDyn(kind)));
         }
         if let Some(kind) = self.checker.io_fn_in_scope(name) {
             return Some(host(Some(kind.native_name())));
@@ -2034,6 +2066,32 @@ impl Compiler {
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
     /// `Result` argument boxed and packs its result in the call's layout.
+    /// A builtin call's value operands: for `declare` the library and name
+    /// (its signature is constants), for `invoke` the library, function id
+    /// and the argument tuple's items; any other call's arguments as is.
+    fn hir_ffi_operands(hir: &HirBody, builtin: HirBuiltin, args: &[HirId]) -> Vec<HirId> {
+        use crate::typechecking::FfiBuiltin;
+        match builtin {
+            HirBuiltin::FfiDyn(FfiBuiltin::Declare) => args[..2].to_vec(),
+            HirBuiltin::FfiDyn(FfiBuiltin::Invoke) => {
+                let items = lower::tuple_items(hir, args[2]).unwrap_or(&[]);
+                args[..2].iter().chain(items).copied().collect()
+            }
+            _ => args.to_vec(),
+        }
+    }
+
+    /// An `invoke` argument naming a function: `Some(Some(offset))` for its
+    /// `CodePtr`, `Some(None)` when the name is not a compiled function.
+    fn hir_ffi_callback(&self, hir: &HirBody, builtin: HirBuiltin, arg: HirId) -> Option<Option<u32>> {
+        match (&hir.expr(arg).kind, builtin) {
+            (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke)) => {
+                Some(self.functions.get(name.as_str()).map(|&offset| offset as u32))
+            }
+            _ => None,
+        }
+    }
+
     fn hir_builtin_abi(&self, hir: &HirBody, call: HirId, builtin: HirBuiltin) -> Result<HirCall, &'static str> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
@@ -2078,12 +2136,21 @@ impl Compiler {
                 }
             }
         }
+        // `declare`'s signature is constants and `invoke`'s tuple is its
+        // items: only the value operands take a layout.
+        let operands = Self::hir_ffi_operands(hir, builtin, args);
+        let args = &operands[..];
         let shows = match (builtin, args.first().map(|&a| &hir.expr(a).kind)) {
             (HirBuiltin::Format, Some(HirKind::Lit(Lit::Str(fmt)))) => Self::format_consuming_specs(fmt),
             _ => Vec::new(),
         };
         let mut params = Vec::with_capacity(args.len());
         for &arg in args {
+            if let Some(callback) = self.hir_ffi_callback(hir, builtin, arg) {
+                callback.ok_or("ffi-callback")?;
+                params.push(ValueLayout::Boxed);
+                continue;
+            }
             let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
                 Some(class) if lower::is_word(class) => {}
@@ -2192,8 +2259,8 @@ impl Compiler {
             return Ok(HirCall {
                 key,
                 pair,
-                params: vec![ValueLayout::Boxed],
-                ret: ValueLayout::Boxed,
+                params: vec![ValueLayout::Boxed; 1 + words],
+                ret,
                 method: false,
                 mono: false,
                 builtin: None,
@@ -3680,6 +3747,10 @@ impl Compiler {
             }
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
+                let args = match call.builtin {
+                    Some(builtin) => Self::hir_ffi_operands(hir, builtin, args),
+                    None => args.clone(),
+                };
                 for (i, &arg) in args.iter().enumerate().take(call.params.len()) {
                     self.hir_check_value(hir, emit, arg, &Self::hir_arg_rep(call, i))?;
                 }
@@ -5014,6 +5085,48 @@ impl Compiler {
                         self.bytecode
                             .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(args.len() as u32 & 0xFFFF));
                         self.emit_result_unwrap_or_panic();
+                    }
+                    HirBuiltin::FfiDyn(kind) => {
+                        use crate::typechecking::FfiBuiltin;
+                        let operands = Self::hir_ffi_operands(hir, HirBuiltin::FfiDyn(kind), args);
+                        for (i, (&arg, param)) in operands.iter().zip(params.iter().copied()).enumerate().take(2) {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                        }
+                        match kind {
+                            FfiBuiltin::Dload => self.bytecode.push(Byte::new(Instruction::FfiLoad)),
+                            FfiBuiltin::Declare => {
+                                let items = lower::tuple_items(hir, args[2]).expect("planned declare signature");
+                                for &t in items {
+                                    let (tag, aux) = lower::ffi_tag(hir, &self.checker, t).expect("planned FFI tag");
+                                    emit_ffi_type_const(&mut self.bytecode, tag, aux);
+                                }
+                                self.bytecode.push_make_tuple(items.len() as u32);
+                                let (tag, aux) = lower::ffi_tag(hir, &self.checker, args[3]).expect("planned FFI tag");
+                                emit_ffi_type_const(&mut self.bytecode, tag, aux);
+                                self.bytecode
+                                    .push(Byte::new(Instruction::DeclareFFI).with_operand_u32(items.len() as u32 & 0xFFFF));
+                            }
+                            FfiBuiltin::Invoke => {
+                                let n = operands.len() as u32 - 2;
+                                for (i, (&arg, param)) in operands.iter().zip(params.iter().copied()).enumerate().skip(2) {
+                                    match self.hir_ffi_callback(hir, HirBuiltin::FfiDyn(kind), arg) {
+                                        Some(offset) => self.bytecode.push(
+                                            Byte::new(Instruction::CodePtr).with_operand_u32(offset.expect("planned callback")),
+                                        ),
+                                        None => self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32),
+                                    }
+                                }
+                                self.bytecode.push_make_tuple(n);
+                                self.bytecode.push(Byte::new(Instruction::FfiInvoke).with_operand_u32(n & 0xFFFF));
+                            }
+                        }
+                        // The VM pushes a boxed `Result`; a niche-shaped one
+                        // converts, as `emit_ffi_invoke`.
+                        match Self::hir_call_rep(&emit.calls[&id.0]) {
+                            Rep::Word(ValueLayout::NicheUnitResult) => Self::emit_boxed_result_to_niche(&mut self.bytecode, true),
+                            Rep::Word(ValueLayout::NicheResult) => Self::emit_boxed_result_to_niche(&mut self.bytecode, false),
+                            _ => {}
+                        }
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
