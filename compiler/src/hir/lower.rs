@@ -100,7 +100,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             // A generic class instance: one object word, its methods shared
             // across instances (fields are only read inside them).
-            if is_generic_class(checker, name) {
+            // (A generic enum with an `impl` has a class key too; it is
+            // still an enum.)
+            if is_generic_class(checker, name) && checker.enum_variants(name).is_none() {
                 return Some(ValueClass::Opaque);
             }
             let option = common::is_builtin_option_enum(name);
