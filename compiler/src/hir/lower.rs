@@ -1917,6 +1917,11 @@ impl Walk<'_> {
             {
                 self.value(*value, depth)
             }
+            // `v as [byte]` of a `Vec<byte>` (or back): one array object,
+            // passed through as the AST does.
+            HirKind::Cast { value } if self.ty(*value).is_some_and(is_byte_vec) && self.ty(id).is_some_and(is_byte_vec) => {
+                self.value(*value, depth)
+            }
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
                 let to = self.ty(id).and_then(primitive).ok_or("cast")?;
