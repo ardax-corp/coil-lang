@@ -161,8 +161,8 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
 
 /// A closed function type whose parameters and result are plain words:
 /// no enum (its layout may be niche or a pair), no unit, no type variable.
-/// The result may also be a closed one-word enum, which a call through the
-/// function returns as that word.
+/// The result may also be a closed enum: a call through the function
+/// returns a one-word enum as that word, any other boxed.
 fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
     let plain = |t: &Ty, seen: &mut Vec<String>| {
         (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
@@ -175,12 +175,10 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
         // `() -> T` takes a unit parameter, and `T -> ()` returns one.
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
-            let one_word_enum = |t: &Ty, seen: &mut Vec<String>| {
-                super::layout::ty_is_closed(t)
-                    && classify_in(checker, t, seen) == Some(ValueClass::Enum)
-                    && super::layout::of(checker, t).words() == 1
+            let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
+                super::layout::ty_is_closed(t) && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
-            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen) || one_word_enum(ret, seen))
+            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
         }
         _ => false,
     }
