@@ -294,9 +294,12 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
     f(id) || children(body, id).into_iter().any(|k| any_id(body, k, f))
 }
 
-/// The stack arrays of `body`: each `let a = [..]` with 1..=32 items that
-/// is never reassigned, copied by another `let` or iterated, and whose
-/// escape, if any, is a later statement of the block that binds it.
+/// The stack arrays of `body`: each `let a = [..]` with 1..=32 items, or
+/// `let b = a` of such an `a` (a slot copy), that is never iterated or
+/// destructured, and whose escape, if any, is a later statement of the
+/// block that binds it. `a = b` between two stack arrays of one length and
+/// `a = [..]` of that many items store into the slots; a stack array that
+/// takes part in a copy or such a store never escapes.
 pub fn stack_arrays(body: &HirBody) -> StackArrays {
     use std::collections::HashSet;
     let bases: HashSet<u32> = body
@@ -333,39 +336,18 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             _ => {}
         }
     }
-    // Reads of the local that are not an index base, and forms the AST
-    // reads from the slots even after an escape (a copy, a loop).
-    let mut escapes: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut slot_uses: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
-    let mut refused: HashSet<u32> = HashSet::new();
-    for (i, e) in body.exprs.iter().enumerate() {
-        match e.kind {
-            HirKind::Local(local) if slot_reads.contains_key(&(i as u32)) => {
-                slot_uses.entry(local.0).or_default().push((i as u32, slot_reads[&(i as u32)]))
-            }
-            HirKind::Local(local) if !bases.contains(&(i as u32)) => escapes.entry(local.0).or_default().push(i as u32),
-            HirKind::Assign { place, .. } => {
-                if let HirKind::Local(local) = body.expr(place).kind {
-                    refused.insert(local.0);
-                }
-            }
-            HirKind::Let { init: Some(init), .. }
-            | HirKind::LetPat { init, .. }
-            | HirKind::ForIn { iterable: init, .. }
-            | HirKind::Spread(init) => {
-                if let HirKind::Local(local) = body.expr(init).kind {
-                    refused.insert(local.0);
-                }
-            }
-            _ => {}
-        }
+    // Candidates: block-statement lets of a literal (its length) or of a
+    // local (a copy, its source).
+    enum Init {
+        Literal(usize),
+        Copy(LocalId, HirId),
     }
-    let mut out = StackArrays::default();
+    let mut cands: HashMap<u32, Init> = HashMap::new();
     for e in &body.exprs {
-        let HirKind::Block { stmts, tail } = &e.kind else {
+        let HirKind::Block { stmts, .. } = &e.kind else {
             continue;
         };
-        for (k, &stmt) in stmts.iter().enumerate() {
+        for &stmt in stmts {
             let HirKind::Let {
                 local,
                 init: Some(init),
@@ -373,19 +355,172 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             else {
                 continue;
             };
-            let HirKind::Make {
-                kind: MakeKind::Array,
-                args,
-            } = &body.expr(init).kind
-            else {
-                continue;
-            };
-            let n = args.len();
-            if !(1..=32).contains(&n) || body.local(local).kind != LocalKind::Let || refused.contains(&local.0) {
+            if body.local(local).kind != LocalKind::Let {
                 continue;
             }
+            match &body.expr(init).kind {
+                HirKind::Make {
+                    kind: MakeKind::Array,
+                    args,
+                } if (1..=32).contains(&args.len()) => {
+                    cands.insert(local.0, Init::Literal(args.len()));
+                }
+                HirKind::Local(src) => {
+                    cands.insert(local.0, Init::Copy(*src, init));
+                }
+                _ => {}
+            }
+        }
+    }
+    // Stores into a local: `dst = value`.
+    let mut stores: Vec<(u32, HirId, HirId)> = Vec::new();
+    let mut refused: HashSet<u32> = HashSet::new();
+    for (i, e) in body.exprs.iter().enumerate() {
+        match e.kind {
+            HirKind::Assign { place, value } => {
+                if let HirKind::Local(local) = body.expr(place).kind {
+                    if body.expr(HirId(i as u32)).flags.contains(HirFlags::COMPOUND) {
+                        refused.insert(local.0);
+                    } else {
+                        stores.push((local.0, place, value));
+                    }
+                }
+            }
+            HirKind::LetPat { init, .. } | HirKind::ForIn { iterable: init, .. } | HirKind::Spread(init) => {
+                if let HirKind::Local(local) = body.expr(init).kind {
+                    refused.insert(local.0);
+                }
+            }
+            // A copy into a local that is no candidate.
+            HirKind::Let { local, init: Some(init) } if !cands.contains_key(&local.0) => {
+                if let HirKind::Local(src) = body.expr(init).kind {
+                    refused.insert(src.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Reads of each local that are not an index base or element-wise operand.
+    let mut reads: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut slot_uses: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+    for (i, e) in body.exprs.iter().enumerate() {
+        match e.kind {
+            HirKind::Local(local) if slot_reads.contains_key(&(i as u32)) => {
+                slot_uses.entry(local.0).or_default().push((i as u32, slot_reads[&(i as u32)]))
+            }
+            HirKind::Local(local) if !bases.contains(&(i as u32)) => reads.entry(local.0).or_default().push(i as u32),
+            _ => {}
+        }
+    }
+    // Each candidate's length: a literal's item count, a copy's source's.
+    fn resolve(cands: &HashMap<u32, Init>, local: u32, depth: usize) -> Option<usize> {
+        match cands.get(&local)? {
+            Init::Literal(n) => Some(*n),
+            Init::Copy(src, _) if depth < 64 => resolve(cands, src.0, depth + 1),
+            Init::Copy(..) => None,
+        }
+    }
+    let mut len: HashMap<u32, usize> = cands
+        .keys()
+        .filter(|l| !refused.contains(l))
+        .filter_map(|&l| resolve(&cands, l, 0).map(|n| (l, n)))
+        .collect();
+    // Drop candidates to a fixed point: a copy needs a stack source, and a
+    // copy whose target is not one refuses its source (the two would
+    // share one object); a store needs a stack source of the same length
+    // or a literal of that many items; both ends of a copy or store never
+    // escape.
+    loop {
+        let before = len.len();
+        for (&local, init) in &cands {
+            if let Init::Copy(src, _) = init {
+                if len.contains_key(&local) && !len.contains_key(&src.0) {
+                    len.remove(&local);
+                }
+                if !len.contains_key(&local) {
+                    len.remove(&src.0);
+                }
+            }
+        }
+        for &(dst, _, value) in &stores {
+            let Some(&n) = len.get(&dst) else { continue };
+            let ok = match &body.expr(value).kind {
+                HirKind::Local(src) => len.get(&src.0) == Some(&n),
+                HirKind::Make {
+                    kind: MakeKind::Array,
+                    args,
+                } => args.len() == n,
+                _ => false,
+            };
+            if !ok {
+                len.remove(&dst);
+            }
+        }
+        // The reads a copy or store consumes are not escapes.
+        let mut linked: HashSet<u32> = HashSet::new();
+        let mut link_ids: HashSet<u32> = HashSet::new();
+        for (&local, init) in &cands {
+            if let Init::Copy(src, id) = init
+                && len.contains_key(&local)
+            {
+                linked.extend([local, src.0]);
+                link_ids.insert(id.0);
+            }
+        }
+        for &(dst, place, value) in &stores {
+            if len.contains_key(&dst) {
+                linked.insert(dst);
+                link_ids.insert(place.0);
+                if let HirKind::Local(src) = body.expr(value).kind {
+                    linked.insert(src.0);
+                    link_ids.insert(value.0);
+                }
+            }
+        }
+        for local in &linked {
+            let Some(&n) = len.get(local) else { continue };
+            let escapes = reads.get(local).into_iter().flatten().any(|id| !link_ids.contains(id));
+            let packed = slot_uses.get(local).into_iter().flatten().any(|&(_, min)| min != 0 && n >= min);
+            if escapes || packed {
+                len.remove(local);
+            }
+        }
+        if len.len() == before {
+            break;
+        }
+    }
+    // Reads consumed by a surviving copy or store.
+    let mut link_ids: HashSet<u32> = HashSet::new();
+    for (&local, init) in &cands {
+        if let Init::Copy(_, id) = init
+            && len.contains_key(&local)
+        {
+            link_ids.insert(id.0);
+        }
+    }
+    for &(dst, place, value) in &stores {
+        if len.contains_key(&dst) {
+            link_ids.insert(place.0);
+            link_ids.insert(value.0);
+        }
+    }
+    for ids in reads.values_mut() {
+        ids.retain(|id| !link_ids.contains(id));
+    }
+    let mut out = StackArrays::default();
+    for e in &body.exprs {
+        let HirKind::Block { stmts, tail } = &e.kind else {
+            continue;
+        };
+        for (k, &stmt) in stmts.iter().enumerate() {
+            let HirKind::Let { local, .. } = body.expr(stmt).kind else {
+                continue;
+            };
+            let Some(&n) = len.get(&local.0) else {
+                continue;
+            };
             let packed = slot_uses.get(&local.0).into_iter().flatten().filter(|&&(_, min)| min != 0 && n >= min).map(|&(id, _)| id);
-            let uses: HashSet<u32> = escapes.get(&local.0).into_iter().flatten().copied().chain(packed).collect();
+            let uses: HashSet<u32> = reads.get(&local.0).into_iter().flatten().copied().chain(packed).collect();
             if !uses.is_empty() {
                 let first = stmts[k + 1..]
                     .iter()
@@ -1966,8 +2101,9 @@ impl Walk<'_> {
                 // `let a = [..]` keeps the elements in frame slots in the AST;
                 // only one that is never more than indexed lowers.
                 if self.stack.contains_key(&local.0) {
+                    // A copy loads the source's slots.
                     let HirKind::Make { args, .. } = &body.expr(*init).kind else {
-                        unreachable!()
+                        return Ok(());
                     };
                     for &arg in args {
                         self.word(arg)?;
@@ -2020,6 +2156,17 @@ impl Walk<'_> {
                 }
                 let compound = body.expr(id).flags.contains(HirFlags::COMPOUND);
                 match &body.expr(*place).kind {
+                    // A stack array's slots: the source's, or each item.
+                    HirKind::Local(local) if self.stack.contains_key(&local.0) => match &body.expr(*value).kind {
+                        HirKind::Make { args, .. } => {
+                            for &arg in args {
+                                self.word(arg)?;
+                                self.value(arg, 0)?;
+                            }
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    },
                     HirKind::Local(_) => {
                         self.word(*value)?;
                         self.value(*value, depth)
