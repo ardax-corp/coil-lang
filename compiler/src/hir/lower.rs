@@ -768,10 +768,25 @@ pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32
                     &e.kind,
                     HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
                 ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }))
-                    || shows_through_temps(body, checker, e);
+                    || shows_through_temps(body, checker, e)
+                    || staged_make(body, e);
             });
             found
         })
+}
+
+/// A variant make whose several arguments are not all literals or locals:
+/// it stages them through temps in source order, which need an empty
+/// operand stack below them.
+pub fn staged_make(body: &HirBody, e: &super::HirExpr) -> bool {
+    let HirKind::Make {
+        kind: MakeKind::Variant { .. },
+        args,
+    } = &e.kind
+    else {
+        return false;
+    };
+    args.len() > 1 && !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)))
 }
 
 /// Whether `e` is a `format` call with a tuple or record argument: `%v`
@@ -1944,10 +1959,8 @@ impl Walk<'_> {
                 }
                 // A boxed make stages complex args through temps in source
                 // order; those `STORE`s need no operands below them.
-                let simple = args
-                    .iter()
-                    .all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)));
-                if depth != 0 && args.len() > 1 && !simple {
+                let staged = staged_make(body, body.expr(id));
+                if depth != 0 && staged {
                     return Err("staged-make");
                 }
                 for (i, &arg) in args.iter().enumerate() {
@@ -1963,7 +1976,6 @@ impl Walk<'_> {
                     }
                     self.word(arg)?;
                     // Staged args each run at depth zero into a temp.
-                    let staged = args.len() > 1 && !simple;
                     self.value(arg, if staged { 0 } else { depth + i as u32 })?;
                 }
                 Ok(())
