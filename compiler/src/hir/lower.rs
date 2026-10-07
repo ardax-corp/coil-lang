@@ -653,7 +653,7 @@ fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
         HirKind::LetPat { init, .. } => kids.push(*init),
         HirKind::Assign { place, value } | HirKind::Append { base: place, value } => kids.extend([*place, *value]),
         HirKind::If { cond, then, els } => kids.extend([*cond, *then].into_iter().chain(*els)),
-        HirKind::Loop { body: b } | HirKind::Defer { body: b } => kids.push(*b),
+        HirKind::Loop { body: b } | HirKind::Defer { body: b, .. } => kids.push(*b),
         HirKind::ForIn { iterable, body: b, .. } => kids.extend([*iterable, *b]),
         HirKind::Return(v) => kids.extend(v),
         HirKind::Match { scrutinee, arms } => kids.extend(std::iter::once(*scrutinee).chain(arms.iter().map(|a| a.body))),
@@ -2189,6 +2189,43 @@ impl Walk<'_> {
                 }
             }
             HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
+            // `defer`: a thunk each later `return` calls with the captures
+            // (`let`s and parameters) as its frame. Control can only fall
+            // out of its body.
+            HirKind::Defer { captures, body: inner } => {
+                if depth != 0 {
+                    return Err("nested-defer");
+                }
+                for cap in captures {
+                    let Some(local) = cap else {
+                        return Err("defer-capture");
+                    };
+                    if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param)
+                        || is_unit_local(body, self.checker, *local)
+                        || self.stack.contains_key(&local.0)
+                    {
+                        return Err("defer-capture");
+                    }
+                }
+                let exits = |e: HirId| {
+                    matches!(
+                        body.expr(e).kind,
+                        HirKind::Return(_)
+                            | HirKind::Break
+                            | HirKind::Continue
+                            | HirKind::Yield { .. }
+                            | HirKind::Defer { .. }
+                            | HirKind::Lambda { .. }
+                    )
+                };
+                if any_id(body, *inner, &exits) {
+                    return Err("defer-body");
+                }
+                let loops = std::mem::replace(&mut self.loops, 0);
+                let checked = self.effect(*inner, 0);
+                self.loops = loops;
+                checked
+            }
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),

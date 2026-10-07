@@ -373,7 +373,7 @@ impl Printer<'_> {
                     self.node(v, d);
                 }
             }
-            HirKind::Defer { body } => {
+            HirKind::Defer { body, .. } => {
                 self.line(depth, id, "defer".to_string());
                 self.node(body, d);
             }

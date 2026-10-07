@@ -804,9 +804,10 @@ impl<'c, 'm> Cx<'c, 'm> {
             }
 
             E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
-            E::Defer { body, .. } => {
+            E::Defer { captures, body } => {
+                let captures = captures.iter().map(|c| b.lookup(c)).collect();
                 let body = self.expr(b, body);
-                self.emit_ty(b, node, HirKind::Defer { body }, Some(coil_ty::unit()))
+                self.emit_ty(b, node, HirKind::Defer { captures, body }, Some(coil_ty::unit()))
             }
             E::Yield(value) | E::YieldFrom(value) => {
                 let from = matches!(node.1.as_ref(), E::YieldFrom(_));
