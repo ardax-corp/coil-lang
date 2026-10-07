@@ -81,6 +81,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
             .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
+        // `Matrix<D>` is its data at run time.
+        Ty::App(..) if crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty).is_some() => {
+            classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
+        }
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
             aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
         }
@@ -697,16 +701,62 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
 /// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`
 /// (the AST's `try_emit_aggregate_arith`); `None` for a matrix op, which the
 /// AST emits first and HIR leaves to it.
+/// Whether the checker recorded `id` as a linear-algebra op (a matrix or
+/// vector operator, or `dot` / `matmul` / ..).
+pub fn linear_algebra(checker: &Checker, body: &HirBody, id: HirId) -> bool {
+    let e = body.expr(id);
+    let (start, end) = e.span;
+    e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some()
+}
+
 pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
     let e = body.expr(id);
     let (start, end) = e.span;
-    if e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some() {
+    if linear_algebra(checker, body, id) {
         return None;
     }
     e.node
         .and_then(|n| checker.aggregate_arith_at(n))
         .or_else(|| checker.aggregate_arith_span(start, end))
         .cloned()
+        .or_else(|| recover_aggregate(checker, body, id))
+}
+
+/// The element-wise shape from the operand types where the checker kept
+/// none (a mono clone of a generic body), as the AST's
+/// `recover_aggregate_arith`: only for operands it types itself, locals and
+/// literals.
+fn recover_aggregate(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
+    use crate::typechecking::{AggregateOp, aggregate_arith::recover};
+    fn typed(body: &HirBody, id: HirId) -> bool {
+        match &body.expr(id).kind {
+            HirKind::Local(_) | HirKind::Lit(Lit::Int(_) | Lit::Float(_)) => true,
+            HirKind::Make {
+                kind: MakeKind::Tuple,
+                args,
+            } => args.iter().all(|&a| typed(body, a)),
+            HirKind::Make {
+                kind: MakeKind::Array,
+                args,
+            } => !args.is_empty() && args.iter().all(|&a| typed(body, a)),
+            _ => false,
+        }
+    }
+    let ty = |x: HirId| {
+        typed(body, x)
+            .then(|| body.expr(x).ty.as_ref())
+            .flatten()
+            .map(|t| apply_ty_prune(checker.subst(), t))
+    };
+    match body.expr(id).kind {
+        HirKind::Bin {
+            op: BinOp::Overloaded(sym),
+            lhs,
+            rhs,
+        } => recover(&ty(lhs)?, Some(&ty(rhs)?), AggregateOp::from_str(sym)?),
+        HirKind::Un { op: UnOp::Neg, operand } => recover(&ty(operand)?, None, AggregateOp::Neg),
+        _ => None,
+    }
 }
 
 /// How an element-wise operand's elements are read, as the AST's
@@ -768,10 +818,25 @@ pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32
                     &e.kind,
                     HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
                 ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }))
-                    || shows_through_temps(body, checker, e);
+                    || shows_through_temps(body, checker, e)
+                    || staged_make(body, e);
             });
             found
         })
+}
+
+/// A variant make whose several arguments are not all literals or locals:
+/// it stages them through temps in source order, which need an empty
+/// operand stack below them.
+pub fn staged_make(body: &HirBody, e: &super::HirExpr) -> bool {
+    let HirKind::Make {
+        kind: MakeKind::Variant { .. },
+        args,
+    } = &e.kind
+    else {
+        return false;
+    };
+    args.len() > 1 && !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)))
 }
 
 /// Whether `e` is a `format` call with a tuple or record argument: `%v`
@@ -1676,6 +1741,28 @@ impl Walk<'_> {
             // An anonymous `fn`: its captures, then `MakeFn` (codegen plans
             // the body).
             HirKind::Lambda { .. } => self.word(id),
+            // A matrix operator the checker recorded as linear algebra:
+            // the packed kernel's id under the operands, or each operand
+            // to a temp (codegen picks, as for the builtin calls).
+            HirKind::Bin { lhs, rhs, .. } if linear_algebra(self.checker, body, id) => {
+                if depth != 0 {
+                    return Err("operator-depth");
+                }
+                self.word(id)?;
+                for (i, &operand) in [*lhs, *rhs].iter().enumerate() {
+                    self.word(operand)?;
+                    self.value(operand, 1 + i as u32)?;
+                }
+                Ok(())
+            }
+            HirKind::Un { operand, .. } if linear_algebra(self.checker, body, id) => {
+                if depth != 0 {
+                    return Err("operator-depth");
+                }
+                self.word(id)?;
+                self.word(*operand)?;
+                self.value(*operand, 1)
+            }
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
                 // (`==` / `!=` without one) the VM's structural `EQ` /
@@ -1944,10 +2031,8 @@ impl Walk<'_> {
                 }
                 // A boxed make stages complex args through temps in source
                 // order; those `STORE`s need no operands below them.
-                let simple = args
-                    .iter()
-                    .all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)));
-                if depth != 0 && args.len() > 1 && !simple {
+                let staged = staged_make(body, body.expr(id));
+                if depth != 0 && staged {
                     return Err("staged-make");
                 }
                 for (i, &arg) in args.iter().enumerate() {
@@ -1963,7 +2048,6 @@ impl Walk<'_> {
                     }
                     self.word(arg)?;
                     // Staged args each run at depth zero into a temp.
-                    let staged = args.len() > 1 && !simple;
                     self.value(arg, if staged { 0 } else { depth + i as u32 })?;
                 }
                 Ok(())
