@@ -1975,7 +1975,8 @@ impl Walk<'_> {
                     }
                     return Ok(());
                 }
-                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if !args.is_empty()) {
+                // Past 32 items the AST builds the array on the heap too.
+                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if (1..=32).contains(&args.len())) {
                     return Err("stack-array");
                 }
                 // With no escape the fields live in frame slots (as the AST's
