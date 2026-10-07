@@ -3505,6 +3505,10 @@ impl Compiler {
                 if !Self::hir_same_enum(&named, kind) || args.len() > 1 {
                     return Err("make-pair");
                 }
+                // `Ok(e)` of a `()`-typed `e`: `e` for its effect.
+                if args.len() == 1 && unit_value(0) {
+                    return self.hir_check_effect(hir, emit, args[0]);
+                }
                 if args.len() == 1 && !unit_arg(0) {
                     word_arg(0)?;
                 }
@@ -4967,6 +4971,12 @@ impl Compiler {
             }
             Rep::Pair(_) => {
                 match args.first() {
+                    // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then
+                    // the `()` payload word.
+                    Some(&arg) if !lower::is_unit_make(hir, arg) && lower::is_unit_value(hir, &self.checker, arg) => {
+                        self.hir_effect(hir, emit, arg);
+                        self.bytecode.push_const(0);
+                    }
                     Some(&arg) if !lower::is_unit_make(hir, arg) => {
                         self.hir_value(hir, emit, arg, &wants[0], depth);
                     }
