@@ -2376,6 +2376,9 @@ impl Compiler {
             } => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
+            // A value `match` (`x ?? y`) yields each arm at the layout asked
+            // for; its own type's is the natural one.
+            HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
             _ => None,
         }
     }
