@@ -2002,8 +2002,19 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if hint.arity != 1 || args.len() != 1 {
+        if hint.arity != args.len() || args.is_empty() {
             return Err("callee-trait");
+        }
+        // Further arguments pass as the AST compiles them: one word each
+        // (an enum's layout may differ at the instance).
+        let mut params = vec![ValueLayout::Boxed];
+        for &arg in &args[1..] {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).ok_or("callee-signature")?);
+            match lower::classify(&self.checker, &ty) {
+                Some(ValueClass::Enum) | None => return Err("callee-trait"),
+                Some(class) if lower::is_word(class) => params.push(self.value_layout(&ty)),
+                Some(_) => return Err("callee-trait"),
+            }
         }
         let ret_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-signature")?);
         if !crate::hir::layout::ty_is_closed(&ret_ty) || lower::classify(&self.checker, &ret_ty).is_none() {
@@ -2017,7 +2028,7 @@ impl Compiler {
         Ok(HirCall {
             key: String::new(),
             pair: None,
-            params: vec![ValueLayout::Boxed],
+            params,
             ret,
             method: false,
             mono: false,
@@ -2066,6 +2077,19 @@ impl Compiler {
 
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
     /// `Result` argument boxed and packs its result in the call's layout.
+    /// Field `field` of an existential pack: from its staged temp, or the
+    /// local pack loaded at `depth` and indexed.
+    fn hir_existential_field(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, pack: Option<u32>, field: i32, depth: u32) {
+        match pack {
+            Some(pack) => Self::load_tuple_field(&mut self.bytecode, pack, field),
+            None => {
+                self.hir_value(hir, emit, value, &BOXED, depth);
+                self.bytecode.push_const(field);
+                self.bytecode.push_index();
+            }
+        }
+    }
+
     /// A builtin call's value operands: for `declare` the library and name
     /// (its signature is constants), for `invoke` the library, function id
     /// and the argument tuple's items; any other call's arguments as is.
@@ -5032,31 +5056,30 @@ impl Compiler {
                     }
                     HirBuiltin::Matrix => self.hir_value(hir, emit, args[0], &Rep::Word(params[0]), depth),
                     HirBuiltin::Existential { slot } => {
-                        // `[value, dict, dict[slot]]` then `CallIndirect`: a
-                        // local pack loads per use, anything else stages
-                        // through a temp at depth zero (lowering refuses
-                        // it deeper, `lower::existential_staged`).
-                        if matches!(hir.expr(args[0]).kind, HirKind::Local(_)) {
-                            for (i, field) in [0, 1, 1].into_iter().enumerate() {
-                                self.hir_value(hir, emit, args[0], &BOXED, depth + i as u32);
-                                self.bytecode.push_const(field);
-                                self.bytecode.push_index();
-                            }
-                        } else {
+                        // `[value, args.., dict, dict[slot]]` then
+                        // `CallIndirect`: a local pack loads per use,
+                        // anything else stages through a temp at depth zero
+                        // (lowering refuses it deeper,
+                        // `lower::existential_staged`).
+                        let local = matches!(hir.expr(args[0]).kind, HirKind::Local(_));
+                        let pack = (!local).then(|| {
                             debug_assert_eq!(depth, 0);
                             self.hir_value(hir, emit, args[0], &BOXED, 0);
                             self.expr_depth = 0;
                             let pack = self.alloc_temp_slot();
                             self.bytecode.push_store_pop(pack);
-                            let mut bc = std::mem::take(&mut self.bytecode);
-                            Self::load_tuple_field(&mut bc, pack, 0);
-                            Self::load_tuple_field(&mut bc, pack, 1);
-                            Self::load_tuple_field(&mut bc, pack, 1);
-                            self.bytecode = bc;
+                            pack
+                        });
+                        self.hir_existential_field(hir, emit, args[0], pack, 0, depth);
+                        for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
+                            self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
                         }
+                        let n = args.len() as u32;
+                        self.hir_existential_field(hir, emit, args[0], pack, 1, depth + n);
+                        self.hir_existential_field(hir, emit, args[0], pack, 1, depth + n + 1);
                         self.bytecode.push_const(slot as i32);
                         self.bytecode.push_index();
-                        self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(2));
+                        self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(n + 1));
                     }
                     HirBuiltin::LinAlg => {
                         let info = self.hir_linear_algebra(hir, id).expect("planned linear algebra");
