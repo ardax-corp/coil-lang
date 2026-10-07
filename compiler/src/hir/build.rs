@@ -1222,6 +1222,11 @@ impl<'c, 'm> Cx<'c, 'm> {
             },
             (None, None) => HirPat::Wild,
         };
+        // `for _ in xs` still steps an item: bind it to a temp.
+        let pat = match pat {
+            HirPat::Wild => HirPat::Bind(b.temp("item", item_ty.clone())),
+            pat => pat,
+        };
         let body = self.expr(b, body);
         b.scopes.pop();
         self.emit_ty(
