@@ -950,7 +950,7 @@ impl Compiler {
         if !crate::hir::layout::ty_is_closed(&ret) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
-        let ret_layout = if lower::classify(&self.checker, &ret) == Some(ValueClass::Enum) {
+        let ret_layout = if enum_boundary(&ret_ty, &ret) {
             self.generic_enum_layout(&ret_ty).ok_or("callee-signature")?
         } else {
             self.value_layout(&ret)
