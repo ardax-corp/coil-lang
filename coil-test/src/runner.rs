@@ -145,10 +145,17 @@ fn compile_fail_verdict(src: &str, reported: &str) -> (bool, Option<String>) {
     if got.iter().any(|c| declared.contains(c)) {
         (true, None)
     } else {
-        let got = if got.is_empty() { "none".to_string() } else { got.join(", ") };
+        let got = if got.is_empty() {
+            "none".to_string()
+        } else {
+            got.join(", ")
+        };
         (
             false,
-            Some(format!("expected {}, compiler reported {got}", declared.join(" or "))),
+            Some(format!(
+                "expected {}, compiler reported {got}",
+                declared.join(" or ")
+            )),
         )
     }
 }

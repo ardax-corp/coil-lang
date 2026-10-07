@@ -288,6 +288,7 @@ name = "coil"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "coil-args",
  "coil-cli",
  "coil-host",
  "common",
@@ -299,6 +300,14 @@ dependencies = [
  "reporting",
  "rkyv",
  "sha2",
+]
+
+[[package]]
+name = "coil-args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "compiler",
 ]
 
 [[package]]
@@ -314,6 +323,8 @@ dependencies = [
 name = "coil-debug"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-cli",
  "common",
  "compiler",
@@ -328,6 +339,8 @@ dependencies = [
 name = "coil-dissect"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-cli",
  "common",
  "compiler",
@@ -347,6 +360,7 @@ dependencies = [
 name = "coil-fmt"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "parser",
  "reporting",
 ]
@@ -364,6 +378,8 @@ dependencies = [
 name = "coil-lsp"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "compiler",
  "comptime",
  "lsp-server",
@@ -384,6 +400,8 @@ dependencies = [
 name = "coil-test"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "coil-args",
  "coil-host",
  "common",
  "compiler",

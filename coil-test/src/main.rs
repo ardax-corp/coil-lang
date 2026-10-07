@@ -2,6 +2,7 @@
 
 use std::process::exit;
 
+use coil_args::print_cli_error;
 use coil_test::args::{MUTATE, Parsed, parse_args, print_help, print_mutate_help};
 use coil_test::mutate::cmd_mutate;
 use coil_test::mutate::job::{WORKER_ARG, worker_main};
@@ -25,12 +26,7 @@ fn main() {
         Ok(Parsed::MutateHelp) => print_mutate_help(),
         Ok(Parsed::Mutate(config, options)) => cmd_mutate(config, *options),
         Err(msg) => {
-            eprintln!("coil-test: {msg}");
-            if raw.get(1).map(String::as_str) == Some(MUTATE) {
-                print_mutate_help();
-            } else {
-                print_help();
-            }
+            print_cli_error(&msg);
             exit(1);
         }
     }
