@@ -2431,13 +2431,27 @@ impl Compiler {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
             (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty)).then_some(ty)
         };
-        let mut arg_tys = Vec::with_capacity(args.len());
-        for &arg in args {
-            arg_tys.push(ground(arg).ok_or("callee-generic")?);
-        }
-        let ret_ty = ground(call).ok_or("callee-generic")?;
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
+        // A type the call never boxes or unboxes passes as the word its
+        // expression already is, even with a variable nothing pinned
+        // (`HashMap::new()` never given a value).
+        let loose = |id: HirId| {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+            lower::classify(&self.checker, &ty).is_some().then_some(ty)
+        };
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for (k, &arg) in args.iter().enumerate() {
+            let bare = k >= receivers
+                && params
+                    .get(skip + k - receivers)
+                    .is_some_and(|p| matches!(p, Ty::Var(v) if scheme.bounds.contains(v)));
+            let ty = ground(arg).or_else(|| (!bare).then(|| loose(arg)).flatten());
+            arg_tys.push(ty.ok_or("callee-generic")?);
+        }
+        let ret_ty = ground(call)
+            .or_else(|| (!self.generic_return_is_boxed(lookup)).then(|| loose(call)).flatten())
+            .ok_or("callee-generic")?;
         let mut boxed = vec![None; receivers];
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             let bare = params
