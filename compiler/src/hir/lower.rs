@@ -1220,6 +1220,39 @@ fn is_byte(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == coil_ty::BYTE)
 }
 
+/// The `dload` / `declare` / `invoke` a call to `name` is, after
+/// `use ffi::{…}`.
+pub fn ffi_builtin(checker: &Checker, callee: &Callee) -> Option<crate::typechecking::FfiBuiltin> {
+    match callee {
+        Callee::Named { name, .. } => checker.ffi_fn_in_scope(name),
+        _ => None,
+    }
+}
+
+/// The `(tag, aux)` constant a `declare` signature entry stands for, as
+/// the checker's `ffi_type_tag_from_output`: a tag name, a builtin FFI
+/// enum variant, or `[T]` / `(T, U)` as a pointer.
+pub fn ffi_tag(body: &HirBody, checker: &Checker, id: HirId) -> Option<(u32, u32)> {
+    match &body.expr(id).kind {
+        HirKind::Global { name, .. } => checker.ffi_type_tag_from_name(name),
+        HirKind::Make {
+            kind: MakeKind::Variant { enum_name, variant, .. },
+            args,
+        } if args.is_empty() && common::is_builtin_ffi_enum(enum_name) => checker.ffi_type_tag_from_variant(enum_name, variant),
+        HirKind::Make { kind: MakeKind::Array, args } if args.len() == 1 => Some((common::tag::PTR, 0)),
+        HirKind::Make { kind: MakeKind::Tuple, .. } => Some((common::tag::PTR, 0)),
+        _ => None,
+    }
+}
+
+/// The items of a `(a, b, ..)` literal argument.
+pub fn tuple_items(body: &HirBody, id: HirId) -> Option<&[HirId]> {
+    match &body.expr(id).kind {
+        HirKind::Make { kind: MakeKind::Tuple, args } => Some(args),
+        _ => None,
+    }
+}
+
 pub fn primitive(ty: &Ty) -> Option<&'static str> {
     match strip_readonly(ty) {
         Ty::Con(n) if n == coil_ty::INT => Some(coil_ty::INT),
@@ -1707,7 +1740,12 @@ impl Walk<'_> {
             // A diverging value (a `match` whose arms all `raise`) never
             // reaches its join, so it fits any word.
             None if self.ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Never)) => Ok(()),
-            _ => Err("value-type"),
+            _ => {
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("    value {:?}: {:?}", self.body.expr(id).kind, self.ty(id));
+                }
+                Err("value-type")
+            }
         }
     }
 
@@ -1765,6 +1803,53 @@ impl Walk<'_> {
 
     /// Call arguments: plain values (no `name:` or `...`), each staged at
     /// depth zero when `staged`, else pushed on the ones before it.
+    /// `dload(path)`, `declare(lib, name, (T, ..), R)` or
+    /// `invoke(lib, f, (a, ..))`, as the AST's `emit_ffi_declare` /
+    /// `emit_ffi_invoke`: the value operands in order, a signature's tags
+    /// as constants, the argument tuple packed. A variadic `declare` or
+    /// `invoke` and a function passed as a callback stay on the AST.
+    fn ffi_call(&mut self, id: HirId, kind: crate::typechecking::FfiBuiltin, args: &[HirId], depth: u32) -> Check {
+        use crate::typechecking::FfiBuiltin;
+        let body = self.body;
+        if self.class(id).is_none() {
+            return Err("call-type");
+        }
+        match kind {
+            FfiBuiltin::Dload => {
+                let [path] = args else { return Err("callee-arity") };
+                self.args(&[*path], depth, false)
+            }
+            FfiBuiltin::Declare => {
+                let [lib, name, sig, ret] = args else { return Err("callee-arity") };
+                let items = tuple_items(body, *sig).ok_or("ffi-signature")?;
+                if items.iter().chain([ret]).any(|&t| ffi_tag(body, self.checker, t).is_none()) {
+                    return Err("ffi-signature");
+                }
+                self.args(&[*lib, *name], depth, false)
+            }
+            FfiBuiltin::Invoke => {
+                let [lib, f, values] = args else { return Err("callee-arity") };
+                let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
+                let HirKind::Local(local) = body.expr(*f).kind else {
+                    return Err("ffi-function");
+                };
+                if self.checker.ffi_fn_id_variadic(&body.local(local).name).unwrap_or(false) {
+                    return Err("callee-variadic");
+                }
+                self.args(&[*lib, *f], depth, false)?;
+                // A function named as an argument is its code pointer
+                // (codegen checks the name is one).
+                let values: Vec<HirId> = items.iter().copied().filter(|&a| !matches!(body.expr(a).kind, HirKind::Global { .. })).collect();
+                for (i, &a) in items.iter().enumerate() {
+                    if values.contains(&a) {
+                        self.args(&[a], depth + 2 + i as u32, false)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn args(&mut self, args: &[HirId], depth: u32, staged: bool) -> Check {
         for (i, &arg) in args.iter().enumerate() {
             if matches!(
@@ -1938,6 +2023,7 @@ impl Walk<'_> {
                 callee: Callee::Method { name },
                 args,
             } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0], depth),
+            HirKind::Call { callee, args } if let Some(kind) = ffi_builtin(self.checker, callee) => self.ffi_call(id, kind, args, depth),
             HirKind::Call {
                 callee: Callee::Named { .. },
                 args,

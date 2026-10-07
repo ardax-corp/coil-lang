@@ -7985,7 +7985,7 @@ impl Compiler {
 
     /// Boxed `ObjEnum` Result → pointer niche (`Err = ptr | 1`), or the
     /// Option-shaped `Result<(), E>` (`Ok = 0`, `Err = ptr`) when `unit_ok`.
-    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
+    pub(super) fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
         let mut bb = BlockBuilder::new();
         let ok = bb.fresh_label(bytecode.il_mut());
         let err = bb.fresh_label(bytecode.il_mut());
