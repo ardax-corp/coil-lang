@@ -295,9 +295,9 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
 }
 
 /// The stack arrays of `body`: each `let a = [..]` with 1..=32 items, or
-/// `let b = a` of such an `a` (a slot copy), that is never iterated or
-/// destructured, and whose escape, if any, is a later statement of the
-/// block that binds it. `a = b` between two stack arrays of one length and
+/// `let b = a` of such an `a` (a slot copy), that is never destructured or
+/// spread, and whose escape (a `for` over it among them), if any, is a
+/// later statement of the block that binds it. `a = b` between two stack arrays of one length and
 /// `a = [..]` of that many items store into the slots; a stack array that
 /// takes part in a copy or such a store never escapes.
 pub fn stack_arrays(body: &HirBody) -> StackArrays {
@@ -386,7 +386,7 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
                     }
                 }
             }
-            HirKind::LetPat { init, .. } | HirKind::ForIn { iterable: init, .. } | HirKind::Spread(init) => {
+            HirKind::LetPat { init, .. } | HirKind::Spread(init) => {
                 if let HirKind::Local(local) = body.expr(init).kind {
                     refused.insert(local.0);
                 }
