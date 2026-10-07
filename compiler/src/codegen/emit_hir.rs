@@ -1913,7 +1913,9 @@ impl Compiler {
                     continue;
                 }
                 let string = matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING);
-                if !string && lower::primitive(ty).is_none() {
+                // A scalar enum's word is its backing literal.
+                let scalar = crate::hir::layout::is_scalar_enum_ty(&self.checker, ty);
+                if !string && !scalar && lower::primitive(ty).is_none() {
                     return Err("format-argument");
                 }
             }
@@ -3051,37 +3053,45 @@ impl Compiler {
             None => match sym {
                 "==" => Some(HirOp::Prim(Instruction::EQ)),
                 "!=" => Some(HirOp::Prim(Instruction::NEQ)),
-                // Arithmetic on an int-backed scalar enum with no instance is
-                // on its backing word: the AST's raw opcode over both operands.
-                _ if self.hir_int_lane(hir, lhs) && self.hir_int_lane(hir, rhs) => Some(HirOp::Prim(match sym {
-                    "+" => Instruction::ADD,
-                    "-" => Instruction::SUB,
-                    "*" => Instruction::MUL,
-                    "/" => Instruction::DIV,
-                    _ => return None,
-                })),
-                _ => None,
+                // Arithmetic on a number-backed scalar enum with no instance
+                // is on its backing word: the AST's raw opcode over both
+                // operands, in the backing's lane.
+                _ => match (self.hir_number_lane(hir, lhs)?, self.hir_number_lane(hir, rhs)?) {
+                    (false, false) => Some(HirOp::Prim(match sym {
+                        "+" => Instruction::ADD,
+                        "-" => Instruction::SUB,
+                        "*" => Instruction::MUL,
+                        "/" => Instruction::DIV,
+                        _ => return None,
+                    })),
+                    (true, true) => Some(HirOp::Prim(match sym {
+                        "+" => Instruction::ADDF,
+                        "-" => Instruction::SUBF,
+                        "*" => Instruction::MULF,
+                        "/" => Instruction::DIVF,
+                        _ => return None,
+                    })),
+                    _ => None,
+                },
             },
         }
     }
 
-    /// An `int` / `byte` operand, or an int-backed scalar enum's.
-    fn hir_int_lane(&self, hir: &HirBody, id: HirId) -> bool {
-        let Some(ty) = Self::hir_ty(hir, id) else {
-            return false;
+    /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,
+    /// or of a number-backed scalar enum's backing.
+    fn hir_number_lane(&self, hir: &HirBody, id: HirId) -> Option<bool> {
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        let lane = |t: &Ty| match crate::typechecking::ty::strip_readonly(t) {
+            Ty::Con(n) if n == crate::typechecking::ty::INT || n == crate::typechecking::ty::BYTE => Some(false),
+            Ty::Con(n) if n == crate::typechecking::ty::FLOAT => Some(true),
+            _ => None,
         };
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let int = |t: &Ty| {
-            matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n)
-                if n == crate::typechecking::ty::INT || n == crate::typechecking::ty::BYTE)
-        };
-        if int(&ty) {
-            return true;
-        }
-        self.hir_enum_name(&ty)
-            .filter(|name| self.checker.is_scalar_enum(name))
-            .and_then(|name| self.checker.scalar_value_ty(&name))
-            .is_some_and(|backing| int(&backing))
+        lane(&ty).or_else(|| {
+            self.hir_enum_name(&ty)
+                .filter(|name| self.checker.is_scalar_enum(name))
+                .and_then(|name| self.checker.scalar_value_ty(&name))
+                .and_then(|backing| lane(&backing))
+        })
     }
 
     /// `class`'s fields with their declared types. A generic class's type
