@@ -152,6 +152,10 @@ enum HirBuiltin {
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
+    /// A trait method on a bare-class existential (`show(x)`): the pack to
+    /// a temp, its value, its dictionary, the method's code pointer from
+    /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
+    Existential { slot: u32 },
 }
 
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
@@ -917,9 +921,10 @@ impl Compiler {
         }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
         // argument types; trait-object dispatch stays on the AST.
-        if self.existential_method_hint(node.node, start, end).is_some()
-            || self.bound_method_hint(node.node, start, end).is_some()
-        {
+        if let Some(hint) = self.existential_method_hint(node.node, start, end) {
+            return self.hir_existential_abi(hir, call, &hint);
+        }
+        if self.bound_method_hint(node.node, start, end).is_some() {
             return Err("callee-trait");
         }
         // Dictionaries a generic body forwards reach a generic callee's
@@ -1300,9 +1305,10 @@ impl Compiler {
         }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
         // argument types; trait-object dispatch stays on the AST.
-        if self.existential_method_hint(node.node, start, end).is_some()
-            || self.bound_method_hint(node.node, start, end).is_some()
-        {
+        if let Some(hint) = self.existential_method_hint(node.node, start, end) {
+            return self.hir_existential_abi(hir, call, &hint);
+        }
+        if self.bound_method_hint(node.node, start, end).is_some() {
             return Err("callee-trait");
         }
         let overload = self.sidecar_overload(node.node, start, end);
@@ -1919,6 +1925,45 @@ impl Compiler {
             .cloned()
     }
 
+    /// A one-argument trait method on an existential pack: the pack is a
+    /// boxed word, the result its type's word (a non-niche enum boxed).
+    fn hir_existential_abi(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        hint: &crate::typechecking::infer::ExistentialMethodCall,
+    ) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        if hint.arity != 1 || args.len() != 1 {
+            return Err("callee-trait");
+        }
+        let ret_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-signature")?);
+        if !crate::hir::layout::ty_is_closed(&ret_ty) || lower::classify(&self.checker, &ret_ty).is_none() {
+            return Err("callee-signature");
+        }
+        let ret = if crate::hir::layout::of(&self.checker, &ret_ty).words() == 1 {
+            self.value_layout(&ret_ty)
+        } else {
+            ValueLayout::Boxed
+        };
+        Ok(HirCall {
+            key: String::new(),
+            pair: None,
+            params: vec![ValueLayout::Boxed],
+            ret,
+            method: false,
+            mono: false,
+            builtin: Some(HirBuiltin::Existential {
+                slot: hint.method_slot as u32,
+            }),
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        })
+    }
+
     /// `[id, args.., meta]` then `HostInvoke` for a packed kernel, else each
     /// argument to a temp and the unrolled form, as the AST.
     fn hir_linear_algebra_op(
@@ -2511,15 +2556,17 @@ impl Compiler {
                 self.hir_natural(hir, emit, *place)
             }
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
-            // A function value returns its result's own layout: a one-word
-            // (niche) enum comes back as that word, as from a direct call.
+            // A function value returns one word: a one-word (niche) enum
+            // as that word, as from a direct call; any other boxed.
             HirKind::Call {
                 callee: Callee::Value(_),
                 ..
             } => Some(
                 Self::hir_ty(hir, id)
                     .filter(|ty| {
-                        self.hir_enum_name(ty).is_some() && !crate::hir::layout::is_scalar_enum_ty(&self.checker, ty)
+                        self.hir_enum_name(ty).is_some()
+                            && !crate::hir::layout::is_scalar_enum_ty(&self.checker, ty)
+                            && crate::hir::layout::of(&self.checker, ty).words() == 1
                     })
                     .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
             ),
@@ -4090,6 +4137,29 @@ impl Compiler {
 
     /// Push `id` as `want`, on top of `depth` live operands.
     fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
+        self.hir_value_unpacked(hir, emit, id, want, depth);
+        // A concrete value where a bare-class existential is expected packs
+        // as `[boxed value, dictionary]` (`append_with_existential_pack`).
+        if let Some(pack) = self.hir_existential_pack(hir, id) {
+            let mut bc = std::mem::take(&mut self.bytecode);
+            self.emit_existential_pack_recipe(&mut bc, &pack);
+            self.bytecode = bc;
+        }
+    }
+
+    /// The checker's existential pack recipe for `id`, when `id` is the
+    /// packed value itself (a wrapper sharing its span has another type).
+    fn hir_existential_pack(&self, hir: &HirBody, id: HirId) -> Option<crate::typechecking::infer::ExistentialPack> {
+        let e = hir.expr(id);
+        let pack = e
+            .node
+            .and_then(|n| self.checker.existential_pack_at(n))
+            .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
+        let ty = apply_ty_prune(self.checker.subst(), e.ty.as_ref()?);
+        (ty == apply_ty_prune(self.checker.subst(), &pack.value_ty)).then(|| pack.clone())
+    }
+
+    fn hir_value_unpacked(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
         match &hir.expr(id).kind {
             HirKind::Lit(Lit::Int(n)) => self.hir_push_int(*n),
             HirKind::Lit(Lit::Float(f)) => self.hir_push_float(*f),
@@ -4710,6 +4780,33 @@ impl Compiler {
                         self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
                     }
                     HirBuiltin::Matrix => self.hir_value(hir, emit, args[0], &Rep::Word(params[0]), depth),
+                    HirBuiltin::Existential { slot } => {
+                        // `[value, dict, dict[slot]]` then `CallIndirect`: a
+                        // local pack loads per use, anything else stages
+                        // through a temp at depth zero (lowering refuses
+                        // it deeper, `lower::existential_staged`).
+                        if matches!(hir.expr(args[0]).kind, HirKind::Local(_)) {
+                            for (i, field) in [0, 1, 1].into_iter().enumerate() {
+                                self.hir_value(hir, emit, args[0], &BOXED, depth + i as u32);
+                                self.bytecode.push_const(field);
+                                self.bytecode.push_index();
+                            }
+                        } else {
+                            debug_assert_eq!(depth, 0);
+                            self.hir_value(hir, emit, args[0], &BOXED, 0);
+                            self.expr_depth = 0;
+                            let pack = self.alloc_temp_slot();
+                            self.bytecode.push_store_pop(pack);
+                            let mut bc = std::mem::take(&mut self.bytecode);
+                            Self::load_tuple_field(&mut bc, pack, 0);
+                            Self::load_tuple_field(&mut bc, pack, 1);
+                            Self::load_tuple_field(&mut bc, pack, 1);
+                            self.bytecode = bc;
+                        }
+                        self.bytecode.push_const(slot as i32);
+                        self.bytecode.push_index();
+                        self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(2));
+                    }
                     HirBuiltin::LinAlg => {
                         let info = self.hir_linear_algebra(hir, id).expect("planned linear algebra");
                         self.hir_linear_algebra_op(hir, emit, &info, args, &params, depth);
