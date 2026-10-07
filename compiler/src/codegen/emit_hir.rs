@@ -1039,7 +1039,13 @@ impl Compiler {
         // its open signature types keep the body's own layouts.
         let shared = lower::is_generic_class(&self.checker, owner)
             && lower::classify(&self.checker, &recv_ty) == Some(ValueClass::Opaque);
-        if !shared && lower::classify(&self.checker, &recv_ty) != Some(ValueClass::Object) {
+        // A user enum's word is its heap object, passed as a class's is.
+        let receiver = match lower::classify(&self.checker, &recv_ty) {
+            Some(ValueClass::Object) => true,
+            Some(ValueClass::Enum) => self.hir_boxed_enum_word(&recv_ty) && self.checker.is_class(owner),
+            _ => false,
+        };
+        if !shared && !receiver {
             return Err("method-receiver");
         }
         let key = self
