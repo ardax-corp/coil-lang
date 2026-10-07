@@ -207,6 +207,9 @@ struct HirEmit {
     /// Each named function read as a value, by node: its entry offset,
     /// arity and rest flag for `MakeFn`.
     fn_refs: HashMap<u32, (usize, u32, bool)>,
+    /// Each generic function read as a `PolyFn` value, by node: its
+    /// resolved name (`MakePolyFn` / `MakePolyFnCapture`).
+    polyfns: HashMap<u32, String>,
     /// Each anonymous `fn`, by node: its body and that body's plan.
     lambdas: HashMap<u32, Box<HirLambda>>,
     /// Each `static let` read or write, by node: its static slot.
@@ -712,6 +715,7 @@ impl Compiler {
             lens: HashMap::new(),
             consts: HashMap::new(),
             fn_refs: HashMap::new(),
+            polyfns: HashMap::new(),
             lambdas: HashMap::new(),
             statics: HashMap::new(),
             ops: HashMap::new(),
@@ -758,8 +762,12 @@ impl Compiler {
                     emit.consts.insert(i as u32, value);
                     continue;
                 }
-                let fn_ref = self.hir_global_fn(hir, HirId(i as u32), name).ok_or("global")?;
-                emit.fn_refs.insert(i as u32, fn_ref);
+                if let Some(fn_ref) = self.hir_global_fn(hir, HirId(i as u32), name) {
+                    emit.fn_refs.insert(i as u32, fn_ref);
+                    continue;
+                }
+                let poly = self.hir_global_polyfn(hir, HirId(i as u32), name).ok_or("global")?;
+                emit.polyfns.insert(i as u32, poly);
                 continue;
             }
             // A matrix operator (`a * b`, `a == b`, `~m`): the packed
@@ -1227,7 +1235,17 @@ impl Compiler {
         if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) || self.two_word_return_kind(lookup).is_some() {
             return Err("callee-generic");
         }
-        let param_tys = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?;
+        let mut param_tys = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?.to_vec();
+        let mut ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
+        // A returned function's parameters are flattened onto the
+        // callee's own (`fn f<T>(T x) { return show; }`): curry them back
+        // onto the result.
+        let named = self.checker.fn_param_names(lookup).map_or(param_tys.len(), <[String]>::len);
+        if param_tys.len() > named && named == arg_tys.len() {
+            for extra in param_tys.split_off(named).into_iter().rev() {
+                ret_ty = Ty::Fun(Box::new(extra), Box::new(ret_ty));
+            }
+        }
         if param_tys.len() != arg_tys.len() {
             return Err("callee-signature");
         }
@@ -1235,7 +1253,6 @@ impl Compiler {
         for (param, arg) in param_tys.iter().zip(&arg_tys) {
             Self::bind_scheme_vars(param, arg, &mut map);
         }
-        let ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
         // A generic `Option` / `Result` boundary is boxed even in a clone.
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
@@ -1266,7 +1283,9 @@ impl Compiler {
         {
             ret = apply_ty_prune(self.checker.subst(), ty);
         }
-        if !crate::hir::layout::ty_is_closed(&ret) || lower::classify(&self.checker, &ret).is_none() {
+        // A returned function (`return show`, a `PolyFn`) is one word.
+        let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. });
+        if !(crate::hir::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
         let ret_layout = if enum_boundary(&ret_ty, &ret) {
@@ -2779,6 +2798,96 @@ impl Compiler {
         Some((entry, arity, rest))
     }
 
+    /// A generic function already emitted, read where a `PolyFn` is
+    /// expected: `compile_identifier_into`'s `MakePolyFn` path.
+    fn hir_global_polyfn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<String> {
+        if name.contains("::") {
+            return None;
+        }
+        let expr = hir.expr(id);
+        let resolved = self.resolve_free_fn(name);
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        // Any generic function escapes as a `PolyFn`, whatever type the
+        // read is instantiated at (the AST's `MakePolyFn` path).
+        if !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..) | Ty::Forall { .. })
+            || !self.checker.is_generic_fn(&resolved)
+            || self.checker.is_overloaded(&resolved)
+            || self.lookup_slot(name).is_some()
+            || self.checker.bare_construct_at(expr.span.0, expr.span.1).is_some()
+            || !self.functions.contains_key(&resolved)
+        {
+            return None;
+        }
+        Some(resolved)
+    }
+
+    /// The generic function a `PolyFn` local was bound from (`let f = id`),
+    /// whose scheme picks the call's dictionaries and result unbox.
+    fn hir_polyfn_source(&self, hir: &HirBody, emit: &HirEmit, f: HirId) -> Option<String> {
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return None;
+        };
+        hir.exprs.iter().find_map(|e| match &e.kind {
+            HirKind::Let { local: l, init: Some(init) } if *l == local => emit.polyfns.get(&init.0).cloned(),
+            _ => None,
+        })
+    }
+
+    /// `f(args)` through a `PolyFn` local, as `compile_call_expr`: each
+    /// argument boxed, the call site's dictionaries, `f`, `CallIndirect`
+    /// with both arities, then the result unboxed when the function
+    /// returns a bare type parameter.
+    fn hir_polyfn_call(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, f: HirId, args: &[HirId], depth: u32) {
+        let mut arg_tys = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            self.hir_value(hir, emit, arg, &BOXED, depth + i as u32);
+            if let Some(ty) = Self::hir_ty(hir, arg) {
+                let ty = apply_ty_prune(self.checker.subst(), ty);
+                Self::emit_box_if_needed(&mut self.bytecode, &ty);
+                arg_tys.push(ty);
+            }
+        }
+        let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+        let source = self.hir_polyfn_source(hir, emit, f);
+        let mut dicts = 0u32;
+        if let Some(source) = &source {
+            let mut bc = std::mem::take(&mut self.bytecode);
+            dicts = self.emit_call_site_dicts(&mut bc, source, &arg_tys, call_ty.as_ref()) as u32;
+            self.bytecode = bc;
+        }
+        self.hir_value(hir, emit, f, &BOXED, depth + args.len() as u32 + dicts);
+        self.bytecode
+            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 | (dicts << 16)));
+        let unbox = match &source {
+            Some(source) => self.generic_return_depends_on_type_param(source),
+            None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
+        };
+        if unbox && let Some(ty) = call_ty {
+            let mut bc = std::mem::take(&mut self.bytecode);
+            Self::emit_unbox_if_needed(&mut bc, &ty);
+            self.bytecode = bc;
+        }
+    }
+
+    /// Whether a `PolyFn` local's own type returns a bare type parameter
+    /// (boxed at run time), as `local_polyfn_call_needs_unbox`.
+    fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return false;
+        };
+        let Some(ty) = hir.local(local).ty.as_ref() else {
+            return false;
+        };
+        let mut result = apply_ty_prune(checker.subst(), ty);
+        while let Ty::Forall { body, .. } = result {
+            result = *body;
+        }
+        while let Ty::Fun(_, ret) = result {
+            result = *ret;
+        }
+        matches!(result, Ty::Var(_))
+    }
+
     fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
         use crate::const_fold::ConstValue;
         if name.contains("::") {
@@ -3488,6 +3597,17 @@ impl Compiler {
                 callee: Callee::Value(f),
                 args,
             } => {
+                // A `PolyFn` call: no dictionary forwarded from a generic
+                // frame, and an enum result stays on the AST (it comes back
+                // as the shared path's object).
+                if lower::polyfn_callee(hir, &self.checker, *f) {
+                    let e = hir.expr(id);
+                    let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
+                    let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    if forwarded || ty.as_ref().is_none_or(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum) || !crate::hir::layout::ty_is_closed(t)) {
+                        return Err("callee-value");
+                    }
+                }
                 for &arg in args.iter().chain([f]) {
                     self.hir_check_value(hir, emit, arg, &BOXED)?;
                 }
@@ -4239,6 +4359,19 @@ impl Compiler {
                     .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(captures, 0, arity, false)));
                 emit.lambdas.insert(id.0, lam);
             }
+            HirKind::Global { .. } if let Some(name) = emit.polyfns.get(&id.0).cloned() => {
+                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let entry = self.functions[&name] as u32;
+                let mut bc = std::mem::take(&mut self.bytecode);
+                let dict_arity = self.emit_polyfn_escape_dicts(&mut bc, &name, ty.as_ref());
+                if dict_arity == 0 {
+                    bc.push(Byte::new(Instruction::MakePolyFn).with_operand_u32(entry));
+                } else {
+                    bc.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
+                    bc.push(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(dict_arity as u32));
+                }
+                self.bytecode = bc;
+            }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);
                 self.bytecode
@@ -4407,6 +4540,13 @@ impl Compiler {
                     UnOp::BitNot => Instruction::NOT,
                     UnOp::Not => Instruction::LogNot,
                 }));
+            }
+            HirKind::Call {
+                callee: Callee::Value(f),
+                args,
+            } if lower::polyfn_callee(hir, &self.checker, *f) => {
+                let (f, args) = (*f, args.clone());
+                self.hir_polyfn_call(hir, emit, id, f, &args, depth);
             }
             HirKind::Call {
                 callee: Callee::Value(f),
