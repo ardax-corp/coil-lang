@@ -1883,8 +1883,10 @@ impl Walk<'_> {
                 if self.class(*base) != Some(ValueClass::Enum) {
                     self.object(*base)?;
                 }
-                // `new C(..).f` reads the argument directly in the AST.
-                if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
+                // `new C(..).f` stages each argument through a temp and
+                // reads the field's (codegen), or builds the object, which
+                // runs at depth zero either way.
+                if depth != 0 && matches!(body.expr(*base).kind, HirKind::Make { .. }) {
                     return Err("field-of-new");
                 }
                 self.value(*base, depth)

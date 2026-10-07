@@ -3168,6 +3168,24 @@ impl Compiler {
         Some((class, fields.into_iter().map(|(_, ty)| ty).collect()))
     }
 
+    /// `new C(args).f` of a class with no `drop`: the arguments, their
+    /// field types, and the index of `f`.
+    fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
+        let HirKind::Make {
+            kind: MakeKind::Class(name),
+            args,
+        } = &hir.expr(base).kind
+        else {
+            return None;
+        };
+        if self.checker.class_has_drop(name) {
+            return None;
+        }
+        let (class, tys) = self.hir_new_layout(hir, base)?;
+        let at = self.context.classes.get(&class)?.iter().position(|(f, _)| f == field)?;
+        Some((args.clone(), tys, at))
+    }
+
     /// The field-slot words of a planned `new C(args)`.
     fn hir_check_new_args(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
         let (_, tys) = self.hir_new_layout(hir, id).ok_or("class-layout")?;
@@ -4483,6 +4501,21 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
                     self.bytecode.push_load(slot);
+                } else if let Some((args, tys, at)) = self.hir_field_of_new(hir, *base, name) {
+                    // As the AST's `try_emit_direct_class_field_access`: the
+                    // object is never observed, so each argument runs in
+                    // order into a temp and the field's is read back.
+                    debug_assert_eq!(depth, 0);
+                    let mut temps = Vec::with_capacity(args.len());
+                    for (&arg, ty) in args.iter().zip(&tys) {
+                        let want = Rep::Word(self.value_layout(ty));
+                        self.hir_value(hir, emit, arg, &want, 0);
+                        self.expr_depth = 0;
+                        let tmp = self.alloc_temp_slot();
+                        self.bytecode.push_store_pop(tmp);
+                        temps.push(tmp);
+                    }
+                    self.bytecode.push_load(temps[at]);
                 } else {
                     let (at, _) = self.hir_field(hir, *base, name).expect("planned field");
                     let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).expect("planned field base"));
