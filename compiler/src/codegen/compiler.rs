@@ -15502,8 +15502,20 @@ impl Compiler {
         } else {
             None
         };
+        self.emit_linear_algebra_unrolled(bytecode, info.kind, t0, t1);
+    }
 
-        match info.kind {
+    /// The scalar unroll of a linear-algebra op over operands in temps `t0`
+    /// (and `t1`): the result is left on the stack.
+    pub(crate) fn emit_linear_algebra_unrolled(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        kind: crate::typechecking::LinearAlgebraKind,
+        t0: u32,
+        t1: Option<u32>,
+    ) {
+        use crate::typechecking::LinearAlgebraKind;
+        match kind {
             LinearAlgebraKind::Dot {
                 length,
                 elem_is_float,
@@ -15740,22 +15752,53 @@ impl Compiler {
         kind: &crate::typechecking::LinearAlgebraKind,
         args: &[Output],
     ) -> bool {
-        use crate::typechecking::LinearAlgebraKind;
+        let Some((native_id, meta)) = self.packed_linear_algebra_op(kind, args.len()) else {
+            return false;
+        };
+        let value_args = args;
 
-        let (native_name, meta, value_args): (&str, u32, &[Output]) = match kind {
+        // HostInvoke stack: [id, arg0, …, meta].
+        // Meta is a full u32 bitfield, must use `with_operand_u32` (not
+        // `with_value_u32`, which only keeps the low 16 bits).
+        let depth_on_entry = self.expr_depth;
+        bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native_id as u32));
+        self.expr_depth = depth_on_entry + 1;
+        for arg in value_args {
+            bytecode.append(&mut self.do_compile(arg));
+            self.expr_depth += 1;
+        }
+        bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
+        self.expr_depth += 1;
+        let arity = value_args.len() + 1; // + meta
+        bytecode.push_host_invoke(arity as u32);
+        self.expr_depth = depth_on_entry;
+        true
+    }
+
+    /// The packed `HostInvoke` kernel (native id, meta word) for a
+    /// linear-algebra op with `argc` operands, when its dimensions fit and
+    /// the native is registered.
+    pub(crate) fn packed_linear_algebra_op(
+        &self,
+        kind: &crate::typechecking::LinearAlgebraKind,
+        argc: usize,
+    ) -> Option<(usize, u32)> {
+        use crate::typechecking::LinearAlgebraKind;
+        let args_len = argc;
+        let (native_name, meta): (&str, u32) = match kind {
             LinearAlgebraKind::Dot {
                 length,
                 elem_is_float,
                 ..
             } => {
-                if *length == 0 || *length > u16::MAX as usize || args.len() != 2 {
-                    return false;
+                if *length == 0 || *length > u16::MAX as usize || args_len != 2 {
+                    return None;
                 }
                 let mut ops = (*length as u32) & 0xFFFF;
                 if *elem_is_float {
                     ops |= 1 << 16;
                 }
-                (common::PACKED_DOT, ops, args)
+                (common::PACKED_DOT, ops)
             }
             LinearAlgebraKind::MatMul {
                 m,
@@ -15765,7 +15808,7 @@ impl Compiler {
                 row_is_tuple,
                 elem_is_float,
             } => {
-                if args.len() != 2
+                if args_len != 2
                     || *m == 0
                     || *k == 0
                     || *n == 0
@@ -15773,7 +15816,7 @@ impl Compiler {
                     || *k > u8::MAX as usize
                     || *n > u8::MAX as usize
                 {
-                    return false;
+                    return None;
                 }
                 let mut ops = (*m as u32) | ((*k as u32) << 8) | ((*n as u32) << 16);
                 if *elem_is_float {
@@ -15785,7 +15828,7 @@ impl Compiler {
                 if *row_is_tuple {
                     ops |= 1 << 26;
                 }
-                (common::PACKED_MATMUL, ops, args)
+                (common::PACKED_MATMUL, ops)
             }
             LinearAlgebraKind::MatrixZip {
                 m,
@@ -15797,13 +15840,13 @@ impl Compiler {
                 elem_is_byte,
                 scalar_on,
             } => {
-                if args.len() != 2
+                if args_len != 2
                     || *m == 0
                     || *n == 0
                     || *m > u8::MAX as usize
                     || *n > u8::MAX as usize
                 {
-                    return false;
+                    return None;
                 }
                 let mut ops = (*m as u32) | ((*n as u32) << 8) | (u32::from(op.zip_kind()) << 16);
                 if *elem_is_float {
@@ -15824,7 +15867,7 @@ impl Compiler {
                 if *elem_is_byte {
                     ops |= 1 << 29;
                 }
-                (common::PACKED_MATRIX_ZIP, ops, args)
+                (common::PACKED_MATRIX_ZIP, ops)
             }
             LinearAlgebraKind::MatrixNeg {
                 m,
@@ -15835,13 +15878,13 @@ impl Compiler {
                 elem_is_byte,
                 bit_not,
             } => {
-                if args.is_empty()
+                if args_len == 0
                     || *m == 0
                     || *n == 0
                     || *m > u8::MAX as usize
                     || *n > u8::MAX as usize
                 {
-                    return false;
+                    return None;
                 }
                 let mut ops = (*m as u32) | ((*n as u32) << 8);
                 if *elem_is_float {
@@ -15859,31 +15902,13 @@ impl Compiler {
                 if *elem_is_byte {
                     ops |= 1 << 20;
                 }
-                (common::PACKED_MATRIX_NEG, ops, args)
+                (common::PACKED_MATRIX_NEG, ops)
             }
-            LinearAlgebraKind::Cross { .. } => return false,
+            LinearAlgebraKind::Cross { .. } => return None,
         };
 
-        let Some(native_id) = self.native_id(native_name) else {
-            return false;
-        };
-
-        // HostInvoke stack: [id, arg0, …, meta].
-        // Meta is a full u32 bitfield, must use `with_operand_u32` (not
-        // `with_value_u32`, which only keeps the low 16 bits).
-        let depth_on_entry = self.expr_depth;
-        bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native_id as u32));
-        self.expr_depth = depth_on_entry + 1;
-        for arg in value_args {
-            bytecode.append(&mut self.do_compile(arg));
-            self.expr_depth += 1;
-        }
-        bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
-        self.expr_depth += 1;
-        let arity = value_args.len() + 1; // + meta
-        bytecode.push_host_invoke(arity as u32);
-        self.expr_depth = depth_on_entry;
-        true
+        let native_id = self.native_id(native_name)?;
+        Some((native_id, meta))
     }
 
     /// Desugar `assert(cond[, msg])` to Ok(()) / Err(msg) via MakeEnum.
