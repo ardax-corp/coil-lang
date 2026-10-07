@@ -1091,6 +1091,61 @@ impl Compiler {
         })
     }
 
+    /// `recv.m(args)` the checker resolved to one arity overload of an
+    /// inherent method, keyed `Owner::m#arity.id` as `compile_call_expr`
+    /// keys it; layouts are read off the call's own types, as
+    /// [`Self::resolve_hir_overload`].
+    fn resolve_hir_method_overload(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        base: &str,
+        fixed: usize,
+        id: u32,
+        shared: bool,
+    ) -> Result<HirCall, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        let key = overload_fn_key(base, fixed, false, id);
+        if shared
+            || fixed + 1 != args.len()
+            || !self.functions.contains_key(&key)
+            || self.checker.is_generic_fn(base)
+            || self.checker.is_generic_fn(&key)
+            || self.coroutine_fns.contains(&key)
+            || self.two_word_return_kind(&key).is_some()
+            || self.callee_has_unboxed_range_params(&key)
+        {
+            return Err("callee-overload");
+        }
+        let plain = |id: HirId, unit: bool| -> Result<ValueLayout, &'static str> {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
+            match lower::classify(&self.checker, &ty) {
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
+                    if crate::hir::layout::ty_is_closed(&ty) =>
+                {
+                    Ok(self.value_layout(&ty))
+                }
+                Some(ValueClass::Unit) if unit => Ok(ValueLayout::Boxed),
+                _ => Err("callee-signature"),
+            }
+        };
+        let params = args.iter().map(|&a| plain(a, false)).collect::<Result<Vec<_>, _>>()?;
+        Ok(HirCall {
+            key,
+            pair: None,
+            params,
+            ret: plain(call, true)?,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        })
+    }
+
     /// Whether the AST's `mono_call_offset` finds an emitted clone of `key`
     /// for `call`'s ground argument types.
     fn hir_has_mono_clone(&self, hir: &HirBody, call: HirId, key: &str) -> bool {
@@ -1223,12 +1278,16 @@ impl Compiler {
         {
             return Err("callee-trait");
         }
-        if self.sidecar_overload(node.node, start, end).is_some() {
+        let overload = self.sidecar_overload(node.node, start, end);
+        if overload.is_some_and(|(_, rest, _)| rest) {
             return Err("callee-overload");
         }
         // Dictionaries a generic body forwards reach only a generic
         // method's shared body ([`Self::hir_generic_abi`]).
         let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty());
+        if overload.is_some() && forwards {
+            return Err("callee-overload");
+        }
         if !forwards && let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
             return Ok(call);
         }
@@ -1290,8 +1349,24 @@ impl Compiler {
         if !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key)) {
             return Err("method-unknown");
         }
+        if let Some((fixed, _, id)) = overload {
+            return self.resolve_hir_method_overload(hir, call, &key, fixed, id, shared);
+        }
+        // A forward call inside an impl that later gained more overloads has
+        // no recorded selection: pick by argument types, as the AST does.
         if self.checker.is_overloaded(&key) {
-            return Err("callee-overload");
+            use crate::typechecking::infer::OverloadSelect;
+            let tys = args[1..]
+                .iter()
+                .map(|&a| Self::hir_ty(hir, a).cloned())
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            return match self.checker.select_overload_for_args(&key, args.len() - 1, &tys) {
+                OverloadSelect::Selected(c) if !c.is_rest => {
+                    self.resolve_hir_method_overload(hir, call, &key, c.fixed_arity, c.id, shared)
+                }
+                _ => Err("callee-overload"),
+            };
         }
         let lookup = key.clone();
         let generic = self.checker.is_generic_fn(&lookup);
