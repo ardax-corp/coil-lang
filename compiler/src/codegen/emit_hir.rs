@@ -308,15 +308,13 @@ impl Compiler {
             self.hir_module = Some(module);
             return false;
         }
-        // An enum whose generic type mentions a type parameter keeps the
-        // boxed boundary layout in the AST's clone; those stay there.
-        if let Some(inst) = &instance
-            && self.hir_mono_enum_boundary(&module.bodies[index], inst)
-        {
-            crate::il::opt::note_hir_fallback("mono-enum");
-            self.hir_module = Some(module);
-            return false;
-        }
+        // An `Option` / `Result` parameter whose generic type mentions a type
+        // parameter arrives in that open type's (boxed) layout; the body
+        // converts it to the instance's own layout on entry.
+        let entry_convs = instance
+            .as_ref()
+            .map(|inst| self.hir_mono_enum_params(&module.bodies[index], inst))
+            .unwrap_or_default();
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         let shapes = self.hir_call_shapes(hir);
         let hir = match &shapes {
@@ -350,6 +348,12 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
+                for &(param, from, to) in &entry_convs {
+                    let slot = Self::hir_slot(&emit, param);
+                    self.bytecode.push_load(slot);
+                    self.hir_convert(&Rep::Word(from), &Rep::Word(to), 0);
+                    self.bytecode.push_store_pop(slot);
+                }
                 if let Some(root) = hir.root {
                     self.hir_effect(hir, &mut emit, root);
                 }
@@ -381,23 +385,26 @@ impl Compiler {
         lowered
     }
 
-    /// Whether some value of `generic` has a type that mentions a type
-    /// variable and is an enum at the instance's types.
-    fn hir_mono_enum_boundary(&self, generic: &HirBody, inst: &HirBody) -> bool {
-        let open = |ty: &Option<Ty>| {
-            ty.as_ref()
-                .is_some_and(|t| !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), t)))
-        };
-        let is_enum = |ty: &Option<Ty>| {
-            ty.as_ref()
-                .is_some_and(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum))
-        };
-        let exprs = generic.exprs.iter().zip(&inst.exprs).map(|(g, i)| (&g.ty, &i.ty));
-        let locals = generic.locals.iter().zip(&inst.locals).map(|(g, i)| (&g.ty, &i.ty));
-        exprs
-            .chain(locals)
-            .chain(std::iter::once((&generic.ret, &inst.ret)))
-            .any(|(g, i)| open(g) && is_enum(i))
+    /// The parameters of a mono clone that cross a generic `Option` /
+    /// `Result` boundary: each with the boxed layout its caller passes
+    /// (`generic_enum_layout`) and the instance layout the body uses.
+    fn hir_mono_enum_params(&self, generic: &HirBody, inst: &HirBody) -> Vec<(LocalId, ValueLayout, ValueLayout)> {
+        generic
+            .params
+            .iter()
+            .filter_map(|&param| {
+                let open = generic.local(param).ty.as_ref()?;
+                let ty = inst.local(param).ty.as_ref()?;
+                if matches!(apply_ty_prune(self.checker.subst(), open), Ty::Var(_))
+                    || lower::classify(&self.checker, ty) != Some(ValueClass::Enum)
+                {
+                    return None;
+                }
+                let from = self.generic_enum_layout(open)?;
+                let to = self.value_layout(ty);
+                (from != to).then_some((param, from, to))
+            })
+            .collect()
     }
 
     /// `body` with each type variable of the instance being compiled bound
@@ -702,7 +709,27 @@ impl Compiler {
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
                 // Tests return their `Result<(), string>` boxed, as the AST does.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
-                if declared != Some(layout) && !boxed_test {
+                // A mono clone returns a generic `Option` / `Result` in the
+                // open type's layout; each `return` converts to it. A bare
+                // `T` result is the concrete layout at its callers.
+                let boundary = self.compiling_mono_clone
+                    && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
+                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
+                    && self
+                        .compiling_fn_return_ty()
+                        .and_then(|ty| self.generic_enum_layout(&ty))
+                        == Some(layout);
+                // A bare `T` result passes through in its concrete layout,
+                // whatever the AST names its open type's layout.
+                let bare = self.compiling_mono_clone
+                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
+                    && self
+                        .compiling_fn_return_ty()
+                        .is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), &ty), Ty::Var(_)));
+                if let (true, Some(declared)) = (bare, declared) {
+                    return Ok(Rep::Word(declared));
+                }
+                if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
                 Rep::Word(layout)
@@ -1723,11 +1750,11 @@ impl Compiler {
                 Some(_) => Ok(self.value_layout(ty)),
             }
         };
+        let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index)) else {
+            return self.hir_ground_bound_call(hir, call, name, &hint).map(Some);
+        };
         let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
         let ret = word(call)?;
-        let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index)) else {
-            return self.hir_ground_bound_call(hir, call, name, &hint, params, ret).map(Some);
-        };
         Ok(Some(HirCall {
             key: String::new(),
             pair: None,
@@ -1754,8 +1781,6 @@ impl Compiler {
         call: HirId,
         name: &str,
         hint: &crate::typechecking::infer::BoundMethodCall,
-        params: Vec<ValueLayout>,
-        ret: ValueLayout,
     ) -> Result<HirCall, &'static str> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
@@ -1818,9 +1843,8 @@ impl Compiler {
             return Err("callee-trait");
         }
         let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
-        if self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default).is_some() {
-            return Err("callee-trait");
-        }
+        let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
         let unbox = self
             .instance_method_unbox_tys(&instance.class, method, &lookup)
             .into_iter()
@@ -1886,6 +1910,57 @@ impl Compiler {
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
+    /// How a ground instance call passes its arguments and takes its result:
+    /// the boundary signature's layout where it has one, else words as the
+    /// AST compiles them. An enum passes boxed as the instance entry takes
+    /// it; a niche layout may differ.
+    fn hir_ground_words(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        args: &[HirId],
+        fqn: &str,
+        sig: Option<&crate::codegen::BoundarySig>,
+    ) -> Result<(Vec<ValueLayout>, ValueLayout), &'static str> {
+        let word = |id: HirId| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            match lower::classify(&self.checker, ty) {
+                None => Err("callee-trait"),
+                Some(ValueClass::Enum) => match self.value_layout(ty) {
+                    ValueLayout::Boxed => Ok(ValueLayout::Boxed),
+                    _ => Err("callee-trait"),
+                },
+                Some(_) => Ok(self.value_layout(ty)),
+            }
+        };
+        let params = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| match sig.and_then(|s| s.params.get(i).copied().flatten()) {
+                Some(layout) => Ok(layout),
+                None => word(arg),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // A niche enum result is the instance entry's own return word when
+        // its declared return type lays out the same.
+        let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
+            Ok(ret) => ret,
+            Err(_) => {
+                let ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
+                let layout = self.value_layout(ty);
+                let declared = self.checker.fn_return_ty(fqn).ok_or("callee-trait")?;
+                if !(layout.is_niche_option() || layout.is_niche_result())
+                    || Self::ty_has_var(&declared)
+                    || self.value_layout(&declared) != layout
+                {
+                    return Err("callee-trait");
+                }
+                layout
+            }
+        };
+        Ok((params, ret))
+    }
+
     /// A direct call to instance method `fqn`, as the AST's function-style
     /// and static trait calls: arguments in order, the positions the entry
     /// unboxes boxed, staged only when one may clobber the operand stack.
@@ -1904,48 +1979,13 @@ impl Compiler {
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
-        // Words pass as the AST compiles them. An enum passes boxed as the
-        // instance entry takes it; a niche layout may differ.
-        let word = |id: HirId| {
-            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
-            match lower::classify(&self.checker, ty) {
-                None => Err("callee-trait"),
-                Some(ValueClass::Enum) => match self.value_layout(ty) {
-                    ValueLayout::Boxed => Ok(ValueLayout::Boxed),
-                    _ => Err("callee-trait"),
-                },
-                Some(_) => Ok(self.value_layout(ty)),
-            }
-        };
-        let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
-        // A niche enum result is the instance entry's own return word when
-        // its declared return type lays out the same.
-        let ret = match word(call) {
-            Ok(ret) => ret,
-            Err(_) => {
-                let ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
-                let layout = self.value_layout(ty);
-                let declared = self.checker.fn_return_ty(&fqn).ok_or("callee-trait")?;
-                if !(layout.is_niche_option() || layout.is_niche_result())
-                    || Self::ty_has_var(&declared)
-                    || self.value_layout(&declared) != layout
-                {
-                    return Err("callee-trait");
-                }
-                layout
-            }
-        };
-        // Box the positions the instance entry unboxes, except heap words.
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
-        // A boundary signature that lays each word out as the call site
-        // already does needs no conversion.
-        if let Some(sig) = self.trait_method_boundary_sig(&class, method, &inst_args, is_default)
-            && (sig.ret.is_some_and(|l| l != ret)
-                || sig.params.len() != params.len()
-                || sig.params.iter().zip(&params).any(|(s, p)| s.is_some_and(|l| l != *p)))
-        {
+        let sig = self.trait_method_boundary_sig(&class, method, &inst_args, is_default);
+        if sig.as_ref().is_some_and(|s| s.params.len() != args.len()) {
             return Err("callee-trait");
         }
+        let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
+        // Box the positions the instance entry unboxes, except heap words.
         let unbox = self.instance_method_unbox_tys(&class, method, &inst_args);
         let boxed = args
             .iter()
