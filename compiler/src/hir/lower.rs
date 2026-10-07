@@ -1129,6 +1129,38 @@ pub fn is_identity_arm(body: &HirBody, arm: &HirArm) -> bool {
     }
 }
 
+/// Whether some arm tests a sub-pattern of its payload (a literal or an
+/// inner variant): outer-tag dispatch cannot tell such arms apart, so the
+/// match tests arm by arm, as the AST's `compile_match_sequential`.
+pub fn has_nested_test(arms: &[HirArm]) -> bool {
+    let tests = |p: &HirPat| matches!(p, HirPat::Int(_) | HirPat::Variant { .. });
+    arms.iter().any(|arm| match &arm.pat {
+        HirPat::Variant {
+            fields: HirPatFields::Tuple(parts),
+            ..
+        } => parts.iter().any(tests),
+        HirPat::Variant {
+            fields: HirPatFields::Record(fields),
+            ..
+        } => fields.iter().any(|(_, p)| tests(p)),
+        _ => false,
+    })
+}
+
+/// A pattern the arm-by-arm match tests: variants, literals, bindings and
+/// `_`, nested to any depth.
+pub fn nested_pattern(pat: &HirPat) -> Result<(), &'static str> {
+    match pat {
+        HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => Ok(()),
+        HirPat::Variant { fields, .. } => match fields {
+            HirPatFields::Unit => Ok(()),
+            HirPatFields::Tuple(parts) => parts.iter().try_for_each(nested_pattern),
+            HirPatFields::Record(fields) => fields.iter().try_for_each(|(_, p)| nested_pattern(p)),
+        },
+        HirPat::Tuple(_) | HirPat::Record(_) => Err("pattern-nested"),
+    }
+}
+
 /// Whether some arm binds a local the arm body reads from a slot (any
 /// binding besides an identity arm's). Those matches lower with the
 /// payload in frame slots, so they must start at operand depth zero.
@@ -1818,6 +1850,31 @@ impl Walk<'_> {
     ) -> Check {
         if arms.is_empty() {
             return Err("match-empty");
+        }
+        if has_nested_test(arms) {
+            // Arm by arm, with the scrutinee and the payloads an arm opens
+            // in frame slots: only on an empty operand stack.
+            if self.class(scrutinee) != Some(ValueClass::Enum) {
+                return Err("match-type");
+            }
+            if value {
+                self.word(id)?;
+            }
+            if depth != 0 {
+                return Err("nested-match");
+            }
+            for arm in arms {
+                nested_pattern(&arm.pat)?;
+            }
+            self.value(scrutinee, 0)?;
+            for arm in arms {
+                if value {
+                    self.value(arm.body, 0)?;
+                } else {
+                    self.effect(arm.body, 0)?;
+                }
+            }
+            return Ok(());
         }
         if is_scalar_match(self.checker, self.body, scrutinee, arms) {
             if value {

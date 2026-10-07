@@ -17,7 +17,7 @@
 use super::*;
 use crate::hir::lower::{self, ValueClass};
 use crate::hir::{
-    BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind, UnOp,
+    BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind, UnOp,
 };
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::value_layout::ValueLayout;
@@ -150,6 +150,19 @@ struct HirLambda {
 }
 
 /// Per-body lowering state.
+/// One arm's test in [`Compiler::hir_match_seq`].
+struct SeqTest {
+    /// First slot above the scrutinee; payload words land from here.
+    base: u32,
+    /// Words the test has pushed above `base` so far.
+    depth: u32,
+    max_depth: u32,
+    /// Last arm: exhaustiveness guarantees a match, so only unpack.
+    irrefutable: bool,
+    /// Miss labels, each with the number of words to pop before the next arm.
+    misses: Vec<(IlLabel, u32)>,
+}
+
 struct HirEmit {
     /// Frame slot of each [`LocalId`], once bound.
     slots: Vec<Option<u32>>,
@@ -3077,6 +3090,66 @@ impl Compiler {
         }
     }
 
+    /// A pattern [`Self::hir_seq_test`] tests against a word of type `ty`
+    /// in `layout`: each binding must take the word's layout.
+    fn hir_check_seq_pattern(&self, hir: &HirBody, pat: &HirPat, ty: Option<&Ty>, layout: ValueLayout) -> Check {
+        let HirPat::Variant {
+            enum_name,
+            variant,
+            fields,
+            ..
+        } = pat
+        else {
+            return match pat {
+                HirPat::Bind(local) if self.hir_local_layout(hir, *local) != layout => Err("binding-layout"),
+                HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => Ok(()),
+                _ => Err("pattern-nested"),
+            };
+        };
+        if self.checker.scalar_for(enum_name, variant).is_some() {
+            return Ok(());
+        }
+        let ty = ty.ok_or("pattern-type")?;
+        let field_tys = self.hir_payload_tys(ty, variant).ok_or("pattern-payload")?;
+        let subs = self.hir_seq_subpatterns(enum_name, variant, fields);
+        let field_layout = |k: usize| field_tys.get(k).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+        if layout != ValueLayout::Boxed {
+            if !matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err") || subs.len() > 1 {
+                return Err("pattern-niche");
+            }
+            return match subs.first() {
+                Some(Some(sub)) => self.hir_check_seq_pattern(hir, sub, field_tys.first(), field_layout(0)),
+                _ => Ok(()),
+            };
+        }
+        self.checker.tag_for(enum_name, variant).ok_or("pattern-tag")?;
+        let arity = self.checker.arity_for(enum_name, variant).unwrap_or(0);
+        if subs.len() > arity {
+            return Err("pattern-payload");
+        }
+        for (k, sub) in subs.iter().enumerate() {
+            if let Some(sub) = sub {
+                self.hir_check_seq_pattern(hir, sub, field_tys.get(k), field_layout(k))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A variant pattern's payload sub-patterns in declaration order
+    /// (`None` for a record field the pattern leaves out).
+    fn hir_seq_subpatterns<'p>(&self, enum_name: &str, variant: &str, fields: &'p HirPatFields) -> Vec<Option<&'p HirPat>> {
+        match fields {
+            HirPatFields::Unit => Vec::new(),
+            HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
+            HirPatFields::Record(named) => self
+                .checker
+                .payload_tys_for(enum_name, variant)
+                .iter()
+                .map(|(name, _)| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
+                .collect(),
+        }
+    }
+
     fn hir_check_match(
         &self,
         hir: &HirBody,
@@ -3085,6 +3158,18 @@ impl Compiler {
         arms: &[HirArm],
         want: Option<&Rep>,
     ) -> Check {
+        if lower::has_nested_test(arms) {
+            self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
+            let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
+            for arm in arms {
+                self.hir_check_seq_pattern(hir, &arm.pat, Some(ty), ValueLayout::Boxed)?;
+                match want {
+                    Some(want) => self.hir_check_value(hir, emit, arm.body, want)?,
+                    None => self.hir_check_effect(hir, emit, arm.body)?,
+                }
+            }
+            return Ok(());
+        }
         if lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
             for arm in arms {
@@ -4514,6 +4599,9 @@ impl Compiler {
             .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
             .map_or(arms.len(), |i| i + 1);
         let arms = &arms[..reach];
+        if lower::has_nested_test(arms) {
+            return self.hir_match_seq(hir, emit, scrutinee, arms, want, depth);
+        }
         if lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             return self.hir_match_scalar(hir, emit, scrutinee, arms, want, depth);
         }
@@ -4635,6 +4723,193 @@ impl Compiler {
         }
         emit.payload_base = saved_base;
         self.bytecode.bind_label(end);
+    }
+
+    /// `match` whose arms test nested sub-patterns, arm by arm, as the
+    /// AST's `compile_match_sequential`: the scrutinee goes to a slot; each
+    /// arm tests it (pushing the payloads it opens above that slot, where
+    /// its bindings live), then runs its body. A failed test pops what the
+    /// arm pushed and falls into the next arm.
+    fn hir_match_seq(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+        want: Option<&Rep>,
+        depth: u32,
+    ) {
+        debug_assert_eq!(depth, 0);
+        let ty = Self::hir_ty(hir, scrutinee)
+            .expect("planned match has a type")
+            .clone();
+        self.bytecode.push_seek(self.context.variables.len() as u32);
+        self.hir_value(hir, emit, scrutinee, &BOXED, 0);
+        let slot = self.context.variables.len() as u32;
+        self.context.variables.intern(format!("__match_scrutinee{slot}"));
+        self.bytecode.push_store_pop(slot);
+        let saved_base = emit.payload_base.take();
+        let end = self.bytecode.fresh_label();
+        for (i, arm) in arms.iter().enumerate() {
+            let is_last = i + 1 == arms.len();
+            let mut test = SeqTest {
+                base: slot + 1,
+                depth: 0,
+                max_depth: 0,
+                irrefutable: is_last,
+                misses: Vec::new(),
+            };
+            self.hir_seq_test(hir, emit, &mut test, &arm.pat, slot, Some(&ty), ValueLayout::Boxed);
+            // Arm-body temps go above the payload words.
+            while (self.context.variables.len() as u32) < test.base + test.max_depth {
+                let pad = format!("__match{}", self.context.variables.len());
+                let _ = self.context.variables.intern(pad);
+            }
+            match want {
+                Some(want) => self.hir_value(hir, emit, arm.body, want, 0),
+                None => self.hir_effect(hir, emit, arm.body),
+            }
+            if !is_last {
+                self.hir_jump(IlJumpKind::Unconditional, end);
+            }
+            // Misses unwind to the arm's base and fall into the next arm:
+            // deepest first, one POP between depths.
+            let deepest = test.misses.iter().map(|&(_, d)| d).max().unwrap_or(0);
+            for d in (0..=deepest).rev() {
+                for &(label, at) in &test.misses {
+                    if at == d {
+                        self.bytecode.bind_label(label);
+                    }
+                }
+                if d > 0 && !test.misses.is_empty() {
+                    self.bytecode.push_pop();
+                }
+            }
+        }
+        emit.payload_base = saved_base;
+        self.bytecode.bind_label(end);
+    }
+
+    /// Branch to a new miss label of `test` (popping `pending` extra words
+    /// on the way) when the flag on top of the stack is `on`.
+    fn hir_seq_miss(&mut self, test: &mut SeqTest, kind: IlJumpKind, pending: u32) {
+        let label = self.bytecode.fresh_label();
+        test.misses.push((label, test.depth + pending));
+        self.hir_jump_under(kind, label);
+    }
+
+    /// Test `pat` against the word in `slot` (type `ty`, layout `layout`),
+    /// binding its locals to slots; a miss jumps to a label in `test.misses`.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_seq_test(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        test: &mut SeqTest,
+        pat: &HirPat,
+        slot: u32,
+        ty: Option<&Ty>,
+        layout: ValueLayout,
+    ) {
+        let HirPat::Variant {
+            enum_name,
+            variant,
+            fields,
+            ..
+        } = pat
+        else {
+            match pat {
+                HirPat::Bind(local) => {
+                    emit.slots[local.0 as usize] = Some(slot);
+                    self.record_debug_local(&hir.local(*local).name, slot);
+                }
+                HirPat::Int(n) if !test.irrefutable => {
+                    self.hir_seq_scalar(test, slot, &crate::typechecking::ty::ScalarBacking::Int(*n));
+                }
+                _ => {}
+            }
+            return;
+        };
+        if let Some(backing) = self.checker.scalar_for(enum_name, variant).cloned() {
+            if !test.irrefutable {
+                self.hir_seq_scalar(test, slot, &backing);
+            }
+            return;
+        }
+        let subs = self.hir_seq_subpatterns(enum_name, variant, fields);
+        let field_tys = ty.and_then(|ty| self.hir_payload_tys(ty, variant)).unwrap_or_default();
+        let field_layout = |this: &Self, k: usize| field_tys.get(k).map_or(ValueLayout::Boxed, |t| this.value_layout(t));
+        if layout != ValueLayout::Boxed {
+            // Pointer niche: the payload is the word itself (an `Err` with
+            // its tag bit cleared). `0` is `None` / `Ok(())`; bit 0 is `Err`.
+            let wanted = matches!(variant.as_str(), "Some" | "Err");
+            if !test.irrefutable {
+                self.bytecode.push_load(slot);
+                if layout.is_niche_result() {
+                    self.bytecode.push_const(1);
+                    self.bytecode.push(Byte::new(Instruction::BITAND));
+                    let kind = if variant == "Err" {
+                        IlJumpKind::JumpIfFalse
+                    } else {
+                        IlJumpKind::JumpIfTrue
+                    };
+                    self.hir_seq_miss(test, kind, 0);
+                } else {
+                    self.bytecode.push(Byte::new(Instruction::LogNot));
+                    let kind = if wanted {
+                        IlJumpKind::JumpIfTrue
+                    } else {
+                        IlJumpKind::JumpIfFalse
+                    };
+                    self.hir_seq_miss(test, kind, 0);
+                }
+            }
+            let Some(Some(sub)) = subs.first().copied() else {
+                return;
+            };
+            let mut inner = slot;
+            if layout.is_niche_result() && variant == "Err" {
+                self.bytecode.push_load(slot);
+                Self::push_result_untag(&mut self.bytecode);
+                inner = test.base + test.depth;
+                test.depth += 1;
+                test.max_depth = test.max_depth.max(test.depth);
+            }
+            let sub_layout = field_layout(self, 0);
+            self.hir_seq_test(hir, emit, test, sub, inner, field_tys.first(), sub_layout);
+            return;
+        }
+        let tag = self.checker.tag_for(enum_name, variant).expect("planned pattern tag");
+        let arity = self.checker.arity_for(enum_name, variant).unwrap_or(0) as u32;
+        self.bytecode.push_load(slot);
+        if test.irrefutable {
+            self.bytecode.push(Byte::new(Instruction::Unpack).with_operand_u32(arity));
+        } else {
+            let hit = self.bytecode.fresh_label();
+            self.hir_jump(IlJumpKind::JumpIfMatch { tag, arity }, hit);
+            // Miss: the enum is still on the stack.
+            let miss = self.bytecode.fresh_label();
+            test.misses.push((miss, test.depth + 1));
+            self.hir_jump(IlJumpKind::Unconditional, miss);
+            self.bytecode.bind_label(hit);
+        }
+        let first = test.base + test.depth;
+        test.depth += arity;
+        test.max_depth = test.max_depth.max(test.depth);
+        for k in 0..arity as usize {
+            if let Some(Some(sub)) = subs.get(k).copied() {
+                let sub_layout = field_layout(self, k);
+                self.hir_seq_test(hir, emit, test, sub, first + k as u32, field_tys.get(k), sub_layout);
+            }
+        }
+    }
+
+    /// `LOAD slot; <literal>; EQ` and miss when false.
+    fn hir_seq_scalar(&mut self, test: &mut SeqTest, slot: u32, backing: &crate::typechecking::ty::ScalarBacking) {
+        self.bytecode.push_load(slot);
+        self.hir_push_scalar(backing);
+        self.bytecode.push(Byte::new(Instruction::EQ));
+        self.hir_seq_miss(test, IlJumpKind::JumpIfFalse, 0);
     }
 
     /// `match` of an `int` on literals or of a scalar enum on its variants:
