@@ -3322,15 +3322,19 @@ impl Compiler {
             None => match sym {
                 "==" => Some(HirOp::Prim(Instruction::EQ)),
                 "!=" => Some(HirOp::Prim(Instruction::NEQ)),
-                // Arithmetic on a number-backed scalar enum with no instance
-                // is on its backing word: the AST's raw opcode over both
-                // operands, in the backing's lane.
+                // Arithmetic or ordering on a number-backed scalar enum with
+                // no instance is on its backing word: the AST's raw opcode
+                // over both operands, in the backing's lane.
                 _ => match (self.hir_number_lane(hir, lhs)?, self.hir_number_lane(hir, rhs)?) {
                     (false, false) => Some(HirOp::Prim(match sym {
                         "+" => Instruction::ADD,
                         "-" => Instruction::SUB,
                         "*" => Instruction::MUL,
                         "/" => Instruction::DIV,
+                        "<" => Instruction::LE,
+                        ">" => Instruction::GT,
+                        "<=" => Instruction::LEQ,
+                        ">=" => Instruction::GEQ,
                         _ => return None,
                     })),
                     (true, true) => Some(HirOp::Prim(match sym {
@@ -3338,6 +3342,10 @@ impl Compiler {
                         "-" => Instruction::SUBF,
                         "*" => Instruction::MULF,
                         "/" => Instruction::DIVF,
+                        "<" => Instruction::LEF,
+                        ">" => Instruction::GTF,
+                        "<=" => Instruction::LEQF,
+                        ">=" => Instruction::GEQF,
                         _ => return None,
                     })),
                     _ => None,
