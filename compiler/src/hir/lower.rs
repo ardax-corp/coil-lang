@@ -842,6 +842,19 @@ pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32
         })
 }
 
+/// Whether a call at the top of the stack stages its arguments because one
+/// after the first holds a clobbering index read ([`staged_read`]), which
+/// a live argument would sit under (the AST stages every argument when
+/// one may clobber).
+pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId], depth: u32) -> bool {
+    depth == 0
+        && args.iter().skip(1).any(|&arg| {
+            let mut found = false;
+            visit(body, arg, &mut |e| found |= staged_read(body, stack, e));
+            found
+        })
+}
+
 /// A trait method call on an existential pack that is not a local: the
 /// pack goes to a temp, which needs an empty operand stack below it (a
 /// local pack is just loaded once per use).
@@ -850,9 +863,15 @@ pub fn existential_staged(body: &HirBody, checker: &Checker, id: HirId) -> bool 
     let HirKind::Call { args, .. } = &e.kind else {
         return false;
     };
-    let hinted = e.node.and_then(|n| checker.existential_method_call_at(n)).is_some()
-        || checker.existential_method_call_span(e.span.0, e.span.1).is_some();
-    hinted && !args.first().is_some_and(|&a| matches!(body.expr(a).kind, HirKind::Local(_)))
+    existential_hint(body, checker, id) && !args.first().is_some_and(|&a| matches!(body.expr(a).kind, HirKind::Local(_)))
+}
+
+/// Whether the checker recorded the call at `id` as a trait method on an
+/// existential pack.
+pub fn existential_hint(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    let e = body.expr(id);
+    e.node.and_then(|n| checker.existential_method_call_at(n)).is_some()
+        || checker.existential_method_call_span(e.span.0, e.span.1).is_some()
 }
 
 /// A variant make whose several arguments are not all literals or locals:
@@ -1562,14 +1581,21 @@ pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bo
 }
 
 /// String `a + b` at depth zero stages both operands through temps when
-/// either holds a `match` (`?`, `??`): it then runs with no operand below
-/// it, as the AST does (`arg_emits_on_self_bytecode`).
-pub fn concat_stages(body: &HirBody, lhs: HirId, rhs: HirId) -> bool {
+/// either holds a `match` (`?`, `??`) or a clobbering index read
+/// ([`staged_read`]): it then runs with no operand below it, as the AST
+/// does (`arg_emits_on_self_bytecode`).
+pub fn concat_stages(body: &HirBody, stack: &HashMap<u32, usize>, lhs: HirId, rhs: HirId) -> bool {
     let mut found = false;
     for id in [lhs, rhs] {
-        visit(body, id, &mut |e| found |= matches!(e.kind, HirKind::Match { .. }));
+        visit(body, id, &mut |e| found |= matches!(e.kind, HirKind::Match { .. }) || staged_read(body, stack, e));
     }
     found
+}
+
+/// `v[i]` with an index that may clobber (`v[f(j)]`): it stages base and
+/// index through temps, so it runs with no operand below it.
+pub fn staged_read(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirExpr) -> bool {
+    matches!(e.kind, HirKind::Index { index, kind, .. } if !matches!(kind, IndexKind::String) && clobbers(body, stack, index))
 }
 
 /// A stack-array read the AST lowers as a select over the slots (any index
@@ -1953,7 +1979,7 @@ impl Walk<'_> {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
                     }
-                    if concat && depth == 0 && concat_stages(body, *lhs, *rhs) {
+                    if concat && depth == 0 && concat_stages(body, &self.stack, *lhs, *rhs) {
                         self.value(*lhs, 0)?;
                         return self.value(*rhs, 0);
                     }
@@ -2054,7 +2080,13 @@ impl Walk<'_> {
                 if depth != 0 && block_on(body, self.checker, id) {
                     return Err("block-on-depth");
                 }
-                self.args(args, depth, shows || stages_args(body, self.checker, args, depth))
+                // An existential or linear-algebra call keeps its operands
+                // on the stack, so a clobbering index read stays refused.
+                let indexed = index_stages(body, &self.stack, args, depth);
+                if indexed && (linear_algebra(self.checker, body, id) || existential_hint(body, self.checker, id)) {
+                    return Err("staged-index");
+                }
+                self.args(args, depth, shows || indexed || stages_args(body, self.checker, args, depth))
             }
             // `recv.m(args)` stages the receiver and each argument through
             // temps at depth zero, as the AST codegen does.
