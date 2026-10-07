@@ -48,6 +48,37 @@ fn fib_line(needle: &str) -> usize {
         + 1
 }
 
+thread_local! {
+    /// Whether the debugger under test compiles through HIR (`COIL_HIR`).
+    static HIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Each case runs on the AST path and again through HIR lowering, which
+/// must keep the same stops, frames and locals.
+macro_rules! dap_tests {
+    ($($case:ident => $ast:ident, $hir:ident;)*) => {
+        $(
+            #[test]
+            fn $ast() {
+                $case();
+            }
+
+            #[test]
+            fn $hir() {
+                HIR.set(true);
+                $case();
+            }
+        )*
+    };
+}
+
+/// A scratch directory for one case, apart from the same case on the
+/// other path (both run in one process).
+fn case_dir(tag: &str) -> PathBuf {
+    let path = if HIR.get() { "hir" } else { "ast" };
+    std::env::temp_dir().join(format!("{tag}-{path}-{}", std::process::id()))
+}
+
 struct DapClient {
     child: Child,
     stdin: ChildStdin,
@@ -63,6 +94,9 @@ impl DapClient {
     fn spawn_with(cwd: &std::path::Path, extra: &[&str]) -> Self {
         let bin = coil_debug_bin();
         let mut cmd = Command::new(&bin);
+        if HIR.get() {
+            cmd.env("COIL_HIR", "1");
+        }
         cmd.arg("--dap");
         cmd.args(extra);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
@@ -186,8 +220,7 @@ fn initialize_and_launch(client: &mut DapClient, program: &str, cwd: &str, stop_
     );
 }
 
-#[test]
-fn dap_stop_on_entry_and_continue() {
+fn dap_stop_on_entry_and_continue_case() {
     let entry = fib_entry();
     let cwd = entry.parent().unwrap().parent().unwrap();
     let mut client = DapClient::spawn(cwd);
@@ -212,8 +245,7 @@ fn dap_stop_on_entry_and_continue() {
     client.disconnect();
 }
 
-#[test]
-fn dap_function_breakpoint_stack_and_locals() {
+fn dap_function_breakpoint_stack_and_locals_case() {
     let entry = fib_entry();
     let cwd = entry.parent().unwrap().parent().unwrap();
     let mut client = DapClient::spawn(cwd);
@@ -299,8 +331,7 @@ fn dap_function_breakpoint_stack_and_locals() {
     client.disconnect();
 }
 
-#[test]
-fn dap_line_breakpoint_hit() {
+fn dap_line_breakpoint_hit_case() {
     let entry = fib_entry();
     let cwd = entry.parent().unwrap().parent().unwrap();
     let mut client = DapClient::spawn(cwd);
@@ -363,8 +394,7 @@ fn dap_line_breakpoint_hit() {
     client.disconnect();
 }
 
-#[test]
-fn dap_launch_compile_failure() {
+fn dap_launch_compile_failure_case() {
     let entry = fib_entry();
     let cwd = entry.parent().unwrap().parent().unwrap();
     let mut client = DapClient::spawn(cwd);
@@ -398,8 +428,7 @@ fn dap_launch_compile_failure() {
     client.disconnect();
 }
 
-#[test]
-fn dap_stop_on_entry_has_stack_and_step() {
+fn dap_stop_on_entry_has_stack_and_step_case() {
     let entry = fib_entry();
     let cwd = entry.parent().unwrap().parent().unwrap();
     let mut client = DapClient::spawn(cwd);
@@ -462,9 +491,8 @@ fn dap_stop_on_entry_has_stack_and_step() {
     client.disconnect();
 }
 
-#[test]
-fn dap_launch_allow_attach_grant() {
-    let dir = std::env::temp_dir().join(format!("coil_dap_grant_{}", std::process::id()));
+fn dap_launch_allow_attach_grant_case() {
+    let dir = case_dir("coil_dap_grant");
     let _ = std::fs::create_dir_all(&dir);
     let gated = dir.join("gated.hy");
     std::fs::write(
@@ -543,9 +571,8 @@ fn dap_launch_allow_attach_grant() {
 
 /// A panic is a `stopped` (reason `exception`) event with the stack intact;
 /// resuming afterwards ends the session with exit code 1.
-#[test]
-fn dap_panic_stops_for_inspection() {
-    let dir = std::env::temp_dir().join(format!("coil-dap-panic-{}", std::process::id()));
+fn dap_panic_stops_for_inspection_case() {
+    let dir = case_dir("coil-dap-panic");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("panics.hy");
@@ -581,3 +608,85 @@ fn dap_panic_stops_for_inspection() {
     client.disconnect();
 }
 
+fn dap_let_locals_at_line_breakpoint_case() {
+    let dir = case_dir("coil-dap-locals");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("locals.hy");
+    std::fs::write(
+        &prog,
+        "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic \"label\";\n    }\n    return total;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
+    )
+    .unwrap();
+    let mut client = DapClient::spawn(&dir);
+    initialize_and_launch(&mut client, prog.to_str().unwrap(), dir.to_str().unwrap(), false);
+    let set_bp = client.request(
+        "setBreakpoints",
+        serde_json::json!({
+            "source": { "path": prog.to_string_lossy() },
+            "breakpoints": [{ "line": 5 }]
+        }),
+    );
+    assert_eq!(
+        set_bp.pointer("/body/breakpoints/0/verified").and_then(|v| v.as_bool()),
+        Some(true),
+        "setBreakpoints={set_bp}"
+    );
+    let done = client.request("configurationDone", serde_json::json!({}));
+    assert_eq!(done.get("success"), Some(&serde_json::json!(true)));
+    let stopped = client.wait_for_event("stopped");
+    assert_eq!(
+        stopped.pointer("/body/reason").and_then(|v| v.as_str()),
+        Some("breakpoint"),
+        "stopped={stopped}"
+    );
+    let stack = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frame_id = stack
+        .pointer("/body/stackFrames/0/id")
+        .and_then(|i| i.as_i64())
+        .expect("frame id");
+    let scopes = client.request("scopes", serde_json::json!({ "frameId": frame_id }));
+    let variables_ref = scopes
+        .pointer("/body/scopes/0/variablesReference")
+        .and_then(|v| v.as_i64())
+        .expect("variablesReference");
+    let vars = client.request(
+        "variables",
+        serde_json::json!({ "variablesReference": variables_ref }),
+    );
+    let value = |name: &str| {
+        vars.pointer("/body/variables")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(name))
+            .and_then(|v| v.get("value").and_then(|x| x.as_str()).map(str::to_string))
+    };
+    assert_eq!(value("n").as_deref(), Some("20"), "variables={vars}");
+    // The AST path reports these still-live slots as optimized out.
+    if HIR.get() {
+        assert_eq!(value("doubled").as_deref(), Some("40"), "variables={vars}");
+        assert_eq!(value("total").as_deref(), Some("41"), "variables={vars}");
+    }
+    assert!(value("label").is_some_and(|v| v.contains('x')), "variables={vars}");
+    let clear = client.request(
+        "setBreakpoints",
+        serde_json::json!({ "source": { "path": prog.to_string_lossy() }, "breakpoints": [] }),
+    );
+    assert_eq!(clear.get("success"), Some(&serde_json::json!(true)));
+    let _ = client.request("continue", serde_json::json!({ "threadId": 1 }));
+    let _ = client.wait_for_event("terminated");
+    client.disconnect();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+dap_tests! {
+    dap_stop_on_entry_and_continue_case => dap_stop_on_entry_and_continue, dap_stop_on_entry_and_continue_hir;
+    dap_function_breakpoint_stack_and_locals_case => dap_function_breakpoint_stack_and_locals, dap_function_breakpoint_stack_and_locals_hir;
+    dap_line_breakpoint_hit_case => dap_line_breakpoint_hit, dap_line_breakpoint_hit_hir;
+    dap_launch_compile_failure_case => dap_launch_compile_failure, dap_launch_compile_failure_hir;
+    dap_stop_on_entry_has_stack_and_step_case => dap_stop_on_entry_has_stack_and_step, dap_stop_on_entry_has_stack_and_step_hir;
+    dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant, dap_launch_allow_attach_grant_hir;
+    dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection, dap_panic_stops_for_inspection_hir;
+    dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint, dap_let_locals_at_line_breakpoint_hir;
+}
