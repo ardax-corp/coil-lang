@@ -500,6 +500,12 @@ impl Walk<'_> {
             // names): the value is pushed, then measured or popped.
             // Folded to its byte length, as the AST's `eval_len_operand`.
             HirKind::Lit(Lit::Str(_)) if structural => Ok(()),
+            // An array, tuple or record literal folds to its item count
+            // unevaluated, as `eval_len_operand`.
+            HirKind::Make {
+                kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
+                ..
+            } => Ok(()),
             HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if structural => {
                 self.word(arg)?;
                 self.value(arg, depth)
@@ -1807,6 +1813,21 @@ impl Walk<'_> {
                 self.word(*handle)?;
                 self.value(*handle, depth + u32::from(value.is_some()))
             }
+            // `readonly e`: `e`'s value.
+            HirKind::Builtin {
+                op: Builtin::Readonly,
+                args,
+            } => {
+                let [inner] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.value(*inner, depth)
+            }
+            // `typeof e`: a string constant; `e` is not evaluated.
+            HirKind::Builtin {
+                op: Builtin::TypeOf,
+                args,
+            } if args.len() == 1 => Ok(()),
             // `done(h)`: the handle, `DoneCoro`.
             HirKind::Builtin {
                 op: Builtin::Done,
@@ -2241,7 +2262,8 @@ impl Walk<'_> {
             | HirKind::Call { .. }
             | HirKind::Resume { .. }
             | HirKind::Builtin {
-                op: Builtin::Done, ..
+                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf,
+                ..
             } => self.value(id, depth),
             other => Err(kind_name(other)),
         }

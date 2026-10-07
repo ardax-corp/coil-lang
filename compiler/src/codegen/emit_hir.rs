@@ -2451,11 +2451,22 @@ impl Compiler {
             } => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
+            HirKind::Builtin {
+                op: Builtin::Readonly,
+                args,
+            } => self.hir_natural(hir, emit, args[0]),
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
             // A value `match` (`x ?? y`) yields each arm at the layout asked
             // for; its own type's is the natural one.
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
             _ => None,
         }
+    }
+
+    /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
+    fn hir_typeof(&self, hir: &HirBody, arg: HirId) -> Option<String> {
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+        crate::typechecking::pretty::format_ty_fqn(&ty, &self.checker.generics().nominal_type_modules)
     }
 
     /// A scalar-backed enum's variant: its backing constant.
@@ -2483,6 +2494,14 @@ impl Compiler {
             Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
             Callee::Value(_) => false,
         };
+        if is_len
+            && let HirKind::Make {
+                kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
+                args: items,
+            } = &hir.expr(*arg).kind
+        {
+            return u32::try_from(items.len()).ok().map(Some);
+        }
         if !is_len
             || !matches!(
                 hir.expr(*arg).kind,
@@ -3290,6 +3309,17 @@ impl Compiler {
                 op: Builtin::Done,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
+            // `readonly e` is `e`'s value.
+            HirKind::Builtin {
+                op: Builtin::Readonly,
+                args,
+            } => return self.hir_check_value(hir, emit, args[0], want),
+            HirKind::Builtin {
+                op: Builtin::TypeOf,
+                args,
+            } => {
+                self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
+            }
             HirKind::Call { args, .. } => {
                 let call = emit.calls.get(&id.0).ok_or("callee")?;
                 for (i, &arg) in args.iter().enumerate().take(call.params.len()) {
@@ -4170,11 +4200,25 @@ impl Compiler {
                 self.hir_value(hir, emit, args[0], &BOXED, depth);
                 self.bytecode.push(Byte::new(Instruction::DoneCoro));
             }
+            HirKind::Builtin {
+                op: Builtin::Readonly,
+                args,
+            } => return self.hir_value(hir, emit, args[0], want, depth),
+            // The operand's type name; the operand itself is not evaluated.
+            HirKind::Builtin {
+                op: Builtin::TypeOf,
+                args,
+            } => {
+                let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
+                let mut bc = CodeBuf::new();
+                self.emit_raw_string_literal(&mut bc, &name);
+                self.bytecode.append(&mut bc);
+            }
             HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
                 // evaluated and dropped (as in the AST).
                 Some(n) => {
-                    if !matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_)) {
+                    if !matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
                         self.hir_value(hir, emit, args[0], &BOXED, depth);
                         self.bytecode.push_pop();
                     }
