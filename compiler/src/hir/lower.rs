@@ -100,7 +100,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             }
             // A generic class instance: one object word, its methods shared
             // across instances (fields are only read inside them).
-            if is_generic_class(checker, name) {
+            // (A generic enum with an `impl` has a class key too; it is
+            // still an enum.)
+            if is_generic_class(checker, name) && checker.enum_variants(name).is_none() {
                 return Some(ValueClass::Opaque);
             }
             let option = common::is_builtin_option_enum(name);
@@ -1973,7 +1975,8 @@ impl Walk<'_> {
                     }
                     return Ok(());
                 }
-                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if !args.is_empty()) {
+                // Past 32 items the AST builds the array on the heap too.
+                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if (1..=32).contains(&args.len())) {
                     return Err("stack-array");
                 }
                 // With no escape the fields live in frame slots (as the AST's
