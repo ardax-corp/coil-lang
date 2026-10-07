@@ -2456,11 +2456,19 @@ impl Compiler {
                 self.hir_natural(hir, emit, *place)
             }
             HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
+            // A function value returns its result's own layout: a one-word
+            // (niche) enum comes back as that word, as from a direct call.
             HirKind::Call {
                 callee: Callee::Value(_),
                 ..
-            }
-            | HirKind::Resume { .. }
+            } => Some(
+                Self::hir_ty(hir, id)
+                    .filter(|ty| {
+                        self.hir_enum_name(ty).is_some() && !crate::hir::layout::is_scalar_enum_ty(&self.checker, ty)
+                    })
+                    .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
+            ),
+            HirKind::Resume { .. }
             | HirKind::Builtin {
                 op: Builtin::Done, ..
             } => Some(BOXED),

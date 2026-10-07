@@ -141,7 +141,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         }
         // A monomorphic function value (closure, partial, `fn` object):
         // one word, only moved and called through `CallIndirect`.
-        Ty::Fun(..) if fun_words(checker, ty, seen, true) => Some(ValueClass::Opaque),
+        Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
         // `self` inside a generic class's shared method body.
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
@@ -157,10 +157,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
 
 /// A closed function type whose parameters and result are plain words:
 /// no enum (its layout may be niche or a pair), no unit, no type variable.
-/// With `enum_ret`, the result may also be a closed one-word enum: the
-/// function is still one word, but a call through it is not
-/// ([`indirect_callee`] asks without it).
-fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, enum_ret: bool) -> bool {
+/// The result may also be a closed one-word enum, which a call through the
+/// function returns as that word.
+fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
     let plain = |t: &Ty, seen: &mut Vec<String>| {
         (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
             && matches!(
@@ -173,8 +172,7 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, enum_ret: bool)
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
             let one_word_enum = |t: &Ty, seen: &mut Vec<String>| {
-                enum_ret
-                    && super::layout::ty_is_closed(t)
+                super::layout::ty_is_closed(t)
                     && classify_in(checker, t, seen) == Some(ValueClass::Enum)
                     && super::layout::of(checker, t).words() == 1
             };
@@ -295,9 +293,9 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
 }
 
 /// The stack arrays of `body`: each `let a = [..]` with 1..=32 items, or
-/// `let b = a` of such an `a` (a slot copy), that is never iterated or
-/// destructured, and whose escape, if any, is a later statement of the
-/// block that binds it. `a = b` between two stack arrays of one length and
+/// `let b = a` of such an `a` (a slot copy), that is never destructured or
+/// spread, and whose escape (a `for` over it among them), if any, is a
+/// later statement of the block that binds it. `a = b` between two stack arrays of one length and
 /// `a = [..]` of that many items store into the slots; a stack array that
 /// takes part in a copy or such a store never escapes.
 pub fn stack_arrays(body: &HirBody) -> StackArrays {
@@ -386,7 +384,7 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
                     }
                 }
             }
-            HirKind::LetPat { init, .. } | HirKind::ForIn { iterable: init, .. } | HirKind::Spread(init) => {
+            HirKind::LetPat { init, .. } | HirKind::Spread(init) => {
                 if let HirKind::Local(local) = body.expr(init).kind {
                     refused.insert(local.0);
                 }
@@ -1182,7 +1180,7 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         .as_ref()
         .is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
-            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new(), false)
+            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new())
         })
     {
         return false;
