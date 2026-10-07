@@ -3392,6 +3392,14 @@ impl Compiler {
         }
     }
 
+    /// Whether a call's arguments stage through temps
+    /// ([`lower::stages_args`] while no stack array is boxed, or
+    /// [`lower::index_stages`] for a clobbering index read).
+    fn hir_stages_args(&self, hir: &HirBody, emit: &HirEmit, args: &[HirId], depth: u32) -> bool {
+        (emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth))
+            || lower::index_stages(hir, &emit.stacks, args, depth)
+    }
+
     /// Each one-word argument run at depth zero into a fresh temp.
     fn hir_stage_words(&mut self, hir: &HirBody, emit: &mut HirEmit, args: &[HirId], params: &[ValueLayout]) -> Vec<u32> {
         let mut temps = Vec::with_capacity(args.len());
@@ -4609,9 +4617,10 @@ impl Compiler {
                 lhs,
                 rhs,
             } => {
-                // Either side holds a `match`: both run at depth zero into
-                // temps, then the format string goes under them.
-                let staged = depth == 0 && lower::concat_stages(hir, *lhs, *rhs);
+                // Either side holds a `match` or a clobbering index read:
+                // both run at depth zero into temps, then the format string
+                // goes under them.
+                let staged = depth == 0 && lower::concat_stages(hir, &emit.stacks, *lhs, *rhs);
                 let mut temps = [0u32; 2];
                 if staged {
                     for (temp, operand) in temps.iter_mut().zip([*lhs, *rhs]) {
@@ -5065,7 +5074,7 @@ impl Compiler {
                         // temps first, then the format string goes under
                         // them, as the AST's `emit_call_args_stage_all`.
                         let staged = lower::shows_through_temps(hir, &self.checker, hir.expr(id))
-                            || (emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth));
+                            || self.hir_stages_args(hir, emit, args, depth);
                         let mut temps = Vec::new();
                         if staged {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
@@ -5099,7 +5108,7 @@ impl Compiler {
                             .push(Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32 - 1));
                     }
                     HirBuiltin::Bound { dict, method } => {
-                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                        if self.hir_stages_args(hir, emit, args, depth) {
                             for tmp in self.hir_stage_words(hir, emit, args, &params) {
                                 self.bytecode.push_load(tmp);
                             }
@@ -5116,7 +5125,7 @@ impl Compiler {
                             .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
                     }
                     HirBuiltin::Partial { entry, mask, operand } => {
-                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                        if self.hir_stages_args(hir, emit, args, depth) {
                             for tmp in self.hir_stage_words(hir, emit, args, &params) {
                                 self.bytecode.push_load(tmp);
                             }
@@ -5167,7 +5176,7 @@ impl Compiler {
                             bc.push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib));
                             bc.push(Byte::new(Instruction::LoadStatic).with_operand_u32(func));
                         };
-                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                        if self.hir_stages_args(hir, emit, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             statics(&mut self.bytecode);
                             for &tmp in &temps {
@@ -5229,7 +5238,7 @@ impl Compiler {
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
                         // ones run into temps before it.
-                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                        if self.hir_stages_args(hir, emit, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
                             for &tmp in &temps {
@@ -5413,7 +5422,7 @@ impl Compiler {
                     // its attempt back (the temps stay allocated).
                     self.bytecode.truncate(mark);
                 }
-                if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                if self.hir_stages_args(hir, emit, args, depth) {
                     // Each argument (one or two words) to temps, then
                     // reloaded in order, as the AST's `emit_call_args_stage_all`.
                     let mut temps = Vec::with_capacity(args.len());
