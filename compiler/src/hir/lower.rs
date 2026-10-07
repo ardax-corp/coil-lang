@@ -759,7 +759,7 @@ pub fn push_stages(body: &HirBody, stack: &HashMap<u32, usize>, value: HirId) ->
 /// operator through temps (a user type's instance, an aggregate), or one
 /// after the first holds a `match` (`?`, `??`), which binds slots with no
 /// operand below it.
-pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
+pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32) -> bool {
     depth == 0
         && args.iter().enumerate().any(|(i, &arg)| {
             let mut found = false;
@@ -767,9 +767,34 @@ pub fn stages_args(body: &HirBody, args: &[HirId], depth: u32) -> bool {
                 found |= matches!(
                     &e.kind,
                     HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
-                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }));
+                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }))
+                    || shows_through_temps(body, checker, e);
             });
             found
+        })
+}
+
+/// Whether `e` is a `format` call with a tuple or record argument: `%v`
+/// shows it field by field through temps, which need an empty operand
+/// stack below them, so the call stages its arguments and runs at depth
+/// zero (the AST stages around every call).
+pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr) -> bool {
+    use crate::typechecking::StringBuiltin;
+    let HirKind::Call {
+        callee: Callee::Named { name, .. },
+        args,
+    } = &e.kind
+    else {
+        return false;
+    };
+    let format = checker
+        .string_fn_in_scope(name)
+        .or_else(|| name.strip_prefix("string::").and_then(StringBuiltin::from_name));
+    matches!(format, Some(StringBuiltin::Format))
+        && args.iter().skip(1).any(|&a| {
+            body.expr(a).ty.as_ref().is_some_and(|t| {
+                matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Tuple(_) | Ty::Record { .. })
+            })
         })
 }
 
@@ -1744,7 +1769,11 @@ impl Walk<'_> {
                 // A `new` argument leaves its object in a temp on top of the
                 // stack, so every argument stages through a temp, as the AST
                 // does when one may clobber the operand stack.
-                self.args(args, depth, stages_args(body, args, depth))
+                let shows = shows_through_temps(body, self.checker, body.expr(id));
+                if shows && depth != 0 {
+                    return Err("format-show");
+                }
+                self.args(args, depth, shows || stages_args(body, self.checker, args, depth))
             }
             // `recv.m(args)` stages the receiver and each argument through
             // temps at depth zero, as the AST codegen does.
