@@ -687,6 +687,7 @@ impl Compiler {
                 && Self::hir_call_rep(call) == emit.ret
                 && !self.coroutine_fns.contains(&call.key)
                 && self.hir_tail_call_ok(&call.key)
+                && !hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }))
             {
                 emit.tail_calls.insert(value.0);
             }
@@ -3321,6 +3322,18 @@ impl Compiler {
                 }
             }
             HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
+            // Each capture is one frame word the thunk's frame copies.
+            HirKind::Defer { captures, body } => {
+                for local in captures.iter().flatten() {
+                    if emit.sroa.contains_key(&local.0)
+                        || emit.stacks.contains_key(&local.0)
+                        || emit.pair_locals.contains_key(&local.0)
+                    {
+                        return Err("defer-capture");
+                    }
+                }
+                self.hir_check_effect(hir, emit, *body)
+            }
             HirKind::ForIn { pat, iterable, body, kind } => {
                 if !matches!(pat, HirPat::Bind(_)) {
                     self.hir_check_let_pat(hir, pat)?;
@@ -5158,6 +5171,38 @@ impl Compiler {
         self.fill_statement_locs(il_start, SimpleSpan::from(start..end));
     }
 
+    /// `defer use (captures) { body }`, as the AST: `JMP after; thunk:
+    /// body; CONST 0; RETURN; after:`. The thunk's frame holds the captures
+    /// in slots `0..n`; each later `return` calls it with them, loading
+    /// each by the name of its slot ([`Self::emit_run_defers`]).
+    fn hir_defer(&mut self, hir: &HirBody, emit: &mut HirEmit, captures: &[Option<LocalId>], body: HirId) {
+        let after = self.bytecode.fresh_label();
+        let thunk = self.bytecode.fresh_label();
+        self.hir_jump(IlJumpKind::Unconditional, after);
+        self.bytecode.bind_label(thunk);
+        let mut names = Vec::new();
+        let saved_slots = emit.slots.clone();
+        for slot in emit.slots.iter_mut() {
+            *slot = None;
+        }
+        for (k, local) in captures.iter().flatten().enumerate() {
+            let slot = saved_slots[local.0 as usize].expect("defer capture is bound");
+            names.push(self.context.variables.resolve(slot as usize).clone());
+            emit.slots[local.0 as usize] = Some(k as u32);
+        }
+        self.fn_defers.push((thunk, names.clone()));
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        for name in names {
+            self.context.variables.intern(name);
+        }
+        self.hir_effect(hir, emit, body);
+        self.context.variables = prev_vars;
+        emit.slots = saved_slots;
+        self.bytecode.push_const(0);
+        self.bytecode.push_return();
+        self.bytecode.bind_label(after);
+    }
+
     /// Box the frame-slot locals that escape first in statement (or block
     /// tail) `id`.
     fn hir_box_before(&mut self, emit: &mut HirEmit, id: HirId) {
@@ -5395,6 +5440,7 @@ impl Compiler {
                 }
                 self.bytecode.bind_label(end);
             }
+            HirKind::Defer { captures, body } => self.hir_defer(hir, emit, captures, *body),
             HirKind::Loop { body } => {
                 let top = self.bytecode.fresh_label();
                 let exit = self.bytecode.fresh_label();

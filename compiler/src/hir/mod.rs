@@ -319,7 +319,9 @@ pub enum HirKind {
     Lambda { body: usize },
     Yield { value: HirId, from: bool },
     Resume { handle: HirId, value: Option<HirId> },
-    Defer { body: HirId },
+    /// `defer use (captures) { body }`: the body runs as a thunk whose
+    /// frame holds the captures (`None`: a name that did not resolve).
+    Defer { captures: Vec<Option<LocalId>>, body: HirId },
     Builtin { op: Builtin, args: Vec<HirId> },
     /// A construct this phase does not build yet.
     Unsupported(&'static str),
