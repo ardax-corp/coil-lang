@@ -82,3 +82,23 @@ test("a generic fn forwards to a generic method") {
     assert(via_scale(new Scale(5), 3) == 11)?;
     assert(via_scale(new Scale(5), new Crate(3)) == 35)?;
 }
+
+class Pack<T> {
+    pub item: T,
+}
+
+impl Weigh for Pack<T: Weigh> {
+    pub fn weight(Pack<T> p) -> int {
+        return p.item.weight() + 100;
+    }
+}
+
+// `Weigh<Pack<T>>` takes its `Weigh<T>` context from the enclosing bound.
+fn packed<T: Weigh>(T x) -> int {
+    return new Pack(x).weight();
+}
+
+test("an open instance goal takes its context from scope") {
+    assert(packed(3) == 106)?;
+    assert(packed(new Crate(2)) == 120)?;
+}

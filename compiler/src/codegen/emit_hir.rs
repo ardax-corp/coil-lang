@@ -1077,9 +1077,9 @@ impl Compiler {
         else {
             return Ok(None);
         };
-        // An open goal resolves its dictionary from scope; a pair return
-        // has its own ABI.
-        if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
+        // A pair return has its own ABI. (An open goal resolves its
+        // dictionary from scope when the call is emitted, as on the AST.)
+        if self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
         let recv = *args.first().ok_or("method-receiver")?;
