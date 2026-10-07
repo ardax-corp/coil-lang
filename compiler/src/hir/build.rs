@@ -1275,7 +1275,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         // The miss arm re-wraps the error in the function's own return type.
         let (miss_pat, miss_val) = if let Some(kind) = test_try {
             use crate::typechecking::TestTry;
-            let ret = b.body.ret.clone();
+            let ret = miss_ret(b);
             let (pat, text) = match kind {
                 TestTry::NoneValue => (
                     self.variant_pat(enum_name, miss, HirPatFields::Unit),
@@ -1292,7 +1292,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             };
             (pat, self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Err", vec![text], ret))
         } else if enum_name == common::BUILTIN_OPTION_ENUM {
-            let ret = b.body.ret.clone();
+            let ret = miss_ret(b);
             (
                 self.variant_pat(enum_name, miss, HirPatFields::Unit),
                 self.synth_variant(b, span, enum_name, miss, Vec::new(), ret),
@@ -1301,7 +1301,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             let err_ty = resolved.and_then(result_ok_err).map(|(_, e)| e);
             let e = b.temp("err", err_ty.clone());
             let read = self.synth(b, span, HirKind::Local(e), err_ty);
-            let ret = b.body.ret.clone();
+            let ret = miss_ret(b);
             (
                 self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)])),
                 self.synth_variant(b, span, enum_name, miss, vec![read], ret),
@@ -1873,3 +1873,18 @@ fn restore(mut arms: Vec<HirArm>, catch_all: Option<HirArm>) -> Vec<HirArm> {
 #[path = "build.tests.rs"]
 mod tests;
 
+
+/// The type a `?` miss returns: the function's own return type, or a
+/// coroutine's yielded type (its final value).
+fn miss_ret(b: &BodyBuilder) -> Option<Ty> {
+    let ret = b.body.ret.clone();
+    if !b.body.is_coro {
+        return ret;
+    }
+    match ret.as_ref().map(strip_readonly) {
+        Some(Ty::App(head, args)) if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 => {
+            Some(args[0].clone())
+        }
+        _ => ret,
+    }
+}
