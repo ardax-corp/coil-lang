@@ -308,15 +308,13 @@ impl Compiler {
             self.hir_module = Some(module);
             return false;
         }
-        // An enum whose generic type mentions a type parameter keeps the
-        // boxed boundary layout in the AST's clone; those stay there.
-        if let Some(inst) = &instance
-            && self.hir_mono_enum_boundary(&module.bodies[index], inst)
-        {
-            crate::il::opt::note_hir_fallback("mono-enum");
-            self.hir_module = Some(module);
-            return false;
-        }
+        // An `Option` / `Result` parameter whose generic type mentions a type
+        // parameter arrives in that open type's (boxed) layout; the body
+        // converts it to the instance's own layout on entry.
+        let entry_convs = instance
+            .as_ref()
+            .map(|inst| self.hir_mono_enum_params(&module.bodies[index], inst))
+            .unwrap_or_default();
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         let shapes = self.hir_call_shapes(hir);
         let hir = match &shapes {
@@ -350,6 +348,12 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
+                for &(param, from, to) in &entry_convs {
+                    let slot = Self::hir_slot(&emit, param);
+                    self.bytecode.push_load(slot);
+                    self.hir_convert(&Rep::Word(from), &Rep::Word(to), 0);
+                    self.bytecode.push_store_pop(slot);
+                }
                 if let Some(root) = hir.root {
                     self.hir_effect(hir, &mut emit, root);
                 }
@@ -381,23 +385,26 @@ impl Compiler {
         lowered
     }
 
-    /// Whether some value of `generic` has a type that mentions a type
-    /// variable and is an enum at the instance's types.
-    fn hir_mono_enum_boundary(&self, generic: &HirBody, inst: &HirBody) -> bool {
-        let open = |ty: &Option<Ty>| {
-            ty.as_ref()
-                .is_some_and(|t| !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), t)))
-        };
-        let is_enum = |ty: &Option<Ty>| {
-            ty.as_ref()
-                .is_some_and(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum))
-        };
-        let exprs = generic.exprs.iter().zip(&inst.exprs).map(|(g, i)| (&g.ty, &i.ty));
-        let locals = generic.locals.iter().zip(&inst.locals).map(|(g, i)| (&g.ty, &i.ty));
-        exprs
-            .chain(locals)
-            .chain(std::iter::once((&generic.ret, &inst.ret)))
-            .any(|(g, i)| open(g) && is_enum(i))
+    /// The parameters of a mono clone that cross a generic `Option` /
+    /// `Result` boundary: each with the boxed layout its caller passes
+    /// (`generic_enum_layout`) and the instance layout the body uses.
+    fn hir_mono_enum_params(&self, generic: &HirBody, inst: &HirBody) -> Vec<(LocalId, ValueLayout, ValueLayout)> {
+        generic
+            .params
+            .iter()
+            .filter_map(|&param| {
+                let open = generic.local(param).ty.as_ref()?;
+                let ty = inst.local(param).ty.as_ref()?;
+                if matches!(apply_ty_prune(self.checker.subst(), open), Ty::Var(_))
+                    || lower::classify(&self.checker, ty) != Some(ValueClass::Enum)
+                {
+                    return None;
+                }
+                let from = self.generic_enum_layout(open)?;
+                let to = self.value_layout(ty);
+                (from != to).then_some((param, from, to))
+            })
+            .collect()
     }
 
     /// `body` with each type variable of the instance being compiled bound
@@ -702,7 +709,12 @@ impl Compiler {
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
                 // Tests return their `Result<(), string>` boxed, as the AST does.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
-                if declared != Some(layout) && !boxed_test {
+                // A mono clone returns a generic `Option` / `Result` in the
+                // open type's layout; each `return` converts to it.
+                let boundary = self.compiling_mono_clone
+                    && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
+                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum);
+                if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
                 Rep::Word(layout)
