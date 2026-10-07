@@ -924,27 +924,42 @@ impl Compiler {
                 && !crate::hir::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
         };
+        // The boxed side of such a boundary is the open type's layout
+        // (`generic_enum_layout`); the argument and result convert to and
+        // from it.
         let mut params = Vec::with_capacity(args.len());
         for param in &param_tys {
             let ty = at(param);
             match lower::classify(&self.checker, &ty) {
-                Some(class) if lower::is_word(class) && !enum_boundary(param, &ty) => {}
+                Some(class) if lower::is_word(class) => {}
                 _ => return Err("callee-signature"),
             }
-            params.push(self.value_layout(&ty));
+            if enum_boundary(param, &ty) {
+                params.push(self.generic_enum_layout(param).ok_or("callee-signature")?);
+            } else {
+                params.push(self.value_layout(&ty));
+            }
         }
-        let ret = at(&ret_ty);
+        // A result type the parameters do not bind is the call's own.
+        let mut ret = at(&ret_ty);
         if !crate::hir::layout::ty_is_closed(&ret)
-            || lower::classify(&self.checker, &ret).is_none()
-            || lower::classify(&self.checker, &ret) == Some(ValueClass::Enum)
+            && let Some(ty) = Self::hir_ty(hir, call)
         {
+            ret = apply_ty_prune(self.checker.subst(), ty);
+        }
+        if !crate::hir::layout::ty_is_closed(&ret) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
+        let ret_layout = if lower::classify(&self.checker, &ret) == Some(ValueClass::Enum) {
+            self.generic_enum_layout(&ret_ty).ok_or("callee-signature")?
+        } else {
+            self.value_layout(&ret)
+        };
         Ok(HirCall {
             key: mono,
             pair: None,
             params,
-            ret: self.value_layout(&ret),
+            ret: ret_layout,
             method: false,
             mono: true,
             builtin: None,
