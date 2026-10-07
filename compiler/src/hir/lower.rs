@@ -81,6 +81,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
             .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
+        // `Matrix<D>` is its data at run time.
+        Ty::App(..) if crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty).is_some() => {
+            classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
+        }
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
             aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
         }
@@ -697,10 +701,18 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
 /// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`
 /// (the AST's `try_emit_aggregate_arith`); `None` for a matrix op, which the
 /// AST emits first and HIR leaves to it.
+/// Whether the checker recorded `id` as a linear-algebra op (a matrix or
+/// vector operator, or `dot` / `matmul` / ..).
+pub fn linear_algebra(checker: &Checker, body: &HirBody, id: HirId) -> bool {
+    let e = body.expr(id);
+    let (start, end) = e.span;
+    e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some()
+}
+
 pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
     let e = body.expr(id);
     let (start, end) = e.span;
-    if e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some() {
+    if linear_algebra(checker, body, id) {
         return None;
     }
     e.node
@@ -1729,6 +1741,28 @@ impl Walk<'_> {
             // An anonymous `fn`: its captures, then `MakeFn` (codegen plans
             // the body).
             HirKind::Lambda { .. } => self.word(id),
+            // A matrix operator the checker recorded as linear algebra:
+            // the packed kernel's id under the operands, or each operand
+            // to a temp (codegen picks, as for the builtin calls).
+            HirKind::Bin { lhs, rhs, .. } if linear_algebra(self.checker, body, id) => {
+                if depth != 0 {
+                    return Err("operator-depth");
+                }
+                self.word(id)?;
+                for (i, &operand) in [*lhs, *rhs].iter().enumerate() {
+                    self.word(operand)?;
+                    self.value(operand, 1 + i as u32)?;
+                }
+                Ok(())
+            }
+            HirKind::Un { operand, .. } if linear_algebra(self.checker, body, id) => {
+                if depth != 0 {
+                    return Err("operator-depth");
+                }
+                self.word(id)?;
+                self.word(*operand)?;
+                self.value(*operand, 1)
+            }
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
                 // (`==` / `!=` without one) the VM's structural `EQ` /

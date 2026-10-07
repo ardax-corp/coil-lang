@@ -1732,6 +1732,10 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 fn index_kind(ty: Option<&Ty>) -> IndexKind {
+    // `Matrix<D>` indexes its data.
+    if let Some(data) = ty.map(strip_readonly).and_then(crate::typechecking::aggregate_arith::unwrap_matrix_ty) {
+        return index_kind(Some(data));
+    }
     match ty.map(strip_readonly) {
         Some(Ty::Con(n)) if n == coil_ty::STRING => IndexKind::String,
         Some(Ty::List(_) | Ty::Array { .. }) => IndexKind::Array,

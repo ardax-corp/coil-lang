@@ -150,6 +150,8 @@ enum HirBuiltin {
     /// the operands to temps and the scalar unroll, as the AST's
     /// `emit_linear_algebra`.
     LinAlg,
+    /// `matrix(data)`: the data itself, a zero-cost wrap.
+    Matrix,
 }
 
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
@@ -233,6 +235,9 @@ enum HirOp {
     Prim(Instruction),
     /// An element-wise op (`Compiler::hir_aggregate`).
     Aggregate(crate::typechecking::AggregateArithInfo),
+    /// A matrix / vector operator the checker recorded as linear algebra
+    /// (`Compiler::hir_linear_algebra_op`).
+    LinAlg(crate::typechecking::aggregate_arith::LinearAlgebraInfo),
 }
 
 /// Where an element-wise operand's elements are read.
@@ -751,6 +756,18 @@ impl Compiler {
                 }
                 let fn_ref = self.hir_global_fn(hir, HirId(i as u32), name).ok_or("global")?;
                 emit.fn_refs.insert(i as u32, fn_ref);
+                continue;
+            }
+            // A matrix operator (`a * b`, `a == b`, `~m`): the packed
+            // kernel or the unrolled form, as a builtin call of it.
+            if matches!(expr.kind, HirKind::Bin { .. } | HirKind::Un { .. })
+                && let Some(info) = self.hir_linear_algebra(hir, HirId(i as u32))
+            {
+                let unary = matches!(info.kind, crate::typechecking::LinearAlgebraKind::MatrixNeg { .. });
+                if unary != matches!(expr.kind, HirKind::Un { .. }) {
+                    return Err("operator-linear-algebra");
+                }
+                emit.ops.insert(i as u32, HirOp::LinAlg(info));
                 continue;
             }
             if let HirKind::Bin {
@@ -1578,6 +1595,7 @@ impl Compiler {
         if let Some(kind) = self.checker.prelude_fn_in_scope(name) {
             return Some(match kind {
                 PreludeFn::Assert => Ok(HirBuiltin::Assert),
+                PreludeFn::Matrix => Ok(HirBuiltin::Matrix),
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
@@ -1901,6 +1919,40 @@ impl Compiler {
             .cloned()
     }
 
+    /// `[id, args.., meta]` then `HostInvoke` for a packed kernel, else each
+    /// argument to a temp and the unrolled form, as the AST.
+    fn hir_linear_algebra_op(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        info: &crate::typechecking::aggregate_arith::LinearAlgebraInfo,
+        args: &[HirId],
+        params: &[ValueLayout],
+        depth: u32,
+    ) {
+        if let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len()) {
+            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native as u32));
+            for (i, (&arg, &param)) in args.iter().zip(params).enumerate() {
+                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
+            }
+            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
+            self.bytecode.push_host_invoke(args.len() as u32 + 1);
+        } else {
+            let mut temps = Vec::with_capacity(args.len());
+            for (&arg, &param) in args.iter().zip(params) {
+                self.expr_depth = depth;
+                let tmp = self.alloc_temp_slot();
+                self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
+                self.bytecode.push_store_pop(tmp);
+                temps.push(tmp);
+            }
+            self.expr_depth = depth;
+            let mut bc = std::mem::take(&mut self.bytecode);
+            self.emit_linear_algebra_unrolled(&mut bc, info.kind.clone(), temps[0], temps.get(1).copied());
+            self.bytecode = bc;
+        }
+    }
+
     /// Argument and result layouts of a builtin call. `HostInvoke` takes a
     /// `Result` argument boxed and packs its result in the call's layout.
     fn hir_builtin_abi(&self, hir: &HirBody, call: HirId, builtin: HirBuiltin) -> Result<HirCall, &'static str> {
@@ -1908,6 +1960,9 @@ impl Compiler {
             return Err("callee");
         };
         if matches!(builtin, HirBuiltin::Assert) && !(1..=2).contains(&args.len()) {
+            return Err("callee-arity");
+        }
+        if matches!(builtin, HirBuiltin::Matrix) && args.len() != 1 {
             return Err("callee-arity");
         }
         if matches!(builtin, HirBuiltin::LinAlg) {
@@ -4166,11 +4221,22 @@ impl Compiler {
                 }
                 self.bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
             }
+            HirKind::Bin { lhs, rhs, .. } if let Some(HirOp::LinAlg(info)) = emit.ops.get(&id.0) => {
+                let info = info.clone();
+                let params = [*lhs, *rhs].map(|x| Self::hir_ty(hir, x).map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+                self.hir_linear_algebra_op(hir, emit, &info, &[*lhs, *rhs], &params, depth);
+            }
+            HirKind::Un { operand, .. } if let Some(HirOp::LinAlg(info)) = emit.ops.get(&id.0) => {
+                let info = info.clone();
+                let params = [Self::hir_ty(hir, *operand).map_or(ValueLayout::Boxed, |t| self.value_layout(t))];
+                self.hir_linear_algebra_op(hir, emit, &info, &[*operand], &params, depth);
+            }
             HirKind::Bin {
                 op: BinOp::Overloaded(_),
                 lhs,
                 rhs,
             } => match &emit.ops[&id.0] {
+                HirOp::LinAlg(_) => unreachable!("linear algebra emitted above"),
                 HirOp::Aggregate(info) => {
                     let info = info.clone();
                     self.hir_aggregate(hir, emit, &info, *lhs, Some(*rhs));
@@ -4643,30 +4709,10 @@ impl Compiler {
                         self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
                         self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
                     }
+                    HirBuiltin::Matrix => self.hir_value(hir, emit, args[0], &Rep::Word(params[0]), depth),
                     HirBuiltin::LinAlg => {
                         let info = self.hir_linear_algebra(hir, id).expect("planned linear algebra");
-                        if let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len()) {
-                            // `[id, args.., meta]`, then `HostInvoke`.
-                            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native as u32));
-                            for (i, (&arg, &param)) in args.iter().zip(&params).enumerate() {
-                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
-                            }
-                            self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
-                            self.bytecode.push_host_invoke(args.len() as u32 + 1);
-                        } else {
-                            let mut temps = Vec::with_capacity(args.len());
-                            for (&arg, &param) in args.iter().zip(&params) {
-                                self.expr_depth = depth;
-                                let tmp = self.alloc_temp_slot();
-                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
-                                self.bytecode.push_store_pop(tmp);
-                                temps.push(tmp);
-                            }
-                            self.expr_depth = depth;
-                            let mut bc = std::mem::take(&mut self.bytecode);
-                            self.emit_linear_algebra_unrolled(&mut bc, info.kind, temps[0], temps.get(1).copied());
-                            self.bytecode = bc;
-                        }
+                        self.hir_linear_algebra_op(hir, emit, &info, args, &params, depth);
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
