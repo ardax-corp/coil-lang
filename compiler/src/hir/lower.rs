@@ -1374,7 +1374,11 @@ pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
 pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bool {
     match &body.expr(rhs).kind {
         HirKind::Call { .. } | HirKind::Match { .. } | HirKind::Make { .. } => true,
-        HirKind::Index { .. } => stack_select(body, stack, body.expr(rhs)),
+        // Through field and index reads, as `expr_may_clobber_operand_stack`.
+        HirKind::Index { base, index, .. } => {
+            stack_select(body, stack, body.expr(rhs)) || stages_rhs(body, stack, *base) || stages_rhs(body, stack, *index)
+        }
+        HirKind::Field { base, .. } => stages_rhs(body, stack, *base),
         // An operator on a user type or aggregate stages through temps.
         HirKind::Bin {
             op: BinOp::Overloaded(_), ..
