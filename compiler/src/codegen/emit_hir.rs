@@ -156,6 +156,10 @@ enum HirBuiltin {
     /// a temp, its value, its dictionary, the method's code pointer from
     /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
     Existential { slot: u32 },
+    /// An `extern` function: its library and function-id statics under
+    /// the arguments, the arguments packed in a tuple, `FfiInvoke`, then
+    /// the `Result` unwrapped or panicked, as `compile_call_expr`.
+    Ffi { lib: u32, func: u32 },
 }
 
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
@@ -959,10 +963,18 @@ impl Compiler {
         if !known(&key) && !self.namespace.is_empty() && !key.contains("::") {
             key = format!("{}::{}", self.namespace, key);
         }
+        // An `extern` function (C variadics pass per-call type tags, kept
+        // on the AST).
+        if let Some((lib, func)) = self.lookup_extern_runtime(&key) {
+            if self.checker.is_extern_variadic(&key) {
+                return Err("callee-variadic");
+            }
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func });
+        }
         if !known(&key) {
             return Err("callee-unknown");
         }
-        if self.lookup_extern_runtime(&key).is_some() || self.native.contains_key(&key) {
+        if self.native.contains_key(&key) {
             return Err("callee-native");
         }
         if key.starts_with(&format!("{}::", common::BUILTIN_VEC_TYPE)) {
@@ -4950,6 +4962,30 @@ impl Compiler {
                     HirBuiltin::LinAlg => {
                         let info = self.hir_linear_algebra(hir, id).expect("planned linear algebra");
                         self.hir_linear_algebra_op(hir, emit, &info, args, &params, depth);
+                    }
+                    HirBuiltin::Ffi { lib, func } => {
+                        // Both statics go under the arguments; staged ones
+                        // run into temps before them.
+                        let statics = |bc: &mut CodeBuf| {
+                            bc.push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib));
+                            bc.push(Byte::new(Instruction::LoadStatic).with_operand_u32(func));
+                        };
+                        if emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth) {
+                            let temps = self.hir_stage_words(hir, emit, args, &params);
+                            statics(&mut self.bytecode);
+                            for &tmp in &temps {
+                                self.bytecode.push_load(tmp);
+                            }
+                        } else {
+                            statics(&mut self.bytecode);
+                            for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 2 + i as u32);
+                            }
+                        }
+                        self.bytecode.push_make_tuple(args.len() as u32);
+                        self.bytecode
+                            .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(args.len() as u32 & 0xFFFF));
+                        self.emit_result_unwrap_or_panic();
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged

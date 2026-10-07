@@ -69,6 +69,8 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
     }
     match ty {
         Ty::Con(n) if n == coil_ty::STRING => Some(ValueClass::Opaque),
+        // A foreign pointer: one word, only moved and passed to `extern`s.
+        Ty::Con(n) if n == "ptr" && !checker.is_class(n) && checker.enum_variants(n).is_none() => Some(ValueClass::Opaque),
         // Host handles (`io` streams, threads, channels, locks): one word.
         Ty::Con(n) if is_host_handle(n) && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
             Some(ValueClass::Opaque)
