@@ -143,6 +143,9 @@ enum HirBuiltin {
     /// the arguments, the hidden dictionary, then its method slot's code
     /// pointer through `CallIndirect`.
     Bound { dict: u32, method: u32 },
+    /// `f(a)` filling a prefix of `f`'s parameters: the filled values, the
+    /// fill mask, then `CodePtr` and `MakeFn`, as `compile_call_expr`.
+    Partial { entry: u32, mask: u32, operand: u32 },
 }
 
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
@@ -900,10 +903,8 @@ impl Compiler {
             return Ok(call);
         }
         let overload = self.sidecar_overload(node.node, start, end);
-        if overload.is_some_and(|(_, rest, _)| rest)
-            || (forwards && overload.is_some())
-            || self.checker.partial_fill_at(start, end).is_some()
-        {
+        let partial = self.checker.partial_fill_at(start, end);
+        if overload.is_some_and(|(_, rest, _)| rest) || (forwards && overload.is_some()) || (partial.is_some() && overload.is_some()) {
             return Err("callee-overload");
         }
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
@@ -931,6 +932,9 @@ impl Compiler {
         if self.checker.is_overloaded(&lookup) || self.checker.is_overloaded(name) {
             return Err("callee-overload");
         }
+        if let Some(call) = self.hir_partial(hir, call, &key, &lookup, partial, argc)? {
+            return Ok(call);
+        }
         // The AST sends a call to an emitted mono clone, else to the shared
         // body with boxed arguments and dictionaries.
         if self.checker.is_generic_fn(&lookup) && self.hir_has_mono_clone(hir, call, &key) {
@@ -949,6 +953,72 @@ impl Compiler {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
         }
         Ok(abi)
+    }
+
+    /// `f(a)` with fewer arguments than `f`'s fixed parameters: a function
+    /// value over the filled prefix (`compile_call_expr`'s `MakeFn`).
+    fn hir_partial(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        key: &str,
+        lookup: &str,
+        partial: Option<u32>,
+        argc: usize,
+    ) -> Result<Option<HirCall>, &'static str> {
+        let Some(&(fixed, rest)) = self.fn_arities.get(key).or_else(|| self.fn_arities.get(lookup)) else {
+            return Ok(None);
+        };
+        let fixed = fixed as usize;
+        let mask = match partial {
+            Some(mask) => mask,
+            None if !rest && fixed > 0 && argc < fixed => (1u32 << argc).wrapping_sub(1),
+            None => return Ok(None),
+        };
+        // Only a prefix filled positionally, of a plain function taking
+        // and returning words.
+        if rest
+            || mask != (1u32 << argc).wrapping_sub(1)
+            || self.checker.is_generic_fn(lookup)
+            || self.coroutine_fns.contains(key)
+            || self.two_word_return_kind(lookup).is_some()
+            || self.callee_has_unboxed_range_params(lookup)
+        {
+            return Err("callee-partial");
+        }
+        let entry = *self.functions.get(key).ok_or("callee-partial")?;
+        let param_tys = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?;
+        if param_tys.len() != fixed {
+            return Err("callee-partial");
+        }
+        let mut params = Vec::with_capacity(argc);
+        for ty in &param_tys[..argc] {
+            match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Enum) | None => return Err("callee-partial"),
+                Some(class) if lower::is_word(class) => params.push(self.value_layout(ty)),
+                Some(_) => return Err("callee-partial"),
+            }
+        }
+        let ty = Self::hir_ty(hir, call).ok_or("call-type")?;
+        if lower::classify(&self.checker, ty) != Some(ValueClass::Opaque) {
+            return Err("callee-partial");
+        }
+        Ok(Some(HirCall {
+            key: String::new(),
+            pair: None,
+            params,
+            ret: ValueLayout::Boxed,
+            method: false,
+            mono: false,
+            builtin: Some(HirBuiltin::Partial {
+                entry: entry as u32,
+                mask,
+                operand: make_fn_operand(0, mask.count_ones(), fixed as u32, false),
+            }),
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+        }))
     }
 
     /// A call the checker resolved to one arity overload, keyed as
@@ -4324,6 +4394,20 @@ impl Compiler {
                         self.bytecode.push_index();
                         self.bytecode
                             .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32 + 1));
+                    }
+                    HirBuiltin::Partial { entry, mask, operand } => {
+                        if emit.boxes.is_empty() && lower::stages_args(hir, args, depth) {
+                            for tmp in self.hir_stage_words(hir, emit, args, &params) {
+                                self.bytecode.push_load(tmp);
+                            }
+                        } else {
+                            for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                                self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
+                            }
+                        }
+                        self.bytecode.push_const(mask as i32);
+                        self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
+                        self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
