@@ -69,6 +69,8 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
     }
     match ty {
         Ty::Con(n) if n == coil_ty::STRING => Some(ValueClass::Opaque),
+        // A foreign pointer: one word, only moved and passed to `extern`s.
+        Ty::Con(n) if n == "ptr" && !checker.is_class(n) && checker.enum_variants(n).is_none() => Some(ValueClass::Opaque),
         // Host handles (`io` streams, threads, channels, locks): one word.
         Ty::Con(n) if is_host_handle(n) && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
             Some(ValueClass::Opaque)
@@ -1702,6 +1704,9 @@ impl Walk<'_> {
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
             Some(class) if is_word(class) => Ok(()),
+            // A diverging value (a `match` whose arms all `raise`) never
+            // reaches its join, so it fits any word.
+            None if self.ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Never)) => Ok(()),
             _ => Err("value-type"),
         }
     }
@@ -1910,6 +1915,11 @@ impl Walk<'_> {
                     && self.ty(*value).is_some_and(is_byte_array)
                     && self.ty(id).is_some_and(|t| is_byte_array(t) || is_byte_vec(t)) =>
             {
+                self.value(*value, depth)
+            }
+            // `v as [byte]` of a `Vec<byte>` (or back): one array object,
+            // passed through as the AST does.
+            HirKind::Cast { value } if self.ty(*value).is_some_and(is_byte_vec) && self.ty(id).is_some_and(is_byte_vec) => {
                 self.value(*value, depth)
             }
             HirKind::Cast { value } => {
