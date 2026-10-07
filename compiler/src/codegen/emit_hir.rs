@@ -972,6 +972,9 @@ impl Compiler {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func });
         }
         if !known(&key) {
+            if std::env::var_os("COIL_HIR_WHY").is_some() {
+                eprintln!("    callee `{key}`");
+            }
             return Err("callee-unknown");
         }
         if self.native.contains_key(&key) {
@@ -2157,8 +2160,19 @@ impl Compiler {
             None if key == lookup
                 && self.fn_entry_labels.contains_key(&key)
                 && !self.checker.fn_has_rest(&lookup)
-                && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == explicit) => {}
-            _ => return Err("callee-arity"),
+                && self
+                    .checker
+                    .fn_param_names(&lookup)
+                    .map(<[String]>::len)
+                    // A module-qualified function's names are keyed bare.
+                    .or_else(|| self.checker.fn_param_tys(&lookup).map(|tys| tys.len()))
+                    .is_some_and(|n| n == explicit) => {}
+            arity => {
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("    callee `{key}` arity {arity:?}, {explicit} given");
+                }
+                return Err("callee-arity");
+            }
         }
         // `Stream.fd()`: the inherent `HostInvoke` thunk takes the stream
         // and returns the boxed `Result<int, IoError>` (no scheme lists it).

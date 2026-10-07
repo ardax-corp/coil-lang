@@ -1704,6 +1704,9 @@ impl Walk<'_> {
     fn word(&self, id: HirId) -> Check {
         match self.class(id) {
             Some(class) if is_word(class) => Ok(()),
+            // A diverging value (a `match` whose arms all `raise`) never
+            // reaches its join, so it fits any word.
+            None if self.ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Never)) => Ok(()),
             _ => Err("value-type"),
         }
     }
