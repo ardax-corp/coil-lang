@@ -658,6 +658,15 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
 }
 
+/// Whether `len(x)` dispatches to a user `Length` instance: `x` has a
+/// known type that is not structural, so it is a plain call.
+pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
+    body.expr(arg).ty.as_ref().is_some_and(|t| {
+        let t = apply_ty_prune(checker.subst(), t);
+        super::layout::ty_is_closed(&t) && !Checker::is_structural_len_ty_for_codegen(&t)
+    })
+}
+
 /// Whether `x.len()` is the structural `len(x)` (not a `Vec` method).
 pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
     body.expr(recv).ty.as_ref().is_some_and(|t| {
@@ -1720,7 +1729,7 @@ impl Walk<'_> {
             HirKind::Call {
                 callee: Callee::Named { name, .. },
                 args,
-            } if name == "len" && args.len() == 1 => self.len(args[0], depth),
+            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0], depth),
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,

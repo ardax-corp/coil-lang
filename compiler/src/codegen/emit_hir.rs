@@ -883,7 +883,8 @@ impl Compiler {
     ) -> Result<HirCall, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if name == "len" || self.checker.bare_construct_at(start, end).is_some() {
+        let user_len = name == "len" && matches!(&node.kind, HirKind::Call { args, .. } if args.len() == 1 && lower::user_len(hir, &self.checker, args[0]));
+        if (name == "len" && !user_len) || self.checker.bare_construct_at(start, end).is_some() {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
@@ -2524,7 +2525,7 @@ impl Compiler {
             return None;
         };
         let is_len = match callee {
-            Callee::Named { name, .. } => name == "len",
+            Callee::Named { name, .. } => name == "len" && !lower::user_len(hir, &self.checker, *arg),
             Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
             Callee::Value(_) => false,
         };
