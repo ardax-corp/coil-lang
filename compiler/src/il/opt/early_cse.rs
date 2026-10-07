@@ -245,7 +245,10 @@ impl Avail {
 
     fn bind_slot(&mut self, slot: u32, e: Expr) {
         self.kill_slot(slot);
-        self.map.insert(e, slot);
+        // `n = n + 1` leaves `n + 1` of the old `n`, not of the new one.
+        if !depends_on(&e, slot) {
+            self.map.insert(e, slot);
+        }
     }
 
     fn kill_slot(&mut self, slot: u32) {
@@ -709,6 +712,29 @@ mod tests {
             matches!(ops[4], IlOp::BinSlotSlot { .. }),
             "killed by store to operand slot"
         );
+    }
+
+    #[test]
+    fn store_of_own_operand_is_not_reused() {
+        // `n = n + 1; n = n + 1`: the second add reads the new `n`.
+        let mut ops = vec![IlOp::Const { imm: 0, loc: loc() }, IlOp::StorePop { slot: 0, loc: loc() }];
+        for _ in 0..2 {
+            ops.extend([
+                IlOp::Load { slot: 0, loc: loc() },
+                IlOp::Const { imm: 1, loc: loc() },
+                IlOp::Bin {
+                    op: Instruction::ADD,
+                    loc: loc(),
+                },
+                IlOp::StorePop { slot: 0, loc: loc() },
+            ]);
+        }
+        ops.push(IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        });
+        assert_eq!(early_cse_with(&mut ops, None), 0);
+        assert_eq!(ops.iter().filter(|op| matches!(op, IlOp::Bin { .. })).count(), 2);
     }
 
     #[test]
