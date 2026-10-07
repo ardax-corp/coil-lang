@@ -124,6 +124,9 @@ struct HirGeneric {
     dicts: usize,
     /// The result type to `UnboxValue` (a bare type parameter result).
     unbox: Option<Ty>,
+    /// The enclosing body's dictionaries (`__dictN`) the call forwards
+    /// ahead of its own, as `forwarded_dicts_at` lists them.
+    forwarded: Vec<usize>,
 }
 
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
@@ -724,15 +727,21 @@ impl Compiler {
         // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
-            || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
         {
             return Err("callee-trait");
         }
-        if let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
+        // Dictionaries a generic body forwards reach a generic callee's
+        // shared body ([`Self::hir_generic_abi`]); a mono clone or a plain
+        // function takes none, as on the AST.
+        let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty());
+        if !forwards && let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
             return Ok(call);
         }
         let overload = self.sidecar_overload(node.node, start, end);
-        if overload.is_some_and(|(_, rest, _)| rest) || self.checker.partial_fill_at(start, end).is_some() {
+        if overload.is_some_and(|(_, rest, _)| rest)
+            || (forwards && overload.is_some())
+            || self.checker.partial_fill_at(start, end).is_some()
+        {
             return Err("callee-overload");
         }
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
@@ -915,27 +924,42 @@ impl Compiler {
                 && !crate::hir::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
         };
+        // The boxed side of such a boundary is the open type's layout
+        // (`generic_enum_layout`); the argument and result convert to and
+        // from it.
         let mut params = Vec::with_capacity(args.len());
         for param in &param_tys {
             let ty = at(param);
             match lower::classify(&self.checker, &ty) {
-                Some(class) if lower::is_word(class) && !enum_boundary(param, &ty) => {}
+                Some(class) if lower::is_word(class) => {}
                 _ => return Err("callee-signature"),
             }
-            params.push(self.value_layout(&ty));
+            if enum_boundary(param, &ty) {
+                params.push(self.generic_enum_layout(param).ok_or("callee-signature")?);
+            } else {
+                params.push(self.value_layout(&ty));
+            }
         }
-        let ret = at(&ret_ty);
+        // A result type the parameters do not bind is the call's own.
+        let mut ret = at(&ret_ty);
         if !crate::hir::layout::ty_is_closed(&ret)
-            || lower::classify(&self.checker, &ret).is_none()
-            || lower::classify(&self.checker, &ret) == Some(ValueClass::Enum)
+            && let Some(ty) = Self::hir_ty(hir, call)
         {
+            ret = apply_ty_prune(self.checker.subst(), ty);
+        }
+        if !crate::hir::layout::ty_is_closed(&ret) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
+        let ret_layout = if lower::classify(&self.checker, &ret) == Some(ValueClass::Enum) {
+            self.generic_enum_layout(&ret_ty).ok_or("callee-signature")?
+        } else {
+            self.value_layout(&ret)
+        };
         Ok(HirCall {
             key: mono,
             pair: None,
             params,
-            ret: self.value_layout(&ret),
+            ret: ret_layout,
             method: false,
             mono: true,
             builtin: None,
@@ -964,17 +988,22 @@ impl Compiler {
         // argument types; trait-object dispatch stays on the AST.
         if self.existential_method_hint(node.node, start, end).is_some()
             || self.bound_method_hint(node.node, start, end).is_some()
-            || self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty())
         {
             return Err("callee-trait");
         }
         if self.sidecar_overload(node.node, start, end).is_some() {
             return Err("callee-overload");
         }
-        if let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
+        // Dictionaries a generic body forwards reach only a generic
+        // method's shared body ([`Self::hir_generic_abi`]).
+        let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty());
+        if !forwards && let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
             return Ok(call);
         }
         let recv = *args.first().ok_or("method-receiver")?;
+        if forwards && (lower::is_vec(hir, &self.checker, recv) || method == "to_vec") {
+            return Err("callee-trait");
+        }
         if lower::is_vec(hir, &self.checker, recv) {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
@@ -1028,6 +1057,9 @@ impl Compiler {
         }
         let lookup = key.clone();
         let generic = self.checker.is_generic_fn(&lookup);
+        if forwards && !generic {
+            return Err("callee-trait");
+        }
         let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
@@ -1060,9 +1092,9 @@ impl Compiler {
         else {
             return Ok(None);
         };
-        // An open goal resolves its dictionary from scope; a pair return
-        // has its own ABI.
-        if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
+        // A pair return has its own ABI. (An open goal resolves its
+        // dictionary from scope when the call is emitted, as on the AST.)
+        if self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
         let recv = *args.first().ok_or("method-receiver")?;
@@ -1764,11 +1796,16 @@ impl Compiler {
             params.push(p.as_ref().clone());
             cur = r;
         }
+        let node = hir.expr(call);
+        let forwarded = self.forwarded_dicts_hint(node.node, node.span.0, node.span.1).unwrap_or_default();
         // A function argument (`map(xs, fn (int x) => ..)`) is one closure
-        // word whose own types are ground.
+        // word whose own types are ground. A body forwarding its
+        // dictionaries also passes its own bare type parameters, already
+        // boxed words.
+        let open = |ty: &Ty| !forwarded.is_empty() && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty)).then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty)).then_some(ty)
         };
         let mut arg_tys = Vec::with_capacity(args.len());
         for &arg in args {
@@ -1782,7 +1819,7 @@ impl Compiler {
             let bare = params
                 .get(skip + i)
                 .is_some_and(|p| matches!(p, Ty::Var(v) if scheme.bounds.contains(v)));
-            if !bare {
+            if !bare || open(ty) {
                 boxed.push(None);
                 continue;
             }
@@ -1802,13 +1839,17 @@ impl Compiler {
         for constraint in &scheme.constraints {
             let lookup_tys =
                 Self::resolve_constraint_lookup(constraint, &vars, &self.checker).ok_or("callee-trait")?;
+            // An open goal is served by a forwarded dictionary.
+            if lookup_tys.iter().any(Self::ty_has_var) && !forwarded.is_empty() {
+                continue;
+            }
             if lookup_tys.iter().any(Self::ty_has_var)
                 || self.checker.generics().find_instance_relaxed(&constraint.class, &lookup_tys).is_none()
             {
                 return Err("callee-trait");
             }
         }
-        let unbox = self.generic_return_is_boxed(lookup).then(|| ret_ty.clone());
+        let unbox = (self.generic_return_is_boxed(lookup) && !open(&ret_ty)).then(|| ret_ty.clone());
         if unbox.is_some() && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum) {
             return Err("callee-generic");
         }
@@ -1819,16 +1860,29 @@ impl Compiler {
             ret_ty,
             dicts: scheme.constraints.len(),
             unbox,
+            forwarded,
         })
     }
 
     /// Push `generic`'s dictionaries after the arguments; their count.
     fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
+        // The enclosing body's own first, then the call site's, as the AST.
+        let mut forwarded = 0;
+        for &i in &generic.forwarded {
+            if let Some(slot) = self.lookup_slot(&format!("__dict{i}")) {
+                self.bytecode.push_load(slot);
+                forwarded += 1;
+            }
+        }
         let mut dicts = CodeBuf::new();
         let n = self.emit_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
-        debug_assert_eq!(n, generic.dicts, "planned dictionaries for `{}`", generic.lookup);
+        debug_assert!(
+            !generic.forwarded.is_empty() || n == generic.dicts,
+            "planned dictionaries for `{}`",
+            generic.lookup
+        );
         self.bytecode.append(&mut dicts);
-        n as u32
+        (forwarded + n) as u32
     }
 
     /// `return f(..)` may jump instead of call, under the rules
