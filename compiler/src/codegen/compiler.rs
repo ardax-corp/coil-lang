@@ -16488,7 +16488,6 @@ impl Compiler {
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             self.active_fn_name = Some(name.to_string());
             let lowered = prev_fn_table_key_was_none
-                && !*is_coro
                 && type_params.is_empty()
                 && dict_arity == 0
                 && self.try_lower_hir_function(span, body);

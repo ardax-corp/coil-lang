@@ -709,6 +709,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
                 | HirKind::Index { kind: IndexKind::String, .. }
                 | HirKind::Builtin { .. }
                 | HirKind::Resume { .. }
+                | HirKind::Yield { .. }
         );
     });
     found
@@ -1124,13 +1125,20 @@ pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
     found
 }
 
+/// Whether `id` is a `block_on(h)` call (the prelude's, not a user `fn`).
+pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    matches!(
+        &body.expr(id).kind,
+        HirKind::Call { callee: Callee::Named { name, .. }, args }
+            if args.len() == 1
+                && checker.prelude_fn_in_scope(name) == Some(crate::typechecking::PreludeFn::BlockOn)
+    )
+}
+
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda) {
         return Some("body-kind");
-    }
-    if body.is_coro {
-        return Some("coroutine");
     }
     if body.is_generic {
         return Some("generic");
@@ -2041,6 +2049,11 @@ impl Walk<'_> {
                 if shows && depth != 0 {
                     return Err("format-show");
                 }
+                // `block_on(h)` drives `h` through two temps, which a live
+                // operand would sit under.
+                if depth != 0 && block_on(body, self.checker, id) {
+                    return Err("block-on-depth");
+                }
                 self.args(args, depth, shows || stages_args(body, self.checker, args, depth))
             }
             // `recv.m(args)` stages the receiver and each argument through
@@ -2245,6 +2258,13 @@ impl Walk<'_> {
                     return Err("class-escape-tail");
                 }
                 self.value(*tail, depth)
+            }
+            // `yield v` / `yield from h`: the operand, then `YieldCoro` /
+            // `YieldFromCoro`; its value is the word the next resume sends.
+            HirKind::Yield { value, .. } => {
+                self.word(id)?;
+                self.word(*value)?;
+                self.value(*value, depth)
             }
             // `resume h [with v]`: the sent value, the handle, `ResumeCoro`.
             HirKind::Resume { handle, value } => {
@@ -2703,6 +2723,12 @@ impl Walk<'_> {
                 checked
             }
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
+            // A statement `yield` leaves nothing: a send lands only where a
+            // receiving `yield` takes it.
+            HirKind::Yield { value, .. } => {
+                self.word(*value)?;
+                self.value(*value, depth)
+            }
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Lit(_)

@@ -152,6 +152,9 @@ enum HirBuiltin {
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
+    /// `block_on(h)`: `h` resumed until done, waiting on batched IO between
+    /// resumes, then its last resumed word, as the AST's `emit_block_on`.
+    BlockOn,
     /// A trait method on a bare-class existential (`show(x)`): the pack to
     /// a temp, its value, its dictionary, the method's code pointer from
     /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
@@ -1695,6 +1698,7 @@ impl Compiler {
             return Some(match kind {
                 PreludeFn::Assert => Ok(HirBuiltin::Assert),
                 PreludeFn::Matrix => Ok(HirBuiltin::Matrix),
+                PreludeFn::BlockOn => Ok(HirBuiltin::BlockOn),
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
@@ -2163,8 +2167,14 @@ impl Compiler {
         if matches!(builtin, HirBuiltin::Assert) && !(1..=2).contains(&args.len()) {
             return Err("callee-arity");
         }
-        if matches!(builtin, HirBuiltin::Matrix) && args.len() != 1 {
+        if matches!(builtin, HirBuiltin::Matrix | HirBuiltin::BlockOn) && args.len() != 1 {
             return Err("callee-arity");
+        }
+        // The resumed word moves as it is (as `Resume`).
+        if matches!(builtin, HirBuiltin::BlockOn)
+            && !Self::hir_ty(hir, call).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)
+        {
+            return Err("resume-layout");
         }
         if matches!(builtin, HirBuiltin::LinAlg) {
             let info = self.hir_linear_algebra(hir, call).ok_or("callee-builtin")?;
@@ -2767,6 +2777,7 @@ impl Compiler {
                     .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
             ),
             HirKind::Resume { .. }
+            | HirKind::Yield { .. }
             | HirKind::Builtin {
                 op: Builtin::Done, ..
             } => Some(BOXED),
@@ -3797,6 +3808,14 @@ impl Compiler {
                     self.hir_check_value(hir, emit, arg, &BOXED)?;
                 }
             }
+            // The yielded word moves as it is (as `Resume`).
+            HirKind::Yield { value, .. } => {
+                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
+                if !boxed(*value) {
+                    return Err("yield-layout");
+                }
+                self.hir_check_value(hir, emit, *value, &BOXED)?;
+            }
             // As the AST: the yielded and sent words move as they are, so
             // only a boxed-layout type is taken.
             HirKind::Resume { handle, value } => {
@@ -4747,6 +4766,7 @@ impl Compiler {
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
             }
+            HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, depth),
             HirKind::Resume { handle, value } => {
                 for (i, &v) in value.iter().chain([handle]).enumerate() {
                     self.hir_value(hir, emit, v, &BOXED, depth + i as u32);
@@ -5034,6 +5054,7 @@ impl Compiler {
                         }
                         self.bytecode.bind_label(end);
                     }
+                    HirBuiltin::BlockOn => self.hir_block_on(hir, emit, args[0]),
                     HirBuiltin::Format => {
                         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
                             unreachable!("planned format literal")
@@ -6634,6 +6655,8 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_match(hir, emit, *scrutinee, arms, None, 0);
             }
+            // A statement `yield` leaves nothing on the stack.
+            HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, 0),
             _ if lower::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => {}
             HirKind::Make { .. } => {
                 self.hir_value(hir, emit, id, &BOXED, 0);
@@ -6651,6 +6674,38 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// `block_on(h)` at depth zero, as the AST's `emit_block_on`.
+    fn hir_block_on(&mut self, hir: &HirBody, emit: &mut HirEmit, handle: HirId) {
+        self.expr_depth = 0;
+        let handle_slot = self.alloc_temp_slot();
+        let value_slot = self.alloc_temp_slot();
+        self.hir_value(hir, emit, handle, &BOXED, 0);
+        self.bytecode.push_store_pop(handle_slot);
+        let top = self.bytecode.fresh_label();
+        let exit = self.bytecode.fresh_label();
+        self.bytecode.bind_label(top);
+        self.bytecode.push_load(handle_slot);
+        self.bytecode.push(Byte::new(Instruction::ResumeCoro).with_operand_u32(0));
+        self.bytecode.push_store_pop(value_slot);
+        self.bytecode.push_load(handle_slot);
+        self.bytecode.push(Byte::new(Instruction::DoneCoro));
+        self.hir_jump(IlJumpKind::JumpIfTrue, exit);
+        if self.native_id("wait_ready").is_some() {
+            self.emit_host_native_invoke("wait_ready", &[], None);
+            self.bytecode.push_pop();
+        }
+        self.hir_jump(IlJumpKind::Unconditional, top);
+        self.bytecode.bind_label(exit);
+        self.bytecode.push_load(value_slot);
+    }
+
+    /// `yield v` (`YieldCoro`) or `yield from h` (`YieldFromCoro`).
+    fn hir_yield(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, from: bool, depth: u32) {
+        self.hir_value(hir, emit, value, &BOXED, depth);
+        let op = if from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+        self.bytecode.push(Byte::new(op));
     }
 
     /// A test jump with the scrutinee's payload still under it, hinted as
