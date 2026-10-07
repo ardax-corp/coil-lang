@@ -7540,128 +7540,13 @@ impl Compiler {
         rhs: Option<&Output>,
         op: crate::typechecking::AggregateOp,
     ) -> Option<crate::typechecking::AggregateArithInfo> {
-        use crate::typechecking::aggregate_arith::{elem_is_float, homogeneous_aggregate_elem};
         use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{ArrayLength, Ty};
-        use crate::typechecking::{
-            AggregateArithInfo, AggregateArithKind, AggregateOp, ScalarSide,
+        let lty = apply_ty_prune(self.checker.subst(), &self.expr_codegen_ty(lhs)?);
+        let rty = match rhs {
+            Some(rhs) => Some(apply_ty_prune(self.checker.subst(), &self.expr_codegen_ty(rhs)?)),
+            None => None,
         };
-
-        let lty = self.expr_codegen_ty(lhs)?;
-        let lty = apply_ty_prune(self.checker.subst(), &lty);
-        match (op, rhs) {
-            (AggregateOp::Neg, None) => {
-                let elem = homogeneous_aggregate_elem(&lty)?;
-                let float = elem_is_float(&elem);
-                match lty {
-                    Ty::Tuple(elems) => Some(AggregateArithInfo {
-                        kind: AggregateArithKind::NegTuple {
-                            arity: elems.len(),
-                            elem_is_float: float,
-                        },
-                        op,
-                    }),
-                    Ty::Array { length, .. } => Some(AggregateArithInfo {
-                        kind: AggregateArithKind::NegArray {
-                            length: match length {
-                                ArrayLength::Static(n) => Some(n),
-                                ArrayLength::Dynamic => None,
-                            },
-                            elem_is_float: float,
-                        },
-                        op,
-                    }),
-                    _ => None,
-                }
-            }
-            (_, Some(rhs)) => {
-                let rty = self.expr_codegen_ty(rhs)?;
-                let rty = apply_ty_prune(self.checker.subst(), &rty);
-                use crate::typechecking::aggregate_arith::is_numeric_elem;
-                match (&lty, &rty) {
-                    (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() && !a.is_empty() => {
-                        let le = homogeneous_aggregate_elem(&lty)?;
-                        let re = homogeneous_aggregate_elem(&rty)?;
-                        if le != re {
-                            return None;
-                        }
-                        Some(AggregateArithInfo {
-                            kind: AggregateArithKind::ZipTuple {
-                                arity: a.len(),
-                                elem_is_float: elem_is_float(&le),
-                            },
-                            op,
-                        })
-                    }
-                    (
-                        Ty::Array {
-                            element,
-                            length: ArrayLength::Static(n),
-                        },
-                        Ty::Array {
-                            length: ArrayLength::Static(m),
-                            ..
-                        },
-                    ) if n == m => Some(AggregateArithInfo {
-                        kind: AggregateArithKind::ZipArray {
-                            length: *n,
-                            elem_is_float: elem_is_float(element),
-                        },
-                        op,
-                    }),
-                    (Ty::Tuple(a), r) if !a.is_empty() && is_numeric_elem(r) => {
-                        let elem = homogeneous_aggregate_elem(&lty)?;
-                        Some(AggregateArithInfo {
-                            kind: AggregateArithKind::BroadcastTuple {
-                                arity: a.len(),
-                                scalar_on: ScalarSide::Right,
-                                elem_is_float: elem_is_float(&elem),
-                            },
-                            op,
-                        })
-                    }
-                    (l, Ty::Tuple(b)) if !b.is_empty() && is_numeric_elem(l) => {
-                        let elem = homogeneous_aggregate_elem(&rty)?;
-                        Some(AggregateArithInfo {
-                            kind: AggregateArithKind::BroadcastTuple {
-                                arity: b.len(),
-                                scalar_on: ScalarSide::Left,
-                                elem_is_float: elem_is_float(&elem),
-                            },
-                            op,
-                        })
-                    }
-                    (Ty::Array { element, length }, r) if is_numeric_elem(r) => {
-                        Some(AggregateArithInfo {
-                            kind: AggregateArithKind::BroadcastArray {
-                                length: match length {
-                                    ArrayLength::Static(n) => Some(*n),
-                                    ArrayLength::Dynamic => None,
-                                },
-                                scalar_on: ScalarSide::Right,
-                                elem_is_float: elem_is_float(element),
-                            },
-                            op,
-                        })
-                    }
-                    (l, Ty::Array { element, length }) if is_numeric_elem(l) => {
-                        Some(AggregateArithInfo {
-                            kind: AggregateArithKind::BroadcastArray {
-                                length: match length {
-                                    ArrayLength::Static(n) => Some(*n),
-                                    ArrayLength::Dynamic => None,
-                                },
-                                scalar_on: ScalarSide::Left,
-                                elem_is_float: elem_is_float(element),
-                            },
-                            op,
-                        })
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        crate::typechecking::aggregate_arith::recover(&lty, rty.as_ref(), op)
     }
 
     fn expr_codegen_ty(&self, expr: &Output) -> Option<Ty> {

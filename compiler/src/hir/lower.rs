@@ -707,6 +707,44 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
         .and_then(|n| checker.aggregate_arith_at(n))
         .or_else(|| checker.aggregate_arith_span(start, end))
         .cloned()
+        .or_else(|| recover_aggregate(checker, body, id))
+}
+
+/// The element-wise shape from the operand types where the checker kept
+/// none (a mono clone of a generic body), as the AST's
+/// `recover_aggregate_arith`: only for operands it types itself, locals and
+/// literals.
+fn recover_aggregate(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
+    use crate::typechecking::{AggregateOp, aggregate_arith::recover};
+    fn typed(body: &HirBody, id: HirId) -> bool {
+        match &body.expr(id).kind {
+            HirKind::Local(_) | HirKind::Lit(Lit::Int(_) | Lit::Float(_)) => true,
+            HirKind::Make {
+                kind: MakeKind::Tuple,
+                args,
+            } => args.iter().all(|&a| typed(body, a)),
+            HirKind::Make {
+                kind: MakeKind::Array,
+                args,
+            } => !args.is_empty() && args.iter().all(|&a| typed(body, a)),
+            _ => false,
+        }
+    }
+    let ty = |x: HirId| {
+        typed(body, x)
+            .then(|| body.expr(x).ty.as_ref())
+            .flatten()
+            .map(|t| apply_ty_prune(checker.subst(), t))
+    };
+    match body.expr(id).kind {
+        HirKind::Bin {
+            op: BinOp::Overloaded(sym),
+            lhs,
+            rhs,
+        } => recover(&ty(lhs)?, Some(&ty(rhs)?), AggregateOp::from_str(sym)?),
+        HirKind::Un { op: UnOp::Neg, operand } => recover(&ty(operand)?, None, AggregateOp::Neg),
+        _ => None,
+    }
 }
 
 /// How an element-wise operand's elements are read, as the AST's
