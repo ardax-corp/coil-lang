@@ -861,6 +861,22 @@ fn pure_base(body: &HirBody, id: HirId) -> bool {
     }
 }
 
+/// A field store's base that only reads: `x`, `x.f`, or `x[i]` of such a
+/// base with a [`pure_index`] (`xs[0].b`). The AST pushes it above the
+/// value, and a compound store builds it twice.
+fn read_base(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Local(_) => true,
+        HirKind::Field { base, .. } => read_base(body, *base),
+        HirKind::Index {
+            base,
+            index,
+            kind: IndexKind::Array | IndexKind::Tuple,
+        } => read_base(body, *base) && pure_index(body, *index),
+        _ => false,
+    }
+}
+
 /// A user enum the lowering builds and matches: not scalar-backed, not a
 /// class, not builtin, with every payload field a handled non-unit type.
 fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<ValueClass> {
@@ -2209,8 +2225,7 @@ impl Walk<'_> {
                     }
                     // `base.f = v`: the value, then the base on top of it.
                     HirKind::Field { base, .. } => {
-                        // The AST runs an impure base before the value.
-                        if !pure_base(body, *base) {
+                        if !read_base(body, *base) {
                             return Err("assign-base");
                         }
                         self.word(*place)?;
