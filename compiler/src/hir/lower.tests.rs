@@ -80,9 +80,17 @@ fn result_mode_bodies_are_in_the_subset() {
 }
 
 #[test]
-fn constructs_outside_the_subset_name_their_kind() {
+fn generic_shared_bodies_are_in_the_subset() {
     let src = "fn id<T>(T x) -> T { return x; }";
-    assert_eq!(refusal_of(src, "id"), Some("generic"));
+    assert_eq!(refusal_of(src, "id"), None);
+}
+
+/// The checker can type a type parameter ground inside its own body
+/// (#801); such a body's types do not hold for every instance.
+#[test]
+fn a_type_parameter_typed_ground_is_refused() {
+    let src = "fn below<T: Ord>(Vec<T> xs, int i) -> T { if i < xs[0] { return xs[0]; } return xs[1]; }";
+    assert_eq!(refusal_of(src, "below"), Some("pinned-type-param"));
 }
 
 #[test]
