@@ -911,12 +911,9 @@ impl Compiler {
                 return Err("lambda-mono");
             }
             let lam = &module.bodies[body];
-            let root = lam.root.ok_or("lambda")?;
-            if lam.is_coro || lam.result_mode || matches!(lam.expr(root).kind, HirKind::Block { .. }) {
+            lam.root.ok_or("lambda")?;
+            if lam.is_coro || lam.result_mode {
                 return Err("lambda-body");
-            }
-            if lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
-                return Err("lambda-nested");
             }
             // Captures are plain one-word locals of this body.
             for &(outer, _) in &lam.captures {
@@ -943,12 +940,20 @@ impl Compiler {
             let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
             let ret = Rep::Word(self.value_layout(ret_ty));
             if let Some(reason) = lower::refusal(lam, &self.checker) {
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    for l in &lam.locals {
+                        eprintln!("    lambda `{}` local `{}`: {:?}", lam.name, l.name, l.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)));
+                    }
+                }
                 return Err(reason);
             }
             let prev_vars = std::mem::take(&mut self.context.variables);
             let prev_two_word = self.compiling_two_word_enum.take();
             Self::hir_lambda_frame(&mut self.context.variables, lam);
-            let plan = self.plan_hir_body_ret(lam, ret);
+            // Lambdas inside it are planned in its frame.
+            let plan = self
+                .plan_hir_body_ret(lam, ret)
+                .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
             self.context.variables = prev_vars;
             self.compiling_two_word_enum = prev_two_word;
             let mut plan = plan?;

@@ -2833,6 +2833,7 @@ impl Walk<'_> {
             | HirKind::Index { .. }
             | HirKind::Call { .. }
             | HirKind::Resume { .. }
+            | HirKind::Lambda { .. }
             | HirKind::Builtin {
                 op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf,
                 ..

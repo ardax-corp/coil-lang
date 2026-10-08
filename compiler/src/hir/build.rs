@@ -1771,6 +1771,12 @@ impl<'c, 'm> Cx<'c, 'm> {
         for (i, name) in captured.iter().enumerate() {
             if let Some(outer) = b.lookup(name) {
                 inner.body.captures[i].0 = outer;
+                // A capture `b` only relays to this lambda has no read of
+                // its own to type it.
+                let inner_local = inner.body.captures[i].1;
+                if b.body.locals[outer.0 as usize].ty.is_none() {
+                    b.body.locals[outer.0 as usize].ty = inner.body.locals[inner_local.0 as usize].ty.clone();
+                }
             }
         }
         let index = self.module.bodies.len();
