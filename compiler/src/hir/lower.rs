@@ -1220,8 +1220,8 @@ pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Op
     if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda | BodyKind::Static) {
         return Some(("body-kind", None));
     }
-    if body.is_generic {
-        return Some(("generic", None));
+    if body.pinned_param {
+        return Some(("pinned-type-param", None));
     }
     // A lambda's captures sit in its frame's first slots.
     if !body.captures.is_empty() && body.kind != BodyKind::Lambda {

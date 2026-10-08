@@ -114,6 +114,7 @@ impl BodyBuilder {
                 result_mode: false,
                 is_coro: false,
                 is_generic: false,
+                pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
                 locals: Vec::new(),
@@ -476,6 +477,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             is_static,
             type_params,
             args,
+            returns,
             effects,
             body,
             ..
@@ -508,6 +510,9 @@ impl<'c, 'm> Cx<'c, 'm> {
         }
         let param_tys = keys.iter().find_map(|k| self.checker.fn_param_tys(k));
         self.params(&mut b, args, param_tys.as_deref());
+        if self.pinned(returns.as_ref(), b.body.ret.as_ref()) {
+            b.body.pinned_param = true;
+        }
         let root = self.expr(&mut b, body);
         self.implicit_ok_return(&mut b, root);
         b.body.root = Some(root);
@@ -567,16 +572,30 @@ impl<'c, 'm> Cx<'c, 'm> {
         };
         let skip = b.body.params.len();
         for (i, item) in items.into_iter().enumerate() {
-            if let Expression::Argument { name, .. } = item.1.as_ref() {
+            if let Expression::Argument { name, ty: ty_ann, .. } = item.1.as_ref() {
                 let ty = tys
                     .and_then(|t| t.get(skip + i).or_else(|| t.get(i)))
                     .cloned()
                     .filter(|t| !matches!(t, Ty::Con(n) if n == coil_ty::UNIT))
                     .or_else(|| self.ty_of(item));
+                if self.pinned(ty_ann.as_ref(), ty.as_ref()) {
+                    b.body.pinned_param = true;
+                }
                 let id = b.local(name, ty, LocalKind::Param);
                 b.body.params.push(id);
             }
         }
+    }
+
+    /// A bare type parameter annotation (`K`) the checker typed ground.
+    fn pinned(&self, ann: Option<&Output<'_>>, ty: Option<&Ty>) -> bool {
+        let Some(Expression::Type(declared)) = ann.map(|t| peel(t).1.as_ref()) else {
+            return false;
+        };
+        declared.starts_with(|c: char| c.is_ascii_uppercase())
+            && !self.checker.is_class(declared)
+            && self.checker.enum_variants(declared).is_none()
+            && ty.is_some_and(|t| !matches!(t, Ty::Var(_)) && !matches!(t, Ty::Con(n) if n == declared))
     }
 
     // ----- expressions -------------------------------------------------

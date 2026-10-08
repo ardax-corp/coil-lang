@@ -880,6 +880,7 @@ impl Compiler {
             result_mode: body.result_mode,
             is_coro: body.is_coro,
             is_generic: false,
+            pinned_param: body.pinned_param,
             captures: body.captures.clone(),
             declared: body.declared.clone(),
             locals: body

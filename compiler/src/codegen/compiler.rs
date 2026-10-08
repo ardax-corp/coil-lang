@@ -16631,10 +16631,7 @@ impl Compiler {
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             self.active_fn_name = Some(name.to_string());
             self.begin_fn_defers(body);
-            let lowered = prev_fn_table_key_was_none
-                && type_params.is_empty()
-                && dict_arity == 0
-                && self.try_lower_hir_function(span, body);
+            let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
                 let mut c = self.do_compile(body);
                 self.bytecode.append(&mut c);

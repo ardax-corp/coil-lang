@@ -102,6 +102,10 @@ pub struct HirBody {
     /// Generic over type parameters. Built once; a mono clone lowers a
     /// copy with the instance's types (`Compiler::hir_instance`).
     pub is_generic: bool,
+    /// A parameter or result declared as a bare type parameter was typed
+    /// ground: the checker unified the parameter with a ground type in the
+    /// body (coil-lang#801), so its types do not hold for every instance.
+    pub pinned_param: bool,
     /// Lambda captures, outer local in the parent body to inner local.
     pub captures: Vec<(LocalId, LocalId)>,
     /// `pure fn` / `uses {…}` on the function.
