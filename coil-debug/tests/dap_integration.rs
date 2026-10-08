@@ -94,9 +94,7 @@ impl DapClient {
     fn spawn_with(cwd: &std::path::Path, extra: &[&str]) -> Self {
         let bin = coil_debug_bin();
         let mut cmd = Command::new(&bin);
-        if HIR.get() {
-            cmd.env("COIL_HIR", "1");
-        }
+        cmd.env("COIL_HIR", if HIR.get() { "1" } else { "0" });
         cmd.arg("--dap");
         cmd.args(extra);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
