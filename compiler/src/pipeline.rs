@@ -3436,19 +3436,22 @@ fn main() {}
         );
     }
 
+    /// FFI process-exec stays a typecheck gate; host calls such as
+    /// `env::exec` are checked over reachable code after codegen.
     #[test]
-    fn typecheck_project_denies_ungranted_exec() {
+    fn typecheck_project_denies_ungranted_ffi_exec() {
         let src = r#"
-use env::{exec};
+use ffi::{declare};
+use ffi::types::{Int, Ptr};
 fn main() {
-    let _ = exec("true", []);
+    let _ = declare(0, "system", (Ptr,), Int);
 }
 "#;
-        let (_dir, file) = temp_hy("exec", src);
+        let (_dir, file) = temp_hy("ffi_exec", src);
         let errors = typecheck_errors(&file);
         assert!(
-            errors.iter().any(|m| m.contains("--allow-exec")),
-            "typecheck_project must error on ungranted env::exec, got {errors:?}"
+            errors.iter().any(|m| m.contains("--allow-ffi-exec")),
+            "typecheck_project must error on ungranted FFI exec, got {errors:?}"
         );
     }
 
