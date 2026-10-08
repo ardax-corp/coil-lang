@@ -3,18 +3,18 @@
 use string::format;
 
 fn word(int idx) -> string {
-    if idx == 0 {
-        return format("%s", "o");
-    }
-    return format("%s%s", "k", "");
+    let parts: Vec<string> = Vec::new();
+    parts.push("o");
+    parts.push("k");
+    return format("%s", parts[idx]);
 }
 
 fn count_hits(int n) -> int {
     let hits = 0;
     let i = 0;
     while i < n {
-        let a = word(0) == "o";
-        let b = word(1) == "k";
+        let a = word(i % 2) == "o";
+        let b = word(1 - i % 2) == "k";
         if a && b {
             hits = hits + 1;
         }
@@ -36,7 +36,7 @@ fn pick(Vec<string> rows, string key) -> string {
 }
 
 test("string == on call results in a loop") {
-    assert(count_hits(3) == 3)?;
+    assert(count_hits(4) == 2)?;
 }
 
 test("string == in a loop condition") {
