@@ -6053,6 +6053,9 @@ impl Compiler {
             let base = self.context.variables.len() as u32;
             self.bytecode.push_seek(base);
             self.hir_value(hir, emit, scrutinee, &dispatch, depth);
+            // The payload temps must be the next slots: no padding for
+            // operands an earlier expression left counted.
+            self.expr_depth = depth;
             if self.context.variables.len() as u32 != base {
                 let tmp = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(tmp);
