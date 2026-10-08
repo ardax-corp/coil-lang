@@ -1,6 +1,6 @@
 // COI-410: sequential TCP HTTP/1.1 GETs with Connection: close (no pool).
-// One pair per request: park the client on await_readable, then discard.
-use io::await_readable;
+// One pair per request: park the client on wait_readable, then discard.
+use io::wait_readable;
 use io::close;
 use io::read;
 use io::wait_ready;
@@ -15,12 +15,12 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     let listener = listen("127.0.0.1", 0)?;
     let addr = local_addr(listener)?;
     let client = connect("127.0.0.1", addr[1])?;
-    await_readable(listener)?;
+    wait_readable(listener)?;
     let server = accept(listener)?;
     return Result::Ok((client, server, listener));
 }
 
-async fn http_read_after_wait(Stream c) -> int {
+gen fn http_read_after_wait(Stream c) -> int {
     let z: byte = 0;
     let buf = Vec::from([z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z]);
     let got = 0;
@@ -39,9 +39,9 @@ async fn http_read_after_wait(Stream c) -> int {
                 Option::None => panic "eof before body",
             },
             Result::Err(IoError::WouldBlock) => {
-                match await_readable(c) {
+                match wait_readable(c) {
                     Result::Ok(_) => {},
-                    Result::Err(_) => panic "await_readable treated Ok as Err",
+                    Result::Err(_) => panic "wait_readable treated Ok as Err",
                 }
             },
             Result::Err(_) => panic "read",

@@ -6,13 +6,13 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn counter() {
+gen fn counter() {
     yield 0;
     yield 1;
     yield 2;
 }
 
-async fn wrap() {
+gen fn wrap() {
     yield from counter();
 }
 

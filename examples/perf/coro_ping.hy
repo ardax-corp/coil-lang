@@ -3,7 +3,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn ping(int n) {
+gen fn ping(int n) {
     let i = 0;
     while i < n {
         yield i;

@@ -2232,7 +2232,7 @@ impl<'s> Formatter<'s> {
         }
         self.fmt_attrs(attrs);
         if *is_coro {
-            self.push_str("async ");
+            self.push_str("gen ");
         }
         if *is_static {
             self.push_str("static ");
@@ -2698,6 +2698,16 @@ mod tests {
         let once = format_source(src).unwrap();
         let twice = format_source(&once).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn async_fn_is_rewritten_to_gen_fn() {
+        let src = "async fn count() {\n    yield 1;\n}\n";
+        assert_eq!(
+            format_source(src).expect("formats"),
+            "gen fn count() {\n    yield 1;\n}\n"
+        );
+        round_trip("gen fn count() {\n    yield 1;\n}\n");
     }
 
     #[test]

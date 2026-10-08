@@ -618,6 +618,8 @@ fn is_fd_op(short: &str) -> bool {
             | "shutdown"
             | "await_readable"
             | "await_writable"
+            | "wait_readable"
+            | "wait_writable"
             | "drive"
             | "wait_ready"
             | "set_nodelay"

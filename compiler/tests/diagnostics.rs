@@ -1026,7 +1026,7 @@ fn access_field_ambiguous_across_variants_suggests_match() {
 fn yield_outside_async_fn_reports_diagnostic() {
     let (_ty, msgs) = check("fn main() { yield 1; }");
     assert!(
-        msgs.iter().any(|m| m.contains("yield outside async")),
+        msgs.iter().any(|m| m.contains("yield outside gen")),
         "expected yield-outside-async diagnostic, got: {:?}",
         msgs
     );
@@ -1036,7 +1036,7 @@ fn yield_outside_async_fn_reports_diagnostic() {
 fn binding_yield_outside_async_fn_reports_diagnostic() {
     let (_ty, msgs) = check("fn main() { let x = yield 1; }");
     assert!(
-        msgs.iter().any(|m| m.contains("yield outside async")),
+        msgs.iter().any(|m| m.contains("yield outside gen")),
         "expected yield-outside-async diagnostic for binding yield, got: {:?}",
         msgs
     );

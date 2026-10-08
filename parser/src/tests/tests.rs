@@ -1669,6 +1669,7 @@
         );
     }
 
+    /// `async fn` is the old spelling of `gen fn`.
     #[test]
     fn parse_async_fn_round_trips() {
         let ast = decl_ast!("async fn coro() { yield 1; }");
@@ -1679,6 +1680,35 @@
             }
             other => panic!("expected async Function, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_gen_fn() {
+        let ast = decl_ast!("gen fn coro() { yield 1; }");
+        match ast {
+            Expression::Function { name, is_coro, .. } => {
+                assert_eq!(name, "coro");
+                assert!(is_coro);
+            }
+            other => panic!("expected gen Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gen_stays_an_ordinary_name() {
+        match decl_ast!("fn gen() -> int { return 1; }") {
+            Expression::Function { name, is_coro, .. } => {
+                assert_eq!(name, "gen");
+                assert!(!is_coro);
+            }
+            other => panic!("expected plain Function, got {:?}", other),
+        }
+        let src = "fn main() { let gen = 1; let n = gen + 1; }";
+        Pratt::default()
+            .declaration()
+            .parse(src)
+            .into_result()
+            .expect("`gen` as a local name should parse");
     }
 
     #[test]

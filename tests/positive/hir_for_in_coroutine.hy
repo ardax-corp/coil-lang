@@ -1,6 +1,6 @@
 // `for x in coroutine`: resume into `x`, stop once the handle is done;
 // the completion value is never bound.
-async fn upto(int n) {
+gen fn upto(int n) {
     let i = 0;
     while i < n {
         yield i;

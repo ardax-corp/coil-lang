@@ -1121,7 +1121,7 @@ impl<'a> Display for Expression<'a> {
                 where_constraints,
                 body,
             } => {
-                let async_kw = if *is_coro { "async " } else { "" };
+                let async_kw = if *is_coro { "gen " } else { "" };
                 let static_kw = if *is_static { "static " } else { "" };
                 let tp = if type_params.is_empty() {
                     String::new()

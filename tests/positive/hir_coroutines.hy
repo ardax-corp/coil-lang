@@ -1,7 +1,7 @@
 // Coroutine bodies lower through HIR: statement and receiving `yield`,
-// `yield from`, `?` inside an async fn, and `block_on`.
+// `yield from`, `?` inside a gen fn, and `block_on`.
 
-async fn count(int n) {
+gen fn count(int n) {
     let i = 0;
     while i < n {
         yield i;
@@ -9,13 +9,13 @@ async fn count(int n) {
     }
 }
 
-async fn echo(int start) {
+gen fn echo(int start) {
     let got = yield start;
     let again = yield got + 1;
     yield again * 2;
 }
 
-async fn twice() {
+gen fn twice() {
     yield from count(2);
     yield from count(2);
 }
@@ -27,13 +27,13 @@ fn parse(int n) -> Result<int, string> {
     return Result::Ok(n * 10);
 }
 
-async fn checked(int n) -> Result<int, string> {
+gen fn checked(int n) -> Result<int, string> {
     let v = parse(n)?;
     yield Result::Ok(v);
     return Result::Ok(v + 1);
 }
 
-async fn greet() -> int {
+gen fn greet() -> int {
     yield 1;
     return 2;
 }
@@ -64,7 +64,7 @@ test("yield from") {
     assert(b == 1)?;
 }
 
-test("question mark in an async fn") {
+test("question mark in a gen fn") {
     let bad = checked(-1);
     let first = match resume bad {
         Result::Ok(_) => "ok",

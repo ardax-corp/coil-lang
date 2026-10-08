@@ -1,4 +1,4 @@
-// Expected: E0112 — yield outside async fn.
+// Expected: E0112 — yield outside gen fn.
 fn main() {
     yield 1;
 }

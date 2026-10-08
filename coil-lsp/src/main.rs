@@ -1979,8 +1979,10 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
                 .into()
         }
         ("io", "write") => "Writes bytes to a stream and reports the number written.".into(),
-        ("io", "await_readable") => "Parks until the stream is readable (yields inside a coroutine).".into(),
-        ("io", "await_writable") => "Parks until the stream is writable (yields inside a coroutine).".into(),
+        ("io", "wait_readable") => "Parks until the stream is readable (yields inside a coroutine).".into(),
+        ("io", "wait_writable") => "Parks until the stream is writable (yields inside a coroutine).".into(),
+        ("io", "await_readable") => "Old name of `wait_readable`.".into(),
+        ("io", "await_writable") => "Old name of `wait_writable`.".into(),
         ("io", "drive") => "Polls async IO waiters once; returns newly-ready count.".into(),
         ("io", "wait_ready") => "Blocks until any registered async IO waiter is ready; returns newly-ready count.".into(),
         ("io", "from_bytes") | ("string", "from_bytes") => {
@@ -4149,7 +4151,8 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
             let word = &source[start..index];
             let macro_call = bytes.get(index) == Some(&b'!') && bytes.get(index + 1) == Some(&b'(');
             let contextual_keyword = (word == "from" && is_yield_from_keyword(source, start))
-                || (word == "with" && is_resume_with_keyword(source, start));
+                || (word == "with" && is_resume_with_keyword(source, start))
+                || (word == "gen" && is_gen_fn_keyword(source, index));
             if coil_keywords().contains(&word)
                 || highlight_keywords().contains(&word)
                 || contextual_keyword
@@ -4235,6 +4238,12 @@ fn is_yield_from_keyword(source: &str, from_start: usize) -> bool {
 fn is_resume_with_keyword(source: &str, with_start: usize) -> bool {
     let before = source[..with_start].trim_end();
     before.ends_with("resume")
+}
+
+/// `gen` is only a keyword directly before `fn`; elsewhere it is a name.
+fn is_gen_fn_keyword(source: &str, gen_end: usize) -> bool {
+    let after = source[gen_end..].trim_start();
+    after.starts_with("fn") && !after[2..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn encode_semantic_tokens(source: &str, tokens: &[SpannedToken]) -> Vec<SemanticToken> {
@@ -4900,6 +4909,17 @@ fn main() {
         assert!(token_types_at_word(source, &tokens, "Point").contains(&TOKEN_TYPE));
         assert!(token_types_at_word(source, &tokens, "Id").contains(&TOKEN_TYPE));
         assert!(token_types_at_word(source, &tokens, "int").contains(&TOKEN_TYPE));
+    }
+
+    #[test]
+    fn semantic_tokens_gen_is_keyword_only_before_fn() {
+        let source = "gen fn count() -> int { yield 1; return 0; }\n";
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        assert!(token_types_at_word(source, &tokens, "gen").contains(&TOKEN_KEYWORD));
+
+        let source = "fn main() { let gen = 1; return; }\n";
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        assert!(!token_types_at_word(source, &tokens, "gen").contains(&TOKEN_KEYWORD));
     }
 
     #[test]

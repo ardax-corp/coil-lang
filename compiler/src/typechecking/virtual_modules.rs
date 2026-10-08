@@ -246,8 +246,14 @@ pub enum IoBuiltin {
     Write,
     /// Write `buf[offset..]` without allocating a suffix array (`write_from`).
     WriteFrom,
+    /// Old name of [`IoBuiltin::WaitReadable`]; same HostInvoke id.
     AwaitReadable,
+    /// Old name of [`IoBuiltin::WaitWritable`]; same HostInvoke id.
     AwaitWritable,
+    /// Park until the stream is readable (`wait_readable`).
+    WaitReadable,
+    /// Park until the stream is writable (`wait_writable`).
+    WaitWritable,
     Drive,
     /// Block until any registered async waiter is ready (`() -> int`).
     WaitReady,
@@ -295,6 +301,8 @@ impl IoBuiltin {
             Self::WriteFrom => "write_from",
             Self::AwaitReadable => "await_readable",
             Self::AwaitWritable => "await_writable",
+            Self::WaitReadable => "wait_readable",
+            Self::WaitWritable => "wait_writable",
             Self::Drive => "drive",
             Self::WaitReady => "wait_ready",
             Self::FromBytes => "from_bytes",
@@ -335,6 +343,9 @@ impl IoBuiltin {
             | Self::WaitReady
             | Self::FromBytes
             | Self::ToBytes => self.as_str(),
+            // The new names share the old registry rows (HostInvoke ids 7 and 8).
+            Self::WaitReadable => "await_readable",
+            Self::WaitWritable => "await_writable",
             Self::TcpConnect => "tcp_connect",
             Self::TcpConnectTimeout => "tcp_connect_timeout",
             Self::TcpListen => "tcp_listen",
@@ -365,6 +376,8 @@ impl IoBuiltin {
             Self::Read,
             Self::Write,
             Self::WriteFrom,
+            Self::WaitReadable,
+            Self::WaitWritable,
             Self::AwaitReadable,
             Self::AwaitWritable,
             Self::Drive,
@@ -1341,6 +1354,12 @@ mod tests {
         assert!(exports.iter().any(|e| e.short_name() == "open"));
         assert!(exports.iter().any(|e| e.short_name() == "from_bytes"));
         assert!(exports.iter().any(|e| e.short_name() == "await_readable"));
+        assert!(exports.iter().any(|e| e.short_name() == "wait_readable"));
+        assert!(exports.iter().any(|e| e.short_name() == "wait_writable"));
+        assert_eq!(
+            IoBuiltin::WaitReadable.native_name(),
+            IoBuiltin::AwaitReadable.native_name()
+        );
         assert!(exports.iter().any(|e| e.short_name() == "wait_ready"));
         assert!(exports.iter().any(|e| e.short_name() == "write_from"));
         assert!(exports.iter().any(|e| e.short_name() == "attach"));

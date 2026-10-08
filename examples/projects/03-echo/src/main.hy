@@ -21,7 +21,7 @@ use client::{client_port, request_body};
 
 use string::{format, to_bytes};
 
-async fn greeting_bytes() {
+gen fn greeting_bytes() {
     yield 65;
     yield 66;
     return 0;

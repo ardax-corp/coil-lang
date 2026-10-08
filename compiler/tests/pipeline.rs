@@ -3785,7 +3785,7 @@ fn main() {
 }
 
 /// COI-410: 200 sequential HTTP/1.1 GETs with `Connection: close` (no pool).
-/// A separate-thread server delays each response so `await_readable` parks,
+/// A separate-thread server delays each response so `wait_readable` parks,
 /// then the client discards the socket — the release-only crash path.
 #[test]
 fn http_no_pool_two_hundred_connection_close_gets() {
@@ -3809,7 +3809,7 @@ fn http_no_pool_two_hundred_connection_close_gets() {
 
     let src = format!(
         r#"
-use io::{{close, read, await_readable, stdout}};
+use io::{{close, read, wait_readable, stdout}};
 use io::sync::{{write_all}};
 use io::net::tcp::{{connect}};
 use string::{{to_bytes}};
@@ -3835,7 +3835,7 @@ fn read_http(Stream s) -> Result<int, IoError> {{
             let nopt = match read(s, chunk) {{
                 Result::Ok(o) => o,
                 Result::Err(IoError::WouldBlock) => {{
-                    match await_readable(s) {{
+                    match wait_readable(s) {{
                         Result::Ok(_) => {{
                             parked = 1;
                             guard = guard - 1;
@@ -3855,7 +3855,7 @@ fn read_http(Stream s) -> Result<int, IoError> {{
                     }},
                     Option::Some(n) => {{
                         if n == 0 {{
-                            match await_readable(s) {{
+                            match wait_readable(s) {{
                                 Result::Ok(_) => {{
                                     guard = guard - 1;
                                     0
