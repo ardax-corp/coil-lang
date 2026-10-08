@@ -9283,7 +9283,8 @@ fn main() {
 
 #[test]
 fn stream_attach_denied_without_allow_attach() {
-    assert_compile_fails(
+    assert_compile_fails_pipeline(
+        &mut deny_pipeline(),
         r#"
 use io::{stdout, attach};
 fn main() {
