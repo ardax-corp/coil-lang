@@ -493,6 +493,12 @@ impl Cx<'_> {
     /// A user function's summary: this module's, an earlier module's, or
     /// the AST walk's flags for a module compiled without HIR.
     fn known_named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Option<Summary> {
+        // A `use`d name has no def on the call; the module's def table has it.
+        let def = def.or_else(|| {
+            (self.checker.current_module_name() == self.module_path)
+                .then(|| self.checker.def_id_of(name))
+                .flatten()
+        });
         if let Some(def) = def {
             if let Some(&i) = self.by_def.get(&def) {
                 return Some(w.summaries[i]);
@@ -504,8 +510,14 @@ impl Cx<'_> {
         if let Some(Some(i)) = self.by_name.get(name) {
             return Some(w.summaries[*i]);
         }
+        // An imported function: its def names the module it is in.
+        let interner = self.checker.def_interner();
+        let declared = def
+            .and_then(|d| interner.info(d))
+            .and_then(|info| Some((interner.module_path(info.module)?, info.name.as_str())))
+            .map(|(module, short)| if module.is_empty() { short.to_string() } else { format!("{module}::{short}") });
         let qualified = format!("{}::{name}", self.module_path);
-        for key in [name, qualified.as_str()] {
+        for key in [Some(name), declared.as_deref(), Some(qualified.as_str())].into_iter().flatten() {
             if let Some(&s) = self.program.by_name.get(key) {
                 return Some(s);
             }

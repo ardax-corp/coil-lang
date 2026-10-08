@@ -19537,6 +19537,15 @@ impl Compiler {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
+        // E1: the HIR summaries also prove functions pure that call a
+        // function parameter only with pure functions (`map(xs, fn ...)`).
+        if let Some(hir) = self.hir_module.as_ref() {
+            use crate::hir::effects;
+            let summaries = effects::analyze(hir, &self.checker, module, &self.program_effects);
+            let pure = effects::pure_names(hir, module, &summaries, &self.pure_fns);
+            self.pure_fns.extend(pure);
+            self.program_effects.record(hir, &self.checker, module, &summaries);
+        }
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
