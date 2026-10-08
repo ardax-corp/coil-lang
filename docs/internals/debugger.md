@@ -52,7 +52,7 @@ are not shipped in this repository.
 | `program` | Absolute or workspace-relative path to entry `.hy` |
 | `cwd` | Optional working directory for resolving paths |
 | `stopOnEntry` | Optional; stop **before** the first bytecode insn (real VM frame) |
-| `allowAttach` / `allowExit` / `allowExec` / `allowFfiExec` | Optional; OR with CLI `--allow-*` |
+| `allowAttach` / `allowExit` / `allowExec` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
 | `allowDload` | Optional string array of dload stems |
 | `ffiSearchPath` | Optional string array of FFI lookup dirs |
 

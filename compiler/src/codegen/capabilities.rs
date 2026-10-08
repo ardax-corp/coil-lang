@@ -108,9 +108,16 @@ impl Compiler {
         }
     }
 
+    /// Functions besides `main` and the tests the program is entered by
+    /// (a macro module's expansion entries).
+    pub fn set_entry_functions(&mut self, names: Vec<String>) {
+        self.entry_functions = names;
+    }
+
     /// The gated host calls reachable from `main`, the tests (when
-    /// compiling them) and static initializers whose capabilities `granted`
-    /// lacks. Without `main` or tests every function counts as reachable.
+    /// compiling them), [`Self::set_entry_functions`] and static
+    /// initializers whose capabilities `granted` lacks. A program with none
+    /// of those never runs (a library on its own), so nothing is reported.
     pub fn capability_violations(&self, granted: Caps) -> Vec<CapViolation> {
         let missing = self
             .gated_host_calls
@@ -120,15 +127,15 @@ impl Compiler {
         if missing.is_empty() {
             return Vec::new();
         }
-        let mut roots = vec!["main".to_string()];
+        let mut roots = self.entry_functions.clone();
+        roots.push("main".to_string());
         let test_pcs: Vec<usize> = if self.include_tests {
             self.test_cases.iter().map(|&(_, pc)| pc as usize).collect()
         } else {
             Vec::new()
         };
-        let has_entry = self.functions.contains_key("main") || !test_pcs.is_empty();
-        if !has_entry {
-            roots = self.functions.keys().cloned().collect();
+        if test_pcs.is_empty() && !roots.iter().any(|r| self.functions.contains_key(r)) {
+            return Vec::new();
         }
         let (parent, spans) = crate::il::reachable_functions(
             &self.bytecode,

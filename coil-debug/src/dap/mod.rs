@@ -558,6 +558,14 @@ fn merge_launch_grants(cli: &HostGrants, args: &Value) -> HostGrants {
     if args.get("allowFfiExec").and_then(|v| v.as_bool()) == Some(true) {
         grants.allow_ffi_exec = true;
     }
+    for (key, name) in [("allowRead", "read"), ("allowWrite", "write"), ("allowNet", "net"), ("allowEnv", "env")] {
+        if args.get(key).and_then(|v| v.as_bool()) == Some(true) {
+            grants.grant_named(name);
+        }
+    }
+    if args.get("allowAll").and_then(|v| v.as_bool()) == Some(true) {
+        grants.grant_all();
+    }
     if let Some(stems) = args.get("allowDload").and_then(|v| v.as_array()) {
         for stem in stems.iter().filter_map(|v| v.as_str()) {
             grants.grant_dload_allow(stem);

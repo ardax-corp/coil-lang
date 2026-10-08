@@ -431,7 +431,15 @@ fn main() {
     );
 }
 
+/// A pipeline granted every capability: these tests are about other
+/// things. [`deny_pipeline`] grants none.
 fn test_pipeline() -> Pipeline {
+    let mut p = deny_pipeline();
+    p.grant_all();
+    p
+}
+
+fn deny_pipeline() -> Pipeline {
     comptime::install();
     let mut p = Pipeline::new();
     p.bind_workspace_language_roots();
@@ -11292,7 +11300,7 @@ fn reachable_host_calls_need_their_capabilities() {
     let unused_cleanup = "fn cleanup() {\n    let _ = remove_file(\"x\");\n}\n";
     let src = format!("{src}{unused_cleanup}");
     for hir in [true, false] {
-        let mut pipeline = test_pipeline();
+        let mut pipeline = deny_pipeline();
         pipeline.set_hir_lowering(hir);
         assert!(pipeline.compile_src(&src).is_err(), "hir={hir}");
         let msgs: Vec<(Option<compiler::ErrorCode>, String)> = pipeline
@@ -11306,7 +11314,7 @@ fn reachable_host_calls_need_their_capabilities() {
         assert!(has(compiler::ErrorCode::HostCapDenied, "`io::fs::exists` requires `--allow-read`"), "hir={hir}: {msgs:?}");
         assert!(!msgs.iter().any(|(_, m)| m.contains("env::exec") || m.contains("remove_file")), "hir={hir}: unreached calls are free: {msgs:?}");
 
-        let mut pipeline = test_pipeline();
+        let mut pipeline = deny_pipeline();
         pipeline.set_hir_lowering(hir);
         assert!(pipeline.grant_capability("read"));
         pipeline.grant_exit();
@@ -11319,15 +11327,15 @@ fn reachable_host_calls_need_their_capabilities() {
 #[test]
 fn open_mode_and_static_initializers_decide_capabilities() {
     let src = "use io::{open};\nstatic let LOG = open(\"log.txt\", \"a\");\nfn mode() -> string {\n    return \"r\";\n}\nfn main() {\n    let _ = open(\"in.txt\", mode());\n}\n";
-    let mut pipeline = test_pipeline();
+    let mut pipeline = deny_pipeline();
     assert!(pipeline.compile_src(src).is_err());
     let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();
     assert!(msgs.iter().any(|m| m == "`io::open` requires `--allow-write`: reached from the initializer of static `LOG`"), "{msgs:?}");
     assert!(msgs.iter().any(|m| m.starts_with("`io::open` requires `--allow-read --allow-write`: reached from `main`")), "{msgs:?}");
-    let mut pipeline = test_pipeline();
+    let mut pipeline = deny_pipeline();
     pipeline.grant_capability("write");
     assert!(pipeline.compile_src(src).is_err(), "the non-literal mode still needs read");
-    let mut pipeline = test_pipeline();
+    let mut pipeline = deny_pipeline();
     pipeline.grant_all();
     compile_ok(&mut pipeline, src);
 }
@@ -11337,7 +11345,7 @@ fn open_mode_and_static_initializers_decide_capabilities() {
 #[test]
 fn tests_are_entry_points_for_capabilities() {
     let src = "use io::fs::{exists};\nfn probe() -> bool {\n    let _ = exists(\"x\");\n    return true;\n}\ntest(\"looks for x\") {\n    assert(probe())?;\n}\n";
-    let mut pipeline = test_pipeline();
+    let mut pipeline = deny_pipeline();
     pipeline.set_include_tests(true);
     assert!(pipeline.compile_src(src).is_err());
     let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();
