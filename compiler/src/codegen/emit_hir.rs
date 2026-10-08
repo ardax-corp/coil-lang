@@ -6400,6 +6400,29 @@ impl Compiler {
                     this.bytecode.push_const(tag as i32);
                     this.push_return_two_word();
                 }
+                _ if emit.ret == BOXED && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                    // Into a boxed return (a test body's `assert(..)?`): make
+                    // the variant straight from the payload word.
+                    if decode {
+                        Self::push_result_untag(&mut this.bytecode);
+                    }
+                    let HirKind::Return(Some(value)) = hir.expr(arm.body).kind else { unreachable!() };
+                    let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } = &hir.expr(value).kind else {
+                        unreachable!()
+                    };
+                    let made_ty = Self::hir_ty(hir, value).expect("rewrap make has a type").clone();
+                    let payload = this.hir_payload_tys(&made_ty, variant).expect("rewrap payload");
+                    let kinds = common::pack_word_kinds(
+                        payload.iter().map(|t| crate::typechecking::value_layout::word_kind(&this.checker, t)),
+                    );
+                    this.bytecode.push_make_enum_kinds(tag as u16, 1, kinds);
+                    if this.checker.enum_has_drop(enum_name) {
+                        let type_id = this.checker.class_type_id(enum_name);
+                        this.bytecode.push(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id));
+                    }
+                    this.emit_run_defers();
+                    this.bytecode.push_return();
+                }
                 _ if emit.ret == Rep::Word(layout) && this.hir_rewrap_tag(hir, ty, arm).is_some() => {
                     // Into the same niche layout: the matched word is the
                     // returned value.
