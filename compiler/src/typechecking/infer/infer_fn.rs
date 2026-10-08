@@ -586,6 +586,7 @@ impl Checker {
 
         // If generic, build a poly scheme and re-insert into env.
         if is_generic {
+            self.reroot_type_params(&param_vars);
             let mut bounds = param_vars;
             bounds.extend(fn_assoc_projections.iter().map(|p| p.var));
             let mut kinds = param_kinds;
@@ -595,7 +596,7 @@ impl Checker {
                 kinds,
                 resolved_param_constraints.clone(),
                 fn_assoc_projections,
-                fun_ty.clone(),
+                apply_ty_prune(&self.subst, &fun_ty),
             );
             // Non-entry modules also register under `module::name` so later
             // files can `use` the real poly scheme (not a dummy Var).

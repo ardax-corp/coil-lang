@@ -13838,6 +13838,33 @@ impl Checker {
         current
     }
 
+    /// A type parameter bound to a body variable (`T := t` from unifying
+    /// `T` with a local annotated `Result<T, E>` that holds an `Err`) would
+    /// drop out of its scheme: the function type then mentions `t`, which
+    /// the scheme does not quantify, and every call shares it (#789). Point
+    /// such a variable back at the parameter instead.
+    pub(super) fn reroot_type_params(&mut self, params: &[TyVarId]) {
+        for &p in params {
+            let Ty::Var(q) = apply_ty_prune(&self.subst, &Ty::Var(p)) else {
+                continue;
+            };
+            if q == p || params.contains(&q) {
+                continue;
+            }
+            let back = Subst::singleton(q, Ty::Var(p));
+            let rewritten: Vec<(TyVarId, Ty)> = self
+                .subst
+                .iter()
+                .map(|(v, ty)| (v, apply_ty(&back, ty)))
+                .collect();
+            for (v, ty) in rewritten {
+                self.subst.insert(v, ty);
+            }
+            self.subst.remove(p);
+            self.subst.insert(q, Ty::Var(p));
+        }
+    }
+
     fn stub_free_function_signature(
         &mut self,
         name: &str,
