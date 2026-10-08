@@ -319,12 +319,48 @@ pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
         .collect();
     let status = Command::new(&helper).args(&args).status();
     match status {
+        Ok(s) if s.code().is_none() => {
+            // Killed by a signal (a crash in native code, or the OOM killer):
+            // the helper printed nothing about it, so say so here.
+            let what = signal_name(&s);
+            eprintln!("coil: `{helper_name}` was terminated by {what}");
+            if helper_name == "coil-test" {
+                eprintln!(
+                    "  note: tests run on several workers at once; a native library that is not \
+                     thread-safe can crash this way (try `-j 1`)"
+                );
+            }
+            exit(1)
+        }
         Ok(s) => exit(s.code().unwrap_or(1)),
         Err(e) => {
             eprintln!("coil: failed to exec `{}`: {e}", helper.display());
             exit(1);
         }
     }
+}
+
+/// `signal 11 (SIGSEGV)` for an exit status a signal ended.
+fn signal_name(status: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = match sig {
+                4 => "SIGILL",
+                6 => "SIGABRT",
+                7 => "SIGBUS",
+                8 => "SIGFPE",
+                9 => "SIGKILL",
+                11 => "SIGSEGV",
+                15 => "SIGTERM",
+                _ => return format!("signal {sig}"),
+            };
+            return format!("signal {sig} ({name})");
+        }
+    }
+    let _ = status;
+    "a signal".to_string()
 }
 
 /// Resolve the default package runner template (`coil-embed` beside this binary).
