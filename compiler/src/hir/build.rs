@@ -422,9 +422,22 @@ impl<'c, 'm> Cx<'c, 'm> {
                 tb.body.root = Some(root);
                 self.module.bodies.push(tb.finish());
             }
+            Expression::Class { name: class, fields, .. } => {
+                for field in fields {
+                    if let Expression::Field {
+                        modifier: parser::ast::FieldModifier::Static,
+                        init: Some(init),
+                        name,
+                        ..
+                    } = field.1.as_ref()
+                    {
+                        let full = join(&join(prefix, class), &name.1.to_string());
+                        self.static_init(&full, init);
+                    }
+                }
+            }
             // Declarations with no body.
-            Expression::Class { .. }
-            | Expression::EnumDecl { .. }
+            Expression::EnumDecl { .. }
             | Expression::TypeAlias { .. }
             | Expression::Use { .. }
             | Expression::ExternBlock { .. }
@@ -438,6 +451,21 @@ impl<'c, 'm> Cx<'c, 'm> {
                 stmts.push(id);
             }
         }
+    }
+
+    /// A static's initializer as its own body, keyed by the initializer's
+    /// span: it returns the value the setup region stores.
+    fn static_init(&mut self, name: &str, init: &Output<'_>) {
+        let mut b = BodyBuilder::new(&format!("{name}$init"), BodyKind::Static, span_of(init));
+        let ty = self.ty_of(init);
+        b.body.ret_layout = ty
+            .as_ref()
+            .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
+        b.body.ret = ty;
+        let value = self.expr(&mut b, init);
+        let root = b.push(HirKind::Return(Some(value)), Some(coil_ty::never()), span_of(init), None);
+        b.body.root = Some(root);
+        self.module.bodies.push(b.finish());
     }
 
     /// Build one function body. `owner` is set for inherent methods, whose
@@ -652,6 +680,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                 self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()))
             }
             E::StaticDecl { name, init, .. } => {
+                self.static_init(name, init);
                 let ty = self.ty_of(init);
                 let local = b.local(name, ty, LocalKind::Const);
                 let init = self.expr(b, init);

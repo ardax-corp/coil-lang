@@ -299,7 +299,7 @@ impl Compiler {
         let hir = crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast);
         for (i, body) in hir.bodies.iter().enumerate() {
             use crate::hir::BodyKind;
-            if matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test) {
+            if matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Static) {
                 self.hir_fns.insert(body.span, i);
             }
             if matches!(body.kind, BodyKind::Function | BodyKind::Method) {
@@ -366,7 +366,10 @@ impl Compiler {
         let body_pos = table
             .walk_id(body, table.ids().get(self.emit_idx).copied())
             .map(|id| (id.0 as usize).max(self.emit_idx))
-            .filter(|&pos| pos <= table.len());
+            .filter(|&pos| pos <= table.len())
+            // A class static's initializer is walked from the field's own
+            // id, as the AST takes them.
+            .or((hir.kind == crate::hir::BodyKind::Static).then_some(self.emit_idx));
         let plan = if body_pos.is_none() {
             Some("emit-cursor")
         } else if let Err(reason) = &shapes {
@@ -985,6 +988,10 @@ impl Compiler {
         Ok(match self.compiling_two_word_enum.clone() {
             Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
+            // A static's initializer returns the word its slot holds.
+            None if hir.kind == crate::hir::BodyKind::Static => {
+                Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
+            }
             None => {
                 let layout = self.return_layout();
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));

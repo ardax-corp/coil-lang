@@ -83,6 +83,8 @@ pub enum BodyKind {
     Test,
     /// Top-level statements and static initializers.
     TopLevel,
+    /// One static's initializer, returning its value.
+    Static,
 }
 
 /// One function, method, lambda or test body.

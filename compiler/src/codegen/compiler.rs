@@ -14982,11 +14982,12 @@ impl Compiler {
 
         let body_start = self.bytecode.len();
         self.record_fn_span(name.clone(), body_start, body_start);
-        let mut init_bc = self.do_compile(init);
-        self.bytecode.append(&mut init_bc);
-        self.bytecode
-            .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
-        self.emit_fallthrough_return(&name, init.0);
+        // The initializer returns the value; the setup region stores it.
+        if !self.try_lower_hir_function(&init.0, init) {
+            let mut init_bc = self.do_compile(init);
+            self.bytecode.append(&mut init_bc);
+            self.bytecode.push_return();
+        }
         self.emit_shared_try_fail_epilogue();
         let body_end = self.bytecode.len();
         self.record_fn_span(name.clone(), body_start, body_end);
@@ -15013,15 +15014,17 @@ impl Compiler {
         self.context.stack_array_locals = prev_stack_arrays;
         self.context.variables = prev_fn_vars;
 
-        // Setup region: `CALL init; POP`. The packed target is resolved to
-        // the entry label when the region is spliced (`splice_buf_at`).
+        // Setup region: `CALL init; StoreStatic`. The packed target is
+        // resolved to the entry label when the region is spliced
+        // (`splice_buf_at`).
         self.static_init.push(Self::packed_entry_byte_ret(
             crate::il::EntryKind::Call,
             0,
             offset as u32,
             1,
         ));
-        self.static_init.push(Byte::new(Instruction::POP));
+        self.static_init
+            .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
     }
 
     /// Receiver type for field access / method calls.

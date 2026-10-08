@@ -1217,7 +1217,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
 /// [`refusal`], with the operand that would lower if it were staged into a
 /// temp ahead of its statement ([`super::stage`]).
 pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Option<HirId>)> {
-    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda) {
+    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda | BodyKind::Static) {
         return Some(("body-kind", None));
     }
     if body.is_generic {
