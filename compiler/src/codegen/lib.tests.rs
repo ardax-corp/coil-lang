@@ -6380,9 +6380,11 @@ fn show_bound_ground_call_uses_dictionary_not_mono() {
 #[test]
 fn length_bound_ground_call_uses_dictionary_not_mono() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // The clone would inline; the test pins its `CALL`.
+    let (bc, _pool) = compile_src_tuned(
         "fn n<T: Length>(T x) -> int { return len(x); } \
              fn main() { return n(\"ab\"); }",
+        |c| c.set_hir_inline(false),
     );
     let max_call_arity = bc
         .iter()
@@ -6406,9 +6408,11 @@ fn length_bound_ground_call_uses_dictionary_not_mono() {
 #[test]
 fn num_plus_show_ground_call_keeps_dictionary() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // The clone would inline; the test pins its `CALL`.
+    let (bc, _pool) = compile_src_tuned(
         "fn mix<T: Num + Show>(T a, T b) -> T { return a + b; } \
              fn main() { let y = mix(1, 2); }",
+        |c| c.set_hir_inline(false),
     );
     let max_call_arity = bc
         .iter()
