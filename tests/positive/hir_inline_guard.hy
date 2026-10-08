@@ -54,13 +54,17 @@ test("a guard with statements before and inside it") {
     assert(step(8) == 18, "large")?;
 }
 
-test("guards in a loop and a unit callee") {
+fn mix(int n) -> int {
     let acc = 0;
-    let i = -20;
-    while i < 20 {
+    let i = 0 - n;
+    while i < n {
         note(i);
         acc = acc + clamp(i, -5, 5) + sign(i) + step(i);
         i = i + 1;
     }
-    assert(acc == 260, "sum")?;
+    return acc;
+}
+
+test("guards in a loop and a unit callee") {
+    assert(mix(20) == 260, "sum")?;
 }
