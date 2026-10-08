@@ -1087,13 +1087,16 @@ pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, a
     Some(payload.iter().map(|t| super::layout::bind_params(t, params, args)).collect())
 }
 
-/// A ground instance of a generic user enum (`Tree<int>`): laid out as a
-/// closed enum with its parameters bound, as the AST's instance is.
+/// An instance of a generic user enum (`Tree<int>`, or `Tree<T>` in a
+/// shared body): laid out as a closed enum with its parameters bound, as
+/// the AST's instance is.
 fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<String>) -> Option<ValueClass> {
     if checker.is_class(name) && checker.enum_variants(name).is_none() {
         return None;
     }
-    if !args.iter().all(super::layout::ty_is_closed) {
+    // Open only in type parameters: a shared generic body's instance,
+    // each parameter one boxed word.
+    if !args.iter().all(params_closed) {
         return None;
     }
     let key = format!("{name}<{args:?}>");
@@ -1107,9 +1110,9 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
     seen.push(key);
     let ok = variants.iter().all(|(variant, _, _)| {
         generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
-            payload.iter().all(|field| {
-                super::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some_and(is_word)
-            })
+            payload
+                .iter()
+                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some_and(is_word))
         })
     });
     seen.pop();

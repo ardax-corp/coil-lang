@@ -2521,9 +2521,9 @@ impl Compiler {
             let Some(HirKind::Lit(Lit::Str(fmt))) = args.first().map(|&a| &hir.expr(a).kind) else {
                 return Err("format-literal");
             };
-            // `%v` goes through `Show` at a ground type (a type parameter's
-            // `Show` is a dictionary call the HIR does not plan); other
-            // arguments print as words.
+            // `%v` goes through `Show`: at a ground type its instance, at a
+            // bound type parameter the frame's dictionary; other arguments
+            // print as words.
             let specs = Self::format_consuming_specs(fmt);
             for (i, &arg) in args[1..].iter().enumerate() {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
@@ -2531,7 +2531,7 @@ impl Compiler {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     // A tuple or record shows through temps at depth zero
                     // ([`lower::shows_through_temps`]).
-                    if !crate::hir::layout::ty_is_closed(&ty) {
+                    if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() {
                         return Err("format-show");
                     }
                     continue;
@@ -2906,6 +2906,29 @@ impl Compiler {
         let arity = unbox.len() as u32;
         self.bytecode
             .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(1, 0, arity, false)));
+    }
+
+    /// The frame's dictionary slot and `show` method slot for a `%v` of a
+    /// bound type parameter (`emit_show_for_format_arg`).
+    fn hir_bound_show(&self, hir: &HirBody, arg: HirId) -> Option<(u32, u32)> {
+        let e = hir.expr(arg);
+        let hint = self.bound_display_hint(e.node, e.span.0, e.span.1)?;
+        let dict = self.lookup_slot(&format!("__dict{}", hint.dict_index))?;
+        Some((dict, hint.method_slot as u32))
+    }
+
+    /// `Show` the value on top of the stack, leaving its string.
+    fn hir_show(&mut self, hir: &HirBody, arg: HirId) {
+        if let Some((dict, method)) = self.hir_bound_show(hir, arg) {
+            self.bytecode.push_load(dict);
+            self.bytecode.push_load(dict);
+            self.bytecode.push_const(method as i32);
+            self.bytecode.push_index();
+            self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(2));
+            return;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).expect("planned show"));
+        self.emit_show_for_stack_value(&ty);
     }
 
     /// An enum whose word is the heap object (no pointer niche).
@@ -5579,9 +5602,8 @@ impl Compiler {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
                                 self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                                 if specs.get(i - 1) == Some(&'v') {
-                                    let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).expect("planned show"));
                                     self.expr_depth = 0;
-                                    self.emit_show_for_stack_value(&ty);
+                                    self.hir_show(hir, arg);
                                 }
                                 self.expr_depth = 0;
                                 let tmp = self.alloc_temp_slot();
@@ -5598,9 +5620,8 @@ impl Compiler {
                             if specs.get(i - 1) == Some(&'v') {
                                 // `Show::show` on the value: a call, so it
                                 // keeps the operands below it.
-                                let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).expect("planned show"));
                                 self.expr_depth = depth + i as u32;
-                                self.emit_show_for_stack_value(&ty);
+                                self.hir_show(hir, arg);
                             }
                         }
                         self.bytecode
