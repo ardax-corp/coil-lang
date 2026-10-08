@@ -13401,6 +13401,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                is_coro,
                 ..
             } = body.1.as_ref()
             else {
@@ -13424,6 +13425,10 @@ impl Checker {
                 Some(r) => self.parse_return_type_name(r),
                 None => Ty::Var(self.counter.fresh()),
             };
+            if *is_coro {
+                let send_ty = Ty::Var(self.counter.fresh());
+                fun_ty = self.coroutine_type(fun_ty, send_ty);
+            }
             for (_, arg_ty) in arg_tys.iter().rev() {
                 fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
             }
@@ -13789,6 +13794,7 @@ impl Checker {
         args: &Output,
         returns: Option<&Output>,
         where_constraints: &[parser::ast::WhereConstraint],
+        is_coro: bool,
         range: &Range<usize>,
     ) {
         let key = if self.current_module.is_empty() {
@@ -13862,6 +13868,14 @@ impl Checker {
             Some(r) => self.parse_return_type_name(r),
             None => Ty::Var(self.counter.fresh()),
         };
+        // A `gen fn` returns its coroutine, as `infer_function_expr` types it:
+        // `-> T` is the yield / return slot.
+        let ret_ty = if is_coro {
+            let send_ty = Ty::Var(self.counter.fresh());
+            self.coroutine_type(ret_ty, send_ty)
+        } else {
+            ret_ty
+        };
         let mut fun_ty = ret_ty;
         for arg_ty in arg_tys.iter().rev() {
             fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
@@ -13899,6 +13913,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                is_coro,
                 ..
             } = child.1.as_ref()
             {
@@ -13912,6 +13927,7 @@ impl Checker {
                     args,
                     returns.as_ref(),
                     where_constraints,
+                    *is_coro,
                     &child.0.into_range(),
                 );
             }
