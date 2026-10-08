@@ -5291,8 +5291,12 @@ impl Compiler {
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
-                        // ones run into temps before it.
-                        if self.hir_stages_args(hir, emit, args, depth) {
+                        // ones run into temps before it. The plan checks the
+                        // arguments from `depth`, so at depth zero one that
+                        // may clobber (a `match` binding slots, a call that
+                        // stages its own) runs before the id as well.
+                        let clobbering = depth == 0 && args.iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
+                        if clobbering || self.hir_stages_args(hir, emit, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
                             for &tmp in &temps {
