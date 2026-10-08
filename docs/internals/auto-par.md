@@ -62,6 +62,31 @@ its first reason (`loop over `i` in `main` not parallelized: `step` calls
 `write_all` (write, suspend)`). The editor hover (`coil-lsp`) shows the same
 one-line effects for a function in the open file.
 
+### Declared effects (E3)
+
+`pure fn f()` and `fn f() uses {read, write}` (after `where`) are promises
+the compiler checks; inference is unchanged and always runs. A summary keeps
+`visible` effects apart from `flags`: panics, `defer`, GC, generator yields,
+resizes and `ALLOC` (byte/string conversions that return a fresh object)
+stay in `flags` for auto-par, LICM and CSE but are no effect a user sees or
+declares. The vocabulary maps onto the bits in `hir::effects::VOCABULARY`:
+`read` (`READ`, `HOST`: the clock and mutable statics), `write`, `net`,
+`env`, `exec`, `ffi`, `thread`, `suspend` (`SUSPEND`, `ATTACH_PARK`) and
+`mutate` (`HEAP_MUT`). Unknown effects cannot be declared. A declaration
+covers the body's own effects, not the function parameters it calls.
+
+`ModuleEffects::violations` reports E0413 (`EffectMismatch`) for a body whose
+visible effects exceed its declaration, with the call chain that needs the
+missing effect (`run → step → bump needs mutate: it writes static `HITS``).
+A trait method's declaration bounds every impl (`Area for Sq::area` is
+checked against `Area::area`) and is what a call through the trait costs
+(`area(a)` on an existential, `a.area()`): all traits with that method must
+declare it, or the call stays unknown. Trait declarations are kept across
+modules in `ProgramEffects`. Codegen checks every module; with
+`--ast-codegen` it builds HIR for the effects alone. `coil-lsp` reports the
+same errors for a well-typed file. Hover, `coil dissect --effects` and
+auto-par reasons print effects in this vocabulary (`uses {read, mutate}`).
+
 Expression IPA runs on **any pure** function whose body contains a fork site
 (self-calls or independent helper calls). Loop IPA also needs pure body callees.
 
