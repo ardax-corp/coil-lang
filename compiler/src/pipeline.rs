@@ -759,6 +759,38 @@ impl Pipeline {
         }
     }
 
+    /// E4: report each host call reachable from `main` / the tests that
+    /// needs a capability this build was not granted, in its own file.
+    /// False when there was one.
+    fn check_capabilities(&mut self) -> bool {
+        let granted = self.host_grants.caps();
+        let found = self.compiler_lazy().capability_violations(granted);
+        if found.is_empty() {
+            return true;
+        }
+        for v in found {
+            let rel = PathBuf::from(&v.file);
+            let path = if rel.is_absolute() || self.ast_cache.get(&rel).is_some() {
+                rel.clone()
+            } else {
+                self.project_root.join(&rel)
+            };
+            let src = self
+                .ast_cache
+                .get(&path)
+                .or_else(|| self.ast_cache.get(&rel))
+                .map(|c| c.report_source())
+                .or_else(|| self.overlays.get(&path).cloned())
+                .or_else(|| std::fs::read_to_string(&path).ok())
+                .unwrap_or_default();
+            let file_id = self.sink.register_source(&path, &src);
+            self.compiler_lazy_mut().push_message(v.message());
+            self.emit_new_messages_for(file_id, &path);
+        }
+        self.failed = true;
+        false
+    }
+
     /// Emit compiler messages that have not yet been forwarded to the sink.
     fn emit_new_messages(&mut self, file_id: SourceId) {
         let already = self.messages_emitted;
@@ -1364,7 +1396,7 @@ impl Pipeline {
         // scan rotation invalidates plain LIFO `pop_back`.
         self.compile_discovered_modules();
 
-        if self.failed {
+        if self.failed || !self.check_capabilities() {
             return;
         }
 
@@ -1490,7 +1522,7 @@ impl Pipeline {
         // Register source and drain typecheck / codegen diagnostics via the sink.
         let file_id = self.sink.register_source(path, src);
         self.emit_new_messages(file_id);
-        if self.had_errors() {
+        if self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 
@@ -1590,7 +1622,7 @@ impl Pipeline {
         self.expand_user_macros();
         self.compile_discovered_modules();
 
-        if self.failed || self.had_errors() {
+        if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 
@@ -1642,7 +1674,7 @@ impl Pipeline {
         self.expand_user_macros();
         self.compile_discovered_modules();
 
-        if self.failed || self.had_errors() {
+        if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 

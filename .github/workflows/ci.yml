@@ -243,21 +243,21 @@ jobs:
       - name: Language harness (`coil test`)
         if: matrix.features.id == 'default'
         run: |
-          ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness at -O0 (`coil test -O 0`)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
           # Optimizations hide codegen bugs (LICM materializes invariants,
           # inlining drops CALL targets); run the unoptimized pipeline too.
-          ./target/debug/coil test -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness on the AST codegen (`coil test --ast-codegen`)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
           # HIR lowering is the default; the AST walk stays one release as
           # an escape hatch, so both paths must agree on every test.
-          ./target/debug/coil test --ast-codegen --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test --ast-codegen --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
           ./target/debug/coil test --ast-codegen -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
@@ -265,7 +265,7 @@ jobs:
         run: |
           # Typed inlining is the default; every test must give the same
           # result with it off.
-          COIL_HIR_INLINE=0 ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: GC stress (`coil test`, collect and evacuate at every allocation)
         if: matrix.features.id == 'default' && runner.os == 'Linux'

@@ -5709,6 +5709,15 @@ impl Compiler {
                         } else {
                             self.bytecode.push_host_invoke_layout(args.len() as u32, layout);
                         }
+                        if let Some(row) = common::HOST_NATIVES.get(native as usize)
+                            && self.native_id(row.name) == Some(native as usize)
+                        {
+                            let mode = match args.get(1).map(|&a| &hir.expr(a).kind) {
+                                Some(HirKind::Lit(Lit::Str(m))) => Some(m.as_str()),
+                                _ => None,
+                            };
+                            self.tag_gated_host_call(row.name, hir.expr(id).span, mode);
+                        }
                     }
                 }
                 self.expr_depth = depth;

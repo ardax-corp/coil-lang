@@ -112,6 +112,9 @@ pub enum ErrorCode {
     /// A function's effects are not all in its `pure fn` / `uses {…}`
     /// declaration (or its trait method's).
     EffectMismatch,
+    /// A host call reachable from `main` / tests needs `--allow-read`,
+    /// `--allow-write`, `--allow-net` or `--allow-env`.
+    HostCapDenied,
 
     UnknownExpression,
     CodegenError,
@@ -197,6 +200,7 @@ impl ErrorCode {
             Self::HostDloadNonConst => "E0411",
             Self::FixedArrayGrow => "E0412",
             Self::EffectMismatch => "E0413",
+            Self::HostCapDenied => "E0414",
             Self::UnknownExpression => "E0800",
             Self::CodegenError => "E0801",
             Self::UnboundedRecursion => "E0802",
@@ -282,6 +286,7 @@ impl ErrorCode {
             Self::HostDloadNonConst => "dload path must be a string literal",
             Self::FixedArrayGrow => "[T; N] cannot grow",
             Self::EffectMismatch => "effects exceed the declaration",
+            Self::HostCapDenied => "host call needs a capability that was not granted",
             Self::UnknownExpression => "unknown expression in codegen",
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
@@ -375,6 +380,7 @@ mod tests {
             | HostDloadNonConst
             | FixedArrayGrow
             | EffectMismatch
+            | HostCapDenied
             | UnknownExpression
             | CodegenError
             | UnboundedRecursion
@@ -450,6 +456,7 @@ mod tests {
             HostDloadNonConst,
             FixedArrayGrow,
             EffectMismatch,
+            HostCapDenied,
             UnknownExpression,
             CodegenError,
             UnboundedRecursion,

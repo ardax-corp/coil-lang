@@ -4303,13 +4303,6 @@ impl Checker {
         {
             return self.reject_fixed_array_grow(method, range);
         }
-        if *method == "attach"
-            && self.class_owner_from_ty(&resolved).as_deref()
-                == Some(crate::typechecking::ty::STREAM)
-        {
-            self.gate_stream_attach(range.clone());
-        }
-
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);
@@ -4777,13 +4770,10 @@ impl Checker {
             }
         };
 
-        if let Some("env_exec") = self.host_fn_in_scope(&ident) {
-            self.gate_env_exec(range.clone());
-        } else if let Some("env_exit") = self.host_fn_in_scope(&ident) {
-            self.gate_env_exit(range.clone());
-        }
+        // `env::exec`, `env::exit`, `Stream.attach` and the other gated host
+        // calls are checked over what `main` / tests reach, after codegen
+        // (`Compiler::capability_violations`).
         match self.io_fn_in_scope(&ident) {
-            Some(IoBuiltin::StreamAttach) => self.gate_stream_attach(range.clone()),
             Some(IoBuiltin::Drive | IoBuiltin::WaitReady) => self.warn_deprecated(
                 &ident,
                 "run concurrent IO as tasks: `task::scope` with `spawn`; an IO wait suspends only its task",

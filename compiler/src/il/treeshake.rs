@@ -277,14 +277,16 @@ impl CallGraph {
 
 /// Every function reachable from `roots` (by name) or from the ops outside
 /// every function body (setup, static initializers), with the function it
-/// was first reached from (`None` for a root). Raw op indices of the code
-/// outside every body come back too: it always runs.
+/// was first reached from (`None` for a root), and every function's
+/// emitting span. `extra` is code kept outside `buf` that always runs
+/// (static initializers before they are spliced in).
 pub fn reachable_functions(
     buf: &CodeBuf,
     functions: &HashMap<String, usize>,
     fn_entry_labels: &HashMap<String, Label>,
     roots: &[String],
     test_pcs: &[usize],
+    extra: &[&[IlOp]],
 ) -> (HashMap<String, Option<String>>, HashMap<String, (usize, usize)>) {
     let graph = CallGraph::new(buf, functions, fn_entry_labels, None);
     let ops = buf.ops();
@@ -311,8 +313,14 @@ pub fn reachable_functions(
     if buf.len() > at {
         outside.push((at, buf.len()));
     }
-    for (s, e) in outside {
-        for callee in graph.callees(ops, s, e) {
+    let extra = extra.iter().flat_map(|ops| {
+        ops.iter()
+            .flat_map(entry_targets)
+            .filter_map(|t| resolve_target(&t, &graph.label_to_name, &graph.pc_to_name))
+    });
+    let outside = outside.into_iter().flat_map(|(s, e)| graph.callees(ops, s, e));
+    for callee in outside.collect::<Vec<_>>().into_iter().chain(extra) {
+        {
             if parent.insert(callee.clone(), None).is_none() {
                 work.push_back(callee);
             }

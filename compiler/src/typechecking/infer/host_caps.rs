@@ -1,4 +1,7 @@
-//! Compile-time host capability gates (`HostGrants`, default deny).
+//! Compile-time host capability gates for FFI (`dload`, process-exec
+//! symbols), checked where they are declared. The host calls (`env::exec`,
+//! `open`, …) are checked over what the program reaches, after codegen
+//! (`Compiler::capability_violations`).
 
 use std::ops::Range;
 
@@ -17,42 +20,6 @@ impl Checker {
     ) {
         self.host_grants = grants;
         self.dload_host_stems = extra_dload_stems;
-    }
-
-    pub(super) fn gate_env_exec(&mut self, range: Range<usize>) {
-        if self.host_grants.allow_exec {
-            return;
-        }
-        let _ = self.error_with_help(
-            ErrorCode::HostExecDenied,
-            "`env::exec` requires `--allow-exec`".to_string(),
-            range,
-            Some("pass `--allow-exec` (or `Pipeline::grant_exec`)".to_string()),
-        );
-    }
-
-    pub(super) fn gate_env_exit(&mut self, range: Range<usize>) {
-        if self.host_grants.allow_exit {
-            return;
-        }
-        let _ = self.error_with_help(
-            ErrorCode::HostExitDenied,
-            "`env::exit` requires `--allow-exit`".to_string(),
-            range,
-            Some("pass `--allow-exit` (or `Pipeline::grant_exit`)".to_string()),
-        );
-    }
-
-    pub(super) fn gate_stream_attach(&mut self, range: Range<usize>) {
-        if self.host_grants.allow_attach {
-            return;
-        }
-        let _ = self.error_with_help(
-            ErrorCode::HostAttachDenied,
-            "`Stream.attach` requires `--allow-attach`".to_string(),
-            range,
-            Some("pass `--allow-attach` (or `Pipeline::grant_attach`)".to_string()),
-        );
     }
 
     pub(super) fn gate_ffi_exec_symbol(
@@ -156,78 +123,6 @@ mod tests {
             .into_iter()
             .filter_map(|m| m.code())
             .collect()
-    }
-
-    #[test]
-    fn exec_without_grant_is_error() {
-        let src = r#"
-use env::{exec};
-fn main() {
-    let args: Vec<string> = [];
-    let _ = exec("true", args);
-}
-"#;
-        let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
-        assert!(codes.contains(&ErrorCode::HostExecDenied), "{codes:?}");
-    }
-
-    #[test]
-    fn exec_with_grant_typechecks() {
-        let src = r#"
-use env::{exec};
-fn main() {
-    let args: Vec<string> = [];
-    let _ = exec("true", args);
-}
-"#;
-        let mut g = crate::HostGrants::deny_all();
-        g.allow_exec = true;
-        let codes = check_codes(src, g, &[]);
-        assert!(codes.is_empty(), "{codes:?}");
-    }
-
-    #[test]
-    fn exit_without_grant_is_error() {
-        let src = r#"
-use env::{exit};
-fn main() { exit(0); }
-"#;
-        let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
-        assert!(codes.contains(&ErrorCode::HostExitDenied), "{codes:?}");
-    }
-
-    #[test]
-    fn attach_without_grant_is_error() {
-        let src = r#"
-use io::{stdout};
-fn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }
-"#;
-        let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
-        assert!(codes.contains(&ErrorCode::HostAttachDenied), "{codes:?}");
-    }
-
-    #[test]
-    fn exit_with_grant_typechecks() {
-        let src = r#"
-use env::{exit};
-fn main() { exit(0); }
-"#;
-        let mut g = crate::HostGrants::deny_all();
-        g.allow_exit = true;
-        let codes = check_codes(src, g, &[]);
-        assert!(!codes.contains(&ErrorCode::HostExitDenied), "{codes:?}");
-    }
-
-    #[test]
-    fn attach_with_grant_typechecks() {
-        let src = r#"
-use io::{stdout};
-fn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }
-"#;
-        let mut g = crate::HostGrants::deny_all();
-        g.allow_attach = true;
-        let codes = check_codes(src, g, &[]);
-        assert!(!codes.contains(&ErrorCode::HostAttachDenied), "{codes:?}");
     }
 
     #[test]
