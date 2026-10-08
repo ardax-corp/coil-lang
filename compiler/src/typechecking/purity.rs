@@ -410,7 +410,7 @@ fn host_effect_table() -> &'static HashMap<&'static str, EffectFlags> {
         // this table unresolved (methods and stdlib helpers called by name).
         for (name, bits) in [
             ("len", EffectFlags::HOST | EffectFlags::UNKNOWN),
-            ("write_all", EffectFlags::IO),
+            ("write_all", EffectFlags::WRITE),
             ("fd", EffectFlags::ATTACH_PARK | EffectFlags::RESIZE),
         ] {
             table.entry(name).or_insert(EffectFlags::from_bits(bits));
@@ -464,8 +464,9 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
         BuiltinExport::IoFn { kind } => row(kind.native_name()),
         BuiltinExport::StringFn { kind } => match kind.native_name() {
             Some(registry) => row(registry),
-            // `format` lowers to the FORMAT opcode.
-            None => EffectFlags::from_bits(EffectFlags::IO),
+            // `format` lowers to the FORMAT opcode. Kept impure like the
+            // other text helpers (see `TEXT` in `common::host`).
+            None => EffectFlags::from_bits(EffectFlags::READ),
         },
         BuiltinExport::ThreadFn { kind } => row(kind.native_name()),
         BuiltinExport::GcFn { kind } => row(kind.native_name()),
@@ -1409,7 +1410,13 @@ fn main() { return; }
         // `io::fs` and `env` short names used to fall through to UNKNOWN.
         assert!(classify_host_name("exists").contains(EffectFlags::IO));
         assert!(!classify_host_name("exists").contains(EffectFlags::UNKNOWN));
-        assert!(classify_host_name("var").contains(EffectFlags::HOST));
+        assert!(classify_host_name("var").contains(EffectFlags::ENV));
+        assert!(classify_host_name("exec").contains(EffectFlags::EXEC));
+        assert!(classify_host_name("connect").contains(EffectFlags::NET));
+        assert!(classify_host_name("wait_ready").contains(EffectFlags::SUSPEND));
+        assert!(!classify_host_name("wait_ready").contains(EffectFlags::IO));
+        assert!(classify_host_name("remove_file").contains(EffectFlags::WRITE));
+        assert!(!classify_host_name("exists").contains(EffectFlags::WRITE));
         assert!(classify_host_name("get").contains(EffectFlags::GC));
         // Same row by registry name and by surface name.
         assert_eq!(classify_host_name("fs_exists"), classify_host_name("exists"));

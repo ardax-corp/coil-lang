@@ -6,19 +6,35 @@
 pub struct EffectFlags(u16);
 
 impl EffectFlags {
+    /// Reads the clock or other nondeterministic host state (not IO).
     pub const HOST: u16 = 1 << 0;
     pub const FFI: u16 = 1 << 1;
     pub const HEAP_MUT: u16 = 1 << 2;
+    /// Generator `yield`.
     pub const YIELD: u16 = 1 << 3;
     pub const THREAD: u16 = 1 << 4;
     pub const GC: u16 = 1 << 5;
-    pub const IO: u16 = 1 << 6;
+    /// Reads a stream or the file system.
+    pub const READ: u16 = 1 << 6;
     pub const ATTACH_PARK: u16 = 1 << 7;
     pub const UNKNOWN: u16 = 1 << 8;
     /// May change the length (or buffer) of an array it can reach: `Vec`
     /// grow/shrink methods, unknown or indirect code, yield, FFI. Always set
     /// alongside another impure bit, so purity is unchanged.
     pub const RESIZE: u16 = 1 << 9;
+    /// Writes a stream or the file system.
+    pub const WRITE: u16 = 1 << 10;
+    /// Opens or uses a socket.
+    pub const NET: u16 = 1 << 11;
+    /// Reads or changes the process environment (args, vars, cwd).
+    pub const ENV: u16 = 1 << 12;
+    /// Runs another program or ends this one.
+    pub const EXEC: u16 = 1 << 13;
+    /// May park the caller until IO is ready (`wait_readable`, `wait_ready`).
+    pub const SUSPEND: u16 = 1 << 14;
+
+    /// Any IO: a mask, so `contains(IO)` is true for any of its bits.
+    pub const IO: u16 = Self::READ | Self::WRITE | Self::NET;
 
     pub const fn empty() -> Self {
         Self(0)

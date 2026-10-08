@@ -19,15 +19,31 @@ pub struct HostNative {
     pub effects: EffectFlags,
 }
 
+const fn fx(bits: u16) -> EffectFlags {
+    EffectFlags::from_bits(bits)
+}
+
+const R: u16 = EffectFlags::RESIZE;
 const PURE: EffectFlags = EffectFlags::empty();
-const IO: EffectFlags = EffectFlags::from_bits(EffectFlags::IO);
-const IO_R: EffectFlags = EffectFlags::from_bits(EffectFlags::IO | EffectFlags::RESIZE);
-const HOST: EffectFlags = EffectFlags::from_bits(EffectFlags::HOST);
-const HOST_R: EffectFlags = EffectFlags::from_bits(EffectFlags::HOST | EffectFlags::RESIZE);
-const THREAD_R: EffectFlags = EffectFlags::from_bits(EffectFlags::THREAD | EffectFlags::RESIZE);
-const GC_R: EffectFlags = EffectFlags::from_bits(EffectFlags::GC | EffectFlags::RESIZE);
-const HEAP_R: EffectFlags = EffectFlags::from_bits(EffectFlags::HEAP_MUT | EffectFlags::RESIZE);
-const PARK_R: EffectFlags = EffectFlags::from_bits(EffectFlags::ATTACH_PARK | EffectFlags::RESIZE);
+const READ: EffectFlags = fx(EffectFlags::READ | R);
+const WRITE: EffectFlags = fx(EffectFlags::WRITE);
+const WRITE_R: EffectFlags = fx(EffectFlags::WRITE | R);
+const READ_WRITE: EffectFlags = fx(EffectFlags::READ | EffectFlags::WRITE | R);
+const NET: EffectFlags = fx(EffectFlags::NET | R);
+const SUSPEND: EffectFlags = fx(EffectFlags::SUSPEND | R);
+const ENV: EffectFlags = fx(EffectFlags::ENV | R);
+const EXEC: EffectFlags = fx(EffectFlags::EXEC | R);
+const HOST: EffectFlags = fx(EffectFlags::HOST);
+const HOST_R: EffectFlags = fx(EffectFlags::HOST | R);
+const THREAD_R: EffectFlags = fx(EffectFlags::THREAD | R);
+const GC_R: EffectFlags = fx(EffectFlags::GC | R);
+const HEAP_R: EffectFlags = fx(EffectFlags::HEAP_MUT | R);
+const PARK_R: EffectFlags = fx(EffectFlags::ATTACH_PARK | R);
+/// Byte/string conversions and searches. Pure in fact; kept impure (as
+/// before the split) until a bench shows marking them pure is safe for
+/// auto-par and LICM.
+const TEXT: EffectFlags = fx(EffectFlags::READ);
+const TEXT_R: EffectFlags = fx(EffectFlags::READ | R);
 
 /// Standard host natives in HostInvoke id order.
 pub const HOST_NATIVES: &[HostNative] = &[
@@ -35,247 +51,247 @@ pub const HOST_NATIVES: &[HostNative] = &[
         name: "stdin",
         arity: 0,
         id: 0,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "stdout",
         arity: 0,
         id: 1,
-        effects: IO,
+        effects: WRITE,
     },
     HostNative {
         name: "stderr",
         arity: 0,
         id: 2,
-        effects: IO,
+        effects: WRITE,
     },
     HostNative {
         name: "open",
         arity: 2,
         id: 3,
-        effects: IO_R,
+        effects: READ_WRITE,
     },
     HostNative {
         name: "close",
         arity: 1,
         id: 4,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "read",
         arity: 2,
         id: 5,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "write",
         arity: 2,
         id: 6,
-        effects: IO,
+        effects: WRITE,
     },
     HostNative {
         name: "await_readable",
         arity: 1,
         id: 7,
-        effects: IO_R,
+        effects: SUSPEND,
     },
     HostNative {
         name: "await_writable",
         arity: 1,
         id: 8,
-        effects: IO_R,
+        effects: SUSPEND,
     },
     HostNative {
         name: "drive",
         arity: 0,
         id: 9,
-        effects: IO_R,
+        effects: SUSPEND,
     },
     HostNative {
         name: "from_bytes",
         arity: 1,
         id: 10,
-        effects: IO,
+        effects: TEXT,
     },
     HostNative {
         name: "to_bytes",
         arity: 1,
         id: 11,
-        effects: IO,
+        effects: TEXT,
     },
     HostNative {
         name: "tcp_connect",
         arity: 2,
         id: 12,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_connect_timeout",
         arity: 3,
         id: 13,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_listen",
         arity: 2,
         id: 14,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_accept",
         arity: 1,
         id: 15,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_peer_addr",
         arity: 1,
         id: 16,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_local_addr",
         arity: 1,
         id: 17,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_set_nodelay",
         arity: 2,
         id: 18,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "tcp_shutdown",
         arity: 2,
         id: 19,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "udp_bind",
         arity: 2,
         id: 20,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "udp_connect",
         arity: 2,
         id: 21,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "udp_send_to",
         arity: 4,
         id: 22,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "udp_recv_from",
         arity: 2,
         id: 23,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "udp_local_port",
         arity: 1,
         id: 24,
-        effects: IO_R,
+        effects: NET,
     },
     HostNative {
         name: "fs_exists",
         arity: 1,
         id: 25,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_is_file",
         arity: 1,
         id: 26,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_is_dir",
         arity: 1,
         id: 27,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_is_symlink",
         arity: 1,
         id: 28,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_metadata",
         arity: 1,
         id: 29,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_create_dir",
         arity: 1,
         id: 30,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_create_dir_all",
         arity: 1,
         id: 31,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_remove_file",
         arity: 1,
         id: 32,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_remove_dir",
         arity: 1,
         id: 33,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_remove_dir_all",
         arity: 1,
         id: 34,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_rename",
         arity: 2,
         id: 35,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_copy",
         arity: 2,
         id: 36,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_read_link",
         arity: 1,
         id: 37,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_symlink",
         arity: 2,
         id: 38,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "fs_list_dir",
         arity: 1,
         id: 39,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "fs_realpath",
         arity: 1,
         id: 40,
-        effects: IO_R,
+        effects: READ,
     },
     HostNative {
         name: "time_timestamp",
@@ -377,49 +393,49 @@ pub const HOST_NATIVES: &[HostNative] = &[
         name: "env_args",
         arity: 0,
         id: 57,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_var",
         arity: 1,
         id: 58,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_set_var",
         arity: 2,
         id: 59,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_remove_var",
         arity: 1,
         id: 60,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_cwd",
         arity: 0,
         id: 61,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_set_cwd",
         arity: 1,
         id: 62,
-        effects: HOST_R,
+        effects: ENV,
     },
     HostNative {
         name: "env_exit",
         arity: 1,
         id: 63,
-        effects: HOST_R,
+        effects: EXEC,
     },
     HostNative {
         name: "env_exec",
         arity: 2,
         id: 64,
-        effects: HOST_R,
+        effects: EXEC,
     },
     HostNative {
         name: "ord",
@@ -587,13 +603,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         name: "wait_ready",
         arity: 0,
         id: 92,
-        effects: IO_R,
+        effects: SUSPEND,
     },
     HostNative {
         name: "write_from",
         arity: 3,
         id: 93,
-        effects: IO_R,
+        effects: WRITE_R,
     },
     HostNative {
         name: "gc_root",
@@ -869,31 +885,31 @@ pub const HOST_NATIVES: &[HostNative] = &[
         name: "string_byte_at",
         arity: 2,
         id: 139,
-        effects: IO_R,
+        effects: TEXT_R,
     },
     HostNative {
         name: "string_slice_bytes",
         arity: 3,
         id: 140,
-        effects: IO_R,
+        effects: TEXT_R,
     },
     HostNative {
         name: "string_find_from",
         arity: 3,
         id: 141,
-        effects: IO_R,
+        effects: TEXT_R,
     },
     HostNative {
         name: "string_rfind",
         arity: 2,
         id: 142,
-        effects: IO_R,
+        effects: TEXT_R,
     },
     HostNative {
         name: "string_match_at",
         arity: 3,
         id: 143,
-        effects: IO_R,
+        effects: TEXT_R,
     },
 ];
 
