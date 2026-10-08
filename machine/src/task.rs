@@ -39,14 +39,28 @@ pub(crate) enum TaskState {
     Blocked,
     Done,
     Failed,
-    /// Dropped because a sibling panicked (no unwinding until T2).
+    /// Cancelled: never started, or unwound running its `defer`s.
     Dropped,
+    /// Its frames are gone; it finishes (as [`TaskRec::ending`]) once the
+    /// child tasks of the scopes it opened have finished.
+    Ending,
 }
 
 impl TaskState {
     pub(crate) fn finished(self) -> bool {
         matches!(self, Self::Done | Self::Failed | Self::Dropped)
     }
+}
+
+/// Cancellation progress of a task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum Cancel {
+    #[default]
+    None,
+    /// Delivered when the task next suspends (or leaves its last `shield`).
+    Requested,
+    /// Running its `defer`s; it is not cancelled again.
+    Unwinding,
 }
 
 /// What a blocked task waits on.
@@ -56,6 +70,8 @@ pub(crate) enum Block {
     Join(TaskId),
     Scope(ScopeId),
     Sleep,
+    /// Cancelled: waits for the tasks of its scopes to stop before it unwinds.
+    Cancel,
 }
 
 /// The value a task's suspension point returns when it runs again.
@@ -82,6 +98,13 @@ pub(crate) struct TaskRec {
     pub ctx_index: usize,
     pub joiners: Vec<TaskId>,
     pub panic: Option<String>,
+    /// It has run at least once (a task that never ran has nothing to unwind).
+    pub started: bool,
+    pub cancel: Cancel,
+    /// Open `task::shield` sections: a cancel waits until they end.
+    pub shield: u32,
+    /// [`TaskState::Ending`]: the state it finishes in.
+    pub ending: Option<TaskState>,
     /// Root only: where it continues (it stays on the operand stack).
     pub resume_ip: usize,
     pub resume_sp: usize,
@@ -100,6 +123,10 @@ impl TaskRec {
             ctx_index: 0,
             joiners: Vec::new(),
             panic: None,
+            started: false,
+            cancel: Cancel::None,
+            shield: 0,
+            ending: None,
             resume_ip: 0,
             resume_sp: 0,
         }
@@ -234,6 +261,41 @@ impl Scheduler {
             }
         }
         self.check_scope_done(scope);
+        // The scope's owner may wait for its children to stop: to unwind
+        // a cancel, or (its frames gone) to finish.
+        if let Some(owner) = self.scopes.get(&scope).map(|s| s.owner)
+            && self.owned_children_finished(owner)
+            && let Some(rec) = self.tasks.get(&owner)
+        {
+            if let Some(ending) = rec.ending {
+                self.finalize(owner, ending);
+            } else if rec.block == Some(Block::Cancel) {
+                self.make_ready(owner, Wake::Unit);
+            }
+        }
+    }
+
+    /// Task `id` stopped running: it finishes as `state`, forgets the
+    /// scopes it opened and wakes whoever waits for it.
+    pub(crate) fn finalize(&mut self, id: TaskId, state: TaskState) {
+        let Some(rec) = self.tasks.get_mut(&id) else {
+            return;
+        };
+        rec.state = state;
+        rec.ending = None;
+        self.live -= 1;
+        for scope in self.scopes_owned_by(id) {
+            self.remove_scope(scope);
+        }
+        self.after_finish(id);
+    }
+
+    /// Every child of every scope `owner` opened has finished.
+    pub(crate) fn owned_children_finished(&self, owner: TaskId) -> bool {
+        self.scopes
+            .iter()
+            .filter(|(_, s)| s.owner == owner)
+            .all(|(id, _)| self.children_finished(*id))
     }
 
     /// Wake a scope's owner once its body returned and every child finished.
