@@ -2106,8 +2106,12 @@ impl Walk<'_> {
                 }
                 // Any one-word receiver may name a ground trait instance's
                 // method; codegen resolves inherent methods on objects only.
-                if !self.shared_receiver(recv) && self.object(recv).is_err() {
+                // `().m()`: the unit receiver is an empty tuple object.
+                if !self.shared_receiver(recv) && self.object(recv).is_err() && !is_unit_make(body, recv) {
                     self.word(recv).map_err(|_| "receiver-type")?;
+                }
+                if is_unit_make(body, recv) {
+                    return self.args(&args[1..], depth + 1, depth == 0);
                 }
                 self.args(args, depth, depth == 0)
             }

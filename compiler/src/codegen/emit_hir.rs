@@ -161,8 +161,14 @@ enum HirBuiltin {
     Existential { slot: u32 },
     /// An `extern` function: its library and function-id statics under
     /// the arguments, the arguments packed in a tuple, `FfiInvoke`, then
-    /// the `Result` unwrapped or panicked, as `compile_call_expr`.
-    Ffi { lib: u32, func: u32 },
+    /// the `Result` unwrapped or panicked, as `compile_call_expr`. A C
+    /// variadic (`variadic`, the extern's def for its sidecar tags) adds
+    /// each argument's type tag in a second tuple.
+    Ffi {
+        lib: u32,
+        func: u32,
+        variadic: Option<Option<crate::typechecking::DefId>>,
+    },
     /// `dload` / `declare` / `invoke` after `use ffi::{…}`: the value
     /// operands ([`Compiler::hir_ffi_operands`]), a `declare` signature's
     /// tags as constants, `invoke`'s arguments packed in a tuple, then the
@@ -1025,13 +1031,15 @@ impl Compiler {
         if !known(&key) && !self.namespace.is_empty() && !key.contains("::") {
             key = format!("{}::{}", self.namespace, key);
         }
-        // An `extern` function (C variadics pass per-call type tags, kept
-        // on the AST).
+        // An `extern` function; a C variadic passes per-call type tags.
         if let Some((lib, func)) = self.lookup_extern_runtime(&key) {
-            if self.checker.is_extern_variadic(&key) {
+            let variadic = self.checker.is_extern_variadic(&key).then(|| self.def_id_for_name(&key));
+            if let Some(def) = variadic
+                && self.hir_variadic_tags(def, node.span, argc).is_none()
+            {
                 return Err("callee-variadic");
             }
-            return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func });
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func, variadic });
         }
         if !known(&key) {
             if std::env::var_os("COIL_HIR_WHY").is_some() {
@@ -3392,6 +3400,18 @@ impl Compiler {
         }
     }
 
+    /// A C variadic call's per-argument FFI type tags, as the AST's
+    /// `resolve_call_ffi_tags`: the extern's sidecar tags when they cover
+    /// every argument, else the checker's tags for the call at `span`.
+    fn hir_variadic_tags(&self, def: Option<crate::typechecking::DefId>, span: (usize, usize), argc: usize) -> Option<Vec<(u32, u32)>> {
+        if let Some(tags) = def.and_then(|d| self.typed_sidecar.ffi_tags(d))
+            && tags.len() == argc
+        {
+            return Some(tags.iter().map(|&tag| (tag, 0)).collect());
+        }
+        self.checker.variadic_arg_tags_at(span).map(<[_]>::to_vec)
+    }
+
     /// Whether a call's arguments stage through temps
     /// ([`lower::stages_args`] while no stack array is boxed, or
     /// [`lower::index_stages`] for a clobbering index read).
@@ -5169,7 +5189,7 @@ impl Compiler {
                         let info = self.hir_linear_algebra(hir, id).expect("planned linear algebra");
                         self.hir_linear_algebra_op(hir, emit, &info, args, &params, depth);
                     }
-                    HirBuiltin::Ffi { lib, func } => {
+                    HirBuiltin::Ffi { lib, func, variadic } => {
                         // Both statics go under the arguments; staged ones
                         // run into temps before them.
                         let statics = |bc: &mut CodeBuf| {
@@ -5189,8 +5209,16 @@ impl Compiler {
                             }
                         }
                         self.bytecode.push_make_tuple(args.len() as u32);
-                        self.bytecode
-                            .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(args.len() as u32 & 0xFFFF));
+                        let mut operand = args.len() as u32 & 0xFFFF;
+                        if let Some(def) = variadic {
+                            let tags = self.hir_variadic_tags(def, hir.expr(id).span, args.len()).expect("planned variadic tags");
+                            for &(tag, aux) in &tags {
+                                emit_ffi_type_const(&mut self.bytecode, tag, aux);
+                            }
+                            self.bytecode.push_make_tuple(tags.len() as u32);
+                            operand |= 1 << 16;
+                        }
+                        self.bytecode.push(Byte::new(Instruction::FfiInvoke).with_operand_u32(operand));
                         self.emit_result_unwrap_or_panic();
                     }
                     HirBuiltin::FfiDyn(kind) => {
