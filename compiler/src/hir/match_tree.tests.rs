@@ -58,3 +58,38 @@ fn declines_when_no_variant_repeats_or_a_row_is_not_a_variant() {
     ];
     assert!(outer_groups(&tuple).is_none());
 }
+
+fn lit(p: &HirPat) -> Option<i64> {
+    match p {
+        HirPat::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+#[test]
+fn int_search_sorts_cases_and_keeps_the_first_arm_per_literal() {
+    let mut arms: Vec<HirArm> = [9, 3, 7, 1, 3, 5, 8, 2, 6]
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| arm(HirPat::Int(n), i as u32))
+        .collect();
+    arms.push(arm(HirPat::Wild, 9));
+    let plan = int_search(&arms, lit).expect("eight distinct literals");
+    assert_eq!(
+        plan.cases,
+        vec![(1, 3), (2, 7), (3, 1), (5, 5), (6, 8), (7, 2), (8, 6), (9, 0)]
+    );
+    assert_eq!(plan.default, 9);
+}
+
+#[test]
+fn int_search_declines_short_or_mixed_matches() {
+    let short: Vec<HirArm> = (0..4)
+        .map(|n| arm(HirPat::Int(n), n as u32))
+        .chain([arm(HirPat::Wild, 4)])
+        .collect();
+    assert!(int_search(&short, lit).is_none());
+    let mut mixed: Vec<HirArm> = (0..9).map(|n| arm(HirPat::Int(n), n as u32)).collect();
+    mixed.insert(3, arm(HirPat::Wild, 99));
+    assert!(int_search(&mixed, lit).is_none());
+}
