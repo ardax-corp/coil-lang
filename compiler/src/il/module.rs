@@ -359,6 +359,7 @@ impl IlModule {
             .saturating_add(1);
 
         for body in &mut self.funcs {
+            drop_jumps_to_next_label(&mut body.ops);
             opt::optimize_at_with_labels(
                 &mut body.ops,
                 &per,
@@ -639,6 +640,31 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
 /// sides to expose the same loops; otherwise compare flat counts.
 /// A weighted tie is settled by the flat count.
+/// Drop `JMP L` when `L` is the next label: it is a fall-through. Passes that
+/// turn stack words into slots misread the words such a jump carries (an
+/// `Unpack` payload went to the wrong slots, #771).
+fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let next = match &ops[i] {
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target,
+                ..
+            } => ops[i + 1..]
+                .iter()
+                .take_while(|op| matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+                .any(|op| matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if l == target)),
+            _ => false,
+        };
+        if next {
+            ops.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// `new` still jumps to or calls a label `old` bound, but no longer binds it.
 fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
     let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
@@ -952,6 +978,32 @@ mod tests {
                 loc: loc(),
             },
         ]
+    }
+
+    /// `JMP L` straight into `L` (past other labels) is a fall-through and
+    /// goes; a jump over code stays (#771).
+    #[test]
+    fn drops_only_jumps_to_the_next_label() {
+        let jmp = |l: u32| IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            target: Label(l),
+            loc: loc(),
+            hint: Default::default(),
+        };
+        let mut ops = vec![
+            IlOp::Load { slot: 0, loc: loc() },
+            jmp(2),
+            IlOp::Label(Label(1)),
+            IlOp::Label(Label(2)),
+            jmp(3),
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Label(Label(3)),
+            IlOp::Return { loc: loc(), ret_words: 1 },
+        ];
+        drop_jumps_to_next_label(&mut ops);
+        assert_eq!(ops.len(), 7);
+        assert!(matches!(ops[1], IlOp::Label(Label(1))));
+        assert!(matches!(ops[3], IlOp::Jump { target: Label(3), .. }));
     }
 
     #[test]
