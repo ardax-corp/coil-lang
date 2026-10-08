@@ -130,7 +130,7 @@ fn weak_suite_end_to_end() {
             show_output: false,
             coverage: None,
             opt_level: OptLevel::Standard,
-            hir: false,
+            hir: None,
             grants: HostGrants::deny_all(),
             extra_roots: vec![root.join("src")],
             report: Default::default(),
