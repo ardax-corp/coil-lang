@@ -7498,10 +7498,11 @@ use string::{format, to_bytes};
 fn keep([int] xs) -> [int] {
     let junk = [1, 2, 3];
     collect();
-    if junk == xs {
-        return junk;
+    let r = xs;
+    if len(xs) > 5 {
+        r = junk;
     }
-    return xs;
+    return r;
 }
 fn main() {
     let a = [42, 7];
