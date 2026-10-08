@@ -34,6 +34,12 @@ pub const DERIVE_MODULE: &str = "derive";
 /// Source of the built-in derives.
 pub const DERIVE_SOURCE: &str = include_str!("../prelude/derive.hy");
 
+/// Module path of the embedded task API (`use task::{scope, Scope, Task}`).
+pub const TASK_MODULE: &str = "task";
+
+/// Source of the embedded `task` module.
+pub const TASK_SOURCE: &str = include_str!("../prelude/task.hy");
+
 /// Derives [`DERIVE_MODULE`] declares: usable without a `use`.
 pub const PRELUDE_DERIVES: &[&str] = &[
     "Show",
@@ -56,12 +62,19 @@ pub fn derive_module_path() -> PathBuf {
     PathBuf::from("<coil>/derive.hy")
 }
 
+/// Pseudo path of the embedded task module.
+pub fn task_module_path() -> PathBuf {
+    PathBuf::from("<coil>/task.hy")
+}
+
 /// Embedded source for a pseudo path.
 pub fn embedded_source(path: &Path) -> Option<&'static str> {
     if path == macro_module_path() {
         Some(MACRO_SOURCE)
     } else if path == derive_module_path() {
         Some(DERIVE_SOURCE)
+    } else if path == task_module_path() {
+        Some(TASK_SOURCE)
     } else {
         None
     }
@@ -73,6 +86,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(MACRO_MODULE)
     } else if path == derive_module_path() {
         Some(DERIVE_MODULE)
+    } else if path == task_module_path() {
+        Some(TASK_MODULE)
     } else {
         None
     }
@@ -83,6 +98,9 @@ pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static st
     let head = path.first().map(String::as_str).unwrap_or(name);
     if head == MACRO_MODULE {
         return Some((macro_module_path(), MACRO_MODULE));
+    }
+    if head == TASK_MODULE {
+        return Some((task_module_path(), TASK_MODULE));
     }
     (head == DERIVE_MODULE).then(|| (derive_module_path(), DERIVE_MODULE))
 }

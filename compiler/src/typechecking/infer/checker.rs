@@ -1245,6 +1245,17 @@ impl Checker {
             "clock_wall_nanos" | "clock_mono_nanos" => fun(&[], int()),
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
 
+            "task_scope_open" => fun(&[], int()),
+            "task_scope_close" | "task_join" => fun(&[int()], int()),
+            "task_scope_error" | "task_error" => fun(&[int()], string()),
+            "task_sleep" => fun(&[int()], unit_ty()),
+            "task_yield" => fun(&[], unit_ty()),
+            "task_spawn" => {
+                // (scope, coroutine) -> task id; the coroutine's type is free.
+                let t = self.counter.fresh();
+                return Scheme::poly(vec![t], vec![], fun(&[int(), Ty::Var(t)], int()));
+            }
+
             _ => {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,
