@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::Value;
 
-use crate::io::{IoErrorTag, reactor_wait_fd_no_help, stream_wait_handle, with_stream_mut};
+use crate::io::{
+    IoErrorTag, IoParkRequest, reactor_wait_fd_no_help, stream_wait_handle, with_stream_mut,
+};
 use crate::io_handle::NativeHandle;
 use crate::io_reactor::Interest;
 use crate::memory::{Heap, ObjStream, StreamKind};
@@ -217,6 +219,12 @@ pub fn stream_attach(
 
 /// Park this coro on the stream fd without help-steal (COI-116 / COI-165).
 pub fn stream_park(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
+    let req = stream_park_request(heap, stream)?;
+    reactor_wait_fd_no_help(req.handle, req.interest, req.timeout)
+}
+
+/// What [`stream_park`] waits for, as a park request (a task suspends on it).
+pub fn stream_park_request(heap: &mut Heap, stream: Value) -> Result<IoParkRequest, IoErrorTag> {
     let wait = stream_wait_handle(heap, stream)?;
     let wants_write = with_stream_mut(heap, stream, |s| {
         s.attached.as_ref().is_some_and(|a| a.wants_write())
@@ -233,7 +241,11 @@ pub fn stream_park(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     } else {
         Interest::Readable
     };
-    reactor_wait_fd_no_help(wait, interest, timeout)
+    Ok(IoParkRequest {
+        handle: wait,
+        interest,
+        timeout,
+    })
 }
 
 /// True when this stream dispatches read/write/close through an attached vtable.

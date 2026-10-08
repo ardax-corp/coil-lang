@@ -26,6 +26,8 @@ fn compile_program_archive_bytes(
 ) -> Result<Vec<u8>, ()> {
     let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let debug = pipeline.program_debug();
+    // Cleanup ranges are behaviour (panics run `defer`s), not debug info.
+    let cleanup_ranges = debug.cleanup.clone();
     let (source_files, debug_locs, debug_lines) = if strip_debug {
         (Vec::new(), Vec::new(), Vec::new())
     } else {
@@ -47,6 +49,7 @@ fn compile_program_archive_bytes(
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines,
+        cleanup_ranges,
     };
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
@@ -369,6 +372,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -392,6 +396,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -418,6 +423,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

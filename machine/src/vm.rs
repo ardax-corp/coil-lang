@@ -347,6 +347,8 @@ struct ResumeCtx {
     coro: RefCoroutine,
     base_sp: usize,
     frame_depth: usize,
+    /// The coroutine is a task the scheduler resumed (its return ends the task).
+    task: bool,
 }
 
 /// Deferred `FfiInvoke` so libffi (and callbacks) run outside `execute`'s borrow.
@@ -519,6 +521,12 @@ pub struct Machine<const S: usize> {
     pending_io: Option<PendingIoWait>,
     /// Set when a language-level `panic` aborts the VM.
     panicked: bool,
+    /// Task scheduler, created by the first `task::scope` (see `task.rs`).
+    sched: Option<Box<crate::task::Scheduler>>,
+    /// Message of a panic a child task raised (the scope reports it).
+    task_panic_message: Option<String>,
+    /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
+    unwind: Unwind,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
     statics: Vec<Value>,
     /// Debug line table (parallel to archived bytecode indices).
@@ -637,6 +645,9 @@ impl<const S: usize> Machine<S> {
             pending_ffi: None,
             pending_io: None,
             panicked: false,
+            sched: None,
+            task_panic_message: None,
+            unwind: Unwind::default(),
             statics: Vec::new(),
             program_debug: ProgramDebug::default(),
             pc_lines: Vec::new(),
@@ -993,6 +1004,8 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
+        self.sched = None;
+        self.unwind = Unwind::default();
         self.pending_debug_stop = None;
         self.nested_depth = 0;
         self.nested_frame_depths.clear();
@@ -1185,6 +1198,13 @@ impl<const S: usize> Machine<S> {
         // (and the debugger) read it.
         if !self.frames.is_empty() {
             self.frames.get_mut().seek(panic_insn_ip);
+        }
+        self.arm_unwind(message);
+        // A child task's panic fails its scope; the scope reports it.
+        if self.task_panic_is_caught() {
+            self.task_panic_message = Some(message.to_string());
+            self.panicked = true;
+            return false;
         }
         let loc_suffix = self
             .format_panic_location(panic_insn_ip)
@@ -1784,6 +1804,14 @@ impl<const S: usize> Machine<S> {
         word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
+        }
+        if let Some(sched) = &self.sched {
+            for rec in sched.tasks.values() {
+                let inner = rec.inner.iter().map(|(c, _, _)| *c);
+                for coro in rec.coro.into_iter().chain(inner) {
+                    visit(coro.as_ptr() as u64, crate::memory::RootKind::Precise);
+                }
+            }
         }
         for pins in &self.frame_pins {
             for obj in pins.by_slot.iter().flatten() {
@@ -2621,79 +2649,39 @@ impl<const S: usize> Machine<S> {
         *sp = caller.get();
         // Coroutine resume bookkeeping is cold for ordinary calls (fib).
         if unlikely(self.return_bookkeeping) {
-            self.after_return_bookkeeping();
+            self.after_return_bookkeeping(ip, sp);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn after_return_bookkeeping(&mut self) {
+    fn after_return_bookkeeping(&mut self, ip: &mut usize, sp: &mut usize) {
         if !self.resume_stack.is_empty()
-            && let Some(ctx) = self.resume_stack.last()
+            && let Some(ctx) = self.resume_stack.last().copied()
             && self.frames.len() <= ctx.frame_depth
         {
             let coro_ref = ctx.coro;
-            let old_wait = {
-                let mut taken = None;
-                Self::with_coroutine_mut(coro_ref, |coro| {
-                    // Outer coroutines suspended via `yield from` stay on
-                    // `resume_stack` while main runs; host RETURN must not
-                    // treat that as coroutine completion.
-                    if coro.yield_from.is_some() {
-                        return;
-                    }
-                    taken = coro.io_wait.take();
-                    coro.state = CoroState::Done;
-                    coro.saved_stack.clear();
-                    coro.saved_frames.clear();
-                    coro.yield_from = None;
-                });
-                taken
-            };
-            if let Some(tok) = old_wait {
-                self.io_reactor.cancel_wait(tok);
-            }
+            Self::with_coroutine_mut(coro_ref, |coro| {
+                // Outer coroutines suspended via `yield from` stay on
+                // `resume_stack` while main runs; host RETURN must not
+                // treat that as coroutine completion.
+                if coro.yield_from.is_some() {
+                    return;
+                }
+                coro.state = CoroState::Done;
+                coro.saved_stack.clear();
+                coro.saved_frames.clear();
+                coro.yield_from = None;
+            });
             self.resume_stack.pop();
+            if ctx.task {
+                // A task's body returned: the scheduler picks what runs next.
+                self.task_finished(ip, sp);
+            }
         }
         self.return_bookkeeping = self.nested_depth > 0
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
-    }
-
-    /// Register handle interest and yield so other coros / `wait_ready` can batch.
-    ///
-    /// Pushes `Ok(())` onto the coroutine stack before yielding so resume
-    /// continues after `HostInvoke` as if the await completed. Callers must
-    /// `wait_ready` (or tolerate L0 `WouldBlock`) before the next resume.
-    fn cooperative_io_await_yield(
-        &mut self,
-        ip: &mut usize,
-        sp: &mut usize,
-        req: crate::io::IoParkRequest,
-        layout: crate::host_enum::HostEnumLayout,
-    ) {
-        let token = self.io_reactor.register_wait(req.handle, req.interest);
-        let coro_ref = self
-            .resume_stack
-            .last()
-            .expect("cooperative await requires an active coroutine")
-            .coro;
-        let old = {
-            let mut taken = None;
-            Self::with_coroutine_mut(coro_ref, |c| {
-                taken = c.io_wait.replace(token);
-            });
-            taken
-        };
-        if let Some(old) = old {
-            self.io_reactor.cancel_wait(old);
-        }
-        let ok = crate::host_enum::with_host_enum_layout(layout, || {
-            crate::io::as_result_unit(&mut self.heap, Ok(()))
-        });
-        self.stack.push(ok);
-        // Yield value is discarded by `block_on`; multiplex loops ignore it.
-        self.yield_coroutine(ip, sp, Value::from(0_i64));
     }
 
     fn resume_coroutine(
@@ -2716,23 +2704,16 @@ impl<const S: usize> Machine<S> {
 
         self.frames.get_mut().seek(return_ip);
 
-        let old_wait = {
-            let mut taken = None;
-            Self::with_coroutine_mut(gc, |c| {
-                taken = c.io_wait.take();
-                c.pending_send = send_val;
-            });
-            taken
-        };
-        if let Some(tok) = old_wait {
-            self.io_reactor.cancel_wait(tok);
-        }
+        Self::with_coroutine_mut(gc, |c| {
+            c.pending_send = send_val;
+        });
 
         self.return_bookkeeping = true;
         self.resume_stack.push(ResumeCtx {
             coro: gc,
             base_sp,
             frame_depth: self.frames.len(),
+            task: false,
         });
 
         for v in &coro.saved_stack {
@@ -2948,6 +2929,8 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
+        self.sched = None;
+        self.unwind = Unwind::default();
         self.userland_libraries.clear();
         self.ffi_closures.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
@@ -2990,6 +2973,8 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
+        self.sched = None;
+        self.unwind = Unwind::default();
         self.gc_in_progress = false;
         self.gc_deferred = false;
     }
@@ -3515,15 +3500,33 @@ impl<const S: usize> Machine<S> {
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         IN_EXECUTE.set(IN_EXECUTE.get() + 1);
-        // The dispatch loop is instantiated twice: with hooks (a debugger or
-        // coverage is attached) and without. Plain runs never pay a
-        // per-instruction check, however the binary was built: cargo unifies
-        // `machine` features across a workspace build, so `coil` can carry
-        // the `debugger` / `coverage` code without using it (#558).
-        let paused = if self.exec_hooks_attached() {
-            self.execute::<true>(code, constants, start_ip)
-        } else {
-            self.execute::<false>(code, constants, start_ip)
+        let mut start_ip = start_ip;
+        let paused = loop {
+            // The dispatch loop is instantiated twice: with hooks (a debugger
+            // or coverage is attached) and without. Plain runs never pay a
+            // per-instruction check, however the binary was built: cargo
+            // unifies `machine` features across a workspace build, so `coil`
+            // can carry the `debugger` / `coverage` code without using it (#558).
+            let paused = if self.exec_hooks_attached() {
+                self.execute::<true>(code, constants, start_ip)
+            } else {
+                self.execute::<false>(code, constants, start_ip)
+            };
+            if unlikely(!paused && self.panicked) {
+                // Run the `defer`s of the frames the panic leaves.
+                if let Some(ip) = self.unwind_step() {
+                    start_ip = ip;
+                    continue;
+                }
+            }
+            if unlikely(!paused && self.panicked && self.sched.is_some()) {
+                // A child task panicked: fail it and run the next task.
+                if let Some(ip) = self.task_recover_panic() {
+                    start_ip = ip;
+                    continue;
+                }
+            }
+            break paused;
         };
         IN_EXECUTE.set(IN_EXECUTE.get() - 1);
         paused
@@ -4088,6 +4091,8 @@ impl<const S: usize> Machine<S> {
 }
 
 include!("exec_rest.rs");
+include!("vm_task.rs");
+include!("vm_unwind.rs");
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {

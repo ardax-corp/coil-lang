@@ -73,6 +73,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
             debug_locs: program.debug_locs,
             fn_symbols: Vec::new(),
             debug_lines: program.debug_lines,
+            cleanup: program.cleanup_ranges,
         },
         struct_layouts: program.struct_layouts,
         operand_stack_slots: decoded
@@ -475,6 +476,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let loaded = load_archive_bytes(bytes.as_slice()).expect("load");

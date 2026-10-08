@@ -358,7 +358,7 @@ impl IlModule {
             .unwrap_or(0)
             .saturating_add(1);
 
-        for body in &mut self.funcs {
+        for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
             opt::optimize_at_with_labels(
                 &mut body.ops,
@@ -400,7 +400,10 @@ impl IlModule {
             }
         }
         let mut dense_calls = crate::mir::DenseCallMap::new();
-        let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
+        // Pinned bodies stay fuse-IL as emitted.
+        let mut pending: Vec<usize> = (0..self.funcs.len())
+            .filter(|&i| !self.funcs[i].meta.pinned)
+            .collect();
         let mut dense_why: Vec<Option<String>> = vec![None; self.funcs.len()];
         let mut lir_why: Vec<Option<String>> = vec![None; self.funcs.len()];
         let mut tier: Vec<&'static str> = vec!["fuse"; self.funcs.len()];
@@ -457,7 +460,8 @@ impl IlModule {
             }
             pending = next;
         }
-        let dense_kept = self.funcs.len() - pending.len();
+        let pinned = self.funcs.iter().filter(|b| b.meta.pinned).count();
+        let dense_kept = self.funcs.len() - pending.len() - pinned;
         let mut lir_kept = 0usize;
         for i in pending.iter().copied() {
             if !opts.mir_specialize {
@@ -501,7 +505,7 @@ impl IlModule {
         }
         if opts.collect_stats {
             let (dense, fuse) = if opts.mir_specialize {
-                (dense_kept, pending.len() - lir_kept)
+                (dense_kept, pending.len() - lir_kept + pinned)
             } else {
                 (0, self.funcs.len())
             };

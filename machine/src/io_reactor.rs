@@ -304,6 +304,19 @@ impl IoReactor {
         n
     }
 
+    /// Take every ready token and forget its waiter (task scheduler).
+    ///
+    /// Locks `waits` before `ready`, the same order as [`Self::poll_once`].
+    pub fn take_ready(&self) -> Vec<WaitToken> {
+        let mut waits = self.inner.waits.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ready = self.inner.ready.lock().unwrap_or_else(|e| e.into_inner());
+        let out = std::mem::take(&mut *ready);
+        for t in &out {
+            waits.remove(t);
+        }
+        out
+    }
+
     /// True when at least one async waiter is still registered.
     pub fn has_waiters(&self) -> bool {
         !self
@@ -556,6 +569,21 @@ mod tests {
 
     fn wait_of(stream: &TcpStream) -> WaitHandle {
         WaitHandle::from_tcp(stream)
+    }
+
+    #[test]
+    fn take_ready_drains_only_ready_tokens_and_forgets_them() {
+        let (r, mut w) = tcp_pair();
+        let (quiet, _quiet_peer) = tcp_pair();
+        let io = IoReactor::new();
+        let ready = io.register_wait(wait_of(&r), Interest::Readable);
+        let idle = io.register_wait(wait_of(&quiet), Interest::Readable);
+        w.write_all(b"x").expect("write");
+        assert!(io.wait_any(Some(Duration::from_secs(5))) > 0);
+        assert_eq!(io.take_ready(), vec![ready]);
+        assert!(!io.has_wait(ready));
+        assert!(io.has_wait(idle));
+        assert!(io.take_ready().is_empty());
     }
 
     #[test]

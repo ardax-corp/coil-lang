@@ -708,7 +708,11 @@ pub struct Compiler {
     /// capture names. At run time those captures are LOADed from the enclosing
     /// frame and passed as CALL arguments so the thunk's fresh frame sees them
     /// at slots 0..N-1 (same layout as lambda capture slots).
-    fn_defers: Vec<(BbLabel, Vec<String>)>,
+    fn_defers: FnDefers,
+    /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
+    cleanup_pads: Vec<CleanupPad>,
+    /// [`Self::cleanup_pads`] resolved at finalize (sorted by `start_pc`).
+    cleanup_ranges: Vec<common::CleanupRange>,
 
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
@@ -975,7 +979,9 @@ impl Default for Compiler {
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),
-            fn_defers: Vec::new(),
+            fn_defers: FnDefers::default(),
+            cleanup_pads: Vec::new(),
+            cleanup_ranges: Vec::new(),
             active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,
@@ -1129,3 +1135,51 @@ mod emit_loop;
 mod inline_cost;
 mod precise_frames;
 pub(crate) use precise_frames::jump_target as jump_target_of;
+
+/// One `defer` thunk of the function being compiled.
+#[derive(Clone, Debug)]
+pub(crate) struct DeferThunk {
+    /// Thunk entry (bound inside the function body, jumped over).
+    pub label: BbLabel,
+    /// Bound right after the thunk: where the function continues.
+    pub after: BbLabel,
+    /// `use (…)` capture names, LOADed from the frame when the thunk runs.
+    pub captures: Vec<String>,
+    /// Each capture's slot where the `defer` stands: the cleanup pad's
+    /// fallback once a block-scoped name is gone.
+    pub slots: Vec<Option<u32>>,
+    /// Armed flag slot (set when the `defer` statement runs).
+    pub flag: Option<u32>,
+}
+
+/// The `defer`s of the function being compiled.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FnDefers {
+    pub thunks: Vec<DeferThunk>,
+    /// Armed flag slots, zeroed at function entry; thunk `k` takes `flags[k]`.
+    pub flags: Vec<u32>,
+}
+
+impl FnDefers {
+    pub fn is_empty(&self) -> bool {
+        self.thunks.is_empty()
+    }
+
+    /// The flag for the next registered thunk.
+    pub fn next_flag(&self) -> Option<u32> {
+        self.flags.get(self.thunks.len()).copied()
+    }
+}
+
+/// A function's cleanup pad, before label resolution.
+#[derive(Clone, Debug)]
+pub(crate) struct CleanupPad {
+    /// Function table key (resolves labels through its IL chunk).
+    pub func: String,
+    pub pad: BbLabel,
+    /// `(thunk, after)` label pairs: pcs in `thunk..after` are thunk code,
+    /// not the function's own frame.
+    pub thunks: Vec<(BbLabel, BbLabel)>,
+    /// Slots the frame uses; the unwinder raises the stack top past them.
+    pub frame_words: u32,
+}

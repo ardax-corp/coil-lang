@@ -228,6 +228,11 @@ impl Compiler {
         &self.stack_maps
     }
 
+    /// `defer` cleanup ranges for the VM unwinder.
+    pub fn cleanup_ranges(&self) -> &[common::CleanupRange] {
+        &self.cleanup_ranges
+    }
+
     pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
         &self.precise_frames
     }
@@ -262,16 +267,30 @@ impl Compiler {
 
     /// Run registered `defer` thunks in LIFO order.
     ///
-    /// For each thunk: LOAD `use (…)` captures from the enclosing frame, then
-    /// `CALL` the thunk entry with that arity (push return IP + new frame whose
-    /// slots 0..N-1 are the captures). The thunk ends in `RETURN`, which
-    /// resumes at the next op. A following `POP` discards the thunk's sentinel
-    /// return value so a pending function return value stays on top.
+    /// For each armed thunk: disarm it (so a panic inside it does not run it
+    /// again from the cleanup pad), LOAD its `use (…)` captures from the
+    /// enclosing frame, then `CALL` the thunk entry with that arity (push
+    /// return IP + new frame whose slots 0..N-1 are the captures). The thunk
+    /// ends in `RETURN`, which resumes at the next op. A following `POP`
+    /// discards the thunk's sentinel return value so a pending function
+    /// return value stays on top.
     fn emit_run_defers(&mut self) {
-        let defers = self.fn_defers.clone();
-        for (label, captures) in defers.iter().rev() {
-            for cap in captures {
-                if let Some(slot) = self.lookup_slot(cap) {
+        let defers = self.fn_defers.thunks.clone();
+        for thunk in defers.iter().rev() {
+            let skip = self.bytecode.fresh_label();
+            if let Some(flag) = thunk.flag {
+                self.bytecode.push_load(flag);
+                self.bytecode.push_op(IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: skip,
+                    loc: DebugLoc::unknown(),
+                    hint: Default::default(),
+                });
+                self.emit_defer_flag(flag, false);
+            }
+            for (k, cap) in thunk.captures.iter().enumerate() {
+                let slot = self.lookup_slot(cap).or(thunk.slots.get(k).copied().flatten());
+                if let Some(slot) = slot {
                     self.bytecode.push_load(slot);
                 } else {
                     // Typecheck should have rejected unknown captures; emit a
@@ -287,9 +306,81 @@ impl Compiler {
                 }
             }
             self.bytecode
-                .emit_entry(EntryKind::Call, captures.len() as u32, *label);
+                .emit_entry(EntryKind::Call, thunk.captures.len() as u32, thunk.label);
             self.bytecode.push_pop();
+            if thunk.flag.is_some() {
+                self.bytecode.bind_label(skip);
+            }
         }
+    }
+
+    /// `flag = armed` for a `defer` armed flag slot.
+    fn emit_defer_flag(&mut self, flag: u32, armed: bool) {
+        self.bytecode.push(Byte::new_with_value(
+            Instruction::CONST,
+            Value::from(armed).raw() as _,
+        ));
+        self.bytecode.push_store_pop(flag);
+    }
+
+    /// Number of `defer` statements in a function body (not in nested
+    /// lambdas, which are functions of their own).
+    fn count_defers(body: &Output) -> usize {
+        fn walk(node: &Output, n: &mut usize) {
+            match node.1.as_ref() {
+                Expression::Lambda { .. } => return,
+                Expression::Defer { .. } => *n += 1,
+                _ => {}
+            }
+            node.1.for_each_child(&mut |c| walk(c, n));
+        }
+        let mut n = 0;
+        walk(body, &mut n);
+        n
+    }
+
+    /// Start a function body that may hold `defer`s: one armed flag slot
+    /// per `defer`, cleared here so an exit (or the unwinder) runs only the
+    /// thunks whose `defer` statement ran.
+    fn begin_fn_defers(&mut self, body: &Output) {
+        let n = Self::count_defers(body);
+        let mut flags = Vec::with_capacity(n);
+        for i in 0..n {
+            let slot = self.context.variables.intern(format!("__defer_armed{i}")) as u32;
+            self.emit_defer_flag(slot, false);
+            flags.push(slot);
+        }
+        self.fn_defers.flags = flags;
+    }
+
+    /// End a function body: a function with `defer`s gets a cleanup pad
+    /// after its code. The VM unwinder jumps there when a panic (or a
+    /// cancellation) leaves the frame; the pad runs the armed thunks, then
+    /// `unwind_resume` hands the frame back to the unwinder. The body is
+    /// pinned so the pad's slot numbers stay true.
+    fn finish_fn_defers(&mut self, table_key: &str) -> bool {
+        if self.fn_defers.is_empty() {
+            return false;
+        }
+        let Some(native_id) = self.native_id("unwind_resume") else {
+            return false;
+        };
+        let pad = self.bytecode.fresh_label();
+        self.bytecode.bind_label(pad);
+        self.emit_run_defers();
+        self.bytecode
+            .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+        self.bytecode.push_host_invoke(0);
+        // Not reached (`unwind_resume` never returns to the pad).
+        self.bytecode.push_return();
+        let thunks = self.fn_defers.thunks.iter().map(|t| (t.label, t.after)).collect();
+        self.cleanup_pads.push(CleanupPad {
+            func: table_key.to_string(),
+            pad,
+            thunks,
+            frame_words: self.context.variables.len() as u32,
+        });
+        true
     }
 
     fn loc_from_span(&mut self, span: SimpleSpan) -> DebugLoc {
@@ -12300,6 +12391,7 @@ impl Compiler {
                 self.bytecode.push_store_pop(slot);
             }
         }
+        self.begin_fn_defers(body);
         let body_op_start = self.bytecode.ops().len();
         let mut c = self.do_compile(body);
         self.bytecode.append(&mut c);
@@ -12308,12 +12400,16 @@ impl Compiler {
             self.emit_fallthrough_return(name, body.0);
         }
         self.emit_shared_try_fail_epilogue();
+        let pinned = self.finish_fn_defers(&qualified);
 
         let body_end = self.bytecode.len();
         self.record_fn_span(qualified.clone(), code_start, body_end);
         let entry = self.fn_entry_labels.get(&qualified).copied();
         self.bytecode
             .record_func_with_sp(qualified.clone(), entry, code_start, body_end, entry_sp);
+        if pinned {
+            self.bytecode.set_last_func_pinned();
+        }
         self.record_unboxed_class_fields();
 
         self.fn_defers = prev_fn_defers;
@@ -12750,6 +12846,7 @@ impl Compiler {
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
+            self.begin_fn_defers(body);
             // One HIR per instance: the generic body's HIR at this clone's
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
@@ -12762,6 +12859,7 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
+            let pinned = self.finish_fn_defers(&mono_name);
             // Its own IL function: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
@@ -12775,6 +12873,9 @@ impl Compiler {
                 clone_end,
                 clone_entry_sp,
             );
+            if pinned {
+                self.bytecode.set_last_func_pinned();
+            }
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
@@ -16515,6 +16616,7 @@ impl Compiler {
             let prev_active = self.active_fn_name.take();
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             self.active_fn_name = Some(name.to_string());
+            self.begin_fn_defers(body);
             let lowered = prev_fn_table_key_was_none
                 && type_params.is_empty()
                 && dict_arity == 0
@@ -16533,6 +16635,7 @@ impl Compiler {
                 self.emit_fallthrough_return(name, body.0);
             }
             self.emit_shared_try_fail_epilogue();
+            let pinned = self.finish_fn_defers(&table_key);
             self.debug_scope_exit(saved_debug_scope);
 
             self.fn_defers = prev_fn_defers;
@@ -16566,6 +16669,9 @@ impl Compiler {
                 body_end,
                 entry_sp,
             );
+            if pinned {
+                self.bytecode.set_last_func_pinned();
+            }
             self.record_unboxed_class_fields();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
@@ -17610,7 +17716,15 @@ impl Compiler {
 
                 bb.bind_label(thunk, self.bytecode.il_mut());
                 let cap_names: Vec<String> = captures.iter().map(|c| (*c).to_string()).collect();
-                self.fn_defers.push((thunk, cap_names));
+                let flag = self.fn_defers.next_flag();
+                let slots = cap_names.iter().map(|c| self.lookup_slot(c)).collect();
+                self.fn_defers.thunks.push(DeferThunk {
+                    label: thunk,
+                    after,
+                    captures: cap_names,
+                    slots,
+                    flag,
+                });
 
                 // Captures occupy slots 0..N-1 (matches emit_run_defers CALL args).
                 let prev_vars = std::mem::take(&mut self.context.variables);
@@ -17625,6 +17739,9 @@ impl Compiler {
                 self.bytecode.push_return();
 
                 bb.bind_label(after, self.bytecode.il_mut());
+                if let Some(flag) = flag {
+                    self.emit_defer_flag(flag, true);
+                }
             }
             Expression::Call { name, args } => {
                 bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span))
@@ -18658,6 +18775,8 @@ impl Compiler {
                 let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
+                let prev_fn_defers = std::mem::take(&mut self.fn_defers);
+                self.begin_fn_defers(body);
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
                     let mut body_bc = self.do_compile(body);
@@ -18671,6 +18790,8 @@ impl Compiler {
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
                 self.emit_shared_try_fail_epilogue();
+                let pinned = self.finish_fn_defers(&fn_name);
+                self.fn_defers = prev_fn_defers;
 
                 let body_end = self.bytecode.len();
                 // Flatten remaps per IlFunc; unrecorded tests share the epilogue
@@ -18684,6 +18805,9 @@ impl Compiler {
                     body_end,
                     0,
                 );
+                if pinned {
+                    self.bytecode.set_last_func_pinned();
+                }
                 self.record_unboxed_class_fields();
 
                 self.compiling_result_mode = prev_result_mode;
@@ -19877,6 +20001,31 @@ impl Compiler {
         }
         self.program_start_offset = resolve_entry(self.program_start_offset as usize) as u32;
         self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
+        let mut cleanup = Vec::new();
+        for pad in &self.cleanup_pads {
+            let ranges = (|| {
+                let start = self
+                    .fn_entry_labels
+                    .get(&pad.func)
+                    .and_then(|l| resolve_fn_label_pc(&pad.func, l.0))
+                    .or_else(|| self.functions.get(&pad.func).copied())?;
+                let pad_pc = resolve_fn_label_pc(&pad.func, pad.pad.0)?;
+                let mut cuts = Vec::new();
+                for &(thunk, after) in &pad.thunks {
+                    cuts.push((
+                        resolve_fn_label_pc(&pad.func, thunk.0)?,
+                        resolve_fn_label_pc(&pad.func, after.0)?,
+                    ));
+                }
+                cuts.sort_unstable();
+                Some(cleanup_ranges_for(start, pad_pc, &cuts, pad.frame_words))
+            })();
+            // A body that is not its own IL function (a generic template:
+            // its instances carry their own pads) resolves to nothing.
+            cleanup.extend(ranges.unwrap_or_default());
+        }
+        cleanup.sort_unstable_by_key(|r: &common::CleanupRange| r.start_pc);
+        self.cleanup_ranges = cleanup;
 
         self.debug_locs = lowered.debug_locs;
 
@@ -20106,4 +20255,32 @@ fn let_bound_names<'a>(stmt: &'a Output<'a>) -> Vec<&'a str> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The stretches of `start..pad` outside the thunk bodies `cuts` (sorted
+/// `(thunk, after)` pcs), each unwinding through `pad`.
+fn cleanup_ranges_for(
+    start: usize,
+    pad: usize,
+    cuts: &[(usize, usize)],
+    frame_words: u32,
+) -> Vec<common::CleanupRange> {
+    let mut out = Vec::new();
+    let mut lo = start;
+    let mut push = |lo: usize, hi: usize| {
+        if lo < hi {
+            out.push(common::CleanupRange {
+                start_pc: lo as u32,
+                end_pc: hi as u32,
+                pad_pc: pad as u32,
+                frame_words,
+            });
+        }
+    };
+    for &(thunk, after) in cuts {
+        push(lo, thunk.min(pad));
+        lo = lo.max(after);
+    }
+    push(lo, pad);
+    out
 }

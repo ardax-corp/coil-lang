@@ -53,6 +53,10 @@ pub const GC_MODULE: &str = "gc";
 /// Process clocks (`wall_nanos`, `mono_nanos`, `sleep_ms`). Not virtual `time`.
 pub const CLOCK_MODULE: &str = "clock";
 
+/// Task scheduler natives behind the embedded `task` module (`task::scope`, …).
+/// Not meant for direct use: the `task` module wraps them.
+pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -1019,6 +1023,23 @@ impl VirtualModules {
                 ("wall_nanos", common::CLOCK_WALL_NANOS_NATIVE),
                 ("mono_nanos", common::CLOCK_MONO_NANOS_NATIVE),
                 ("sleep_ms", common::CLOCK_SLEEP_MS_NATIVE),
+            ]),
+        );
+
+        modules.insert(
+            PRELUDE_TASK_MODULE,
+            host_exports(&[
+                ("task_scope_open", "task_scope_open"),
+                ("task_scope_close", "task_scope_close"),
+                ("task_scope_error", "task_scope_error"),
+                ("task_spawn", "task_spawn"),
+                ("task_join", "task_join"),
+                ("task_error", "task_error"),
+                ("task_sleep", "task_sleep"),
+                ("task_yield", "task_yield"),
+                ("task_cancel", "task_cancel"),
+                ("task_shield_enter", "task_shield_enter"),
+                ("task_shield_exit", "task_shield_exit"),
             ]),
         );
 

@@ -18,6 +18,13 @@ pub enum HostOp {
     Ordinary,
     Collect,
     RegisterFinalizer,
+    /// Task scheduler native (`task_*`): the VM runs it, since it can switch
+    /// tasks. Ids [`common::TASK_SCOPE_OPEN_ID`]..=[`common::TASK_YIELD_ID`]
+    /// and [`common::TASK_CANCEL_ID`]..=[`common::TASK_SHIELD_EXIT_ID`].
+    Task,
+    /// `unwind_resume`: the end of a `defer` cleanup pad; the VM unwinder
+    /// takes the frame back ([`common::UNWIND_RESUME_ID`]).
+    Unwind,
 }
 
 pub trait NativeFn: Send + Sync {

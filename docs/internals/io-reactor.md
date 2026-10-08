@@ -16,57 +16,36 @@ Host streams store a [`NativeHandle`](../../machine/src/io_handle.rs) (`File` / 
 | Surface | Behavior |
 |---------|----------|
 | L0 `read` / `write` / `accept` | Always non-blocking; `WouldBlock` when not ready |
-| `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | **Top-level:** park the VM (`PendingIoWait`) until ready. **Inside a coroutine:** register a waiter and yield so many awaits can share one `poll` |
-| `drive()` | Non-blocking `poll_once` on registered async waiters |
-| `wait_ready()` | Block until ≥1 registered waiter is ready (batch); no-op when none registered |
-| **`block_on(coro)`** (prelude) | Resume until `done`; calls `wait_ready` between resumes |
-| Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)) — top-level park path |
+| `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | Inside a `task::scope` with other tasks: suspend the **task** and run others ([tasks](tasks.md)). Otherwise: park the VM (`PendingIoWait`) until ready, inside a generator too (a generator never yields because of IO) |
+| `drive()` / `wait_ready()` | **Deprecated** (warning `E0129`). Leftovers from manual multiplexing; nothing registers waiters for them any more. Use `task::scope` |
+| **`block_on(coro)`** (prelude) | **Deprecated** (warning `E0129`). Resume until `done`. IO inside parks as above |
+| Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)), so they work unchanged in and out of tasks |
 
-Preferred DX — async work, sync boundary:
+Concurrent IO uses tasks:
 
 ```coil
-use io::{Stream};
-async fn copy(Stream a, Stream b) -> Result<(), IoError> {
-    // L0 + await_* …
-}
+use task::{scope, Scope};
+
 fn main() {
-    block_on(copy(in, out))?;
+    let r = scope(fn (Scope s) {
+        let a = s.spawn(fn () => serve(c1));
+        let b = s.spawn(fn () => serve(c2));
+        0
+    });
 }
 ```
 
-`block_on` is auto-imported from `prelude`. Intermediate `yield`s are discarded;
-only the final `return` value is kept. IO `await_*` inside the coroutine yields
-cooperatively; `block_on` parks on `wait_ready` between resumes.
-
-## Batching without `block_on`
-
-Multiple coroutine handles can register waiters and share one poll:
-
-```coil
-use io::{wait_ready, ...};
-
-fn main() {
-    let h1 = serve(c1);
-    let h2 = serve(c2);
-    while !done(h1) || !done(h2) {
-        if !done(h1) { resume h1; }
-        if !done(h2) { resume h2; }
-        wait_ready();
-    }
-}
-```
-
-Each `await_*` inside `serve` yields after registering interest; `wait_ready`
-runs one multiplexed wait over all outstanding handles.
+Each IO wait inside `serve` suspends its task; the scheduler polls every
+waiting task's handle at once when none is ready to run.
 
 ## Waiting on readiness
 
-Top-level `await_*` and sync adapters call
+The VM park path and sync adapters call
 [`IoReactor::wait_fd`](../../machine/src/io_reactor.rs) (via
-[`reactor_wait_fd`](../../machine/src/io.rs)). Cooperative awaits use
-[`register_wait`](../../machine/src/io_reactor.rs) + yield.
-Userland sync adapters (`write_all`, …) reach the park path through top-level
-`wait_readable` / `wait_writable`.
+[`reactor_wait_fd`](../../machine/src/io.rs)). A task wait uses
+[`register_wait`](../../machine/src/io_reactor.rs) on the scheduler's own
+`IoReactor` and [`take_ready`](../../machine/src/io_reactor.rs) after
+`wait_any`.
 
 When a CPU reactor is bound (`HostStateGuard`), those blocking waits use
 [`wait_fd_helping`](../../machine/src/io_reactor.rs): short poll slices interleaved with
@@ -79,6 +58,9 @@ step per `read` / `write` until the handshake completes,
 so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
 the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
 — COI-116). The pool worker still runs the peer while the waiter polls.
+Inside a `task::scope` with other tasks, `Stream.park` suspends the task
+instead (it returns a park request), so a TLS handshake does not stall the
+scheduler.
 
 `Stream.attach` is a compile-time capability (`--allow-attach` / `HostGrants`,
 default deny). It is not a process-wide switch and is not read from
@@ -103,9 +85,12 @@ is OK (best-effort close_notify).
 | `stream_park` | **120** | `Stream.park` |
 | `clock_wall_nanos` | **121** | `clock::wall_nanos` (unix UTC nanos) |
 | `clock_mono_nanos` | **122** | `clock::mono_nanos` (process Instant snapshot) |
-| `clock_sleep_ms` | **123** | `clock::sleep_ms` (real thread sleep) |
+| `clock_sleep_ms` | **123** | `clock::sleep_ms` (thread sleep; suspends the task inside a `task::scope`) |
 | `result_unit_probe` | **124** | host `Result<(), E>` probe |
 | `math_atan` … `math_tanh` | **125–135** | M1 `prelude::math` (see below) |
+| `task_scope_open` … `task_yield` | **144–151** | embedded `task` module ([tasks](tasks.md)); archive minor 32 |
+| `unwind_resume` | **152** | end of a `defer` cleanup pad ([tasks](tasks.md#unwinding)); archive minor 33 |
+| `task_cancel`, `task_shield_enter`, `task_shield_exit` | **153–155** | embedded `task` module; archive minor 33 |
 
 119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of

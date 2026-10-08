@@ -25,6 +25,7 @@ pub mod runtime_wire;
 pub mod shared_heap;
 pub mod str_bytes;
 pub mod stream_attach;
+mod task;
 pub mod thread;
 pub mod value_eq;
 pub mod vec_ops;

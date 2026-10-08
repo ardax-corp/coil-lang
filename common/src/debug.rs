@@ -59,6 +59,26 @@ pub struct FnDebugSym {
     pub entry_pc: u32,
 }
 
+/// A `defer` cleanup range: a frame whose pc is in `start_pc..end_pc` is
+/// left through the cleanup pad at `pad_pc`, which runs the function's armed
+/// `defer` thunks. Sorted by `start_pc`, non-overlapping.
+#[derive(Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, Debug)]
+#[rkyv(compare(PartialEq))]
+pub struct CleanupRange {
+    pub start_pc: u32,
+    pub end_pc: u32,
+    pub pad_pc: u32,
+    /// Slots the frame uses; the pad's calls go above them.
+    pub frame_words: u32,
+}
+
+/// The cleanup range holding `pc`, if any (`ranges` sorted by `start_pc`).
+pub fn cleanup_range_at(ranges: &[CleanupRange], pc: usize) -> Option<&CleanupRange> {
+    let i = ranges.partition_point(|r| (r.start_pc as usize) <= pc);
+    let r = ranges.get(i.checked_sub(1)?)?;
+    (pc < r.end_pc as usize).then_some(r)
+}
+
 /// Debug sections loaded with bytecode (not the reporting `SourceMap`).
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize, Debug, Default)]
 #[rkyv(compare(PartialEq))]
@@ -70,6 +90,8 @@ pub struct ProgramDebug {
     /// One per [`Self::debug_locs`] entry, or empty when not recorded
     /// (archives before minor 30): then lines come from the source files.
     pub debug_lines: Vec<DebugLine>,
+    /// `defer` cleanup ranges (minor 33+); empty means panics run no `defer`.
+    pub cleanup: Vec<CleanupRange>,
 }
 
 impl ProgramDebug {
@@ -79,6 +101,7 @@ impl ProgramDebug {
             debug_locs: vec![DebugLoc::unknown(); len],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup: Vec::new(),
         }
     }
 
