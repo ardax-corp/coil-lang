@@ -34,6 +34,16 @@ pub struct Shape {
     result: Option<HirId>,
     /// The trailing `return` (dropped in the copy).
     ret: Option<HirId>,
+    /// The result is a heap value: a temp holding it past the statement
+    /// would keep it alive, so the call must be the statement's operand.
+    heap_result: bool,
+}
+
+impl Shape {
+    pub fn with_heap_result(mut self, heap: bool) -> Self {
+        self.heap_result = heap;
+        self
+    }
 }
 
 /// HIR call weight in [`inlinable`]'s cost, as the IL tiny-inline counts a call.
@@ -98,7 +108,12 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         (None, _) if returns == 0 => (None, None),
         _ => return Err("return"),
     };
-    Ok(Shape { stmts, result, ret })
+    Ok(Shape {
+        stmts,
+        result,
+        ret,
+        heap_result: false,
+    })
 }
 
 /// Rewrite every eligible call site of `caller`. `callee_of(call)` names
@@ -134,14 +149,7 @@ pub fn inline_calls<'a>(
             }
         }
         // A tail's calls hoist into the statements; the tail itself stays.
-        if let Some(t) = tail {
-            while let Some((call, callee, shape)) = b.site_in(t, false, &callee_of) {
-                if b.body.exprs.len() - b.original > growth {
-                    break;
-                }
-                b.splice(call, callee, &shape, Site::Nested, &mut out);
-            }
-        }
+        let tail = tail.and_then(|t| b.statement(t, &callee_of, growth, &mut out));
         b.body.exprs[i].kind = HirKind::Block { stmts: out, tail };
     }
     (b.sites > 0).then_some((b.body, b.sites))
@@ -177,7 +185,7 @@ impl Inliner {
         out: &mut Vec<HirId>,
     ) -> Option<HirId> {
         while self.body.exprs.len() - self.original <= growth {
-            let Some((call, callee, shape)) = self.site_in(s, true, callee_of) else {
+            let Some((call, callee, shape)) = self.site_in(s, callee_of) else {
                 break;
             };
             let site = if call == s {
@@ -217,14 +225,13 @@ impl Inliner {
     fn site_in<'a>(
         &self,
         s: HirId,
-        stmt: bool,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
         let b = &self.body;
         let root = match &b.expr(s).kind {
-            HirKind::Let { init: Some(i), .. } if stmt => *i,
-            HirKind::Return(Some(v)) if stmt => *v,
-            HirKind::Assign { place, value } if stmt => {
+            HirKind::Let { init: Some(i), .. } => *i,
+            HirKind::Return(Some(v)) => *v,
+            HirKind::Assign { place, value } => {
                 // The place is computed after the value only when it has
                 // no effects of its own; a compound place is also read.
                 let compound = b.expr(s).flags.contains(HirFlags::COMPOUND);
@@ -242,7 +249,7 @@ impl Inliner {
         };
         let mut found = None;
         let _ = self.search(root, callee_of, &mut found);
-        found
+        found.filter(|(call, _, shape)| *call == root || !shape.heap_result)
     }
 
     /// Walk `e` in evaluation order. `Err` stops at an operand that is not
@@ -272,9 +279,17 @@ impl Inliner {
                 callee: Callee::Named { .. } | Callee::Method { .. },
                 args,
             } => {
-                seq(args, found)?;
-                if found.is_some() {
-                    return Ok(());
+                // A call's own arguments are bound in order ahead of the
+                // spliced body, so they need not be pure; only a nested
+                // call past an impure argument cannot move.
+                for &a in args {
+                    let nested = self.search(a, callee_of, found);
+                    if found.is_some() {
+                        return Ok(());
+                    }
+                    if nested.is_err() || !self.pure(a) {
+                        break;
+                    }
                 }
                 if (e.0 as usize) < self.original
                     && let Some((callee, shape)) = callee_of(e)
@@ -423,7 +438,7 @@ impl Inliner {
 }
 
 /// Whether `callee` assigns parameter `p` or a place rooted at it by index.
-fn rebinds(callee: &HirBody, p: LocalId) -> bool {
+pub fn rebinds(callee: &HirBody, p: LocalId) -> bool {
     let rooted = |mut place: HirId| loop {
         match &callee.expr(place).kind {
             HirKind::Local(l) => return *l == p,
