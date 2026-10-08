@@ -198,6 +198,8 @@ fn method_call_target_relocated_after_static_init_splice() {
         .unwrap()
         .join("examples/static_singleton.hy");
     let mut pipeline = crate::Pipeline::new();
+    // Pins the callee's own code; typed inlining would splice it.
+    pipeline.set_hir_inline(false);
     pipeline.bind_workspace_language_roots();
     let (bytecode, constants) = pipeline
         .compile_src_from_file(path.to_str().unwrap())
@@ -4797,6 +4799,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Pins the callee's own code; typed inlining would splice it.
+    pipeline.set_hir_inline(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let hot_off = pipeline.compiler_mut().get_function("hot").expect("hot");
     let main_off = pipeline.compiler_mut().get_function("main").expect("main");
@@ -7659,7 +7663,7 @@ fn main() {
 
 #[test]
 fn class_ctor_emits_init_typed() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_tuned(
         r#"
 class Box { pub n: int }
 fn take(Box b) -> int {
@@ -7670,6 +7674,8 @@ fn main() {
     return take(b);
 }
 "#,
+        // Pins the callee's own code; typed inlining would splice it.
+        |c| c.set_hir_inline(false),
     );
     assert!(
         bc.iter().any(|b| matches!(
@@ -9297,7 +9303,7 @@ fn pair_int_churn_stays_two_slot() {
 
 #[test]
 fn local_cse_reuses_stored_mul() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_tuned(
         r#"
 fn recompute(int a, int b) -> int {
     let x = a * b;
@@ -9311,6 +9317,8 @@ fn main() {
     return recompute(n + 2, n + 3);
 }
 "#,
+        // Pins the callee's own code; typed inlining would splice it.
+        |c| c.set_hir_inline(false),
     );
     let muls = bc
         .iter()

@@ -306,7 +306,10 @@ pub(crate) fn note_hir_fallback(reason: &str) {
 
 /// Count `sites` call sites inlined into one HIR body.
 pub(crate) fn note_hir_inlined(sites: usize) {
-    with_stats(|s| s.hir_inlined += sites);
+    with_stats(|s| {
+        s.hir_inlined += sites;
+        s.functions_inlined += sites;
+    });
 }
 
 /// Count one body whose inlined HIR was refused, and why.
