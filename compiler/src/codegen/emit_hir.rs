@@ -6150,6 +6150,18 @@ impl Compiler {
         self.bytecode.push_store_pop(slot);
         let saved_base = emit.payload_base.take();
         let end = self.bytecode.fresh_label();
+        if self.hir_match_tree
+            && let Some(tree) = crate::hir::match_tree::outer_groups(arms)
+            && tree
+                .groups
+                .iter()
+                .all(|g| self.checker.scalar_for(g.enum_name, g.variant).is_none())
+        {
+            self.hir_match_grouped(hir, emit, &tree, slot, &ty, want, end);
+            emit.payload_base = saved_base;
+            self.bytecode.bind_label(end);
+            return;
+        }
         for (i, arm) in arms.iter().enumerate() {
             let is_last = i + 1 == arms.len();
             let mut test = SeqTest {
@@ -6188,6 +6200,123 @@ impl Compiler {
         }
         emit.payload_base = saved_base;
         self.bytecode.bind_label(end);
+    }
+
+    /// A nested match as a decision tree on its outer tag: one
+    /// `JumpIfMatch` per variant, then that variant's rows test only their
+    /// sub-patterns on the payload it unpacked. A group whose rows all miss
+    /// pops the payload and runs the catch-all, emitted once.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_match_grouped(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        tree: &crate::hir::match_tree::OuterTree<'_>,
+        slot: u32,
+        ty: &Ty,
+        want: Option<&Rep>,
+        end: IlLabel,
+    ) {
+        let catch = tree.catch_all.map(|_| self.bytecode.fresh_label());
+        let labels: Vec<IlLabel> = tree.groups.iter().map(|_| self.bytecode.fresh_label()).collect();
+        // With no catch-all the last group is the fall-through: emit it
+        // first, right after its `Unpack`, so no jump carries the payload.
+        let mut order: Vec<usize> = (0..tree.groups.len()).collect();
+        if catch.is_none() {
+            order.rotate_right(1);
+        }
+        let arity_of = |this: &Self, g: &crate::hir::match_tree::Group<'_>| {
+            this.checker.arity_for(g.enum_name, g.variant).unwrap_or(0) as u32
+        };
+        // Dispatch: every group tested when a catch-all takes the rest,
+        // else the last group is the only tag left and just unpacks.
+        self.bytecode.push_load(slot);
+        let tested = if catch.is_some() { tree.groups.len() } else { tree.groups.len() - 1 };
+        for (g, &label) in tree.groups.iter().zip(&labels).take(tested) {
+            let tag = self.checker.tag_for(g.enum_name, g.variant).expect("planned pattern tag");
+            let arity = arity_of(self, g);
+            self.hir_jump(IlJumpKind::JumpIfMatch { tag, arity }, label);
+        }
+        match (catch, tree.catch_all) {
+            (Some(catch), Some(arm)) => {
+                self.bytecode.push_pop();
+                self.bytecode.bind_label(catch);
+                let mut test = SeqTest {
+                    base: slot + 1,
+                    depth: 0,
+                    max_depth: 0,
+                    irrefutable: true,
+                    misses: Vec::new(),
+                };
+                self.hir_seq_test(hir, emit, &mut test, &arm.pat, slot, Some(ty), ValueLayout::Boxed);
+                self.hir_grouped_body(hir, emit, arm.body, &test, want);
+                self.hir_jump(IlJumpKind::Unconditional, end);
+            }
+            _ => {
+                let last = tree.groups.last().expect("a grouped match has a group");
+                let arity = arity_of(self, last);
+                self.bytecode.push(Byte::new(Instruction::Unpack).with_operand_u32(arity));
+            }
+        }
+        for &gi in &order {
+            let (g, label) = (&tree.groups[gi], labels[gi]);
+            if catch.is_some() || gi + 1 != tree.groups.len() {
+                self.bytecode.bind_label(label);
+            }
+            let arity = arity_of(self, g);
+            let field_tys = self.hir_payload_tys(ty, g.variant).unwrap_or_default();
+            for (r, &(fields, arm)) in g.rows.iter().enumerate() {
+                let mut test = SeqTest {
+                    base: slot + 1,
+                    depth: arity,
+                    max_depth: arity,
+                    // With no catch-all, exhaustiveness covers this tag
+                    // with its rows: the last one needs no test.
+                    irrefutable: catch.is_none() && r + 1 == g.rows.len(),
+                    misses: Vec::new(),
+                };
+                let subs = self.hir_seq_subpatterns(g.enum_name, g.variant, fields);
+                for k in 0..arity as usize {
+                    if let Some(Some(sub)) = subs.get(k).copied() {
+                        let layout = field_tys.get(k).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+                        self.hir_seq_test(hir, emit, &mut test, sub, slot + 1 + k as u32, field_tys.get(k), layout);
+                    }
+                }
+                self.hir_grouped_body(hir, emit, arm.body, &test, want);
+                self.hir_jump(IlJumpKind::Unconditional, end);
+                // Misses unwind to the payload and fall into the next row.
+                let deepest = test.misses.iter().map(|&(_, d)| d).max().unwrap_or(arity);
+                for d in (arity..=deepest).rev() {
+                    for &(miss, at) in &test.misses {
+                        if at == d {
+                            self.bytecode.bind_label(miss);
+                        }
+                    }
+                    if d > arity && !test.misses.is_empty() {
+                        self.bytecode.push_pop();
+                    }
+                }
+                if r + 1 == g.rows.len() && !test.misses.is_empty() {
+                    // Every row of this tag missed: the catch-all.
+                    for _ in 0..arity {
+                        self.bytecode.push_pop();
+                    }
+                    self.hir_jump(IlJumpKind::Unconditional, catch.expect("a refutable last row has a catch-all"));
+                }
+            }
+        }
+    }
+
+    /// One grouped-match arm body, its temps above the payload words.
+    fn hir_grouped_body(&mut self, hir: &HirBody, emit: &mut HirEmit, body: HirId, test: &SeqTest, want: Option<&Rep>) {
+        while (self.context.variables.len() as u32) < test.base + test.max_depth {
+            let pad = format!("__match{}", self.context.variables.len());
+            let _ = self.context.variables.intern(pad);
+        }
+        match want {
+            Some(want) => self.hir_value(hir, emit, body, want, 0),
+            None => self.hir_effect(hir, emit, body),
+        }
     }
 
     /// Branch to a new miss label of `test` (popping `pending` extra words
