@@ -64,6 +64,12 @@ fn compile_src_ast(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |c| c.set_hir_lowering(false))
 }
 
+/// Tests of how an enum value is built: a local built in place would
+/// otherwise stay in two slots with no `MakeEnum`.
+fn compile_src_boxed_locals(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.set_hir_pair_locals(false))
+}
+
 fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Vec<u64>) {
     let mut owned = String::new();
     let needs_io = src.contains("write(")
@@ -2656,7 +2662,7 @@ fn main() {
 fn record_construct_one_field_emits_correct_bytecode() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src("enum E { Foo { x: int } } fn main() { let _ = E::Foo { x: 1 }; }");
+        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let _ = E::Foo { x: 1 }; }");
 
     // Find the MAKE_ENUM. Its operand is tag (upper 16) and
     // arity (lower 16).
@@ -2727,7 +2733,7 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
     use common::Instruction;
     // Use bindings to keep the constructs alive in the
     // bytecode (the codegen is silent on unused `let _`).
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_boxed_locals(
         "enum E { A, B(int), C { x: int } } \
  fn main() { \
  let a = E::A; \
@@ -8988,7 +8994,8 @@ fn main() {
 
 #[test]
 fn two_slot_try_keeps_second_call_arg_on_success() {
-    let (bc, _) = compile_src(
+    // `step` would inline; the test pins its two-word `CALL`.
+    let (bc, _) = compile_src_tuned(
         r#"
 fn step(int n) -> Result<int, int> {
     return Result::Ok(n);
@@ -9002,6 +9009,7 @@ fn main() {
     let _ = pipe(2);
 }
 "#,
+        |c| c.set_hir_inline(false),
     );
     let has_add_then_call = bc.windows(2).any(|w| {
         let add_then_call = matches!(
@@ -9568,4 +9576,15 @@ fn hir_inline_respects_zero_inline_budget() {
         c.inline_cost.max_inline_cost = 0;
     });
     assert_eq!(call_count(&on), call_count(&off), "max_inline_cost = 0 keeps every CALL");
+}
+
+#[test]
+fn hir_pair_local_built_in_place_is_not_boxed() {
+    let (bc, _) = compile_src(
+        "fn main() { let o = Option::Some(3); let v = match o { Option::Some(x) => x, Option::None => 0 }; write(stdout(), to_bytes(format(\"%i\", v))); }",
+    );
+    assert!(
+        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+        "an Option local built in place stays in two slots"
+    );
 }

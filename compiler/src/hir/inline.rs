@@ -27,6 +27,15 @@ pub(crate) fn inline_from_env() -> bool {
     )
 }
 
+/// Inlining callees with a two-word result is on unless
+/// `COIL_HIR_INLINE_PAIR=0` (or `false` / `off` / `no`).
+pub(crate) fn pair_from_env() -> bool {
+    !matches!(
+        std::env::var("COIL_HIR_INLINE_PAIR").as_deref(),
+        Ok("0" | "false" | "off" | "no")
+    )
+}
+
 /// What a callee's body splices in as: its statements and its result.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -54,7 +63,8 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
     if !matches!(callee.kind, BodyKind::Function | BodyKind::Method) {
         return Err("kind");
     }
-    if callee.is_coro || callee.is_generic || callee.result_mode || !callee.captures.is_empty() {
+    // A Result-mode body's returns are explicit `Ok` / `Err` values.
+    if callee.is_coro || callee.is_generic || !callee.captures.is_empty() {
         return Err("body");
     }
     // A fixed array, tuple or record argument is shared with the callee,
@@ -457,6 +467,9 @@ impl Inliner {
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } => {
                 self.search(*x, callee_of, found)
             }
+            // The scrutinee or condition runs first; the arms and branches
+            // are not pure, which the enclosing operand checks.
+            HirKind::Match { scrutinee: x, .. } | HirKind::If { cond: x, .. } => self.search(*x, callee_of, found),
             _ if self.pure(e) => Ok(()),
             _ => Err(()),
         }
