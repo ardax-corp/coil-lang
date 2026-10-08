@@ -216,6 +216,7 @@ impl Checker {
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
+            whole_result_returns: HashSet::new(),
             option_mode_fns: HashSet::new(),
             test_case_names: Vec::new(),
             main_decl_span: None,
@@ -1548,6 +1549,7 @@ impl Checker {
         self.fn_option_mode = None;
         self.result_mode_fns.clear();
         self.result_mode_ok_is_result.clear();
+        self.whole_result_returns.clear();
         self.option_mode_fns.clear();
         self.test_case_names.clear();
         self.main_decl_span = None;
@@ -2771,6 +2773,15 @@ impl Checker {
                             "return value",
                         );
                     }
+                } else if let Some((ok, err)) = self.fn_result_mode.clone()
+                    && result_ok_err(&apply_ty_prune(&self.subst, &ok)).is_none()
+                    && result_ok_err(&apply_ty_prune(&self.subst, &ty)).is_some()
+                {
+                    // `return r;` with `r` already a `Result`: the Ok payload
+                    // is not one, so this is the whole value (#786).
+                    self.whole_result_returns.insert((e.0.start, e.0.end));
+                    let full = result_ty(ok, err);
+                    self.coerce_or_unify(&full, &ty, Some(e), &e.0.into_range(), "return value");
                 } else if let Some(ret) = self.current_return_ty.clone() {
                     self.coerce_or_unify(&ret, &ty, Some(e), &e.0.into_range(), "return value");
                 }
@@ -10894,6 +10905,12 @@ impl Checker {
     /// Whether codegen should Ok-wrap bare returns for `fn_name`.
     pub fn fn_is_result_mode(&self, fn_name: &str) -> bool {
         self.result_mode_fns.contains(fn_name)
+    }
+
+    /// Whether the result-mode `return` value at `start..end` is already the
+    /// function's whole `Result` (returned as is, not Ok-wrapped).
+    pub fn returns_whole_result(&self, start: usize, end: usize) -> bool {
+        self.whole_result_returns.contains(&(start, end))
     }
 
     /// Whether `fn_name`'s Result Ok payload is itself a Result (nested).

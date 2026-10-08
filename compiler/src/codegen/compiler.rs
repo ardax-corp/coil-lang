@@ -1386,6 +1386,9 @@ impl Compiler {
     /// result-mode Ok-wrap (COI-113). Nested `Result<Result<…>, …>` still
     /// wraps `return Result::Ok(payload)`.
     fn skip_result_ok_wrap_for_return(&self, expr: &Output<'_>) -> bool {
+        if self.checker.returns_whole_result(expr.0.start, expr.0.end) {
+            return true;
+        }
         let node = unwrap_expr_output(expr);
         let Expression::Construct {
             enum_name,
