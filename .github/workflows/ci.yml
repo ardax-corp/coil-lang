@@ -252,13 +252,13 @@ jobs:
           # inlining drops CALL targets); run the unoptimized pipeline too.
           ./target/debug/coil test -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
-      - name: Language harness under HIR lowering (`coil test --hir`)
+      - name: Language harness on the AST codegen (`coil test --ast-codegen`)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
-          # Bodies in the HIR subset compile from HIR; the rest fall back to
-          # the AST walk. Both paths must agree on every test.
-          ./target/debug/coil test --hir --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-          ./target/debug/coil test --hir -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          # HIR lowering is the default; the AST walk stays one release as
+          # an escape hatch, so both paths must agree on every test.
+          ./target/debug/coil test --ast-codegen --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test --ast-codegen -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: GC stress (`coil test`, collect and evacuate at every allocation)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
