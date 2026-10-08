@@ -768,7 +768,7 @@ impl Compiler {
             box_at: HashMap::new(),
             boxes: HashMap::new(),
         };
-        let stacks = lower::stack_arrays(hir);
+        let stacks = lower::stack_arrays(hir, &self.checker);
         emit.stacks = stacks.len;
         emit.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
@@ -5291,8 +5291,12 @@ impl Compiler {
                     }
                     HirBuiltin::Host(native) => {
                         // The native id goes under the arguments; staged
-                        // ones run into temps before it.
-                        if self.hir_stages_args(hir, emit, args, depth) {
+                        // ones run into temps before it. The plan checks the
+                        // arguments from `depth`, so at depth zero one that
+                        // may clobber (a `match` binding slots, a call that
+                        // stages its own) runs before the id as well.
+                        let clobbering = depth == 0 && args.iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
+                        if clobbering || self.hir_stages_args(hir, emit, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
                             for &tmp in &temps {
@@ -6318,6 +6322,12 @@ impl Compiler {
         if emit.ret != Rep::Pair(kind.to_string()) {
             return None;
         }
+        self.hir_rewrap_tag(hir, ty, arm)
+    }
+
+    /// The tag of `arm`'s `V(x) => return V(x)` when the returned variant
+    /// carries the same one-word payload as the matched one.
+    fn hir_rewrap_tag(&self, hir: &HirBody, ty: &Ty, arm: &HirArm) -> Option<u32> {
         let HirPat::Variant { enum_name, variant, fields: HirPatFields::Tuple(pats), .. } = &arm.pat else {
             return None;
         };
@@ -6384,6 +6394,45 @@ impl Compiler {
                     this.hir_arm(hir, emit, arm, 0, None, want, depth);
                 }
                 HirPat::Bind(_) => this.hir_arm(hir, emit, arm, 0, None, want, depth),
+                _ if matches!(emit.ret, Rep::Pair(_)) && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                    // `Err(e) => return Err(e)` from a niche word into a pair
+                    // return (`assert(..)?`): the word is the payload.
+                    if decode {
+                        Self::push_result_untag(&mut this.bytecode);
+                    }
+                    this.emit_run_defers();
+                    this.bytecode.push_const(tag as i32);
+                    this.push_return_two_word();
+                }
+                _ if emit.ret == BOXED && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                    // Into a boxed return (a test body's `assert(..)?`): make
+                    // the variant straight from the payload word.
+                    if decode {
+                        Self::push_result_untag(&mut this.bytecode);
+                    }
+                    let HirKind::Return(Some(value)) = hir.expr(arm.body).kind else { unreachable!() };
+                    let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } = &hir.expr(value).kind else {
+                        unreachable!()
+                    };
+                    let made_ty = Self::hir_ty(hir, value).expect("rewrap make has a type").clone();
+                    let payload = this.hir_payload_tys(&made_ty, variant).expect("rewrap payload");
+                    let kinds = common::pack_word_kinds(
+                        payload.iter().map(|t| crate::typechecking::value_layout::word_kind(&this.checker, t)),
+                    );
+                    this.bytecode.push_make_enum_kinds(tag as u16, 1, kinds);
+                    if this.checker.enum_has_drop(enum_name) {
+                        let type_id = this.checker.class_type_id(enum_name);
+                        this.bytecode.push(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id));
+                    }
+                    this.emit_run_defers();
+                    this.bytecode.push_return();
+                }
+                _ if emit.ret == Rep::Word(layout) && this.hir_rewrap_tag(hir, ty, arm).is_some() => {
+                    // Into the same niche layout: the matched word is the
+                    // returned value.
+                    this.emit_run_defers();
+                    this.bytecode.push_return();
+                }
                 _ => {
                     let rep = payload_rep(this, side);
                     let reads = rep.is_some()
@@ -6541,13 +6590,16 @@ impl Compiler {
                     }
                     self.context
                         .unboxed_class_locals
-                        .insert(key, (base, tys.len(), class));
+                        .insert(key.clone(), (base, tys.len(), class));
+                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
+                    let il_start = self.bytecode.il_mut().raw_len();
                     for (i, (&arg, ty)) in args.iter().zip(&tys).enumerate() {
                         let want = Rep::Word(self.value_layout(ty));
                         self.hir_value(hir, emit, arg, &want, 0);
                         self.bytecode.push_store_pop(base + i as u32);
                     }
+                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 if let Some(&n) = emit.stacks.get(&local.0) {
@@ -6559,9 +6611,12 @@ impl Compiler {
                         let slot = self.context.variables.intern(format!("__arrpad_{key}_{i}")) as u32;
                         debug_assert_eq!(slot, base + i as u32);
                     }
-                    self.context.stack_array_locals.insert(key, (base, n));
+                    self.context.stack_array_locals.insert(key.clone(), (base, n));
+                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
+                    let il_start = self.bytecode.il_mut().raw_len();
                     self.hir_stack_array_init(hir, emit, *local, *init);
+                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 // Value first: its operands live above every bound slot.
@@ -6704,6 +6759,10 @@ impl Compiler {
                 self.bytecode.bind_label(end);
             }
             HirKind::Defer { captures, body } => self.hir_defer(hir, emit, captures, *body),
+            // `while false { .. }` never runs, as the AST drops it.
+            HirKind::Loop { body }
+                if lower::while_shape(hir, *body)
+                    .is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
             HirKind::Loop { body } => {
                 let top = self.bytecode.fresh_label();
                 let exit = self.bytecode.fresh_label();
@@ -7296,6 +7355,85 @@ impl Compiler {
         }
     }
 
+    /// A split local's debug location: its fields or elements in their
+    /// own slots, as the AST's `debug_layout_of` at the `let`.
+    fn hir_debug_split(&mut self, hir: &HirBody, local: LocalId, key: &str) {
+        let Some(mut layout) = self.debug_layout_of(key) else {
+            return;
+        };
+        let ty = hir
+            .local(local)
+            .ty
+            .as_ref()
+            .map(|t| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t));
+        if let (crate::debug_vars::DebugVarLoc::Elems { elem, .. }, Some(Ty::Array { element, .. })) =
+            (&mut layout, ty.as_ref().map(crate::typechecking::ty::strip_readonly))
+        {
+            *elem = crate::debug_vars::DebugTy::from_ty(element);
+        }
+        if let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
+            if let Some(ty) = &ty {
+                var.ty = crate::debug_vars::DebugTy::from_ty(ty);
+            }
+            var.loc = layout;
+        }
+    }
+
+    /// Tag each store of a split local's component since `il_start` with
+    /// the component's own site (the AST's `tag_statement_defs`), so the
+    /// debugger shows a component a pass dropped as optimized out.
+    fn hir_debug_tag_components(&mut self, hir: &HirBody, local: LocalId, stmt: HirId, il_start: usize) {
+        let name = &hir.local(local).name;
+        // The name's span: its first whole-word occurrence in the `let`.
+        let (start, end) = hir.expr(stmt).span;
+        let Some(text) = self.source_text.get(start..end) else {
+            return;
+        };
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let Some(at) = text.match_indices(name.as_str()).map(|(i, _)| i).find(|&i| {
+            !word(text[..i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
+        }) else {
+            return;
+        };
+        let site = ((start + at) as u32, (start + at + name.len()) as u32);
+        let Some(var) = self.last_debug_var_mut(name) else {
+            return;
+        };
+        var.name_span = Some(site);
+        let slots = var.component_slots();
+        if slots.is_empty() {
+            return;
+        }
+        let file = self.intern_source_file();
+        let mut tagged = false;
+        let ops = self.bytecode.il_mut().ops_slice_mut();
+        let from = il_start.min(ops.len());
+        for op in &mut ops[from..] {
+            let written = match op {
+                IlOp::StorePop { slot, .. } => Some(*slot),
+                IlOp::Byte { byte, .. }
+                    if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
+                        && byte.load_store_count() == 1 =>
+                {
+                    Some(byte.load_store_slot_at(0))
+                }
+                _ => None,
+            };
+            if let Some(i) = written.and_then(|w| slots.iter().position(|&s| s == w)) {
+                let (start, end) = crate::debug_vars::DebugVar::component_site(site, i);
+                op.set_loc(common::DebugLoc {
+                    file,
+                    start_byte: start,
+                    end_byte: end.max(start + 1),
+                });
+                tagged = true;
+            }
+        }
+        if tagged && let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
+            var.def_sites.push(site);
+        }
+    }
+
     fn hir_bind_local(&mut self, hir: &HirBody, local: LocalId) -> u32 {
         let name = &hir.local(local).name;
         let key = if self.context.variables.key(name).is_some() {
@@ -7311,7 +7449,10 @@ impl Compiler {
     /// Push `lhs` then `rhs`, staging both through temps when
     /// [`lower::stages_rhs`] wants the right side at depth zero.
     fn hir_operands(&mut self, hir: &HirBody, emit: &mut HirEmit, lhs: HirId, rhs: HirId, depth: u32) {
-        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) {
+        // Two plain calls with leaf arguments stack, as the AST's
+        // `expr_is_stackable_direct_call` (`f(a) + g(b)` → `BinReturn`).
+        let stackable = |this: &Self| this.hir_stackable_call(hir, emit, lhs) && this.hir_stackable_call(hir, emit, rhs);
+        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) || stackable(self) {
             self.hir_value(hir, emit, lhs, &BOXED, depth);
             self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
             return;
@@ -7325,6 +7466,45 @@ impl Compiler {
         }
         self.bytecode.push_load(staged[0]);
         self.bytecode.push_load(staged[1]);
+    }
+
+    /// A call that emits a real one-word `CALL` of a known function with
+    /// leaf arguments, so a sibling operand can stay under it.
+    fn hir_stackable_call(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+        let HirKind::Call { callee: Callee::Named { .. }, args } = &hir.expr(id).kind else {
+            return false;
+        };
+        let Some(call) = emit.calls.get(&id.0) else { return false };
+        if call.method
+            || call.builtin.is_some()
+            || call.generic.is_some()
+            || call.instance.is_some()
+            || !call.ranges.is_empty()
+            || Self::hir_call_rep(call).words() != 1
+            || self.coroutine_fns.contains(&call.key)
+            || !(self.functions.contains_key(&call.key) || self.functions.contains_key(strip_overload_key(&call.key)))
+            || self.callee_is_tiny_inlineable(&call.key)
+        {
+            return false;
+        }
+        fn leaf(hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+            if emit.ops.contains_key(&id.0) {
+                return false;
+            }
+            match &hir.expr(id).kind {
+                HirKind::Lit(_) => true,
+                HirKind::Local(_) => !matches!(
+                    hir.expr(id).ty.as_ref().map(crate::typechecking::ty::strip_readonly),
+                    Some(Ty::Array { .. })
+                ),
+                HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => leaf(hir, emit, *operand),
+                HirKind::Bin { op, lhs, rhs } if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) => {
+                    leaf(hir, emit, *lhs) && leaf(hir, emit, *rhs)
+                }
+                _ => false,
+            }
+        }
+        args.iter().all(|&a| leaf(hir, emit, a))
     }
 
     /// A literal (under casts) already in `0..=255`: an int / byte cast of

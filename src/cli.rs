@@ -75,8 +75,8 @@ pub(crate) struct CliArgs {
     pub opt_level: OptLevel,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
-    /// `--hir`: lower function bodies from HIR where it covers them.
-    pub hir: bool,
+    /// `--hir` / `--ast-codegen`; `None` keeps the default (HIR, or `COIL_HIR`).
+    pub hir: Option<bool>,
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
@@ -315,7 +315,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             opt_level: OptLevel::Standard,
             opt_stats: false,
             opt_stats_json: false,
-            hir: false,
+            hir: None,
             host_grants: HostGrants::deny_all(),
             module_roots: Vec::new(),
         });
@@ -372,7 +372,7 @@ fn cli_from(
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
-        hir: false,
+        hir: None,
         host_grants: grants.into_grants(),
         module_roots: roots,
     }
@@ -391,7 +391,7 @@ impl RawCli {
         self.log.is_set()
             || self.opt.is_set()
             || self.profile.is_set()
-            || self.hir.hir
+            || self.hir.lowering().is_some()
             || self.include_tests
             || self.file.is_some()
             || self.grants.is_set()
@@ -413,7 +413,7 @@ impl RawCli {
                     return Err("missing input file (pass a .hy file or `--entry`)".into());
                 }
                 CliArgs {
-                    hir: self.hir.hir,
+                    hir: self.hir.lowering(),
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -484,7 +484,7 @@ impl RawCli {
                     return Err("compile requires an entry file".into());
                 }
                 CliArgs {
-                    hir: hir.hir,
+                    hir: hir.lowering(),
                     ..cli_from(
                         Command::Compile {
                             filename,

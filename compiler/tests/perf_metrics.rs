@@ -486,11 +486,12 @@ fn perf_field_hot_reuses_repeated_string_keys() {
 #[test]
 fn perf_for_in_array_uses_single_array_len() {
     let (bc, _, _, _, _) = compile("examples/for_in_array.hy");
-    // Loop hoist emits one ArrayLen; `io::sync` helpers linked via write_all
-    // contribute additional ArrayLen ops in the same archive.
+    // Loop hoist emits at most one ArrayLen (HIR folds a literal array's
+    // length to a constant, so none); `io::sync` helpers linked via
+    // write_all contribute additional ArrayLen ops in the same archive.
     let n = count_opcodes(&bc, Instruction::ArrayLen);
     assert!(
-        (1..=8).contains(&n),
+        n <= 8,
         "for_in_array should hoist ArrayLen out of the loop (got {n})"
     );
 }
@@ -1637,7 +1638,9 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
         "len(v) should hoist across pure absorb; stats={stats:?}"
     );
     assert!(
-        stats.proven_index >= 1,
+        // HIR keeps the scan's `ArrayPin` and rewrites the read to
+        // `IndexPinUnchecked` instead of proving a plain `Index`.
+        stats.proven_index >= 1 || stats.index_pin_rewrites >= 1,
         "v[i] under i < len(v) should prove; stats={stats:?}"
     );
     let syms = pipeline.program_debug().fn_symbols;
@@ -1680,7 +1683,9 @@ fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_impure.hy");
     let stats = compiler::last_bounds_stats();
     assert!(
-        stats.proven_index >= 1,
+        // HIR keeps the scan's `ArrayPin` and rewrites the read to
+        // `IndexPinUnchecked` instead of proving a plain `Index`.
+        stats.proven_index >= 1 || stats.index_pin_rewrites >= 1,
         "v[i] under i < len(v) should prove across absorb; stats={stats:?}"
     );
     let syms = pipeline.program_debug().fn_symbols;

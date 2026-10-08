@@ -310,7 +310,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
             opt_level: parts.opt.level(),
-            hir: parts.hir.hir,
+            hir: parts.hir.lowering(),
             grants: parts.grants.into_grants(),
             extra_roots: parts.roots.root,
             report: if parts.json {

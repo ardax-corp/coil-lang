@@ -49,10 +49,18 @@ test("nested array index") {
         .nth(3)
         .map(|(i, _)| i)
         .expect("four element stores");
+    // The AST folds `len(a)` to `CONST 4`; HIR folds the whole `len(a) == 4`
+    // to its boolean. Either way no `ArrayLen` runs and the poisoned outer
+    // length 2 never appears.
     let folded = &body[elems_end + 1];
     assert!(
-        matches!(*folded.bytecode(), Instruction::CONST) && folded.operand_u32() == 4,
-        "len(a) must const-fold to 4, not later nested outer len; got {:?}",
-        folded.bytecode()
+        matches!(*folded.bytecode(), Instruction::CONST) && folded.operand_u32() != 2,
+        "len(a) must const-fold, not to the later nested outer len; got {:?} {:#x}",
+        folded.bytecode(),
+        folded.operand_u32()
+    );
+    assert!(
+        !body.iter().any(|b| matches!(*b.bytecode(), Instruction::ArrayLen)),
+        "len(a) of a stack array must not read a length at run time"
     );
 }

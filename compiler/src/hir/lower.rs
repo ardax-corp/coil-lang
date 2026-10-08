@@ -318,8 +318,34 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
 /// later statement of the block that binds it. `a = b` between two stack arrays of one length and
 /// `a = [..]` of that many items store into the slots; a stack array that
 /// takes part in a copy or such a store never escapes.
-pub fn stack_arrays(body: &HirBody) -> StackArrays {
+pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
     use std::collections::HashSet;
+    // `len(a)` of a fixed-length array folds to a constant (`hir_len_call`),
+    // so its argument reads no slots.
+    let folded_len: HashSet<u32> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            HirKind::Call {
+                callee: Callee::Named { name, .. } | Callee::Method { name },
+                args,
+            } if name == "len" && args.len() == 1 => Some(args[0]),
+            _ => None,
+        })
+        .filter(|&arg| {
+            matches!(body.expr(arg).kind, HirKind::Local(_))
+                && body.expr(arg).ty.as_ref().is_some_and(|t| {
+                    matches!(
+                        crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)),
+                        Ty::Array {
+                            length: crate::typechecking::ty::ArrayLength::Static(_),
+                            ..
+                        }
+                    )
+                })
+        })
+        .map(|arg| arg.0)
+        .collect();
     let bases: HashSet<u32> = body
         .exprs
         .iter()
@@ -426,7 +452,7 @@ pub fn stack_arrays(body: &HirBody) -> StackArrays {
             HirKind::Local(local) if slot_reads.contains_key(&(i as u32)) => {
                 slot_uses.entry(local.0).or_default().push((i as u32, slot_reads[&(i as u32)]))
             }
-            HirKind::Local(local) if !bases.contains(&(i as u32)) => reads.entry(local.0).or_default().push(i as u32),
+            HirKind::Local(local) if !bases.contains(&(i as u32)) && !folded_len.contains(&(i as u32)) => reads.entry(local.0).or_default().push(i as u32),
             _ => {}
         }
     }
@@ -1188,7 +1214,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     let boxes = class_boxes(body, checker);
     walk.class_box_at = boxes.keys().copied().collect();
     walk.class_boxed = boxes.into_values().flatten().collect();
-    let stacks = stack_arrays(body);
+    let stacks = stack_arrays(body, checker);
     walk.stack = stacks.len;
     walk.box_at = stacks.box_at;
     walk.effect(root, 0).err()

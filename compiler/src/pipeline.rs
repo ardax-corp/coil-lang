@@ -100,7 +100,8 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
-    /// Lower function bodies from HIR where it covers them (`--hir` / `COIL_HIR=1`).
+    /// Lower function bodies from HIR (the default; `--ast-codegen` /
+    /// `COIL_HIR=0` keep the AST codegen).
     hir_lowering: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
@@ -1708,8 +1709,8 @@ impl Pipeline {
         }
     }
 
-    /// Lower function bodies from HIR where the HIR lowering covers them
-    /// (`--hir`); the rest keep the AST codegen. Defaults to `COIL_HIR=1`.
+    /// Lower function bodies from HIR (`on`) or keep the AST codegen
+    /// (`--ast-codegen`). Defaults to on unless `COIL_HIR=0`.
     pub fn set_hir_lowering(&mut self, on: bool) {
         self.hir_lowering = on;
         if self.compiler.get().is_some() {
@@ -2842,10 +2843,6 @@ fn main() -> int {
             stats.array_len_hoists >= 1,
             "len(b) should hoist across pure absorb; stats={stats:?}"
         );
-        assert!(
-            stats.proven_index >= 1,
-            "b[j] should be proven under i < len(b); stats={stats:?}"
-        );
         let snap = pipeline.cursor_il.as_ref().expect("retained IL");
         let unchecked = snap
             .ops
@@ -2871,9 +2868,11 @@ fn main() -> int {
                     | Instruction::DenseIndexJmpf
             )
         });
+        // `last_bounds_stats` is the last body the pass saw, which depends
+        // on body order, so `b[j]` being proven shows in the output.
         assert!(
-            unchecked >= 1 || bc_index,
-            "pure helper scan should uncheck or keep DenseIndex; stats={stats:?}"
+            stats.proven_index >= 1 || unchecked >= 1 || bc_index,
+            "b[j] should be proven under j < len(b) (unchecked or DenseIndex); stats={stats:?}"
         );
         let calls = bytecode
             .iter()

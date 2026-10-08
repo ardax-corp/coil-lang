@@ -198,6 +198,7 @@ impl Compiler {
     /// slices of it). Used for exact name spans in debug info.
     pub fn set_source_text(&mut self, text: &str) {
         self.source_base = (text.as_ptr() as usize, text.len());
+        self.source_text = text.to_string();
     }
 
     /// Byte span of `name` when it is a slice of the current source.

@@ -57,6 +57,13 @@ fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
 }
 
+/// Tests of a call-site peephole only the AST codegen does (predicate
+/// peel, pure-arg reorder, self-unroll). The HIR codegen leaves these calls
+/// plain; a guarded-call loop ran faster that way than with the peel.
+fn compile_src_ast(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.set_hir_lowering(false))
+}
+
 fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Vec<u64>) {
     let mut owned = String::new();
     let needs_io = src.contains("write(")
@@ -2954,7 +2961,7 @@ fn call_arg_prep_packs_three_loads() {
     // Predicate peel (2B) still applies, and since every arg is a plain
     // local the re-materializing peel reads them in place ,  the packed
     // LOAD feeding the CALL names `x, y, z`, not argument spills.
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_ast(
         "fn add(int a, int b, int c) -> int { \
  if a < 0 { return 0; } \
  if b < 0 { return 0; } \
@@ -3015,7 +3022,7 @@ fn predicate_peel_does_not_spill_leaf_args() {
 #[test]
 fn predicate_peel_spills_computed_guard_arg() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_ast(
         "fn add(int a, int b, int c) -> int { \
  if a < 0 { return 0; } \
  if b < 0 { return 0; } \
@@ -3854,7 +3861,7 @@ fn is_tiny_inline_il_accepts_compare_branch_diamond() {
 #[test]
 fn self_unroll_peels_one_level_at_call_site() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_ast(
         "fn fib(int n) -> int { \
                if n <= 2 { return 1; } \
                return fib(n - 1) + fib(n - 2); \
@@ -3891,7 +3898,7 @@ fn self_unroll_peels_one_level_at_call_site() {
 fn pure_arg_reorder_stores_pure_before_effectful() {
     use common::Instruction;
     // `sink` is non-tiny so the CALL path runs reorder.
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_ast(
         "fn effect() -> int { let acc = 0; while acc < 2 { acc = acc + 1; } return acc; } \
              fn sink(int a, int b) -> int { let sum = a + b; if sum < 0 { return 0; } return sum; } \
              fn main() { let result = sink(effect(), 10); }",
@@ -5367,7 +5374,10 @@ fn main() {
 #[test]
 fn fixed_array_local_uses_slots_and_boxes_on_escape() {
     use common::Instruction;
+    // The HIR codegen folds the constant stores and builds the escaping
+    // array straight from them, so this pins the AST's slot shape.
     let mut pipeline = crate::Pipeline::new();
+    pipeline.set_hir_lowering(false);
     let (bc, _pool) = pipeline
         .compile_src(
             "fn take([int; 3] xs) -> int { return xs[0]; } \

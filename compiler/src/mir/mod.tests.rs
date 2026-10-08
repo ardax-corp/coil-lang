@@ -4982,6 +4982,10 @@ fn main() {
     std::fs::write(&path, src).expect("write src");
     let mut p = crate::Pipeline::new();
     p.set_inline_max_cost(0);
+    // AST codegen: HIR leaves `score_res`'s payload on the stack (no `Seek`),
+    // so `return_convoy` sinks the scrutinee `LOAD` into the return and the
+    // body stays a four-op fuse-IL form the LIR infer cannot enter.
+    p.set_hir_lowering(false);
     let arts = p
         .compile_dissect(path.to_str().unwrap(), true)
         .expect("compile match helpers");

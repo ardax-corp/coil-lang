@@ -51,12 +51,29 @@ fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
     })
 }
 
-/// `--hir`: lower function bodies from HIR where it covers them.
+/// Which codegen lowers function bodies: HIR by default, `--ast-codegen`
+/// for the AST walk.
 #[derive(Args, Clone, Debug, Default)]
 pub struct HirFlags {
-    /// Lower function bodies from HIR where it covers them (also `COIL_HIR=1`)
-    #[arg(long)]
+    /// Lower function bodies from HIR (the default; `COIL_HIR=0` turns it off)
+    #[arg(long, conflicts_with = "ast_codegen")]
     pub hir: bool,
+    /// Compile every function body with the AST codegen instead of HIR (also `COIL_HIR=0`)
+    #[arg(long)]
+    pub ast_codegen: bool,
+}
+
+impl HirFlags {
+    /// The lowering a flag asks for; `None` keeps the default (`COIL_HIR`).
+    pub fn lowering(&self) -> Option<bool> {
+        if self.ast_codegen {
+            Some(false)
+        } else if self.hir {
+            Some(true)
+        } else {
+            None
+        }
+    }
 }
 
 /// Opt-stat dump (need a compile, not `run` / `test` / `debug`).

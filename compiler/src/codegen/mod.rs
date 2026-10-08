@@ -853,6 +853,9 @@ pub struct Compiler {
     /// `(address, len)` of the current module's source text: AST names are
     /// slices of it, so a name's byte offset is pointer arithmetic.
     source_base: (usize, usize),
+    /// A copy of that text: HIR names are owned, so their spans are found
+    /// in it.
+    source_text: String,
 
     /// When true, [`Expression::Match`] binds `end` as a plain label instead of
     /// a value-join (`JoinLabel`). Set while compiling a match whose value is
@@ -904,7 +907,8 @@ pub struct Compiler {
     stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
-    /// Lower the HIR core subset instead of the AST walk (`--hir` / `COIL_HIR=1`).
+    /// Lower function bodies from HIR instead of the AST walk (the default;
+    /// `COIL_HIR=0` keeps the AST walk).
     hir_lowering: bool,
     /// HIR of the module being compiled, when [`Self::hir_lowering`] is on.
     hir_module: Option<crate::hir::HirModule>,
@@ -1008,6 +1012,7 @@ impl Default for Compiler {
             debug_scope_ends: Vec::new(),
             debug_stmt_start: 0,
             source_base: (0, 0),
+            source_text: String::new(),
             suppress_match_fusion_barrier: false,
             statement_match_pending: false,
             arm_discard: Vec::new(),
