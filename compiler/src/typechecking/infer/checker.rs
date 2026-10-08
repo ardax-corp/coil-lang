@@ -4303,6 +4303,14 @@ impl Checker {
         {
             return self.reject_fixed_array_grow(method, range);
         }
+        // The method form runs through a shared thunk with no call site of
+        // its own, so it is still gated where it is written.
+        if *method == "attach"
+            && self.class_owner_from_ty(&resolved).as_deref()
+                == Some(crate::typechecking::ty::STREAM)
+        {
+            self.gate_stream_attach(range.clone());
+        }
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);

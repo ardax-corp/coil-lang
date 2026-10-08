@@ -27,6 +27,19 @@ impl Checker {
         &self.host_grants
     }
 
+    /// `stream.attach(…)` (the method form) without `--allow-attach`.
+    pub(super) fn gate_stream_attach(&mut self, range: Range<usize>) {
+        if self.host_grants.allow_attach {
+            return;
+        }
+        let _ = self.error_with_help(
+            ErrorCode::HostAttachDenied,
+            "`Stream.attach` requires `--allow-attach`".to_string(),
+            range,
+            Some("pass `--allow-attach` (or `Pipeline::grant_attach`)".to_string()),
+        );
+    }
+
     pub(super) fn gate_ffi_exec_symbol(
         &mut self,
         symbol: &str,

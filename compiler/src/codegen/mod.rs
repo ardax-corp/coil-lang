@@ -832,8 +832,6 @@ pub struct Compiler {
     /// for the calls reachable from `main` / tests
     /// ([`Compiler::capability_violations`]).
     gated_host_calls: HashMap<(u32, u32, u32), GatedHostCall>,
-    /// Entry points besides `main` and the tests, for the capability check.
-    entry_functions: Vec<String>,
 
     /// Compile-time scalar values for `const` bindings (frame stack).
     const_env_stack: Vec<HashMap<String, ConstValue>>,
@@ -1035,7 +1033,6 @@ impl Default for Compiler {
             source_file_indices: std::collections::BTreeMap::new(),
             source_file_list: Vec::new(),
             gated_host_calls: HashMap::new(),
-            entry_functions: Vec::new(),
             const_env_stack: Vec::new(),
             static_const_values: HashMap::new(),
             current_function_qualified: None,

@@ -108,15 +108,8 @@ impl Compiler {
         }
     }
 
-    /// Functions besides `main` and the tests the program is entered by
-    /// (a macro module's expansion entries).
-    pub fn set_entry_functions(&mut self, names: Vec<String>) {
-        self.entry_functions = names;
-    }
-
     /// The gated host calls reachable from `main`, the tests (when
-    /// compiling them), [`Self::set_entry_functions`] and static
-    /// initializers whose capabilities `granted` lacks. A program with none
+    /// compiling them) and static initializers whose capabilities `granted` lacks. A program with none
     /// of those never runs (a library on its own), so nothing is reported.
     pub fn capability_violations(&self, granted: Caps) -> Vec<CapViolation> {
         let missing = self
@@ -127,8 +120,7 @@ impl Compiler {
         if missing.is_empty() {
             return Vec::new();
         }
-        let mut roots = self.entry_functions.clone();
-        roots.push("main".to_string());
+        let roots = vec!["main".to_string()];
         let test_pcs: Vec<usize> = if self.include_tests {
             self.test_cases.iter().map(|&(_, pc)| pc as usize).collect()
         } else {

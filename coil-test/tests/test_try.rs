@@ -36,7 +36,7 @@ test("none") {
     for mode in [&[][..], &["--hir"][..]] {
         let out = Command::new(env!("CARGO_BIN_EXE_coil-test"))
             .args(mode)
-            .args(["--no-shuffle", "-j", "1"])
+            .args(["--no-shuffle", "-j", "1", "--allow-read"])
             .arg(&root)
             .output()
             .expect("spawn coil-test");

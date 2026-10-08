@@ -1176,9 +1176,10 @@ impl SubProgram {
         sub.overlays = self.overlays;
         let entry = expansion_entry_path();
         sub.overlays.insert(entry.clone(), self.text);
-        // The expansion entries are what runs; macros get no capabilities.
-        let entries = (0..self.entries.len()).map(|i| format!("__coil_run_{i}")).collect();
-        sub.compiler_lazy_mut().set_entry_functions(entries);
+        // Host calls in a macro are refused when it runs (the macro host
+        // wires none), with the macro named; a provider can hold macros
+        // the program never uses, so they are not checked here.
+        sub.host_grants.grant_all();
         let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
             Ok(out) => out,
             Err(_) => {
