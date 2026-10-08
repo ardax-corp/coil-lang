@@ -77,18 +77,27 @@ fn quarter(int x) -> Result<int, string> {
 }
 
 test("a Result callee under ?") {
-    assert(match quarter(12) {
-        Result::Ok(v) => v,
-        Result::Err(_) => -1,
-    } == 3, "ok")?;
-    assert(match quarter(6) {
-        Result::Ok(_) => "",
-        Result::Err(e) => e,
-    } == "odd", "inner err")?;
-    assert(match quarter(7) {
-        Result::Ok(_) => "",
-        Result::Err(e) => e,
-    } == "odd", "outer err")?;
+    assert(
+        match quarter(12) {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        } == 3,
+        "ok",
+    )?;
+    assert(
+        match quarter(6) {
+            Result::Ok(_) => "",
+            Result::Err(e) => e,
+        } == "odd",
+        "inner err",
+    )?;
+    assert(
+        match quarter(7) {
+            Result::Ok(_) => "",
+            Result::Err(e) => e,
+        } == "odd",
+        "outer err",
+    )?;
 }
 
 fn count_bad(int n) -> int {
@@ -113,10 +122,13 @@ test("a unit Result callee as a statement match") {
 test("a float Option result, kept and passed on") {
     let r = ratio(3, 4);
     let z = ratio(1, 0);
-    assert(match r {
-        Option::Some(v) => v == 0.75,
-        Option::None => false,
-    }, "some")?;
+    assert(
+        match r {
+            Option::Some(v) => v == 0.75,
+            Option::None => false,
+        },
+        "some",
+    )?;
     assert(match z {
         Option::Some(_) => false,
         Option::None => true,
