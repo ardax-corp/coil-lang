@@ -4946,14 +4946,35 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Self::hir_bin_instruction(*op, float)));
                 }
             }
-            HirKind::Logic { and, lhs, rhs } => {
-                // The AST codegen evaluates both sides into `AND` / `OR`.
+            HirKind::Logic { and, lhs, rhs } if lower::logic_eager(hir, *rhs) => {
+                // `b` has no effect and cannot trap: both sides into one `AND` / `OR`.
                 self.hir_operands(hir, emit, *lhs, *rhs, depth);
                 self.bytecode.push(Byte::new(if *and {
                     Instruction::AND
                 } else {
                     Instruction::OR
                 }));
+            }
+            HirKind::Logic { and, lhs, rhs } => {
+                // Short-circuit: `a && b` is `if a { b } else { false }`,
+                // `a || b` is `if a { true } else { b }`.
+                let short = self.bytecode.fresh_label();
+                let end = self.bytecode.fresh_label();
+                self.hir_value(hir, emit, *lhs, &BOXED, depth);
+                self.hir_jump(
+                    if *and {
+                        IlJumpKind::JumpIfFalse
+                    } else {
+                        IlJumpKind::JumpIfTrue
+                    },
+                    short,
+                );
+                self.hir_value(hir, emit, *rhs, &BOXED, depth);
+                self.hir_jump(IlJumpKind::Unconditional, end);
+                self.bytecode.bind_label(short);
+                self.bytecode
+                    .push(Byte::new_with_value(Instruction::CONST, Value::from(!*and).raw() as _));
+                self.bytecode.bind_label(end);
             }
             // A negated literal is one constant, as in the AST codegen (it
             // keeps small leaves inside the tiny-inline budget).
