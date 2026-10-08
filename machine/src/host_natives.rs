@@ -91,6 +91,8 @@ pub fn build_standard_host_natives(
     push_stream_fd(&mut out, &mut register_id);
     // Append-only after stream_fd: byte-offset `string` natives (minor 31).
     push_string_bytes(&mut out, &mut register_id);
+    // Append-only after string bytes: task scheduler natives (minor 32).
+    push_task_natives(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -224,6 +226,16 @@ fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
     let id = out.len();
     register_id(STREAM_PARK_NATIVE, id);
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        if crate::task::tasks_active() {
+            // Under a task scheduler: suspend this task, not the thread.
+            return match crate::stream_attach::stream_park_request(heap, args[0]) {
+                Ok(req) => {
+                    crate::io::request_io_park(req);
+                    Ok(None)
+                }
+                Err(e) => Ok(Some(as_result_unit(heap, Err(e)))),
+            };
+        }
         let r = crate::stream_attach::stream_park(heap, args[0]);
         Ok(Some(as_result_unit(heap, r)))
     })));
@@ -270,6 +282,30 @@ fn push_string_bytes(
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
             Ok(Some(host(heap, args)))
         })));
+    }
+}
+
+/// `task_*` natives: VM hooks ([`HostOp::Task`]), like `gc_collect`.
+fn push_task_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    for id in common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID {
+        let row = &common::HOST_NATIVES[id as usize];
+        let name = row.name;
+        let sig = FfiSignature::from_parts(
+            name.to_string(),
+            vec![FfiType::Int; row.arity as usize],
+            FfiType::Int,
+        )
+        .expect("task native signature");
+        assert_eq!(out.len(), id as usize);
+        register_id(name, out.len());
+        out.push(Arc::new(
+            HostClosureFn::new(sig, move |_heap, _args| {
+                Err(FfiError::Unsupported(format!(
+                    "{name} is HostOp::Task (VM hook only)"
+                )))
+            })
+            .with_host_op(HostOp::Task),
+        ));
     }
 }
 
@@ -1073,7 +1109,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some("string_match_at")
+            Some("task_yield")
         );
         assert_eq!(attach, 119);
     }
@@ -1357,6 +1393,10 @@ mod tests {
             registrations.get(end + 3).map(|(n, _)| n.as_str()),
             Some("string_byte_at")
         );
-        assert_eq!(registrations.len(), end + 8);
+        assert_eq!(
+            registrations.get(end + 8).map(|(n, _)| n.as_str()),
+            Some("task_scope_open")
+        );
+        assert_eq!(registrations.len(), end + 16);
     }
 }

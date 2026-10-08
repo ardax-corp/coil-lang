@@ -1,9 +1,8 @@
 // COI-410: sequential TCP HTTP/1.1 GETs with Connection: close (no pool).
 // One pair per request: park the client on wait_readable, then discard.
-use io::wait_readable;
-use io::close;
-use io::read;
-use io::wait_ready;
+// The client parks in its own task while the server task writes.
+use io::{wait_readable, close, read};
+use task::{scope, Scope};
 use io::write;
 use io::net::tcp::accept;
 use io::net::tcp::connect;
@@ -59,13 +58,39 @@ test("200 sequential Connection-close GETs park then discard") {
         let c = triple[0];
         let s = triple[1];
         let listener = triple[2];
-        let reader = http_read_after_wait(c);
-        let n = resume reader;
-        write(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))?;
-        while !done(reader) {
-            wait_ready();
-            n = resume reader;
-        }
+        let r = scope(
+            fn (Scope sc) use (c, s) {
+                let reader = sc
+                    .spawn(
+                        fn () use (c) {
+                            let g = http_read_after_wait(c);
+                            resume g
+                        },
+                    );
+                sc
+                    .spawn(
+                        fn () use (s) {
+                            match write(
+                                s,
+                                to_bytes(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                                ),
+                            ) {
+                                Result::Ok(_) => 0,
+                                Result::Err(_) => panic "server write",
+                            }
+                        },
+                    );
+                match reader.join() {
+                    Result::Ok(n) => n,
+                    Result::Err(_) => -1,
+                }
+            },
+        );
+        let n = match r {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        };
         assert(n >= 2)?;
         total = total + 2;
         close(c)?;

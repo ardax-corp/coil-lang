@@ -1,10 +1,7 @@
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
 // Uses the old names `await_readable` / `await_writable` on purpose; io_wait_park_match.hy covers the new ones.
-use io::await_readable;
-use io::await_writable;
-use io::close;
-use io::read;
-use io::wait_ready;
+use io::{await_readable, await_writable, close, read};
+use task::{scope, Scope};
 use io::write;
 use io::net::tcp::accept;
 use io::net::tcp::connect;
@@ -54,12 +51,34 @@ test("await_readable match Ok after WouldBlock park") {
     let c = triple[0];
     let s = triple[1];
     let listener = triple[2];
-    let reader = http_read_after_wait(c);
-    let writer = http_write_response(s);
-    resume reader;
-    resume writer;
-    wait_ready();
-    let n = resume reader;
+    // The reader parks inside its generator; that suspends its task, so the
+    // writer task runs and the reader's wait completes.
+    let r = scope(
+        fn (Scope sc) use (c, s) {
+            let reader = sc
+                .spawn(
+                    fn () use (c) {
+                        let g = http_read_after_wait(c);
+                        resume g
+                    },
+                );
+            sc
+                .spawn(
+                    fn () use (s) {
+                        let g = http_write_response(s);
+                        resume g
+                    },
+                );
+            match reader.join() {
+                Result::Ok(n) => n,
+                Result::Err(_) => -1,
+            }
+        },
+    );
+    let n = match r {
+        Result::Ok(n) => n,
+        Result::Err(_) => -1,
+    };
     assert(n > 0)?;
     close(c)?;
     close(s)?;

@@ -112,10 +112,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 31 — HostInvoke 139–143: byte-offset `string` natives (`byte_at`,
 ///      `slice_bytes`, `find_from`, `rfind`, `match_at`). Older archives
 ///      never reference them.
+/// 32 — HostInvoke 144–151: task scheduler natives (`task_scope_open` …
+///      `task_yield`) behind the embedded `task` module. Older archives
+///      never reference them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 31;
+pub const ARCHIVE_MINOR: u16 = 32;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -978,9 +981,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 31);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 31));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.31");
+        assert_eq!(ARCHIVE_MINOR, 32);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 32));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.32");
     }
 
     #[test]

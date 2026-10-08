@@ -2487,8 +2487,6 @@ pub struct ObjCoroutine {
     pub delegator: Option<RefCoroutine>,
     /// Outer continuation IP when the delegate completes.
     pub yield_from_resume_ip: usize,
-    /// Registered IO reactor waiter while this coro cooperatively awaits readiness.
-    pub io_wait: Option<crate::io_reactor::WaitToken>,
 }
 
 /// Heap-allocated boxed value for the generics runtime.

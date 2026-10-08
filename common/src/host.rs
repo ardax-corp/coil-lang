@@ -912,6 +912,54 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 143,
         effects: TEXT_R,
     },
+    HostNative {
+        name: "task_scope_open",
+        arity: 0,
+        id: 144,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_scope_close",
+        arity: 1,
+        id: 145,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_scope_error",
+        arity: 1,
+        id: 146,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_spawn",
+        arity: 2,
+        id: 147,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_join",
+        arity: 1,
+        id: 148,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_error",
+        arity: 1,
+        id: 149,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_sleep",
+        arity: 1,
+        id: 150,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_yield",
+        arity: 0,
+        id: 151,
+        effects: SUSPEND,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -953,6 +1001,12 @@ pub const STREAM_FD_NATIVE: &str = "stream_fd";
 pub const STRING_BYTE_AT_ID: u16 = 139;
 /// Last byte-offset `string` native (`string_match_at`).
 pub const STRING_MATCH_AT_ID: u16 = 143;
+/// First task-scheduler native (`task_scope_open`); the block runs through
+/// [`TASK_YIELD_ID`] (archive minor 32). The VM handles these itself
+/// (`HostOp::Task`): they can switch tasks.
+pub const TASK_SCOPE_OPEN_ID: u16 = 144;
+/// Last task-scheduler native (`task_yield`).
+pub const TASK_YIELD_ID: u16 = 151;
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1000,7 +1054,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 144);
+    assert!(HOST_NATIVES.len() == 152);
+    assert!(HOST_NATIVES[TASK_SCOPE_OPEN_ID as usize].id == TASK_SCOPE_OPEN_ID);
+    assert!(HOST_NATIVES[TASK_YIELD_ID as usize].id == TASK_YIELD_ID);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
@@ -1115,6 +1171,8 @@ mod tests {
         assert_eq!(host_native_id("math_tanh"), Some(135));
         assert_eq!(host_native_id(SIMD_AXPY_REDUCE_NATIVE), Some(136));
         assert_eq!(host_native_id(THREAD_SPAWN_SHARED_NATIVE), Some(137));
+        assert_eq!(host_native_id("task_scope_open"), Some(TASK_SCOPE_OPEN_ID as usize));
+        assert_eq!(host_native_id("task_yield"), Some(TASK_YIELD_ID as usize));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
