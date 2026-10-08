@@ -108,12 +108,10 @@ fn owns_a_scope() -> int {
     defer {
         push(6);
     }
-    let _ = scope(
-        fn (Scope s) {
-            sleeper_task(s, 5, 10000);
-            0
-        },
-    );
+    let _ = scope(fn (Scope s) {
+        sleeper_task(s, 5, 10000);
+        0
+    });
     return 0;
 }
 
@@ -153,12 +151,10 @@ fn guarded() -> int {
     defer {
         push(8);
     }
-    shield(
-        fn () {
-            task::sleep(10);
-            push(1);
-        },
-    );
+    shield(fn () {
+        task::sleep(10);
+        push(1);
+    });
     task::sleep(10000);
     push(9);
     return 0;
