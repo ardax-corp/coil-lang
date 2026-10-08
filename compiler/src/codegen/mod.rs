@@ -935,6 +935,9 @@ pub struct Compiler {
     /// lives in two slots when its type is a two-word pair
     /// (`COIL_HIR_PAIR_LOCALS=0` off).
     hir_pair_locals: bool,
+    /// Typed inlining takes mono clone callees, as their generic body at the
+    /// call's types (`COIL_HIR_INLINE_MONO=0` off).
+    hir_inline_mono: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -1067,6 +1070,10 @@ impl Default for Compiler {
             debugger_attached: false,
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
             hir_inline_pair: crate::hir::inline::pair_from_env(),
+            hir_inline_mono: !matches!(
+                std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
+                Ok("0" | "false" | "off" | "no")
+            ),
             hir_pair_locals: !matches!(
                 std::env::var("COIL_HIR_PAIR_LOCALS").as_deref(),
                 Ok("0" | "false" | "off" | "no")

@@ -84,6 +84,9 @@ struct HirCall {
     /// Per parameter of a free function taking numeric ranges unboxed: the
     /// `[start, end]` kind it takes as two words (empty when none does).
     ranges: Vec<Option<&'static str>>,
+    /// A mono clone call: the generic function's name and its type
+    /// variables bound to this call's types, for typed inlining.
+    mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
 }
 
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
@@ -457,6 +460,21 @@ impl Compiler {
             .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
             .collect();
+        // Mono clone callees, as their generic body at the call's types.
+        let instances: HashMap<u32, crate::hir::HirBody> = emit
+            .calls
+            .iter()
+            .filter(|_| self.hir_inline_mono)
+            .filter_map(|(&id, call)| {
+                let (name, map) = call.mono_of.as_deref()?;
+                let index = self.hir_fn_names.get(name.as_str()).copied().flatten()?;
+                let inst = self.hir_inline_instance(&module.bodies[index], map)?;
+                match inline::inlinable(&inst, budget) {
+                    Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
+                    _ => Some((id, inst)),
+                }
+            })
+            .collect();
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             let Some(call) = emit.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
@@ -464,7 +482,7 @@ impl Compiler {
             let kind = [
                 (call.builtin.is_some(), "builtin"),
                 (call.pair.is_some() && !self.hir_inline_pair, "pair"),
-                (call.mono, "mono"),
+                (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
                 (call.instance.is_some(), "instance"),
                 (!call.ranges.is_empty(), "ranges"),
@@ -473,16 +491,21 @@ impl Compiler {
             if let Some((_, what)) = kind.iter().find(|(hit, _)| *hit) {
                 return Err(format!("call-kind {what}"));
             }
-            let name = strip_overload_key(&call.key);
-            if self.checker.is_overloaded(name) {
-                return Err("overloaded".to_string());
-            }
-            let index = self
-                .hir_fn_names
-                .get(name)
-                .ok_or_else(|| format!("no body `{name}`"))?
-                .ok_or("ambiguous")?;
-            let callee = folded.get(&index).unwrap_or(&module.bodies[index]);
+            let callee = match instances.get(&id.0) {
+                Some(inst) => inst,
+                None => {
+                    let name = strip_overload_key(&call.key);
+                    if self.checker.is_overloaded(name) {
+                        return Err("overloaded".to_string());
+                    }
+                    let index = self
+                        .hir_fn_names
+                        .get(name)
+                        .ok_or_else(|| format!("no body `{name}`"))?
+                        .ok_or("ambiguous")?;
+                    folded.get(&index).unwrap_or(&module.bodies[index])
+                }
+            };
             // Trait instance and default method bodies dispatch; a generic
             // class's methods share one body.
             if callee.name == hir.name
@@ -774,6 +797,37 @@ impl Compiler {
             flags: Default::default(),
         });
         id
+    }
+
+    /// `map` plus each variable's representative in the checker's
+    /// substitution, which the generic body's types use (as
+    /// `mono_var_tys_for`).
+    fn hir_mono_var_map(
+        &self,
+        map: HashMap<crate::typechecking::ty::TyVarId, Ty>,
+    ) -> HashMap<crate::typechecking::ty::TyVarId, Ty> {
+        let mut out = map.clone();
+        for (var, ty) in map {
+            if let Ty::Var(rep) = apply_ty_prune(self.checker.subst(), &Ty::Var(var)) {
+                out.entry(rep).or_insert(ty);
+            }
+        }
+        out
+    }
+
+    /// A generic body's HIR at one call's types, for typed inlining: `None`
+    /// unless every local and node type is ground there.
+    fn hir_inline_instance(&self, generic: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Option<HirBody> {
+        let mut inst = self.hir_instance(generic, map);
+        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(crate::hir::layout::ty_is_closed);
+        if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
+            return None;
+        }
+        inst.ret_layout = inst
+            .ret
+            .as_ref()
+            .map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of(&self.checker, t));
+        Some(inst)
     }
 
     fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {
@@ -1363,6 +1417,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         }))
     }
 
@@ -1433,6 +1488,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -1488,6 +1544,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -1609,6 +1666,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: Some(Box::new((lookup.to_string(), self.hir_mono_var_map(map)))),
         })
     }
 
@@ -1681,6 +1739,7 @@ impl Compiler {
                 generic: None,
                 instance: None,
                 ranges: Vec::new(),
+                mono_of: None,
             });
         }
         // A generic class's methods are one shared body (no mono clones):
@@ -1799,6 +1858,7 @@ impl Compiler {
                 ground: None,
             })),
             ranges: Vec::new(),
+            mono_of: None,
         }))
     }
 
@@ -1840,6 +1900,7 @@ impl Compiler {
                 generic: None,
                 instance: None,
                 ranges: Vec::new(),
+                mono_of: None,
             });
         }
         // An overload-keyed entry would be picked over the bare thunk.
@@ -1861,6 +1922,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -1897,6 +1959,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -2001,6 +2064,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         }))
     }
 
@@ -2103,6 +2167,7 @@ impl Compiler {
                 }),
             })),
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -2250,6 +2315,7 @@ impl Compiler {
                 }),
             })),
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -2310,6 +2376,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -2481,6 +2548,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges: Vec::new(),
+            mono_of: None,
         })
     }
 
@@ -2569,6 +2637,7 @@ impl Compiler {
                 generic: None,
                 instance: None,
                 ranges: Vec::new(),
+                mono_of: None,
             });
         }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
@@ -2637,6 +2706,7 @@ impl Compiler {
             generic: None,
             instance: None,
             ranges,
+            mono_of: None,
         })
     }
 
