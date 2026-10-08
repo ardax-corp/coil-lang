@@ -920,6 +920,8 @@ pub struct Compiler {
     debugger_attached: bool,
     /// Nested matches dispatch on their outer tag once (`COIL_HIR_MATCH_TREE=0` off).
     hir_match_tree: bool,
+    /// Matches on many int literals binary-search (`COIL_HIR_INT_SEARCH=0` off).
+    hir_int_search: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -1048,6 +1050,7 @@ impl Default for Compiler {
             hir_inline: crate::hir::inline::inline_from_env(),
             debugger_attached: false,
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
+            hir_int_search: crate::hir::match_tree::int_search_from_env(),
             hir_fn_names: HashMap::new(),
         }
     }

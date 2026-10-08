@@ -48,6 +48,7 @@ declare -A EXPECTED=(
     ["examples/perf/cse_cast_recompute.hy"]="1999998000000"
     ["examples/perf/dest_prop_field_alias.hy"]="40000000"
     ["examples/perf/nested_match.hy"]="11250000"
+    ["examples/perf/int_match.hy"]="77470488"
 )
 
 # CPU-focused subset for poop / quick timing (no FFI, no modules).
@@ -74,6 +75,7 @@ CPU_BENCH=(
     examples/perf/cse_cast_recompute.hy
     examples/perf/dest_prop_field_alias.hy
     examples/perf/nested_match.hy
+    examples/perf/int_match.hy
 )
 
 CROSS_LANG=(

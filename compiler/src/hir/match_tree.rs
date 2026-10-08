@@ -75,6 +75,58 @@ pub fn irrefutable(fields: &HirPatFields) -> bool {
     }
 }
 
+/// Binary search for `int` matches is on unless `COIL_HIR_INT_SEARCH=0`
+/// (or `false` / `off` / `no`).
+pub(crate) fn int_search_from_env() -> bool {
+    !matches!(
+        std::env::var("COIL_HIR_INT_SEARCH").as_deref(),
+        Ok("0" | "false" | "off" | "no")
+    )
+}
+
+/// Fewest literal cases worth a search: below this a linear chain of
+/// equality tests is as short.
+pub const MIN_SEARCH_CASES: usize = 8;
+
+/// Cases a search leaf tests one by one.
+pub const SEARCH_LEAF: usize = 3;
+
+/// A match on integer literals as a sorted case table.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IntSearch {
+    /// `(literal, arm index)`, sorted by literal, first arm per literal.
+    pub cases: Vec<(i64, usize)>,
+    /// The arm a value matching no case runs.
+    pub default: usize,
+}
+
+/// Plan a binary search over `arms`, whose literal (if any) `literal`
+/// gives. The default is the trailing catch-all, or for an exhaustive
+/// match the last arm (every value the others miss is its). `None` when
+/// some arm is neither a literal nor the trailing catch-all, or there are
+/// fewer than [`MIN_SEARCH_CASES`] cases.
+pub fn int_search(arms: &[HirArm], literal: impl Fn(&HirPat) -> Option<i64>) -> Option<IntSearch> {
+    let last = arms.len().checked_sub(1)?;
+    let mut cases: Vec<(i64, usize)> = Vec::new();
+    for (i, arm) in arms.iter().enumerate() {
+        if i == last {
+            break;
+        }
+        let n = literal(&arm.pat)?;
+        if !cases.iter().any(|&(m, _)| m == n) {
+            cases.push((n, i));
+        }
+    }
+    if !matches!(arms[last].pat, HirPat::Wild | HirPat::Bind(_)) {
+        literal(&arms[last].pat)?;
+    }
+    if cases.len() < MIN_SEARCH_CASES {
+        return None;
+    }
+    cases.sort_unstable();
+    Some(IntSearch { cases, default: last })
+}
+
 #[cfg(test)]
 #[path = "match_tree.tests.rs"]
 mod tests;
