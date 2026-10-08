@@ -479,6 +479,7 @@ impl Compiler {
             // Trait instance and default method bodies dispatch; a generic
             // class's methods share one body.
             if callee.name == hir.name
+                || callee.result_mode && !self.hir_inline_pair
                 || callee.name.contains(" for ")
                 || home(callee) != here
                 || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)

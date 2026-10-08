@@ -518,6 +518,12 @@ impl Compiler {
         self.hir_inline = on;
     }
 
+    /// Keep enum locals built in place as two slots or boxed (default
+    /// `COIL_HIR_PAIR_LOCALS`).
+    pub fn set_hir_pair_locals(&mut self, on: bool) {
+        self.hir_pair_locals = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_options = level.options();
