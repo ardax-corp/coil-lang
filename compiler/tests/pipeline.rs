@@ -431,7 +431,15 @@ fn main() {
     );
 }
 
+/// A pipeline granted every capability: these tests are about other
+/// things. [`deny_pipeline`] grants none.
 fn test_pipeline() -> Pipeline {
+    let mut p = deny_pipeline();
+    p.grant_all();
+    p
+}
+
+fn deny_pipeline() -> Pipeline {
     comptime::install();
     let mut p = Pipeline::new();
     p.bind_workspace_language_roots();
@@ -9275,7 +9283,8 @@ fn main() {
 
 #[test]
 fn stream_attach_denied_without_allow_attach() {
-    assert_compile_fails(
+    assert_compile_fails_pipeline(
+        &mut deny_pipeline(),
         r#"
 use io::{stdout, attach};
 fn main() {
@@ -11281,4 +11290,68 @@ fn broken_effect_declarations_are_errors_on_both_backends() {
         pipeline.set_hir_lowering(hir);
         compile_ok(&mut pipeline, kept);
     }
+}
+
+/// E4: each gated host call the program reaches needs its capability, with
+/// the call chain in the message, on both backends; one nothing reaches
+/// needs none.
+#[test]
+fn reachable_host_calls_need_their_capabilities() {
+    let src = "use env::{exec, exit};\nuse io::{open};\nuse io::fs::{exists, remove_file};\nfn shell() {\n    let args: Vec<string> = Vec::new();\n    let _ = exec(\"true\", args);\n}\nfn load() -> bool {\n    let _ = open(\"cfg.toml\", \"r\");\n    let _ = exists(\"cfg.toml\");\n    return true;\n}\nfn main() {\n    if load() {\n        exit(0);\n    }\n}\n";
+    let unused_cleanup = "fn cleanup() {\n    let _ = remove_file(\"x\");\n}\n";
+    let src = format!("{src}{unused_cleanup}");
+    for hir in [true, false] {
+        let mut pipeline = deny_pipeline();
+        pipeline.set_hir_lowering(hir);
+        assert!(pipeline.compile_src(&src).is_err(), "hir={hir}");
+        let msgs: Vec<(Option<compiler::ErrorCode>, String)> = pipeline
+            .messages()
+            .iter()
+            .map(|m| (m.code(), m.message().to_string()))
+            .collect();
+        let has = |code, text: &str| msgs.iter().any(|(c, m)| *c == Some(code) && m.contains(text));
+        assert!(has(compiler::ErrorCode::HostExitDenied, "`env::exit` requires `--allow-exit`: reached from `main`"), "hir={hir}: {msgs:?}");
+        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::open` requires `--allow-read`: reached from `main` → `load`"), "hir={hir}: {msgs:?}");
+        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::fs::exists` requires `--allow-read`"), "hir={hir}: {msgs:?}");
+        assert!(!msgs.iter().any(|(_, m)| m.contains("env::exec") || m.contains("remove_file")), "hir={hir}: unreached calls are free: {msgs:?}");
+
+        let mut pipeline = deny_pipeline();
+        pipeline.set_hir_lowering(hir);
+        assert!(pipeline.grant_capability("read"));
+        pipeline.grant_exit();
+        compile_ok(&mut pipeline, &src);
+    }
+}
+
+/// E4: `open` needs read or write by its literal mode, both when the mode
+/// is not a literal; a static initializer always runs.
+#[test]
+fn open_mode_and_static_initializers_decide_capabilities() {
+    let src = "use io::{open};\nstatic let LOG = open(\"log.txt\", \"a\");\nfn mode() -> string {\n    return \"r\";\n}\nfn main() {\n    let _ = open(\"in.txt\", mode());\n}\n";
+    let mut pipeline = deny_pipeline();
+    assert!(pipeline.compile_src(src).is_err());
+    let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();
+    assert!(msgs.iter().any(|m| m == "`io::open` requires `--allow-write`: reached from the initializer of static `LOG`"), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.starts_with("`io::open` requires `--allow-read --allow-write`: reached from `main`")), "{msgs:?}");
+    let mut pipeline = deny_pipeline();
+    pipeline.grant_capability("write");
+    assert!(pipeline.compile_src(src).is_err(), "the non-literal mode still needs read");
+    let mut pipeline = deny_pipeline();
+    pipeline.grant_all();
+    compile_ok(&mut pipeline, src);
+}
+
+/// E4: under `coil test` the tests are the entry points, named by their
+/// description in the chain.
+#[test]
+fn tests_are_entry_points_for_capabilities() {
+    let src = "use io::fs::{exists};\nfn probe() -> bool {\n    let _ = exists(\"x\");\n    return true;\n}\ntest(\"looks for x\") {\n    assert(probe())?;\n}\n";
+    let mut pipeline = deny_pipeline();
+    pipeline.set_include_tests(true);
+    assert!(pipeline.compile_src(src).is_err());
+    let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("reached from test \"looks for x\" → `probe`")),
+        "{msgs:?}"
+    );
 }

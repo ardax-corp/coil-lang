@@ -43,66 +43,8 @@ pub fn prune_unused_functions(
         return (0, Vec::new());
     }
 
-    let code_len = buf.len();
-    let mut ordered: Vec<(usize, String)> = input
-        .functions
-        .iter()
-        .map(|(n, &pc)| (pc, n.clone()))
-        .collect();
-    ordered.sort_by_key(|(pc, _)| *pc);
-
-    let mut spans: HashMap<String, (usize, usize)> = HashMap::with_capacity(ordered.len());
-    // Prefer exact body spans recorded at emit (user fns / mono clones).
-    for f in buf.funcs() {
-        if f.code_start < f.code_end && input.functions.contains_key(&f.name) {
-            spans.insert(f.name.clone(), (f.code_start, f.code_end));
-        }
-    }
-    for i in 0..ordered.len() {
-        let name = &ordered[i].1;
-        if spans.contains_key(name) {
-            continue;
-        }
-        let start = ordered[i].0;
-        // Loop-IPA chunk workers are emitted inside the caller and only get an
-        // entry PC. A fallback span from that PC would overlap the caller's
-        // recorded body and, when the caller is dropped, leave its jump to the
-        // post-worker label behind.
-        if spans.values().any(|&(s, e)| start > s && start < e) {
-            continue;
-        }
-        let mut end = if i + 1 < ordered.len() {
-            ordered[i + 1].0
-        } else {
-            code_len
-        };
-        // Builtin thunks are packed before setup; do not extend a thunk span
-        // through static-init / JMP-to-main into the next user function.
-        if let Some(preserve) = input.preserve_emit_start
-            && start < preserve && end > preserve {
-                end = preserve;
-            }
-        if start < end {
-            spans.insert(name.clone(), (start, end));
-        }
-    }
-
-    let label_to_name: HashMap<u32, String> = input
-        .fn_entry_labels
-        .iter()
-        .map(|(n, l)| (l.0, n.clone()))
-        .collect();
-
-    // Emitting PC → function name for absolute CALL/CodePtr operands.
-    let mut pc_to_name: HashMap<usize, String> = HashMap::new();
-    for (name, &(start, _)) in &spans {
-        pc_to_name.insert(start, name.clone());
-    }
-    for (pc, label) in buf.entry_labels() {
-        if let Some(name) = label_to_name.get(&label.0) {
-            pc_to_name.entry(pc).or_insert_with(|| name.clone());
-        }
-    }
+    let graph = CallGraph::new(buf, input.functions, input.fn_entry_labels, input.preserve_emit_start);
+    let CallGraph { spans, label_to_name, pc_to_name } = &graph;
 
     let mut live: HashSet<String> = HashSet::new();
     let mut work: VecDeque<String> = VecDeque::new();
@@ -135,7 +77,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, setup_start, setup_end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -147,7 +89,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, 0, setup_start.min(3));
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -162,7 +104,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, start, end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -242,6 +184,163 @@ pub fn prune_unused_functions(
     let live_names: HashSet<&str> = input.functions.keys().map(|s| s.as_str()).collect();
     buf.retain_funcs(|f| live_names.contains(f.name.as_str()));
     (dropped, shrinks)
+}
+
+/// Function bodies in the flat [`CodeBuf`] and the calls between them, for
+/// [`prune_unused_functions`] and [`reachable_functions`].
+pub struct CallGraph {
+    /// Function name → emitting span.
+    spans: HashMap<String, (usize, usize)>,
+    label_to_name: HashMap<u32, String>,
+    pc_to_name: HashMap<usize, String>,
+}
+
+impl CallGraph {
+    pub fn new(
+        buf: &CodeBuf,
+        functions: &HashMap<String, usize>,
+        fn_entry_labels: &HashMap<String, Label>,
+        preserve_emit_start: Option<usize>,
+    ) -> Self {
+        let code_len = buf.len();
+        let mut ordered: Vec<(usize, String)> = functions
+            .iter()
+            .map(|(n, &pc)| (pc, n.clone()))
+            .collect();
+        ordered.sort_by_key(|(pc, _)| *pc);
+
+        let mut spans: HashMap<String, (usize, usize)> = HashMap::with_capacity(ordered.len());
+        // Prefer exact body spans recorded at emit (user fns / mono clones).
+        for f in buf.funcs() {
+            if f.code_start < f.code_end && functions.contains_key(&f.name) {
+                spans.insert(f.name.clone(), (f.code_start, f.code_end));
+            }
+        }
+        for i in 0..ordered.len() {
+            let name = &ordered[i].1;
+            if spans.contains_key(name) {
+                continue;
+            }
+            let start = ordered[i].0;
+            // Loop-IPA chunk workers are emitted inside the caller and only get an
+            // entry PC. A fallback span from that PC would overlap the caller's
+            // recorded body and, when the caller is dropped, leave its jump to the
+            // post-worker label behind.
+            if spans.values().any(|&(s, e)| start > s && start < e) {
+                continue;
+            }
+            let mut end = if i + 1 < ordered.len() {
+                ordered[i + 1].0
+            } else {
+                code_len
+            };
+            // Builtin thunks are packed before setup; do not extend a thunk span
+            // through static-init / JMP-to-main into the next user function.
+            if let Some(preserve) = preserve_emit_start
+                && start < preserve && end > preserve {
+                    end = preserve;
+                }
+            if start < end {
+                spans.insert(name.clone(), (start, end));
+            }
+        }
+
+        let label_to_name: HashMap<u32, String> = fn_entry_labels
+            .iter()
+            .map(|(n, l)| (l.0, n.clone()))
+            .collect();
+
+        // Emitting PC → function name for absolute CALL/CodePtr operands.
+        let mut pc_to_name: HashMap<usize, String> = HashMap::new();
+        for (name, &(start, _)) in &spans {
+            pc_to_name.insert(start, name.clone());
+        }
+        for (pc, label) in buf.entry_labels() {
+            if let Some(name) = label_to_name.get(&label.0) {
+                pc_to_name.entry(pc).or_insert_with(|| name.clone());
+            }
+        }
+        Self { spans, label_to_name, pc_to_name }
+    }
+
+    /// The functions the ops in emitting range `[start, end)` call or take
+    /// the address of.
+    fn callees(&self, ops: &[IlOp], start: usize, end: usize) -> Vec<String> {
+        let (raw_s, raw_e) = emitting_range_to_raw(ops, start, end);
+        ops[raw_s..raw_e]
+            .iter()
+            .flat_map(entry_targets)
+            .filter_map(|t| resolve_target(&t, &self.label_to_name, &self.pc_to_name))
+            .collect()
+    }
+}
+
+/// Each reached function and the function it was first reached from.
+pub type ReachParents = HashMap<String, Option<String>>;
+
+/// Every function reachable from `roots` (by name) or from the ops outside
+/// every function body (setup, static initializers), with the function it
+/// was first reached from (`None` for a root), and every function's
+/// emitting span. `extra` is code kept outside `buf` that always runs
+/// (static initializers before they are spliced in).
+pub fn reachable_functions(
+    buf: &CodeBuf,
+    functions: &HashMap<String, usize>,
+    fn_entry_labels: &HashMap<String, Label>,
+    roots: &[String],
+    test_pcs: &[usize],
+    extra: &[&[IlOp]],
+) -> (ReachParents, HashMap<String, (usize, usize)>) {
+    let graph = CallGraph::new(buf, functions, fn_entry_labels, None);
+    let ops = buf.ops();
+    let mut parent: HashMap<String, Option<String>> = HashMap::new();
+    let mut work: VecDeque<String> = VecDeque::new();
+    let tests = test_pcs.iter().filter_map(|pc| graph.pc_to_name.get(pc).cloned());
+    for name in roots.iter().cloned().chain(tests) {
+        if functions.contains_key(&name) && parent.insert(name.clone(), None).is_none() {
+            work.push_back(name);
+        }
+    }
+    // Code outside every body: the prologue, static initializers, `extern`
+    // setup.
+    let mut bodies: Vec<(usize, usize)> = graph.spans.values().copied().collect();
+    bodies.sort();
+    let mut at = 0usize;
+    let mut outside = Vec::new();
+    for &(s, e) in &bodies {
+        if s > at {
+            outside.push((at, s));
+        }
+        at = at.max(e);
+    }
+    if buf.len() > at {
+        outside.push((at, buf.len()));
+    }
+    let extra = extra.iter().flat_map(|ops| {
+        ops.iter()
+            .flat_map(entry_targets)
+            .filter_map(|t| resolve_target(&t, &graph.label_to_name, &graph.pc_to_name))
+    });
+    let outside = outside.into_iter().flat_map(|(s, e)| graph.callees(ops, s, e));
+    for callee in outside.collect::<Vec<_>>().into_iter().chain(extra) {
+        {
+            if parent.insert(callee.clone(), None).is_none() {
+                work.push_back(callee);
+            }
+        }
+    }
+    while let Some(name) = work.pop_front() {
+        let Some(&(start, end)) = graph.spans.get(&name) else {
+            continue;
+        };
+        for callee in graph.callees(ops, start, end) {
+            if !parent.contains_key(&callee) {
+                parent.insert(callee.clone(), Some(name.clone()));
+                work.push_back(callee);
+            }
+        }
+    }
+    (parent, graph.spans)
 }
 
 enum Target {

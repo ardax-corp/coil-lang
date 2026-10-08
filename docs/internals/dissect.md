@@ -29,14 +29,18 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
 | `--entry FILE` | Entry `.hy` instead of the positional file |
-| `--allow-attach` | Allow `Stream.attach` at typecheck (default deny) |
-| `--allow-exit` | Allow `env::exit` at typecheck (default deny) |
-| `--allow-exec` | Allow `env::exec` at typecheck (default deny) |
+| `--allow-read` / `--allow-write` | Allow reachable file reads / writes (`io::open`, `io::fs::*`; default deny) |
+| `--allow-net` | Allow reachable sockets (`io::net::tcp::*`, `udp_*`; default deny) |
+| `--allow-env` | Allow reachable environment / working-directory calls (`env::var`, …; default deny) |
+| `--allow-attach` | Allow `Stream.attach` (default deny) |
+| `--allow-exit` | Allow reachable `env::exit` (default deny) |
+| `--allow-exec` | Allow reachable `env::exec` (default deny) |
+| `-A`, `--allow-all` | Every capability above plus `--allow-ffi-exec` (not `dload`) |
 | `--allow-ffi-exec` | Allow FFI process-exec symbols (`system`, `execve`, …) |
 | `--allow-dload STEM` | Allow `dload` of STEM (repeatable; `dload("c")` still denied) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (repeatable; not a dload grant) |
 
-Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only — `coil.toml` does not grant them. Dissect compiles in memory; gated calls without a flag fail typecheck (`E0406`–`E0411`) the same as `coil compile`. `--ffi-search-path` is lookup only.
+Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only — `coil.toml` does not grant them. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
 
 A `.hyc` archive as the entry (`coil dissect out.hyc`) dumps its bytecode
 without compiling; `--il` / `--il-post` / `--hir` / `--effects` / `--mir` / `--ast` need a source.

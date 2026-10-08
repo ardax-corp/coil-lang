@@ -23,13 +23,13 @@ echo
 
 echo "=== 02-adventure (canned transcript) ==="
 rm -f "$ROOT/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" "$PROJECTS/02-adventure/src/main.hy" \
+timeout "${TIMEOUT_SECS}s" "$BIN" --allow-read --allow-write "$PROJECTS/02-adventure/src/main.hy" \
   <"$PROJECTS/02-adventure/transcript.txt"
 echo
 
 echo "=== 03-echo ==="
 rm -f "$ROOT/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" "$PROJECTS/03-echo/src/main.hy"
+timeout "${TIMEOUT_SECS}s" "$BIN" --allow-net "$PROJECTS/03-echo/src/main.hy"
 echo
 
 echo "All showcase demos finished."

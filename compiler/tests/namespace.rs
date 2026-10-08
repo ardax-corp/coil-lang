@@ -97,6 +97,8 @@ fn bind_ns_pipeline(pipeline: &mut Pipeline, extra: &[PathBuf]) {
     let mut roots = vec![workspace_stdlib()];
     roots.extend(extra.iter().cloned());
     pipeline.bind_project_roots_with_default(cwd, roots);
+    // These tests exercise module resolution, not capabilities.
+    pipeline.grant_all();
 }
 
 fn run_project(project_root: &PathBuf, entry: &PathBuf) -> String {

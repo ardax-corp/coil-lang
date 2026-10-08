@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-/// Deny-by-default host capabilities (`dload`, attach, env exec/exit).
+/// Deny-by-default host capabilities (`dload`, attach, env exec/exit, and
+/// read / write / net / env).
 ///
 /// Defaults match a missing `coil.toml` (everything denied). `dload("c")` /
 /// libc aliases stay denied even when listed in [`Self::allow_dload`].
@@ -20,6 +21,14 @@ pub struct HostGrants {
     pub allow_exit: bool,
     /// FFI process-exec symbols (`system`, `execve`, …).
     pub allow_ffi_exec: bool,
+    /// Open files for reading, inspect the file system (`--allow-read`).
+    pub allow_read: bool,
+    /// Open files for writing, create / remove / rename (`--allow-write`).
+    pub allow_write: bool,
+    /// Connect, listen or bind sockets (`--allow-net`).
+    pub allow_net: bool,
+    /// Environment variables and the working directory (`--allow-env`).
+    pub allow_env: bool,
     /// Consumer `dload` stems (`--allow-dload`). Still need lock hash or
     /// `trusted = true`. Lookup paths are not a grant.
     pub allow_dload: Vec<String>,
@@ -31,6 +40,53 @@ impl HostGrants {
     /// All capabilities denied; empty dload allow and search paths.
     pub fn deny_all() -> Self {
         Self::default()
+    }
+
+    /// Every capability except `dload` (`--allow-all`).
+    pub fn grant_all(&mut self) {
+        self.allow_attach = true;
+        self.allow_exec = true;
+        self.allow_exit = true;
+        self.allow_ffi_exec = true;
+        self.allow_read = true;
+        self.allow_write = true;
+        self.allow_net = true;
+        self.allow_env = true;
+    }
+
+    /// Grant the capability named `name` (`read`, `net`, `exec`, …). False
+    /// when there is no such capability.
+    pub fn grant_named(&mut self, name: &str) -> bool {
+        let flag = match name {
+            "read" => &mut self.allow_read,
+            "write" => &mut self.allow_write,
+            "net" => &mut self.allow_net,
+            "env" => &mut self.allow_env,
+            "exec" => &mut self.allow_exec,
+            "exit" => &mut self.allow_exit,
+            "attach" => &mut self.allow_attach,
+            "ffi-exec" => &mut self.allow_ffi_exec,
+            _ => return false,
+        };
+        *flag = true;
+        true
+    }
+
+    /// The capabilities checked against reachable host calls.
+    pub fn caps(&self) -> common::Caps {
+        use common::Caps;
+        [
+            (self.allow_read, Caps::READ),
+            (self.allow_write, Caps::WRITE),
+            (self.allow_net, Caps::NET),
+            (self.allow_env, Caps::ENV),
+            (self.allow_exec, Caps::EXEC),
+            (self.allow_exit, Caps::EXIT),
+            (self.allow_attach, Caps::ATTACH),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(Caps::NONE, |acc, (_, c)| acc.union(c))
     }
 
     /// Append a consumer dload stem (duplicates ignored).

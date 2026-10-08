@@ -1176,6 +1176,10 @@ impl SubProgram {
         sub.overlays = self.overlays;
         let entry = expansion_entry_path();
         sub.overlays.insert(entry.clone(), self.text);
+        // Host calls in a macro are refused when it runs (the macro host
+        // wires none), with the macro named; a provider can hold macros
+        // the program never uses, so they are not checked here.
+        sub.host_grants.grant_all();
         let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
             Ok(out) => out,
             Err(_) => {

@@ -3,9 +3,20 @@ use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInCounted, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
+/// A string literal, under any `Expr` / `Group` wrappers.
+fn literal_string<'a>(node: &'a Output<'a>) -> Option<&'a str> {
+    match node.1.as_ref() {
+        Expression::String(s) => Some(s),
+        Expression::Expr(e) | Expression::Group(e) => literal_string(e),
+        _ => None,
+    }
+}
+
 /// Synthetic function name prefix for a static initializer body.
 const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
 
+#[path = "capabilities.rs"]
+mod capabilities;
 #[path = "emit_call.rs"]
 mod emit_call;
 #[path = "emit_hir.rs"]
@@ -10701,6 +10712,15 @@ impl Compiler {
         } else {
             self.bytecode.push_host_invoke(arity as u32);
         }
+        let span = match (result, args.first(), args.last()) {
+            (Some(call), _, _) => Some((call.0.start, call.0.end)),
+            (None, Some(first), Some(last)) => Some((first.0.start, last.0.end)),
+            _ => None,
+        };
+        if let Some(span) = span {
+            let mode = args.get(1).and_then(literal_string);
+            self.tag_gated_host_call(native_name, span, mode);
+        }
         // Result stays on the stack for the caller (ExprStatement POPs it).
         self.expr_depth = depth_on_entry;
     }
@@ -20226,6 +20246,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> Vec<Byte> {
         self.compile_unfused(module, ast, false);
+        self.report_capability_violations();
         self.finalize_bytecode();
         self.bytecode.clone_bytes()
     }

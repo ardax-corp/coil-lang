@@ -3,6 +3,7 @@
 mod archive;
 mod array_vec;
 mod builtins;
+mod caps;
 mod debug;
 mod effects;
 mod ffi;
@@ -20,6 +21,7 @@ mod verify;
 pub use archive::*;
 pub use array_vec::*;
 pub use builtins::*;
+pub use caps::{Caps, open_mode_caps};
 pub use debug::*;
 pub use effects::EffectFlags;
 pub use ffi::tag;

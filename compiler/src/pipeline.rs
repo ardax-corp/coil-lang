@@ -504,21 +504,36 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow `Stream.attach` at typecheck (`--allow-attach`).
+    /// Allow `Stream.attach` (`--allow-attach`).
     pub fn grant_attach(&mut self) {
         self.host_grants.allow_attach = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exec` at typecheck (`--allow-exec`).
+    /// Allow `env::exec` (`--allow-exec`).
     pub fn grant_exec(&mut self) {
         self.host_grants.allow_exec = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exit` at typecheck (`--allow-exit`).
+    /// Allow `env::exit` (`--allow-exit`).
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
+        self.try_sync_host_caps();
+    }
+
+    /// Allow a capability by name (`read`, `write`, `net`, `env`, `exec`,
+    /// `exit`, `attach`, `ffi-exec`): `--allow-<name>`. False for an
+    /// unknown name.
+    pub fn grant_capability(&mut self, name: &str) -> bool {
+        let known = self.host_grants.grant_named(name);
+        self.try_sync_host_caps();
+        known
+    }
+
+    /// Allow every capability except `dload` (`--allow-all`).
+    pub fn grant_all(&mut self) {
+        self.host_grants.grant_all();
         self.try_sync_host_caps();
     }
 
@@ -757,6 +772,38 @@ impl Pipeline {
         if self.sink.had_errors() {
             self.failed = true;
         }
+    }
+
+    /// E4: report each host call reachable from `main` / the tests that
+    /// needs a capability this build was not granted, in its own file.
+    /// False when there was one.
+    fn check_capabilities(&mut self) -> bool {
+        let granted = self.host_grants.caps();
+        let found = self.compiler_lazy().capability_violations(granted);
+        if found.is_empty() {
+            return true;
+        }
+        for v in found {
+            let rel = PathBuf::from(&v.file);
+            let path = if rel.is_absolute() || self.ast_cache.get(&rel).is_some() {
+                rel.clone()
+            } else {
+                self.project_root.join(&rel)
+            };
+            let src = self
+                .ast_cache
+                .get(&path)
+                .or_else(|| self.ast_cache.get(&rel))
+                .map(|c| c.report_source())
+                .or_else(|| self.overlays.get(&path).cloned())
+                .or_else(|| std::fs::read_to_string(&path).ok())
+                .unwrap_or_default();
+            let file_id = self.sink.register_source(&path, &src);
+            self.compiler_lazy_mut().push_message(v.message());
+            self.emit_new_messages_for(file_id, &path);
+        }
+        self.failed = true;
+        false
     }
 
     /// Emit compiler messages that have not yet been forwarded to the sink.
@@ -1364,7 +1411,7 @@ impl Pipeline {
         // scan rotation invalidates plain LIFO `pop_back`.
         self.compile_discovered_modules();
 
-        if self.failed {
+        if self.failed || !self.check_capabilities() {
             return;
         }
 
@@ -1490,7 +1537,7 @@ impl Pipeline {
         // Register source and drain typecheck / codegen diagnostics via the sink.
         let file_id = self.sink.register_source(path, src);
         self.emit_new_messages(file_id);
-        if self.had_errors() {
+        if self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 
@@ -1590,7 +1637,7 @@ impl Pipeline {
         self.expand_user_macros();
         self.compile_discovered_modules();
 
-        if self.failed || self.had_errors() {
+        if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 
@@ -1642,7 +1689,7 @@ impl Pipeline {
         self.expand_user_macros();
         self.compile_discovered_modules();
 
-        if self.failed || self.had_errors() {
+        if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
         }
 
@@ -3389,19 +3436,22 @@ fn main() {}
         );
     }
 
+    /// FFI process-exec stays a typecheck gate; host calls such as
+    /// `env::exec` are checked over reachable code after codegen.
     #[test]
-    fn typecheck_project_denies_ungranted_exec() {
+    fn typecheck_project_denies_ungranted_ffi_exec() {
         let src = r#"
-use env::{exec};
+use ffi::{declare};
+use ffi::types::{Int, Ptr};
 fn main() {
-    let _ = exec("true", []);
+    let _ = declare(0, "system", (Ptr,), Int);
 }
 "#;
-        let (_dir, file) = temp_hy("exec", src);
+        let (_dir, file) = temp_hy("ffi_exec", src);
         let errors = typecheck_errors(&file);
         assert!(
-            errors.iter().any(|m| m.contains("--allow-exec")),
-            "typecheck_project must error on ungranted env::exec, got {errors:?}"
+            errors.iter().any(|m| m.contains("--allow-ffi-exec")),
+            "typecheck_project must error on ungranted FFI exec, got {errors:?}"
         );
     }
 

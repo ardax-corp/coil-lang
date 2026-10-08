@@ -225,7 +225,9 @@ fn dependency_classes_and_enums_resolve() {
 #[test]
 fn command_line_roots_and_grants_reach_diagnostics() {
     let geo = "class Point {\n    pub x: int,\n}\n\nimpl Point {\n    pub static fn at(int x) -> Point {\n        return new Point(x);\n    }\n}\n";
-    let main = "use env::{exec};\nuse geo::{Point};\n\nfn main() {\n    let p = Point::at(2);\n    let argv: Vec<string> = Vec::new();\n    let _ = exec(\"true\", argv);\n    let _ = p.x;\n}\n";
+    // FFI process-exec is gated at typecheck, so the editor sees it; the
+    // host-call gates (`env::exec`, …) run after codegen and do not.
+    let main = "use ffi::{declare};\nuse ffi::types::{Int, Ptr};\nuse geo::{Point};\n\nfn main() {\n    let p = Point::at(2);\n    let _ = declare(0, \"system\", (Ptr,), Int);\n    let _ = p.x;\n}\n";
     let dir = project("cli-roots", &[("vendor/geo.hy", geo), ("src/main.hy", main)]);
     let main_uri = uri(&dir.join("src/main.hy"));
     let last = |args: &[&str]| -> Vec<String> {
@@ -241,12 +243,12 @@ fn command_line_roots_and_grants_reach_diagnostics() {
         "vendor/ is not a root by default: {without:?}"
     );
     assert!(
-        without.iter().any(|m| m.contains("--allow-exec")),
-        "exec needs the grant: {without:?}"
+        without.iter().any(|m| m.contains("--allow-ffi-exec")),
+        "ffi exec needs the grant: {without:?}"
     );
 
     let vendor = dir.join("vendor");
-    let with = last(&["--root", vendor.to_str().unwrap(), "--allow-exec"]);
+    let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec"]);
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
 }
 

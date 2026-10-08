@@ -963,6 +963,8 @@ impl Compiler {
                     }
                 }
                 self.bytecode.push_host_invoke(arity as u32);
+                let mode = args.as_ref().and_then(|items| items.get(1)).and_then(literal_string);
+                self.tag_gated_host_call(&n, (span.start, span.end), mode);
                 self.expr_depth = depth_on_entry;
             } else if self.functions.contains_key(&n) || self.fn_entry_labels.contains_key(&n) {
                 let offset = self.functions.get(&n).copied();

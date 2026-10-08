@@ -2265,42 +2265,6 @@ fn primitive_cast_rejects_negative_literal_int_as_byte() {
 }
 
 #[test]
-fn env_exec_call_is_compile_error_without_grant() {
-    let msgs = compile_messages(
-        r#"
-use env::{exec};
-fn main() {
-    let _ = exec("true", []);
-}
-"#,
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("env::exec") && m.contains("--allow-exec")),
-        "expected env::exec capability error, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
-fn env_exit_call_is_compile_error_without_grant() {
-    let msgs = compile_messages(
-        r#"
-use env::{exit};
-fn main() {
-    exit(0);
-}
-"#,
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("env::exit") && m.contains("--allow-exit")),
-        "expected env::exit capability error, got: {:?}",
-        msgs
-    );
-}
-
-#[test]
 fn primitive_cast_rejects_non_primitive_target() {
     let (_ty, msgs) = check(r#"fn main() { let x = "hi" as int; }"#);
     assert!(

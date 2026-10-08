@@ -95,7 +95,7 @@ impl CompileProfileFlags {
 
 /// Host capabilities. Default deny (same as a missing coil.toml).
 ///
-/// Not read from Manifest. Used for **compile/typecheck** (`E0406`–`E0411`).
+/// Not read from Manifest. Used at **compile** (`E0406`–`E0411`, `E0414`).
 /// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
 /// is the grant. `--ffi-search-path` is lookup, not a dload grant.
 /// `dload("c")` stays denied even with `--allow-dload c`.
@@ -113,6 +113,21 @@ pub struct HostGrantFlags {
     /// Allow FFI process-exec symbols (system, execve, …)
     #[arg(long)]
     pub allow_ffi_exec: bool,
+    /// Allow opening files for reading and inspecting the file system
+    #[arg(long)]
+    pub allow_read: bool,
+    /// Allow opening files for writing, creating, removing and renaming
+    #[arg(long)]
+    pub allow_write: bool,
+    /// Allow connecting, listening on and binding sockets
+    #[arg(long)]
+    pub allow_net: bool,
+    /// Allow reading and changing environment variables and the working directory
+    #[arg(long)]
+    pub allow_env: bool,
+    /// Allow everything above (not dload)
+    #[arg(short = 'A', long)]
+    pub allow_all: bool,
     /// Allow dload of STEM (repeatable). Still needs lock hash or trusted.
     #[arg(long = "allow-dload", value_name = "STEM", action = clap::ArgAction::Append)]
     pub allow_dload: Vec<String>,
@@ -127,19 +142,32 @@ impl HostGrantFlags {
             || self.allow_exit
             || self.allow_exec
             || self.allow_ffi_exec
+            || self.allow_read
+            || self.allow_write
+            || self.allow_net
+            || self.allow_env
+            || self.allow_all
             || !self.allow_dload.is_empty()
             || !self.ffi_search_path.is_empty()
     }
 
     pub fn into_grants(self) -> HostGrants {
-        HostGrants {
+        let mut grants = HostGrants {
             allow_attach: self.allow_attach,
             allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
             allow_ffi_exec: self.allow_ffi_exec,
+            allow_read: self.allow_read,
+            allow_write: self.allow_write,
+            allow_net: self.allow_net,
+            allow_env: self.allow_env,
             allow_dload: self.allow_dload,
             ffi_search_paths: self.ffi_search_path,
+        };
+        if self.allow_all {
+            grants.grant_all();
         }
+        grants
     }
 }
 
