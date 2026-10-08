@@ -147,6 +147,13 @@ impl MirBuilder {
         })
     }
 
+    fn is_int_const(&self, v: ValueId) -> bool {
+        let v = self.resolve(v);
+        self.func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
+            matches!(i, MirInst::Const { dest, c: MirConst::I64(_) | MirConst::I32(_) } if *dest == v)
+        })
+    }
+
     pub fn create_block(&mut self) -> BlockId {
         let id = BlockId(self.func.blocks.len() as u32);
         self.func.blocks.push(MirBlock::new(id));
@@ -259,6 +266,12 @@ impl MirBuilder {
             let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
             if !ok(lt) || !ok(rt) {
                 return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
+            }
+            // The dense compare is a word compare, but VM `EQ` is structural
+            // (strings by content, arrays and tuples element-wise). The two
+            // agree only against an integer constant such as a niche `0`.
+            if !self.is_int_const(lhs) && !self.is_int_const(rhs) {
+                return Err(MirError::msg(format!("structural cmp {lt} vs {rt}")));
             }
         } else if lt != rt || !lt.is_numeric() || lt == MirTy::Bool {
             return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
@@ -1231,6 +1244,21 @@ impl MirBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heap_eq_is_dense_only_against_an_int_constant() {
+        let mut b = MirBuilder::new("heap_eq");
+        let x = b.add_param(MirTy::HeapRef).unwrap();
+        let y = b.add_param(MirTy::HeapRef).unwrap();
+        let w = b.add_param(MirTy::I64).unwrap();
+        // Two heap words (or a heap word and an unknown i64) need the VM's
+        // structural EQ: strings by content, arrays element-wise.
+        assert!(b.ins_cmp(MirCmpOp::Eq, x, y).is_err());
+        assert!(b.ins_cmp(MirCmpOp::Ne, w, x).is_err());
+        let zero = b.ins_const(MirConst::I64(0)).unwrap();
+        assert!(b.ins_cmp(MirCmpOp::Eq, x, zero).is_ok());
+        assert!(b.ins_cmp(MirCmpOp::Ne, zero, y).is_ok());
+    }
 
     #[test]
     fn builder_smoke_diamond() {

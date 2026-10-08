@@ -448,8 +448,9 @@ mod tests {
         let n = b.ins_const(MirConst::I64(1)).unwrap();
         let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
         let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        let eq = b.ins_cmp(MirCmpOp::Eq, xs, a).unwrap();
-        let _ = eq;
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
         b.ret(Some(g)).unwrap();
         let f = b.finish().unwrap();
         f.verify().unwrap();
@@ -487,7 +488,9 @@ mod tests {
         let n2 = b.ins_const(MirConst::I64(2)).unwrap();
         let c = b.ins_alloc(MirAllocKind::Array, vec![n2]).unwrap();
         let g2 = b.ins_gc_barrier(MirGcKind::Safepoint, vec![c]).unwrap();
-        let _eq = b.ins_cmp(MirCmpOp::Eq, a, c).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, c, z).unwrap();
         b.ret(Some(g2)).unwrap();
         let f = b.finish().unwrap();
         f.verify().unwrap();
@@ -512,9 +515,19 @@ mod tests {
             IlOp::MakeArray { elem_kind: 0, arity: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 0, loc },
-            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 0, loc },
             IlOp::Bin {
                 op: common::Instruction::EQ,
+                loc,
+            },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Bin {
+                op: common::Instruction::EQ,
+                loc,
+            },
+            IlOp::Bin {
+                op: common::Instruction::AND,
                 loc,
             },
             IlOp::Return { loc, ret_words: 1 },
