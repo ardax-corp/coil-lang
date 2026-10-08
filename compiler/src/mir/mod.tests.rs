@@ -3008,8 +3008,13 @@ fn main() {
     );
 }
 
+/// The payload words of `Node(bottom_up(..), bottom_up(..))` are open
+/// self-call results, which MIR types as `i64` from their use. Lowering
+/// them typed scalar dropped the first subtree from the GC roots across
+/// the second call (and marked it scalar in the object), so the body stays
+/// on the stack path, where `MakeEnumReturnK` carries the pointer kinds.
 #[test]
-fn b6_recursive_make_enum_binds_maps() {
+fn b6_recursive_make_enum_of_open_calls_stays_on_stack() {
     let src = r#"
 enum Tree {
     Leaf,
@@ -3029,8 +3034,8 @@ fn main() {
     let mut p = crate::Pipeline::new();
     let _ = p.compile_src(src).expect("compile bottom_up");
     assert!(
-        p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
-        "B6 recursive MakeEnum should bind maps: {:?}",
+        p.stack_maps().iter().all(|m| m.safepoints.is_empty()),
+        "recursive MakeEnum of call results must not bind scalar-typed maps: {:?}",
         p.stack_maps()
     );
 }

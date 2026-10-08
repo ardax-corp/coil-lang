@@ -930,20 +930,24 @@ fn lower_op(
             b.def_local(LocalId(*slot), arr)?;
             Ok(())
         }
-        IlOp::MakeTuple { arity, .. } if hints.allow_alloc => {
+        IlOp::MakeTuple { arity, kinds, .. } if hints.allow_alloc => {
+            check_alloc_kinds(b, tos, *arity as usize, *kinds, false)?;
             lower_alloc(b, tos, MirAllocKind::Tuple, *arity)
         }
         IlOp::MakeArray { arity, .. } if hints.allow_alloc => {
             lower_alloc(b, tos, MirAllocKind::Array, *arity)
         }
-        IlOp::MakeEnum { tag, arity, .. } if hints.allow_alloc => lower_alloc(
-            b,
-            tos,
-            MirAllocKind::Enum {
-                tag: u32::from(*tag),
-            },
-            u32::from(*arity),
-        ),
+        IlOp::MakeEnum { tag, arity, kinds, .. } if hints.allow_alloc => {
+            check_alloc_kinds(b, tos, usize::from(*arity), *kinds, true)?;
+            lower_alloc(
+                b,
+                tos,
+                MirAllocKind::Enum {
+                    tag: u32::from(*tag),
+                },
+                u32::from(*arity),
+            )
+        }
         IlOp::GetField { .. } if hints.allow_heap_fields => {
             lower_heap_get_field(b, tos, next, hints)
         }
@@ -1235,6 +1239,38 @@ fn lower_format(
         }
         _ => Err(LowerError::Refused("format".into())),
     }
+}
+
+/// Refuse an aggregate whose codegen word kinds mark a payload word as a
+/// heap pointer while its SSA value was typed as a scalar: a `CALL` result
+/// typed from its use defaults to `i64`, and a scalar-typed pointer is no
+/// GC root across later safepoints (nor a pointer word in the object).
+fn check_alloc_kinds(
+    b: &MirBuilder,
+    tos: &[ValueId],
+    arity: usize,
+    kinds: u8,
+    popped_first: bool,
+) -> Result<(), LowerError> {
+    if kinds == 0 || tos.len() < arity {
+        return Ok(());
+    }
+    let elems = &tos[tos.len() - arity..];
+    for word in 0..arity.min(common::PACKED_KIND_WORDS) {
+        if common::packed_word_kind(kinds, word) != common::WORD_POINTER {
+            continue;
+        }
+        // `MakeEnum` pops word 0 first (it is the last push); a tuple's
+        // words are in push order.
+        let v = if popped_first { elems[arity - 1 - word] } else { elems[word] };
+        if matches!(
+            b.func().ty(v),
+            MirTy::I32 | MirTy::I64 | MirTy::F32 | MirTy::F64 | MirTy::Bool
+        ) {
+            return Err(LowerError::Refused("alloc pointer word typed scalar".into()));
+        }
+    }
+    Ok(())
 }
 
 fn lower_alloc(
