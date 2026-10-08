@@ -918,6 +918,8 @@ pub struct Compiler {
     hir_inline: bool,
     /// A debugger session compiles this program: no typed inlining.
     debugger_attached: bool,
+    /// Nested matches dispatch on their outer tag once (`COIL_HIR_MATCH_TREE=0` off).
+    hir_match_tree: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -1045,6 +1047,7 @@ impl Default for Compiler {
             hir_fns: HashMap::new(),
             hir_inline: crate::hir::inline::inline_from_env(),
             debugger_attached: false,
+            hir_match_tree: crate::hir::match_tree::tree_from_env(),
             hir_fn_names: HashMap::new(),
         }
     }
