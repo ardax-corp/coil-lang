@@ -1,6 +1,6 @@
 // `==` on strings returned by a call inside a loop compares content, not the
 // heap word. The dense loop path used to compare the two pointers.
-use string::{format};
+use string::format;
 
 fn word(int idx) -> string {
     if idx == 0 {
