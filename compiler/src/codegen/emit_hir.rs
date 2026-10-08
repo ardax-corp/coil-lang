@@ -442,6 +442,14 @@ impl Compiler {
         };
         let here = home(hir);
         let budget = self.inline_cost.max_inline_cost;
+        // Callees with guard returns, folded to a single exit.
+        let folded: HashMap<usize, crate::hir::HirBody> = emit
+            .calls
+            .values()
+            .filter_map(|call| self.hir_fn_names.get(strip_overload_key(&call.key)).copied().flatten())
+            .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
+            .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
+            .collect();
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             let Some(call) = emit.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
@@ -465,7 +473,7 @@ impl Compiler {
                 .get(name)
                 .ok_or_else(|| format!("no body `{name}`"))?
                 .ok_or("ambiguous")?;
-            let callee = &module.bodies[index];
+            let callee = folded.get(&index).unwrap_or(&module.bodies[index]);
             // Trait instance and default method bodies dispatch; a generic
             // class's methods share one body.
             if callee.name == hir.name
