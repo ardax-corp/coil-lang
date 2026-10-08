@@ -4300,7 +4300,14 @@ impl Compiler {
                     None => Ok(()),
                 }
             }
-            HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
+            HirKind::Loop { body } => {
+                // A parallel `while` site keeps the AST's `try_emit_par_loop`.
+                let (start, end) = hir.expr(id).span;
+                if self.loop_par_sites.contains_key(&(start, end)) {
+                    return Err("while-par");
+                }
+                self.hir_check_effect(hir, emit, *body)
+            }
             // Each capture is one frame word the thunk's frame copies.
             HirKind::Defer { captures, body } => {
                 for local in captures.iter().flatten() {
@@ -5437,6 +5444,20 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let tail = emit.tail_calls.contains(&id.0);
+                if self.hir_par_call(hir, emit, &key, args, depth) {
+                    if tail {
+                        // A tail site's `Return` emits nothing after it.
+                        if natural.words() == 2 {
+                            self.push_return_two_word();
+                        } else {
+                            self.bytecode.push_return();
+                        }
+                        return;
+                    }
+                    self.hir_convert(&natural, want, depth);
+                    return;
+                }
+                let call = &emit.calls[&id.0];
                 // Only with no operands below: the arg and result temps are
                 // `STORE`s, which would lift the cursor over live operands.
                 let mono = call.mono;
@@ -7125,6 +7146,70 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
+    }
+
+    /// A call to a function with an auto-par fork site, as the AST's
+    /// `try_emit_par_specialized_call` (all-literal arguments the site's
+    /// guards accept: the worker with its hop budget) and
+    /// `try_emit_par_dynamic_call` (one non-literal argument: the worker
+    /// above the site's cutoff, else the sequential function).
+    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
+        let short = Self::par_shape_key(key);
+        if args.is_empty() || !self.par_shapes.contains_key(short) {
+            return false;
+        }
+        let spec = crate::typechecking::par_worker_name(short);
+        let Some(&worker) = self.functions.get(&spec) else {
+            return false;
+        };
+        let lits: Option<Vec<i64>> = args
+            .iter()
+            .map(|&a| match hir.expr(a).kind {
+                HirKind::Lit(Lit::Int(n)) if n >= 0 => Some(n),
+                _ => None,
+            })
+            .collect();
+        let hops = crate::typechecking::PAR_SPEC_HOPS as i32;
+        if let Some(vals) = lits {
+            let site = &self.par_shapes[short];
+            if !crate::typechecking::guards_hold(&site.guards, &vals)
+                || !crate::typechecking::args_worth_parallel(&self.par_shapes, short, &vals)
+            {
+                return false;
+            }
+            let mut bc = CodeBuf::new();
+            for &v in &vals {
+                self.push_int_const_into(v, &mut bc);
+            }
+            self.bytecode.append(&mut bc);
+            self.bytecode.push_const(hops);
+            self.bytecode
+                .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
+            return true;
+        }
+        let [arg] = args else { return false };
+        let Some(cutoff) = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short) else {
+            return false;
+        };
+        let Some(&orig) = self.functions.get(key).or_else(|| self.functions.get(short)) else {
+            return false;
+        };
+        self.hir_value(hir, emit, *arg, &BOXED, depth);
+        let use_worker = self.bytecode.fresh_label();
+        let done = self.bytecode.fresh_label();
+        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+        let mut bc = CodeBuf::new();
+        self.push_int_const_into(cutoff - 1, &mut bc);
+        self.bytecode.append(&mut bc);
+        self.bytecode.push(Byte::new(Instruction::LE));
+        self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
+        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+        self.hir_jump(IlJumpKind::Unconditional, done);
+        self.bytecode.bind_label(use_worker);
+        self.bytecode.push_const(hops);
+        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+        self.bytecode.bind_label(done);
+        true
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
