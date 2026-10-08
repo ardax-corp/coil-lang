@@ -473,6 +473,9 @@ fn worker_loop(reactor: Arc<Reactor>) {
 fn run_help_job(reactor: &Reactor, job: Job) {
     bump(&reactor.join_helps);
     let program = Arc::clone(&job.program);
+    // The waiting job may be mid-epoch on its own heap; the helped one must
+    // not allocate from (or flush into) that batch (#766, #779).
+    let _stash = crate::memory::stash_epoch_batch();
     with_help_vm(&program, |vm| run_job_on_vm(vm, job));
 }
 

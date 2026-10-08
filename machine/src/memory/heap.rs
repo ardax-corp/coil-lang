@@ -71,6 +71,30 @@ thread_local! {
         std::cell::RefCell::new(EpochBatch::default());
 }
 
+/// This thread's epoch batch, set aside while it helps with a job that may
+/// allocate in another heap's epoch (a join help-steals unrelated jobs: other
+/// test cases, other VMs' auto-par work). Dropping it puts the batch back.
+#[must_use]
+pub struct EpochBatchStash(Option<EpochBatch>);
+
+/// Set aside this thread's epoch batch until the returned stash drops.
+pub fn stash_epoch_batch() -> EpochBatchStash {
+    EpochBatchStash(Some(EPOCH_BATCH_TLS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))))
+}
+
+impl Drop for EpochBatchStash {
+    fn drop(&mut self) {
+        let Some(saved) = self.0.take() else {
+            return;
+        };
+        EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            debug_assert!(batch.is_empty(), "a helped job left its epoch batch unflushed");
+            *batch = saved;
+        });
+    }
+}
+
 /// Collector phase. `Idle` means the last cycle finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcPhase {
@@ -4309,6 +4333,32 @@ mod tests {
         heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
         assert!(heap.should_collect(), "normal threshold again after the epoch");
         heap.alloc_bytes = 0;
+    }
+
+    /// A thread that waits mid-epoch on heap A and helps with a job in heap
+    /// B's epoch keeps the two batches apart (#766, #779): B's objects land
+    /// in B, and A's batch comes back intact for A's flush.
+    #[test]
+    fn stashed_epoch_batch_keeps_heaps_apart() {
+        let (lock_a, lock_b) = (Mutex::new(()), Mutex::new(()));
+        let (mut a, mut b) = (Heap::default(), Heap::default());
+        a.enter_epoch_stw(&lock_a);
+        let in_a = a.alloc(ObjString::from("a"), Object::String).0.addr();
+        {
+            let _stash = stash_epoch_batch();
+            b.enter_epoch_stw(&lock_b);
+            let in_b = b.alloc(ObjString::from("b"), Object::String).0.addr();
+            assert!(b.find_object_by_addr(in_b).is_some());
+            assert!(a.find_object_by_addr(in_b).is_none());
+            b.flush_epoch_batch();
+            b.exit_epoch_stw();
+        }
+        let again = a.alloc(ObjString::from("a2"), Object::String).0.addr();
+        assert!(a.find_object_by_addr(in_a).is_some() && a.find_object_by_addr(again).is_some());
+        a.flush_epoch_batch();
+        a.exit_epoch_stw();
+        assert_eq!(a.live_object_count(), 2);
+        assert_eq!(b.live_object_count(), 1);
     }
 
     /// An epoch batch hands out the same slots a plain alloc would, and its
