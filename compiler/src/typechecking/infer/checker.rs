@@ -4769,8 +4769,14 @@ impl Checker {
         } else if let Some("env_exit") = self.host_fn_in_scope(&ident) {
             self.gate_env_exit(range.clone());
         }
-        if self.io_fn_in_scope(&ident) == Some(IoBuiltin::StreamAttach) {
-            self.gate_stream_attach(range.clone());
+        match self.io_fn_in_scope(&ident) {
+            Some(IoBuiltin::StreamAttach) => self.gate_stream_attach(range.clone()),
+            Some(IoBuiltin::Drive | IoBuiltin::WaitReady) => self.warn_deprecated(
+                &ident,
+                "run concurrent IO as tasks: `task::scope` with `spawn`; an IO wait suspends only its task",
+                range.clone(),
+            ),
+            _ => {}
         }
         self.gate_ffi_exec_call(&ident, range.clone());
 
@@ -7176,7 +7182,23 @@ impl Checker {
     }
 
     /// `block_on(coro)`, drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.
+    /// Warn that `name` is deprecated; `help` names the replacement.
+    fn warn_deprecated(&mut self, name: &str, help: &str, range: Range<usize>) {
+        let mut msg = Message::warn(
+            ErrorCode::Deprecated,
+            format!("`{name}` is deprecated"),
+            range,
+        );
+        msg.with_help(help.to_string());
+        self.messages.push(msg);
+    }
+
     fn infer_block_on(&mut self, args: &[Output], range: Range<usize>) -> Ty {
+        self.warn_deprecated(
+            "block_on",
+            "call the generator's work directly, or run it as a task with `task::scope` and `join`",
+            range.clone(),
+        );
         if args.len() != 1 {
             for arg in args {
                 let _ = self.infer(arg);

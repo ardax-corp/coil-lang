@@ -2922,3 +2922,41 @@ fn main() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn block_on_drive_wait_ready_warn_deprecated() {
+    let msgs = check_messages(
+        r#"
+use io::{drive, wait_ready};
+gen fn one() -> int {
+    return 1;
+}
+fn main() {
+    let _ = block_on(one());
+    let _ = drive();
+    let _ = wait_ready();
+}
+"#,
+    );
+    let deprecated: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::Deprecated))
+        .map(|m| m.message().to_string())
+        .collect();
+    for name in ["block_on", "drive", "wait_ready"] {
+        assert!(
+            deprecated.iter().any(|m| m.contains(&format!("`{name}`"))),
+            "expected Deprecated (E0129) for {name}, got: {:?}",
+            msgs.iter()
+                .map(|m| (m.code(), m.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        msgs.iter().all(|m| m.code() == Some(ErrorCode::Deprecated)),
+        "deprecation must stay a warning only: {:?}",
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
+    );
+}
