@@ -479,6 +479,14 @@ impl Compiler {
             {
                 return Err("generic-class".to_string());
             }
+            // A finalizer class's methods keep their frames: `drop` and
+            // what it reaches see the object, not its fields.
+            if callee.kind == BodyKind::Method
+                && let Some(owner) = callee.name.rsplit("::").nth(1)
+                && (self.checker.class_has_drop(owner) || callee.name.ends_with("::drop"))
+            {
+                return Err("drop-class".to_string());
+            }
             let shape = inline::inlinable(callee, budget)?;
             Ok((callee, shape))
         };

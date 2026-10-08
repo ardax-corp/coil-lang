@@ -47,6 +47,12 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
     if callee.is_coro || callee.is_generic || callee.result_mode || !callee.captures.is_empty() {
         return Err("body");
     }
+    // A fixed array, tuple or record argument is shared with the callee,
+    // but a `let` of it copies.
+    let value_ty = |t: &Option<ty::Ty>| matches!(t, Some(ty::Ty::Array { .. } | ty::Ty::Tuple(_) | ty::Ty::Record { .. }));
+    if callee.params.iter().any(|&p| value_ty(&callee.local(p).ty)) || value_ty(&callee.ret) {
+        return Err("value-param");
+    }
     let root = callee.root.ok_or("no-body")?;
     let HirKind::Block { stmts, tail } = &callee.expr(root).kind else {
         return Err("root");
@@ -104,6 +110,10 @@ pub fn inline_calls<'a>(
     callee_of: impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     growth: usize,
 ) -> Option<(HirBody, usize)> {
+    // Defer thunks are planned against the caller's own statements.
+    if caller.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })) {
+        return None;
+    }
     let mut b = Inliner {
         body: caller.clone(),
         original: caller.exprs.len(),
