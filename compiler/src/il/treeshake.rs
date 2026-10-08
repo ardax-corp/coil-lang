@@ -77,7 +77,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, setup_start, setup_end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -89,7 +89,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, 0, setup_start.min(3));
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -104,7 +104,7 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, start, end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
@@ -275,6 +275,9 @@ impl CallGraph {
     }
 }
 
+/// Each reached function and the function it was first reached from.
+pub type ReachParents = HashMap<String, Option<String>>;
+
 /// Every function reachable from `roots` (by name) or from the ops outside
 /// every function body (setup, static initializers), with the function it
 /// was first reached from (`None` for a root), and every function's
@@ -287,7 +290,7 @@ pub fn reachable_functions(
     roots: &[String],
     test_pcs: &[usize],
     extra: &[&[IlOp]],
-) -> (HashMap<String, Option<String>>, HashMap<String, (usize, usize)>) {
+) -> (ReachParents, HashMap<String, (usize, usize)>) {
     let graph = CallGraph::new(buf, functions, fn_entry_labels, None);
     let ops = buf.ops();
     let mut parent: HashMap<String, Option<String>> = HashMap::new();

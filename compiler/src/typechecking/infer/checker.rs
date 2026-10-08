@@ -4781,13 +4781,12 @@ impl Checker {
         // `env::exec`, `env::exit`, `Stream.attach` and the other gated host
         // calls are checked over what `main` / tests reach, after codegen
         // (`Compiler::capability_violations`).
-        match self.io_fn_in_scope(&ident) {
-            Some(IoBuiltin::Drive | IoBuiltin::WaitReady) => self.warn_deprecated(
+        if let Some(IoBuiltin::Drive | IoBuiltin::WaitReady) = self.io_fn_in_scope(&ident) {
+            self.warn_deprecated(
                 &ident,
                 "run concurrent IO as tasks: `task::scope` with `spawn`; an IO wait suspends only its task",
                 range.clone(),
-            ),
-            _ => {}
+            );
         }
         self.gate_ffi_exec_call(&ident, range.clone());
 
