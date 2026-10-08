@@ -60,6 +60,10 @@ impl CapViolation {
 
 /// `module::f`, `Owner::m`, `f$mono$…` as the user would name them.
 fn shown_fn(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("__static_init$") {
+        let static_name = rest.split('$').next().unwrap_or(rest);
+        return format!("the initializer of static `{static_name}`");
+    }
     let base = name.split('$').next().unwrap_or(name);
     format!("`{base}`")
 }
@@ -76,9 +80,12 @@ impl Compiler {
         if caps.is_empty() {
             return;
         }
-        let loc = self.loc_from_span(SimpleSpan::from(span.0..span.1));
+        let mut loc = self.loc_from_span(SimpleSpan::from(span.0..span.1));
         if loc.file == DEBUG_FILE_UNKNOWN {
-            return;
+            // No source file (a bare `Compiler`): still keyed by the span,
+            // which debug info ignores without a file.
+            loc.start_byte = span.0 as u32;
+            loc.end_byte = span.1.max(span.0 + 1) as u32;
         }
         let Some(op @ IlOp::HostInvoke { .. }) = self.bytecode.il_mut().ops_slice_mut().last_mut() else {
             return;
@@ -90,6 +97,15 @@ impl Compiler {
             native: row.name,
         });
         entry.caps = entry.caps.union(caps);
+    }
+
+    /// Report [`Self::capability_violations`] against this compile's grants
+    /// as messages (a single-module [`Self::compile`]).
+    pub(super) fn report_capability_violations(&mut self) {
+        let granted = self.checker.host_grants().caps();
+        for v in self.capability_violations(granted) {
+            self.messages.push(v.message());
+        }
     }
 
     /// The gated host calls reachable from `main`, the tests (when

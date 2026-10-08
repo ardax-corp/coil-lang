@@ -258,7 +258,7 @@ jobs:
           # HIR lowering is the default; the AST walk stays one release as
           # an escape hatch, so both paths must agree on every test.
           ./target/debug/coil test --ast-codegen --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-          ./target/debug/coil test --ast-codegen -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test --ast-codegen -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
@@ -272,7 +272,7 @@ jobs:
         run: |
           # `coil test` re-execs `coil-test`; build the harness itself with the feature.
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-          ./target/gc-stress/debug/coil-test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Leak smoke (`coil test` under ulimit -v)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
@@ -280,7 +280,7 @@ jobs:
           ulimit -v 65536
           # One job: every extra thread reserves a glibc malloc arena (64 MiB
           # of address space), which alone exceeds the cap.
-          ./target/debug/coil test -j 1 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
         if: matrix.features.id == 'default'
@@ -363,7 +363,7 @@ jobs:
         run: |
           cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          ./target/debug/coil.exe test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          ./target/debug/coil.exe test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
         shell: msys2 {0}

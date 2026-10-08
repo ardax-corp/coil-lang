@@ -20246,6 +20246,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> Vec<Byte> {
         self.compile_unfused(module, ast, false);
+        self.report_capability_violations();
         self.finalize_bytecode();
         self.bytecode.clone_bytes()
     }

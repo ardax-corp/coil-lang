@@ -49,9 +49,9 @@ Manual equivalent (no scripts):
 ```bash
 rm -f out.hyc
 cargo run --release -- examples/projects/01-todo/src/main.hy
-timeout 10s cargo run --release -- examples/projects/02-adventure/src/main.hy \
+timeout 10s cargo run --release -- --allow-read --allow-write examples/projects/02-adventure/src/main.hy \
   < examples/projects/02-adventure/transcript.txt
-timeout 10s cargo run --release -- examples/projects/03-echo/src/main.hy
+timeout 10s cargo run --release -- --allow-net examples/projects/03-echo/src/main.hy
 ```
 
 ## Per-project unit tests

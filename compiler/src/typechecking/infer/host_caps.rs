@@ -22,6 +22,11 @@ impl Checker {
         self.dload_host_stems = extra_dload_stems;
     }
 
+    /// This typecheck's grants.
+    pub(crate) fn host_grants(&self) -> &crate::HostGrants {
+        &self.host_grants
+    }
+
     pub(super) fn gate_ffi_exec_symbol(
         &mut self,
         symbol: &str,

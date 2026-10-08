@@ -504,21 +504,36 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow `Stream.attach` at typecheck (`--allow-attach`).
+    /// Allow `Stream.attach` (`--allow-attach`).
     pub fn grant_attach(&mut self) {
         self.host_grants.allow_attach = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exec` at typecheck (`--allow-exec`).
+    /// Allow `env::exec` (`--allow-exec`).
     pub fn grant_exec(&mut self) {
         self.host_grants.allow_exec = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exit` at typecheck (`--allow-exit`).
+    /// Allow `env::exit` (`--allow-exit`).
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
+        self.try_sync_host_caps();
+    }
+
+    /// Allow a capability by name (`read`, `write`, `net`, `env`, `exec`,
+    /// `exit`, `attach`, `ffi-exec`): `--allow-<name>`. False for an
+    /// unknown name.
+    pub fn grant_capability(&mut self, name: &str) -> bool {
+        let known = self.host_grants.grant_named(name);
+        self.try_sync_host_caps();
+        known
+    }
+
+    /// Allow every capability except `dload` (`--allow-all`).
+    pub fn grant_all(&mut self) {
+        self.host_grants.grant_all();
         self.try_sync_host_caps();
     }
 
