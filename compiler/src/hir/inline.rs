@@ -224,18 +224,21 @@ fn ret_ty(b: &HirBody) -> Option<ty::Ty> {
 
 /// A branch block that ends in `return`, as a block that ends in its value.
 fn fold_branch(b: &mut HirBody, branch: HirId, folded: &mut usize) -> Option<HirId> {
-    let HirKind::Block { stmts, tail } = b.expr(branch).kind.clone() else {
-        return None;
-    };
-    fold_exit(b, &stmts, tail, folded)
+    match b.expr(branch).kind.clone() {
+        HirKind::Block { stmts, tail } => fold_exit(b, &stmts, tail, folded),
+        // `else if`: the branch is the `if` itself.
+        HirKind::If { .. } => fold_exit(b, &[branch], None, folded),
+        _ => None,
+    }
 }
 
-/// `branch` is a block whose last step is a `return`.
+/// `branch` (a block, or an `else if`) ends in a `return` on every path.
 fn exits(b: &HirBody, branch: HirId) -> bool {
-    let HirKind::Block { stmts, tail } = &b.expr(branch).kind else {
-        return false;
+    let last = match &b.expr(branch).kind {
+        HirKind::Block { stmts, tail } => tail.or_else(|| stmts.last().copied()),
+        HirKind::If { .. } => Some(branch),
+        _ => return false,
     };
-    let last = tail.or_else(|| stmts.last().copied());
     last.is_some_and(|l| match &b.expr(l).kind {
         HirKind::Return(_) => true,
         HirKind::If { then, els: Some(e), .. } => exits(b, *then) && exits(b, *e),
