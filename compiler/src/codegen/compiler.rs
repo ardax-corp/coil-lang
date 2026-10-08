@@ -12399,10 +12399,14 @@ impl Compiler {
         }
         self.begin_fn_defers(body);
         let body_op_start = self.bytecode.ops().len();
-        let mut c = self.do_compile(body);
-        self.bytecode.append(&mut c);
+        let lowered = self.try_lower_hir_function(&method.0, body);
+        if !lowered {
+            let mut c = self.do_compile(body);
+            self.bytecode.append(&mut c);
+        }
 
-        if !self.region_ends_with_return(body_op_start) {
+        let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+        if ends_on_label || !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
         self.emit_shared_try_fail_epilogue();
