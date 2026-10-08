@@ -532,15 +532,61 @@ impl<const S: usize> Machine<S> {
                             self.stack.seek(tell - consume);
                             self.stack.push(Value::from(0i64));
                         }
+                        crate::HostOp::Task => {
+                            let mut args = [Value::default(); 2];
+                            let window = &self.stack.top_window(consume)[1..];
+                            let n = window.len().min(2);
+                            args[..n].copy_from_slice(&window[..n]);
+                            self.stack.seek(tell - consume);
+                            match self.task_host_op(fn_id, &args[..n], &mut ip, &mut sp) {
+                                TaskFlow::Value(v) => self.stack.push(v),
+                                TaskFlow::Switched => {
+                                    *ip_out = ip;
+                                    *sp_out = sp;
+                                    return dispatch::RestFlow::Continue;
+                                }
+                                TaskFlow::Panic(msg) => {
+                                    *ip_out = ip;
+                                    *sp_out = sp;
+                                    return dispatch::RestFlow::Done(
+                                        self.runtime_panic(&msg, ip.saturating_sub(1)),
+                                    );
+                                }
+                            }
+                        }
                         crate::HostOp::Ordinary => {
+                            if unlikely(
+                                fn_id == common::CLOCK_SLEEP_MS_ID as usize
+                                    && self.tasks_can_switch(),
+                            ) {
+                                // Inside a scope, `clock::sleep_ms` suspends the task.
+                                let ms = self.stack.top_window(consume)[1].as_int();
+                                self.stack.seek(tell - consume);
+                                if let TaskFlow::Value(v) = self.task_sleep(ms, &mut ip, &mut sp) {
+                                    self.stack.push(v);
+                                }
+                                *ip_out = ip;
+                                *sp_out = sp;
+                                return dispatch::RestFlow::Continue;
+                            }
                             let native = self.natives.get_by_id(fn_id).expect("id checked above");
                             let args = &self.stack.top_window(consume)[1..];
                             let layout = crate::host_enum::HostEnumLayout::from_operand(
                                 opcode.operand_u32(),
                             );
-                            match crate::host_enum::with_host_enum_layout(layout, || {
+                            // `stream_park` parks the task (not the thread) under a scheduler.
+                            let park_tasks = fn_id == common::STREAM_PARK_ID as usize
+                                && self.tasks_can_switch();
+                            if unlikely(park_tasks) {
+                                crate::task::set_tasks_active(true);
+                            }
+                            let invoked = crate::host_enum::with_host_enum_layout(layout, || {
                                 native.invoke(&mut self.heap, args)
-                            }) {
+                            });
+                            if unlikely(park_tasks) {
+                                crate::task::set_tasks_active(false);
+                            }
+                            match invoked {
                                 Ok(Some(v)) => {
                                     self.stack.seek(tell - consume);
                                     self.stack.push(v);
@@ -548,13 +594,16 @@ impl<const S: usize> Machine<S> {
                                 Ok(None) => {
                                     self.stack.seek(tell - consume);
                                     if let Some(req) = crate::io::take_pending_io_park() {
-                                        if !self.resume_stack.is_empty() {
-                                            // Inside a coroutine: register for batch
-                                            // poll and yield (do not park the VM).
-                                            self.cooperative_io_await_yield(
-                                                &mut ip, &mut sp, req, layout,
-                                            );
+                                        if self.tasks_can_switch() {
+                                            // Suspend this task (with any generator it
+                                            // is resuming); another task runs meanwhile.
+                                            self.task_suspend_io(req, layout, &mut ip, &mut sp);
+                                            *ip_out = ip;
+                                            *sp_out = sp;
+                                            return dispatch::RestFlow::Continue;
                                         } else {
+                                            // No other task: park the whole VM, even
+                                            // inside a generator (it does not yield).
                                             self.frames.get_mut().set(sp);
                                             self.pending_io = Some(PendingIoWait {
                                                 request: req,
@@ -649,6 +698,14 @@ impl<const S: usize> Machine<S> {
                     }
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
                     let s = unsafe { (*ptr).as_ref() };
+                    if self.task_panic_is_caught() {
+                        // A child task's panic fails its scope, which reports it.
+                        self.task_panic_message = Some(s.to_string());
+                        self.panicked = true;
+                        *ip_out = ip;
+                        *sp_out = sp;
+                        return dispatch::RestFlow::Done(false);
+                    }
                     let loc_suffix = self
                         .format_panic_location(panic_ip)
                         .map(|loc| format!(" at {loc}"))
@@ -1284,7 +1341,6 @@ impl<const S: usize> Machine<S> {
                         yield_from: None,
                         delegator: None,
                         yield_from_resume_ip: 0,
-                        io_wait: None,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 

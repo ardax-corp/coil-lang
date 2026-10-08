@@ -37,7 +37,7 @@ pub(crate) fn take_pending_io_park() -> Option<IoParkRequest> {
     PENDING_IO_PARK.with(|c| c.borrow_mut().take())
 }
 
-fn request_io_park(req: IoParkRequest) {
+pub(crate) fn request_io_park(req: IoParkRequest) {
     PENDING_IO_PARK.with(|c| *c.borrow_mut() = Some(req));
 }
 
