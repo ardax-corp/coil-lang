@@ -2076,10 +2076,15 @@ impl Compiler {
         if args.len() != hint.arity || (method && !hint.has_receiver) {
             return Err("callee-trait");
         }
-        // Words pass as the AST compiles them; enum layouts may differ.
+        // Words pass as the AST compiles them; a ground enum's layout may
+        // differ from the instance's, an open one is the shared layout the
+        // dictionary's adapter speaks.
         let word = |id: HirId| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
+                Some(ValueClass::Enum) if !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), ty)) => {
+                    Ok(self.value_layout(ty))
+                }
                 Some(ValueClass::Enum) | None => Err("callee-trait"),
                 Some(_) => Ok(self.value_layout(ty)),
             }

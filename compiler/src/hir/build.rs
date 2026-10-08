@@ -491,7 +491,20 @@ impl<'c, 'm> Cx<'c, 'm> {
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
         b.body.is_generic = !type_params.is_empty();
-        let ret = keys.iter().find_map(|k| self.checker.fn_return_ty(k));
+        // A trait's default method body has only the trait method's scheme.
+        let default_sig = keys.first().and_then(|k| k.split_once("__default__")).and_then(|(class, m)| {
+            let mut ty = &self.checker.typeclass_method_scheme(class, m)?.ty;
+            let mut params = Vec::new();
+            while let Ty::Fun(p, r) = ty {
+                params.push(p.as_ref().clone());
+                ty = r;
+            }
+            Some((params, ty.clone()))
+        });
+        let ret = keys
+            .iter()
+            .find_map(|k| self.checker.fn_return_ty(k))
+            .or_else(|| default_sig.as_ref().map(|(_, ret)| ret.clone()));
         b.body.ret_layout = ret
             .as_ref()
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
@@ -508,7 +521,10 @@ impl<'c, 'm> Cx<'c, 'm> {
             let id = b.local("self", Some(Ty::Con(owner.to_string())), LocalKind::Param);
             b.body.params.push(id);
         }
-        let param_tys = keys.iter().find_map(|k| self.checker.fn_param_tys(k));
+        let param_tys = keys
+            .iter()
+            .find_map(|k| self.checker.fn_param_tys(k))
+            .or_else(|| default_sig.map(|(params, _)| params));
         self.params(&mut b, args, param_tys.as_deref());
         if self.pinned(returns.as_ref(), b.body.ret.as_ref()) {
             b.body.pinned_param = true;
