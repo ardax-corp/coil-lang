@@ -24,6 +24,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--il-post` | Also print the **optimized** IL (after IL passes and MIR substitution, before fuse / lowering) |
 | `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
 | `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or lost the cost gate to fuse-IL |
+| `--effects` | Also print each function's effects with the first reason for each (`step: write, suspend: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (host state)`). Needs HIR lowering (the default); see [auto-par.md](auto-par.md) |
 | `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print the IL counters) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
@@ -38,7 +39,7 @@ coil-dissect examples/fib.hy --fn fib --il
 Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only — `coil.toml` does not grant them. Dissect compiles in memory; gated calls without a flag fail typecheck (`E0406`–`E0411`) the same as `coil compile`. `--ffi-search-path` is lookup only.
 
 A `.hyc` archive as the entry (`coil dissect out.hyc`) dumps its bytecode
-without compiling; `--il` / `--il-post` / `--mir` / `--ast` need a source.
+without compiling; `--il` / `--il-post` / `--hir` / `--effects` / `--mir` / `--ast` need a source.
 Archives may not record function symbols, in which case the listing is one
 `<program>` section.
 

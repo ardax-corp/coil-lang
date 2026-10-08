@@ -101,3 +101,56 @@ fn compile_dissect_attach_matches_compile_grant() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `coil dissect --effects`: each function's effects with the reason, and
+/// why auto-par left a loop sequential.
+#[test]
+fn effects_capture_names_reasons_and_auto_par_blockers() {
+    let src = r#"
+static let HITS: int = 0;
+fn step(int i) -> int {
+    HITS = HITS + 1;
+    return i * 2;
+}
+fn sq(int i) -> int {
+    return i * i;
+}
+fn apply(int x, int -> int f) -> int {
+    return f(x);
+}
+fn main() {
+    let acc = 0;
+    for i in 0..1000 {
+        acc = acc + step(i);
+    }
+    let b = 0;
+    for i in 0..1000 {
+        b = b + apply(i, fn (int x) => sq(x));
+    }
+    HITS = acc + b;
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    compiler::start_effects_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let fx = compiler::take_effects_capture();
+    let of = |name: &str| {
+        fx.fns
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| d.as_str())
+            .unwrap_or_else(|| panic!("no `{name}` in {:?}", fx.fns))
+    };
+    assert_eq!(
+        of("step"),
+        "heap write, host state: writes static `HITS` (heap write); reads static `HITS` (host state)"
+    );
+    assert_eq!(of("sq"), "pure");
+    assert_eq!(of("apply"), "pure apart from its parameters: calls parameter `f`");
+    assert_eq!(
+        fx.auto_par,
+        vec!["loop over `i` in `main` not parallelized: `step` writes static `HITS` (heap write)".to_string()],
+        "{fx:?}"
+    );
+}

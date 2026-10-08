@@ -49,6 +49,19 @@ the pure functions whose result is a scalar or `string`: two calls that each
 return a fresh array are not the same value
 ([coil-lang#790](https://github.com/ardax-corp/coil-lang/issues/790)).
 
+A `static let` read is `HOST` and a write is `HEAP_MUT` in both analyses:
+the chunk workers have no statics, and another call may change one
+([coil-lang#793](https://github.com/ardax-corp/coil-lang/issues/793)). A
+`static const` is folded and stays pure.
+
+`coil dissect --effects` prints each function's effects with the first reason
+for each, and why auto-par left a loop or a fork site sequential when purity
+is all that stopped it. It reruns loop and fork-site detection as if every
+user function were pure: a site found only then names the impure callee and
+its first reason (`loop over `i` in `main` not parallelized: `step` calls
+`write_all` (write, suspend)`). The editor hover (`coil-lsp`) shows the same
+one-line effects for a function in the open file.
+
 Expression IPA runs on **any pure** function whose body contains a fork site
 (self-calls or independent helper calls). Loop IPA also needs pure body callees.
 

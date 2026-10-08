@@ -19,7 +19,8 @@ fn summaries(src: &str) -> (HirModule, Vec<Summary>) {
     );
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
-    let out = analyze(&module, &checker, "", &ProgramEffects::default());
+    let program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
     (module, out)
 }
 

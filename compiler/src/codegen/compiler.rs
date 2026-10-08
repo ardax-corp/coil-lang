@@ -19561,8 +19561,16 @@ impl Compiler {
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
             use crate::hir::effects;
-            let summaries = effects::analyze(hir, &self.checker, module, &self.program_effects);
-            let pure = effects::pure_names(hir, module, &summaries, &self.pure_fns);
+            let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
+            let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
+            if effects::effects_capture_active() {
+                let explained = (self.auto_par && auto_par_enabled()).then(|| {
+                    let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
+                    effects::auto_par_explanations(ast, hir, module, &fx, &all)
+                });
+                effects::capture(hir, &fx, explained);
+            }
+            let summaries = fx.summaries;
             self.pure_fns.extend(pure);
             self.program_effects.record(hir, &self.checker, module, &summaries);
         }
