@@ -16,6 +16,17 @@ fn name_len(Result<string, string> r) -> Result<int, string> {
     }
 }
 
+fn first_word(Result<string, string> r) -> Result<string, string> {
+    match r {
+        Result::Ok(s) => {
+            return Result::Ok(s + "!");
+        },
+        Result::Err(e) => {
+            return Result::Err(e);
+        },
+    }
+}
+
 fn score(Result<int, string> r) -> int {
     return match r {
         Result::Ok(v) => v,
@@ -31,4 +42,15 @@ test("assert ? forwards its error") {
 test("a niche Err rewraps into a pair") {
     assert(score(name_len(Result::Ok("abc"))) == 3)?;
     assert(score(name_len(Result::Err("no"))) == -2)?;
+}
+
+test("a niche Err returns its own word") {
+    match first_word(Result::Err("bad")) {
+        Result::Ok(_) => assert(false)?,
+        Result::Err(e) => assert(e == "bad")?,
+    }
+    match first_word(Result::Ok("hi")) {
+        Result::Ok(s) => assert(s == "hi!")?,
+        Result::Err(_) => assert(false)?,
+    }
 }

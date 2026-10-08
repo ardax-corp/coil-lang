@@ -6400,6 +6400,12 @@ impl Compiler {
                     this.bytecode.push_const(tag as i32);
                     this.push_return_two_word();
                 }
+                _ if emit.ret == Rep::Word(layout) && this.hir_rewrap_tag(hir, ty, arm).is_some() => {
+                    // Into the same niche layout: the matched word is the
+                    // returned value.
+                    this.emit_run_defers();
+                    this.bytecode.push_return();
+                }
                 _ => {
                     let rep = payload_rep(this, side);
                     let reads = rep.is_some()
