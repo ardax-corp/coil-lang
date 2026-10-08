@@ -89,6 +89,8 @@ is OK (best-effort close_notify).
 | `result_unit_probe` | **124** | host `Result<(), E>` probe |
 | `math_atan` … `math_tanh` | **125–135** | M1 `prelude::math` (see below) |
 | `task_scope_open` … `task_yield` | **144–151** | embedded `task` module ([tasks](tasks.md)); archive minor 32 |
+| `unwind_resume` | **152** | end of a `defer` cleanup pad ([tasks](tasks.md#unwinding)); archive minor 33 |
+| `task_cancel`, `task_shield_enter`, `task_shield_exit` | **153–155** | embedded `task` module; archive minor 33 |
 
 119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of

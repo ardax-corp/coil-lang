@@ -22,7 +22,7 @@ fn total(string a, string b) -> Result<int, TaskError> {
 
 Design and rationale: the task-model spec and the implementation plan
 (steps T0–T5) in the project docs. This page describes what is implemented
-(T1).
+(T1, and T2's unwinding and cancellation).
 
 ## Surface
 
@@ -33,16 +33,20 @@ Design and rationale: the task-model spec and the implementation plan
 | `t.join() -> Result<R, TaskError>` | Waits for the child (suspension point). Works after the scope ended too |
 | `task::sleep(int ms)` | Suspends for at least `ms`; outside a scope it sleeps the thread |
 | `task::yield_now()` | Lets other ready tasks run first |
-| `TaskError` | `Cancelled`, `Panicked(string)`, `TimedOut` (the last is for `timeout`, T2) |
+| `t.cancel()` | Cancels the task (see [Cancellation](#cancellation)); a finished task stays as it is |
+| `task::timeout(int ms, fn () -> T) -> Result<T, TaskError>` | Runs the body as a task, cancelled after `ms`: `Err(TaskError::TimedOut)` if the deadline came first |
+| `task::shield(fn () -> T) -> T` | Runs a section a cancel waits for instead of interrupting |
+| `TaskError` | `Cancelled`, `Panicked(string)`, `TimedOut` |
 
 Closures passed to `spawn` share the heap: they capture locals, classes and
 `Vec`s freely (no `PortableValue` copy, unlike `thread::spawn`).
 
 `task` is an embedded Coil module
 ([`compiler/src/prelude/task.hy`](../../compiler/src/prelude/task.hy)), like
-`macro`. It wraps eight VM natives from virtual `prelude::task`
-(HostInvoke **144–151**, archive minor 32), which the VM runs itself
-(`HostOp::Task`) because they can switch tasks.
+`macro`. It wraps VM natives from virtual `prelude::task`
+(HostInvoke **144–151**, archive minor 32, and **153–155** `task_cancel` /
+`task_shield_enter` / `task_shield_exit`, archive minor 33), which the VM
+runs itself (`HostOp::Task`) because they can switch tasks.
 
 ## Suspension points
 
@@ -89,25 +93,55 @@ generator with a placeholder `0`, which a `for` loop took as an element).
 
 ## Failure
 
-A panic in a child task fails that task, not the VM: the VM drops its frames,
-marks the scope failed, and drops the scope's other unfinished children (and
-everything they spawned). The scope returns `Err(TaskError::Panicked(msg))`
-once they have stopped; a `join` on the panicking task returns the same
-error, a `join` on a dropped one `Err(TaskError::Cancelled)`. The panic is not
-printed. A panic in the root task still aborts the program.
+A panic runs the `defer`s of the frames it leaves, innermost first (the
+unwinder, below). In a child task it then fails that task, not the VM: the
+scope is marked failed and its other unfinished children are cancelled. The
+scope returns `Err(TaskError::Panicked(msg))` once they have stopped; a
+`join` on the panicking task returns the same error, a `join` on a cancelled
+one `Err(TaskError::Cancelled)`. The panic is not printed. A panic in the
+root task still aborts the program (after its `defer`s ran).
 
-Dropped tasks do not run their `defer`s yet: that needs the frame unwinder
-(T2), which also brings `t.cancel()`, `task::timeout` and `task::shield`.
+## Cancellation
+
+`t.cancel()`, a failing sibling and `task::timeout` cancel a task. The
+cancel is delivered at the task's next suspension point, or at once if it is
+suspended now: the task unwinds from there, running its `defer`s, and ends
+as `Cancelled`. Code cannot catch it.
+
+- A task that never ran is dropped without running.
+- Before a task unwinds, the tasks of the scopes it opened are cancelled and
+  it waits for them to stop, so the inner `defer`s run first.
+- A `defer` may suspend (close a socket gracefully) while its task unwinds.
+  An unwinding task is not cancelled again.
+- Inside `task::shield` a cancel waits: it is delivered when the last open
+  shield of the task returns.
+- A task that does not reach a suspension point is not interrupted.
+
+## Unwinding
+
+For each function with a `defer`, the compiler emits a cleanup pad after its
+code, and the archive carries a table of cleanup ranges (pc range of the
+function's own code → pad, `ProgramDebug::cleanup`, archive minor 33). Each
+`defer` statement arms a flag local when it runs, so a pad only calls the
+thunks of `defer`s that were reached. Unwinding walks the frames from the
+top: a frame with a range continues at its pad, which calls the armed thunks
+(LIFO) and ends in `unwind_resume` (HostInvoke **152**, `HostOp::Unwind`);
+that drops the frame and the walk goes on. It stops at the frame the
+execution started from (the program entry, a native callback, or the task's
+own coroutine). Stack overflow and the step budget do not unwind.
+Implementation: [`machine/src/vm_unwind.rs`](../../machine/src/vm_unwind.rs).
 
 When every task waits on another task (a join cycle) and no IO or timer can
 wake one, the waiting `join` / scope end panics with `task deadlock`.
 
-## Limitations (T1)
+## Limitations
 
 - One OS thread; `thread::spawn` stays the tool for CPU parallelism.
   `thread::recv` / `join` / `with_lock` called from a task block every task
   (T3 makes them task-aware).
-- No detached tasks, no preemption, no cancellation (T2).
+- No detached tasks, no preemption.
+- `task::timeout` reads its task through the natives instead of `join`
+  (coil-lang#786), and spawns its timer from a plain `gen fn` (coil-lang#787).
 - `block_on`, `io::drive` and `io::wait_ready` still run but no longer
   multiplex. Calling them warns `E0129` (deprecated) and points at
   `task::scope`. Example: [`examples/task_files.hy`](../../examples/task_files.hy).
