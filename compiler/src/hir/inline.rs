@@ -200,10 +200,7 @@ impl Inliner {
             let result = self.splice(call, callee, &shape, site, out);
             match site {
                 // The statement is gone; its result (if any) is the new one.
-                Site::Stmt => match result {
-                    Some(r) => s = r,
-                    None => return None,
-                },
+                Site::Stmt => s = result?,
                 Site::Direct => {
                     let span = self.body.expr(call).span;
                     let value = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
