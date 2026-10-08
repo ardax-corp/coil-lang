@@ -6453,6 +6453,19 @@ impl Compiler {
         want: Option<&Rep>,
         depth: u32,
     ) {
+        if depth == 0 && self.hir_int_search {
+            let literal = |pat: &HirPat| match pat {
+                HirPat::Int(n) => Some(*n),
+                HirPat::Variant { enum_name, variant, .. } => match self.checker.scalar_for(enum_name, variant) {
+                    Some(crate::typechecking::ty::ScalarBacking::Int(n)) => Some(*n),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(plan) = crate::hir::match_tree::int_search(arms, literal) {
+                return self.hir_match_search(hir, emit, scrutinee, arms, &plan, want);
+            }
+        }
         self.hir_value(hir, emit, scrutinee, &BOXED, depth);
         let end = self.bytecode.fresh_label();
         let last = arms.len() - 1;
@@ -6498,6 +6511,72 @@ impl Compiler {
             }
         }
         self.bytecode.bind_label(end);
+    }
+
+    /// A match on many integer literals as a binary search: the scrutinee
+    /// sits in a slot, `<` tests halve the sorted cases down to leaves of
+    /// equality tests, and each arm body is emitted once.
+    fn hir_match_search(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        scrutinee: HirId,
+        arms: &[HirArm],
+        plan: &crate::hir::match_tree::IntSearch,
+        want: Option<&Rep>,
+    ) {
+        self.bytecode.push_seek(self.context.variables.len() as u32);
+        self.hir_value(hir, emit, scrutinee, &BOXED, 0);
+        let slot = self.context.variables.len() as u32;
+        self.context.variables.intern(format!("__match_scrutinee{slot}"));
+        self.bytecode.push_store_pop(slot);
+        let mut labels: Vec<Option<IlLabel>> = vec![None; arms.len()];
+        for &(_, arm) in &plan.cases {
+            labels[arm].get_or_insert_with(|| self.bytecode.fresh_label());
+        }
+        let default = *labels[plan.default].get_or_insert_with(|| self.bytecode.fresh_label());
+        self.hir_search_node(&plan.cases, slot, &labels, default);
+        let end = self.bytecode.fresh_label();
+        let reached: Vec<usize> = (0..arms.len()).filter(|&i| labels[i].is_some()).collect();
+        for (k, &i) in reached.iter().enumerate() {
+            self.bytecode.bind_label(labels[i].expect("reached arm has a label"));
+            if let HirPat::Bind(local) = &arms[i].pat {
+                emit.slots[local.0 as usize] = Some(slot);
+                self.record_debug_local(&hir.local(*local).name, slot);
+            }
+            match want {
+                Some(want) => self.hir_value(hir, emit, arms[i].body, want, 0),
+                None => self.hir_effect(hir, emit, arms[i].body),
+            }
+            if k + 1 != reached.len() {
+                self.hir_jump(IlJumpKind::Unconditional, end);
+            }
+        }
+        self.bytecode.bind_label(end);
+    }
+
+    /// Search `cases` (sorted) for the value in `slot`: split on the middle
+    /// literal with `<`, and test a small leaf case by case.
+    fn hir_search_node(&mut self, cases: &[(i64, usize)], slot: u32, labels: &[Option<IlLabel>], default: IlLabel) {
+        if cases.len() <= crate::hir::match_tree::SEARCH_LEAF {
+            for &(n, arm) in cases {
+                self.bytecode.push_load(slot);
+                self.hir_push_int(n);
+                self.bytecode.push(Byte::new(Instruction::NEQ));
+                self.hir_jump(IlJumpKind::JumpIfFalse, labels[arm].expect("case arm has a label"));
+            }
+            self.hir_jump(IlJumpKind::Unconditional, default);
+            return;
+        }
+        let mid = cases.len() / 2;
+        let upper = self.bytecode.fresh_label();
+        self.bytecode.push_load(slot);
+        self.hir_push_int(cases[mid].0);
+        self.bytecode.push(Byte::new(Instruction::LE));
+        self.hir_jump(IlJumpKind::JumpIfFalse, upper);
+        self.hir_search_node(&cases[..mid], slot, labels, default);
+        self.bytecode.bind_label(upper);
+        self.hir_search_node(&cases[mid..], slot, labels, default);
     }
 
     /// `match` over `[payload, tag]`.
