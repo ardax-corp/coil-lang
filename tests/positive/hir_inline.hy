@@ -1,4 +1,4 @@
-// Typed inlining (`COIL_HIR_INLINE=1`): small callees spliced into their
+// Typed inlining (on by default): small callees spliced into their
 // callers must keep argument order, receiver mutation and side effects.
 class Counter {
     pub n: int,

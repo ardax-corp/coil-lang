@@ -260,12 +260,12 @@ jobs:
           ./target/debug/coil test --ast-codegen --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
           ./target/debug/coil test --ast-codegen -O 0 --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
-      - name: Language harness with typed inlining (`COIL_HIR_INLINE=1 coil test`)
+      - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
-          # Typed inlining is off by default until its bench gate passes;
-          # every test must give the same result with it on.
-          COIL_HIR_INLINE=1 ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          # Typed inlining is the default; every test must give the same
+          # result with it off.
+          COIL_HIR_INLINE=0 ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: GC stress (`coil test`, collect and evacuate at every allocation)
         if: matrix.features.id == 'default' && runner.os == 'Linux'

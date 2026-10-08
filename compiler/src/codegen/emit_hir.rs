@@ -416,10 +416,12 @@ impl Compiler {
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that
-    /// inlines, outside coverage runs, and in a plain function or method.
+    /// inlines, with no debugger or coverage run, and in a plain function
+    /// or method.
     fn hir_inline_on(&self, hir: &HirBody) -> bool {
         use crate::hir::BodyKind;
         self.hir_inline
+            && !self.debugger_attached
             && self.inline_cost.max_inline_cost > 0
             && self.keep_fns_in.is_none()
             && !hir.is_coro

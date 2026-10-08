@@ -438,8 +438,10 @@ impl Compiler {
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
-    /// I7/B8: session flag only. Does not disable MIR specialize.
-    pub fn set_debugger_attached(&mut self, _on: bool) {
+    /// I7/B8: session flag. Does not disable MIR specialize; turns typed
+    /// inlining off so frames and locals match the source.
+    pub fn set_debugger_attached(&mut self, on: bool) {
+        self.debugger_attached = on;
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
