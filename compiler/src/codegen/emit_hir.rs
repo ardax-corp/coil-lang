@@ -2824,9 +2824,11 @@ impl Compiler {
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
         for constraint in &scheme.constraints {
-            let lookup_tys =
-                Self::resolve_constraint_lookup(constraint, &vars, &self.checker).ok_or("callee-trait")?;
             // An open goal is served by a forwarded dictionary.
+            let lookup_tys = match Self::resolve_constraint_lookup(constraint, &vars, &self.checker) {
+                None if !forwarded.is_empty() => continue,
+                lookup => lookup.ok_or("callee-trait")?,
+            };
             if lookup_tys.iter().any(Self::ty_has_var) && !forwarded.is_empty() {
                 continue;
             }
