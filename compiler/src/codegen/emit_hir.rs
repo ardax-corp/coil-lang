@@ -6541,13 +6541,16 @@ impl Compiler {
                     }
                     self.context
                         .unboxed_class_locals
-                        .insert(key, (base, tys.len(), class));
+                        .insert(key.clone(), (base, tys.len(), class));
+                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
+                    let il_start = self.bytecode.il_mut().raw_len();
                     for (i, (&arg, ty)) in args.iter().zip(&tys).enumerate() {
                         let want = Rep::Word(self.value_layout(ty));
                         self.hir_value(hir, emit, arg, &want, 0);
                         self.bytecode.push_store_pop(base + i as u32);
                     }
+                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 if let Some(&n) = emit.stacks.get(&local.0) {
@@ -6559,9 +6562,12 @@ impl Compiler {
                         let slot = self.context.variables.intern(format!("__arrpad_{key}_{i}")) as u32;
                         debug_assert_eq!(slot, base + i as u32);
                     }
-                    self.context.stack_array_locals.insert(key, (base, n));
+                    self.context.stack_array_locals.insert(key.clone(), (base, n));
+                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
+                    let il_start = self.bytecode.il_mut().raw_len();
                     self.hir_stack_array_init(hir, emit, *local, *init);
+                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 // Value first: its operands live above every bound slot.
@@ -7293,6 +7299,85 @@ impl Compiler {
                     self.hir_let_pat_binds(hir, emit, nested, tmp);
                 }
             }
+        }
+    }
+
+    /// A split local's debug location: its fields or elements in their
+    /// own slots, as the AST's `debug_layout_of` at the `let`.
+    fn hir_debug_split(&mut self, hir: &HirBody, local: LocalId, key: &str) {
+        let Some(mut layout) = self.debug_layout_of(key) else {
+            return;
+        };
+        let ty = hir
+            .local(local)
+            .ty
+            .as_ref()
+            .map(|t| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t));
+        if let (crate::debug_vars::DebugVarLoc::Elems { elem, .. }, Some(Ty::Array { element, .. })) =
+            (&mut layout, ty.as_ref().map(crate::typechecking::ty::strip_readonly))
+        {
+            *elem = crate::debug_vars::DebugTy::from_ty(element);
+        }
+        if let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
+            if let Some(ty) = &ty {
+                var.ty = crate::debug_vars::DebugTy::from_ty(ty);
+            }
+            var.loc = layout;
+        }
+    }
+
+    /// Tag each store of a split local's component since `il_start` with
+    /// the component's own site (the AST's `tag_statement_defs`), so the
+    /// debugger shows a component a pass dropped as optimized out.
+    fn hir_debug_tag_components(&mut self, hir: &HirBody, local: LocalId, stmt: HirId, il_start: usize) {
+        let name = &hir.local(local).name;
+        // The name's span: its first whole-word occurrence in the `let`.
+        let (start, end) = hir.expr(stmt).span;
+        let Some(text) = self.source_text.get(start..end) else {
+            return;
+        };
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let Some(at) = text.match_indices(name.as_str()).map(|(i, _)| i).find(|&i| {
+            !word(text[..i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
+        }) else {
+            return;
+        };
+        let site = ((start + at) as u32, (start + at + name.len()) as u32);
+        let Some(var) = self.last_debug_var_mut(name) else {
+            return;
+        };
+        var.name_span = Some(site);
+        let slots = var.component_slots();
+        if slots.is_empty() {
+            return;
+        }
+        let file = self.intern_source_file();
+        let mut tagged = false;
+        let ops = self.bytecode.il_mut().ops_slice_mut();
+        let from = il_start.min(ops.len());
+        for op in &mut ops[from..] {
+            let written = match op {
+                IlOp::StorePop { slot, .. } => Some(*slot),
+                IlOp::Byte { byte, .. }
+                    if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
+                        && byte.load_store_count() == 1 =>
+                {
+                    Some(byte.load_store_slot_at(0))
+                }
+                _ => None,
+            };
+            if let Some(i) = written.and_then(|w| slots.iter().position(|&s| s == w)) {
+                let (start, end) = crate::debug_vars::DebugVar::component_site(site, i);
+                op.set_loc(common::DebugLoc {
+                    file,
+                    start_byte: start,
+                    end_byte: end.max(start + 1),
+                });
+                tagged = true;
+            }
+        }
+        if tagged && let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
+            var.def_sites.push(site);
         }
     }
 

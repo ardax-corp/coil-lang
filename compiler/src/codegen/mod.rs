@@ -853,6 +853,9 @@ pub struct Compiler {
     /// `(address, len)` of the current module's source text: AST names are
     /// slices of it, so a name's byte offset is pointer arithmetic.
     source_base: (usize, usize),
+    /// A copy of that text: HIR names are owned, so their spans are found
+    /// in it.
+    source_text: String,
 
     /// When true, [`Expression::Match`] binds `end` as a plain label instead of
     /// a value-join (`JoinLabel`). Set while compiling a match whose value is
@@ -1009,6 +1012,7 @@ impl Default for Compiler {
             debug_scope_ends: Vec::new(),
             debug_stmt_start: 0,
             source_base: (0, 0),
+            source_text: String::new(),
             suppress_match_fusion_barrier: false,
             statement_match_pending: false,
             arm_discard: Vec::new(),
