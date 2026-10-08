@@ -5,12 +5,17 @@ use compiler::Pipeline;
 use machine::{Machine, dispatch_count, reset_dispatch_count};
 
 fn compile(path: &str) -> (Vec<Byte>, Vec<u64>, Vec<String>, u32, Pipeline) {
+    compile_tuned(path, |_| {})
+}
+
+fn compile_tuned(path: &str, tune: impl FnOnce(&mut Pipeline)) -> (Vec<Byte>, Vec<u64>, Vec<String>, u32, Pipeline) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root");
     let src =
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut pipeline = Pipeline::new();
+    tune(&mut pipeline);
     pipeline.bind_workspace_language_roots();
     let (bytecode, constants) = pipeline
         .compile_src(&src)
@@ -438,7 +443,8 @@ fn perf_mandelbrot_tree_shakes_unused_builtin_thunks() {
 
 #[test]
 fn perf_field_hot_reuses_repeated_string_keys() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/field_hot.hy");
+    // Reads the methods' own bodies, which typed inlining splices into `hot`.
+    let (bc, _, _, _, pipeline) = compile_tuned("examples/perf/field_hot.hy", |p| p.set_hir_inline(false));
     let syms = pipeline.program_debug().fn_symbols;
     let mut strings = 0usize;
     for name in ["Point::sum", "Point::twice_x", "hot", "main"] {

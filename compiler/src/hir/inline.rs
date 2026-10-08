@@ -19,11 +19,11 @@ use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal
 use super::{BinOp, BodyKind, Lit};
 use crate::typechecking::ty;
 
-/// Typed inlining is off unless `COIL_HIR_INLINE=1` (or `true` / `on` / `yes`).
+/// Typed inlining is on unless `COIL_HIR_INLINE=0` (or `false` / `off` / `no`).
 pub(crate) fn inline_from_env() -> bool {
-    matches!(
+    !matches!(
         std::env::var("COIL_HIR_INLINE").as_deref(),
-        Ok("1" | "true" | "on" | "yes")
+        Ok("0" | "false" | "off" | "no")
     )
 }
 

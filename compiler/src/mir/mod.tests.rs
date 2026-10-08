@@ -1200,6 +1200,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile above-gate kernel");
     assert_eq!(numeric_work_ops(&[]), 0);
     assert!(
@@ -1329,6 +1331,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile mid CALL");
     let hot = p.function_offset("hot").expect("hot");
     let main = p.function_offset("main").expect("main");
@@ -1869,6 +1873,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, _) = p.compile_src(src).expect("compile eval_a");
     let dense = bc.iter().any(|b| is_dense_bin_op(*b.bytecode()));
     assert!(
@@ -3773,6 +3779,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile times_a");
     let symbols = p.program_debug().fn_symbols;
     let i = symbols
@@ -4598,6 +4606,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile escaping Point");
     let symbols = p.program_debug().fn_symbols;
     let hot = symbols
@@ -4659,6 +4669,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile field_hot board");
     assert!(
         p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
@@ -4726,6 +4738,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Pins the callee's own tier; typed inlining would splice it.
+    p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile field store loop");
     let symbols = p.program_debug().fn_symbols;
     let bump = symbols

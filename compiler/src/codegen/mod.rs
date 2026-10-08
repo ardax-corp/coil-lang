@@ -914,8 +914,10 @@ pub struct Compiler {
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
     hir_fns: HashMap<(usize, usize), usize>,
-    /// Typed inlining on HIR bodies (`COIL_HIR_INLINE=1`).
+    /// Typed inlining on HIR bodies (the default; `COIL_HIR_INLINE=0` turns it off).
     hir_inline: bool,
+    /// A debugger session compiles this program: no typed inlining.
+    debugger_attached: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -1042,6 +1044,7 @@ impl Default for Compiler {
             hir_module: None,
             hir_fns: HashMap::new(),
             hir_inline: crate::hir::inline::inline_from_env(),
+            debugger_attached: false,
             hir_fn_names: HashMap::new(),
         }
     }

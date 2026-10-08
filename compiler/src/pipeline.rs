@@ -103,6 +103,8 @@ pub struct Pipeline {
     /// Lower function bodies from HIR (the default; `--ast-codegen` /
     /// `COIL_HIR=0` keep the AST codegen).
     hir_lowering: bool,
+    /// Typed inlining of HIR bodies (the default; `COIL_HIR_INLINE=0` off).
+    hir_inline: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -287,6 +289,7 @@ impl Pipeline {
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
             c.set_hir_lowering(self.hir_lowering);
+            c.set_hir_inline(self.hir_inline);
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
             #[cfg(any(test, feature = "vm-wire"))]
@@ -697,6 +700,7 @@ impl Pipeline {
             keep_fns_in: None,
             auto_par: true,
             hir_lowering: crate::hir::lowering_from_env(),
+            hir_inline: crate::hir::inline::inline_from_env(),
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -1715,6 +1719,15 @@ impl Pipeline {
         self.hir_lowering = on;
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_hir_lowering(on);
+        }
+    }
+
+    /// Typed inlining of HIR bodies. Tests that pin a callee's own code
+    /// shape (its MIR tier, its `CALL`) turn it off.
+    pub fn set_hir_inline(&mut self, on: bool) {
+        self.hir_inline = on;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_hir_inline(on);
         }
     }
 
