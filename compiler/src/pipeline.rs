@@ -100,7 +100,8 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
-    /// Lower function bodies from HIR where it covers them (`--hir` / `COIL_HIR=1`).
+    /// Lower function bodies from HIR (the default; `--ast-codegen` /
+    /// `COIL_HIR=0` keep the AST codegen).
     hir_lowering: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
@@ -1708,8 +1709,8 @@ impl Pipeline {
         }
     }
 
-    /// Lower function bodies from HIR where the HIR lowering covers them
-    /// (`--hir`); the rest keep the AST codegen. Defaults to `COIL_HIR=1`.
+    /// Lower function bodies from HIR (`on`) or keep the AST codegen
+    /// (`--ast-codegen`). Defaults to on unless `COIL_HIR=0`.
     pub fn set_hir_lowering(&mut self, on: bool) {
         self.hir_lowering = on;
         if self.compiler.get().is_some() {

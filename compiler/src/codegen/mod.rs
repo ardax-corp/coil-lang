@@ -904,7 +904,8 @@ pub struct Compiler {
     stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
-    /// Lower the HIR core subset instead of the AST walk (`--hir` / `COIL_HIR=1`).
+    /// Lower function bodies from HIR instead of the AST walk (the default;
+    /// `COIL_HIR=0` keeps the AST walk).
     hir_lowering: bool,
     /// HIR of the module being compiled, when [`Self::hir_lowering`] is on.
     hir_module: Option<crate::hir::HirModule>,
