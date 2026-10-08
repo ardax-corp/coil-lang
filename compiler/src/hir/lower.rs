@@ -399,7 +399,7 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             else {
                 continue;
             };
-            if body.local(local).kind != LocalKind::Let {
+            if body.local(local).kind != LocalKind::Let || body.local(local).captured {
                 continue;
             }
             match &body.expr(init).kind {
@@ -633,7 +633,9 @@ fn reassigned(body: &HirBody, local: LocalId) -> bool {
 /// Whether `let local = init` keeps its fields in frame slots: a
 /// [`sroa_class`] that is only a field base, or one [`class_boxes`] boxes.
 pub fn sroa_local(body: &HirBody, checker: &Checker, boxed: &std::collections::HashSet<u32>, local: LocalId, init: HirId) -> bool {
-    sroa_class(body, checker, init).is_some() && (only_field_base(body, local) || boxed.contains(&local.0))
+    !body.local(local).captured
+        && sroa_class(body, checker, init).is_some()
+        && (only_field_base(body, local) || boxed.contains(&local.0))
 }
 
 fn writes_field_of(body: &HirBody, local: LocalId) -> bool {

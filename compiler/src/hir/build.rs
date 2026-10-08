@@ -151,6 +151,7 @@ impl BodyBuilder {
             name: name.to_string(),
             ty,
             kind,
+            captured: false,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), id);
@@ -164,6 +165,7 @@ impl BodyBuilder {
             name: name.to_string(),
             ty,
             kind: LocalKind::Temp,
+            captured: false,
         });
         id
     }
@@ -182,6 +184,7 @@ impl BodyBuilder {
                     name: name.to_string(),
                     ty: None,
                     kind: LocalKind::Capture,
+                    captured: false,
                 });
                 self.body.captures.push((outer_id, inner));
                 self.scopes[0].insert(name.to_string(), inner);
@@ -1771,6 +1774,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         for (i, name) in captured.iter().enumerate() {
             if let Some(outer) = b.lookup(name) {
                 inner.body.captures[i].0 = outer;
+                b.body.locals[outer.0 as usize].captured = true;
                 // A capture `b` only relays to this lambda has no read of
                 // its own to type it.
                 let inner_local = inner.body.captures[i].1;

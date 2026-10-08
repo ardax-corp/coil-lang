@@ -1236,7 +1236,7 @@ impl Compiler {
             else {
                 continue;
             };
-            if assigned.contains(&local.0) {
+            if assigned.contains(&local.0) || hir.local(local).captured {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {

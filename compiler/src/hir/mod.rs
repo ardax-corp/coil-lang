@@ -123,6 +123,9 @@ pub struct HirLocal {
     pub name: String,
     pub ty: Option<Ty>,
     pub kind: LocalKind,
+    /// A lambda in this body captures it, so it stays one plain word in
+    /// its own slot.
+    pub captured: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
