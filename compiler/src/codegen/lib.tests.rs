@@ -9444,3 +9444,60 @@ fn main() {
             .collect::<Vec<_>>(),
     );
 }
+
+fn call_count(bc: &[Byte]) -> usize {
+    bc.iter().filter(|b| matches!(b.bytecode(), Instruction::CALL)).count()
+}
+
+const HIR_INLINE_METHODS: &str = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+impl Point {
+    pub fn sum() -> int {
+        return self.x + self.y;
+    }
+}
+fn scale(int a, int k) -> int {
+    let t = a * k;
+    return t + 1;
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc = acc + p.sum() + scale(i, 2);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    return hot();
+}
+"#;
+
+#[test]
+fn hir_inline_splices_methods_and_callees_with_locals() {
+    let (off, _) = compile_src_tuned(HIR_INLINE_METHODS, |c| c.set_hir_inline(false));
+    let (on, _) = compile_src_tuned(HIR_INLINE_METHODS, |c| c.set_hir_inline(true));
+    // `p.sum()` (a receiver) and `scale` (a local, at depth 1) are both
+    // spliced into `hot`; only `main`'s call to `hot` stays.
+    assert!(
+        call_count(&on) + 2 <= call_count(&off),
+        "typed inlining must remove both calls; off={} on={}",
+        call_count(&off),
+        call_count(&on)
+    );
+}
+
+#[test]
+fn hir_inline_respects_zero_inline_budget() {
+    let (off, _) = compile_src_tuned(HIR_INLINE_METHODS, |c| c.set_hir_inline(false));
+    let (on, _) = compile_src_tuned(HIR_INLINE_METHODS, |c| {
+        c.set_hir_inline(true);
+        c.inline_cost.max_inline_cost = 0;
+    });
+    assert_eq!(call_count(&on), call_count(&off), "max_inline_cost = 0 keeps every CALL");
+}

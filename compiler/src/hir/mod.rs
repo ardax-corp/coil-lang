@@ -19,6 +19,7 @@
 pub mod build;
 pub mod check;
 pub mod layout;
+pub mod inline;
 pub mod lower;
 pub mod print;
 

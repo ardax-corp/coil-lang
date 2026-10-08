@@ -281,6 +281,7 @@ impl Compiler {
     /// Build the module's HIR for lowering when `--hir` is on.
     pub(super) fn build_hir_for_lowering(&mut self, module: &str, ast: &Output<'_>) {
         self.hir_fns.clear();
+        self.hir_fn_names.clear();
         self.hir_module = None;
         if !self.hir_lowering {
             return;
@@ -290,6 +291,12 @@ impl Compiler {
             use crate::hir::BodyKind;
             if matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test) {
                 self.hir_fns.insert(body.span, i);
+            }
+            if matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+                self.hir_fn_names
+                    .entry(body.name.clone())
+                    .and_modify(|seen| *seen = None)
+                    .or_insert(Some(i));
             }
         }
         self.hir_module = Some(hir);
@@ -354,6 +361,20 @@ impl Compiler {
         .or_else(|| lower::refusal(hir, &self.checker))
         .map_or_else(|| self.plan_hir_body(hir), Err)
         .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
+        // Typed inlining rewrites the body and plans it again; a body whose
+        // inlined form does not plan keeps its calls.
+        let mut inlined = None;
+        let plan = match plan {
+            Ok(emit) if self.hir_inline_on(hir) => match self.hir_inline_replan(&module, hir, &emit) {
+                Some((body, replanned)) => {
+                    inlined = Some(body);
+                    Ok(replanned)
+                }
+                None => Ok(emit),
+            },
+            plan => plan,
+        };
+        let hir = inlined.as_ref().unwrap_or(hir);
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
@@ -392,6 +413,140 @@ impl Compiler {
         };
         self.hir_module = Some(module);
         lowered
+    }
+
+    /// Whether typed inlining runs on `hir`: on, at an opt level that
+    /// inlines, outside coverage runs, and in a plain function or method.
+    fn hir_inline_on(&self, hir: &HirBody) -> bool {
+        use crate::hir::BodyKind;
+        self.hir_inline
+            && self.inline_cost.max_inline_cost > 0
+            && self.keep_fns_in.is_none()
+            && !hir.is_coro
+            && matches!(hir.kind, BodyKind::Function | BodyKind::Method)
+    }
+
+    /// Inline the eligible direct calls `emit` planned in `hir`, then plan
+    /// the result. `None` when nothing inlined or the result did not plan.
+    fn hir_inline_replan(&mut self, module: &crate::hir::HirModule, hir: &HirBody, emit: &HirEmit) -> Option<(HirBody, HirEmit)> {
+        use crate::hir::{BodyKind, inline};
+        // The module path a body's names resolve in.
+        let home = |b: &HirBody| {
+            let mut s = b.name.as_str();
+            for _ in 0..if b.kind == BodyKind::Method { 2 } else { 1 } {
+                s = s.rsplit_once("::").map_or("", |(head, _)| head);
+            }
+            s.to_string()
+        };
+        let here = home(hir);
+        let budget = self.inline_cost.max_inline_cost;
+        let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
+            let Some(call) = emit.calls.get(&id.0) else {
+                return Err("not-planned".to_string());
+            };
+            if call.builtin.is_some()
+                || call.mono
+                || call.generic.is_some()
+                || call.instance.is_some()
+                || !call.ranges.is_empty()
+                || call.pair.is_some()
+                || self.coroutine_fns.contains(&call.key)
+            {
+                return Err("call-kind".to_string());
+            }
+            let name = strip_overload_key(&call.key);
+            if self.checker.is_overloaded(name) {
+                return Err("overloaded".to_string());
+            }
+            let index = self
+                .hir_fn_names
+                .get(name)
+                .ok_or_else(|| format!("no body `{name}`"))?
+                .ok_or("ambiguous")?;
+            let callee = &module.bodies[index];
+            // Trait instance and default method bodies dispatch; a generic
+            // class's methods share one body.
+            if callee.name == hir.name
+                || callee.name.contains(" for ")
+                || home(callee) != here
+                || callee.ret_layout != crate::hir::layout::Layout::Word
+            {
+                return Err(format!("callee `{}`", callee.name));
+            }
+            if callee.kind == BodyKind::Method
+                && let Some(owner) = callee.name.rsplit("::").nth(1)
+                && lower::is_generic_class(&self.checker, owner)
+            {
+                return Err("generic-class".to_string());
+            }
+            // A finalizer class's methods keep their frames: `drop` and
+            // what it reaches see the object, not its fields.
+            if callee.kind == BodyKind::Method
+                && let Some(owner) = callee.name.rsplit("::").nth(1)
+                && (self.checker.class_has_drop(owner) || callee.name.ends_with("::drop"))
+            {
+                return Err("drop-class".to_string());
+            }
+            // Spliced locals live on in the caller's frame, where a heap
+            // value would stay reachable: only scalars become new slots.
+            let scalar = |ty: &Option<Ty>| {
+                ty.as_ref().is_some_and(|t| {
+                    matches!(
+                        lower::classify(&self.checker, t),
+                        Some(ValueClass::Scalar | ValueClass::Unit)
+                    )
+                })
+            };
+            let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+                return Err("not-call".to_string());
+            };
+            for (k, l) in callee.locals.iter().enumerate() {
+                let local = LocalId(k as u32);
+                if scalar(&l.ty) {
+                    continue;
+                }
+                let bound = match callee.params.iter().position(|&p| p == local) {
+                    Some(k) => {
+                        !matches!(args.get(k).map(|&a| &hir.expr(a).kind), Some(HirKind::Lit(_) | HirKind::Local(_)))
+                            || inline::rebinds(callee, local)
+                    }
+                    None => true,
+                };
+                if bound {
+                    return Err(format!("heap local `{}`", l.name));
+                }
+            }
+            let shape = inline::inlinable(callee, budget)?.with_heap_result(!scalar(&hir.expr(id).ty));
+            Ok((callee, shape))
+        };
+        let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
+        let callee_of = |id: HirId| {
+            let found = callee_for(id);
+            if why && let Err(reason) = &found {
+                eprintln!("hir inline `{}` site {}: {reason}", hir.name, id.0);
+            }
+            found.ok()
+        };
+        let (body, sites) = inline::inline_calls(hir, callee_of, hir.exprs.len().max(32) * 2)?;
+        let replanned = lower::refusal(&body, &self.checker)
+            .map_or_else(|| self.plan_hir_body(&body), Err)
+            .and_then(|mut emit| self.plan_hir_lambdas(module, &body, &mut emit).map(|()| emit));
+        match replanned {
+            Ok(emit) => {
+                crate::il::opt::note_hir_inlined(sites);
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("hir inline `{}`: {sites} sites", hir.name);
+                }
+                Some((body, emit))
+            }
+            Err(reason) => {
+                crate::il::opt::note_hir_inline_refused(reason);
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("hir inline refused `{}`: {reason}", hir.name);
+                }
+                None
+            }
+        }
     }
 
     /// The parameters of a mono clone that cross a generic `Option` /

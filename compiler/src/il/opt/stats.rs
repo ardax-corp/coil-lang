@@ -85,6 +85,12 @@ pub struct OptStats {
     /// Why each fallback body was refused (coarse keys, counted).
     #[serde(default)]
     pub hir_fallback_reasons: Vec<PassHit>,
+    /// Call sites typed inlining spliced into HIR bodies (`COIL_HIR_INLINE`).
+    #[serde(default)]
+    pub hir_inlined: usize,
+    /// Bodies whose inlined HIR did not plan, by reason (kept un-inlined).
+    #[serde(default)]
+    pub hir_inline_refused: Vec<PassHit>,
 }
 
 impl OptStats {
@@ -127,6 +133,10 @@ impl OptStats {
         self.hir_fallback += other.hir_fallback;
         for hit in &other.hir_fallback_reasons {
             note_reason(&mut self.hir_fallback_reasons, &hit.name, hit.applied);
+        }
+        self.hir_inlined += other.hir_inlined;
+        for hit in &other.hir_inline_refused {
+            note_reason(&mut self.hir_inline_refused, &hit.name, hit.applied);
         }
         for hit in &other.passes {
             self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
@@ -183,6 +193,14 @@ impl OptStats {
             ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
             for hit in ranked {
                 let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+            }
+        }
+        if self.hir_inlined + self.hir_inline_refused.len() > 0 {
+            let _ = writeln!(out, "  hir inline: {} sites", self.hir_inlined);
+            let mut ranked = self.hir_inline_refused.clone();
+            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
+            for hit in ranked {
+                let _ = writeln!(out, "    refused {}: {}", hit.name, hit.applied);
             }
         }
         if self.passes.is_empty() {
@@ -284,6 +302,16 @@ pub(crate) fn note_hir_fallback(reason: &str) {
         s.hir_fallback += 1;
         note_reason(&mut s.hir_fallback_reasons, reason, 1);
     });
+}
+
+/// Count `sites` call sites inlined into one HIR body.
+pub(crate) fn note_hir_inlined(sites: usize) {
+    with_stats(|s| s.hir_inlined += sites);
+}
+
+/// Count one body whose inlined HIR was refused, and why.
+pub(crate) fn note_hir_inline_refused(reason: &str) {
+    with_stats(|s| note_reason(&mut s.hir_inline_refused, reason, 1));
 }
 
 /// Record one body's final tier and refusal reasons.
