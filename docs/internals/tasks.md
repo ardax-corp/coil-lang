@@ -109,4 +109,5 @@ wake one, the waiting `join` / scope end panics with `task deadlock`.
   (T3 makes them task-aware).
 - No detached tasks, no preemption, no cancellation (T2).
 - `block_on`, `io::drive` and `io::wait_ready` still run but no longer
-  multiplex: deprecated with T1b in favour of `task::scope`.
+  multiplex. Calling them warns `E0129` (deprecated) and points at
+  `task::scope`. Example: [`examples/task_files.hy`](../../examples/task_files.hy).

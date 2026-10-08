@@ -61,6 +61,8 @@ pub enum ErrorCode {
     UnsupportedGenericOptionReturn,
     /// Private field or inherent method used outside its type's `impl`.
     PrivateMember,
+    /// Call to a deprecated function (warning; the help names the replacement).
+    Deprecated,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -158,6 +160,7 @@ impl ErrorCode {
             Self::InvalidDrop => "E0126",
             Self::UnsupportedGenericOptionReturn => "E0127",
             Self::PrivateMember => "E0128",
+            Self::Deprecated => "E0129",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -241,6 +244,7 @@ impl ErrorCode {
             Self::InvalidDrop => "invalid drop method",
             Self::UnsupportedGenericOptionReturn => "unsupported free generic Option return",
             Self::PrivateMember => "private member is not accessible",
+            Self::Deprecated => "deprecated function",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -332,6 +336,7 @@ mod tests {
             | InvalidDrop
             | UnsupportedGenericOptionReturn
             | PrivateMember
+            | Deprecated
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -405,6 +410,7 @@ mod tests {
             InvalidDrop,
             UnsupportedGenericOptionReturn,
             PrivateMember,
+            Deprecated,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
