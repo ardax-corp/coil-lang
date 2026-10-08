@@ -5584,12 +5584,13 @@ impl Compiler {
             } => {
                 let else_l = self.bytecode.fresh_label();
                 let end = self.bytecode.fresh_label();
-                self.hir_value(hir, emit, *cond, &BOXED, depth);
+                let (cond, then, els) = Self::hir_invert_not_if(hir, *cond, *then, *els);
+                self.hir_value(hir, emit, cond, &BOXED, depth);
                 self.hir_jump(IlJumpKind::JumpIfFalse, else_l);
-                self.hir_value(hir, emit, *then, want, depth);
+                self.hir_value(hir, emit, then, want, depth);
                 self.hir_jump(IlJumpKind::Unconditional, end);
                 self.bytecode.bind_label(else_l);
-                self.hir_value(hir, emit, *els, want, depth);
+                self.hir_value(hir, emit, els, want, depth);
                 self.bytecode.bind_label(end);
                 return;
             }
@@ -6662,17 +6663,19 @@ impl Compiler {
             },
             HirKind::If { cond, then, els } => {
                 let end = self.bytecode.fresh_label();
-                self.hir_value(hir, emit, *cond, &BOXED, 0);
                 match els {
                     Some(els) => {
                         let else_l = self.bytecode.fresh_label();
+                        let (cond, then, els) = Self::hir_invert_not_if(hir, *cond, *then, *els);
+                        self.hir_value(hir, emit, cond, &BOXED, 0);
                         self.hir_jump(IlJumpKind::JumpIfFalse, else_l);
-                        self.hir_effect(hir, emit, *then);
+                        self.hir_effect(hir, emit, then);
                         self.hir_jump(IlJumpKind::Unconditional, end);
                         self.bytecode.bind_label(else_l);
-                        self.hir_effect(hir, emit, *els);
+                        self.hir_effect(hir, emit, els);
                     }
                     None => {
+                        self.hir_value(hir, emit, *cond, &BOXED, 0);
                         self.hir_jump(IlJumpKind::JumpIfFalse, end);
                         self.hir_effect(hir, emit, *then);
                     }
@@ -7122,6 +7125,18 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
+    }
+
+    /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
+    /// `try_invert_not_if_else`, so the test fuses without a `LogNot`. An
+    /// `else if` chain keeps its order.
+    fn hir_invert_not_if(hir: &HirBody, cond: HirId, then: HirId, els: HirId) -> (HirId, HirId, HirId) {
+        match hir.expr(cond).kind {
+            HirKind::Un { op: UnOp::Not, operand } if !matches!(hir.expr(els).kind, HirKind::If { .. }) => {
+                (operand, els, then)
+            }
+            _ => (cond, then, els),
+        }
     }
 
     fn hir_jump(&mut self, kind: IlJumpKind, target: IlLabel) {
