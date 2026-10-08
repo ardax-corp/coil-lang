@@ -3945,13 +3945,15 @@ fn pure_arg_reorder_stores_pure_before_effectful() {
 #[test]
 fn predicate_peel_emits_cmp_jmp_before_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // The IL peel is under test: typed inlining would splice `base`.
+    let (bc, _pool) = compile_src_tuned(
         "fn other(int n) -> int { return n; } \
              fn base(int n) -> int { \
                if n <= 0 { return 1; } \
                return other(n) + 1; \
              } \
              fn main() { let n = 5; let result = base(n); }",
+        |c| c.set_hir_inline(false),
     );
     let cmp_jmps: Vec<usize> = bc
         .iter()
