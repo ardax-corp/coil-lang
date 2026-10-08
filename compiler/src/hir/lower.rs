@@ -947,7 +947,7 @@ pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExp
 }
 
 /// The direct subexpressions of `id`.
-fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
+pub(crate) fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
     let e = body.expr(id);
     let mut kids: Vec<HirId> = Vec::new();
     match &e.kind {
