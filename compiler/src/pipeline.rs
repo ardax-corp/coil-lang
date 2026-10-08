@@ -1713,6 +1713,11 @@ impl Pipeline {
         }
     }
 
+    /// Whether function bodies lower from HIR (off under `--ast-codegen`).
+    pub fn hir_lowering(&self) -> bool {
+        self.hir_lowering
+    }
+
     /// Lower function bodies from HIR (`on`) or keep the AST codegen
     /// (`--ast-codegen`). Defaults to on unless `COIL_HIR=0`.
     pub fn set_hir_lowering(&mut self, on: bool) {

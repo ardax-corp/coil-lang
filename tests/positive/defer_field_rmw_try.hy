@@ -1,6 +1,7 @@
 // A `defer` that read-modify-writes a field, in a function whose `?` can
 // miss, compiled to a "label was never bound" panic once the body took the
 // dense tier: the thunk is reached only by `CALL` and was dropped (#760).
+// HIR only: coil-lang#785 (the AST codegen does not carry this fix).
 class Log {
     pub n: int,
 }
