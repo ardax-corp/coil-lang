@@ -1,6 +1,6 @@
 //! Pure-call context for IL passes that refuse impure `CALL` barriers (COI-99).
 //!
-//! Reuses [`crate::typechecking::analyze_pure_fns`] (auto-par's whole-function
+//! Reuses the checker's `pure_fn_names` (auto-par's whole-function
 //! purity). A callee is length-safe only when that set contains its bind name
 //! (or a single-segment `mod::f` / `Type::m` suffix). Anything the lattice
 //! cannot prove — host / FFI / `FORMAT`, field get/set, `CallIndirect`,

@@ -107,6 +107,7 @@ impl Checker {
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
             fn_effects: HashMap::new(),
+            program_fn_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
             program_finalizers_resize: None,

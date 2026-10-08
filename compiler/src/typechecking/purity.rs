@@ -274,6 +274,7 @@ pub fn analyze_fn_effects(ast: &Output<'_>) -> HashMap<String, EffectFlags> {
 /// Unlike [`analyze_recursive_pure`] this keeps non-recursive functions, so
 /// callers that only need "safe to evaluate on another thread" (loop IPA) can
 /// admit ordinary helpers such as `fn sq(int i) -> int { i * i }`.
+#[cfg(test)]
 pub fn analyze_pure_fns(ast: &Output<'_>) -> HashSet<String> {
     analyze_fn_effects(ast)
         .into_iter()
@@ -350,6 +351,16 @@ fn impure_closure(facts: &HashMap<String, FnFacts>) -> HashSet<String> {
 }
 
 fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFlags> {
+    effect_closure_with(facts, &|_| None)
+}
+
+/// [`effect_closure`] where `resolve` gives the effects of a callee that is
+/// not a `fn` in this file (an imported user function, already analysed when
+/// its own module was checked). `None` falls back to the host table.
+fn effect_closure_with(
+    facts: &HashMap<String, FnFacts>,
+    resolve: &dyn Fn(&str) -> Option<EffectFlags>,
+) -> HashMap<String, EffectFlags> {
     let user_fns: HashSet<&String> = facts.keys().collect();
     let mut out: HashMap<String, EffectFlags> = HashMap::new();
     for (name, f) in facts {
@@ -361,7 +372,7 @@ fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFla
                     EffectFlags::UNKNOWN | EffectFlags::HOST | EffectFlags::RESIZE,
                 ));
             } else if !user_fns.contains(c) {
-                flags = flags.union(classify_unknown_callee(c));
+                flags = flags.union(resolve(c).unwrap_or_else(|| classify_unknown_callee(c)));
             }
         }
         out.insert(name.clone(), flags);
@@ -962,10 +973,24 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 }
 
 /// Fill [`Checker::fn_effects`] / [`Checker::pure_fn_names`] after infer.
+///
+/// Effects are also kept per [`DefId`] for the whole program, so a module
+/// checked later sees an imported function's real effects instead of
+/// treating the call as unknown (modules are checked in dependency order).
 pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) {
     checker.fn_effects.clear();
     checker.pure_fn_names.clear();
-    let effects = analyze_fn_effects(ast);
+    let effects = {
+        let checker = &*checker;
+        let resolve = |name: &str| {
+            let id = checker.def_id_of(name).or_else(|| {
+                let (module, short) = name.rsplit_once("::")?;
+                checker.interned_def(module, short)
+            })?;
+            checker.program_fn_effects.get(&id).copied()
+        };
+        effect_closure_with(&collect_fn_facts(ast), &resolve)
+    };
     checker.length_stability = length_stability(
         &effects,
         checker.program_finalizers_resize.unwrap_or(false),
@@ -976,9 +1001,9 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
         }
         if let Some(id) = checker.def_id_of(name) {
             checker.fn_effects.insert(id, *flags);
+            checker.program_fn_effects.insert(id, *flags);
         }
     }
-    debug_assert_eq!(checker.pure_fn_names, analyze_pure_fns(ast));
 }
 
 #[cfg(test)]
@@ -1342,6 +1367,48 @@ fn main() { return; }
             shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
             "shout should record IO/unknown, got {shout_fx:?}"
         );
+    }
+
+    #[test]
+    fn imported_fns_carry_their_effects_by_def_id() {
+        use crate::typechecking::infer::Checker;
+
+        let mut c = Checker::new();
+        c.set_current_module("geom");
+        let lib = parse_ast(
+            r#"
+use io::{stdout, write};
+use string::{to_bytes};
+fn sq(int x) -> int { return x * x; }
+fn shout(int n) -> int {
+    write(stdout(), to_bytes("!"));
+    return n;
+}
+fn sin(float x) -> float {
+    write(stdout(), to_bytes("?"));
+    return x;
+}
+"#,
+        );
+        let _ = c.check_program(&lib);
+        c.set_current_module("");
+        let app = parse_ast(
+            r#"
+use geom::{sq, shout, sin};
+fn area(int s) -> int { return sq(s) + 1; }
+fn loud(int s) -> int { return shout(s); }
+fn wave(float x) -> float { return sin(x); }
+fn qualified(int s) -> int { return geom::sq(s); }
+fn main() { return; }
+"#,
+        );
+        let _ = c.check_program(&app);
+        let side = c.typed_sidecar();
+        assert!(side.name_is_pure("area"), "pure import keeps the caller pure");
+        assert!(side.name_is_pure("qualified"), "qualified call resolves too");
+        assert!(!side.name_is_pure("loud"), "impure import stays impure");
+        // A user `sin` shadows the host math row of the same short name.
+        assert!(!side.name_is_pure("wave"), "user sin does IO");
     }
 
     #[test]
