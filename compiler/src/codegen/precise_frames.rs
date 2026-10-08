@@ -521,9 +521,10 @@ impl FrameState {
     /// Pop returning `(may be heap, must be pointer)`.
     fn pop_copy(&mut self) -> Option<(bool, bool)> {
         let tracked = self.ops.last().copied();
+        let exact = self.lo == self.hi && self.lo > 0 && self.must_ptr(self.lo - 1);
         self.pop_n(1)?;
         let heap = (self.lo..=self.hi).any(|p| self.bit(p));
-        let must = tracked.unwrap_or(self.lo == self.hi && self.must_ptr(self.lo));
+        let must = tracked.unwrap_or(exact);
         Some((heap, must))
     }
 
@@ -610,8 +611,16 @@ impl FrameState {
     }
 
     fn pop_n(&mut self, n: usize) -> Option<()> {
+        let old_hi = self.hi;
         self.lo = self.lo.checked_sub(n)?;
         self.hi -= n;
+        // A popped word sits above the cursor: a collection before the next
+        // write to it does not update it, so it may go stale. It may still
+        // hold a heap word, but no longer a must-pointer once a store raises
+        // the cursor over it again (#775).
+        for p in self.lo..old_hi {
+            self.set_must(p, false);
+        }
         self.popped = self.popped.min(self.lo);
         match self.ops.len().checked_sub(n) {
             Some(k) => self.ops.truncate(k),
