@@ -1037,6 +1037,9 @@ impl VirtualModules {
                 ("task_error", "task_error"),
                 ("task_sleep", "task_sleep"),
                 ("task_yield", "task_yield"),
+                ("task_cancel", "task_cancel"),
+                ("task_shield_enter", "task_shield_enter"),
+                ("task_shield_exit", "task_shield_exit"),
             ]),
         );
 

@@ -5,7 +5,7 @@
 // suspension point: an IO wait, `sleep`, `join`, the end of a scope, or
 // `yield_now`. Ordinary functions that do IO work unchanged inside tasks.
 // See docs/internals/tasks.md.
-use prelude::task::{task_scope_open, task_scope_close, task_scope_error, task_spawn, task_join, task_error, task_sleep, task_yield};
+use prelude::task::{task_scope_open, task_scope_close, task_scope_error, task_spawn, task_join, task_error, task_sleep, task_yield, task_cancel, task_shield_enter, task_shield_exit};
 
 // Status codes from the scheduler natives.
 fn status_panicked() -> int {
@@ -66,11 +66,19 @@ impl Task<R> {
         }
         return Result::Err(TaskError::Cancelled);
     }
+
+    // Ask the task to stop. It unwinds at its next suspension point (at
+    // once, if it is suspended), running its `defer`s, and `join` returns
+    // `Err(TaskError::Cancelled)`. A finished task stays as it is.
+    pub fn cancel() {
+        task_cancel(self.__id);
+    }
 }
 
 // Run `body` with a scope for child tasks. Returns once `body` returned and
 // every child finished. A child panic fails the scope: its other children
-// are dropped and the result is `Err(TaskError::Panicked(message))`.
+// are cancelled and, once they have stopped, the result is
+// `Err(TaskError::Panicked(message))`.
 fn scope<T>(Scope -> T body) -> Result<T, TaskError> {
     let id = task_scope_open();
     let v = body(new Scope(id));
@@ -93,4 +101,50 @@ fn sleep(int ms) {
 // Let other ready tasks run first.
 fn yield_now() {
     task_yield();
+}
+
+// Cancels task `id` after `ms` milliseconds (unless cancelled first). A
+// plain `gen fn`, not a `spawn` closure: coil-lang#787.
+gen fn __task_timer(int id, int ms) -> int {
+    task_sleep(ms);
+    task_cancel(id);
+    return 0;
+}
+
+// Run `body` as a task cancelled after `ms` milliseconds:
+// `Err(TaskError::TimedOut)` if the deadline came first.
+fn timeout<T>(int ms, unit -> T body) -> Result<T, TaskError> {
+    let id = task_scope_open();
+    let t = new Scope(id).spawn(body);
+    let timer = task_spawn(id, __task_timer(t.__id, ms));
+    // Not `t.join()`: inside a generic fn that trips coil-lang#786.
+    let joined = task_join(t.__id);
+    task_cancel(timer);
+    let fired = task_join(timer) == 0;
+    let status = task_scope_close(id);
+    if status == status_deadlock() || joined == status_deadlock() {
+        panic "task deadlock: every task is waiting on another task";
+    }
+    if status == status_panicked() {
+        return Result::Err(TaskError::Panicked(task_scope_error(id)));
+    }
+    match t.__value {
+        Option::Some(v) => {
+            return Result::Ok(v);
+        },
+        Option::None => {},
+    }
+    if fired {
+        return Result::Err(TaskError::TimedOut);
+    }
+    return Result::Err(TaskError::Cancelled);
+}
+
+// Run `body` so that a cancel waits for it instead of interrupting it (for
+// "finish writing this record"). The cancel is delivered when it returns.
+fn shield<T>(unit -> T body) -> T {
+    task_shield_enter();
+    let v = body();
+    task_shield_exit();
+    return v;
 }

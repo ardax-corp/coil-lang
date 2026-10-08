@@ -1403,6 +1403,7 @@ impl Pipeline {
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
             debug_lines: debug.debug_lines,
+            cleanup_ranges: debug.cleanup,
             bytecode: self.bytecode,
         };
 
@@ -1824,6 +1825,7 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             debug_lines: Vec::new(),
+            cleanup: self.compiler_lazy().cleanup_ranges().to_vec(),
         };
         self.remap_generated_debug_locs(&mut debug);
         // Lines are resolved now, while the sources exist, so archives and
@@ -1925,6 +1927,7 @@ impl Pipeline {
                 debug_locs: program.debug_locs,
                 fn_symbols: self.compiler_lazy().fn_debug_symbols(),
                 debug_lines: program.debug_lines,
+                cleanup: program.cleanup_ranges,
             },
         ))
     }
@@ -2157,6 +2160,7 @@ fn main() {
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -2202,6 +2206,7 @@ fn main() {
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");

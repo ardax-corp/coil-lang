@@ -7615,6 +7615,7 @@ fn main() {
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
+        cleanup_ranges: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -10337,6 +10338,7 @@ fn main() {
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
+        cleanup_ranges: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =
@@ -11063,4 +11065,129 @@ fn compile_is_deterministic_for_many_drop_classes() {
     for _ in 0..4 {
         assert_eq!(compile(), first, "bytecode differs between identical compiles");
     }
+}
+
+/// T2: a panic runs the `defer`s of every frame it leaves, innermost first,
+/// after the panic message; captures read their values at the panic.
+#[test]
+fn panic_runs_defers_of_the_frames_it_leaves() {
+    let out = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+fn inner(int k) -> int {
+    defer use (k) {
+        say(format("[inner %i]", k));
+    }
+    if k > 2 {
+        panic "boom";
+    }
+    return k;
+}
+
+fn outer() -> int {
+    let n = 1;
+    defer use (n) {
+        say(format("[outer %i]", n));
+    }
+    n = 5;
+    say("a");
+    let r = inner(n);
+    say("unreached");
+    return r;
+}
+
+fn main() {
+    defer {
+        say("[main]");
+    }
+    outer();
+}
+"#,
+    );
+    assert!(out.starts_with("apanic: boom"), "got {out:?}");
+    assert!(out.ends_with("[inner 5][outer 5][main]"), "got {out:?}");
+    assert!(!out.contains("unreached"), "got {out:?}");
+}
+
+/// #781: a `defer` whose statement never ran does not run at the exit, and
+/// a panic skips it too.
+#[test]
+fn defer_runs_only_once_its_statement_ran() {
+    let out = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+fn f(bool b, bool fail) -> int {
+    defer {
+        say("A");
+    }
+    if b {
+        defer {
+            say("B");
+        }
+        say("x");
+    }
+    if fail {
+        panic "stop";
+    }
+    say("y");
+    return 1;
+}
+
+fn main() {
+    f(false, false);
+    say("|");
+    f(true, false);
+    say("|");
+    f(false, true);
+}
+"#,
+    );
+    assert!(out.starts_with("yA|xyBA|panic: stop"), "got {out:?}");
+    assert!(out.ends_with('A') && !out.ends_with("BA"), "got {out:?}");
+}
+
+/// A `defer` that panics while a panic unwinds stops its own function's
+/// cleanup; the callers' `defer`s still run.
+#[test]
+fn panic_inside_a_defer_keeps_unwinding_the_callers() {
+    let out = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+fn inner() {
+    defer {
+        say("[inner]");
+        panic "second";
+    }
+    panic "first";
+}
+
+fn main() {
+    defer {
+        say("[main]");
+    }
+    inner();
+}
+"#,
+    );
+    assert!(out.starts_with("panic: first"), "got {out:?}");
+    assert!(out.contains("[inner]panic: second"), "got {out:?}");
+    assert!(out.ends_with("[main]"), "got {out:?}");
 }

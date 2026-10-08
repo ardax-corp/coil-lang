@@ -373,6 +373,13 @@ impl CodeBuf {
         }
     }
 
+    /// Mark the last recorded function [`IlFunc::pinned`].
+    pub fn set_last_func_pinned(&mut self) {
+        if let Some(f) = self.funcs.last_mut() {
+            f.pinned = true;
+        }
+    }
+
     pub fn funcs(&self) -> &[IlFunc] {
         &self.funcs
     }

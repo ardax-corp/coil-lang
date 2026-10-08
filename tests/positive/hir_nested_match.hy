@@ -75,3 +75,19 @@ test("statement match in a loop") {
     ];
     assert(total(shapes) == 2009)?;
 }
+
+fn apply<T>(int n, unit -> T f) -> Result<T, Color> {
+    return Result::Ok(f());
+}
+
+test("a binding match right after a call that took a closure") {
+    // The call's closure argument left an operand counted; the match's
+    // payload slots must still be the next free ones.
+    let r = apply(10, fn () => 5);
+    let got = match r {
+        Result::Err(Color::Blue) => 1,
+        Result::Ok(v) => v,
+        default => 0,
+    };
+    assert(got == 5)?;
+}

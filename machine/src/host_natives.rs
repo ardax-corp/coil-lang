@@ -92,7 +92,17 @@ pub fn build_standard_host_natives(
     // Append-only after stream_fd: byte-offset `string` natives (minor 31).
     push_string_bytes(&mut out, &mut register_id);
     // Append-only after string bytes: task scheduler natives (minor 32).
-    push_task_natives(&mut out, &mut register_id);
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID,
+    );
+    push_unwind_resume(&mut out, &mut register_id);
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::TASK_CANCEL_ID..=common::TASK_SHIELD_EXIT_ID,
+    );
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -286,8 +296,12 @@ fn push_string_bytes(
 }
 
 /// `task_*` natives: VM hooks ([`HostOp::Task`]), like `gc_collect`.
-fn push_task_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    for id in common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID {
+fn push_task_natives(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+    ids: std::ops::RangeInclusive<u16>,
+) {
+    for id in ids {
         let row = &common::HOST_NATIVES[id as usize];
         let name = row.name;
         let sig = FfiSignature::from_parts(
@@ -307,6 +321,20 @@ fn push_task_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl Fn
             .with_host_op(HostOp::Task),
         ));
     }
+}
+
+/// `unwind_resume` ends a `defer` cleanup pad; the VM runs it (`HostOp::Unwind`).
+fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::UNWIND_RESUME_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("unwind_resume signature");
+    assert_eq!(out.len(), common::UNWIND_RESUME_ID as usize);
+    register_id(name, out.len());
+    out.push(Arc::new(
+        HostClosureFn::new(sig, move |_heap, _args| {
+            Err(FfiError::Unsupported(format!("{name} is HostOp::Unwind (VM hook only)")))
+        })
+        .with_host_op(HostOp::Unwind),
+    ));
 }
 
 /// Register each native on `machine` (same order as [`build_standard_host_natives`]).
@@ -1109,7 +1137,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some("task_yield")
+            Some("task_shield_exit")
         );
         assert_eq!(attach, 119);
     }
@@ -1397,6 +1425,14 @@ mod tests {
             registrations.get(end + 8).map(|(n, _)| n.as_str()),
             Some("task_scope_open")
         );
-        assert_eq!(registrations.len(), end + 16);
+        assert_eq!(
+            registrations.get(end + 16).map(|(n, _)| n.as_str()),
+            Some(common::UNWIND_RESUME_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 19).map(|(n, _)| n.as_str()),
+            Some("task_shield_exit")
+        );
+        assert_eq!(registrations.len(), end + 20);
     }
 }

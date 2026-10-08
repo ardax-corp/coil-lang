@@ -525,6 +525,8 @@ pub struct Machine<const S: usize> {
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
     task_panic_message: Option<String>,
+    /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
+    unwind: Unwind,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
     statics: Vec<Value>,
     /// Debug line table (parallel to archived bytecode indices).
@@ -645,6 +647,7 @@ impl<const S: usize> Machine<S> {
             panicked: false,
             sched: None,
             task_panic_message: None,
+            unwind: Unwind::default(),
             statics: Vec::new(),
             program_debug: ProgramDebug::default(),
             pc_lines: Vec::new(),
@@ -1002,6 +1005,7 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.sched = None;
+        self.unwind = Unwind::default();
         self.pending_debug_stop = None;
         self.nested_depth = 0;
         self.nested_frame_depths.clear();
@@ -1195,6 +1199,7 @@ impl<const S: usize> Machine<S> {
         if !self.frames.is_empty() {
             self.frames.get_mut().seek(panic_insn_ip);
         }
+        self.arm_unwind(message);
         // A child task's panic fails its scope; the scope reports it.
         if self.task_panic_is_caught() {
             self.task_panic_message = Some(message.to_string());
@@ -2925,6 +2930,7 @@ impl<const S: usize> Machine<S> {
         self.pending_io = None;
         self.panicked = false;
         self.sched = None;
+        self.unwind = Unwind::default();
         self.userland_libraries.clear();
         self.ffi_closures.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
@@ -2968,6 +2974,7 @@ impl<const S: usize> Machine<S> {
         self.pending_io = None;
         self.panicked = false;
         self.sched = None;
+        self.unwind = Unwind::default();
         self.gc_in_progress = false;
         self.gc_deferred = false;
     }
@@ -3505,6 +3512,13 @@ impl<const S: usize> Machine<S> {
             } else {
                 self.execute::<false>(code, constants, start_ip)
             };
+            if unlikely(!paused && self.panicked) {
+                // Run the `defer`s of the frames the panic leaves.
+                if let Some(ip) = self.unwind_step() {
+                    start_ip = ip;
+                    continue;
+                }
+            }
             if unlikely(!paused && self.panicked && self.sched.is_some()) {
                 // A child task panicked: fail it and run the next task.
                 if let Some(ip) = self.task_recover_panic() {
@@ -4078,6 +4092,7 @@ impl<const S: usize> Machine<S> {
 
 include!("exec_rest.rs");
 include!("vm_task.rs");
+include!("vm_unwind.rs");
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {

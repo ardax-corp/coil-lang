@@ -532,6 +532,13 @@ impl<const S: usize> Machine<S> {
                             self.stack.seek(tell - consume);
                             self.stack.push(Value::from(0i64));
                         }
+                        crate::HostOp::Unwind => {
+                            self.stack.seek(tell - consume);
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            self.unwind_resume();
+                            return dispatch::RestFlow::Done(false);
+                        }
                         crate::HostOp::Task => {
                             let mut args = [Value::default(); 2];
                             let window = &self.stack.top_window(consume)[1..];
@@ -698,6 +705,7 @@ impl<const S: usize> Machine<S> {
                     }
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
                     let s = unsafe { (*ptr).as_ref() };
+                    self.arm_unwind(&s.to_string());
                     if self.task_panic_is_caught() {
                         // A child task's panic fails its scope, which reports it.
                         self.task_panic_message = Some(s.to_string());
