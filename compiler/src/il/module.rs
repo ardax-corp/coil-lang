@@ -420,6 +420,14 @@ impl IlModule {
                     body.meta.entry,
                     &mut side,
                 ) {
+                    if drops_bound_label(&body.ops, &dense) {
+                        // A `defer` thunk sits in its function's body and is
+                        // reached only by `CALL`; the reconstruct keeps blocks
+                        // reachable from the entry and loses it (#760).
+                        dense_why[i] = Some("drops a called inner label".to_string());
+                        next.push(i);
+                        continue;
+                    }
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -466,7 +474,9 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                if lir_keeps(&body.ops, &lir) {
+                if drops_bound_label(&body.ops, &lir) {
+                    lir_why[i] = Some("drops a called inner label".to_string());
+                } else if lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -629,6 +639,23 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
 /// sides to expose the same loops; otherwise compare flat counts.
 /// A weighted tie is settled by the flat count.
+/// `new` still jumps to or calls a label `old` bound, but no longer binds it.
+fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
+    let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
+        ops.iter()
+            .filter_map(|op| match op {
+                IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+                _ => None,
+            })
+            .collect()
+    };
+    let (was, now) = (bound(old), bound(new));
+    new.iter().any(|op| match op {
+        IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => was.contains(&target.0) && !now.contains(&target.0),
+        _ => false,
+    })
+}
+
 fn lir_keeps(fuse_ops: &[IlOp], lir: &[IlOp]) -> bool {
     let fuse_loops = super::analysis::find_natural_loops(fuse_ops);
     let lir_loops = super::analysis::find_natural_loops(lir);
