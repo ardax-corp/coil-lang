@@ -107,6 +107,8 @@ impl Checker {
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
             fn_effects: HashMap::new(),
+            program_fn_effects: HashMap::new(),
+            program_method_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
             program_finalizers_resize: None,
@@ -17136,6 +17138,18 @@ impl Checker {
             },
             _ => None,
         }
+    }
+
+    /// User class of the expression at `span` (a method-call receiver), as
+    /// its module-qualified key.
+    pub(crate) fn class_owner_at_span(&self, span: (usize, usize)) -> Option<String> {
+        let id = *self.node_ids_by_span.get(&span)?;
+        self.class_owner_from_ty(&self.lookup_at(id)?)
+    }
+
+    /// Module path of the file being checked (`""` for the entry file).
+    pub(crate) fn current_module_name(&self) -> &str {
+        &self.current_module
     }
 
     fn class_owner_from_ty(&self, ty: &Ty) -> Option<String> {
