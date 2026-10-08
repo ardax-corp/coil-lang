@@ -39,11 +39,13 @@ const CORPUS: &[&str] = &[
 /// Dropping jumps to the next label (#771) shortens `option_pair.hy`; fusion
 /// windows now stop at a bound label instead of refusing outright, so
 /// `functions.hy`'s `LOAD; CONST; SHL` before a join still fuses.
+/// Typed inlining of pair-returning callees (HIR phase 7f) splices
+/// `parse_pair` into `match_pair` and `chain_pair` (`option_pair.hy` grows).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "b926f5662cd82634_915"),
     ("functions.hy", "6a84918ecd185078_304"),
     ("loops.hy", "eb56ceb9c5453cc4_248"),
-    ("option_pair.hy", "6d7eee7fd13f9c41_322"),
+    ("option_pair.hy", "9d55c0a16f5303ee_340"),
     ("user_trait_dispatch.hy", "c09fa0597356adad_138"),
 ];
 
