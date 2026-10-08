@@ -855,7 +855,12 @@ fn analyze(source: &str) -> Vec<CoilMessage> {
     };
     let mut checker = Checker::new();
     let _ = checker.check_program(&ast);
-    checker.take_messages()
+    let mut messages = checker.take_messages();
+    // Effect declarations are checked on a well-typed file.
+    if !messages.iter().any(|m| *m.kind() == MessageKind::ERROR) {
+        messages.extend(compiler::effect_declaration_errors(&checker, &ast));
+    }
+    messages
 }
 
 fn lsp_module_roots(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {

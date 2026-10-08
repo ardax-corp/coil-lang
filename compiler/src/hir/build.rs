@@ -72,6 +72,14 @@ pub fn build_module(checker: &Checker, sidecar: &TypedSidecar, module_path: &str
     module
 }
 
+fn declared_effects(e: &parser::ast::EffectDecl<'_>) -> super::DeclaredEffects {
+    super::DeclaredEffects {
+        names: e.uses.iter().map(|n| n.to_string()).collect(),
+        text: e.to_string(),
+        span: (e.span.start, e.span.end),
+    }
+}
+
 fn span_of(node: &Output<'_>) -> Span {
     (node.0.start, node.0.end)
 }
@@ -107,6 +115,7 @@ impl BodyBuilder {
                 is_coro: false,
                 is_generic: false,
                 captures: Vec::new(),
+                declared: None,
                 locals: Vec::new(),
                 exprs: Vec::new(),
                 root: None,
@@ -367,6 +376,15 @@ impl<'c, 'm> Cx<'c, 'm> {
                 }
             }
             Expression::TypeClass { name, methods, .. } => {
+                for method in methods {
+                    if let Expression::Function { name: m, effects, .. } = fn_node(method).1.as_ref() {
+                        self.module.trait_effects.push(super::TraitEffects {
+                            trait_name: name.to_string(),
+                            method: m.to_string(),
+                            declared: effects.as_ref().map(declared_effects),
+                        });
+                    }
+                }
                 // Default method bodies.
                 for method in methods {
                     let Some(m) = fn_name(method) else { continue };
@@ -414,6 +432,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             is_static,
             type_params,
             args,
+            effects,
             body,
             ..
         } = node.1.as_ref()
@@ -424,6 +443,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         let Some(body) = body else { return };
         let mut b = BodyBuilder::new(full, kind, span_of(node));
         b.body.is_coro = *is_coro;
+        b.body.declared = effects.as_ref().map(declared_effects);
         b.body.is_generic = !type_params.is_empty();
         let ret = keys.iter().find_map(|k| self.checker.fn_return_ty(k));
         b.body.ret_layout = ret

@@ -109,6 +109,9 @@ pub enum ErrorCode {
     HostDloadNonConst,
     /// Length-changing method (`push` / `insert` / …) on a fixed `[T; N]`.
     FixedArrayGrow,
+    /// A function's effects are not all in its `pure fn` / `uses {…}`
+    /// declaration (or its trait method's).
+    EffectMismatch,
 
     UnknownExpression,
     CodegenError,
@@ -193,6 +196,7 @@ impl ErrorCode {
             Self::HostDloadDenied => "E0410",
             Self::HostDloadNonConst => "E0411",
             Self::FixedArrayGrow => "E0412",
+            Self::EffectMismatch => "E0413",
             Self::UnknownExpression => "E0800",
             Self::CodegenError => "E0801",
             Self::UnboundedRecursion => "E0802",
@@ -277,6 +281,7 @@ impl ErrorCode {
             Self::HostDloadDenied => "dload stem is not granted",
             Self::HostDloadNonConst => "dload path must be a string literal",
             Self::FixedArrayGrow => "[T; N] cannot grow",
+            Self::EffectMismatch => "effects exceed the declaration",
             Self::UnknownExpression => "unknown expression in codegen",
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
@@ -369,6 +374,7 @@ mod tests {
             | HostDloadDenied
             | HostDloadNonConst
             | FixedArrayGrow
+            | EffectMismatch
             | UnknownExpression
             | CodegenError
             | UnboundedRecursion
@@ -443,6 +449,7 @@ mod tests {
             HostDloadDenied,
             HostDloadNonConst,
             FixedArrayGrow,
+            EffectMismatch,
             UnknownExpression,
             CodegenError,
             UnboundedRecursion,

@@ -32,6 +32,10 @@ impl EffectFlags {
     pub const EXEC: u16 = 1 << 13;
     /// May park the caller until IO is ready (`wait_readable`, `wait_ready`).
     pub const SUSPEND: u16 = 1 << 14;
+    /// Returns a fresh mutable object each call (byte and string
+    /// conversions): not pure, so LICM and CSE keep every call, but no
+    /// effect a user sees or declares.
+    pub const ALLOC: u16 = 1 << 15;
 
     /// Any IO: a mask, so `contains(IO)` is true for any of its bits.
     pub const IO: u16 = Self::READ | Self::WRITE | Self::NET;

@@ -37,6 +37,9 @@ pub struct Summary {
     /// Effects of the body itself and of every call it makes whose callee
     /// is known.
     pub flags: EffectFlags,
+    /// What a user sees and declares (`uses {…}`): `flags` without panics,
+    /// `defer`, GC, generator yields and resizes.
+    pub visible: EffectFlags,
     /// Bit `i`: the body calls its parameter `i` (a function value), so a
     /// call also has the effects of the function passed there.
     pub latent: u64,
@@ -49,8 +52,61 @@ impl Summary {
     }
 
     fn of(flags: EffectFlags) -> Self {
-        Self { flags, latent: 0 }
+        // Host tables pair `unknown` with host state to be safe; unknown
+        // already says it all.
+        let hidden = if flags.contains(EffectFlags::UNKNOWN) { HIDDEN | EffectFlags::HOST } else { HIDDEN };
+        Self {
+            flags,
+            visible: EffectFlags::from_bits(flags.bits() & !hidden),
+            latent: 0,
+        }
     }
+}
+
+/// Bits that are never user-visible effects.
+const HIDDEN: u16 = EffectFlags::GC | EffectFlags::YIELD | EffectFlags::RESIZE | EffectFlags::ALLOC;
+
+/// The `uses {…}` vocabulary and the bits each name covers. `read` covers
+/// the clock and mutable statics too: what a function reads besides its
+/// arguments.
+pub const VOCABULARY: &[(&str, u16)] = &[
+    ("read", EffectFlags::READ | EffectFlags::HOST),
+    ("write", EffectFlags::WRITE),
+    ("net", EffectFlags::NET),
+    ("env", EffectFlags::ENV),
+    ("exec", EffectFlags::EXEC),
+    ("ffi", EffectFlags::FFI),
+    ("thread", EffectFlags::THREAD),
+    ("suspend", EffectFlags::SUSPEND | EffectFlags::ATTACH_PARK),
+    ("mutate", EffectFlags::HEAP_MUT),
+];
+
+/// The `uses {…}` names for `visible`, then `unknown` for effects this
+/// analysis cannot see (no declaration covers those).
+pub fn uses_names(visible: EffectFlags) -> Vec<&'static str> {
+    let mut out: Vec<&str> = VOCABULARY
+        .iter()
+        .filter(|(_, bits)| visible.contains(*bits))
+        .map(|(n, _)| *n)
+        .collect();
+    if visible.contains(EffectFlags::UNKNOWN) {
+        out.push("unknown");
+    }
+    out
+}
+
+/// `uses {read, write}` for `visible`.
+pub fn uses_clause(visible: EffectFlags) -> String {
+    format!("uses {{{}}}", uses_names(visible).join(", "))
+}
+
+/// The bits a declaration's names allow.
+pub fn allowed(names: &[String]) -> EffectFlags {
+    let bits = names
+        .iter()
+        .filter_map(|n| VOCABULARY.iter().find(|(v, _)| v == n))
+        .fold(0, |acc, (_, bits)| acc | bits);
+    EffectFlags::from_bits(bits)
 }
 
 /// Summaries of every body compiled so far, by full body name
@@ -59,11 +115,19 @@ impl Summary {
 pub struct ProgramEffects {
     fns: HashMap<DefId, Summary>,
     by_name: HashMap<String, Summary>,
+    /// Trait methods of every module so far, with their declarations.
+    traits: Vec<super::TraitEffects>,
 }
 
 impl ProgramEffects {
     /// Keep `module`'s summaries for the modules compiled after it.
+    /// Some module so far declares effects on a trait method.
+    pub fn has_trait_declarations(&self) -> bool {
+        self.traits.iter().any(|t| t.declared.is_some())
+    }
+
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
+        self.traits.extend(module.trait_effects.iter().cloned());
         for (body, &s) in module.bodies.iter().zip(summaries) {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
@@ -187,6 +251,18 @@ pub fn describe_fns(checker: &Checker, ast: &parser::ast::Output<'_>) -> Vec<(St
         .collect()
 }
 
+/// Broken effect declarations in one checked file (`""` module), for the
+/// editor: codegen reports the same errors.
+pub fn effect_declaration_errors(checker: &Checker, ast: &parser::ast::Output<'_>) -> Vec<reporting::Message> {
+    if !declares_effects(ast) {
+        return Vec::new();
+    }
+    let sidecar = checker.typed_sidecar();
+    let module = super::build_module(checker, &sidecar, "", ast);
+    let program = ProgramEffects::default();
+    ModuleEffects::solve(&module, checker, "", &program).violation_messages()
+}
+
 /// Why auto-par leaves loops and functions of this module sequential when
 /// purity is all that stops it: each counted loop or fork site that would
 /// split if every function it calls were pure, with the impure callee and
@@ -266,6 +342,26 @@ fn impure_callees(fx: &ModuleEffects<'_>, owner: &HirBody, span: super::Span, pu
     out
 }
 
+/// Some function in `ast` is `pure fn` or has a `uses {…}` clause.
+pub fn declares_effects(ast: &parser::ast::Output<'_>) -> bool {
+    use parser::ast::Expression as E;
+    let any = |items: &[parser::ast::Output<'_>]| items.iter().any(declares_effects);
+    match ast.1.as_ref() {
+        E::Function { effects, .. } => effects.is_some(),
+        E::Program(items) | E::Block(items) | E::Fragment(items) => any(items),
+        E::Implementation { methods, .. } | E::TypeClassImpl { methods, .. } | E::TypeClass { methods, .. } => {
+            any(methods)
+        }
+        E::Method(_, inner) | E::Module(_, inner) | E::Expr(inner) | E::Statement(inner) => declares_effects(inner),
+        _ => false,
+    }
+}
+
+/// The last segment of a path: `shapes::Shape` → `Shape`.
+fn short_name(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
 /// `name` without the module prefix, or `None` when it is not this module's.
 fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
     if module_path.is_empty() {
@@ -341,19 +437,20 @@ impl<'a> ModuleEffects<'a> {
         self.cx.walk(index, &self.summaries, true).causes.unwrap_or_default()
     }
 
-    /// Body `index`'s effects in one line: `pure`, or the effect names
-    /// and the first reason for each (`write: calls `write_all``).
+    /// Body `index`'s user-visible effects in one line: `pure`, or its
+    /// `uses {…}` and the reasons for it (`uses {write}: calls `write_all`
+    /// (write)`).
     pub fn describe(&self, index: usize) -> String {
         let s = self.summaries[index];
-        if s.is_pure() {
+        if s.visible.is_pure() && s.latent == 0 {
             return "pure".into();
         }
         let body = &self.cx.module.bodies[index];
         let mut parts: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         for cause in self.explain(index) {
-            if seen.insert(cause.what.clone()) {
-                parts.push(format!("{} ({})", cause.what, effect_names(cause.flags).join(", ")));
+            if !cause.visible.is_pure() && seen.insert(cause.what.clone()) {
+                parts.push(format!("{} ({})", cause.what, uses_names(cause.visible).join(", ")));
             }
         }
         for (i, p) in body.params.iter().enumerate().take(64) {
@@ -361,9 +458,123 @@ impl<'a> ModuleEffects<'a> {
                 parts.push(format!("calls parameter `{}`", body.local(*p).name));
             }
         }
-        let names = effect_names(s.flags);
-        let head = if names.is_empty() { "pure apart from its parameters".to_string() } else { names.join(", ") };
+        let head = if s.visible.is_pure() {
+            "pure apart from its parameters".to_string()
+        } else {
+            uses_clause(s.visible)
+        };
         format!("{head}: {}", parts.join("; "))
+    }
+
+    /// Every function whose effects break what it declares (`pure fn`,
+    /// `uses {…}`), and every trait impl method that breaks its trait
+    /// method's declaration.
+    pub fn violations(&self) -> Vec<Violation> {
+        let module = self.cx.module;
+        let mut out = Vec::new();
+        for (i, body) in module.bodies.iter().enumerate() {
+            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+                continue;
+            }
+            let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
+            let visible = self.summaries[i].visible;
+            if let Some(d) = &body.declared
+                && let Some(v) = self.violation(i, visible, d, || format!("`{local}` is declared `{}`", d.text), d.span)
+            {
+                out.push(v);
+            }
+            // `Trait for Owner::m` keeps to `Trait::m`'s declaration.
+            let Some((path, m)) = local.rsplit_once("::") else { continue };
+            let Some((tr, _)) = path.split_once(" for ") else { continue };
+            let decl = module
+                .trait_effects
+                .iter()
+                .chain(&self.cx.program.traits)
+                .find(|t| short_name(&t.trait_name) == short_name(tr) && t.method == m)
+                .and_then(|t| t.declared.as_ref());
+            if let Some(d) = decl
+                && let Some(v) =
+                    self.violation(i, visible, d, || format!("`{local}` implements `{tr}::{m}`, declared `{}`", d.text), body.span)
+            {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// [`Self::violations`] as errors.
+    pub fn violation_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Message};
+        self.violations()
+            .into_iter()
+            .map(|v| {
+                let mut msg = Message::error(ErrorCode::EffectMismatch, v.message, v.span.0..v.span.1);
+                msg.with_help(v.help);
+                msg
+            })
+            .collect()
+    }
+
+    fn violation(
+        &self,
+        index: usize,
+        visible: EffectFlags,
+        declared: &super::DeclaredEffects,
+        head: impl FnOnce() -> String,
+        span: super::Span,
+    ) -> Option<Violation> {
+        let allowed = allowed(&declared.names);
+        let missing = EffectFlags::from_bits(visible.bits() & !allowed.bits());
+        if missing.is_pure() {
+            return None;
+        }
+        let known = EffectFlags::from_bits(allowed.bits() | (visible.bits() & !EffectFlags::UNKNOWN));
+        let help = if missing.bits() == EffectFlags::UNKNOWN {
+            "a declaration needs every call resolved: call through a trait method that declares its effects".to_string()
+        } else {
+            format!("declare `{}`", uses_clause(known))
+        };
+        Some(Violation {
+            span,
+            message: format!(
+                "{} but needs {}: {}",
+                head(),
+                uses_names(missing).join(", "),
+                self.chain(index, missing)
+            ),
+            help,
+        })
+    }
+
+    /// How body `index` comes to have the effects in `missing`, as a call
+    /// chain: `load → parse_file → open needs read`.
+    fn chain(&self, index: usize, missing: EffectFlags) -> String {
+        let module = self.cx.module;
+        let name = |i: usize| {
+            let n = &module.bodies[i].name;
+            local_name(self.cx.module_path, n).unwrap_or(n).to_string()
+        };
+        let mut names = vec![name(index)];
+        let mut seen = HashSet::from([index]);
+        let mut i = index;
+        loop {
+            let found = self
+                .explain(i)
+                .into_iter()
+                .find(|c| c.visible.bits() & missing.bits() != 0);
+            let Some(cause) = found else {
+                return format!("{} needs {}", names.join(" → "), uses_names(missing).join(", "));
+            };
+            let need = uses_names(EffectFlags::from_bits(cause.visible.bits() & missing.bits())).join(", ");
+            let Some(callee) = cause.callee else {
+                return format!("{} needs {need}: it {}", names.join(" → "), cause.what);
+            };
+            names.push(callee.name);
+            match callee.body {
+                Some(j) if seen.insert(j) => i = j,
+                _ => return format!("{} needs {need}", names.join(" → ")),
+            }
+        }
     }
 
     /// The first reason body `index` is not pure, as `calls `x` (write)`.
@@ -376,6 +587,15 @@ impl<'a> ModuleEffects<'a> {
         let i = (0..64).find(|i| s.latent & (1 << i) != 0)?;
         Some(format!("calls parameter `{}`", body.local(body.params[i]).name))
     }
+}
+
+/// A broken effect declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Violation {
+    /// The declaration, or the impl method that breaks its trait's.
+    pub span: super::Span,
+    pub message: String,
+    pub help: String,
 }
 
 /// User-facing names of the bits in `flags`. `resize` is left out: it
@@ -396,6 +616,7 @@ pub fn effect_names(flags: EffectFlags) -> Vec<&'static str> {
         (EffectFlags::GC, "gc"),
         (EffectFlags::ATTACH_PARK, "attach"),
         (EffectFlags::UNKNOWN, "unknown"),
+        (EffectFlags::ALLOC, "alloc"),
     ];
     NAMES.iter().filter(|(bit, _)| flags.contains(*bit)).map(|(_, n)| *n).collect()
 }
@@ -532,6 +753,18 @@ pub struct Cause {
     /// What the body does there: "calls `write_all`".
     pub what: String,
     pub flags: EffectFlags,
+    /// The user-visible part of `flags` ([`Summary::visible`]).
+    pub visible: EffectFlags,
+    /// The function called there, for a call.
+    pub callee: Option<Called>,
+}
+
+/// A called function: its name as shown, and its body when it is this
+/// module's (so a call chain can go on through it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Called {
+    pub name: String,
+    pub body: Option<usize>,
 }
 
 impl Cx<'_> {
@@ -555,13 +788,40 @@ impl Cx<'_> {
 
     /// Add `bits` for the node `at`; `what` says why, when explaining.
     fn note(&self, w: &mut Walk<'_>, at: HirId, bits: u16, what: impl FnOnce() -> String) {
-        let flags = EffectFlags::from_bits(bits);
-        w.out.flags = w.out.flags.union(flags);
+        self.record(w, at, Summary::of(EffectFlags::from_bits(bits)), || None, what);
+    }
+
+    /// As [`Self::note`], for effects no user sees (a panic, a `defer`).
+    fn note_hidden(&self, w: &mut Walk<'_>, at: HirId, bits: u16, what: impl FnOnce() -> String) {
+        let s = Summary {
+            flags: EffectFlags::from_bits(bits),
+            ..Summary::default()
+        };
+        self.record(w, at, s, || None, what);
+    }
+
+    /// Add `s`'s effects (not its latent parameters) for the node `at`.
+    fn record(
+        &self,
+        w: &mut Walk<'_>,
+        at: HirId,
+        s: Summary,
+        callee: impl FnOnce() -> Option<Called>,
+        what: impl FnOnce() -> String,
+    ) {
+        w.out.flags = w.out.flags.union(s.flags);
+        w.out.visible = w.out.visible.union(s.visible);
         if let Some(causes) = w.causes.as_mut()
-            && !flags.is_pure()
+            && !s.flags.is_pure()
         {
             let span = self.module.bodies[w.index].expr(at).span;
-            causes.push(Cause { span, what: what(), flags });
+            causes.push(Cause {
+                span,
+                what: what(),
+                flags: s.flags,
+                visible: s.visible,
+                callee: callee(),
+            });
         }
     }
 
@@ -604,9 +864,11 @@ impl Cx<'_> {
                 }
             }
             // As the AST walk: the deferred body is still walked.
-            HirKind::Defer { .. } => self.note(w, id, EffectFlags::UNKNOWN, || "has a `defer`".into()),
+            HirKind::Defer { .. } => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "has a `defer`".into()),
             HirKind::Builtin { op, .. } => match op {
-                Builtin::Panic => self.note(w, id, EffectFlags::UNKNOWN, || "may panic".into()),
+                // Not a user-visible effect: bounds checks panic almost
+                // anywhere.
+                Builtin::Panic => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "may panic".into()),
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
@@ -642,9 +904,14 @@ impl Cx<'_> {
             // The host table keeps `len` unknown for any receiver; a
             // length read has no effect.
             Callee::Named { name, .. } if name == "len" && args.len() == 1 => {}
+            // A failed `assert` panics, which is no user-visible effect.
+            Callee::Named { name, def, .. } if name == "assert" && self.local_body(name, *def).is_none() => {
+                self.note_hidden(w, at, EffectFlags::UNKNOWN | EffectFlags::HOST, || "may panic".into())
+            }
             Callee::Named { name, def, .. } => {
                 let s = self.named(w, name, *def);
-                self.apply(w, at, name, s, args);
+                let callee = self.local_body(name, *def);
+                self.apply(w, at, name, s, callee, args);
             }
             Callee::Method { name } => {
                 let Some(&recv) = args.first() else { return };
@@ -664,7 +931,7 @@ impl Cx<'_> {
                 }
                 let shown = format!(".{name}()");
                 match self.method(w, recv, name) {
-                    Some(s) => self.apply(w, at, &shown, s, args),
+                    Some((s, callee)) => self.apply(w, at, &shown, s, callee, args),
                     // As the AST walk: an unresolved method is unknown code,
                     // but `len` / `capacity` cannot resize.
                     None => {
@@ -683,7 +950,10 @@ impl Cx<'_> {
                     return;
                 }
                 match self.fn_value(w, *f) {
-                    Some(s) => self.apply(w, at, "a function value", s, args),
+                    Some(s) => {
+                        let callee = self.fn_value_body(w.index, *f);
+                        self.apply(w, at, "a function value", s, callee, args)
+                    }
                     None => self.note(w, at, UNKNOWN.bits(), || "calls a function value it cannot resolve".into()),
                 }
             }
@@ -702,8 +972,14 @@ impl Cx<'_> {
     /// The summary of calling `callee` (shown as `shown`) with `args`,
     /// folded into `w`: its own effects, plus for each parameter it calls,
     /// the effects of the function passed there.
-    fn apply(&self, w: &mut Walk<'_>, at: HirId, shown: &str, callee: Summary, args: &[HirId]) {
-        self.note(w, at, callee.flags.bits(), || format!("calls `{shown}`"));
+    fn apply(&self, w: &mut Walk<'_>, at: HirId, shown: &str, callee: Summary, body: Option<usize>, args: &[HirId]) {
+        let link = || {
+            Some(Called {
+                name: shown.to_string(),
+                body,
+            })
+        };
+        self.record(w, at, callee, link, || format!("calls `{shown}`"));
         if callee.latent == 0 {
             return;
         }
@@ -728,7 +1004,14 @@ impl Cx<'_> {
                 // A function that calls its own function parameters gets
                 // arguments this call site does not see.
                 Some(s) if s.latent == 0 => {
-                    self.note(w, arg, s.flags.bits(), || format!("passes `{shown}` a function that is not pure"))
+                    let index = w.index;
+                    let passed = || {
+                        Some(Called {
+                            name: self.fn_value_name(index, arg),
+                            body: self.fn_value_body(index, arg),
+                        })
+                    };
+                    self.record(w, arg, s, passed, || format!("passes `{shown}` a function that is not pure"))
                 }
                 _ => self.note(w, arg, UNKNOWN.bits(), || format!("passes `{shown}` a function it cannot resolve")),
             }
@@ -749,8 +1032,87 @@ impl Cx<'_> {
         }
     }
 
+    /// This module's body for the function value `id`, when it has one.
+    fn fn_value_body(&self, index: usize, id: HirId) -> Option<usize> {
+        let body = &self.module.bodies[index];
+        match &body.expr(id).kind {
+            HirKind::Lambda { body: inner } => Some(*inner),
+            HirKind::Global { name, def } => self.local_body(name, *def),
+            HirKind::Local(l) => self.fn_value_body(index, *self.facts[index].fn_values.get(l)?),
+            _ => None,
+        }
+    }
+
+    /// How a call chain shows the function value `id`.
+    fn fn_value_name(&self, index: usize, id: HirId) -> String {
+        let body = &self.module.bodies[index];
+        match &body.expr(id).kind {
+            HirKind::Global { name, .. } => name.clone(),
+            HirKind::Local(l) => match self.facts[index].fn_values.get(l) {
+                Some(init) if matches!(body.expr(*init).kind, HirKind::Global { .. }) => {
+                    self.fn_value_name(index, *init)
+                }
+                _ => body.local(*l).name.clone(),
+            },
+            _ => "a lambda".into(),
+        }
+    }
+
+    /// This module's body for the function `name`.
+    fn local_body(&self, name: &str, def: Option<DefId>) -> Option<usize> {
+        let def = def.or_else(|| {
+            (self.checker.current_module_name() == self.module_path)
+                .then(|| self.checker.def_id_of(name))
+                .flatten()
+        });
+        if let Some(i) = def.and_then(|d| self.by_def.get(&d)) {
+            return Some(*i);
+        }
+        self.by_name.get(name).copied().flatten()
+    }
+
+    /// What a call of trait method `method` costs, from the declarations
+    /// of every trait with that method (of `trait_name` only, when given).
+    /// `None` when there is no such trait or one leaves it undeclared.
+    fn trait_method(&self, trait_name: Option<&str>, method: &str) -> Option<Summary> {
+        let short = |n: &str| short_name(n).to_string();
+        let traits: Vec<String> = self
+            .checker
+            .generics()
+            .typeclasses
+            .iter()
+            .filter(|(name, def)| {
+                trait_name.is_none_or(|t| short(t) == short(name)) && def.methods.iter().any(|m| m.name == method)
+            })
+            .map(|(name, _)| short(name))
+            .collect();
+        if traits.is_empty() {
+            return None;
+        }
+        let mut visible = EffectFlags::empty();
+        for t in &traits {
+            let decl = self
+                .module
+                .trait_effects
+                .iter()
+                .chain(&self.program.traits)
+                .find(|d| short(&d.trait_name) == *t && d.method == method)?;
+            visible = visible.union(allowed(&decl.declared.as_ref()?.names));
+        }
+        // Panics in the impls stay unknown to auto-par.
+        Some(Summary {
+            flags: visible.union(UNKNOWN),
+            visible,
+            latent: 0,
+        })
+    }
+
     fn named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Summary {
         if let Some(s) = self.known_named(w, name, def) {
+            return s;
+        }
+        let member = name.rsplit_once("::");
+        if let Some(s) = self.trait_method(member.map(|(owner, _)| owner), member.map_or(name, |(_, m)| m)) {
             return s;
         }
         if is_vec_ctor(name) || name == "Vec::from" {
@@ -802,25 +1164,29 @@ impl Cx<'_> {
         self.checker.program_method_effects.get(name).map(|fx| Summary::of(*fx))
     }
 
-    /// The summary of `recv.name(..)` when the receiver is a user class.
-    fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<Summary> {
+    /// The summary of `recv.name(..)` when the receiver is a user class or
+    /// a trait existential, and the method's body when it is this module's.
+    fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
+        if let Some(Ty::Existential { class }) = e.ty.as_ref() {
+            return self.trait_method(Some(class), name).map(|s| (s, None));
+        }
         let owner = self
             .checker
             .class_owner_at_span(e.span)
             .or_else(|| class_of(e.ty.as_ref()).map(str::to_string))?;
         let key = format!("{owner}::{name}");
         if let Some(Some(i)) = self.by_name.get(key.as_str()) {
-            return Some(w.summaries[*i]);
+            return Some((w.summaries[*i], Some(*i)));
         }
         let qualified = format!("{}::{key}", self.module_path);
         for k in [key.as_str(), qualified.as_str()] {
             if let Some(&s) = self.program.by_name.get(k) {
-                return Some(s);
+                return Some((s, None));
             }
             if let Some(fx) = self.checker.program_method_effects.get(k) {
-                return Some(Summary::of(*fx));
+                return Some((Summary::of(*fx), None));
             }
         }
         None
