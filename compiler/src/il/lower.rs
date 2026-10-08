@@ -419,8 +419,14 @@ fn fuse_slots_with_origins(
         // pop, while `ConstReturnImm` would ignore it. Compare-jumps
         // (`*Jmpf`/`*Jmpt`) do not leave that value, so a labeled
         // `CONST; RETURN` (fib `if n <= 2 { return 1 }`) may fuse.
+        // The window stops at the next bound label, so a longer fusion that
+        // would cross it falls back to a shorter one (`LOAD; CONST; SHL`
+        // before a labeled `STORE` still fuses to `BinSlotImm`).
         let mut fused = None;
-        if let Some((f, window)) = try_fuse_slots(&slots[i..], pool) {
+        // Fusion windows are at most four slots wide.
+        let cap = slots.len().min(i + 4);
+        let end = (i + 1..cap).find(|k| binds_at.contains_key(k)).unwrap_or(cap);
+        if let Some((f, window)) = try_fuse_slots(&slots[i..end], pool) {
             let crosses_label = (1..window).any(|k| binds_at.contains_key(&(i + k)));
             let has_cold = (0..window).any(|k| matches!(slots[i + k], Slot::Cold(..)));
             let return_at_uncond_join =

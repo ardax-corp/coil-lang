@@ -36,11 +36,14 @@ const CORPUS: &[&str] = &[
 /// IlFunc spans for trait instance methods retarget `user_trait_dispatch.hy`.
 /// The HIR codegen flip retargets all five (shorter `?` miss paths, `while
 /// false` dropped).
+/// Dropping jumps to the next label (#771) shortens `option_pair.hy`; fusion
+/// windows now stop at a bound label instead of refusing outright, so
+/// `functions.hy`'s `LOAD; CONST; SHL` before a join still fuses.
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "b926f5662cd82634_915"),
-    ("functions.hy", "0da406a8985f8a12_306"),
+    ("functions.hy", "6a84918ecd185078_304"),
     ("loops.hy", "eb56ceb9c5453cc4_248"),
-    ("option_pair.hy", "374ad87b01c88f0b_324"),
+    ("option_pair.hy", "6d7eee7fd13f9c41_322"),
     ("user_trait_dispatch.hy", "c09fa0597356adad_138"),
 ];
 

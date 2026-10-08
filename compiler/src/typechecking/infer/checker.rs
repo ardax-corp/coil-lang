@@ -216,6 +216,7 @@ impl Checker {
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
+            whole_result_returns: HashSet::new(),
             option_mode_fns: HashSet::new(),
             test_case_names: Vec::new(),
             main_decl_span: None,
@@ -1560,6 +1561,7 @@ impl Checker {
         self.fn_option_mode = None;
         self.result_mode_fns.clear();
         self.result_mode_ok_is_result.clear();
+        self.whole_result_returns.clear();
         self.option_mode_fns.clear();
         self.test_case_names.clear();
         self.main_decl_span = None;
@@ -2783,6 +2785,15 @@ impl Checker {
                             "return value",
                         );
                     }
+                } else if let Some((ok, err)) = self.fn_result_mode.clone()
+                    && result_ok_err(&apply_ty_prune(&self.subst, &ok)).is_none()
+                    && result_ok_err(&apply_ty_prune(&self.subst, &ty)).is_some()
+                {
+                    // `return r;` with `r` already a `Result`: the Ok payload
+                    // is not one, so this is the whole value (#786).
+                    self.whole_result_returns.insert((e.0.start, e.0.end));
+                    let full = result_ty(ok, err);
+                    self.coerce_or_unify(&full, &ty, Some(e), &e.0.into_range(), "return value");
                 } else if let Some(ret) = self.current_return_ty.clone() {
                     self.coerce_or_unify(&ret, &ty, Some(e), &e.0.into_range(), "return value");
                 }
@@ -10930,6 +10941,12 @@ impl Checker {
         self.result_mode_fns.contains(fn_name)
     }
 
+    /// Whether the result-mode `return` value at `start..end` is already the
+    /// function's whole `Result` (returned as is, not Ok-wrapped).
+    pub fn returns_whole_result(&self, start: usize, end: usize) -> bool {
+        self.whole_result_returns.contains(&(start, end))
+    }
+
     /// Whether `fn_name`'s Result Ok payload is itself a Result (nested).
     pub fn fn_result_ok_is_result(&self, fn_name: &str) -> bool {
         self.result_mode_ok_is_result.contains(fn_name)
@@ -13435,6 +13452,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                is_coro,
                 ..
             } = body.1.as_ref()
             else {
@@ -13458,6 +13476,10 @@ impl Checker {
                 Some(r) => self.parse_return_type_name(r),
                 None => Ty::Var(self.counter.fresh()),
             };
+            if *is_coro {
+                let send_ty = Ty::Var(self.counter.fresh());
+                fun_ty = self.coroutine_type(fun_ty, send_ty);
+            }
             for (_, arg_ty) in arg_tys.iter().rev() {
                 fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
             }
@@ -13823,7 +13845,7 @@ impl Checker {
         args: &Output,
         returns: Option<&Output>,
         where_constraints: &[parser::ast::WhereConstraint],
-        range: &Range<usize>,
+        is_coro: bool,
     ) {
         let key = if self.current_module.is_empty() {
             name.to_string()
@@ -13896,6 +13918,14 @@ impl Checker {
             Some(r) => self.parse_return_type_name(r),
             None => Ty::Var(self.counter.fresh()),
         };
+        // A `gen fn` returns its coroutine, as `infer_function_expr` types it:
+        // `-> T` is the yield / return slot.
+        let ret_ty = if is_coro {
+            let send_ty = Ty::Var(self.counter.fresh());
+            self.coroutine_type(ret_ty, send_ty)
+        } else {
+            ret_ty
+        };
         let mut fun_ty = ret_ty;
         for arg_ty in arg_tys.iter().rev() {
             fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
@@ -13916,7 +13946,6 @@ impl Checker {
                 .insert(key, Scheme::mono(fun_ty));
         }
         self.messages.truncate(msg_len);
-        let _ = range;
     }
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so
@@ -13933,6 +13962,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                is_coro,
                 ..
             } = child.1.as_ref()
             {
@@ -13946,7 +13976,7 @@ impl Checker {
                     args,
                     returns.as_ref(),
                     where_constraints,
-                    &child.0.into_range(),
+                    *is_coro,
                 );
             }
         }

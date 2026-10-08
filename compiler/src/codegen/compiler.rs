@@ -1477,6 +1477,9 @@ impl Compiler {
     /// result-mode Ok-wrap (COI-113). Nested `Result<Result<…>, …>` still
     /// wraps `return Result::Ok(payload)`.
     fn skip_result_ok_wrap_for_return(&self, expr: &Output<'_>) -> bool {
+        if self.checker.returns_whole_result(expr.0.start, expr.0.end) {
+            return true;
+        }
         let node = unwrap_expr_output(expr);
         let Expression::Construct {
             enum_name,
@@ -3727,8 +3730,19 @@ impl Compiler {
         }
     }
 
+    /// A `gen fn` with a body, bare or wrapped in an `impl` method.
+    fn is_coro_with_body(method: &Output) -> bool {
+        match method.1.as_ref() {
+            Expression::Function { is_coro, body, .. } => *is_coro && body.is_some(),
+            Expression::Method(_, body) => Self::is_coro_with_body(body),
+            _ => false,
+        }
+    }
+
     /// Reserve CALL/CodePtr labels for every callable in this program before
     /// bodies are emitted, so later `impl` methods are never packed as PC 0.
+    /// A `gen fn` is also known as one up front: a call emitted before its
+    /// body still lowers to `MakeCoro` (#787).
     fn reserve_program_callable_entries(&mut self, children: &[Output]) {
         for child in children {
             match child.1.as_ref() {
@@ -3738,6 +3752,9 @@ impl Compiler {
                     } else {
                         format!("{}::{}", self.namespace, name)
                     };
+                    if Self::is_coro_with_body(child) {
+                        self.coroutine_fns.insert(qualified.clone());
+                    }
                     self.reserve_function_entry(qualified);
                 }
                 Expression::Implementation { owner, methods, .. } => {
@@ -3745,6 +3762,9 @@ impl Compiler {
                     for method in methods {
                         if let Some(name) = Self::impl_method_name(method) {
                             let fqn = format!("{}::{}", owner_key, name);
+                            if Self::is_coro_with_body(method) {
+                                self.coroutine_fns.insert(fqn.clone());
+                            }
                             // Method-call lowering resolves `recv.m()` through
                             // `context.methods`: register it now so code before
                             // the `impl` can call it (the typechecker already

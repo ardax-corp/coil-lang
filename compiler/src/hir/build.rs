@@ -1273,6 +1273,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
         let wrap = b.body.result_mode
             && !is_result_construct(value, b.ok_is_result)
+            && !self.checker.returns_whole_result(value.0.start, value.0.end)
             && b.body.ret.as_ref().and_then(result_ok_err).is_some();
         // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
         // `return Some(e?)` of the function's own type return `e` as is, as

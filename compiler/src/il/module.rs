@@ -359,6 +359,7 @@ impl IlModule {
             .saturating_add(1);
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
+            drop_jumps_to_next_label(&mut body.ops);
             opt::optimize_at_with_labels(
                 &mut body.ops,
                 &per,
@@ -423,6 +424,14 @@ impl IlModule {
                     body.meta.entry,
                     &mut side,
                 ) {
+                    if drops_bound_label(&body.ops, &dense) {
+                        // A `defer` thunk sits in its function's body and is
+                        // reached only by `CALL`; the reconstruct keeps blocks
+                        // reachable from the entry and loses it (#760).
+                        dense_why[i] = Some("drops a called inner label".to_string());
+                        next.push(i);
+                        continue;
+                    }
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -470,7 +479,9 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                if lir_keeps(&body.ops, &lir) {
+                if drops_bound_label(&body.ops, &lir) {
+                    lir_why[i] = Some("drops a called inner label".to_string());
+                } else if lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -633,6 +644,48 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
 /// sides to expose the same loops; otherwise compare flat counts.
 /// A weighted tie is settled by the flat count.
+/// Drop `JMP L` when `L` is the next label: it is a fall-through. Passes that
+/// turn stack words into slots misread the words such a jump carries (an
+/// `Unpack` payload went to the wrong slots, #771).
+fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let next = match &ops[i] {
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target,
+                ..
+            } => ops[i + 1..]
+                .iter()
+                .take_while(|op| matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+                .any(|op| matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if l == target)),
+            _ => false,
+        };
+        if next {
+            ops.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// `new` still jumps to or calls a label `old` bound, but no longer binds it.
+fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
+    let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
+        ops.iter()
+            .filter_map(|op| match op {
+                IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+                _ => None,
+            })
+            .collect()
+    };
+    let (was, now) = (bound(old), bound(new));
+    new.iter().any(|op| match op {
+        IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => was.contains(&target.0) && !now.contains(&target.0),
+        _ => false,
+    })
+}
+
 fn lir_keeps(fuse_ops: &[IlOp], lir: &[IlOp]) -> bool {
     let fuse_loops = super::analysis::find_natural_loops(fuse_ops);
     let lir_loops = super::analysis::find_natural_loops(lir);
@@ -929,6 +982,32 @@ mod tests {
                 loc: loc(),
             },
         ]
+    }
+
+    /// `JMP L` straight into `L` (past other labels) is a fall-through and
+    /// goes; a jump over code stays (#771).
+    #[test]
+    fn drops_only_jumps_to_the_next_label() {
+        let jmp = |l: u32| IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            target: Label(l),
+            loc: loc(),
+            hint: Default::default(),
+        };
+        let mut ops = vec![
+            IlOp::Load { slot: 0, loc: loc() },
+            jmp(2),
+            IlOp::Label(Label(1)),
+            IlOp::Label(Label(2)),
+            jmp(3),
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Label(Label(3)),
+            IlOp::Return { loc: loc(), ret_words: 1 },
+        ];
+        drop_jumps_to_next_label(&mut ops);
+        assert_eq!(ops.len(), 7);
+        assert!(matches!(ops[1], IlOp::Label(Label(1))));
+        assert!(matches!(ops[3], IlOp::Jump { target: Label(3), .. }));
     }
 
     #[test]
