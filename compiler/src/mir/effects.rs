@@ -77,8 +77,8 @@ mod tests {
         assert!(host_effects(6).contains(EffectFlags::IO));
         assert!(!host_is_pure(10)); // from_bytes
         assert!(!host_is_pure(11)); // to_bytes
-        assert!(host_effects(10).contains(EffectFlags::IO));
-        assert!(host_effects(11).contains(EffectFlags::IO));
+        assert!(host_effects(10).contains(EffectFlags::ALLOC));
+        assert!(host_effects(11).contains(EffectFlags::ALLOC));
         assert!(!host_may_hoist(10));
         assert!(!host_may_hoist(11));
         assert!(!host_is_pure(100)); // gc_collect

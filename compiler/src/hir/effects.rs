@@ -577,11 +577,14 @@ impl<'a> ModuleEffects<'a> {
         }
     }
 
-    /// The first reason body `index` is not pure, as `calls `x` (write)`.
+    /// The first reason body `index` is not pure, as `calls `x` (write)`:
+    /// in the `uses {…}` vocabulary, or the internal names for a reason no
+    /// user sees (`may panic (unknown)`).
     pub fn first_reason(&self, index: usize) -> Option<String> {
         let s = self.summaries[index];
         if let Some(cause) = self.explain(index).into_iter().next() {
-            return Some(format!("{} ({})", cause.what, effect_names(cause.flags).join(", ")));
+            let names = if cause.visible.is_pure() { effect_names(cause.flags) } else { uses_names(cause.visible) };
+            return Some(format!("{} ({})", cause.what, names.join(", ")));
         }
         let body = &self.cx.module.bodies[index];
         let i = (0..64).find(|i| s.latent & (1 << i) != 0)?;
