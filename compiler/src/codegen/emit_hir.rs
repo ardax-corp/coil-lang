@@ -1027,35 +1027,6 @@ impl Compiler {
             box_at: HashMap::new(),
             boxes: HashMap::new(),
         };
-        let stacks = lower::stack_arrays(hir, &self.checker);
-        emit.stacks = stacks.len;
-        emit.box_at = stacks.box_at;
-        // Escaping frame-slot class locals box before their escape too.
-        let class_boxes = lower::class_boxes(hir, &self.checker);
-        let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
-        for (stmt, locals) in class_boxes {
-            emit.box_at.entry(stmt).or_default().extend(locals);
-        }
-        let unboxed_ranges = self.current_fn_unboxes_range_params();
-        for &param in &hir.params {
-            let local = hir.local(param);
-            // A free function's numeric range parameter is `[start, end]`
-            // (`argument_unboxed_range_kind`).
-            let range = local
-                .ty
-                .as_ref()
-                .and_then(crate::typechecking::return_layout::two_word_range_kind)
-                .filter(|_| unboxed_ranges);
-            if let Some(kind) = range {
-                let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
-                emit.slots[param.0 as usize] = Some(start);
-                emit.tag_slots.insert(param.0, end);
-                emit.pair_locals.insert(param.0, kind.to_string());
-                continue;
-            }
-            let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
-            emit.slots[param.0 as usize] = Some(slot);
-        }
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
         let tags: HashSet<u32> = hir
@@ -1150,64 +1121,8 @@ impl Compiler {
                 let call = self.resolve_hir_method(hir, HirId(i as u32), name, args)?;
                 emit.calls.insert(i as u32, call);
             }
-            if let HirKind::Let {
-                local,
-                init: Some(init),
-            } = expr.kind
-                && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
-                && let Some(class) = lower::sroa_class(hir, &self.checker, init)
-            {
-                emit.sroa.insert(local.0, class);
-            }
         }
-        let assigned: HashSet<u32> = hir
-            .exprs
-            .iter()
-            .filter_map(|e| match e.kind {
-                HirKind::Assign { place, .. } => match hir.expr(place).kind {
-                    HirKind::Local(local) => Some(local.0),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        for expr in &hir.exprs {
-            let HirKind::Let {
-                local,
-                init: Some(init),
-            } = expr.kind
-            else {
-                continue;
-            };
-            if assigned.contains(&local.0) {
-                continue;
-            }
-            if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {
-                emit.pair_locals.insert(local.0, kind);
-                continue;
-            }
-            if let Some(kind) = self.hir_pair_init(hir, &emit, local, init) {
-                emit.pair_locals.insert(local.0, kind);
-                continue;
-            }
-            // `let r = a..b` or a copy of an unboxed range local, as
-            // `expr_unboxed_range_kind`.
-            let range = match &hir.expr(init).kind {
-                HirKind::Make {
-                    kind: MakeKind::Range { inclusive },
-                    ..
-                } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
-                HirKind::Local(from) => emit
-                    .pair_locals
-                    .get(&from.0)
-                    .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
-                    .cloned(),
-                _ => None,
-            };
-            if let Some(kind) = range {
-                emit.pair_locals.insert(local.0, kind);
-            }
-        }
+        self.plan_hir_local_layouts(hir, &mut emit)?;
         // A call passing `[start, end]` pairs is neither a tail call nor
         // staged above stack-array boxes (`emit_call_args_range_pairs`).
         if emit.calls.values().any(|c| !c.ranges.is_empty()) && !emit.box_at.is_empty() {
@@ -1249,6 +1164,103 @@ impl Compiler {
             self.hir_check_effect(hir, &emit, root)?;
         }
         Ok(emit)
+    }
+
+    /// How each local of `hir` is held, decided once before emission:
+    /// stack arrays and escaping class locals with their box points,
+    /// `[start, end]` range parameters, class locals kept in frame slots
+    /// (`sroa`), and enum locals kept as `[payload, tag]` pairs. Needs the
+    /// planned calls, whose results decide pair locals.
+    fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
+        let stacks = lower::stack_arrays(hir, &self.checker);
+        emit.stacks = stacks.len;
+        emit.box_at = stacks.box_at;
+        // Escaping frame-slot class locals box before their escape too.
+        let class_boxes = lower::class_boxes(hir, &self.checker);
+        let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
+        for (stmt, locals) in class_boxes {
+            emit.box_at.entry(stmt).or_default().extend(locals);
+        }
+        let unboxed_ranges = self.current_fn_unboxes_range_params();
+        for &param in &hir.params {
+            let local = hir.local(param);
+            // A free function's numeric range parameter is `[start, end]`
+            // (`argument_unboxed_range_kind`).
+            let range = local
+                .ty
+                .as_ref()
+                .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                .filter(|_| unboxed_ranges);
+            if let Some(kind) = range {
+                let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
+                emit.slots[param.0 as usize] = Some(start);
+                emit.tag_slots.insert(param.0, end);
+                emit.pair_locals.insert(param.0, kind.to_string());
+                continue;
+            }
+            let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
+            emit.slots[param.0 as usize] = Some(slot);
+        }
+        for expr in &hir.exprs {
+        if let HirKind::Let {
+            local,
+            init: Some(init),
+        } = expr.kind
+            && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
+            && let Some(class) = lower::sroa_class(hir, &self.checker, init)
+        {
+            emit.sroa.insert(local.0, class);
+        }
+        }
+        let assigned: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, .. } => match hir.expr(place).kind {
+                    HirKind::Local(local) => Some(local.0),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for expr in &hir.exprs {
+            let HirKind::Let {
+                local,
+                init: Some(init),
+            } = expr.kind
+            else {
+                continue;
+            };
+            if assigned.contains(&local.0) {
+                continue;
+            }
+            if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {
+                emit.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            if let Some(kind) = self.hir_pair_init(hir, emit, local, init) {
+                emit.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            // `let r = a..b` or a copy of an unboxed range local, as
+            // `expr_unboxed_range_kind`.
+            let range = match &hir.expr(init).kind {
+                HirKind::Make {
+                    kind: MakeKind::Range { inclusive },
+                    ..
+                } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
+                HirKind::Local(from) => emit
+                    .pair_locals
+                    .get(&from.0)
+                    .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
+                    .cloned(),
+                _ => None,
+            };
+            if let Some(kind) = range {
+                emit.pair_locals.insert(local.0, kind);
+            }
+        }
+        Ok(())
     }
 
     /// The table key and ABI of a direct call to `name`, or why it is not a
