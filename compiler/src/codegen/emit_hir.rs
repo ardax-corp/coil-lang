@@ -6265,7 +6265,14 @@ impl Compiler {
                 self.bytecode.push_pop();
             }
             let (arity, rep) = payload_rep(self, arm);
-            if matches!(arm.pat, HirPat::Wild) {
+            if let Some(tag) = self.hir_rewrap_return_tag(hir, emit, ty, kind, arm) {
+                // `Err(e) => return Err(e)` into the same pair: the payload
+                // word is already in place, so only the tag is pushed back
+                // (the AST's shared try-fail epilogue).
+                self.emit_run_defers();
+                self.bytecode.push_const(tag as i32);
+                self.push_return_two_word();
+            } else if matches!(arm.pat, HirPat::Wild) {
                 self.bytecode.push_pop();
                 self.hir_arm(hir, emit, arm, 0, None, want, depth);
             } else {
@@ -6280,6 +6287,38 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// The tag of an arm `V(x) => return V(x)` whose return rebuilds the
+    /// scrutinee's own variant into a function result of the same pair
+    /// kind and payload type, so the arm is the identity on the pair.
+    fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &str, arm: &HirArm) -> Option<u32> {
+        if emit.ret != Rep::Pair(kind.to_string()) {
+            return None;
+        }
+        let HirPat::Variant { enum_name, variant, fields: HirPatFields::Tuple(pats), .. } = &arm.pat else {
+            return None;
+        };
+        let [HirPat::Bind(bound)] = pats.as_slice() else { return None };
+        let HirKind::Return(Some(value)) = hir.expr(arm.body).kind else { return None };
+        let made = hir.expr(value);
+        let HirKind::Make { kind: MakeKind::Variant { enum_name: made_enum, variant: made_variant, fields: None, .. }, args } = &made.kind else {
+            return None;
+        };
+        if made_enum != enum_name || made_variant != variant {
+            return None;
+        }
+        let [arg] = args.as_slice() else { return None };
+        if !matches!(hir.expr(*arg).kind, HirKind::Local(l) if l == *bound) {
+            return None;
+        }
+        let made_ty = made.ty.as_ref()?;
+        let payload = self.hir_payload_tys(ty, variant)?;
+        if payload.len() != 1 || self.hir_payload_tys(made_ty, variant)? != payload {
+            return None;
+        }
+        let tag = self.hir_tag(ty, enum_name, variant)?;
+        (self.hir_tag(made_ty, made_enum, made_variant)? == tag).then_some(tag)
     }
 
     /// `match` over a pointer-niche word.
