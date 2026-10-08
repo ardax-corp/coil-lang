@@ -400,6 +400,7 @@ pub fn fn_decl(
         type_params,
         args,
         returns,
+        effects,
         body,
         ..
     } = node.1.as_ref()
@@ -441,6 +442,9 @@ pub fn fn_decl(
     w.bool(is_pub);
     w.bool(*is_static);
     w.bool(*is_coro);
+    w.bool(effects.is_some());
+    w.bool(effects.as_ref().is_some_and(|e| e.pure));
+    strings(w, effects.as_ref().map_or(&[][..], |e| &e.uses[..]));
     strings(w, docs);
     w.str(&body_text);
     w.str(&source_without_attrs(node, source, attrs, strip));

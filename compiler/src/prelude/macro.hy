@@ -408,6 +408,13 @@ class FnDecl {
     pub is_pub: bool,
     pub is_static: bool,
     pub is_coro: bool,
+    /// Declares its effects: `pure fn` or `uses {…}`.
+    pub declares_effects: bool,
+    /// Spelled `pure fn`.
+    pub is_pure: bool,
+    /// The names in `uses {…}`: `read`, `write`, `net`, `env`, `exec`,
+    /// `ffi`, `thread`, `suspend`, `mutate`.
+    pub effects: Vec<string>,
     pub docs: Vec<string>,
     /// The body block as written, braces included.
     pub body: string,
@@ -454,7 +461,28 @@ impl FnDecl {
         if self.is_static {
             out += "static ";
         }
-        return out + "fn " + self.signature(name) + " " + self.body;
+        if self.is_pure {
+            out += "pure ";
+        }
+        out += "fn " + self.signature(name);
+        if self.declares_effects && !self.is_pure {
+            out += " " + self.uses_clause();
+        }
+        return out + " " + self.body;
+    }
+
+    /// `uses {read, write}` as declared (`uses {}` for none).
+    pub fn uses_clause() -> string {
+        let out = "uses {";
+        let i = 0;
+        while i < len(self.effects) {
+            if i > 0 {
+                out += ", ";
+            }
+            out += self.effects[i];
+            i += 1;
+        }
+        return out + "}";
     }
 
     /// A call of `name` with this function's arguments (`self.name(a, b)`
@@ -727,6 +755,9 @@ impl Reader {
         let is_pub = self.bool();
         let is_static = self.bool();
         let is_coro = self.bool();
+        let declares_effects = self.bool();
+        let is_pure = self.bool();
+        let effects = self.strings();
         let docs = self.strings();
         let body = self.str();
         let source = self.str();
@@ -740,6 +771,9 @@ impl Reader {
             is_pub,
             is_static,
             is_coro,
+            declares_effects,
+            is_pure,
+            effects,
             docs,
             body,
             source,
