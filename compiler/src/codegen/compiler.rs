@@ -422,6 +422,11 @@ impl Compiler {
         self.hir_lowering = on;
     }
 
+    /// Turn typed inlining of HIR bodies on or off (default `COIL_HIR_INLINE`).
+    pub fn set_hir_inline(&mut self, on: bool) {
+        self.hir_inline = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_options = level.options();
@@ -3715,7 +3720,7 @@ impl Compiler {
     /// Skips synthetic `__pad*` / `__dict*` names. `__shadow_name_N` is stored
     /// under the user-facing `name`.
     fn record_debug_local(&mut self, name: &str, slot: u32) {
-        if name.starts_with("__pad") || name.starts_with("__dict") {
+        if name.starts_with("__pad") || name.starts_with("__dict") || name.starts_with("__inl") {
             return;
         }
         let display = if let Some(rest) = name.strip_prefix("__shadow_") {
