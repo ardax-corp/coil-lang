@@ -19856,8 +19856,17 @@ impl Compiler {
             .map(|(name, off)| (*off as u32, name.clone()))
             .collect();
         let stability = self.typed_sidecar.length_stability();
+        // CSE and LICM treat a pure call as a value: two calls become one.
+        // A call that returns a fresh mutable object (array, Vec, class)
+        // is not one, so only scalar- and string-returning fns qualify.
+        let pure_fns = self
+            .pure_fns
+            .iter()
+            .filter(|name| self.checker.fn_return_ty(name).is_some_and(|ty| returns_value(&ty)))
+            .cloned()
+            .collect();
         self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
-            pure_fns: self.pure_fns.clone(),
+            pure_fns,
             label_callees,
             offset_callees,
             length_stable_fns: stability.fns.clone(),
@@ -20263,4 +20272,11 @@ fn cleanup_ranges_for(
     }
     push(lo, pad);
     out
+}
+
+/// A return type whose values are immutable: merging two calls that return
+/// one cannot be observed.
+fn returns_value(ty: &crate::typechecking::ty::Ty) -> bool {
+    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, Ty, UNIT};
+    matches!(ty, Ty::Con(name) if [INT, FLOAT, BOOL, BYTE, STRING, UNIT].contains(&name.as_str()))
 }
