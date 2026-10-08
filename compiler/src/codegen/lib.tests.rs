@@ -3945,13 +3945,15 @@ fn pure_arg_reorder_stores_pure_before_effectful() {
 #[test]
 fn predicate_peel_emits_cmp_jmp_before_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // The IL peel is under test: typed inlining would splice `base`.
+    let (bc, _pool) = compile_src_tuned(
         "fn other(int n) -> int { return n; } \
              fn base(int n) -> int { \
                if n <= 0 { return 1; } \
                return other(n) + 1; \
              } \
              fn main() { let n = 5; let result = base(n); }",
+        |c| c.set_hir_inline(false),
     );
     let cmp_jmps: Vec<usize> = bc
         .iter()
@@ -9495,6 +9497,63 @@ fn hir_inline_splices_methods_and_callees_with_locals() {
     assert!(
         call_count(&on) + 2 <= call_count(&off),
         "typed inlining must remove both calls; off={} on={}",
+        call_count(&off),
+        call_count(&on)
+    );
+}
+
+const HIR_INLINE_GUARDS: &str = r#"
+fn clamp(int x, int lo, int hi) -> int {
+    if x < lo {
+        return lo;
+    }
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+
+fn sign(int x) -> int {
+    if x < 0 {
+        return -1;
+    } else if x == 0 {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+fn countdown(int n) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return countdown(n - 1);
+}
+
+fn hot(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc + clamp(i, 2, 7) + sign(i) + countdown(3);
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn main() {
+    let x = hot(10);
+}
+"#;
+
+#[test]
+fn hir_inline_folds_guard_returns_but_keeps_recursive_callees() {
+    let (off, _) = compile_src_tuned(HIR_INLINE_GUARDS, |c| c.set_hir_inline(false));
+    let (on, _) = compile_src_tuned(HIR_INLINE_GUARDS, |c| c.set_hir_inline(true));
+    // `clamp` and `sign` splice into `hot`; `countdown` recurses and stays.
+    assert_eq!(
+        call_count(&on) + 2,
+        call_count(&off),
+        "guard callees inline, the recursive one does not; off={} on={}",
         call_count(&off),
         call_count(&on)
     );
