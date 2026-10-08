@@ -113,7 +113,7 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
         let old = push(&mut b, old);
         let one = copy_tree(&mut b, one);
         let bin = HirExpr {
-            kind: HirKind::Bin { op: op.clone(), lhs: old, rhs: one },
+            kind: HirKind::Bin { op, lhs: old, rhs: one },
             node: None,
             ..b.expr(value).clone()
         };

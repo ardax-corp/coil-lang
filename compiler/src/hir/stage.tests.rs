@@ -54,8 +54,10 @@ fn an_operand_after_a_call_stays() {
     assert!(stage(&body, index_of(&body, "idx")).is_none());
 }
 
+/// A `while` condition is the loop body's first `if`, so it stages inside
+/// the loop and runs on every trip.
 #[test]
-fn a_loop_condition_stays() {
+fn a_loop_condition_stages_inside_the_loop() {
     let src = "fn f([int; 3] idx, int i) -> int {
             while idx[i] > 0 {
                 i += 1;
@@ -63,7 +65,17 @@ fn a_loop_condition_stays() {
             return i;
         }";
     let body = body_of(src, "f");
-    assert!(stage(&body, index_of(&body, "idx")).is_none());
+    let staged = stage(&body, index_of(&body, "idx")).expect("staged");
+    let HirKind::Block { stmts, .. } = &staged.expr(staged.root.unwrap()).kind else {
+        panic!("block root")
+    };
+    let HirKind::Loop { body: inner } = staged.expr(stmts[0]).kind else {
+        panic!("the loop stays first")
+    };
+    let HirKind::Block { stmts: inner, .. } = &staged.expr(inner).kind else {
+        panic!("loop block")
+    };
+    assert!(matches!(staged.expr(inner[0]).kind, HirKind::Let { .. }));
 }
 
 #[test]
