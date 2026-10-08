@@ -360,7 +360,7 @@ struct PendingFfiInvoke {
     resume_sp: usize,
 }
 
-/// Parked HostInvoke waiting on IO readiness (`await_readable` / `await_writable`).
+/// Parked HostInvoke waiting on IO readiness (`wait_readable` / `wait_writable`).
 struct PendingIoWait {
     request: crate::io::IoParkRequest,
     resume_ip: usize,

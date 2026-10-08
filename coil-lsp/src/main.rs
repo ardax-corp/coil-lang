@@ -1979,8 +1979,10 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
                 .into()
         }
         ("io", "write") => "Writes bytes to a stream and reports the number written.".into(),
-        ("io", "await_readable") => "Parks until the stream is readable (yields inside a coroutine).".into(),
-        ("io", "await_writable") => "Parks until the stream is writable (yields inside a coroutine).".into(),
+        ("io", "wait_readable") => "Parks until the stream is readable (yields inside a coroutine).".into(),
+        ("io", "wait_writable") => "Parks until the stream is writable (yields inside a coroutine).".into(),
+        ("io", "await_readable") => "Old name of `wait_readable`.".into(),
+        ("io", "await_writable") => "Old name of `wait_writable`.".into(),
         ("io", "drive") => "Polls async IO waiters once; returns newly-ready count.".into(),
         ("io", "wait_ready") => "Blocks until any registered async IO waiter is ready; returns newly-ready count.".into(),
         ("io", "from_bytes") | ("string", "from_bytes") => {

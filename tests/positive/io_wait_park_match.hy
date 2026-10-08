@@ -1,7 +1,6 @@
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
-// Uses the old names `await_readable` / `await_writable` on purpose; io_wait_park_match.hy covers the new ones.
-use io::await_readable;
-use io::await_writable;
+use io::wait_readable;
+use io::wait_writable;
 use io::close;
 use io::read;
 use io::wait_ready;
@@ -16,7 +15,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     let listener = listen("127.0.0.1", 0)?;
     let addr = local_addr(listener)?;
     let client = connect("127.0.0.1", addr[1])?;
-    await_readable(listener)?;
+    wait_readable(listener)?;
     let server = accept(listener)?;
     return Result::Ok((client, server, listener));
 }
@@ -27,9 +26,9 @@ gen fn http_read_after_wait(Stream c) -> int {
     match read(c, buf) {
         Result::Ok(_) => panic "first read should WouldBlock",
         Result::Err(_) => {
-            match await_readable(c) {
+            match wait_readable(c) {
                 Result::Ok(_) => {},
-                Result::Err(_) => panic "await_readable treated Ok as Err",
+                Result::Err(_) => panic "wait_readable treated Ok as Err",
             }
         },
     }
@@ -49,7 +48,7 @@ gen fn http_write_response(Stream s) -> int {
     };
 }
 
-test("await_readable match Ok after WouldBlock park") {
+test("wait_readable match Ok after WouldBlock park") {
     let triple = connected_pair()?;
     let c = triple[0];
     let s = triple[1];
@@ -66,14 +65,14 @@ test("await_readable match Ok after WouldBlock park") {
     close(listener)?;
 }
 
-test("await_writable match Ok on connected socket") {
+test("wait_writable match Ok on connected socket") {
     let triple = connected_pair()?;
     let c = triple[0];
     let s = triple[1];
     let listener = triple[2];
-    match await_writable(c) {
+    match wait_writable(c) {
         Result::Ok(_) => {},
-        Result::Err(_) => panic "await_writable treated Ok as Err",
+        Result::Err(_) => panic "wait_writable treated Ok as Err",
     }
     close(c)?;
     close(s)?;

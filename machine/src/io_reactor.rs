@@ -2,7 +2,7 @@
 //!
 //! `await_*` and package attach handshake waits block here via a single-handle wait
 //! (`poll` on Unix, `WSAPoll` / `WaitForSingleObject` on Windows). Userland
-//! sync adapters reach the same path through `await_readable` / `await_writable`.
+//! sync adapters reach the same path through `wait_readable` / `wait_writable`.
 //! Async waiters register interest and are woken when [`IoReactor::poll_once`]
 //! observes readiness.
 

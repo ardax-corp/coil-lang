@@ -16,11 +16,11 @@ Host streams store a [`NativeHandle`](../../machine/src/io_handle.rs) (`File` / 
 | Surface | Behavior |
 |---------|----------|
 | L0 `read` / `write` / `accept` | Always non-blocking; `WouldBlock` when not ready |
-| `await_readable` / `await_writable` | **Top-level:** park the VM (`PendingIoWait`) until ready. **Inside a coroutine:** register a waiter and yield so many awaits can share one `poll` |
+| `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | **Top-level:** park the VM (`PendingIoWait`) until ready. **Inside a coroutine:** register a waiter and yield so many awaits can share one `poll` |
 | `drive()` | Non-blocking `poll_once` on registered async waiters |
 | `wait_ready()` | Block until ≥1 registered waiter is ready (batch); no-op when none registered |
 | **`block_on(coro)`** (prelude) | Resume until `done`; calls `wait_ready` between resumes |
-| Userland `io::sync::{write_all, …}` | Coil loops over L0 + `await_*` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)) — top-level park path |
+| Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)) — top-level park path |
 
 Preferred DX — async work, sync boundary:
 
@@ -66,7 +66,7 @@ Top-level `await_*` and sync adapters call
 [`reactor_wait_fd`](../../machine/src/io.rs)). Cooperative awaits use
 [`register_wait`](../../machine/src/io_reactor.rs) + yield.
 Userland sync adapters (`write_all`, …) reach the park path through top-level
-`await_readable` / `await_writable`.
+`wait_readable` / `wait_writable`.
 
 When a CPU reactor is bound (`HostStateGuard`), those blocking waits use
 [`wait_fd_helping`](../../machine/src/io_reactor.rs): short poll slices interleaved with

@@ -6,7 +6,7 @@
 use io::stdout;
 use io::open;
 use io::close;
-use io::await_readable;
+use io::wait_readable;
 use io::wait_ready;
 use io::sync::write_all;
 use io::sync::read_to_end;
@@ -14,7 +14,7 @@ use string::{format, to_bytes};
 
 gen fn slurp(string path) -> Result<int, IoError> {
     let s = open(path, "r")?;
-    await_readable(s)?;
+    wait_readable(s)?;
     let bytes = read_to_end(s)?;
     close(s)?;
     return len(bytes);
