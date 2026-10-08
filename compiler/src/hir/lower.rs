@@ -1243,7 +1243,7 @@ pub fn is_byte_array(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Array { element, .. } if is_byte(element))
 }
 
-fn is_byte(ty: &Ty) -> bool {
+pub fn is_byte(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == coil_ty::BYTE)
 }
 

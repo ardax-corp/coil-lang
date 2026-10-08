@@ -4718,7 +4718,14 @@ impl Compiler {
             },
             HirKind::Bin { op, lhs, rhs } => {
                 let float = Self::hir_ty(hir, *lhs).is_some_and(lower::is_float);
-                if !float && let Some((value, shift, instr)) = Self::hir_strength_reduce(hir, *op, *lhs, *rhs) {
+                if !float && let Some(bit) = Self::hir_bitop_identity(hir, emit, *op, *lhs, *rhs) {
+                    // `x & x`, `x ^ 0`, `x | -1`, `x << 0`, .. as the AST's
+                    // `strength_reduce_bitops`.
+                    match bit {
+                        Ok(value) => self.hir_value(hir, emit, value, &BOXED, depth),
+                        Err(k) => self.hir_push_int(k),
+                    }
+                } else if !float && let Some((value, shift, instr)) = Self::hir_strength_reduce(hir, emit, *op, *lhs, *rhs) {
                     // `x * 2^n` / non-negative `x / 2^n`, as the AST codegen does.
                     self.hir_value(hir, emit, value, &BOXED, depth);
                     self.bytecode.push_const(shift as i32);
@@ -7201,19 +7208,73 @@ impl Compiler {
     }
 
     /// `x * 2^n` (either side) as `x << n`, and `x / 2^n` as `x >> n` when
-    /// the checker proved `x` non-negative.
-    fn hir_strength_reduce(hir: &HirBody, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, Instruction)> {
-        let pow2 = |id: HirId| match hir.expr(id).kind {
-            HirKind::Lit(Lit::Int(k)) => crate::const_fold::strength_div_int(k),
-            _ => None,
-        };
+    /// `x` is a `byte` or the checker proved it non-negative.
+    fn hir_strength_reduce(hir: &HirBody, emit: &HirEmit, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, Instruction)> {
+        let pow2 = |id: HirId| Self::hir_int_imm(hir, emit, id).and_then(crate::const_fold::strength_div_int);
+        let nonneg = hir.expr(lhs).flags.contains(HirFlags::NONNEG) || Self::hir_ty(hir, lhs).is_some_and(lower::is_byte);
         match op {
             BinOp::IntMul => pow2(rhs)
                 .map(|n| (lhs, n, Instruction::SHL))
                 .or_else(|| pow2(lhs).map(|n| (rhs, n, Instruction::SHL))),
-            BinOp::IntDiv if hir.expr(lhs).flags.contains(HirFlags::NONNEG) => {
-                pow2(rhs).map(|n| (lhs, n, Instruction::SHR))
+            BinOp::IntDiv if nonneg => pow2(rhs).map(|n| (lhs, n, Instruction::SHR)),
+            _ => None,
+        }
+    }
+
+    /// An integer known at compile time: a literal, a `const` global, or a
+    /// `const` local bound to a literal (the AST's `const_env`).
+    fn hir_int_imm(hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<i64> {
+        match &hir.expr(id).kind {
+            HirKind::Lit(Lit::Int(k)) => Some(*k),
+            HirKind::Global { .. } => match emit.consts.get(&id.0)? {
+                crate::const_fold::ConstValue::Int(k) => Some(*k),
+                _ => None,
+            },
+            HirKind::Local(local) if hir.local(*local).kind == crate::hir::LocalKind::Const => {
+                hir.exprs.iter().find_map(|e| match e.kind {
+                    HirKind::Let { local: l, init: Some(init) } if l == *local => match hir.expr(init).kind {
+                        HirKind::Lit(Lit::Int(k)) => Some(k),
+                        _ => None,
+                    },
+                    _ => None,
+                })
             }
+            _ => None,
+        }
+    }
+
+    /// A bitwise identity or annihilator, as the AST's
+    /// `strength_reduce_bitops`: `Ok(x)` is the operand that is the result,
+    /// `Err(k)` a constant one. Only a local or literal operand is dropped,
+    /// so an effect still runs.
+    fn hir_bitop_identity(hir: &HirBody, emit: &HirEmit, op: BinOp, lhs: HirId, rhs: HirId) -> Option<Result<HirId, i64>> {
+        let trivial = |id: HirId| matches!(hir.expr(id).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_) | Lit::Bool(_)));
+        let same = matches!((&hir.expr(lhs).kind, &hir.expr(rhs).kind), (HirKind::Local(a), HirKind::Local(b)) if a == b);
+        let imm = |id: HirId| Self::hir_int_imm(hir, emit, id);
+        let all_ones = |k: i64| k == -1 || k == 0xFFFF_FFFF;
+        let operand = || match (imm(lhs), imm(rhs)) {
+            (Some(k), None) if trivial(rhs) => Some((rhs, k)),
+            (None, Some(k)) if trivial(lhs) => Some((lhs, k)),
+            _ => None,
+        };
+        match op {
+            BinOp::BitAnd | BinOp::BitOr if same => Some(Ok(lhs)),
+            BinOp::BitXor if same => Some(Err(0)),
+            BinOp::BitAnd => match operand()? {
+                (_, 0) => Some(Err(0)),
+                (x, k) if all_ones(k) => Some(Ok(x)),
+                _ => None,
+            },
+            BinOp::BitOr => match operand()? {
+                (x, 0) => Some(Ok(x)),
+                (_, k) if all_ones(k) => Some(Err(-1)),
+                _ => None,
+            },
+            BinOp::BitXor => match operand()? {
+                (x, 0) => Some(Ok(x)),
+                _ => None,
+            },
+            BinOp::Shl | BinOp::Shr if imm(rhs) == Some(0) => Some(Ok(lhs)),
             _ => None,
         }
     }
