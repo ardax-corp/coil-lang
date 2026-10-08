@@ -955,21 +955,33 @@ impl Compiler {
         if !emit.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
             return Err("format-show");
         }
-        for expr in &hir.exprs {
-            if let HirKind::Return(Some(value)) = expr.kind
-                && let Some(call) = emit.calls.get(&value.0)
-                && !call.method
-                && call.builtin.is_none()
-                && call.generic.is_none()
-                && call.ranges.is_empty()
-                && Self::hir_call_rep(call) == emit.ret
-                && !self.coroutine_fns.contains(&call.key)
-                && self.hir_tail_call_ok(&call.key)
-                && !hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }))
-            {
-                emit.tail_calls.insert(value.0);
+        let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
+        let tail = |value: HirId| {
+            emit.calls.get(&value.0).is_some_and(|call| {
+                !call.method
+                    && call.builtin.is_none()
+                    && call.generic.is_none()
+                    && call.ranges.is_empty()
+                    && Self::hir_call_rep(call) == emit.ret
+                    && !self.coroutine_fns.contains(&call.key)
+                    && self.hir_tail_call_ok(&call.key)
+            })
+        };
+        let mut tails = Vec::new();
+        for expr in hir.exprs.iter().filter(|_| !defers) {
+            let HirKind::Return(Some(value)) = expr.kind else { continue };
+            match &hir.expr(value).kind {
+                _ if tail(value) => tails.push(value),
+                // `return match s { p => f(..), .. }` with every arm a tail
+                // call: each arm's call is a `TailCall`, as the AST's
+                // `return_is_tail_match`.
+                HirKind::Match { arms, .. } if !arms.is_empty() && arms.iter().all(|a| tail(a.body)) => {
+                    tails.extend(arms.iter().map(|a| a.body));
+                }
+                _ => {}
             }
         }
+        emit.tail_calls.extend(tails.into_iter().map(|v| v.0));
         if let Some(root) = hir.root {
             self.hir_check_effect(hir, &emit, root)?;
         }
