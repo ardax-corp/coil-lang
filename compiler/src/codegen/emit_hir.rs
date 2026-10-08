@@ -6318,6 +6318,12 @@ impl Compiler {
         if emit.ret != Rep::Pair(kind.to_string()) {
             return None;
         }
+        self.hir_rewrap_tag(hir, ty, arm)
+    }
+
+    /// The tag of `arm`'s `V(x) => return V(x)` when the returned variant
+    /// carries the same one-word payload as the matched one.
+    fn hir_rewrap_tag(&self, hir: &HirBody, ty: &Ty, arm: &HirArm) -> Option<u32> {
         let HirPat::Variant { enum_name, variant, fields: HirPatFields::Tuple(pats), .. } = &arm.pat else {
             return None;
         };
@@ -6384,6 +6390,16 @@ impl Compiler {
                     this.hir_arm(hir, emit, arm, 0, None, want, depth);
                 }
                 HirPat::Bind(_) => this.hir_arm(hir, emit, arm, 0, None, want, depth),
+                _ if matches!(emit.ret, Rep::Pair(_)) && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                    // `Err(e) => return Err(e)` from a niche word into a pair
+                    // return (`assert(..)?`): the word is the payload.
+                    if decode {
+                        Self::push_result_untag(&mut this.bytecode);
+                    }
+                    this.emit_run_defers();
+                    this.bytecode.push_const(tag as i32);
+                    this.push_return_two_word();
+                }
                 _ => {
                     let rep = payload_rep(this, side);
                     let reads = rep.is_some()
@@ -6710,6 +6726,10 @@ impl Compiler {
                 self.bytecode.bind_label(end);
             }
             HirKind::Defer { captures, body } => self.hir_defer(hir, emit, captures, *body),
+            // `while false { .. }` never runs, as the AST drops it.
+            HirKind::Loop { body }
+                if lower::while_shape(hir, *body)
+                    .is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
             HirKind::Loop { body } => {
                 let top = self.bytecode.fresh_label();
                 let exit = self.bytecode.fresh_label();
