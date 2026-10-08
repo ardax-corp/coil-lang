@@ -389,3 +389,10 @@ fn compile_fail_passes_only_on_a_declared_code() {
     assert!(!ok);
     assert!(why.unwrap().contains("no expected error code"));
 }
+
+#[test]
+fn hir_only_reads_the_leading_header() {
+    assert!(is_hir_only("// A fix.\n// HIR only: coil-lang#785\nfn main() {}\n"));
+    assert!(!is_hir_only("// A fix.\nfn main() {}\n// HIR only: coil-lang#785\n"));
+    assert!(!is_hir_only("fn main() {}\n"));
+}

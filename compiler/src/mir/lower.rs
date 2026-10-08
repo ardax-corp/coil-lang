@@ -240,8 +240,20 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
         for i in start..end {
             let op = &ops[i];
-            let rest = &ops[i + 1..end];
-            let next = first_emitting(rest);
+            let mut rest = &ops[i + 1..end];
+            let mut next = first_emitting(rest);
+            // `Unpack; JMP L`: the payload words ride the jump, so the arm
+            // after `L` is what reads them (#771).
+            if matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack)
+                && let Some(IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target,
+                    ..
+                }) = next
+            {
+                next = first_emitting_at(ops, *target);
+                rest = taken_ops(ops, *target);
+            }
             b.pending_loc = op.loc();
             b.match_base = match_base(i);
             lower_op(&mut b, &mut tos, op, next, rest, hints)?;

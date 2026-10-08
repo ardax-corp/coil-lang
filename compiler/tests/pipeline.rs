@@ -5984,6 +5984,61 @@ fn main() {
     assert_eq!(output, "328350,100");
 }
 
+/// E1: a function that passes a pure lambda to a higher-order function is
+/// pure (HIR effects), so a loop over it splits; an impure lambda keeps it
+/// sequential. (`twice` is not generic: coil-lang#699.)
+#[test]
+fn auto_par_loop_over_a_pure_lambda_call_splits() {
+    let body = |lambda: &str| {
+        format!(
+            r#"
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+static let HITS: int = 0;
+fn twice(int x, int -> int f) -> int {{
+    return f(f(x));
+}}
+fn bump(int x) -> int {{
+    HITS = HITS + 1;
+    return x;
+}}
+fn score(int i) -> int {{
+    return twice(i, {lambda});
+}}
+fn main() {{
+    let acc = 0;
+    let i = 0;
+    while i < 100 {{
+        acc = acc + score(i);
+        i = i + 1;
+    }}
+    write(stdout(), to_bytes(format("%i", acc)));
+}}
+"#
+        )
+    };
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(&body("fn (int x) => x + 1"))
+        .expect("pure lambda loop should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker: score is pure through its lambda"
+    );
+    // sum of i + 2 for i in 0..100.
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "5150");
+
+    let mut pipeline = test_pipeline();
+    pipeline
+        .compile_src(&body("fn (int x) => bump(x)"))
+        .expect("impure lambda loop should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_none(),
+        "a lambda that writes a static keeps the loop sequential"
+    );
+}
+
 /// A parameter bound is split only when the trip count clears the grain floor.
 #[test]
 fn auto_par_loop_dynamic_bound_matches_sequential() {

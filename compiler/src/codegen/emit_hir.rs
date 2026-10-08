@@ -124,6 +124,10 @@ struct HirGeneric {
     dicts: usize,
     /// The result type to `UnboxValue` (a bare type parameter result).
     unbox: Option<Ty>,
+    /// Per argument: a ground closure passed where the callee takes a
+    /// function over bare type parameters gets those arguments boxed, so
+    /// it is wrapped to unbox each one (`Some(ty)`) before the call (#699).
+    adapt: Vec<Option<Vec<Option<Ty>>>>,
     /// The enclosing body's dictionaries (`__dictN`) the call forwards
     /// ahead of its own, as `forwarded_dicts_at` lists them.
     forwarded: Vec<usize>,
@@ -230,6 +234,9 @@ struct HirEmit {
     polyfns: HashMap<u32, String>,
     /// Each anonymous `fn`, by node: its body and that body's plan.
     lambdas: HashMap<u32, Box<HirLambda>>,
+    /// Lambda literals passed where a generic callee boxes their arguments:
+    /// which parameters to `UnboxValue` on entry (#699).
+    lambda_unbox: HashMap<u32, Vec<Option<Ty>>>,
     /// Each `static let` read or write, by node: its static slot.
     statics: HashMap<u32, u32>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
@@ -958,6 +965,7 @@ impl Compiler {
             fn_refs: HashMap::new(),
             polyfns: HashMap::new(),
             lambdas: HashMap::new(),
+            lambda_unbox: HashMap::new(),
             statics: HashMap::new(),
             ops: HashMap::new(),
             stacks: HashMap::new(),
@@ -2494,7 +2502,7 @@ impl Compiler {
         }
         // An `async fn` call is `MakeCoro`: its result is the handle word.
         let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
-        if coro && (self_layout.is_some() || open || !self.coroutine_fns.contains(&key)) {
+        if coro && (open || !self.coroutine_fns.contains(&key)) {
             return Err("callee-coroutine");
         }
         let pair = if coro { None } else { self.two_word_return_kind(&key) };
@@ -2726,15 +2734,67 @@ impl Compiler {
         {
             return Err("callee-generic");
         }
+        let mut adapt = vec![None; receivers];
+        for (i, ty) in arg_tys[receivers..].iter().enumerate() {
+            adapt.push(params.get(skip + i).and_then(|p| self.hir_fn_arg_unbox(p, ty, &scheme.bounds, &open)));
+        }
         Ok(HirGeneric {
             lookup: lookup.to_string(),
             boxed,
+            adapt,
             arg_tys,
             ret_ty,
             dicts: scheme.constraints.len(),
             unbox,
             forwarded,
         })
+    }
+
+    /// For a callee parameter `A1 -> .. -> R` given the ground function
+    /// type `ty`: which of its arguments arrive boxed (a bare type parameter
+    /// `Ai` over a type with a value tag), or `None` when none do.
+    fn hir_fn_arg_unbox(
+        &self,
+        param: &Ty,
+        ty: &Ty,
+        bounds: &[crate::typechecking::ty::TyVarId],
+        open: &impl Fn(&Ty) -> bool,
+    ) -> Option<Vec<Option<Ty>>> {
+        let (mut p, mut t) = (param, ty);
+        let mut unbox = Vec::new();
+        while let (Ty::Fun(pa, pr), Ty::Fun(ta, tr)) = (p, t) {
+            let bare = matches!(pa.as_ref(), Ty::Var(v) if bounds.contains(v));
+            let ta = apply_ty_prune(self.checker.subst(), ta);
+            unbox.push((bare && !open(&ta) && Self::ty_to_value_tag(&ta).is_some()).then_some(ta));
+            (p, t) = (pr, tr);
+        }
+        unbox.iter().any(Option::is_some).then_some(unbox)
+    }
+
+    /// Wrap the function value on top of the stack in a closure that
+    /// unboxes the arguments `unbox` marks, then calls it (#699).
+    fn hir_adapt_fn_arg(&mut self, unbox: &[Option<Ty>]) {
+        let after = self.bytecode.fresh_label();
+        self.hir_jump(IlJumpKind::Unconditional, after);
+        self.bytecode.bind_fresh_entry();
+        let entry = self.bytecode.len() as u32;
+        // Frame: the wrapped function (the one capture), then the arguments.
+        for (i, ty) in unbox.iter().enumerate() {
+            self.bytecode.push_load(1 + i as u32);
+            if let Some(ty) = ty {
+                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+            }
+        }
+        self.bytecode.push_load(0);
+        self.bytecode
+            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(unbox.len() as u32));
+        self.bytecode.push_return();
+        self.bytecode.bind_label(after);
+        self.bytecode.push_const(0);
+        self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
+        let arity = unbox.len() as u32;
+        self.bytecode
+            .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(1, 0, arity, false)));
     }
 
     /// An enum whose word is the heap object (no pointer niche).
@@ -4823,6 +4883,15 @@ impl Compiler {
                     let name = lam.body.local(param).name.clone();
                     self.record_debug_param(&name, slot);
                 }
+                if let Some(unbox) = emit.lambda_unbox.remove(&id.0) {
+                    for (ty, &slot) in unbox.iter().zip(&slots[lam.body.captures.len()..]) {
+                        if let Some(ty) = ty {
+                            self.bytecode.push_load(slot);
+                            Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+                            self.bytecode.push_store_pop(slot);
+                        }
+                    }
+                }
                 self.expr_depth = 0;
                 let root = lam.body.root.expect("planned lambda body");
                 let ret = lam.emit.ret.clone();
@@ -4984,14 +5053,35 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Self::hir_bin_instruction(*op, float)));
                 }
             }
-            HirKind::Logic { and, lhs, rhs } => {
-                // The AST codegen evaluates both sides into `AND` / `OR`.
+            HirKind::Logic { and, lhs, rhs } if lower::logic_eager(hir, *rhs) => {
+                // `b` has no effect and cannot trap: both sides into one `AND` / `OR`.
                 self.hir_operands(hir, emit, *lhs, *rhs, depth);
                 self.bytecode.push(Byte::new(if *and {
                     Instruction::AND
                 } else {
                     Instruction::OR
                 }));
+            }
+            HirKind::Logic { and, lhs, rhs } => {
+                // Short-circuit: `a && b` is `if a { b } else { false }`,
+                // `a || b` is `if a { true } else { b }`.
+                let short = self.bytecode.fresh_label();
+                let end = self.bytecode.fresh_label();
+                self.hir_value(hir, emit, *lhs, &BOXED, depth);
+                self.hir_jump(
+                    if *and {
+                        IlJumpKind::JumpIfFalse
+                    } else {
+                        IlJumpKind::JumpIfTrue
+                    },
+                    short,
+                );
+                self.hir_value(hir, emit, *rhs, &BOXED, depth);
+                self.hir_jump(IlJumpKind::Unconditional, end);
+                self.bytecode.bind_label(short);
+                self.bytecode
+                    .push(Byte::new_with_value(Instruction::CONST, Value::from(!*and).raw() as _));
+                self.bytecode.bind_label(end);
             }
             // A negated literal is one constant, as in the AST codegen (it
             // keeps small leaves inside the tiny-inline budget).
@@ -5659,12 +5749,13 @@ impl Compiler {
                     }
                     self.bytecode.append(&mut bc);
                 }
-                let ok = self.emit_named_entry_on_module_ret(
-                    &key,
-                    args.len() as u32 + dicts,
-                    crate::il::EntryKind::Call,
-                    natural.words(),
-                );
+                // A `gen fn` / `async fn` method call is `MakeCoro`, as a free one.
+                let kind = if self.coroutine_fns.contains(&key) {
+                    crate::il::EntryKind::MakeCoro
+                } else {
+                    crate::il::EntryKind::Call
+                };
+                let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
@@ -5698,6 +5789,15 @@ impl Compiler {
                 let generic = call.generic.clone();
                 let ranges = !call.ranges.is_empty();
                 let words = Self::hir_arg_words(call, args.len());
+                if let Some(g) = &generic {
+                    for (&arg, unbox) in args.iter().zip(&g.adapt) {
+                        if let Some(unbox) = unbox
+                            && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
+                        {
+                            emit.lambda_unbox.insert(arg.0, unbox.clone());
+                        }
+                    }
+                }
                 let inline = if tail || depth != 0 || mono || ranges || generic.is_some() || self.coroutine_fns.contains(&key) {
                     None
                 } else {
@@ -5734,6 +5834,11 @@ impl Compiler {
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
                         }
+                        if let Some(unbox) = generic.as_ref().and_then(|g| g.adapt[i].as_ref())
+                            && !matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
+                        {
+                            self.hir_adapt_fn_arg(unbox);
+                        }
                         let mut words = Vec::with_capacity(rep.words() as usize);
                         // Above every word but the top one, which `StorePop`
                         // moves first.
@@ -5759,6 +5864,11 @@ impl Compiler {
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
                         }
+                        if let Some(unbox) = generic.as_ref().and_then(|g| g.adapt[i].as_ref())
+                            && !matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
+                        {
+                            self.hir_adapt_fn_arg(unbox);
+                        }
                     }
                 } else {
                     // A stack array's box lives in a frame slot: as the
@@ -5770,6 +5880,11 @@ impl Compiler {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
+                        }
+                        if let Some(unbox) = generic.as_ref().and_then(|g| g.adapt[i].as_ref())
+                            && !matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
+                        {
+                            self.hir_adapt_fn_arg(unbox);
                         }
                         self.expr_depth = depth;
                         let tmp = self.alloc_temp_slot();

@@ -1483,6 +1483,9 @@ impl Compiler {
     /// result-mode Ok-wrap (COI-113). Nested `Result<Result<…>, …>` still
     /// wraps `return Result::Ok(payload)`.
     fn skip_result_ok_wrap_for_return(&self, expr: &Output<'_>) -> bool {
+        if self.checker.returns_whole_result(expr.0.start, expr.0.end) {
+            return true;
+        }
         let node = unwrap_expr_output(expr);
         let Expression::Construct {
             enum_name,
@@ -3733,8 +3736,19 @@ impl Compiler {
         }
     }
 
+    /// A `gen fn` with a body, bare or wrapped in an `impl` method.
+    fn is_coro_with_body(method: &Output) -> bool {
+        match method.1.as_ref() {
+            Expression::Function { is_coro, body, .. } => *is_coro && body.is_some(),
+            Expression::Method(_, body) => Self::is_coro_with_body(body),
+            _ => false,
+        }
+    }
+
     /// Reserve CALL/CodePtr labels for every callable in this program before
     /// bodies are emitted, so later `impl` methods are never packed as PC 0.
+    /// A `gen fn` is also known as one up front: a call emitted before its
+    /// body still lowers to `MakeCoro` (#787).
     fn reserve_program_callable_entries(&mut self, children: &[Output]) {
         for child in children {
             match child.1.as_ref() {
@@ -3744,6 +3758,9 @@ impl Compiler {
                     } else {
                         format!("{}::{}", self.namespace, name)
                     };
+                    if Self::is_coro_with_body(child) {
+                        self.coroutine_fns.insert(qualified.clone());
+                    }
                     self.reserve_function_entry(qualified);
                 }
                 Expression::Implementation { owner, methods, .. } => {
@@ -3751,6 +3768,9 @@ impl Compiler {
                     for method in methods {
                         if let Some(name) = Self::impl_method_name(method) {
                             let fqn = format!("{}::{}", owner_key, name);
+                            if Self::is_coro_with_body(method) {
+                                self.coroutine_fns.insert(fqn.clone());
+                            }
                             // Method-call lowering resolves `recv.m()` through
                             // `context.methods`: register it now so code before
                             // the `impl` can call it (the typechecker already
@@ -19543,6 +19563,15 @@ impl Compiler {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
+        // E1: the HIR summaries also prove functions pure that call a
+        // function parameter only with pure functions (`map(xs, fn ...)`).
+        if let Some(hir) = self.hir_module.as_ref() {
+            use crate::hir::effects;
+            let summaries = effects::analyze(hir, &self.checker, module, &self.program_effects);
+            let pure = effects::pure_names(hir, module, &summaries, &self.pure_fns);
+            self.pure_fns.extend(pure);
+            self.program_effects.record(hir, &self.checker, module, &summaries);
+        }
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
@@ -19862,8 +19891,17 @@ impl Compiler {
             .map(|(name, off)| (*off as u32, name.clone()))
             .collect();
         let stability = self.typed_sidecar.length_stability();
+        // CSE and LICM treat a pure call as a value: two calls become one.
+        // A call that returns a fresh mutable object (array, Vec, class)
+        // is not one, so only scalar- and string-returning fns qualify.
+        let pure_fns = self
+            .pure_fns
+            .iter()
+            .filter(|name| self.checker.fn_return_ty(name).is_some_and(|ty| returns_value(&ty)))
+            .cloned()
+            .collect();
         self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
-            pure_fns: self.pure_fns.clone(),
+            pure_fns,
             label_callees,
             offset_callees,
             length_stable_fns: stability.fns.clone(),
@@ -20269,4 +20307,11 @@ fn cleanup_ranges_for(
     }
     push(lo, pad);
     out
+}
+
+/// A return type whose values are immutable: merging two calls that return
+/// one cannot be observed.
+fn returns_value(ty: &crate::typechecking::ty::Ty) -> bool {
+    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, Ty, UNIT};
+    matches!(ty, Ty::Con(name) if [INT, FLOAT, BOOL, BYTE, STRING, UNIT].contains(&name.as_str()))
 }

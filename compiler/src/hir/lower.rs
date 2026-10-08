@@ -947,7 +947,7 @@ pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExp
 }
 
 /// The direct subexpressions of `id`.
-fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
+pub(crate) fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
     let e = body.expr(id);
     let mut kids: Vec<HirId> = Vec::new();
     match &e.kind {
@@ -977,6 +977,30 @@ fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
         _ => {}
     }
     kids
+}
+
+/// `a && b` / `a || b` may evaluate `b` eagerly (one `AND` / `OR`, no
+/// branch) when `b` reads only locals, literals and fields with no trap and
+/// no effect. Anything else short-circuits.
+pub fn logic_eager(body: &HirBody, rhs: HirId) -> bool {
+    match &body.expr(rhs).kind {
+        HirKind::Lit(_) | HirKind::Local(_) => true,
+        // `x / k` and `x % k` trap only on a zero divisor.
+        HirKind::Bin {
+            op: BinOp::IntDiv | BinOp::IntRem,
+            lhs,
+            rhs,
+        } => matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0) && logic_eager(body, *lhs),
+        HirKind::Bin { op, lhs, rhs } => {
+            !matches!(op, BinOp::IntPow | BinOp::StrConcat | BinOp::Overloaded(_))
+                && logic_eager(body, *lhs)
+                && logic_eager(body, *rhs)
+        }
+        HirKind::Logic { lhs, rhs, .. } => logic_eager(body, *lhs) && logic_eager(body, *rhs),
+        HirKind::Un { operand, .. } => logic_eager(body, *operand),
+        HirKind::Field { base, .. } => logic_eager(body, *base),
+        _ => false,
+    }
 }
 
 /// An index that is safe to evaluate twice (a compound assignment builds
@@ -2026,7 +2050,12 @@ impl Walk<'_> {
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;
                 self.value(*lhs, depth)?;
-                self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
+                if logic_eager(body, *rhs) {
+                    self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
+                } else {
+                    // Short-circuit: the jump consumes `lhs` before `rhs` runs.
+                    self.value(*rhs, depth)
+                }
             }
             HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
                 self.aggregate_arith(id, *operand, None, depth)

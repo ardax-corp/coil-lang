@@ -34,6 +34,21 @@ on the typed sidecar (`DefId` + bind names). Codegen copies those names into
   keeps only the subset that **calls itself**. `$mono$` clones of a pure bind
   stay pure for LICM.
 
+With HIR lowering on, codegen also solves effects on the module's HIR
+([`hir::effects`](../../compiler/src/hir/effects.rs), E1) and adds the
+functions it proves pure. A body's summary keeps its own effects apart from
+the function parameters it calls, and each call site fills those in from
+its arguments, so `map(xs, fn (int x) => x * 2)` is pure while the same call
+with a lambda that writes a static is not. A lambda, a named `fn` or a
+`let f = fn …` never reassigned is a known callee; a function value from
+anywhere else is unknown. A `Vec` built in the function (`Vec::new()`, a
+literal) that only leaves it by `return` may be pushed to without
+`HEAP_MUT`. Summaries are kept across modules, so a stdlib higher-order
+function is resolved from the caller's module. LICM and early CSE only get
+the pure functions whose result is a scalar or `string`: two calls that each
+return a fresh array are not the same value
+([coil-lang#790](https://github.com/ardax-corp/coil-lang/issues/790)).
+
 Expression IPA runs on **any pure** function whose body contains a fork site
 (self-calls or independent helper calls). Loop IPA also needs pure body callees.
 

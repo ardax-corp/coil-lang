@@ -881,6 +881,8 @@ pub struct Compiler {
     recursive_pure: HashSet<String>,
     /// Side-effect-free user `fn` names (loop bounds / COI-99).
     pure_fns: HashSet<String>,
+    /// HIR effect summaries of every module compiled so far (E1).
+    program_effects: crate::hir::effects::ProgramEffects,
     /// Detected independent-parallel-arm fork sites for pure fns.
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     /// Functions that emit one parameterized `__coil_par_*` fork worker.
@@ -1044,6 +1046,7 @@ impl Default for Compiler {
             recursive_fns: HashSet::new(),
             recursive_pure: HashSet::new(),
             pure_fns: HashSet::new(),
+            program_effects: Default::default(),
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),
             loop_par_sites: crate::typechecking::LoopParSites::new(),
