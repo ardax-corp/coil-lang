@@ -6,7 +6,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn greet() -> int {
+gen fn greet() -> int {
     yield 1;
     return 2;
 }

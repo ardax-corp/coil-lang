@@ -3,7 +3,7 @@
 // heap locals survive across yields.
 use gc::collect;
 
-async fn counter() {
+gen fn counter() {
     let boxed = [10, 20, 30];
     yield boxed[0];
     collect();
@@ -12,7 +12,7 @@ async fn counter() {
     yield boxed[2];
 }
 
-async fn wrap() {
+gen fn wrap() {
     yield from counter();
 }
 

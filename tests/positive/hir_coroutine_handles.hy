@@ -1,6 +1,6 @@
 // A coroutine handle is one word: `MakeCoro` for the call, then
 // `ResumeCoro` (with or without a sent value) and `DoneCoro`.
-async fn upto(int n) {
+gen fn upto(int n) {
     let i = 0;
     while i < n {
         yield i;
@@ -9,7 +9,7 @@ async fn upto(int n) {
     return -1;
 }
 
-async fn echo() {
+gen fn echo() {
     let x = yield 0;
     while true {
         x = yield x * 2;

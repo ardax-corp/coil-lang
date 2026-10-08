@@ -7,14 +7,14 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn counter() {
+gen fn counter() {
     yield 0;
     yield 1;
     yield 2;
     return 99;
 }
 
-async fn early() {
+gen fn early() {
     yield 10;
     yield 20;
     yield 30;

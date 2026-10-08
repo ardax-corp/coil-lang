@@ -1,27 +1,27 @@
-// async fn / yield / resume / done / yield from / send.
-async fn counter() {
+// gen fn / yield / resume / done / yield from / send.
+gen fn counter() {
     yield 1;
     yield 2;
     return 42;
 }
 
-async fn sender() {
+gen fn sender() {
     let x = yield 0;
     yield x;
     return x + 1;
 }
 
-async fn gen_three() {
+gen fn gen_three() {
     yield 0;
     yield 1;
     yield 2;
 }
 
-async fn outer() {
+gen fn outer() {
     yield from gen_three();
 }
 
-async fn parameterized(int base) {
+gen fn parameterized(int base) {
     yield base;
     yield base + 1;
     yield base + 2;
@@ -92,7 +92,7 @@ test("for in coroutine") {
     assert(sum == 3)?;
 }
 
-async fn once() {
+gen fn once() {
     return 99;
 }
 
@@ -101,7 +101,7 @@ test("done false before first resume") {
     assert(done(h) == false)?;
 }
 
-test("immediate return async completes on first resume") {
+test("immediate return gen completes on first resume") {
     let h = once();
     assert(done(h) == false)?;
     let v = resume h;

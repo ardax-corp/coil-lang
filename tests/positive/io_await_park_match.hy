@@ -20,7 +20,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     return Result::Ok((client, server, listener));
 }
 
-async fn http_read_after_wait(Stream c) -> int {
+gen fn http_read_after_wait(Stream c) -> int {
     let z: byte = 0;
     let buf = Vec::from([z, z, z, z, z, z, z, z]);
     match read(c, buf) {
@@ -41,7 +41,7 @@ async fn http_read_after_wait(Stream c) -> int {
     };
 }
 
-async fn http_write_response(Stream s) -> int {
+gen fn http_write_response(Stream s) -> int {
     return match write(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")) {
         Result::Ok(_) => 0,
         Result::Err(_) => panic "server write",

@@ -1,5 +1,5 @@
 // Batch two cooperative awaits without wrapping each in block_on.
-// Each await_* inside an async fn yields + registers; wait_ready polls both.
+// Each await_* inside an gen fn yields + registers; wait_ready polls both.
 //
 // Output: ok
 
@@ -12,7 +12,7 @@ use io::sync::write_all;
 use io::sync::read_to_end;
 use string::{format, to_bytes};
 
-async fn slurp(string path) -> Result<int, IoError> {
+gen fn slurp(string path) -> Result<int, IoError> {
     let s = open(path, "r")?;
     await_readable(s)?;
     let bytes = read_to_end(s)?;

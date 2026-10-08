@@ -20,7 +20,7 @@ fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
     return Result::Ok((client, server, listener));
 }
 
-async fn http_read_after_wait(Stream c) -> int {
+gen fn http_read_after_wait(Stream c) -> int {
     let z: byte = 0;
     let buf = Vec::from([z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z]);
     let got = 0;

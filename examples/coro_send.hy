@@ -7,7 +7,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn ping() {
+gen fn ping() {
     let msg = yield "ready";
     write_all(stdout(), to_bytes(format("%s", msg)));
 }

@@ -1,4 +1,4 @@
-// Two handles from the SAME parameterized async fn, interleaved,
+// Two handles from the SAME parameterized gen fn, interleaved,
 // with `resume` used inline directly as a `print` argument.
 //
 // Output: 10,100,101,11,12,102
@@ -7,7 +7,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-async fn counter(int base) {
+gen fn counter(int base) {
     yield base;
     yield base + 1;
     yield base + 2;
