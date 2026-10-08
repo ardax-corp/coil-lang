@@ -725,10 +725,11 @@ impl<'c, 'm> Cx<'c, 'm> {
                 let (args, names) = match fields {
                     EnumConstructPayload::Unit => (Vec::new(), None),
                     EnumConstructPayload::Tuple(items) => (self.exprs(b, items), None),
-                    EnumConstructPayload::Record(fields) => (
-                        fields.iter().map(|f| self.expr(b, &f.value)).collect(),
-                        Some(fields.iter().map(|f| f.name.to_string()).collect()),
-                    ),
+                    EnumConstructPayload::Record(fields) => {
+                        let src: Vec<HirId> = fields.iter().map(|f| self.expr(b, &f.value)).collect();
+                        let names: Vec<String> = fields.iter().map(|f| f.name.to_string()).collect();
+                        return self.record_variant(b, node, enum_name, variant_name, src, names);
+                    }
                 };
                 self.make_variant(b, node, enum_name, variant_name, args, names)
             }
@@ -1133,6 +1134,37 @@ impl<'c, 'm> Cx<'c, 'm> {
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
     }
 
+    /// `E::V { f: a, .. }`: the payload is in declaration order, as the
+    /// AST's construct emits it, whatever order the call site names the
+    /// fields in. Shuffled arguments with effects still run in source order,
+    /// through temps.
+    fn record_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, src: Vec<HirId>, names: Vec<String>) -> HirId {
+        let decl = self.checker.payload_tys_for(enum_name, variant);
+        let order: Option<Vec<usize>> = decl.iter().map(|(d, _)| names.iter().position(|n| n == d)).collect();
+        let Some(order) = order.filter(|o| o.len() == src.len() && o.iter().enumerate().any(|(i, &j)| i != j)) else {
+            return self.make_variant(b, node, enum_name, variant, src, Some(names));
+        };
+        let decl_names = order.iter().map(|&j| names[j].clone()).collect();
+        let pure = src.iter().all(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Lit(_) | HirKind::Local(_)));
+        if pure {
+            let args = order.iter().map(|&j| src[j]).collect();
+            return self.make_variant(b, node, enum_name, variant, args, Some(decl_names));
+        }
+        let span = span_of(node);
+        let mut stmts = Vec::with_capacity(src.len());
+        let mut reads = Vec::with_capacity(src.len());
+        for (&arg, name) in src.iter().zip(&names) {
+            let ty = self.ty_at(b, arg);
+            let t = b.temp(name, ty.clone());
+            stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(arg) }, Some(coil_ty::unit())));
+            reads.push(self.synth(b, span, HirKind::Local(t), ty));
+        }
+        let args = order.iter().map(|&j| reads[j]).collect();
+        let make = self.make_variant(b, node, enum_name, variant, args, Some(decl_names));
+        let ty = self.ty_at(b, make);
+        self.synth(b, span, HirKind::Block { stmts, tail: Some(make) }, ty)
+    }
+
     fn make_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, args: Vec<HirId>, fields: Option<Vec<String>>) -> HirId {
         let tag = self.checker.tag_for(enum_name, variant);
         self.emit(
@@ -1239,10 +1271,17 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
-        let v = self.expr(b, value);
         let wrap = b.body.result_mode
             && !is_result_construct(value, b.ok_is_result)
             && b.body.ret.as_ref().and_then(result_ok_err).is_some();
+        // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
+        // `return Some(e?)` of the function's own type return `e` as is, as
+        // the AST's `expr_try_return_src` forwards the pair.
+        if let Some(src) = self.try_forward_src(b, value, wrap) {
+            let v = self.expr(b, src);
+            return self.emit_ty(b, node, HirKind::Return(Some(v)), Some(coil_ty::never()));
+        }
+        let v = self.expr(b, value);
         let v = if wrap {
             let ret = b.body.ret.clone();
             let span = span_of(value);
@@ -1252,6 +1291,38 @@ impl<'c, 'm> Cx<'c, 'm> {
         };
         let v = if is_unit && !wrap { None } else { Some(v) };
         self.emit_ty(b, node, HirKind::Return(v), Some(coil_ty::never()))
+    }
+
+    /// The `e` of a returned `e?` that is the identity: `e` has the
+    /// function's own return type and the try's hit is re-wrapped in the
+    /// same variant (`wrap` for result mode, or a written `Ok` / `Some`).
+    fn try_forward_src<'a, 'e>(&self, b: &BodyBuilder, value: &'a Output<'e>, wrap: bool) -> Option<&'a Output<'e>> {
+        if b.body.is_coro {
+            return None;
+        }
+        let node = peel(value);
+        let try_node = match node.1.as_ref() {
+            Expression::Try(_) if wrap => node,
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields: parser::ast::EnumConstructPayload::Tuple(args),
+            } if args.len() == 1
+                && ((common::is_builtin_result_enum(enum_name) && *variant_name == "Ok" && !b.ok_is_result)
+                    || (common::is_builtin_option_enum(enum_name) && *variant_name == "Some")) =>
+            {
+                peel(&args[0])
+            }
+            _ => return None,
+        };
+        let Expression::Try(inner) = try_node.1.as_ref() else { return None };
+        let span = span_of(try_node);
+        if self.checker.test_try_at(span.0, span.1).is_some() {
+            return None;
+        }
+        let ret = b.body.ret.as_ref().map(strip_readonly)?;
+        let ty = self.ty_of(inner)?;
+        (strip_readonly(&ty) == ret).then_some(inner)
     }
 
     /// `e?`: `match e { Some(x) / Ok(x) => x, miss => return miss }`.

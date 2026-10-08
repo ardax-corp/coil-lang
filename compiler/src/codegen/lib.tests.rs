@@ -2778,18 +2778,18 @@ fn empty_record_pattern_does_not_emit_unpack() {
  fn main() { let _ = consume(E::Empty); }",
     );
 
-    // Exactly 1 UNPACK (for the Foo arm, which is the
-    // last arm and uses UNPACK to consume the scrutinee).
-    // The Empty arm is NOT last → emits JUMP_IF_MATCH
-    // (not UNPACK). If the codegen wrongly emitted UNPACK
-    // for the unit arm, we'd see 2 UNPACKs.
+    // At most 1 UNPACK (for the Foo arm, which is the last arm and
+    // consumes the scrutinee; the HIR codegen POPs it since `_` reads
+    // nothing). The Empty arm is NOT last → emits JUMP_IF_MATCH (not
+    // UNPACK). If the codegen wrongly emitted UNPACK for the unit arm,
+    // we'd see 2 UNPACKs.
     let unpack_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::Unpack))
         .count();
-    assert_eq!(
-        unpack_count, 1,
-        "expected exactly 1 UNPACK (for the Foo last arm); got {}",
+    assert!(
+        unpack_count <= 1,
+        "expected at most 1 UNPACK (for the Foo last arm); got {}",
         unpack_count
     );
 
@@ -5756,12 +5756,13 @@ fn match_nested_record_in_tuple_binds_correctly() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         "enum Inner { I { v: int } } \
- fn main() { \
- match Result::Ok(Inner::I { v: 42 }) { \
+ fn pick(Result<Inner, int> r) -> int { \
+ return match r { \
  Result::Err(_) => 0, \
  Result::Ok(Inner::I { v }) => v, \
  }; \
- }",
+ } \
+ fn main() { let _ = pick(Result::Ok(Inner::I { v: 42 })); }",
     );
 
     // The OUTER Result::Ok is the last arm (Err is first),
@@ -5792,16 +5793,18 @@ fn match_nested_record_in_record_binds_correctly() {
     let (bc, _pool) = compile_src(
         "enum Inner { I { v: int } } \
  enum Wrap { Good { x: Inner }, Bad(string) } \
- fn main() { \
- match Wrap::Good { x: Inner::I { v: 42 } } { \
+ fn pick(Wrap w) -> int { \
+ return match w { \
  Wrap::Bad(_) => 0, \
  Wrap::Good { x: Inner::I { v } } => v, \
  }; \
- }",
+ } \
+ fn main() { let _ = pick(Wrap::Good { x: Inner::I { v: 42 } }); }",
     );
 
     // Outer UNPACK + inner walk; Binding `v` emits no STORE.
-    // Pre-18B replaced the inner record with a single POP.
+    // Pre-18B replaced the inner record with a single POP. The match
+    // value is returned so a dead match is not dropped.
     let unpack_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::Unpack | Instruction::UnpackAt))
