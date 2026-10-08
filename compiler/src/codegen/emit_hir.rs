@@ -483,6 +483,33 @@ impl Compiler {
             {
                 return Err(format!("callee `{}`", callee.name));
             }
+            // A recursive callee (itself, or through one other function)
+            // keeps its call: splicing one level only moves the recursion,
+            // and loses its tail calls and the caller's loop-invariant call.
+            let last = |n: &str| n.rsplit("::").next().unwrap_or(n).to_string();
+            let named = |b: &crate::hir::HirBody| -> Vec<String> {
+                b.exprs
+                    .iter()
+                    .filter_map(|e| match &e.kind {
+                        HirKind::Call { callee: crate::hir::Callee::Named { name, .. }, .. } => Some(last(name)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let me = last(&callee.name);
+            let calls = named(callee);
+            let reaches_back = |n: &String| {
+                *n == me
+                    || self
+                        .hir_fn_names
+                        .iter()
+                        .find(|(k, _)| last(k) == *n)
+                        .and_then(|(_, i)| *i)
+                        .is_some_and(|i| named(&module.bodies[i]).contains(&me))
+            };
+            if calls.iter().any(reaches_back) {
+                return Err("recursive".to_string());
+            }
             if callee.kind == BodyKind::Method
                 && let Some(owner) = callee.name.rsplit("::").nth(1)
                 && lower::is_generic_class(&self.checker, owner)
