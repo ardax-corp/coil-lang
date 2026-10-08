@@ -7311,7 +7311,10 @@ impl Compiler {
     /// Push `lhs` then `rhs`, staging both through temps when
     /// [`lower::stages_rhs`] wants the right side at depth zero.
     fn hir_operands(&mut self, hir: &HirBody, emit: &mut HirEmit, lhs: HirId, rhs: HirId, depth: u32) {
-        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) {
+        // Two plain calls with leaf arguments stack, as the AST's
+        // `expr_is_stackable_direct_call` (`f(a) + g(b)` → `BinReturn`).
+        let stackable = |this: &Self| this.hir_stackable_call(hir, emit, lhs) && this.hir_stackable_call(hir, emit, rhs);
+        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) || stackable(self) {
             self.hir_value(hir, emit, lhs, &BOXED, depth);
             self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
             return;
@@ -7325,6 +7328,45 @@ impl Compiler {
         }
         self.bytecode.push_load(staged[0]);
         self.bytecode.push_load(staged[1]);
+    }
+
+    /// A call that emits a real one-word `CALL` of a known function with
+    /// leaf arguments, so a sibling operand can stay under it.
+    fn hir_stackable_call(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+        let HirKind::Call { callee: Callee::Named { .. }, args } = &hir.expr(id).kind else {
+            return false;
+        };
+        let Some(call) = emit.calls.get(&id.0) else { return false };
+        if call.method
+            || call.builtin.is_some()
+            || call.generic.is_some()
+            || call.instance.is_some()
+            || !call.ranges.is_empty()
+            || Self::hir_call_rep(call).words() != 1
+            || self.coroutine_fns.contains(&call.key)
+            || !(self.functions.contains_key(&call.key) || self.functions.contains_key(strip_overload_key(&call.key)))
+            || self.callee_is_tiny_inlineable(&call.key)
+        {
+            return false;
+        }
+        fn leaf(hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+            if emit.ops.contains_key(&id.0) {
+                return false;
+            }
+            match &hir.expr(id).kind {
+                HirKind::Lit(_) => true,
+                HirKind::Local(_) => !matches!(
+                    hir.expr(id).ty.as_ref().map(crate::typechecking::ty::strip_readonly),
+                    Some(Ty::Array { .. })
+                ),
+                HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => leaf(hir, emit, *operand),
+                HirKind::Bin { op, lhs, rhs } if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) => {
+                    leaf(hir, emit, *lhs) && leaf(hir, emit, *rhs)
+                }
+                _ => false,
+            }
+        }
+        args.iter().all(|&a| leaf(hir, emit, a))
     }
 
     /// A literal (under casts) already in `0..=255`: an int / byte cast of
