@@ -5660,8 +5660,14 @@ impl Compiler {
                         self.bytecode.push_load(tmp);
                     }
                 }
-                let kinds = common::pack_word_kinds(payload.iter().map(|t| {
-                    crate::typechecking::value_layout::word_kind(&self.checker, t)
+                // A `()` payload is the empty tuple object `MakeTuple 0`
+                // pushes, so its word is a pointer whatever its type says.
+                let kinds = common::pack_word_kinds(payload.iter().zip(args).map(|(t, &a)| {
+                    if lower::is_unit_make(hir, a) {
+                        common::WORD_POINTER
+                    } else {
+                        crate::typechecking::value_layout::word_kind(&self.checker, t)
+                    }
                 }));
                 self.bytecode
                     .push_make_enum_kinds(tag as u16, n as u16, kinds);
