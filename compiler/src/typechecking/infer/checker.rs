@@ -3139,6 +3139,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                effects: _,
                 body,
             } => self.infer_function_expr(infer_fn::InferFunctionExprArgs {
                 attrs,

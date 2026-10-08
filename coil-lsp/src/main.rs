@@ -855,7 +855,12 @@ fn analyze(source: &str) -> Vec<CoilMessage> {
     };
     let mut checker = Checker::new();
     let _ = checker.check_program(&ast);
-    checker.take_messages()
+    let mut messages = checker.take_messages();
+    // Effect declarations are checked on a well-typed file.
+    if !messages.iter().any(|m| *m.kind() == MessageKind::ERROR) {
+        messages.extend(compiler::effect_declaration_errors(&checker, &ast));
+    }
+    messages
 }
 
 fn lsp_module_roots(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
@@ -4441,6 +4446,19 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_include_broken_effect_declarations() {
+        let messages = analyze(
+            "static let HITS: int = 0;\npure fn bump(int x) -> int {\n    HITS = HITS + 1;\n    return x;\n}\n",
+        );
+        let found = messages
+            .iter()
+            .find(|m| m.code() == Some(reporting::ErrorCode::EffectMismatch))
+            .unwrap_or_else(|| panic!("{messages:?}"));
+        assert!(found.message().contains("`bump` is declared `pure` but needs read, mutate"), "{found:?}");
+        assert!(analyze("pure fn add(int a, int b) -> int {\n    return a + b;\n}\n").is_empty());
+    }
+
+    #[test]
     fn diagnostics_include_type_errors() {
         let messages = analyze("fn main() { let x: int = true; }");
         assert!(!messages.is_empty());
@@ -4554,7 +4572,7 @@ fn add2(int x) -> int {
             value
         };
         let bump = value(1);
-        assert!(bump.contains("**effects:** heap write, host state: writes static `HITS`"), "{bump}");
+        assert!(bump.contains("**effects:** uses {read, mutate}: writes static `HITS`"), "{bump}");
         let twice = value(5);
         assert!(twice.contains("**effects:** pure apart from its parameters: calls parameter `f`"), "{twice}");
         let add2 = value(8);

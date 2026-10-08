@@ -558,7 +558,7 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
             Some(registry) => row(registry),
             // `format` lowers to the FORMAT opcode. Kept impure like the
             // other text helpers (see `TEXT` in `common::host`).
-            None => EffectFlags::from_bits(EffectFlags::READ),
+            None => EffectFlags::from_bits(EffectFlags::ALLOC),
         },
         BuiltinExport::ThreadFn { kind } => row(kind.native_name()),
         BuiltinExport::GcFn { kind } => row(kind.native_name()),

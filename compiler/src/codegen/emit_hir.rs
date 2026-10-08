@@ -869,6 +869,7 @@ impl Compiler {
             is_coro: body.is_coro,
             is_generic: false,
             captures: body.captures.clone(),
+            declared: body.declared.clone(),
             locals: body
                 .locals
                 .iter()

@@ -48,6 +48,29 @@ pub type Span = (usize, usize);
 #[derive(Debug, Default)]
 pub struct HirModule {
     pub bodies: Vec<HirBody>,
+    /// Effects declared on trait methods (`trait T { pure fn m(); }`): the
+    /// bound every impl of `T::m` is checked against, and what a call that
+    /// dispatches through `T` costs.
+    pub trait_effects: Vec<TraitEffects>,
+}
+
+/// A trait method and its declared effects (`None`: undeclared, so a call
+/// through the trait has unknown effects).
+#[derive(Debug, Clone)]
+pub struct TraitEffects {
+    pub trait_name: String,
+    pub method: String,
+    pub declared: Option<DeclaredEffects>,
+}
+
+/// Effects a function promises with `pure fn` or `uses {…}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredEffects {
+    /// The `uses {…}` names (empty for `pure`).
+    pub names: Vec<String>,
+    /// As written: `pure` or `uses {read, write}`.
+    pub text: String,
+    pub span: Span,
 }
 
 /// What a [`HirBody`] was built from.
@@ -78,6 +101,8 @@ pub struct HirBody {
     pub is_generic: bool,
     /// Lambda captures, outer local in the parent body to inner local.
     pub captures: Vec<(LocalId, LocalId)>,
+    /// `pure fn` / `uses {…}` on the function.
+    pub declared: Option<DeclaredEffects>,
     pub locals: Vec<HirLocal>,
     pub exprs: Vec<HirExpr>,
     pub root: Option<HirId>,

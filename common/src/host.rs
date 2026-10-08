@@ -41,10 +41,9 @@ const HEAP_R: EffectFlags = fx(EffectFlags::HEAP_MUT | R);
 const PARK_R: EffectFlags = fx(EffectFlags::ATTACH_PARK | R);
 /// Byte/string conversions and searches. Kept impure: `to_bytes` returns a
 /// fresh mutable array each call, so MIR LICM must not hoist it out of a
-/// loop (every iteration would then share one array). Marking these pure
-/// needs a separate "allocates" bit first.
-const TEXT: EffectFlags = fx(EffectFlags::READ);
-const TEXT_R: EffectFlags = fx(EffectFlags::READ | R);
+/// loop (every iteration would then share one array).
+const TEXT: EffectFlags = fx(EffectFlags::ALLOC);
+const TEXT_R: EffectFlags = fx(EffectFlags::ALLOC | R);
 
 /// Standard host natives in HostInvoke id order.
 pub const HOST_NATIVES: &[HostNative] = &[

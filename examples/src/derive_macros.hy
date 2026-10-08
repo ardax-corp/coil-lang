@@ -140,3 +140,22 @@ derive Summary(TypeDecl t) -> Code {
         }
     };
 }
+
+/// Keep `f` under `<name>_kept` (its `pure` / `uses {…}` too) and add
+/// `<name>_effects()`, its declared effects as written.
+attr declared(FnDecl f) -> Code {
+    let text = "none";
+    if f.is_pure {
+        text = "pure";
+    } else if f.declares_effects {
+        text = f.uses_clause();
+    }
+    let kept = f.name.str() + "_kept";
+    let effects = ident(f.name.str() + "_effects");
+    return quote items {
+        ${raw(f.with_name(kept))}
+        fn ${effects}() -> string {
+            return ${lit(text)};
+        }
+    };
+}

@@ -16499,6 +16499,7 @@ impl Compiler {
                 args,
                 returns: _returns,
                 where_constraints: _,
+                effects: _,
                 body,
             } = ast.1.borrow() else {
             unreachable!("compile_function_decl_into on another expression");
@@ -19563,11 +19564,25 @@ impl Compiler {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
+        // E3: `pure fn` / `uses {…}` hold whichever backend compiles the
+        // module; without HIR lowering, build HIR for the effects alone
+        // (every module, so later modules see the same summaries).
+        let check_only = self
+            .hir_module
+            .is_none()
+            .then(|| crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast));
+        if let Some(hir) = check_only.as_ref() {
+            let fx = crate::hir::effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
+            self.messages.extend(fx.violation_messages());
+            let summaries = fx.summaries;
+            self.program_effects.record(hir, &self.checker, module, &summaries);
+        }
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
             use crate::hir::effects;
             let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
+            self.messages.extend(fx.violation_messages());
             let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && auto_par_enabled()).then(|| {
@@ -20323,3 +20338,4 @@ fn returns_value(ty: &crate::typechecking::ty::Ty) -> bool {
     use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, Ty, UNIT};
     matches!(ty, Ty::Con(name) if [INT, FLOAT, BOOL, BYTE, STRING, UNIT].contains(&name.as_str()))
 }
+

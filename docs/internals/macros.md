@@ -109,7 +109,7 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 | `Variant` | `name`, `shape` (`"unit"` / `"tuple"` / `"record"`), `tuple: Vec<TypeRef>`, `fields: Vec<Field>`, `value` (discriminant as written), `arity()` |
 | `TypeRef` | `str()`, `head()`, `args()` |
 | `Attr` / `AttrArg` | `name`, `args`, `has(key)`, `arg(key, fallback)` |
-| `FnDecl` | `name`, `params: Vec<Param>`, `ret`, `type_params`, `attrs`, `owner` (class of an `impl` method), `is_static`, `is_coro`, `body_source()` (braces included), `signature(name)`, `arg_names()`, `source` |
+| `FnDecl` | `name`, `params: Vec<Param>`, `ret`, `type_params`, `attrs`, `owner` (class of an `impl` method), `is_static`, `is_coro`, `declares_effects`, `is_pure` (`pure fn`), `effects` (the `uses {…}` names), `uses_clause()`, `body_source()` (braces included), `signature(name)`, `arg_names()`, `source` |
 | `Expr` | a `name!(…)` argument as written: `str()` (source text), `src()` (parenthesized unless a single term), `kind()` (`"literal"` / `"ident"` / `"path"` / `"call"` / `"other"`), `is_literal()`, `is_ident()` |
 | `Code` | generated source: `src()` |
 | helpers | `lit(string)` (string literal), `lit_int`, `raw(text)`, `ident(name)`, `join(Vec<Code>, sep)`, `concat` |

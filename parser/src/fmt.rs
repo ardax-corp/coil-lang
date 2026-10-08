@@ -2221,6 +2221,7 @@ impl<'s> Formatter<'s> {
             args,
             returns,
             where_constraints,
+            effects,
             body,
         } = expr
         else {
@@ -2237,6 +2238,9 @@ impl<'s> Formatter<'s> {
         if *is_static {
             self.push_str("static ");
         }
+        if effects.as_ref().is_some_and(|e| e.pure) {
+            self.push_str("pure ");
+        }
         self.push_str("fn ");
         self.push_str(name);
         self.fmt_type_params(type_params);
@@ -2246,6 +2250,9 @@ impl<'s> Formatter<'s> {
             self.fmt_type(ret);
         }
         self.fmt_where(where_constraints);
+        if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
+            self.push_str(&format!(" {e}"));
+        }
         match body {
             Some(b) => {
                 self.push_str(" ");

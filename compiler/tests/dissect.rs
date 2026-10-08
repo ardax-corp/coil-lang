@@ -144,13 +144,13 @@ fn main() {
     };
     assert_eq!(
         of("step"),
-        "heap write, host state: writes static `HITS` (heap write); reads static `HITS` (host state)"
+        "uses {read, mutate}: writes static `HITS` (mutate); reads static `HITS` (read)"
     );
     assert_eq!(of("sq"), "pure");
     assert_eq!(of("apply"), "pure apart from its parameters: calls parameter `f`");
     assert_eq!(
         fx.auto_par,
-        vec!["loop over `i` in `main` not parallelized: `step` writes static `HITS` (heap write)".to_string()],
+        vec!["loop over `i` in `main` not parallelized: `step` writes static `HITS` (mutate)".to_string()],
         "{fx:?}"
     );
 }

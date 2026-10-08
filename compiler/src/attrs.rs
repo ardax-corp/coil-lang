@@ -727,6 +727,7 @@ fn method_fn<'a>(
             args: at(span, Expression::Fragment(args)),
             returns: Some(ty_ret(span, ret)),
             where_constraints: vec![],
+            effects: None,
             body: Some(body),
         },
     );

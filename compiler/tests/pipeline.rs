@@ -11246,3 +11246,39 @@ fn main() {
     assert!(out.contains("[inner]panic: second"), "got {out:?}");
     assert!(out.ends_with("[main]"), "got {out:?}");
 }
+
+/// E3: a function whose effects exceed its `pure fn` / `uses {…}` (or its
+/// trait method's) does not compile, with either backend.
+#[test]
+fn broken_effect_declarations_are_errors_on_both_backends() {
+    let broken = [
+        (
+            "static let HITS: int = 0;\nfn bump() {\n    HITS = HITS + 1;\n}\npure fn twice(int x) -> int {\n    bump();\n    return x * 2;\n}\n",
+            "`twice` is declared `pure` but needs read, mutate: twice → bump needs",
+        ),
+        (
+            "use io::stdout;\nuse io::sync::write_all;\nuse string::to_bytes;\nfn say(string s) uses {suspend} {\n    write_all(stdout(), to_bytes(s));\n}\n",
+            "`say` is declared `uses {suspend}` but needs write",
+        ),
+        (
+            "static let HITS: int = 0;\ntrait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        HITS = HITS + 1;\n        return self.side;\n    }\n}\n",
+            "`Area for Sq::area` implements `Area::area`, declared `pure` but needs read, mutate",
+        ),
+    ];
+    for hir in [true, false] {
+        for (src, expected) in broken {
+            let mut pipeline = test_pipeline();
+            pipeline.set_hir_lowering(hir);
+            assert_compile_fails_pipeline(&mut pipeline, src, compiler::ErrorCode::EffectMismatch);
+            assert!(
+                pipeline.messages().iter().any(|m| m.message().contains(expected)),
+                "hir={hir}: expected `{expected}` in {:?}",
+                pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
+            );
+        }
+        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    assert(true);\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
+        let mut pipeline = test_pipeline();
+        pipeline.set_hir_lowering(hir);
+        compile_ok(&mut pipeline, kept);
+    }
+}
