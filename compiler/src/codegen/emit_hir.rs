@@ -768,7 +768,7 @@ impl Compiler {
             box_at: HashMap::new(),
             boxes: HashMap::new(),
         };
-        let stacks = lower::stack_arrays(hir);
+        let stacks = lower::stack_arrays(hir, &self.checker);
         emit.stacks = stacks.len;
         emit.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
