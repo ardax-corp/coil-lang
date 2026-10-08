@@ -1,18 +1,18 @@
 // T2: a panic runs the `defer`s of the frames it leaves, innermost first.
-// A child task's panic unwinds that task only, so the scope sees the log.
+// A child task's panic unwinds only that task, so a test can watch the log.
+// The log is a static `int`: a class capture through a function value is
+// coil-lang#783.
 use task::{scope, Scope, TaskError};
 
-class Log {
-    pub n: int,
+static let LOG: int = 0;
+
+fn push(int d) {
+    LOG = LOG * 10 + d;
 }
 
-fn push(Log log, int d) {
-    log.n = log.n * 10 + d;
-}
-
-fn fails(Log log, int k) -> int {
-    defer use (log) {
-        push(log, 1);
+fn fails(int k) -> int {
+    defer {
+        push(1);
     }
     if k > 0 {
         panic "fails";
@@ -20,57 +20,58 @@ fn fails(Log log, int k) -> int {
     return 0;
 }
 
-fn calls_fails(Log log) -> int {
-    defer use (log) {
-        push(log, 2);
+fn calls_fails() -> int {
+    defer {
+        push(2);
     }
-    let r = fails(log, 1);
-    push(log, 9);
+    let r = fails(1);
+    push(9);
     return r;
 }
 
-fn skipped(Log log, bool arm) -> int {
-    defer use (log) {
-        push(log, 3);
+fn skipped(bool arm) -> int {
+    defer {
+        push(3);
     }
     if arm {
-        defer use (log) {
-            push(log, 4);
+        defer {
+            push(4);
         }
     }
     panic "skipped";
 }
 
 class Counter {
-    pub log: Log,
+    pub step: int,
 }
 
 impl Counter {
     pub fn bump() -> int {
-        defer use (self) {
-            push(self.log, 5);
+        // No `use (self)`: a class capture through a function value is #783.
+        defer {
+            push(5);
         }
         panic "method";
     }
 }
 
-fn generic<T>(Log log, T value) -> T {
-    defer use (log) {
-        push(log, 6);
+fn generic<T>(T value) -> T {
+    defer {
+        push(6);
     }
     panic "generic";
 }
 
-gen fn producer(Log log) -> int {
-    defer use (log) {
-        push(log, 7);
+gen fn producer() -> int {
+    defer {
+        push(7);
     }
     yield 1;
     panic "generator";
 }
 
-fn drain(Log log) -> int {
-    let g = producer(log);
+fn drain() -> int {
+    let g = producer();
     resume g;
     resume g;
     return 0;
@@ -83,6 +84,7 @@ fn failed(Result<int, TaskError> r) -> bool {
     };
 }
 
+// Run `body` as a child task: its panic fails the scope instead of the VM.
 fn run(unit -> int body) -> bool {
     return failed(scope(fn (Scope s) use (body) {
         let _ = s.spawn(body);
@@ -91,36 +93,36 @@ fn run(unit -> int body) -> bool {
 }
 
 test("a panic runs the defers of each frame it leaves") {
-    let log = new Log(0);
-    assert(run(fn () use (log) => calls_fails(log)))?;
-    assert(log.n == 12)?;
+    LOG = 0;
+    assert(run(calls_fails))?;
+    assert(LOG == 12)?;
 }
 
 test("a defer whose statement did not run stays out") {
-    let log = new Log(0);
-    assert(run(fn () use (log) => skipped(log, false)))?;
-    assert(log.n == 3)?;
-    let log2 = new Log(0);
-    assert(run(fn () use (log2) => skipped(log2, true)))?;
-    assert(log2.n == 43)?;
+    LOG = 0;
+    assert(run(fn () => skipped(false)))?;
+    assert(LOG == 3)?;
+    LOG = 0;
+    assert(run(fn () => skipped(true)))?;
+    assert(LOG == 43)?;
 }
 
 test("methods and generic instances unwind") {
-    let log = new Log(0);
-    let c = new Counter(log);
+    LOG = 0;
+    let c = new Counter(5);
     assert(run(fn () use (c) => c.bump()))?;
-    assert(run(fn () use (log) => generic(log, 4)))?;
-    assert(log.n == 56)?;
+    assert(run(fn () => generic(4)))?;
+    assert(LOG == 56)?;
 }
 
 test("a generator's defers run when it panics") {
-    let log = new Log(0);
-    assert(run(fn () use (log) => drain(log)))?;
-    assert(log.n == 7)?;
+    LOG = 0;
+    assert(run(drain))?;
+    assert(LOG == 7)?;
 }
 
 test("without a panic, defers still run once at the return") {
-    let log = new Log(0);
-    assert(fails(log, 0) == 0)?;
-    assert(log.n == 1)?;
+    LOG = 0;
+    assert(fails(0) == 0)?;
+    assert(LOG == 1)?;
 }

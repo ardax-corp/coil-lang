@@ -83,14 +83,6 @@ impl<const S: usize> Machine<S> {
             let pc = self.unwind_pc(i, exact_top);
             common::cleanup_range_at(&self.program_debug.cleanup, pc).map(|r| (i, *r))
         });
-        if std::env::var_os("COIL_UNWIND_DEBUG").is_some() {
-            eprintln!(
-                "unwind: frames={len} floor={floor} exact_top={exact_top} msg={:?} found={:?} pcs={:?}",
-                self.task_panic_message,
-                found.map(|(i, r)| (i, r.pad_pc)),
-                (floor - 1..len).map(|i| self.unwind_pc(i, exact_top)).collect::<Vec<_>>()
-            );
-        }
         let (index, range) = found?;
         self.return_bookkeeping = true;
         while self.frames.len() > index + 1 {
