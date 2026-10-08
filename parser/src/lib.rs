@@ -1081,14 +1081,15 @@ impl<'pratt> Pratt<'pratt> {
             .map(|opt| opt.unwrap_or_default())
     }
 
-    /// Parses the function *signature* (`async? static? fn Name<T>(args) -> ret where …`)
+    /// Parses the function *signature* (`gen? static? fn Name<T>(args) -> ret where …`;
+    /// `async` is the old spelling of `gen`)
     /// without consuming the body block.
     fn func_sig(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.docs_prefix()
-            .then(keyword!("async").or_not())
+            .then(keyword!("gen").or(keyword!("async")).or_not())
             .then(keyword!("static").or_not())
             .then(keyword!("fn"))
             .then(text::ident().padded_by(trivia()))
@@ -1349,7 +1350,7 @@ impl<'pratt> Pratt<'pratt> {
             })
     }
 
-    /// `#[…] async? static? fn …` without a leading `///` prefix (docs applied by callers).
+    /// `#[…] gen? static? fn …` (or the old `async`) without a leading `///` prefix (docs applied by callers).
     fn func_after_docs<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1360,7 +1361,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.attr_list()
-            .then(keyword!("async").or_not())
+            .then(keyword!("gen").or(keyword!("async")).or_not())
             .then(keyword!("static").or_not())
             .then(keyword!("fn"))
             .then(text::ident().padded_by(trivia()))

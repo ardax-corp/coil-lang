@@ -4739,7 +4739,7 @@ fn yield_outside_async_is_diagnostic() {
     assert!(
         c.messages()
             .iter()
-            .any(|m| m.message().contains("yield outside async")),
+            .any(|m| m.message().contains("yield outside gen")),
         "expected yield-outside-async diagnostic, got {:?}",
         c.messages()
     );

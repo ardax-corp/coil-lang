@@ -449,7 +449,7 @@ impl FnDecl {
             out += "pub ";
         }
         if self.is_coro {
-            out += "async ";
+            out += "gen ";
         }
         if self.is_static {
             out += "static ";

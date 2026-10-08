@@ -224,7 +224,7 @@ impl ErrorCode {
             Self::ConstantRedeclaration => "constant redeclaration",
             Self::UnknownType => "unknown type",
             Self::ReturnMismatch => "return type mismatch",
-            Self::YieldOutsideAsync => "yield outside async fn",
+            Self::YieldOutsideAsync => "yield outside gen fn",
             Self::ResumeTypeMismatch => "resume type mismatch",
             Self::InvalidTry => "invalid try operator",
             Self::InvalidCoalesce => "invalid coalesce operator",
