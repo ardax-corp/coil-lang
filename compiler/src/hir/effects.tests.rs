@@ -176,3 +176,140 @@ fn bump(int x) -> int {{
     assert!(!names.contains("map"));
     assert!(!names.contains("bump"));
 }
+
+fn violations(src: &str) -> Vec<String> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let program = ProgramEffects::default();
+    ModuleEffects::solve(&module, &checker, "", &program)
+        .violations()
+        .into_iter()
+        .map(|v| format!("{} [{}]", v.message, v.help))
+        .collect()
+}
+
+#[test]
+fn panics_and_asserts_are_not_user_visible() {
+    let src = "
+fn pick(Vec<int> v, int i) -> int {
+    assert(i >= 0);
+    if i > 9 {
+        panic(\"too far\");
+    }
+    return v[i];
+}";
+    let (m, out) = summaries(src);
+    let s = of(&m, &out, "pick");
+    assert!(s.visible.is_pure(), "{s:?}");
+    assert!(!s.flags.is_pure(), "auto-par still sees the panic: {s:?}");
+}
+
+#[test]
+fn a_broken_declaration_names_the_call_chain() {
+    let src = "
+static let HITS: int = 0;
+fn bump() {
+    HITS = HITS + 1;
+}
+fn step(int x) -> int {
+    bump();
+    return x;
+}
+pure fn run(int x) -> int {
+    return step(x);
+}
+fn ok(int x) -> int uses {read, mutate} {
+    return step(x);
+}";
+    assert_eq!(
+        violations(src),
+        vec![
+            "`run` is declared `pure` but needs read, mutate: run → step → bump needs mutate: it writes static `HITS` \
+             [declare `uses {read, mutate}`]"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_parameter_called_is_not_the_functions_own_effect() {
+    let src = format!(
+        "{MAP}
+fn bump(int x) -> int {{
+    HITS = HITS + 1;
+    return x;
+}}
+fn each(Vec<int> xs, int -> int f) -> Vec<int> uses {{}} {{
+    return map(xs, f);
+}}
+pure fn count(Vec<int> xs) -> Vec<int> {{
+    return each(xs, bump);
+}}"
+    );
+    let found = violations(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("`count` is declared `pure` but needs read, mutate: count → bump"), "{found:?}");
+}
+
+#[test]
+fn trait_declarations_bound_impls_and_calls_through_the_trait() {
+    let src = "
+static let HITS: int = 0;
+trait Area<A> {
+    pure fn area(A self) -> int;
+}
+trait Plain<P> {
+    fn plain(P self) -> int;
+}
+class Sq {
+    pub side: int,
+}
+impl Area for Sq {
+    fn area(Sq self) -> int {
+        HITS = HITS + 1;
+        return self.side;
+    }
+}
+impl Plain for Sq {
+    fn plain(Sq self) -> int {
+        return 1;
+    }
+}
+fn total(Area a) -> int {
+    return area(a);
+}
+fn other(Plain p) -> int {
+    return plain(p);
+}";
+    let (m, out) = summaries(src);
+    assert!(of(&m, &out, "total").visible.is_pure());
+    assert!(of(&m, &out, "other").visible.contains(EffectFlags::UNKNOWN));
+    let found = violations(src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("`Area for Sq::area` implements `Area::area`, declared `pure` but needs read, mutate"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn descriptions_use_the_uses_vocabulary() {
+    let src = "
+use io::stdout;
+use io::sync::write_all;
+use string::to_bytes;
+fn say(string s) {
+    write_all(stdout(), to_bytes(s));
+}";
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let described = describe_fns(&checker, &ast);
+    let say = described.iter().find(|(n, _)| n == "say").map(|(_, d)| d.as_str());
+    assert_eq!(say, Some("uses {write}: calls `write_all` (write); calls `stdout` (write)"));
+}

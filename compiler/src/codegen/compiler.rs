@@ -19559,9 +19559,11 @@ impl Compiler {
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
         // E3: `pure fn` / `uses {…}` hold whichever backend compiles the
-        // module; without HIR lowering, build HIR for the check alone.
-        let check_only = (self.hir_module.is_none()
-            && (crate::hir::effects::declares_effects(ast) || self.program_effects.has_trait_declarations()))
+        // module; without HIR lowering, build HIR for the effects alone
+        // (every module, so later modules see the same summaries).
+        let check_only = self
+            .hir_module
+            .is_none()
             .then(|| crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast));
         if let Some(hir) = check_only.as_ref() {
             let fx = crate::hir::effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);

@@ -121,11 +121,6 @@ pub struct ProgramEffects {
 
 impl ProgramEffects {
     /// Keep `module`'s summaries for the modules compiled after it.
-    /// Some module so far declares effects on a trait method.
-    pub fn has_trait_declarations(&self) -> bool {
-        self.traits.iter().any(|t| t.declared.is_some())
-    }
-
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
         self.traits.extend(module.trait_effects.iter().cloned());
         for (body, &s) in module.bodies.iter().zip(summaries) {
