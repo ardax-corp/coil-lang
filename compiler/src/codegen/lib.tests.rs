@@ -2778,18 +2778,18 @@ fn empty_record_pattern_does_not_emit_unpack() {
  fn main() { let _ = consume(E::Empty); }",
     );
 
-    // Exactly 1 UNPACK (for the Foo arm, which is the
-    // last arm and uses UNPACK to consume the scrutinee).
-    // The Empty arm is NOT last → emits JUMP_IF_MATCH
-    // (not UNPACK). If the codegen wrongly emitted UNPACK
-    // for the unit arm, we'd see 2 UNPACKs.
+    // At most 1 UNPACK (for the Foo arm, which is the last arm and
+    // consumes the scrutinee; the HIR codegen POPs it since `_` reads
+    // nothing). The Empty arm is NOT last → emits JUMP_IF_MATCH (not
+    // UNPACK). If the codegen wrongly emitted UNPACK for the unit arm,
+    // we'd see 2 UNPACKs.
     let unpack_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::Unpack))
         .count();
-    assert_eq!(
-        unpack_count, 1,
-        "expected exactly 1 UNPACK (for the Foo last arm); got {}",
+    assert!(
+        unpack_count <= 1,
+        "expected at most 1 UNPACK (for the Foo last arm); got {}",
         unpack_count
     );
 
