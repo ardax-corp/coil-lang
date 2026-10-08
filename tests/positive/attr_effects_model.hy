@@ -1,5 +1,5 @@
 // `FnDecl` carries `pure fn` and `uses {…}`, and `with_name` keeps them.
-use derive_macros::{declared};
+use derive_macros::declared;
 
 #[declared]
 pure fn add(int a, int b) -> int {
