@@ -725,10 +725,11 @@ impl<'c, 'm> Cx<'c, 'm> {
                 let (args, names) = match fields {
                     EnumConstructPayload::Unit => (Vec::new(), None),
                     EnumConstructPayload::Tuple(items) => (self.exprs(b, items), None),
-                    EnumConstructPayload::Record(fields) => (
-                        fields.iter().map(|f| self.expr(b, &f.value)).collect(),
-                        Some(fields.iter().map(|f| f.name.to_string()).collect()),
-                    ),
+                    EnumConstructPayload::Record(fields) => {
+                        let src: Vec<HirId> = fields.iter().map(|f| self.expr(b, &f.value)).collect();
+                        let names: Vec<String> = fields.iter().map(|f| f.name.to_string()).collect();
+                        return self.record_variant(b, node, enum_name, variant_name, src, names);
+                    }
                 };
                 self.make_variant(b, node, enum_name, variant_name, args, names)
             }
@@ -1131,6 +1132,37 @@ impl<'c, 'm> Cx<'c, 'm> {
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
+    }
+
+    /// `E::V { f: a, .. }`: the payload is in declaration order, as the
+    /// AST's construct emits it, whatever order the call site names the
+    /// fields in. Shuffled arguments with effects still run in source order,
+    /// through temps.
+    fn record_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, src: Vec<HirId>, names: Vec<String>) -> HirId {
+        let decl = self.checker.payload_tys_for(enum_name, variant);
+        let order: Option<Vec<usize>> = decl.iter().map(|(d, _)| names.iter().position(|n| n == d)).collect();
+        let Some(order) = order.filter(|o| o.len() == src.len() && o.iter().enumerate().any(|(i, &j)| i != j)) else {
+            return self.make_variant(b, node, enum_name, variant, src, Some(names));
+        };
+        let decl_names = order.iter().map(|&j| names[j].clone()).collect();
+        let pure = src.iter().all(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Lit(_) | HirKind::Local(_)));
+        if pure {
+            let args = order.iter().map(|&j| src[j]).collect();
+            return self.make_variant(b, node, enum_name, variant, args, Some(decl_names));
+        }
+        let span = span_of(node);
+        let mut stmts = Vec::with_capacity(src.len());
+        let mut reads = Vec::with_capacity(src.len());
+        for (&arg, name) in src.iter().zip(&names) {
+            let ty = self.ty_at(b, arg);
+            let t = b.temp(name, ty.clone());
+            stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(arg) }, Some(coil_ty::unit())));
+            reads.push(self.synth(b, span, HirKind::Local(t), ty));
+        }
+        let args = order.iter().map(|&j| reads[j]).collect();
+        let make = self.make_variant(b, node, enum_name, variant, args, Some(decl_names));
+        let ty = self.ty_at(b, make);
+        self.synth(b, span, HirKind::Block { stmts, tail: Some(make) }, ty)
     }
 
     fn make_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, args: Vec<HirId>, fields: Option<Vec<String>>) -> HirId {
