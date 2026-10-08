@@ -235,6 +235,9 @@ pub struct Checker {
     /// [`Self::fn_effects`] for every file checked so far (not reset per
     /// file), so calls into an already-checked module resolve by [`DefId`].
     pub(crate) program_fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    /// Impl method effects for every file checked so far, keyed
+    /// `module::Owner::method` (methods have no [`DefId`] of their own).
+    pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,
     /// Bind names proven pure (LICM / index facts / auto-par).
     pub(crate) pure_fn_names: HashSet<String>,
     /// Functions that cannot change an array length, and whether allocation

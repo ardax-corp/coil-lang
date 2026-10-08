@@ -29,6 +29,10 @@ struct FnFacts {
     /// Locals whose object never leaves the function (see [`private_locals`]).
     /// A write through one is not `HEAP_MUT`: no caller can see it.
     private: HashSet<String>,
+    /// `recv.m(..)` calls as (receiver span, method name). The receiver's
+    /// type picks the impl in [`settle_method_calls`]; until then they cost
+    /// nothing.
+    method_calls: Vec<((usize, usize), String)>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -39,6 +43,27 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.local = entry.local.union(f.local);
     entry.callees.extend(f.callees);
     entry.bound.extend(f.bound);
+    entry.method_calls.extend(f.method_calls);
+}
+
+/// Turn each fn's `recv.m(..)` calls into callees. `target` names the impl
+/// method (`Owner::m`) for a receiver span when its type is a user class;
+/// anything else stays unknown, except `len` / `capacity`, which cannot resize.
+fn settle_method_calls(
+    facts: &mut HashMap<String, FnFacts>,
+    target: &dyn Fn((usize, usize), &str) -> Option<String>,
+) {
+    for f in facts.values_mut() {
+        for (span, m) in std::mem::take(&mut f.method_calls) {
+            if let Some(key) = target(span, &m) {
+                f.callees.insert(key);
+            } else if matches!(m.as_str(), "len" | "capacity") {
+                f.local.insert(EffectFlags::UNKNOWN);
+            } else {
+                f.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
+            }
+        }
+    }
 }
 
 /// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
@@ -158,7 +183,8 @@ fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
 /// Collect per-function callee sets (and local impurity) for call-graph analyses.
 fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_fns(ast, &mut facts);
+    collect_fns(ast, &mut facts, false);
+    settle_method_calls(&mut facts, &|_, _| None);
     facts
 }
 
@@ -503,18 +529,20 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
     })
 }
 
-fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
+/// `by_owner` keys impl methods `Owner::m` (so method calls can resolve to
+/// them); otherwise they share the bare name with any same-named `fn`.
+fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, by_owner: bool) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
             for item in items {
-                collect_fns(item, facts);
+                collect_fns(item, facts, by_owner);
             }
         }
-        Expression::Module(_, body) => collect_fns(body, facts),
+        Expression::Module(_, body) => collect_fns(body, facts, by_owner),
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => collect_fns(inner, facts),
+        | Expression::Group(inner) => collect_fns(inner, facts, by_owner),
         Expression::Function {
             name,
             args,
@@ -524,13 +552,37 @@ fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
             insert_facts(facts, name, fn_facts(args, body));
             collect_nested_fns(body, facts);
         }
-        Expression::Implementation { methods, .. } => {
+        Expression::Implementation { owner, methods, .. } if by_owner => {
             for m in methods {
-                collect_fns(m, facts);
+                if let Some((name, args, body)) = method_fn(m) {
+                    insert_facts(facts, &format!("{owner}::{name}"), fn_facts(args, body));
+                    collect_nested_fns(body, facts);
+                }
             }
         }
-        Expression::Method(_, inner) | Expression::Member(inner) => collect_fns(inner, facts),
+        Expression::Implementation { methods, .. } => {
+            for m in methods {
+                collect_fns(m, facts, by_owner);
+            }
+        }
+        Expression::Method(_, inner) | Expression::Member(inner) => {
+            collect_fns(inner, facts, by_owner)
+        }
         _ => {}
+    }
+}
+
+/// The `fn` inside an impl member (through `pub` / attribute wrappers).
+fn method_fn<'n, 's>(m: &'n Output<'s>) -> Option<(&'s str, &'n Output<'s>, &'n Output<'s>)> {
+    match m.1.as_ref() {
+        Expression::Method(_, inner) | Expression::Member(inner) => method_fn(inner),
+        Expression::Function {
+            name,
+            args,
+            body: Some(body),
+            ..
+        } => Some((name, args, body)),
+        _ => None,
     }
 }
 
@@ -771,10 +823,10 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 Expression::QualifiedAccess { owner, member } => {
                     facts.callees.insert(format!("{owner}::{member}"));
                 }
-                // Method calls are keyed by name only here, so the receiver
-                // type is unknown: only `len` / `capacity` cannot resize.
-                Expression::Access(_, member) if matches!(*member, "len" | "capacity") => {
-                    facts.local.insert(EffectFlags::UNKNOWN);
+                Expression::Access(recv, member) => {
+                    facts
+                        .method_calls
+                        .push(((recv.0.start, recv.0.end), (*member).to_string()));
                 }
                 _ => {
                     facts.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
@@ -983,19 +1035,60 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
     let effects = {
         let checker = &*checker;
         let resolve = |name: &str| {
+            if let Some(&fx) = checker.program_method_effects.get(name) {
+                return Some(fx);
+            }
             let id = checker.def_id_of(name).or_else(|| {
                 let (module, short) = name.rsplit_once("::")?;
                 checker.interned_def(module, short)
             })?;
             checker.program_fn_effects.get(&id).copied()
         };
-        effect_closure_with(&collect_fn_facts(ast), &resolve)
+        let mut facts = HashMap::new();
+        collect_fns(ast, &mut facts, true);
+        let target = |span: (usize, usize), m: &str| {
+            let owner = checker.class_owner_at_span(span)?;
+            let local = owner
+                .strip_prefix(checker.current_module_name())
+                .and_then(|o| o.strip_prefix("::"))
+                .unwrap_or(&owner);
+            Some(format!("{local}::{m}"))
+        };
+        settle_method_calls(&mut facts, &target);
+        effect_closure_with(&facts, &resolve)
     };
     checker.length_stability = length_stability(
         &effects,
         checker.program_finalizers_resize.unwrap_or(false),
     );
+    let module = checker.current_module_name().to_string();
+    // Impl methods are keyed `Owner::m`. A bare `m` stays listed when every
+    // fn or method of that short name is pure, as before methods had owners.
+    let mut by_short: HashMap<&str, EffectFlags> = HashMap::new();
     for (name, flags) in &effects {
+        let short = name.rsplit_once("::").map_or(name.as_str(), |(_, s)| s);
+        let e = by_short.entry(short).or_insert(EffectFlags::empty());
+        *e = e.union(*flags);
+    }
+    for (short, flags) in by_short {
+        if flags.is_pure() {
+            checker.pure_fn_names.insert(short.to_string());
+        }
+    }
+    for (name, flags) in &effects {
+        if name.contains("::") {
+            let qualified = if module.is_empty() {
+                name.clone()
+            } else {
+                format!("{module}::{name}")
+            };
+            if flags.is_pure() {
+                checker.pure_fn_names.insert(name.clone());
+                checker.pure_fn_names.insert(qualified.clone());
+            }
+            checker.program_method_effects.insert(qualified, *flags);
+            continue;
+        }
         if flags.is_pure() {
             checker.pure_fn_names.insert(name.clone());
         }
@@ -1388,14 +1481,23 @@ fn sin(float x) -> float {
     write(stdout(), to_bytes("?"));
     return x;
 }
+class Sq {
+    pub s: int,
+}
+impl Sq {
+    pub fn area() -> int { return sq(self.s); }
+    pub fn say() -> int { return shout(self.s); }
+}
 "#,
         );
         let _ = c.check_program(&lib);
         c.set_current_module("");
         let app = parse_ast(
             r#"
-use geom::{sq, shout, sin};
+use geom::{sq, shout, sin, Sq};
 fn area(int s) -> int { return sq(s) + 1; }
+fn sq_area(Sq q) -> int { return q.area(); }
+fn sq_say(Sq q) -> int { return q.say(); }
 fn loud(int s) -> int { return shout(s); }
 fn wave(float x) -> float { return sin(x); }
 fn qualified(int s) -> int { return geom::sq(s); }
@@ -1409,6 +1511,58 @@ fn main() { return; }
         assert!(!side.name_is_pure("loud"), "impure import stays impure");
         // A user `sin` shadows the host math row of the same short name.
         assert!(!side.name_is_pure("wave"), "user sin does IO");
+        assert!(side.name_is_pure("sq_area"), "imported pure method");
+        assert!(!side.name_is_pure("sq_say"), "imported impure method");
+    }
+
+    #[test]
+    fn method_calls_resolve_to_their_impl() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+use io::{stdout, write};
+use string::{to_bytes};
+class Point {
+    pub x: int,
+    pub y: int,
+}
+impl Point {
+    pub fn norm1() -> int { return self.x + self.y; }
+    pub fn twice() -> int { return self.norm1() * 2; }
+    pub fn shift(int d) { self.x = self.x + d; }
+    pub fn show() -> int {
+        write(stdout(), to_bytes("p"));
+        return self.x;
+    }
+}
+class Other {
+    pub n: int,
+}
+impl Other {
+    pub fn norm1() -> int {
+        write(stdout(), to_bytes("o"));
+        return self.n;
+    }
+}
+fn size(Point p) -> int { return p.twice() + 1; }
+fn nudge(Point p) -> int { p.shift(1); return p.x; }
+fn loud(Point p) -> int { return p.show(); }
+fn other(Other o) -> int { return o.norm1(); }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = c.typed_sidecar();
+        assert!(side.name_is_pure("Point::norm1"));
+        assert!(side.name_is_pure("Point::twice"), "self call resolves");
+        assert!(side.name_is_pure("size"), "pure method keeps caller pure");
+        assert!(!side.name_is_pure("nudge"), "field write through a param");
+        assert!(!side.name_is_pure("loud"), "IO method");
+        // Same method name on another class: the receiver type decides.
+        assert!(!side.name_is_pure("other"));
+        assert!(!side.name_is_pure("norm1"), "bare name is the union");
     }
 
     #[test]
