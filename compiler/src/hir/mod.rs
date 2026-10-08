@@ -24,6 +24,7 @@ pub mod inline;
 pub mod lower;
 pub mod match_tree;
 pub mod print;
+pub mod stage;
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;

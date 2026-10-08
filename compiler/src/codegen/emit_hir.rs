@@ -347,6 +347,15 @@ impl Compiler {
             Ok(Some(shaped)) => shaped,
             _ => hir,
         };
+        // An operand that only lowers with nothing below it moves to a temp.
+        let mut staged: Option<crate::hir::HirBody> = None;
+        while let Some((_, Some(at))) = lower::refusal_at(staged.as_ref().unwrap_or(hir), &self.checker) {
+            match crate::hir::stage::stage(staged.as_ref().unwrap_or(hir), at) {
+                Some(body) => staged = Some(body),
+                None => break,
+            }
+        }
+        let hir = staged.as_ref().unwrap_or(hir);
         // Where the AST walk would start the body: the body's pre-order
         // position when the emit cursor still sits on parameter nodes before
         // it, else the cursor itself (it can run ahead of the pre-order ids
@@ -7276,7 +7285,7 @@ impl Compiler {
                 }
                 // Value first: its operands live above every bound slot.
                 let want = self.hir_local_rep(hir, emit, *local);
-                self.hir_value(hir, emit, *init, &want, 0);
+                self.hir_value_copied(hir, emit, *init, &want);
                 let slot = self.hir_bind_local(hir, *local);
                 emit.slots[local.0 as usize] = Some(slot);
                 if let Rep::Pair(_) = &want {
@@ -7294,7 +7303,7 @@ impl Compiler {
                 }
                 HirKind::Local(local) => {
                     let want = Rep::Word(self.hir_local_layout(hir, *local));
-                    self.hir_value(hir, emit, *value, &want, 0);
+                    self.hir_value_copied(hir, emit, *value, &want);
                     let slot = Self::hir_slot(emit, *local);
                     self.bytecode.push_store_pop(slot);
                 }
@@ -7513,6 +7522,28 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// A value bound to a local. A fixed array read from another local is
+    /// copied (`vec_from_array`), as assigning one stack array local to
+    /// another copies its slots: the two never share elements.
+    fn hir_value_copied(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, want: &Rep) {
+        let copied = match hir.expr(value).kind {
+            HirKind::Local(src) => {
+                !emit.stacks.contains_key(&src.0)
+                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
+            }
+            _ => false,
+        };
+        let native = copied.then(|| self.native_id("vec_from_array")).flatten();
+        let Some(native) = native else {
+            self.hir_value(hir, emit, value, want, 0);
+            return;
+        };
+        self.bytecode
+            .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+        self.hir_value(hir, emit, value, want, 1);
+        self.bytecode.push_host_invoke(1);
     }
 
     /// `block_on(h)` at depth zero, as the AST's `emit_block_on`.

@@ -294,6 +294,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         }
     }
 
+    /// The element type an `index` node reads, from its base's type.
+    fn element_ty(&self, b: &BodyBuilder, id: HirId) -> Option<Ty> {
+        let HirKind::Index { base, .. } = b.body.exprs[id.0 as usize].kind else {
+            return None;
+        };
+        let base_ty = self.ty_at(b, base)?;
+        match strip_readonly(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &base_ty)) {
+            Ty::Array { element, .. } => Some(element.as_ref().clone()),
+            Ty::App(head, args) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.first().cloned(),
+            _ => None,
+        }
+    }
+
     fn ty_at(&self, b: &BodyBuilder, id: HirId) -> Option<Ty> {
         b.body.exprs[id.0 as usize].ty.clone()
     }
@@ -1036,7 +1049,13 @@ impl<'c, 'm> Cx<'c, 'm> {
     /// node's value is the old or new `x`.
     fn adjust(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: AdjustOp, prefix: bool, target: &Output<'_>) -> HirId {
         let read = self.expr(b, target);
-        let ty = self.ty_at(b, read);
+        // An element or field read may carry no type of its own; the
+        // adjust's own value has the place's type.
+        let ty = self.ty_at(b, read).or_else(|| self.ty_of(node)).or_else(|| self.element_ty(b, read));
+        if b.body.exprs[read.0 as usize].ty.is_none() {
+            b.body.exprs[read.0 as usize].ty = ty.clone();
+            self.stamp(b, read);
+        }
         let is_float = matches!(ty.as_ref().map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::FLOAT);
         let one = if is_float {
             self.synth(b, span_of(node), HirKind::Lit(Lit::Float(1.0)), Some(coil_ty::float()))

@@ -1206,26 +1206,35 @@ pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     )
 }
 
+/// Depth refusals [`refusal_at`] names an operand for.
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value"];
+
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
+    refusal_at(body, checker).map(|(reason, _)| reason)
+}
+
+/// [`refusal`], with the operand that would lower if it were staged into a
+/// temp ahead of its statement ([`super::stage`]).
+pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Option<HirId>)> {
     if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda) {
-        return Some("body-kind");
+        return Some(("body-kind", None));
     }
     if body.is_generic {
-        return Some("generic");
+        return Some(("generic", None));
     }
     // A lambda's captures sit in its frame's first slots.
     if !body.captures.is_empty() && body.kind != BodyKind::Lambda {
-        return Some("captures");
+        return Some(("captures", None));
     }
     if body.ret.as_ref().and_then(|ty| classify(checker, ty)).is_none() {
-        return Some("return-type");
+        return Some(("return-type", None));
     }
     // A `()` local (`let _ = f()`, the `Ok(ok)` of a `?`) has no slot: it
     // is only read as a statement, and a value read is refused as a value
     // type.
     if body.locals.iter().any(|l| l.ty.as_ref().and_then(|ty| classify(checker, ty)).is_none()) {
-        return Some("local-type");
+        return Some(("local-type", None));
     }
     let root = body.root?;
     let mut walk = Walk {
@@ -1236,6 +1245,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         box_at: HashMap::new(),
         class_boxed: std::collections::HashSet::new(),
         class_box_at: std::collections::HashSet::new(),
+        stage_at: None,
     };
     let boxes = class_boxes(body, checker);
     walk.class_box_at = boxes.keys().copied().collect();
@@ -1243,7 +1253,9 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     let stacks = stack_arrays(body, checker);
     walk.stack = stacks.len;
     walk.box_at = stacks.box_at;
-    walk.effect(root, 0).err()
+    walk.effect(root, 0)
+        .err()
+        .map(|reason| (reason, walk.stage_at.filter(|_| STAGED.contains(&reason))))
 }
 
 /// The builtin opaque types the `io` and `thread` modules export.
@@ -1288,6 +1300,15 @@ pub fn is_byte_vec(ty: &Ty) -> bool {
         }
         _ => false,
     }
+}
+
+/// `[T; N]` with `N > 0`: a fixed array, which a local copies on
+/// assignment.
+pub fn is_fixed_array(checker: &Checker, ty: &Ty) -> bool {
+    matches!(
+        strip_readonly(&apply_ty_prune(checker.subst(), ty)),
+        Ty::Array { length: coil_ty::ArrayLength::Static(n), .. } if *n > 0
+    )
 }
 
 /// `[byte; N]` or `[byte]`: a string literal typed so is its bytes.
@@ -1678,6 +1699,8 @@ struct Walk<'b> {
     loops: u32,
     /// Frame-slot stack arrays: local to length.
     stack: HashMap<u32, usize>,
+    /// The operand a depth refusal names: staged into a temp, it lowers.
+    stage_at: Option<HirId>,
     /// Block statements an escaping stack array is boxed before.
     box_at: HashMap<u32, Vec<u32>>,
     /// Frame-slot class locals boxed at their escape ([`class_boxes`]).
@@ -2209,6 +2232,7 @@ impl Walk<'_> {
                     // A slot `LOAD`, or the index to a temp and a select,
                     // which runs with no operand below it.
                     if depth != 0 && stack_select(body, &self.stack, body.expr(id)) {
+                        self.stage_at = Some(id);
                         return Err("stack-select-depth");
                     }
                     // Once boxed: the box, then the index above it.
@@ -2405,8 +2429,10 @@ impl Walk<'_> {
             // `x++` / `--x` on an int or float local: one `INC` / `DEC`,
             // which leaves the old or new value, as the AST.
             HirKind::Assign { place, .. } if body.expr(id).flags.contains(HirFlags::ADJUST) => {
+                // Any other place splits into statements ahead of this one.
                 if !matches!(body.expr(*place).kind, HirKind::Local(_)) || self.stack_base(*place) {
-                    return Err("assign");
+                    self.stage_at = Some(id);
+                    return Err("adjust-value");
                 }
                 match self.ty(id).and_then(primitive) {
                     Some(coil_ty::INT | coil_ty::FLOAT) => Ok(()),
@@ -2529,10 +2555,6 @@ impl Walk<'_> {
                         self.value(arg, 0)?;
                     }
                     return Ok(());
-                }
-                // Past 32 items the AST builds the array on the heap too.
-                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if (1..=32).contains(&args.len())) {
-                    return Err("stack-array");
                 }
                 // With no escape the fields live in frame slots (as the AST's
                 // unboxed class local); an escaping one is an object from the
