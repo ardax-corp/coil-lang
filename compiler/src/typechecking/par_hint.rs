@@ -1063,13 +1063,12 @@ fn main() { return; }
     fn heap_index_store_is_named() {
         let ast = parse(
             r#"
-fn rec(int n) -> int {
+fn rec([int] a, int n) -> int {
     if n <= 1 {
-        let a = [0];
         a[0] = n;
         return n;
     }
-    return rec(n - 1) + rec(n - 2);
+    return rec(a, n - 1) + rec(a, n - 2);
 }
 fn main() { return; }
 "#,

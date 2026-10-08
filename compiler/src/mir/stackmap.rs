@@ -252,7 +252,9 @@ mod tests {
         let n = b.ins_const(MirConst::I64(1)).unwrap();
         let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
         let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        let _ = b.ins_cmp(MirCmpOp::Eq, xs, a).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
         b.ret(Some(g)).unwrap();
         let f = b.finish().unwrap();
         let draft = encode_draft(&f).expect("draft");
