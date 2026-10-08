@@ -1239,10 +1239,17 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
-        let v = self.expr(b, value);
         let wrap = b.body.result_mode
             && !is_result_construct(value, b.ok_is_result)
             && b.body.ret.as_ref().and_then(result_ok_err).is_some();
+        // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
+        // `return Some(e?)` of the function's own type return `e` as is, as
+        // the AST's `expr_try_return_src` forwards the pair.
+        if let Some(src) = self.try_forward_src(b, value, wrap) {
+            let v = self.expr(b, src);
+            return self.emit_ty(b, node, HirKind::Return(Some(v)), Some(coil_ty::never()));
+        }
+        let v = self.expr(b, value);
         let v = if wrap {
             let ret = b.body.ret.clone();
             let span = span_of(value);
@@ -1252,6 +1259,38 @@ impl<'c, 'm> Cx<'c, 'm> {
         };
         let v = if is_unit && !wrap { None } else { Some(v) };
         self.emit_ty(b, node, HirKind::Return(v), Some(coil_ty::never()))
+    }
+
+    /// The `e` of a returned `e?` that is the identity: `e` has the
+    /// function's own return type and the try's hit is re-wrapped in the
+    /// same variant (`wrap` for result mode, or a written `Ok` / `Some`).
+    fn try_forward_src<'a, 'e>(&self, b: &BodyBuilder, value: &'a Output<'e>, wrap: bool) -> Option<&'a Output<'e>> {
+        if b.body.is_coro {
+            return None;
+        }
+        let node = peel(value);
+        let try_node = match node.1.as_ref() {
+            Expression::Try(_) if wrap => node,
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields: parser::ast::EnumConstructPayload::Tuple(args),
+            } if args.len() == 1
+                && ((common::is_builtin_result_enum(enum_name) && *variant_name == "Ok" && !b.ok_is_result)
+                    || (common::is_builtin_option_enum(enum_name) && *variant_name == "Some")) =>
+            {
+                peel(&args[0])
+            }
+            _ => return None,
+        };
+        let Expression::Try(inner) = try_node.1.as_ref() else { return None };
+        let span = span_of(try_node);
+        if self.checker.test_try_at(span.0, span.1).is_some() {
+            return None;
+        }
+        let ret = b.body.ret.as_ref().map(strip_readonly)?;
+        let ty = self.ty_of(inner)?;
+        (strip_readonly(&ty) == ret).then_some(inner)
     }
 
     /// `e?`: `match e { Some(x) / Ok(x) => x, miss => return miss }`.
