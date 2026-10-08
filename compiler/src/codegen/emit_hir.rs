@@ -487,7 +487,36 @@ impl Compiler {
             {
                 return Err("drop-class".to_string());
             }
-            let shape = inline::inlinable(callee, budget)?;
+            // Spliced locals live on in the caller's frame, where a heap
+            // value would stay reachable: only scalars become new slots.
+            let scalar = |ty: &Option<Ty>| {
+                ty.as_ref().is_some_and(|t| {
+                    matches!(
+                        lower::classify(&self.checker, t),
+                        Some(ValueClass::Scalar | ValueClass::Unit)
+                    )
+                })
+            };
+            let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+                return Err("not-call".to_string());
+            };
+            for (k, l) in callee.locals.iter().enumerate() {
+                let local = LocalId(k as u32);
+                if scalar(&l.ty) {
+                    continue;
+                }
+                let bound = match callee.params.iter().position(|&p| p == local) {
+                    Some(k) => {
+                        !matches!(args.get(k).map(|&a| &hir.expr(a).kind), Some(HirKind::Lit(_) | HirKind::Local(_)))
+                            || inline::rebinds(callee, local)
+                    }
+                    None => true,
+                };
+                if bound {
+                    return Err(format!("heap local `{}`", l.name));
+                }
+            }
+            let shape = inline::inlinable(callee, budget)?.with_heap_result(!scalar(&hir.expr(id).ty));
             Ok((callee, shape))
         };
         let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
