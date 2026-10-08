@@ -13812,7 +13812,6 @@ impl Checker {
         returns: Option<&Output>,
         where_constraints: &[parser::ast::WhereConstraint],
         is_coro: bool,
-        range: &Range<usize>,
     ) {
         let key = if self.current_module.is_empty() {
             name.to_string()
@@ -13913,7 +13912,6 @@ impl Checker {
                 .insert(key, Scheme::mono(fun_ty));
         }
         self.messages.truncate(msg_len);
-        let _ = range;
     }
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so
@@ -13945,7 +13943,6 @@ impl Checker {
                     returns.as_ref(),
                     where_constraints,
                     *is_coro,
-                    &child.0.into_range(),
                 );
             }
         }
