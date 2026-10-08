@@ -39,9 +39,10 @@ const THREAD_R: EffectFlags = fx(EffectFlags::THREAD | R);
 const GC_R: EffectFlags = fx(EffectFlags::GC | R);
 const HEAP_R: EffectFlags = fx(EffectFlags::HEAP_MUT | R);
 const PARK_R: EffectFlags = fx(EffectFlags::ATTACH_PARK | R);
-/// Byte/string conversions and searches. Pure in fact; kept impure (as
-/// before the split) until a bench shows marking them pure is safe for
-/// auto-par and LICM.
+/// Byte/string conversions and searches. Kept impure: `to_bytes` returns a
+/// fresh mutable array each call, so MIR LICM must not hoist it out of a
+/// loop (every iteration would then share one array). Marking these pure
+/// needs a separate "allocates" bit first.
 const TEXT: EffectFlags = fx(EffectFlags::READ);
 const TEXT_R: EffectFlags = fx(EffectFlags::READ | R);
 

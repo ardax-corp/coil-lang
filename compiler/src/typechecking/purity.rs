@@ -26,6 +26,9 @@ struct FnFacts {
     /// Names bound in the body (params, `let`, patterns). A call through one
     /// of these is a function value, not the host or user `fn` it shadows.
     bound: HashSet<String>,
+    /// Locals whose object never leaves the function (see [`private_locals`]).
+    /// A write through one is not `HEAP_MUT`: no caller can see it.
+    private: HashSet<String>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -41,6 +44,15 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
 /// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
 /// match / `if let` pattern bindings.
 fn collect_binders(ast: &Output<'_>, out: &mut HashSet<String>) {
+    each_binder(ast, &mut |n| {
+        out.insert(n.to_string());
+    });
+}
+
+/// Call `f` once per binding site in `ast` (see [`collect_binders`]).
+fn each_binder(ast: &Output<'_>, f: &mut dyn FnMut(&str)) {
+    let mut here: HashSet<String> = HashSet::new();
+    let out = &mut here;
     match ast.1.as_ref() {
         Expression::Variable(n, _) | Expression::Argument { name: n, .. } => {
             out.insert((*n).to_string());
@@ -84,7 +96,10 @@ fn collect_binders(ast: &Output<'_>, out: &mut HashSet<String>) {
         }
         _ => {}
     }
-    walk_children(ast, &mut |c| collect_binders(c, out));
+    for n in &here {
+        f(n);
+    }
+    walk_children(ast, &mut |c| each_binder(c, f));
 }
 
 fn let_pattern_binders(p: &LetPattern<'_>, out: &mut HashSet<String>) {
@@ -130,7 +145,10 @@ fn pattern_binders(p: &Pattern<'_>, out: &mut HashSet<String>) {
 
 /// Facts for one `fn` declaration: its body effects plus every bound name.
 fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
-    let mut f = FnFacts::default();
+    let mut f = FnFacts {
+        private: private_locals(args, body),
+        ..FnFacts::default()
+    };
     walk_body(body, &mut f);
     collect_binders(args, &mut f.bound);
     collect_binders(body, &mut f.bound);
@@ -722,20 +740,14 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             walk_body(b, facts);
         }
         Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
-            if matches!(
-                peel(lhs).1.as_ref(),
-                Expression::Index(_, _) | Expression::Access(_, _)
-            ) {
+            if writes_shared_heap(lhs, &facts.private) {
                 facts.local.insert(EffectFlags::HEAP_MUT);
             }
             walk_body(lhs, facts);
             walk_body(rhs, facts);
         }
         Expression::Adjust { target, .. } => {
-            if matches!(
-                peel(target).1.as_ref(),
-                Expression::Index(_, _) | Expression::Access(_, _)
-            ) {
+            if writes_shared_heap(target, &facts.private) {
                 facts.local.insert(EffectFlags::HEAP_MUT);
             }
             walk_body(target, facts);
@@ -828,6 +840,113 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         // `if let`, `while let`, `new`, and anything added later: effects in
         // any child count. Skipping them used to hide calls from purity.
         _ => walk_children(ast, &mut |c| walk_body(c, facts)),
+    }
+}
+
+/// True when assigning to `lhs` writes heap memory a caller could see: an
+/// index or field write whose base is not one of the function's `private`
+/// locals.
+fn writes_shared_heap(lhs: &Output<'_>, private: &HashSet<String>) -> bool {
+    match peel(lhs).1.as_ref() {
+        Expression::Index(base, _) | Expression::Access(base, _) => {
+            !matches!(peel(base).1.as_ref(), Expression::Identifier(n) if private.contains(*n))
+        }
+        _ => false,
+    }
+}
+
+/// Locals whose object is created in this function and never shared, so
+/// writing through them is invisible to callers. A name qualifies when:
+///
+/// - it is bound exactly once in the function (no shadowing, not a param),
+///   by `let x = <array, list, tuple, dict or class literal>`;
+/// - every use is `x[i]`, `x.f`, a write through one of those, or
+///   `return x` (the caller gets the object only after the last write);
+/// - it is never reassigned, captured by a lambda, passed to a call, stored
+///   elsewhere, or iterated.
+///
+/// Only writes directly through `x` count: `x[i][j] = v` writes into an
+/// element, which may be shared.
+fn private_locals(args: &Output<'_>, body: &Output<'_>) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    each_binder(args, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
+    each_binder(body, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
+    let mut fresh = HashSet::new();
+    fresh_lets(body, &mut fresh);
+    fresh.retain(|n: &String| counts.get(n) == Some(&1));
+    if fresh.is_empty() {
+        return fresh;
+    }
+    let mut escaped = HashSet::new();
+    private_uses(body, &fresh, &mut escaped);
+    fresh.retain(|n| !escaped.contains(n));
+    fresh
+}
+
+/// Names bound by `let x = <fresh literal>` anywhere in `ast`. The parser
+/// spells `let x = e` as `Fragment([Variable(x, ty), e])`.
+fn fresh_lets(ast: &Output<'_>, out: &mut HashSet<String>) {
+    if let Expression::Fragment(items) = ast.1.as_ref()
+        && let [decl, init] = items.as_slice()
+        && let Expression::Variable(n, _) = decl.1.as_ref()
+        && matches!(
+            peel(init).1.as_ref(),
+            Expression::Array(_)
+                | Expression::List(_)
+                | Expression::Tuple(_)
+                | Expression::Dict(_)
+                | Expression::Instantiate(_, _)
+        )
+    {
+        out.insert((*n).to_string());
+    }
+    walk_children(ast, &mut |c| fresh_lets(c, out));
+}
+
+/// Mark every name in `fresh` that `ast` uses other than through `x[i]`,
+/// `x.f`, a write through one, or `return x`.
+fn private_uses(ast: &Output<'_>, fresh: &HashSet<String>, escaped: &mut HashSet<String>) {
+    let base_name = |e: &Output<'_>| match peel(e).1.as_ref() {
+        Expression::Identifier(n) if fresh.contains(*n) => Some((*n).to_string()),
+        _ => None,
+    };
+    match ast.1.as_ref() {
+        Expression::Identifier(n) => {
+            if fresh.contains(*n) {
+                escaped.insert((*n).to_string());
+            }
+        }
+        Expression::Index(base, idx) if base_name(base).is_some() => {
+            if let Some(i) = idx {
+                private_uses(i, fresh, escaped);
+            }
+        }
+        Expression::Access(base, _) if base_name(base).is_some() => {}
+        // A method call passes the receiver along: the callee may keep it.
+        Expression::Call { name, args } => {
+            if let Expression::Access(base, _) = peel(name).1.as_ref()
+                && let Some(n) = base_name(base)
+            {
+                escaped.insert(n);
+            }
+            private_uses(name, fresh, escaped);
+            if let Some(args) = args {
+                for a in args {
+                    private_uses(a, fresh, escaped);
+                }
+            }
+        }
+        Expression::Return(inner) | Expression::ImplicitReturn(inner)
+            if base_name(inner).is_some() => {}
+        Expression::Lambda { captures, .. } => {
+            for c in captures {
+                if fresh.contains(*c) {
+                    escaped.insert((*c).to_string());
+                }
+            }
+            walk_children(ast, &mut |c| private_uses(c, fresh, escaped));
+        }
+        _ => walk_children(ast, &mut |c| private_uses(c, fresh, escaped)),
     }
 }
 
@@ -1008,18 +1127,17 @@ fn main() { return; }
     fn index_store_marks_function_impure() {
         let set = pure_set(
             r#"
-fn bump(int n) -> int {
-    let a = [0];
+fn bump([int] a, int n) -> int {
     a[0] = n;
     if n <= 1 { return a[0]; }
-    return bump(n - 1) + bump(n - 2);
+    return bump(a, n - 1) + bump(a, n - 2);
 }
 fn main() { return; }
 "#,
         );
         assert!(
             !set.contains("bump"),
-            "index assignment is a side effect: {set:?}"
+            "index store into a param is a side effect: {set:?}"
         );
     }
 
@@ -1424,5 +1542,37 @@ fn main() { return; }
         // An unresolved name is unknown, even if it looks like math.
         assert_eq!(classify_host_name("log"), UNKNOWN_CALLEE);
         assert!(classify_host_name("vec_push_like").contains(EffectFlags::UNKNOWN));
+    }
+
+    #[test]
+    fn writes_to_a_private_local_are_pure() {
+        let set = pure_set(
+            r#"
+fn rec(int n) -> int {
+    if n <= 1 { return n; }
+    let a = [0, 0];
+    a[0] = rec(n - 1);
+    a[1] = rec(n - 2);
+    return a[0] + a[1];
+}
+fn main() { return; }
+"#,
+        );
+        assert!(set.contains("rec"), "{set:?}");
+    }
+
+    #[test]
+    fn writes_that_a_caller_could_see_stay_impure() {
+        for (why, body) in [
+            ("param", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } xs[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+            ("alias", "fn rec(int n) -> int { if n <= 1 { return n; } let a = [0]; let b = a; b[0] = n; return rec(n - 1) + rec(n - 2); }"),
+            ("stored", "fn rec(int n) -> int { if n <= 1 { return n; } let a = [0]; let b = [a]; a[0] = n; return rec(n - 1) + rec(n - 2) + b[0][0]; }"),
+            ("nested", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } let a = [xs]; a[0][0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+            ("shadowed", "fn rec([int] a, int n) -> int { if n <= 1 { return n; } if n > 5 { let a = [0]; a[0] = 1; } a[0] = n; return rec(a, n - 1) + rec(a, n - 2); }"),
+            ("reassigned", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } let a = [0]; a = xs; a[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+        ] {
+            let set = pure_set(&format!("{body}\nfn main() {{ return; }}\n"));
+            assert!(!set.contains("rec"), "{why}: {set:?}");
+        }
     }
 }
