@@ -454,15 +454,17 @@ impl Compiler {
             let Some(call) = emit.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
-            if call.builtin.is_some()
-                || call.mono
-                || call.generic.is_some()
-                || call.instance.is_some()
-                || !call.ranges.is_empty()
-                || call.pair.is_some()
-                || self.coroutine_fns.contains(&call.key)
-            {
-                return Err("call-kind".to_string());
+            let kind = [
+                (call.builtin.is_some(), "builtin"),
+                (call.pair.is_some() && !self.hir_inline_pair, "pair"),
+                (call.mono, "mono"),
+                (call.generic.is_some(), "generic"),
+                (call.instance.is_some(), "instance"),
+                (!call.ranges.is_empty(), "ranges"),
+                (self.coroutine_fns.contains(&call.key), "coroutine"),
+            ];
+            if let Some((_, what)) = kind.iter().find(|(hit, _)| *hit) {
+                return Err(format!("call-kind {what}"));
             }
             let name = strip_overload_key(&call.key);
             if self.checker.is_overloaded(name) {
@@ -479,7 +481,8 @@ impl Compiler {
             if callee.name == hir.name
                 || callee.name.contains(" for ")
                 || home(callee) != here
-                || callee.ret_layout != crate::hir::layout::Layout::Word
+                || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
+                    && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
             {
                 return Err(format!("callee `{}`", callee.name));
             }
@@ -531,7 +534,7 @@ impl Compiler {
                     matches!(
                         lower::classify(&self.checker, t),
                         Some(ValueClass::Scalar | ValueClass::Unit)
-                    )
+                    ) || self.hir_inline_pair && immediate_pair(&crate::hir::layout::of(&self.checker, t))
                 })
             };
             let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -1116,6 +1119,10 @@ impl Compiler {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {
+                emit.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            if let Some(kind) = self.hir_pair_init(hir, &emit, local, init) {
                 emit.pair_locals.insert(local.0, kind);
                 continue;
             }
@@ -2829,6 +2836,36 @@ impl Compiler {
             && self.checker.enum_variants(kind).is_some_and(|v| {
                 !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
             })
+    }
+
+    /// The pair kind of an unassigned enum local whose value is built in
+    /// place: variants, `if` and block values of them, two-word calls and
+    /// other such locals. It then lives in two slots, as a two-word call's
+    /// result does, and a `match` on it reads the tag slot.
+    fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<String> {
+        if !self.hir_pair_locals {
+            return None;
+        }
+        let ty = hir.local(local).ty.as_ref()?;
+        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)?;
+        (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
+    }
+
+    /// `e` yields a `kind` pair with no boxing on any path.
+    fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &str) -> bool {
+        match &hir.expr(e).kind {
+            HirKind::Make {
+                kind: MakeKind::Variant { .. },
+                args,
+            } => args.len() <= 1,
+            HirKind::If {
+                then, els: Some(els), ..
+            } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
+            HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
+            HirKind::Call { .. } => emit.calls.get(&e.0).and_then(|c| c.pair.as_deref()) == Some(kind),
+            HirKind::Local(l) => emit.pair_locals.get(&l.0).map(String::as_str) == Some(kind),
+            _ => false,
+        }
     }
 
     /// How argument `i` of `call` is passed.
@@ -8117,4 +8154,11 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         },
         _ => ty.clone(),
     }
+}
+
+/// A two-word `Option`, `Result` or user enum: a payload word and a tag,
+/// so a frame slot holding it keeps at most a `Result`'s error alive.
+fn immediate_pair(layout: &crate::hir::layout::Layout) -> bool {
+    use crate::hir::layout::{Layout, PairKind};
+    matches!(layout, Layout::Pair(PairKind::Option | PairKind::Result | PairKind::Enum(_)))
 }

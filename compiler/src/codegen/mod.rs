@@ -926,6 +926,13 @@ pub struct Compiler {
     hir_match_tree: bool,
     /// Matches on many int literals binary-search (`COIL_HIR_INT_SEARCH=0` off).
     hir_int_search: bool,
+    /// Typed inlining takes callees returning a two-word `Option`, `Result`
+    /// or enum (`COIL_HIR_INLINE_PAIR=0` off).
+    hir_inline_pair: bool,
+    /// An enum local built in place (`let r = if c { Some(x) } else { None }`)
+    /// lives in two slots when its type is a two-word pair
+    /// (`COIL_HIR_PAIR_LOCALS=0` off).
+    hir_pair_locals: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -1056,6 +1063,11 @@ impl Default for Compiler {
             hir_inline: crate::hir::inline::inline_from_env(),
             debugger_attached: false,
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
+            hir_inline_pair: crate::hir::inline::pair_from_env(),
+            hir_pair_locals: !matches!(
+                std::env::var("COIL_HIR_PAIR_LOCALS").as_deref(),
+                Ok("0" | "false" | "off" | "no")
+            ),
             hir_int_search: crate::hir::match_tree::int_search_from_env(),
             hir_fn_names: HashMap::new(),
         }
