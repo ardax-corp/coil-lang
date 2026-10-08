@@ -420,6 +420,7 @@ mod tests {
                 },
             ],
             debug_lines: Vec::new(),
+            cleanup: Vec::new(),
         };
         let mut cov = Coverage::new(cwd.clone(), true);
         let exclude = test_fn_ranges(&debug, [2]);
@@ -460,6 +461,7 @@ mod tests {
                 },
             ],
             debug_lines: Vec::new(),
+            cleanup: Vec::new(),
         };
         let mut cov = Coverage::new(cwd.clone(), false);
         let prog = cov.register_program(&debug, &test_fn_ranges(&debug, [1]));

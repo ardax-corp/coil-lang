@@ -22,6 +22,10 @@ pub struct IlFunc {
     /// Non-escaping unboxed class field ranges `(base, n)` from the
     /// local_escape sidecar (I3). Empty when the body has no such locals.
     pub unboxed_fields: Vec<(u32, u32)>,
+    /// Keep the body as emitted: no per-body opts, no dense / LIR tier. A
+    /// `defer` cleanup pad reads frame slots by number and is reached only
+    /// by the VM unwinder, so no pass may renumber slots or relabel it.
+    pub pinned: bool,
 }
 
 impl IlFunc {
@@ -49,6 +53,7 @@ impl IlFunc {
             code_end,
             entry_sp,
             unboxed_fields: Vec::new(),
+            pinned: false,
         }
     }
 }

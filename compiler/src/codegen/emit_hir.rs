@@ -6904,7 +6904,15 @@ impl Compiler {
             names.push(self.context.variables.resolve(slot as usize).clone());
             emit.slots[local.0 as usize] = Some(k as u32);
         }
-        self.fn_defers.push((thunk, names.clone()));
+        let flag = self.fn_defers.next_flag();
+        let slots = names.iter().map(|n| self.lookup_slot(n)).collect();
+        self.fn_defers.thunks.push(DeferThunk {
+            label: thunk,
+            after,
+            captures: names.clone(),
+            slots,
+            flag,
+        });
         let prev_vars = std::mem::take(&mut self.context.variables);
         for name in names {
             self.context.variables.intern(name);
@@ -6915,6 +6923,9 @@ impl Compiler {
         self.bytecode.push_const(0);
         self.bytecode.push_return();
         self.bytecode.bind_label(after);
+        if let Some(flag) = flag {
+            self.emit_defer_flag(flag, true);
+        }
     }
 
     /// Box the frame-slot locals that escape first in statement (or block

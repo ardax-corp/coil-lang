@@ -115,10 +115,14 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 32 — HostInvoke 144–151: task scheduler natives (`task_scope_open` …
 ///      `task_yield`) behind the embedded `task` module. Older archives
 ///      never reference them.
+/// 33 — [`ArchivedProgram::cleanup_ranges`] and HostInvoke 152
+///      (`unwind_resume`): a panic runs the `defer`s of the frames it
+///      leaves. Older archives load with none (panics run no `defer`, as
+///      before).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 32;
+pub const ARCHIVE_MINOR: u16 = 33;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -320,6 +324,29 @@ pub struct ArchivedProgram {
     /// Line/column per [`Self::debug_locs`] entry (minor 30+); empty means
     /// resolve against the source files.
     pub debug_lines: Vec<DebugLine>,
+    /// `defer` cleanup ranges (minor 33+); empty means panics run no `defer`.
+    pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
+}
+
+/// Minor 30–32 envelope (no cleanup ranges).
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV32 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
+    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
+    pub class_word_kinds: Vec<ClassWordKinds>,
+    pub static_word_kinds: Vec<u8>,
+    pub debug_lines: Vec<DebugLine>,
 }
 
 /// Minor 29 envelope (no debug lines).
@@ -488,6 +515,9 @@ pub const STATIC_WORD_KINDS_MINOR: u16 = 29;
 /// First minor that stores [`ArchivedProgram::debug_lines`].
 pub const DEBUG_LINES_MINOR: u16 = 30;
 
+/// First minor that stores [`ArchivedProgram::cleanup_ranges`].
+pub const CLEANUP_RANGES_MINOR: u16 = 33;
+
 pub use crate::opcode::Byte;
 
 impl ArchivedProgram {
@@ -497,6 +527,30 @@ impl ArchivedProgram {
             debug_locs: self.debug_locs.clone(),
             fn_symbols: self.fn_symbols.clone(),
             debug_lines: self.debug_lines.clone(),
+            cleanup: self.cleanup_ranges.clone(),
+        }
+    }
+}
+
+impl ArchivedProgramV32 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: self.operand_stack_slots,
+            stack_maps: self.stack_maps,
+            precise_frames: self.precise_frames,
+            class_word_kinds: self.class_word_kinds,
+            static_word_kinds: self.static_word_kinds,
+            debug_lines: self.debug_lines,
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -519,6 +573,7 @@ impl ArchivedProgramV29 {
             class_word_kinds: self.class_word_kinds,
             static_word_kinds: self.static_word_kinds,
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -541,6 +596,7 @@ impl ArchivedProgramV12 {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -563,6 +619,7 @@ impl ArchivedProgramV21 {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -585,6 +642,7 @@ impl ArchivedProgramV28 {
             class_word_kinds: self.class_word_kinds,
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -607,6 +665,7 @@ impl ArchivedProgramV23 {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -629,6 +688,7 @@ impl ArchivedProgramV20 {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -651,6 +711,7 @@ impl ArchivedProgramV13 {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         }
     }
 }
@@ -701,6 +762,9 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let v32 = rkyv::access::<ArchivedArchivedProgramV32, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV32, Error>(archived).ok());
     let v29 = rkyv::access::<ArchivedArchivedProgramV29, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV29, Error>(archived).ok());
@@ -725,7 +789,7 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
 
     if let Some(program) = current {
         if archive_version_compatible(program.version, ARCHIVE_VERSION)
-            && archive_minor(program.version) >= DEBUG_LINES_MINOR
+            && archive_minor(program.version) >= CLEANUP_RANGES_MINOR
         {
             return Ok(DecodedArchive {
                 program,
@@ -735,6 +799,20 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         }
         if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
             return Err(ArchiveDecodeError::Version(program.version));
+        }
+    }
+    if let Some(old) = v32 {
+        if archive_version_compatible(old.version, ARCHIVE_VERSION)
+            && archive_minor(old.version) >= DEBUG_LINES_MINOR
+        {
+            return Ok(DecodedArchive {
+                program: old.into_program(),
+                operand_stack_slots_persisted: true,
+                stack_maps_persisted: true,
+            });
+        }
+        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
+            return Err(ArchiveDecodeError::Version(old.version));
         }
     }
     if let Some(old) = v29 {
@@ -883,6 +961,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -915,6 +994,7 @@ mod tests {
                 class_word_kinds,
                 static_word_kinds,
                 debug_lines,
+                cleanup_ranges,
             } = p;
             let _ = (
                 version,
@@ -932,6 +1012,7 @@ mod tests {
                 class_word_kinds,
                 static_word_kinds,
                 debug_lines,
+                cleanup_ranges,
             );
         };
     }
@@ -965,6 +1046,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -981,9 +1063,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 32);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 32));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.32");
+        assert_eq!(ARCHIVE_MINOR, 33);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 33));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.33");
     }
 
     #[test]
@@ -1077,6 +1159,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1108,6 +1191,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1184,6 +1268,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1218,6 +1303,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1297,6 +1383,7 @@ mod tests {
             }],
             static_word_kinds: vec![WORD_POINTER, WORD_SCALAR],
             debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1329,6 +1416,7 @@ mod tests {
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: vec![DebugLine { line: 3, column: 4 }, DebugLine::unknown()],
+            cleanup_ranges: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");

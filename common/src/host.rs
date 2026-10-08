@@ -960,6 +960,12 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 151,
         effects: SUSPEND,
     },
+    HostNative {
+        name: "unwind_resume",
+        arity: 0,
+        id: 152,
+        effects: PURE,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1007,6 +1013,10 @@ pub const STRING_MATCH_AT_ID: u16 = 143;
 pub const TASK_SCOPE_OPEN_ID: u16 = 144;
 /// Last task-scheduler native (`task_yield`).
 pub const TASK_YIELD_ID: u16 = 151;
+/// Ends a `defer` cleanup pad: the VM unwinder takes the frame back
+/// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
+pub const UNWIND_RESUME_ID: u16 = 152;
+pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1054,7 +1064,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 152);
+    assert!(HOST_NATIVES.len() == 153);
+    assert!(HOST_NATIVES[UNWIND_RESUME_ID as usize].id == UNWIND_RESUME_ID);
     assert!(HOST_NATIVES[TASK_SCOPE_OPEN_ID as usize].id == TASK_SCOPE_OPEN_ID);
     assert!(HOST_NATIVES[TASK_YIELD_ID as usize].id == TASK_YIELD_ID);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
@@ -1173,6 +1184,7 @@ mod tests {
         assert_eq!(host_native_id(THREAD_SPAWN_SHARED_NATIVE), Some(137));
         assert_eq!(host_native_id("task_scope_open"), Some(TASK_SCOPE_OPEN_ID as usize));
         assert_eq!(host_native_id("task_yield"), Some(TASK_YIELD_ID as usize));
+        assert_eq!(host_native_id(UNWIND_RESUME_NATIVE), Some(UNWIND_RESUME_ID as usize));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
