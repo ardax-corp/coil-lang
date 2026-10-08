@@ -46,13 +46,13 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.method_calls.extend(f.method_calls);
 }
 
+/// Receiver span and method name to the `Owner::m` callee key.
+type MethodTarget<'a> = dyn Fn((usize, usize), &str) -> Option<String> + 'a;
+
 /// Turn each fn's `recv.m(..)` calls into callees. `target` names the impl
 /// method (`Owner::m`) for a receiver span when its type is a user class;
 /// anything else stays unknown, except `len` / `capacity`, which cannot resize.
-fn settle_method_calls(
-    facts: &mut HashMap<String, FnFacts>,
-    target: &dyn Fn((usize, usize), &str) -> Option<String>,
-) {
+fn settle_method_calls(facts: &mut HashMap<String, FnFacts>, target: &MethodTarget<'_>) {
     for f in facts.values_mut() {
         for (span, m) in std::mem::take(&mut f.method_calls) {
             if let Some(key) = target(span, &m) {
