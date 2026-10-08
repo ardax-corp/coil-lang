@@ -2486,7 +2486,7 @@ impl Compiler {
         }
         // An `async fn` call is `MakeCoro`: its result is the handle word.
         let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
-        if coro && (self_layout.is_some() || open || !self.coroutine_fns.contains(&key)) {
+        if coro && (open || !self.coroutine_fns.contains(&key)) {
             return Err("callee-coroutine");
         }
         let pair = if coro { None } else { self.two_word_return_kind(&key) };
@@ -5642,12 +5642,13 @@ impl Compiler {
                     }
                     self.bytecode.append(&mut bc);
                 }
-                let ok = self.emit_named_entry_on_module_ret(
-                    &key,
-                    args.len() as u32 + dicts,
-                    crate::il::EntryKind::Call,
-                    natural.words(),
-                );
+                // A `gen fn` / `async fn` method call is `MakeCoro`, as a free one.
+                let kind = if self.coroutine_fns.contains(&key) {
+                    crate::il::EntryKind::MakeCoro
+                } else {
+                    crate::il::EntryKind::Call
+                };
+                let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
