@@ -232,6 +232,9 @@ enum RawCommand {
         /// Also print each body's HIR (typed, desugared tree)
         #[arg(long)]
         hir: bool,
+        /// Also print each function's effects and why auto-par left loops sequential
+        #[arg(long)]
+        effects: bool,
         /// Also print the MIR of numeric bodies (dense / LIR)
         #[arg(long)]
         mir: bool,
@@ -575,6 +578,7 @@ impl RawCli {
                 il,
                 il_post: _,
                 hir: _,
+                effects: _,
                 mir: _,
                 no_source: _,
                 ast,

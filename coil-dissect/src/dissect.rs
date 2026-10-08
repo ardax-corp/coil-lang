@@ -25,6 +25,7 @@ pub struct DissectArgs {
     pub show_mir: bool,
     /// Print each body's HIR (typed, desugared tree).
     pub show_hir: bool,
+    pub show_effects: bool,
     pub show_il_post: bool,
     /// Interleave source lines in the bytecode listing.
     pub source: bool,
@@ -88,12 +89,12 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
 
     let from_archive = args.filename.ends_with(".hyc");
     if from_archive
-        && (args.show_il || args.show_il_post || args.show_mir || args.show_hir || args.show_ast || args.show_expand)
+        && (args.show_il || args.show_il_post || args.show_mir || args.show_hir || args.show_effects || args.show_ast || args.show_expand)
     {
         fail_and_exit(
             &mut pipeline,
             ErrorCode::InvalidCliFlags,
-            "--il / --hir / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
+            "--il / --hir / --effects / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
         );
     }
     if args.show_expand {
@@ -113,6 +114,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     if args.show_hir {
         compiler::start_hir_capture();
     }
+    if args.show_effects {
+        compiler::start_effects_capture();
+    }
     let artifacts = if from_archive {
         match archive_artifacts(&args.filename) {
             Ok(a) => a,
@@ -129,6 +133,7 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     };
     let mir = if args.show_mir { compiler::take_mir_capture() } else { Vec::new() };
     let hir = if args.show_hir { compiler::take_hir_capture() } else { Default::default() };
+    let effects = if args.show_effects { compiler::take_effects_capture() } else { Default::default() };
     if args.opt_stats || args.opt_stats_json {
         let stats = compiler::last_opt_stats();
         if args.opt_stats {
@@ -216,6 +221,27 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         for problem in &hir.problems {
             println!(";; hir problem: {problem}");
         }
+    }
+
+    if args.show_effects {
+        println!("=== effects ===");
+        if effects.fns.is_empty() {
+            println!(";; no HIR effects (HIR lowering is off)");
+        }
+        for (name, text) in effects
+            .fns
+            .iter()
+            .filter(|(name, _)| pat.is_none_or(|p| compiler::matches_fn_pat(name, p)))
+        {
+            println!("{name}: {text}");
+        }
+        if effects.auto_par_off {
+            println!(";; auto-par is off");
+        }
+        for line in &effects.auto_par {
+            println!(";; {line}");
+        }
+        println!();
     }
 
     if args.show_mir {

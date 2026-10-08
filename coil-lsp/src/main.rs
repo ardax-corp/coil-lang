@@ -3040,7 +3040,29 @@ fn hover_from_source(
                 .remove(name)
                 .map(|(_, docs)| docs)
         });
+    let docs = match (fn_effects(&checker, &ast, name), docs) {
+        (Some(fx), Some(docs)) => Some(format!("{fx}\n\n{docs}")),
+        (fx, docs) => fx.or(docs),
+    };
     hover_markup(source, name, range, ty_text, docs)
+}
+
+/// `**effects:** …` for a function or method named `name` in this file.
+fn fn_effects(checker: &Checker, ast: &Output<'_>, name: &str) -> Option<String> {
+    // HIR is built from a checked program only.
+    if checker.messages().iter().any(|m| *m.kind() == MessageKind::ERROR) {
+        return None;
+    }
+    let suffix = format!("::{name}");
+    let found: Vec<String> = compiler::describe_fns(checker, ast)
+        .into_iter()
+        .filter(|(n, _)| n == name || n.ends_with(&suffix))
+        .map(|(_, fx)| fx)
+        .collect();
+    match found.as_slice() {
+        [fx] => Some(format!("**effects:** {fx}")),
+        _ => None,
+    }
 }
 
 fn hover_markup(
@@ -4502,6 +4524,41 @@ fn fib(int n) -> int {
         };
         assert!(value.contains("fib"));
         assert!(value.contains("Compute fibonacci"));
+    }
+
+    #[test]
+    fn hover_shows_a_functions_effects() {
+        let text = "\
+static let HITS: int = 0;
+fn bump(int x) -> int {
+    HITS = HITS + 1;
+    return x;
+}
+fn twice(int x, int -> int f) -> int {
+    return f(f(x));
+}
+fn add2(int x) -> int {
+    return twice(x, fn (int y) => y + 1);
+}
+";
+        let value = |line: u32| {
+            let document = Document {
+                text: text.into(),
+                version: 1,
+                last_good: None,
+            };
+            let hover = hover(&document, Position { line, character: 4 }).expect("hover");
+            let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {
+                panic!("expected markup hover");
+            };
+            value
+        };
+        let bump = value(1);
+        assert!(bump.contains("**effects:** heap write, host state: writes static `HITS`"), "{bump}");
+        let twice = value(5);
+        assert!(twice.contains("**effects:** pure apart from its parameters: calls parameter `f`"), "{twice}");
+        let add2 = value(8);
+        assert!(add2.contains("**effects:** pure"), "{add2}");
     }
 
     #[test]
