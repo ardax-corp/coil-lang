@@ -1081,6 +1081,77 @@ impl<'pratt> Pratt<'pratt> {
             .map(|opt| opt.unwrap_or_default())
     }
 
+    /// Optional `uses {read, write}` clause after `where`: the effects a
+    /// function declares. `uses` is a contextual word.
+    fn uses_clause(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Option<ast::EffectDecl<'pratt>>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
+        let name = text::ident().padded_by(trivia()).try_map(|w: &'pratt str, span| {
+            if ast::EFFECT_NAMES.contains(&w) {
+                Ok(w)
+            } else {
+                Err(Rich::custom(
+                    span,
+                    format!("unknown effect `{w}`; expected one of {}", ast::EFFECT_NAMES.join(", ")),
+                ))
+            }
+        });
+        text::ident()
+            .filter(|w: &&str| *w == "uses")
+            .padded_by(trivia())
+            .ignore_then(
+                name.separated_by(op!(','))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(op!("{"), op!("}")),
+            )
+            .map_with(|uses, e| ast::EffectDecl {
+                pure: false,
+                uses,
+                span: e.span(),
+            })
+            .or_not()
+    }
+
+    /// `pure` before `fn`, and the `uses {…}` clause: one or neither. Both
+    /// is an error, reported without stopping the parse.
+    fn effect_decl(
+        pure: Option<SimpleSpan>,
+        uses: Option<ast::EffectDecl<'pratt>>,
+        emitter: &mut chumsky::input::Emitter<Rich<'pratt, char>>,
+    ) -> Option<ast::EffectDecl<'pratt>> {
+        match (pure, uses) {
+            (Some(_), Some(u)) => {
+                emitter.emit(Rich::custom(
+                    u.span,
+                    "a `pure fn` has no `uses` clause; drop `pure` or the clause",
+                ));
+                Some(u)
+            }
+            (Some(p), None) => Some(ast::EffectDecl {
+                pure: true,
+                uses: Vec::new(),
+                span: p,
+            }),
+            (None, uses) => uses,
+        }
+    }
+
+    /// `pure` before `fn` (a contextual word): its span.
+    fn pure_kw(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Option<SimpleSpan>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        text::ident()
+            .filter(|w: &&str| *w == "pure")
+            .map_with(|_, e| e.span())
+            .padded_by(trivia())
+            .then_ignore(keyword!("fn").rewind())
+            .or_not()
+    }
+
     /// Parses the function *signature* (`gen? static? fn Name<T>(args) -> ret where …`;
     /// `async` is the old spelling of `gen`)
     /// without consuming the body block.
@@ -1091,18 +1162,25 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(keyword!("gen").or(keyword!("async")).or_not())
             .then(keyword!("static").or_not())
+            .then(self.pure_kw())
             .then(keyword!("fn"))
             .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(self.arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
-            .map_with(
+            .then(self.uses_clause())
+            .validate(
                 |(
-                    (((((((docs, is_coro), is_static), _), name), type_params), args), returns),
-                    where_constraints,
+                    (
+                        ((((((((docs, is_coro), is_static), pure), _), name), type_params), args), returns),
+                        where_constraints,
+                    ),
+                    uses,
                 ),
-                 e| {
+                 e,
+                 emitter| {
+                    let effects = Self::effect_decl(pure, uses, emitter);
                     let empty_block = (e.span(), Box::new(Expression::Block(vec![])));
                     (
                         e.span(),
@@ -1116,6 +1194,7 @@ impl<'pratt> Pratt<'pratt> {
                             args,
                             returns,
                             where_constraints,
+                            effects,
                             body: Some(empty_block),
                         }),
                     )
@@ -1363,24 +1442,30 @@ impl<'pratt> Pratt<'pratt> {
         self.attr_list()
             .then(keyword!("gen").or(keyword!("async")).or_not())
             .then(keyword!("static").or_not())
+            .then(self.pure_kw())
             .then(keyword!("fn"))
             .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(self.arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
+            .then(self.uses_clause())
             .then(self.block(stmt).labelled("function body `{ ... }`"))
-            .map_with(|full, e| {
+            .validate(|full, e, emitter| {
                 let (
                     (
                         (
-                            ((((((attrs, is_coro), is_static), _), name), type_params), args),
-                            returns,
+                            (
+                                (((((((attrs, is_coro), is_static), pure), _), name), type_params), args),
+                                returns,
+                            ),
+                            where_constraints,
                         ),
-                        where_constraints,
+                        uses,
                     ),
                     body,
                 ) = full;
+                let effects = Self::effect_decl(pure, uses, emitter);
                 (
                     e.span(),
                     Box::new(Expression::Function {
@@ -1393,6 +1478,7 @@ impl<'pratt> Pratt<'pratt> {
                         args,
                         returns,
                         where_constraints,
+                        effects,
                         body: Some(body),
                     }),
                 )
@@ -3777,6 +3863,9 @@ mod tests_classes;
 #[cfg(test)]
 #[path = "tests/tests_diagnostics.rs"]
 mod tests_diagnostics;
+#[cfg(test)]
+#[path = "tests/tests_effects.rs"]
+mod tests_effects;
 #[cfg(test)]
 #[path = "tests/tests_error_handling.rs"]
 mod tests_error_handling;

@@ -16493,6 +16493,7 @@ impl Compiler {
                 args,
                 returns: _returns,
                 where_constraints: _,
+                effects: _,
                 body,
             } = ast.1.borrow() else {
             unreachable!("compile_function_decl_into on another expression");

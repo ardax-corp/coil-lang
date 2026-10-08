@@ -53,6 +53,30 @@ pub struct TypeParam<'expr> {
     pub kind: Kind,
 }
 
+/// Effect names a `uses {…}` clause accepts.
+pub const EFFECT_NAMES: &[&str] = &["read", "write", "net", "env", "exec", "ffi", "thread", "suspend", "mutate"];
+
+/// A function's declared effects: `pure fn f()` or `fn f() uses {read, write}`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct EffectDecl<'expr> {
+    /// Spelled `pure fn` (no `uses` clause).
+    pub pure: bool,
+    /// Names in `uses {…}`, each one of [`EFFECT_NAMES`].
+    pub uses: Vec<&'expr str>,
+    /// The `pure` keyword or the `uses {…}` clause.
+    pub span: SimpleSpan,
+}
+
+impl Display for EffectDecl<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.pure {
+            write!(f, "pure")
+        } else {
+            write!(f, "uses {{{}}}", self.uses.join(", "))
+        }
+    }
+}
+
 /// A `where` clause constraint: `Convert<A, B>` or unary `Num<T>`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct WhereConstraint<'expr> {
@@ -425,6 +449,8 @@ pub enum Expression<'expr> {
         returns: Option<Output<'expr>>,
         /// Constraints from a trailing `where` clause (after returns).
         where_constraints: Vec<WhereConstraint<'expr>>,
+        /// `pure fn` or a `uses {…}` clause (after `where`).
+        effects: Option<EffectDecl<'expr>>,
         /// `None` = signature-only (`fn f(...) -> T;`); `Some` = block body.
         body: Option<Output<'expr>>,
     },
@@ -1119,10 +1145,16 @@ impl<'a> Display for Expression<'a> {
                 args,
                 returns,
                 where_constraints,
+                effects,
                 body,
             } => {
                 let async_kw = if *is_coro { "gen " } else { "" };
                 let static_kw = if *is_static { "static " } else { "" };
+                let (pure_kw, uses_str) = match effects {
+                    Some(e) if e.pure => ("pure ", String::new()),
+                    Some(e) => ("", format!(" {e}")),
+                    None => ("", String::new()),
+                };
                 let tp = if type_params.is_empty() {
                     String::new()
                 } else {
@@ -1148,13 +1180,23 @@ impl<'a> Display for Expression<'a> {
                 match body {
                     Some(b) => write!(
                         f,
-                        "{}{}{}fn {}{}({}){}{} {{\n{}}}",
-                        attr_prefix, async_kw, static_kw, name, tp, args.1, ret_str, where_str, b.1
+                        "{}{}{}{}fn {}{}({}){}{}{} {{\n{}}}",
+                        attr_prefix,
+                        async_kw,
+                        static_kw,
+                        pure_kw,
+                        name,
+                        tp,
+                        args.1,
+                        ret_str,
+                        where_str,
+                        uses_str,
+                        b.1
                     ),
                     None => write!(
                         f,
-                        "{}{}{}fn {}{}({}){}{};",
-                        attr_prefix, async_kw, static_kw, name, tp, args.1, ret_str, where_str
+                        "{}{}{}{}fn {}{}({}){}{}{};",
+                        attr_prefix, async_kw, static_kw, pure_kw, name, tp, args.1, ret_str, where_str, uses_str
                     ),
                 }
             }
