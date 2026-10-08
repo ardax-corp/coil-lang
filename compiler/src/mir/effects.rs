@@ -4,14 +4,14 @@
 //! `from_bytes` / `to_bytes`. Impure edges are LICM/CSE barriers and never hoist. LICM hoist
 //! is purity bits (plus heap-read), not a HostInvoke id allowlist.
 
-use crate::typechecking::purity::{classify_host_name, EffectFlags};
+use crate::typechecking::purity::EffectFlags;
 
 use super::inst::MirInst;
 
 /// Sidecar effect bits for HostInvoke native `id`.
 pub fn host_effects(id: u16) -> EffectFlags {
     match common::HOST_NATIVES.get(id as usize) {
-        Some(n) if n.id == id => classify_host_name(n.name),
+        Some(n) if n.id == id => n.effects,
         _ => EffectFlags::from_bits(EffectFlags::UNKNOWN | EffectFlags::HOST),
     }
 }
