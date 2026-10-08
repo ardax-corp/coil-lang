@@ -268,6 +268,10 @@ enum HirOp {
     },
     /// `EQ` / `NEQ` of the two words.
     Prim(Instruction),
+    /// A bound type parameter's operator in a shared generic body: the
+    /// instance method in dictionary slot `dict` at `method`, through
+    /// `CallIndirect` (`emit_bound_operator_call`).
+    Bound { dict: u32, method: u32 },
     /// An element-wise op (`Compiler::hir_aggregate`).
     Aggregate(crate::typechecking::AggregateArithInfo),
     /// A matrix / vector operator the checker recorded as linear algebra
@@ -3589,10 +3593,10 @@ impl Compiler {
         }
     }
 
-    /// The operator at `id`. Element-wise matrix and aggregate forms stay on
-    /// the AST, as does a bound's dictionary call in a shared generic body
-    /// (`emit_bound_operator_call`); otherwise the operand type's instance
-    /// or the raw opcode.
+    /// The operator at `id`: element-wise matrix and aggregate forms, a
+    /// bound's dictionary call in a shared generic body
+    /// (`emit_bound_operator_call`), the operand type's instance or the raw
+    /// opcode.
     fn hir_operator_at(
         &self,
         hir: &HirBody,
@@ -3617,9 +3621,19 @@ impl Compiler {
             return Err("operator-aggregate");
         }
         if let Some(hint) = self.bound_operator_hint(node.node, start, end)
-            && self.lookup_slot(&format!("__dict{}", hint.dict_index)).is_some()
+            && let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index))
         {
-            return Err("operator-bound");
+            // Each operand passes as its one word.
+            for operand in [lhs, rhs] {
+                let ty = Self::hir_ty(hir, operand).ok_or("operator-bound")?;
+                if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
+                    return Err("operator-bound");
+                }
+            }
+            return Ok(HirOp::Bound {
+                dict,
+                method: hint.method_slot as u32,
+            });
         }
         self.hir_operator(hir, sym, lhs, rhs).ok_or("operator")
     }
@@ -5108,6 +5122,18 @@ impl Compiler {
                     let instr = *instr;
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
                     self.bytecode.push(Byte::new(instr));
+                }
+                &HirOp::Bound { dict, method } => {
+                    for (i, operand) in [*lhs, *rhs].into_iter().enumerate() {
+                        let ty = Self::hir_ty(hir, operand).expect("planned bound operand");
+                        let want = Rep::Word(self.value_layout(ty));
+                        self.hir_value(hir, emit, operand, &want, depth + i as u32);
+                    }
+                    self.bytecode.push_load(dict);
+                    self.bytecode.push_load(dict);
+                    self.bytecode.push_const(method as i32);
+                    self.bytecode.push_index();
+                    self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(3));
                 }
                 HirOp::Call {
                     lookup,
