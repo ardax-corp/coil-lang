@@ -16588,6 +16588,13 @@ impl Checker {
         self.static_slots.get(fqn).map(|(_, c)| *c).unwrap_or(false)
     }
 
+    /// `name` (bare in the current module, or qualified) is a `static let`:
+    /// shared mutable state, unlike a `static const`.
+    pub(crate) fn is_mutable_static(&self, name: &str) -> bool {
+        let is_let = |fqn: &str| self.static_slots.get(fqn).is_some_and(|(_, is_const)| !*is_const);
+        is_let(name) || is_let(&self.qualify_module_name(name))
+    }
+
     /// Static slot for a name in the current module namespace.
     pub fn static_slot_for_module_name(&self, name: &str) -> Option<u32> {
         self.static_slot_index(&self.qualify_module_name(name))

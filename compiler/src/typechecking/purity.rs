@@ -33,6 +33,10 @@ struct FnFacts {
     /// type picks the impl in [`settle_method_calls`]; until then they cost
     /// nothing.
     method_calls: Vec<((usize, usize), String)>,
+    /// Names read / assigned that the body does not bind: statics among
+    /// them are settled by [`settle_statics`].
+    free: HashSet<String>,
+    free_writes: HashSet<String>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -44,6 +48,35 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.callees.extend(f.callees);
     entry.bound.extend(f.bound);
     entry.method_calls.extend(f.method_calls);
+    entry.free.extend(f.free);
+    entry.free_writes.extend(f.free_writes);
+}
+
+/// `static let` names declared anywhere in `ast`.
+fn static_names(ast: &Output<'_>, out: &mut HashSet<String>) {
+    if let Expression::StaticDecl { name, is_const: false, .. } = ast.1.as_ref() {
+        out.insert((*name).to_string());
+    }
+    walk_children(ast, &mut |c| static_names(c, out));
+}
+
+/// A static is shared mutable state: reading one is `HOST` (another call
+/// may have changed it, and auto-par workers have no statics), writing one
+/// is `HEAP_MUT` (coil-lang#793).
+fn settle_statics(facts: &mut HashMap<String, FnFacts>, ast: &Output<'_>) {
+    let mut statics = HashSet::new();
+    static_names(ast, &mut statics);
+    if statics.is_empty() {
+        return;
+    }
+    for f in facts.values_mut() {
+        if f.free.iter().any(|n| statics.contains(n)) {
+            f.local.insert(EffectFlags::HOST);
+        }
+        if f.free_writes.iter().any(|n| statics.contains(n)) {
+            f.local.insert(EffectFlags::HEAP_MUT);
+        }
+    }
 }
 
 /// Receiver span and method name to the `Owner::m` callee key.
@@ -177,6 +210,9 @@ fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
     walk_body(body, &mut f);
     collect_binders(args, &mut f.bound);
     collect_binders(body, &mut f.bound);
+    let bound = &f.bound;
+    f.free.retain(|n| !bound.contains(n));
+    f.free_writes.retain(|n| !bound.contains(n));
     f
 }
 
@@ -185,6 +221,7 @@ fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
     collect_fns(ast, &mut facts, false);
     settle_method_calls(&mut facts, &|_, _| None);
+    settle_statics(&mut facts, ast);
     facts
 }
 
@@ -802,9 +839,15 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             walk_body(a, facts);
             walk_body(b, facts);
         }
+        Expression::Identifier(n) => {
+            facts.free.insert((*n).to_string());
+        }
         Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
             if writes_shared_heap(lhs, &facts.private) {
                 facts.local.insert(EffectFlags::HEAP_MUT);
+            }
+            if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
+                facts.free_writes.insert((*n).to_string());
             }
             walk_body(lhs, facts);
             walk_body(rhs, facts);
@@ -812,6 +855,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         Expression::Adjust { target, .. } => {
             if writes_shared_heap(target, &facts.private) {
                 facts.local.insert(EffectFlags::HEAP_MUT);
+            }
+            if let Expression::Identifier(n) = peel(target).1.as_ref() {
+                facts.free_writes.insert((*n).to_string());
             }
             walk_body(target, facts);
         }
@@ -1055,6 +1101,7 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             Some(format!("{local}::{m}"))
         };
         settle_method_calls(&mut facts, &target);
+        settle_statics(&mut facts, ast);
         effect_closure_with(&facts, &resolve)
     };
     checker.length_stability = length_stability(
@@ -1108,6 +1155,28 @@ mod tests {
         let owned = src.to_string();
         let ast = Pratt::default().parse(owned.as_str()).expect("parse");
         analyze_recursive_pure(&ast)
+    }
+
+    #[test]
+    fn static_reads_and_writes_are_not_pure() {
+        let ast = parse_ast(
+            r#"
+static let N: int = 0;
+static const K: int = 2;
+fn reads(int x) -> int { return x + N; }
+fn writes(int x) -> int { N = x; return x; }
+fn bumps(int x) -> int { N++; return x; }
+fn konst(int x) -> int { return x * K; }
+fn shadow(int N) -> int { return N + 1; }
+fn main() { return; }
+"#,
+        );
+        let pure = analyze_pure_fns(&ast);
+        assert!(!pure.contains("reads"), "{pure:?}");
+        assert!(!pure.contains("writes"));
+        assert!(!pure.contains("bumps"));
+        assert!(pure.contains("konst"));
+        assert!(pure.contains("shadow"));
     }
 
     #[test]
