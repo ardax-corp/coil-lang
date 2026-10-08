@@ -1026,6 +1026,13 @@ impl VirtualModules {
     }
 
     /// True when `module_path` is a known virtual module (`"prelude"`, `"ffi::types"`, …).
+    /// Every `(module path, export)` pair, in no particular order.
+    pub fn all_exports(&self) -> impl Iterator<Item = (&'static str, &BuiltinExport)> {
+        self.modules
+            .iter()
+            .flat_map(|(path, exports)| exports.iter().map(move |e| (*path, e)))
+    }
+
     pub fn is_virtual_module(&self, module_path: &str) -> bool {
         self.modules.contains_key(module_path)
     }
