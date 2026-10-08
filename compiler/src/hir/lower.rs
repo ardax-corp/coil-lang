@@ -2606,7 +2606,7 @@ impl Walk<'_> {
                         if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                             return Err("index-kind");
                         }
-                        if compound && (!pure_base(body, *base) || !pure_index(body, *index)) {
+                        if compound && (!read_base(body, *base) || !pure_index(body, *index)) {
                             return Err("assign-base");
                         }
                         self.word(*place)?;
