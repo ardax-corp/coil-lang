@@ -118,7 +118,8 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 33 — [`ArchivedProgram::cleanup_ranges`] and HostInvoke 152
 ///      (`unwind_resume`): a panic runs the `defer`s of the frames it
 ///      leaves. Older archives load with none (panics run no `defer`, as
-///      before).
+///      before). HostInvoke 153–155 (`task_cancel`, `task_shield_enter`,
+///      `task_shield_exit`): cancelling a task unwinds it.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.

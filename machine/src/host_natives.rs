@@ -92,8 +92,17 @@ pub fn build_standard_host_natives(
     // Append-only after stream_fd: byte-offset `string` natives (minor 31).
     push_string_bytes(&mut out, &mut register_id);
     // Append-only after string bytes: task scheduler natives (minor 32).
-    push_task_natives(&mut out, &mut register_id);
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID,
+    );
     push_unwind_resume(&mut out, &mut register_id);
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::TASK_CANCEL_ID..=common::TASK_SHIELD_EXIT_ID,
+    );
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -287,8 +296,12 @@ fn push_string_bytes(
 }
 
 /// `task_*` natives: VM hooks ([`HostOp::Task`]), like `gc_collect`.
-fn push_task_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    for id in common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID {
+fn push_task_natives(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+    ids: std::ops::RangeInclusive<u16>,
+) {
+    for id in ids {
         let row = &common::HOST_NATIVES[id as usize];
         let name = row.name;
         let sig = FfiSignature::from_parts(
@@ -1124,7 +1137,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some(common::UNWIND_RESUME_NATIVE)
+            Some("task_shield_exit")
         );
         assert_eq!(attach, 119);
     }
@@ -1416,6 +1429,10 @@ mod tests {
             registrations.get(end + 16).map(|(n, _)| n.as_str()),
             Some(common::UNWIND_RESUME_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 17);
+        assert_eq!(
+            registrations.get(end + 19).map(|(n, _)| n.as_str()),
+            Some("task_shield_exit")
+        );
+        assert_eq!(registrations.len(), end + 20);
     }
 }

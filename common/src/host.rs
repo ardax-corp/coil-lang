@@ -966,6 +966,24 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 152,
         effects: PURE,
     },
+    HostNative {
+        name: "task_cancel",
+        arity: 1,
+        id: 153,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_shield_enter",
+        arity: 0,
+        id: 154,
+        effects: SUSPEND,
+    },
+    HostNative {
+        name: "task_shield_exit",
+        arity: 0,
+        id: 155,
+        effects: SUSPEND,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1017,6 +1035,12 @@ pub const TASK_YIELD_ID: u16 = 151;
 /// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
 pub const UNWIND_RESUME_ID: u16 = 152;
 pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
+/// First cancellation native (`task_cancel`); the block runs through
+/// [`TASK_SHIELD_EXIT_ID`] (archive minor 33). `HostOp::Task`, like the
+/// scheduler block.
+pub const TASK_CANCEL_ID: u16 = 153;
+/// Last cancellation native (`task_shield_exit`).
+pub const TASK_SHIELD_EXIT_ID: u16 = 155;
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1064,8 +1088,10 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 153);
+    assert!(HOST_NATIVES.len() == 156);
     assert!(HOST_NATIVES[UNWIND_RESUME_ID as usize].id == UNWIND_RESUME_ID);
+    assert!(HOST_NATIVES[TASK_CANCEL_ID as usize].id == TASK_CANCEL_ID);
+    assert!(HOST_NATIVES[TASK_SHIELD_EXIT_ID as usize].id == TASK_SHIELD_EXIT_ID);
     assert!(HOST_NATIVES[TASK_SCOPE_OPEN_ID as usize].id == TASK_SCOPE_OPEN_ID);
     assert!(HOST_NATIVES[TASK_YIELD_ID as usize].id == TASK_YIELD_ID);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);

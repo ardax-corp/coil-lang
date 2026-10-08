@@ -1249,7 +1249,8 @@ impl Checker {
             "task_scope_close" | "task_join" => fun(&[int()], int()),
             "task_scope_error" | "task_error" => fun(&[int()], string()),
             "task_sleep" => fun(&[int()], unit_ty()),
-            "task_yield" => fun(&[], unit_ty()),
+            "task_yield" | "task_shield_enter" | "task_shield_exit" => fun(&[], unit_ty()),
+            "task_cancel" => fun(&[int()], unit_ty()),
             "task_spawn" => {
                 // (scope, coroutine) -> task id; the coroutine's type is free.
                 let t = self.counter.fresh();
