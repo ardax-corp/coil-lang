@@ -116,6 +116,157 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
     })
 }
 
+/// `callee` with its guard returns folded into `if` values, so it has a
+/// single exit [`inlinable`] can splice: `if c { ..; return a; } rest`
+/// becomes `if c { ..; a } else { rest }`, and a last `if` whose branches
+/// both return becomes the tail. `None` when some `return` sits anywhere
+/// else (in a loop, a match, an operand) or there is nothing to fold.
+pub fn single_exit(callee: &HirBody) -> Option<HirBody> {
+    let root = callee.root?;
+    let returns = callee.exprs.iter().filter(|e| matches!(e.kind, HirKind::Return(_))).count();
+    if returns < 2 {
+        return None;
+    }
+    let mut b = callee.clone();
+    let HirKind::Block { stmts, tail } = b.expr(root).kind.clone() else {
+        return None;
+    };
+    let mut folded = 0;
+    let value = fold_exit(&mut b, &stmts, tail, &mut folded)?;
+    if folded != returns {
+        return None;
+    }
+    b.exprs[root.0 as usize].kind = HirKind::Block {
+        stmts: Vec::new(),
+        tail: Some(value),
+    };
+    b.exprs[root.0 as usize].ty = ret_ty(&b);
+    Some(b)
+}
+
+/// The value of running `stmts` then `tail` up to the function's exit, as
+/// one expression; `folded` counts the `return`s it absorbed.
+fn fold_exit(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut usize) -> Option<HirId> {
+    let span = b.expr(b.root?).span;
+    // A tail `if` folds like a last statement.
+    if let Some(t) = tail
+        && matches!(b.expr(t).kind, HirKind::If { .. })
+        && has_return(b, t)
+    {
+        let mut all = stmts.to_vec();
+        all.push(t);
+        return fold_exit(b, &all, None, folded);
+    }
+    for (i, &s) in stmts.iter().enumerate() {
+        let HirKind::If { cond, then, els } = b.expr(s).kind.clone() else {
+            if has_return(b, s) {
+                return None;
+            }
+            continue;
+        };
+        if has_return(b, cond) {
+            return None;
+        }
+        let last = i + 1 == stmts.len() && tail.is_none();
+        let then_exits = exits(b, then);
+        let else_exits = els.is_some_and(|e| exits(b, e));
+        let value = match (then_exits, els) {
+            // `if c { ..; return a; }` then the rest of the block.
+            (true, None) => {
+                let t = fold_branch(b, then, folded)?;
+                let rest = fold_exit(b, &stmts[i + 1..], tail, folded)?;
+                (t, rest)
+            }
+            // A last `if` whose branches both return.
+            (true, Some(e)) if last && else_exits => (fold_branch(b, then, folded)?, fold_branch(b, e, folded)?),
+            _ if !has_return(b, s) => continue,
+            _ => return None,
+        };
+        let ty = ret_ty(b);
+        b.exprs[s.0 as usize].kind = HirKind::If {
+            cond,
+            then: value.0,
+            els: Some(value.1),
+        };
+        b.exprs[s.0 as usize].ty = ty.clone();
+        return Some(push_block(b, stmts[..i].to_vec(), Some(s), ty, span));
+    }
+    // No guard: at most a trailing `return`.
+    let (stmts, value) = match (tail, stmts.last().map(|&s| b.expr(s).kind.clone())) {
+        (Some(t), _) => match b.expr(t).kind.clone() {
+            HirKind::Return(v) => {
+                *folded += 1;
+                b.exprs[t.0 as usize].kind = HirKind::Lit(Lit::Unit);
+                b.exprs[t.0 as usize].ty = Some(ty::unit());
+                (stmts.to_vec(), v)
+            }
+            _ if has_return(b, t) => return None,
+            _ => (stmts.to_vec(), Some(t)),
+        },
+        (None, Some(HirKind::Return(v))) => {
+            let r = *stmts.last().expect("a last statement");
+            *folded += 1;
+            b.exprs[r.0 as usize].kind = HirKind::Lit(Lit::Unit);
+            b.exprs[r.0 as usize].ty = Some(ty::unit());
+            (stmts[..stmts.len() - 1].to_vec(), v)
+        }
+        (None, _) => (stmts.to_vec(), None),
+    };
+    let ty = ret_ty(b);
+    let value = value.unwrap_or_else(|| push_expr(b, HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+    Some(push_block(b, stmts, Some(value), ty, span))
+}
+
+/// The type the folded exits produce.
+fn ret_ty(b: &HirBody) -> Option<ty::Ty> {
+    b.ret.clone().or_else(|| Some(ty::unit()))
+}
+
+/// A branch block that ends in `return`, as a block that ends in its value.
+fn fold_branch(b: &mut HirBody, branch: HirId, folded: &mut usize) -> Option<HirId> {
+    let HirKind::Block { stmts, tail } = b.expr(branch).kind.clone() else {
+        return None;
+    };
+    fold_exit(b, &stmts, tail, folded)
+}
+
+/// `branch` is a block whose last step is a `return`.
+fn exits(b: &HirBody, branch: HirId) -> bool {
+    let HirKind::Block { stmts, tail } = &b.expr(branch).kind else {
+        return false;
+    };
+    let last = tail.or_else(|| stmts.last().copied());
+    last.is_some_and(|l| match &b.expr(l).kind {
+        HirKind::Return(_) => true,
+        HirKind::If { then, els: Some(e), .. } => exits(b, *then) && exits(b, *e),
+        _ => false,
+    })
+}
+
+/// Some `return` under `e`.
+fn has_return(b: &HirBody, e: HirId) -> bool {
+    let mut found = false;
+    super::lower::visit(b, e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
+    found
+}
+
+fn push_block(b: &mut HirBody, stmts: Vec<HirId>, tail: Option<HirId>, ty: Option<ty::Ty>, span: super::Span) -> HirId {
+    push_expr(b, HirKind::Block { stmts, tail }, ty, span)
+}
+
+fn push_expr(b: &mut HirBody, kind: HirKind, ty: Option<ty::Ty>, span: super::Span) -> HirId {
+    let id = HirId(b.exprs.len() as u32);
+    b.exprs.push(HirExpr {
+        kind,
+        ty,
+        layout: super::layout::Layout::Word,
+        span,
+        node: None,
+        flags: HirFlags::default(),
+    });
+    id
+}
+
 /// Rewrite every eligible call site of `caller`. `callee_of(call)` names
 /// the callee body and its [`Shape`] for a direct call the planner may
 /// inline; `growth` caps how many nodes the rewrite may add. Returns the
