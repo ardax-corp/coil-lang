@@ -177,13 +177,16 @@ pub fn poly_fun(ty: &Ty) -> bool {
     }
 }
 
-/// A closed function type whose parameters and result are plain words:
-/// no enum (its layout may be niche or a pair), no unit, no type variable.
+/// A function type whose parameters and result are plain words: no enum
+/// (its layout may be niche or a pair), no unit; a bare type variable is
+/// one word.
 /// The result may also be a closed enum: a call through the function
 /// returns a one-word enum as that word, any other boxed.
 fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    // A bare type parameter (a shared generic body's own `T -> U`
+    // parameter) is one boxed word too.
     let plain = |t: &Ty, seen: &mut Vec<String>| {
-        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
+        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
             && matches!(
                 classify_in(checker, t, seen),
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
