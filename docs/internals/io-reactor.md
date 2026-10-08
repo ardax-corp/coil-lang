@@ -17,8 +17,8 @@ Host streams store a [`NativeHandle`](../../machine/src/io_handle.rs) (`File` / 
 |---------|----------|
 | L0 `read` / `write` / `accept` | Always non-blocking; `WouldBlock` when not ready |
 | `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | Inside a `task::scope` with other tasks: suspend the **task** and run others ([tasks](tasks.md)). Otherwise: park the VM (`PendingIoWait`) until ready, inside a generator too (a generator never yields because of IO) |
-| `drive()` / `wait_ready()` | Leftovers from manual multiplexing; nothing registers waiters for them any more. Use `task::scope` |
-| **`block_on(coro)`** (prelude) | Resume until `done`. IO inside parks as above |
+| `drive()` / `wait_ready()` | **Deprecated** (warning `E0129`). Leftovers from manual multiplexing; nothing registers waiters for them any more. Use `task::scope` |
+| **`block_on(coro)`** (prelude) | **Deprecated** (warning `E0129`). Resume until `done`. IO inside parks as above |
 | Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)), so they work unchanged in and out of tasks |
 
 Concurrent IO uses tasks:
