@@ -46,4 +46,4 @@ pub(crate) use lower::fused_dispatch_cost;
 pub use lower::{lower, try_lower};
 pub use module::IlModule;
 pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
-pub use treeshake::{TreeshakeInput, prune_unused_functions};
+pub use treeshake::{TreeshakeInput, prune_unused_functions, reachable_functions};

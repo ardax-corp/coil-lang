@@ -827,6 +827,11 @@ pub struct Compiler {
     source_file_list: Vec<String>,
     /// One [`DebugLoc`] per bytecode slot (grows with [`Self::bytecode`]).
     debug_locs: Vec<DebugLoc>,
+    /// Host calls that need a capability (`open`, `env::exec`, …), by the
+    /// [`DebugLoc`] on their `HostInvoke` op. Checked against the grants
+    /// for the calls reachable from `main` / tests
+    /// ([`Compiler::capability_violations`]).
+    gated_host_calls: HashMap<(u32, u32, u32), GatedHostCall>,
 
     /// Compile-time scalar values for `const` bindings (frame stack).
     const_env_stack: Vec<HashMap<String, ConstValue>>,
@@ -1027,6 +1032,7 @@ impl Default for Compiler {
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
             source_file_list: Vec::new(),
+            gated_host_calls: HashMap::new(),
             const_env_stack: Vec::new(),
             static_const_values: HashMap::new(),
             current_function_qualified: None,
@@ -1204,4 +1210,12 @@ pub(crate) struct CleanupPad {
     pub thunks: Vec<(BbLabel, BbLabel)>,
     /// Slots the frame uses; the unwinder raises the stack top past them.
     pub frame_words: u32,
+}
+
+/// A host call that needs a capability.
+#[derive(Debug, Clone)]
+pub(crate) struct GatedHostCall {
+    pub caps: common::Caps,
+    /// The native's name (`open`, `env_exec`).
+    pub native: &'static str,
 }
