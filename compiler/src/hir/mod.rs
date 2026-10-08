@@ -21,6 +21,7 @@ pub mod check;
 pub mod layout;
 pub mod inline;
 pub mod lower;
+pub mod match_tree;
 pub mod print;
 
 use crate::typechecking::def_id::DefId;
