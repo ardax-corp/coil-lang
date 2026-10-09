@@ -47,6 +47,8 @@ pub struct TestOptions {
     /// Line coverage (`--coverage`); `None` = off.
     pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
+    /// `--contracts`; tests check every clause unless told otherwise.
+    pub contracts: Option<compiler::ContractLevel>,
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
     pub extra_roots: Vec<PathBuf>,
@@ -471,6 +473,7 @@ pub(crate) fn compile_test_file(
     };
     pipeline.set_include_tests(true);
     pipeline.set_opt_level(options.opt_level);
+    pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling
     // coil-stdlib checkout, when those directories exist.

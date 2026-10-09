@@ -11366,3 +11366,197 @@ fn tests_are_entry_points_for_capabilities() {
         "{msgs:?}"
     );
 }
+
+/// Compile and run with contract checks at `level`, from a file so panics
+/// name their locations (`contracts.hy:LINE:COL`).
+fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "coil_contracts_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("contracts.hy");
+    std::fs::write(&file, src).expect("write source");
+    let mut pipeline = test_pipeline();
+    pipeline.set_contracts(level);
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(file.to_str().expect("utf-8 path"))
+        .expect("compile");
+    let out = run_bytecode(bytecode, constants, &pipeline, Some(file.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+const CONTRACTS_SRC: &str = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+fn num(int n) -> string {
+    return format("%i", n);
+}
+
+fn half(int n) -> int
+    requires n >= 0, "negative"
+{
+    return n / 2;
+}
+
+fn clamp(int n) -> int
+    ensures result >= 0 && result <= 10
+{
+    if n < 0 {
+        return n;
+    }
+    return match n {
+        0 => 0,
+        default => cap(n),
+    };
+}
+
+fn cap(int n) -> int {
+    if n > 10 {
+        return 10;
+    }
+    return n;
+}
+
+fn parse(int n) -> Result<int, string>
+    ensures match result { Result::Ok(v) => v > 0, Result::Err(_) => true }
+{
+    let v = checked(n)?;
+    return Result::Ok(v - 5);
+}
+
+fn checked(int n) -> Result<int, string> {
+    if n < 0 {
+        return Result::Err("neg");
+    }
+    return Result::Ok(n);
+}
+
+class Counter {
+    pub n: int,
+}
+
+impl Counter {
+    pub fn bump(int by)
+        requires by > 0
+        ensures self.n > 0
+    {
+        self.n = self.n + by;
+    }
+}
+
+fn main() {
+    say(num(half(8)));
+    say(num(clamp(4)) + num(clamp(40)));
+    let c = new Counter(0);
+    c.bump(2);
+    say(num(c.n));
+    let ok = match parse(-1) {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => e,
+    };
+    say(ok);
+    say("|");
+    CASE
+}
+"#;
+
+fn contracts_case(case: &str, level: compiler::ContractLevel) -> String {
+    run_contracts_src(&CONTRACTS_SRC.replace("CASE", case), level)
+}
+
+#[test]
+fn contracts_pass_when_they_hold() {
+    let out = contracts_case("say(\"end\");", compiler::ContractLevel::All);
+    assert_eq!(out, "44102neg|end");
+}
+
+#[test]
+fn a_failed_requires_blames_the_caller() {
+    let out = contracts_case("say(num(half(-2)));", compiler::ContractLevel::All);
+    assert!(
+        out.starts_with("44102neg|panic: contract violated: requires n >= 0 (\"negative\") in half, called from "),
+        "got {out:?}"
+    );
+    // The call site's line (main's last statement), not the clause's.
+    assert!(out.contains("contracts.hy:77:"), "got {out:?}");
+    let out = contracts_case("c.bump(0);", compiler::ContractLevel::All);
+    assert!(out.contains("requires by > 0 in Counter::bump, called from "), "got {out:?}");
+}
+
+#[test]
+fn ensures_checks_every_return() {
+    // An early `return`, a `?` error return and the body's tail value.
+    let out = contracts_case("say(num(clamp(-3)));", compiler::ContractLevel::All);
+    assert!(
+        out.starts_with("44102neg|panic: contract violated: ensures result >= 0 && result <= 10 in clamp at "),
+        "got {out:?}"
+    );
+    let out = contracts_case(
+        "let r = match parse(3) { Result::Ok(v) => v, Result::Err(_) => 0 }; say(num(r));",
+        compiler::ContractLevel::All,
+    );
+    assert!(out.contains("panic: contract violated: ensures match result"), "got {out:?}");
+}
+
+#[test]
+fn contract_levels_skip_clauses() {
+    let out = contracts_case("say(num(clamp(-3)));", compiler::ContractLevel::Requires);
+    assert_eq!(out, "44102neg|-3");
+    let out = contracts_case("say(num(half(-2)));", compiler::ContractLevel::Off);
+    assert_eq!(out, "44102neg|-1");
+}
+
+#[test]
+fn a_contract_clause_must_not_have_effects() {
+    assert_compile_fails(
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn noisy(int n) -> bool {
+    write(stdout(), to_bytes("x"));
+    return n > 0;
+}
+
+fn f(int n) -> int
+    requires noisy(n)
+{
+    return n;
+}
+
+fn main() {
+    let _ = f(1);
+}
+"#,
+        compiler::ErrorCode::EffectMismatch,
+    );
+    // Reading memory is no effect: a `pure fn` keeps its contracts.
+    let out = run_contracts_src(
+        r#"
+pure fn first(Vec<int> xs) -> int
+    requires xs.len() > 0
+    ensures result == xs[0]
+{
+    return xs[0];
+}
+
+fn main() {
+    let v: Vec<int> = Vec::new();
+    v.push(7);
+    assert(first(v) == 7);
+}
+"#,
+        compiler::ContractLevel::All,
+    );
+    assert_eq!(out, "");
+}

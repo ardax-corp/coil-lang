@@ -472,6 +472,7 @@ impl<'a> ModuleEffects<'a> {
                 continue;
             }
             let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
+            out.extend(self.contract_violations(i));
             let visible = self.summaries[i].visible;
             if let Some(d) = &body.declared
                 && let Some(v) = self.violation(i, visible, d, || format!("`{local}` is declared `{}`", d.text), d.span)
@@ -493,6 +494,41 @@ impl<'a> ModuleEffects<'a> {
             {
                 out.push(v);
             }
+        }
+        out
+    }
+
+    /// A `requires` / `ensures` clause that does more than read memory: a
+    /// check must not change what the program does.
+    fn contract_violations(&self, index: usize) -> Vec<Violation> {
+        let body = &self.cx.module.bodies[index];
+        if body.contract_spans.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<Violation> = Vec::new();
+        for cause in self.explain(index) {
+            if cause.visible.is_pure() {
+                continue;
+            }
+            let Some(&clause) = body
+                .contract_spans
+                .iter()
+                .find(|(s, e)| *s <= cause.span.0 && cause.span.1 <= *e)
+            else {
+                continue;
+            };
+            if out.iter().any(|v| v.span == clause) {
+                continue;
+            }
+            out.push(Violation {
+                span: clause,
+                message: format!(
+                    "a contract clause must not have effects, but it {} ({})",
+                    cause.what,
+                    uses_names(cause.visible).join(", ")
+                ),
+                help: "check with pure functions; contracts only read values".to_string(),
+            });
         }
         out
     }

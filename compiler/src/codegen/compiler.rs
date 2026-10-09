@@ -1056,6 +1056,10 @@ impl Compiler {
         if self.checker.fn_has_rest(&lookup) {
             return None;
         }
+        // A failed `requires` names the caller's frame: keep the call.
+        if self.caller_blame_fns.contains(fqn) || self.caller_blame_fns.contains(&lookup) {
+            return None;
+        }
         let ops = self.bytecode.code_slice_ops(start, end);
         let recursive = self.current_function_qualified.as_deref() == Some(fqn)
             || self.current_function_table_key.as_deref() == Some(fqn)

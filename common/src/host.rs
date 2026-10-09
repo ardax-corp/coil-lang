@@ -1176,6 +1176,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: SUSPEND,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "contract_fail",
+        arity: 1,
+        id: 159,
+        effects: PURE,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1239,6 +1246,10 @@ pub const TASK_SHIELD_EXIT_ID: u16 = 155;
 pub const TASK_COND_NEW_ID: u16 = 156;
 /// Last wait-condition native (`task_cond_notify`).
 pub const TASK_COND_NOTIFY_ID: u16 = 158;
+/// A failed `requires` (archive minor 35). `HostOp::Task`: panics with the
+/// message plus the caller's location (the frame below), never returns.
+pub const CONTRACT_FAIL_ID: u16 = 159;
+pub const CONTRACT_FAIL_NATIVE: &str = "contract_fail";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1286,9 +1297,10 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 159);
+    assert!(HOST_NATIVES.len() == 160);
     assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);
     assert!(HOST_NATIVES[TASK_COND_NOTIFY_ID as usize].id == TASK_COND_NOTIFY_ID);
+    assert!(HOST_NATIVES[CONTRACT_FAIL_ID as usize].id == CONTRACT_FAIL_ID);
     assert!(HOST_NATIVES[UNWIND_RESUME_ID as usize].id == UNWIND_RESUME_ID);
     assert!(HOST_NATIVES[TASK_CANCEL_ID as usize].id == TASK_CANCEL_ID);
     assert!(HOST_NATIVES[TASK_SHIELD_EXIT_ID as usize].id == TASK_SHIELD_EXIT_ID);

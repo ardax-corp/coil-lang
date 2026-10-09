@@ -108,6 +108,12 @@ pub fn build_standard_host_natives(
         &mut register_id,
         common::TASK_COND_NEW_ID..=common::TASK_COND_NOTIFY_ID,
     );
+    // `contract_fail` reads the caller's frame, so the VM runs it too.
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::CONTRACT_FAIL_ID..=common::CONTRACT_FAIL_ID,
+    );
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -300,7 +306,7 @@ fn push_string_bytes(
     }
 }
 
-/// `task_*` natives: VM hooks ([`HostOp::Task`]), like `gc_collect`.
+/// `task_*` natives and `contract_fail`: VM hooks ([`HostOp::Task`]), like `gc_collect`.
 fn push_task_natives(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
@@ -1156,7 +1162,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some("task_cond_notify")
+            Some(common::CONTRACT_FAIL_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1456,6 +1462,10 @@ mod tests {
             registrations.get(end + 22).map(|(n, _)| n.as_str()),
             Some("task_cond_notify")
         );
-        assert_eq!(registrations.len(), end + 23);
+        assert_eq!(
+            registrations.get(end + 23).map(|(n, _)| n.as_str()),
+            Some(common::CONTRACT_FAIL_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 24);
     }
 }

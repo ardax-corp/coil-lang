@@ -110,6 +110,8 @@ pub struct Pipeline {
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
+    /// `--contracts`; `None` derives it from the opt level.
+    contracts: Option<crate::ContractLevel>,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -715,6 +717,7 @@ impl Pipeline {
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
             opt_level: crate::OptLevel::Standard,
+            contracts: None,
             debugger_attached: false,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
@@ -1468,6 +1471,7 @@ impl Pipeline {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
     ) -> (Vec<Byte>, Vec<u64>) {
+        crate::hir::set_contract_level(self.contracts());
         let mut bytecode = self.compiler_lazy_mut().compile(module, ast);
         let rejected = self
             .compiler_lazy()
@@ -1810,7 +1814,21 @@ impl Pipeline {
         }
     }
 
+    /// Which contract clauses become runtime checks. Unset, `-O0` / `-O1` /
+    /// `-Og` check everything and `-O2` and above only `requires`.
+    pub fn set_contracts(&mut self, level: crate::ContractLevel) {
+        self.contracts = Some(level);
+    }
+
+    pub fn contracts(&self) -> crate::ContractLevel {
+        self.contracts.unwrap_or(match self.opt_level {
+            crate::OptLevel::None | crate::OptLevel::Basic | crate::OptLevel::Debug => crate::ContractLevel::All,
+            _ => crate::ContractLevel::Requires,
+        })
+    }
+
     fn begin_compile_opt_stats(&mut self) {
+        crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
             crate::il::opt::begin_opt_stats();
             self.compiler_lazy_mut().set_collect_opt_stats(true);

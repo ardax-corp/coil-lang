@@ -394,6 +394,9 @@ pub struct Compiler {
     /// Top-level functions whose frames can never hold a heap word
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
+    /// Functions with a `requires` check: `contract_fail` reads the
+    /// caller's frame, so the tiny-inliner keeps their calls.
+    caller_blame_fns: HashSet<String>,
     precise_frames: Vec<common::PreciseFrameMap>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
@@ -670,6 +673,7 @@ impl Default for Compiler {
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
+            caller_blame_fns: HashSet::new(),
             precise_frames: Vec::new(),
             codegen_depth: 0,
             loop_stack: Vec::new(),

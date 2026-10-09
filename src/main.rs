@@ -470,6 +470,9 @@ fn main() {
                 pipeline.set_include_tests(true);
             }
             pipeline.set_opt_level(cli.opt_level);
+            if let Some(level) = cli.contracts {
+                pipeline.set_contracts(level);
+            }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);
             }

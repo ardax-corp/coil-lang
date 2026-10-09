@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{HostGrants, OptLevel};
+use compiler::{ContractLevel, HostGrants, OptLevel};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -32,6 +32,10 @@ pub struct OptLevelFlags {
     /// none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g
     #[arg(short = 'O', long = "opt-level", value_name = "LEVEL", value_parser = parse_opt_level)]
     pub opt_level: Option<OptLevel>,
+    /// Contract checks: all, requires, off (default: all at -O0/-O1/-Og and
+    /// in `coil test`, requires at -O2 and above)
+    #[arg(long, value_name = "LEVEL", value_parser = ContractLevel::parse)]
+    pub contracts: Option<ContractLevel>,
 }
 
 impl OptLevelFlags {

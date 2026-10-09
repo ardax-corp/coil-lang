@@ -2886,11 +2886,12 @@ impl Walk<'_> {
                 if depth != 0 {
                     return Err("nested-panic");
                 }
-                let [msg] = args.as_slice() else {
+                // A second argument (a literal) marks a failed `requires`.
+                let (&[msg] | &[msg, _]) = args.as_slice() else {
                     return Err("builtin");
                 };
-                self.word(*msg)?;
-                self.value(*msg, 0)
+                self.word(msg)?;
+                self.value(msg, 0)
             }
             HirKind::Return(value) => {
                 if depth != 0 {

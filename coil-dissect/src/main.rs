@@ -115,6 +115,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
             show_il_post: cli.il_post,
             source: !cli.no_source,
             opt_level: cli.opt.level(),
+            contracts: cli.opt.contracts,
             opt_stats: cli.profile.opt_stats,
             opt_stats_json: cli.profile.opt_stats_json,
             include_tests: cli.include_tests,

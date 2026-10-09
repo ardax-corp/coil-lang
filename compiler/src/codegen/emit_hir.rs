@@ -1039,6 +1039,7 @@ impl Compiler {
             pinned_param: body.pinned_param,
             captures: body.captures.clone(),
             declared: body.declared.clone(),
+            contract_spans: body.contract_spans.clone(),
             locals: body
                 .locals
                 .iter()
@@ -7858,9 +7859,23 @@ impl Compiler {
                 args,
             } => {
                 // As the AST: the message and `Panic`, all at the panic's
-                // own location.
+                // own location. A second argument is a failed `requires`:
+                // `contract_fail` panics naming the caller instead.
                 let il_start = self.bytecode.il_mut().raw_len();
+                let blame = (args.len() == 2)
+                    .then(|| self.native_id(common::CONTRACT_FAIL_NATIVE))
+                    .flatten();
+                if let Some(native_id) = blame {
+                    self.bytecode
+                        .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+                }
                 self.hir_value(hir, emit, args[0], &BOXED, 0);
+                if blame.is_some() {
+                    self.bytecode.push_host_invoke(1);
+                    if let Some(key) = self.current_function_table_key.clone() {
+                        self.caller_blame_fns.insert(key);
+                    }
+                }
                 self.bytecode.push(Byte::new(Instruction::Panic));
                 let (start, end) = hir.expr(id).span;
                 let loc = self.loc_from_span(SimpleSpan::from(start..end));
