@@ -11338,7 +11338,8 @@ fn inlined_host_calls_still_need_their_capabilities() {
 /// is not a literal; a static initializer always runs.
 #[test]
 fn open_mode_and_static_initializers_decide_capabilities() {
-    let src = "use io::{open};\nstatic let LOG = open(\"log.txt\", \"a\");\nfn mode() -> string {\n    return \"r\";\n}\nfn main() {\n    let _ = open(\"in.txt\", mode());\n}\n";
+    // `mode` hides its literal behind a `Vec`, which inlining keeps.
+    let src = "use io::{open};\nstatic let LOG = open(\"log.txt\", \"a\");\nfn mode() -> string {\n    let v: Vec<string> = Vec::new();\n    v.push(\"r\");\n    return v[0];\n}\nfn main() {\n    let _ = open(\"in.txt\", mode());\n}\n";
     let mut pipeline = deny_pipeline();
     assert!(pipeline.compile_src(src).is_err());
     let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();

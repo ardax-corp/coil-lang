@@ -41,12 +41,14 @@ const CORPUS: &[&str] = &[
 /// `functions.hy`'s `LOAD; CONST; SHL` before a join still fuses.
 /// Typed inlining of pair-returning callees (HIR phase 7f) splices
 /// `parse_pair` into `match_pair` and `chain_pair` (`option_pair.hy` grows).
+/// Typed inlining into test bodies retargets four (`arithmetic.hy` grows:
+/// its tests inline `opaque`).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "f8a5da737a70192f_915"),
-    ("functions.hy", "a1185b8127e3435d_304"),
+    ("arithmetic.hy", "34e41e3bbb193dc0_1278"),
+    ("functions.hy", "070467521c6c32de_277"),
     ("loops.hy", "d91e9ca0105e4005_248"),
-    ("option_pair.hy", "9bd375f8a6acb9c1_340"),
-    ("user_trait_dispatch.hy", "9bc2e6077835a020_122"),
+    ("option_pair.hy", "e410c0644929fe98_338"),
+    ("user_trait_dispatch.hy", "1514ed8b192197bd_120"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

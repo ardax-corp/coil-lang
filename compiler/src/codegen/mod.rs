@@ -627,6 +627,10 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// Scalar function bodies of modules compiled so far, by table key,
+    /// with their calls named by key: callees another module's typed
+    /// inlining may splice ([`Compiler::hir_portable_body`]).
+    hir_portable: HashMap<String, crate::hir::HirBody>,
 }
 
 impl Default for Compiler {
@@ -758,6 +762,7 @@ impl Default for Compiler {
             ),
             hir_int_search: crate::hir::match_tree::int_search_from_env(),
             hir_fn_names: HashMap::new(),
+            hir_portable: HashMap::new(),
         }
     }
 }
