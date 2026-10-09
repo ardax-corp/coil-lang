@@ -569,13 +569,15 @@ impl Compiler {
             }
             plan => plan,
         };
-        // Constants fold, a repeated pure expression reads the local that
+        // Short counted loops unroll, constants fold, a repeated pure expression reads the local that
         // holds its first value, loop-invariant expressions move in front of
         // their loops, and counted-loop index sites are proven in bounds,
         // when the rewritten body plans.
         let plan = match plan {
             Ok(emit)
-                if (self.opt_options.algebraic || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds)
+                if (self.opt_options.loop_unroll
+                    || self.opt_options.algebraic
+                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds)
                     && !self.debugger_attached
                     && !hir.is_coro =>
             {
@@ -585,14 +587,16 @@ impl Compiler {
                 // A finalizer that can resize runs at any allocation: no
                 // length is steady then.
                 let lengths = self.alloc_steady.then_some(&steady as &dyn Fn(&str) -> bool);
-                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body)).flatten();
-                let body_f = folded.as_ref().unwrap_or(body);
+                let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
+                let body_u = unrolled.as_ref().unwrap_or(body);
+                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
+                let body_f = folded.as_ref().unwrap_or(body_u);
                 let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
                 let body_c = cse.as_ref().unwrap_or(body_f);
                 let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
                 let body_l = licm.as_ref().unwrap_or(body_c);
                 let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
-                match bounds.or(licm).or(cse).or(folded) {
+                match bounds.or(licm).or(cse).or(folded).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))

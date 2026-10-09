@@ -29,6 +29,7 @@ pub mod cse;
 pub mod fold;
 pub mod licm;
 pub mod bounds;
+pub mod unroll;
 pub mod tuple_sroa;
 
 use crate::typechecking::def_id::DefId;

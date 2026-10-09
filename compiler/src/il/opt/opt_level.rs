@@ -157,7 +157,8 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.mir_specialize = true;
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), local CSE,
-    // loop-invariant code motion and counted-loop bounds proofs.
+    // loop-invariant code motion, counted-loop bounds proofs and full unroll
+    // of short counted loops (not at Size: it grows code).
     o.algebraic = true;
     let standard = matches!(
         level,
@@ -167,6 +168,7 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.local_cse = standard;
     o.licm = standard;
     o.loop_bounds = standard;
+    o.loop_unroll = matches!(level, OptLevel::Standard | OptLevel::Aggressive);
     o
 }
 
@@ -314,16 +316,11 @@ mod tests {
     }
 
     #[test]
-    fn size_omits_loop_unroll_and_clone_shared_return() {
+    fn size_omits_clone_shared_return() {
         let names = OptLevel::Size.pass_names();
-        assert!(!names.contains(&"loop_unroll"));
         assert!(!names.contains(&"clone_shared_return"));
-        let standard = OptLevel::Standard.pass_names();
-        for n in &standard {
-            if *n == "loop_unroll" || *n == "clone_shared_return" {
-                continue;
-            }
-            assert!(names.contains(n), "Size missing {n}");
+        for n in OptLevel::Standard.pass_names() {
+            assert!(n == "clone_shared_return" || names.contains(&n), "Size missing {n}");
         }
     }
 
