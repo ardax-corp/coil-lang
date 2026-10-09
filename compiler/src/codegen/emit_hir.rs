@@ -583,6 +583,7 @@ impl Compiler {
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
                 || home(callee) != here
                 || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
+                    && !callee.ret_layout.is_niche()
                     && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
             {
                 return Err(format!("callee `{}`", callee.name));
