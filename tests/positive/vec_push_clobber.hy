@@ -26,7 +26,13 @@ fn serialize_enum(Vec<LockPackage> packages) -> string {
         let p = packages[i];
         i = i + 1;
         match p {
-            LockPackage::Git(name, git, tag, rev, hash) => {
+            LockPackage::Git(
+                name,
+                git,
+                tag,
+                rev,
+                hash,
+            ) => {
                 lines.push(format("name = %s", quote(name)));
                 lines.push(format("git = %s", quote(git)));
                 lines.push(format("tag = %s", quote(tag)));
@@ -73,10 +79,22 @@ test("push match binding keeps both strings") {
     let a = LockPackage::Git("alpha", "a.git", "v1", "r1", "h1");
     let b = LockPackage::Git("zeta", "z.git", "v2", "r2", "h2");
     lines.push(match a {
-        LockPackage::Git(name, git, tag, rev, hash) => name,
+        LockPackage::Git(
+            name,
+            git,
+            tag,
+            rev,
+            hash,
+        ) => name,
     });
     lines.push(match b {
-        LockPackage::Git(name, git, tag, rev, hash) => name,
+        LockPackage::Git(
+            name,
+            git,
+            tag,
+            rev,
+            hash,
+        ) => name,
     });
     assert(len(lines) == 2)?;
 }
