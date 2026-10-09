@@ -428,6 +428,7 @@ fn walk_tree(
             walk_tree(checker, body, pure, env, calls);
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,
@@ -1027,6 +1028,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
             f(body);
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

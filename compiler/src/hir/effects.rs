@@ -513,7 +513,8 @@ impl<'a> ModuleEffects<'a> {
             let Some(&clause) = body
                 .contract_spans
                 .iter()
-                .find(|(s, e)| *s <= cause.span.0 && cause.span.1 <= *e)
+                // By start: a node's span can run on over trailing trivia.
+                .find(|(s, e)| *s <= cause.span.0 && cause.span.0 < *e)
             else {
                 continue;
             };

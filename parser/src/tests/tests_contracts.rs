@@ -56,3 +56,35 @@ fn format_puts_each_contract_on_its_own_line() {
     let methods = "impl Ring {\n    fn push(int x)\n        requires x > 0\n    {\n        return;\n    }\n}\n";
     assert_eq!(crate::format_source(methods).expect("format"), methods);
 }
+
+#[test]
+fn loops_take_invariant_and_decreases() {
+    let src = "fn f(int n) {\n    let i = 0;\n    while i < n\n        invariant i <= n, \"bounded\"\n        decreases n - i\n    {\n        i = i + 1;\n    }\n    for x in xs\n        invariant i >= 0\n    {\n        i = i + x;\n    }\n    while i > 0 {\n        i = i - 1;\n    }\n}\n";
+    assert_eq!(crate::format_source(src).expect("format"), src);
+    let out = Pratt::default().parse(src).expect("parse failed");
+    let Expression::Program(items) = *out.1 else { panic!("expected program") };
+    let Expression::Function { body: Some(body), .. } = items[0].1.as_ref() else { panic!("expected a function") };
+    let Expression::Block(stmts) = body.1.as_ref() else { panic!("expected a block") };
+    let kinds: Vec<Vec<ContractKind>> = stmts
+        .iter()
+        .filter_map(|s| {
+            let mut s = s;
+            while let Expression::Expr(inner) | Expression::Statement(inner) = s.1.as_ref() {
+                s = inner;
+            }
+            match s.1.as_ref() {
+                Expression::Loop { contracts, .. } => Some(contracts.iter().map(|c| c.kind).collect()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![vec![ContractKind::Invariant, ContractKind::Decreases], vec![ContractKind::Invariant], vec![]]
+    );
+    // A `for` loop ends when its items do: no `decreases`.
+    assert!(Pratt::default().parse("fn f() { for x in xs decreases 1 { } }").is_err());
+    // Loop clauses are not function clauses, and the other way round.
+    assert!(Pratt::default().parse("fn f() invariant true { }").is_err());
+    assert!(Pratt::default().parse("fn f() { while true requires true { } }").is_err());
+}

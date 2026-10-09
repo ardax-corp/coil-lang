@@ -391,6 +391,7 @@ fn walk_escapes(
             }
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

@@ -630,20 +630,124 @@ impl<'c, 'm> Cx<'c, 'm> {
         let span = (c.span.start, c.span.end);
         let cond = self.expr(b, &c.expr);
         let not = self.synth(b, span, HirKind::Un { op: UnOp::Not, operand: cond }, Some(coil_ty::boolean()));
+        let text = Self::contract_text(c, fname);
+        let then = self.contract_panic(b, span, text, c.kind == ContractKind::Requires);
+        self.synth(b, span, HirKind::If { cond: not, then, els: None }, Some(coil_ty::unit()))
+    }
+
+    /// `contract violated: <keyword> <clause> ("<message>") in <function>`.
+    fn contract_text(c: &Contract<'_>, fname: &str) -> String {
+        Self::contract_text_why(c, fname, None)
+    }
+
+    fn contract_text_why(c: &Contract<'_>, fname: &str, why: Option<&str>) -> String {
         let mut text = format!("contract violated: {} {}", c.kind.keyword(), c.text);
         if let Some(m) = c.message {
             text.push_str(&format!(" (\"{m}\")"));
         }
+        if let Some(why) = why {
+            text.push_str(&format!(" ({why})"));
+        }
         text.push_str(&format!(" in {fname}"));
+        text
+    }
+
+    /// `{ panic text }`; `blame_caller` reports the caller's location
+    /// (`contract_fail` in the VM) instead of the clause's.
+    fn contract_panic(&mut self, b: &mut BodyBuilder, span: Span, text: String, blame_caller: bool) -> HirId {
         let msg = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
         let mut args = vec![msg];
-        if c.kind == ContractKind::Requires {
+        if blame_caller {
             // A second argument marks the caller-blaming form.
             args.push(self.synth(b, span, HirKind::Lit(Lit::Bool(true)), Some(coil_ty::boolean())));
         }
         let panic = self.synth(b, span, HirKind::Builtin { op: Builtin::Panic, args }, Some(coil_ty::never()));
-        let then = self.synth(b, span, HirKind::Block { stmts: vec![panic], tail: None }, Some(coil_ty::unit()));
-        self.synth(b, span, HirKind::If { cond: not, then, els: None }, Some(coil_ty::unit()))
+        self.synth(b, span, HirKind::Block { stmts: vec![panic], tail: None }, Some(coil_ty::unit()))
+    }
+
+    /// A loop with `invariant` / `decreases` clauses:
+    ///
+    /// ```text
+    /// { let first = true; let prev = 0;
+    ///   loop { invariants; let cur = d; cur >= 0; first || cur < prev;
+    ///          first = false; prev = cur; if cond { body } else { break } }
+    ///   invariants }   // `for` loops: after the last item
+    /// ```
+    ///
+    /// so an invariant holds before every test of the condition and the
+    /// `decreases` value is non-negative and falls on every iteration.
+    #[allow(clippy::too_many_arguments)]
+    fn checked_loop(
+        &mut self,
+        b: &mut BodyBuilder,
+        node: &Output<'_>,
+        identifier: Option<&Output<'_>>,
+        pattern: Option<&LetPattern<'_>>,
+        iterable: &Output<'_>,
+        body: &Output<'_>,
+        contracts: &[Contract<'_>],
+    ) -> HirId {
+        let span = span_of(node);
+        let fname = b.body.name.clone();
+        let unit = Some(coil_ty::unit());
+        let boolean = Some(coil_ty::boolean());
+        let int = Some(coil_ty::int());
+        b.body.contract_spans.extend(contracts.iter().map(|c| (c.span.start, c.span.end)));
+        let mut pre = Vec::new();
+        let mut checks = Vec::new();
+        for c in contracts.iter().filter(|c| c.kind == ContractKind::Invariant) {
+            checks.push(self.contract_check(b, c, &fname));
+        }
+        for c in contracts.iter().filter(|c| c.kind == ContractKind::Decreases) {
+            let cs = (c.span.start, c.span.end);
+            let first = b.temp("decreases$first", boolean.clone());
+            let prev = b.temp("decreases$prev", int.clone());
+            let t = self.synth(b, cs, HirKind::Lit(Lit::Bool(true)), boolean.clone());
+            pre.push(self.synth(b, cs, HirKind::Let { local: first, init: Some(t) }, unit.clone()));
+            let z = self.synth(b, cs, HirKind::Lit(Lit::Int(0)), int.clone());
+            pre.push(self.synth(b, cs, HirKind::Let { local: prev, init: Some(z) }, unit.clone()));
+
+            let cur = b.temp("decreases$cur", int.clone());
+            let value = self.expr(b, &c.expr);
+            checks.push(self.synth(b, cs, HirKind::Let { local: cur, init: Some(value) }, unit.clone()));
+            // cur >= 0
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            let z = self.synth(b, cs, HirKind::Lit(Lit::Int(0)), int.clone());
+            let neg = self.synth(b, cs, HirKind::Bin { op: BinOp::Lt, lhs: l, rhs: z }, boolean.clone());
+            let msg = Self::contract_text_why(c, &fname, Some("went negative"));
+            let fail = self.contract_panic(b, cs, msg, false);
+            checks.push(self.synth(b, cs, HirKind::If { cond: neg, then: fail, els: None }, unit.clone()));
+            // first || cur < prev
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            let p = self.synth(b, cs, HirKind::Local(prev), int.clone());
+            let ge = self.synth(b, cs, HirKind::Bin { op: BinOp::Ge, lhs: l, rhs: p }, boolean.clone());
+            let msg = Self::contract_text_why(c, &fname, Some("did not decrease"));
+            let fail = self.contract_panic(b, cs, msg, false);
+            let not_first = {
+                let f = self.synth(b, cs, HirKind::Local(first), boolean.clone());
+                self.synth(b, cs, HirKind::Un { op: UnOp::Not, operand: f }, boolean.clone())
+            };
+            let inner = self.synth(b, cs, HirKind::If { cond: ge, then: fail, els: None }, unit.clone());
+            let inner = self.synth(b, cs, HirKind::Block { stmts: vec![inner], tail: None }, unit.clone());
+            checks.push(self.synth(b, cs, HirKind::If { cond: not_first, then: inner, els: None }, unit.clone()));
+            // first = false; prev = cur
+            let place = self.synth(b, cs, HirKind::Local(first), boolean.clone());
+            let f = self.synth(b, cs, HirKind::Lit(Lit::Bool(false)), boolean.clone());
+            checks.push(self.synth(b, cs, HirKind::Assign { place, value: f }, unit.clone()));
+            let place = self.synth(b, cs, HirKind::Local(prev), int.clone());
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            checks.push(self.synth(b, cs, HirKind::Assign { place, value: l }, unit.clone()));
+        }
+        let is_for = identifier.is_some() || pattern.is_some();
+        let lp = self.loop_(b, node, identifier, pattern, iterable, body, &checks);
+        let mut stmts = pre;
+        stmts.push(lp);
+        if is_for {
+            for c in contracts.iter().filter(|c| c.kind == ContractKind::Invariant) {
+                stmts.push(self.contract_check(b, c, &fname));
+            }
+        }
+        self.synth(b, span, HirKind::Block { stmts, tail: None }, unit)
     }
 
     /// The `ensures` clauses, with `result` bound to the returned value: a
@@ -1036,8 +1140,11 @@ impl<'c, 'm> Cx<'c, 'm> {
                 }
                 None => self.expr(b, body),
             },
-            E::Loop { identifier, pattern, iterable, body } => {
-                self.loop_(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body)
+            E::Loop { identifier, pattern, iterable, body, contracts } => {
+                if contracts.is_empty() || !super::contract_level().checks_ensures() {
+                    return self.loop_(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body, &[]);
+                }
+                self.checked_loop(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body, contracts)
             }
             E::Break => self.emit_ty(b, node, HirKind::Break, Some(coil_ty::never())),
             E::Continue => self.emit_ty(b, node, HirKind::Continue, Some(coil_ty::never())),
@@ -1504,7 +1611,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         els.unwrap_or_else(|| self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())))
     }
 
-    fn loop_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, identifier: Option<&Output<'_>>, pattern: Option<&LetPattern<'_>>, iterable: &Output<'_>, body: &Output<'_>) -> HirId {
+    /// `checks` are statements run at the start of every iteration, before a
+    /// `while` loop's condition and before a `for` loop's next item.
+    #[allow(clippy::too_many_arguments)]
+    fn loop_(
+        &mut self,
+        b: &mut BodyBuilder,
+        node: &Output<'_>,
+        identifier: Option<&Output<'_>>,
+        pattern: Option<&LetPattern<'_>>,
+        iterable: &Output<'_>,
+        body: &Output<'_>,
+        checks: &[HirId],
+    ) -> HirId {
         let span = span_of(node);
         if identifier.is_none() && pattern.is_none() {
             // `while cond { body }` is `loop { if cond { body } else { break } }`.
@@ -1514,7 +1633,9 @@ impl<'c, 'm> Cx<'c, 'm> {
             b.scopes.pop();
             let brk = self.synth(b, span, HirKind::Break, Some(coil_ty::never()));
             let test = self.synth(b, span, HirKind::If { cond, then, els: Some(brk) }, Some(coil_ty::unit()));
-            let block = self.synth(b, span, HirKind::Block { stmts: vec![test], tail: None }, Some(coil_ty::unit()));
+            let mut stmts = checks.to_vec();
+            stmts.push(test);
+            let block = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
             return self.emit_ty(b, node, HirKind::Loop { body: block }, Some(coil_ty::unit()));
         }
         let iter = self.expr(b, iterable);
@@ -1539,8 +1660,13 @@ impl<'c, 'm> Cx<'c, 'm> {
             HirPat::Wild => HirPat::Bind(b.temp("item", item_ty.clone())),
             pat => pat,
         };
-        let body = self.expr(b, body);
+        let mut body = self.expr(b, body);
         b.scopes.pop();
+        if !checks.is_empty() {
+            let mut stmts = checks.to_vec();
+            stmts.push(body);
+            body = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
+        }
         self.emit_ty(
             b,
             node,

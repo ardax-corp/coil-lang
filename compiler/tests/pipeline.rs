@@ -11606,3 +11606,100 @@ fn main() {
         "got {out:?}"
     );
 }
+
+#[test]
+fn loop_invariants_and_decreases_are_checked() {
+    let src = r#"
+fn sum_to(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n
+        invariant i <= n
+        decreases n - i
+    {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn stuck(int n) {
+    let i = 0;
+    while i < n
+        decreases n - i
+    {
+        if i == 2 {
+            continue;
+        }
+        i = i + 1;
+    }
+}
+
+fn total(Vec<int> xs) -> int {
+    let t = 0;
+    for x in xs
+        invariant t >= 0, "only positives"
+    {
+        t = t + x;
+    }
+    return t;
+}
+
+fn main() {
+    assert(sum_to(5) == 10);
+    let v: Vec<int> = Vec::new();
+    v.push(3);
+    v.push(4);
+    assert(total(v) == 7);
+    let w: Vec<int> = Vec::new();
+    w.push(3);
+    w.push(-9);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    // The invariant fails after the last item, outside the loop.
+    let out = run_contracts_src(&src.replace("CASE", "total(w);"), All);
+    assert!(
+        out.contains("contract violated: invariant t >= 0 (\"only positives\") in total"),
+        "got {out:?}"
+    );
+    let out = run_contracts_src(&src.replace("CASE", "stuck(5);"), All);
+    assert!(out.contains("contract violated: decreases n - i (did not decrease) in stuck"), "got {out:?}");
+    // Loop clauses are checked with `all` only.
+    assert_eq!(run_contracts_src(&src.replace("CASE", "total(w);"), Requires), "");
+}
+
+#[test]
+fn loop_clauses_are_typed() {
+    assert_compile_fails(
+        "fn main() {\n    let i = 0;\n    while i < 3\n        decreases i > 0\n    {\n        i = i + 1;\n    }\n}\n",
+        compiler::ErrorCode::TypeMismatch,
+    );
+    // Only clauses that are compiled in are checked for effects.
+    let mut pipeline = test_pipeline();
+    pipeline.set_contracts(compiler::ContractLevel::All);
+    assert_compile_fails_pipeline(
+        &mut pipeline,
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn noisy() -> bool {
+    write(stdout(), to_bytes("x"));
+    return true;
+}
+
+fn main() {
+    let i = 0;
+    while i < 3
+        invariant noisy()
+    {
+        i = i + 1;
+    }
+}
+"#,
+        compiler::ErrorCode::EffectMismatch,
+    );
+}

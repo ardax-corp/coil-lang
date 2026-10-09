@@ -82,6 +82,10 @@ impl Display for EffectDecl<'_> {
 pub enum ContractKind {
     Requires,
     Ensures,
+    /// On a loop: holds before every test of the loop's condition.
+    Invariant,
+    /// On a `while` loop: a non-negative `int` that every iteration lowers.
+    Decreases,
 }
 
 impl ContractKind {
@@ -89,6 +93,8 @@ impl ContractKind {
         match self {
             Self::Requires => "requires",
             Self::Ensures => "ensures",
+            Self::Invariant => "invariant",
+            Self::Decreases => "decreases",
         }
     }
 }
@@ -522,6 +528,8 @@ pub enum Expression<'expr> {
         pattern: Option<LetPattern<'expr>>,
         iterable: Output<'expr>,
         body: Output<'expr>,
+        /// `invariant` / `decreases` clauses between the header and body.
+        contracts: Vec<Contract<'expr>>,
     },
 
     /// `if let P = e { then } [else …]`. `else_arm` is always present
@@ -1377,15 +1385,18 @@ impl<'a> Display for Expression<'a> {
                 pattern,
                 iterable,
                 body,
-            } => match (identifier, pattern) {
-                (Some(ident), _) => {
-                    write!(f, "for {} in {} {{\n{}}}", ident.1, iterable.1, body.1)
+                contracts,
+            } => {
+                match (identifier, pattern) {
+                    (Some(ident), _) => write!(f, "for {} in {}", ident.1, iterable.1)?,
+                    (None, Some(pat)) => write!(f, "for {} in {}", pat, iterable.1)?,
+                    (None, None) => write!(f, "while {}", iterable.1)?,
                 }
-                (None, Some(pat)) => {
-                    write!(f, "for {} in {} {{\n{}}}", pat, iterable.1, body.1)
+                for c in contracts {
+                    write!(f, " {c}")?;
                 }
-                (None, None) => write!(f, "while {} {{\n{}}}", iterable.1, body.1),
-            },
+                write!(f, " {{\n{}}}", body.1)
+            }
             Self::IfLet {
                 scrutinee,
                 then_arm,

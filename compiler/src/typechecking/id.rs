@@ -377,15 +377,19 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             body,
             identifier,
             pattern: _,
+            contracts,
         } => {
             // For-in binds `identifier` before the body; visit order must
-            // match infer (iterable → binding → body). Pattern for-in has
-            // no Identifier node.
+            // match infer (iterable → binding → body → clauses). Pattern
+            // for-in has no Identifier node.
             visit(iterable);
             if let Some(i) = identifier {
                 visit(i);
             }
             visit(body);
+            for c in contracts {
+                visit(&c.expr);
+            }
         }
 
         // Patterns have no NodeId; walk bodies only (lockstep with infer).

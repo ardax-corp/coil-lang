@@ -1021,27 +1021,22 @@ impl<'s> Formatter<'s> {
                 pattern,
                 iterable,
                 body,
+                contracts,
             } => {
                 if let Some(ident) = identifier {
                     self.push_str("for ");
                     self.fmt_output(ident);
                     self.push_str(" in ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 } else if let Some(pat) = pattern {
                     self.push_str("for ");
                     self.fmt_let_pattern(pat);
                     self.push_str(" in ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 } else {
                     self.push_str("while ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 }
+                self.fmt_condition(iterable);
+                self.fmt_contracts(contracts);
+                self.fmt_block_or_inline(body);
             }
 
             Expression::IfLet {
@@ -2254,8 +2249,21 @@ impl<'s> Formatter<'s> {
         if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
             self.push_str(&format!(" {e}"));
         }
-        // Each contract on its own line, one level in; then the body brace
-        // on a line of its own.
+        self.fmt_contracts(contracts);
+        match body {
+            Some(b) => {
+                self.fmt_block_or_inline(b);
+            }
+            None => {
+                self.out.truncate(self.out.trim_end().len());
+                self.push_str(";");
+            }
+        }
+    }
+
+    /// Each contract on its own line, one level in; then the body brace on a
+    /// line of its own. With no contracts, the space before the brace.
+    fn fmt_contracts(&mut self, contracts: &[crate::ast::Contract<'_>]) {
         self.with_indent(|f| {
             for c in contracts {
                 f.newline();
@@ -2268,17 +2276,11 @@ impl<'s> Formatter<'s> {
                 }
             }
         });
-        match body {
-            Some(b) => {
-                if contracts.is_empty() {
-                    self.push_str(" ");
-                } else {
-                    self.newline();
-                    self.write_indent();
-                }
-                self.fmt_block_or_inline(b);
-            }
-            None => self.push_str(";"),
+        if contracts.is_empty() {
+            self.push_str(" ");
+        } else {
+            self.newline();
+            self.write_indent();
         }
     }
 

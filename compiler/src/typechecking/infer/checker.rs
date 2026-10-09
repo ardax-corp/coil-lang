@@ -2740,6 +2740,7 @@ impl Checker {
                 pattern,
                 iterable,
                 body,
+                contracts,
             } => {
                 if identifier.is_some() || pattern.is_some() {
                     // `for x in expr { body }` / `for (k, v) in …`
@@ -2763,11 +2764,13 @@ impl Checker {
                     }
                     let _ = self.infer(body);
                     self.env.pop();
+                    self.infer_loop_contracts(contracts);
                     unit_ty()
                 } else {
                     let it = self.infer(iterable);
                     self.unify(&it, &boolean(), &iterable.0.into_range(), "while condition");
                     let _ = self.infer(body);
+                    self.infer_loop_contracts(contracts);
                     let lookup = |name: &str| self.const_fold_env.get(name).copied();
                     if crate::typechecking::control_flow::is_infinite_loop(expr, &lookup) {
                         never()
@@ -13743,6 +13746,7 @@ impl Checker {
                 self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
             }
             Expression::Loop {
+                contracts: _,
                 iterable,
                 body,
                 identifier,
@@ -14687,6 +14691,7 @@ impl Checker {
             }
 
             Expression::Loop {
+                contracts: _,
                 iterable,
                 body,
                 identifier,

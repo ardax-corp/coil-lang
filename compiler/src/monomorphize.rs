@@ -706,6 +706,7 @@ where
             }
         }
         Expression::Loop {
+            contracts: _,
             iterable,
             body,
             identifier,

@@ -162,6 +162,21 @@ impl Checker {
         }
     }
 
+    /// A loop's `invariant` is a `bool` and its `decreases` an `int`, in the
+    /// scope around the loop (a `for` binding is not visible).
+    pub(super) fn infer_loop_contracts(&mut self, contracts: &[Contract<'_>]) {
+        for c in contracts {
+            let prev_expected = self.current_expected.take();
+            let ty = self.infer(&c.expr);
+            self.current_expected = prev_expected;
+            let want = match c.kind {
+                ContractKind::Decreases => crate::typechecking::ty::int(),
+                _ => crate::typechecking::ty::boolean(),
+            };
+            self.unify(&want, &ty, &c.span.into_range(), c.kind.keyword());
+        }
+    }
+
     #[inline(never)]
     pub(super) fn infer_lambda(
         &mut self,

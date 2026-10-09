@@ -174,6 +174,7 @@ fn walk(
         }
 
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern,
             iterable,
@@ -214,6 +215,7 @@ pub fn is_infinite_loop(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<Const
         | Expression::ExprStatement(inner)
         | Expression::Group(inner) => is_infinite_loop(inner, lookup),
         Expression::Loop {
+            contracts: _,
             identifier: None,
             pattern: None,
             iterable,
@@ -315,6 +317,7 @@ mod tests {
             pattern: None,
             iterable: out(cond),
             body,
+            contracts: Vec::new(),
         })
     }
 

@@ -1119,27 +1119,63 @@ impl<'pratt> Pratt<'pratt> {
     /// optional `, "message"`. Both words are contextual.
     fn contracts(
         &self,
+        kinds: &'static [ast::ContractKind],
     ) -> impl Parser<'pratt, &'pratt str, Vec<ast::Contract<'pratt>>, extra::Err<Rich<'pratt, char>>>
            + Clone
            + 'pratt {
-        let kind = text::ident().padded_by(trivia()).try_map(|w: &'pratt str, span| match w {
-            "requires" => Ok(ast::ContractKind::Requires),
-            "ensures" => Ok(ast::ContractKind::Ensures),
-            _ => Err(Rich::custom(span, "expected `requires` or `ensures`")),
+        self.contracts_with(self.expr(), kinds)
+    }
+
+    /// [`Self::contracts`] with the expression parser of the caller (a loop
+    /// inside an expression must not build a fresh one: it recurses).
+    fn contracts_with<
+        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: E,
+        kinds: &'static [ast::ContractKind],
+    ) -> impl Parser<'pratt, &'pratt str, Vec<ast::Contract<'pratt>>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
+        // The clause's span runs from its keyword to the end of its
+        // expression or message, without the trivia around it.
+        let kind = trivia().ignore_then(text::ident().try_map(move |w: &'pratt str, span: SimpleSpan| {
+            kinds
+                .iter()
+                .copied()
+                .find(|k| k.keyword() == w)
+                .map(|k| (k, span.start))
+                .ok_or_else(|| Rich::custom(span, "expected a contract clause"))
+        }));
+        let expr = expr.map_with(|e, x| {
+            let slice: &str = x.slice();
+            let span: SimpleSpan = x.span();
+            (e, slice.trim(), span.start + slice.trim_end().len())
         });
-        let expr = self.expr().map_with(|e, x| (e, x.slice().trim()));
         let message = op!(',')
-            .ignore_then(just('"').ignore_then(self.string_lit_body()).then_ignore(just('"')))
-            .padded_by(trivia())
+            .ignore_then(
+                trivia().ignore_then(
+                    just('"')
+                        .ignore_then(self.string_lit_body())
+                        .then_ignore(just('"'))
+                        .map_with(|m, x| (m, x.span().end)),
+                ),
+            )
+            .then_ignore(trivia())
             .or_not();
         kind.then(expr)
             .then(message)
-            .map_with(|((kind, (expr, text)), message), e| ast::Contract {
-                kind,
-                expr,
-                text,
-                message,
-                span: e.span(),
+            .map(|(((kind, start), (expr, text, expr_end)), message)| {
+                let end = message.map_or(expr_end, |(_, end)| end);
+                ast::Contract {
+                    kind,
+                    expr,
+                    text,
+                    message: message.map(|(m, _)| m),
+                    span: SimpleSpan::from(start..end),
+                }
             })
             .repeated()
             .collect()
@@ -1200,7 +1236,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
             .then(self.uses_clause())
-            .then(self.contracts())
+            .then(self.contracts(FN_CONTRACTS))
             .validate(
                 |(
                     (
@@ -1485,7 +1521,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
             .then(self.uses_clause())
-            .then(self.contracts())
+            .then(self.contracts(FN_CONTRACTS))
             .then(self.block(stmt).labelled("function body `{ ... }`"))
             .validate(|full, e, emitter| {
                 let (
@@ -1625,9 +1661,10 @@ impl<'pratt> Pratt<'pratt> {
                     )
                 }),
             keyword!("while")
-                .ignore_then(expr)
+                .ignore_then(expr.clone())
+                .then(self.contracts_with(expr, WHILE_CONTRACTS))
                 .then(self.block(stmt))
-                .map_with(|(iterable, body), e| {
+                .map_with(|((iterable, contracts), body), e| {
                     (
                         e.span(),
                         Box::new(Expression::Loop {
@@ -1635,6 +1672,7 @@ impl<'pratt> Pratt<'pratt> {
                             pattern: None,
                             iterable,
                             body,
+                            contracts,
                         }),
                     )
                 }),
@@ -1682,9 +1720,10 @@ impl<'pratt> Pratt<'pratt> {
         keyword!("for")
             .ignore_then(choice((pattern_bind, ident_bind)))
             .then_ignore(keyword!("in"))
-            .then(expr)
+            .then(expr.clone())
+            .then(self.contracts_with(expr, FOR_CONTRACTS))
             .then(self.block(stmt))
-            .map_with(|(((identifier, pattern), iterable), body), e| {
+            .map_with(|((((identifier, pattern), iterable), contracts), body), e| {
                 (
                     e.span(),
                     Box::new(Expression::Loop {
@@ -1692,6 +1731,7 @@ impl<'pratt> Pratt<'pratt> {
                         pattern,
                         iterable,
                         body,
+                        contracts,
                     }),
                 )
             })
@@ -3712,6 +3752,10 @@ fn found_text(c: char) -> String {
 }
 
 /// Labels of expression atoms: together they just mean "an expression".
+const FN_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Requires, ast::ContractKind::Ensures];
+const WHILE_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Invariant, ast::ContractKind::Decreases];
+const FOR_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Invariant];
+
 const EXPRESSION_LABELS: &[&str] = &[
     "array",
     "boolean",

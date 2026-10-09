@@ -322,6 +322,7 @@ impl SymbolIndex {
                     visit_output(index, file, body);
                 }
                 Expression::Loop {
+                    contracts: _,
                     identifier,
                     pattern: _,
                     iterable,
