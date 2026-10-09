@@ -2416,45 +2416,100 @@ impl Compiler {
         bytecode.push_load_field(1);
     }
 
-    /// Free-fn numeric Range params use two CALL slots when the fn is not
-    /// Inherent / instance methods keep the boxed Range object.
+    /// A free function's parameter of a two-word type (a numeric range,
+    /// `Option<int>`, `Result<int, E>`, a small payload enum) takes two CALL
+    /// slots, `[payload, tag]` / `[start, end]`, when every call reaches the function directly: not a fn value, method,
+    /// overload, generic or coroutine, which keep the one-word boxed ABI.
     fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
+        let Some(params) = self.callee_param_tys_for_pairs(name) else {
+            return false;
+        };
+        params
+            .iter()
+            .any(|ty| self.param_pair_kind(name, ty).is_some())
+    }
+
+    fn callee_param_tys_for_pairs(&self, name: &str) -> Option<Vec<Ty>> {
         let lookup = strip_overload_key(name);
         if self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) {
-            return false;
+            return None;
         }
         if self.checker.inherent_method_visibility(lookup).is_some()
             || is_instance_method_fqn(&self.checker, lookup)
             || is_instance_method_fqn(&self.checker, name)
         {
-            return false;
+            return None;
         }
-        let Some(params) = self
+        let params = self
             .checker
             .fn_param_tys(name)
-            .or_else(|| self.checker.fn_param_tys(lookup))
-        else {
-            return false;
-        };
-        params
-            .iter()
-            .any(|ty| crate::typechecking::return_layout::two_word_range_kind(ty).is_some())
+            .or_else(|| self.checker.fn_param_tys(lookup))?;
+        // A call with fewer arguments may be a partial application, whose
+        // function value keeps the one-word ABI.
+        let under_applied =
+            (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
+        (!under_applied).then_some(params)
     }
 
-    fn current_fn_unboxes_range_params(&self) -> bool {
+    /// The two-word kind a parameter of type `ty` of `callee` takes, if any
+    /// (see [`Self::callee_has_unboxed_range_params`]).
+    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<String> {
+        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+            return Some(kind.to_string());
+        }
+        let lookup = strip_overload_key(callee);
+        if self.checker.is_overloaded(lookup)
+            || self.checker.is_generic_fn(lookup)
+            || self.coroutine_fns.contains(callee)
+            || self.coroutine_fns.contains(lookup)
+        {
+            return None;
+        }
+        // A boxed tuple splits into `[a, b]` through a temp slot, which is
+        // unsafe above live operands, so products stay one boxed word.
+        crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)
+            .filter(|kind| self.hir_pair_kind(kind) && !crate::typechecking::return_layout::is_two_word_product_kind(kind))
+    }
+
+    /// Per parameter of `callee`, the two-word kind it takes (empty when it
+    /// takes none).
+    pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<String>> {
+        if !self.callee_has_unboxed_range_params(callee) {
+            return Vec::new();
+        }
+        self.callee_param_tys_for_pairs(callee)
+            .unwrap_or_default()
+            .iter()
+            .map(|ty| self.param_pair_kind(callee, ty))
+            .collect()
+    }
+
+    /// The function being compiled's key that answers
+    /// [`Self::callee_has_unboxed_range_params`], if any.
+    pub(super) fn current_fn_pair_key(&self) -> Option<String> {
         if self.compiling_method {
-            return false;
+            return None;
         }
         self.current_function_table_key
             .as_deref()
             .into_iter()
             .chain(self.current_function_qualified.as_deref())
-            .any(|key| self.callee_has_unboxed_range_params(key))
+            .find(|key| self.callee_has_unboxed_range_params(key))
+            .map(str::to_string)
     }
 
     fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<String> {
-        if !self.current_fn_unboxes_range_params() {
-            return None;
+        let key = self.current_fn_pair_key()?;
+        // By position, from the same signature every caller reads.
+        if let Expression::Argument { name, .. } = arg.1.as_ref()
+            && let Some(i) = self
+                .checker
+                .fn_param_names(&key)
+                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+                .and_then(|names| names.iter().position(|n| n == name))
+            && let Some(kind) = self.callee_param_pairs(&key).get(i)
+        {
+            return kind.clone();
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
