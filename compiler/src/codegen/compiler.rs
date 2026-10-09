@@ -5164,7 +5164,13 @@ impl Compiler {
         let arity = 3 + site.live_captures.len() as u32;
         self.fn_arities.insert(name, (arity, false));
 
-        let prev_ctx = std::mem::take(&mut self.context);
+        // A fresh frame, with the module's class, method and symbol tables
+        // (inlined code in the body may build an object).
+        let mut prev_ctx = std::mem::take(&mut self.context);
+        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
+        self.context.classes = std::mem::take(&mut prev_ctx.classes);
+        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
+        self.context.methods = std::mem::take(&mut prev_ctx.methods);
         let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
         self.context.variables.intern(site.index.clone());
         self.context.variables.intern("__coil_par_hi".to_string());
@@ -5211,7 +5217,11 @@ impl Compiler {
         self.bytecode.push_load(ACC_SLOT);
         self.bytecode.push_return();
 
-        self.context = prev_ctx;
+        let worker_ctx = std::mem::replace(&mut self.context, prev_ctx);
+        self.context.symbols = worker_ctx.symbols;
+        self.context.classes = worker_ctx.classes;
+        self.context.impementations = worker_ctx.impementations;
+        self.context.methods = worker_ctx.methods;
         self.expr_depth = prev_depth;
         entry
     }
