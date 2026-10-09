@@ -156,11 +156,6 @@ fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) 
     0
 }
 
-fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    crate::il::algebraic::algebraic_simplify(ops, ctx.pool);
-    0
-}
-
 fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     // Invariant `len(a)` moves out of its loop first, which is what lets
     // the bounds proofs below see a fixed length.
@@ -243,16 +238,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_canon),
     },
     PassSpec {
-        name: "algebraic",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::None,
-        omit_from_size: false,
-        gate: |o| o.algebraic,
-        set_flag: |o| o.algebraic = true,
-        apply: ApplyFn::Grow(apply_algebraic),
-    },
-    PassSpec {
         name: "loop_bounds",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -321,7 +306,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
     "stack_dce",
     "canon",
-    "algebraic",
     "loop_bounds",
     "loop_unroll",
     "slot_promote",
@@ -354,7 +338,6 @@ mod tests {
                 "dead_block",
                 "stack_dce",
                 "canon",
-                "algebraic",
                                         "loop_bounds",
                 "loop_unroll",
                 "slot_promote",

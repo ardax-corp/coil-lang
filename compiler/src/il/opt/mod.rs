@@ -63,8 +63,8 @@ pub struct OptimizeOptions {
 
 /// Run IL opts in place. Safe to call before [`super::lower`].
 ///
-/// Pass the const pool when available so algebraic float peeps can read
-/// `ConstPool` bits and push folded IEEE results; an empty vec disables those.
+/// Pass the const pool when available so canon can read `ConstPool` bits;
+/// an empty vec disables the pool-entry demotion.
 pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, pool: &mut Vec<u64>) {
     optimize_at(ops, opts, 0, pool);
 }
