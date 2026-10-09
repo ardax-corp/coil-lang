@@ -5502,8 +5502,10 @@ impl Compiler {
                 self.hir_value(hir, emit, *value, &BOXED, depth);
                 let from = Self::hir_ty(hir, *value).and_then(lower::primitive);
                 let to = Self::hir_ty(hir, id).and_then(lower::primitive);
+                // A byte-range literal is already its byte (or int): only
+                // a cast to `float` or `bool` changes its word.
                 if let (Some(from), Some(to)) = (from, to)
-                    && !Self::hir_byte_range_literal(hir, *value)
+                    && !(Self::hir_byte_range_literal(hir, *value) && matches!(to, "byte" | "int"))
                     && let Some(op) = primitive_cast_opcode(from, to)
                 {
                     self.bytecode.push(Byte::new(op));
@@ -8727,7 +8729,10 @@ impl Compiler {
     /// it is the same word, and the AST folds it away.
     fn hir_byte_range_literal(hir: &HirBody, id: HirId) -> bool {
         match &hir.expr(id).kind {
-            HirKind::Cast { value } => Self::hir_byte_range_literal(hir, *value),
+            HirKind::Cast { value } => {
+                matches!(Self::hir_ty(hir, id).and_then(lower::primitive), Some("byte" | "int"))
+                    && Self::hir_byte_range_literal(hir, *value)
+            }
             HirKind::Lit(Lit::Int(n)) => (0..=255).contains(n),
             HirKind::Lit(Lit::Str(raw)) => lower::byte_literal(raw).is_some(),
             _ => false,
