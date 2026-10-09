@@ -4090,6 +4090,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Inlined, `sum3` reads the slots and nothing boxes.
+    pipeline.set_hir_inline(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];

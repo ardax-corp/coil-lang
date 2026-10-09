@@ -86,9 +86,9 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         return Err("body");
     }
     // A fixed array, tuple or record argument is shared with the callee,
-    // but a `let` of it copies.
-    let value_ty = |t: &Option<ty::Ty>| matches!(t, Some(ty::Ty::Array { .. } | ty::Ty::Tuple(_) | ty::Ty::Record { .. }));
-    if callee.params.iter().any(|&p| value_ty(&callee.local(p).ty)) || value_ty(&callee.ret) {
+    // but a `let` of it copies: only a parameter the callee just reads from
+    // can be bound by a `let`.
+    if callee.params.iter().any(|&p| value_ty(&callee.local(p).ty) && !reads_only(callee, p)) || value_ty(&callee.ret) {
         return Err("value-param");
     }
     let root = callee.root.ok_or("no-body")?;
@@ -645,6 +645,48 @@ impl Inliner {
 }
 
 /// Whether `callee` assigns parameter `p` or a place rooted at it by index.
+fn value_ty(t: &Option<ty::Ty>) -> bool {
+    matches!(t, Some(ty::Ty::Array { .. } | ty::Ty::Tuple(_) | ty::Ty::Record { .. }))
+}
+
+/// Whether every use of the value-typed parameter `p` reads a non-value
+/// element or field out of it (`xs[i]`, `p.x`), so a copy of the argument
+/// behaves like the shared original.
+fn reads_only(callee: &HirBody, p: LocalId) -> bool {
+    let mut parent = vec![None; callee.exprs.len()];
+    for i in 0..callee.exprs.len() {
+        for c in super::lower::children(callee, HirId(i as u32)) {
+            parent[c.0 as usize] = Some(HirId(i as u32));
+        }
+    }
+    let written = |id: HirId| {
+        parent[id.0 as usize].is_some_and(|q| match &callee.expr(q).kind {
+            HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => *place == id,
+            _ => false,
+        })
+    };
+    callee.exprs.iter().enumerate().all(|(i, e)| {
+        if e.kind != HirKind::Local(p) {
+            return true;
+        }
+        let mut at = HirId(i as u32);
+        loop {
+            match parent[at.0 as usize].map(|q| (q, &callee.expr(q).kind)) {
+                Some((q, HirKind::Index { base, .. } | HirKind::Field { base, .. })) if *base == at => {
+                    if written(q) {
+                        return false;
+                    }
+                    if !value_ty(&callee.expr(q).ty) {
+                        return true;
+                    }
+                    at = q;
+                }
+                _ => return false,
+            }
+        }
+    })
+}
+
 pub fn rebinds(callee: &HirBody, p: LocalId) -> bool {
     let rooted = |mut place: HirId| loop {
         match &callee.expr(place).kind {
