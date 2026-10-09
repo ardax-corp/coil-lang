@@ -39,7 +39,7 @@ See [macros.md](macros.md).
 
 Lambdas and `defer` isolate the env (`take_and_isolate`). File-level imports and **module-visible named `fn`s** rebind like globals — a lambda body may **CALL** them with empty captures (direct `CALL`, not a closure slot). Still require `use (…)` for outer **locals** / non-fn values and for other **function values** (anonymous lambdas or `let`-bound fn values). Nested named `fn`s inside another function are not module-visible and follow the local rule.
 
-`thread::with_lock` / `spawn` still reject capturing `ObjFn` at the host (`captures` / filled holes). Capture-free callbacks that only CALL named `fn`s are allowed.
+`thread::spawn` copies a closure's `use` captures to the new thread like its argument (sendable values only); partial applications (filled holes) are rejected. `thread::with_lock` and the readers-writer callbacks still reject capturing `ObjFn` at the host. Capture-free callbacks that only CALL named `fn`s are allowed.
 
 | Issue | Detail | Linear |
 |-------|--------|--------|

@@ -7,9 +7,7 @@
 // `yield_now`. Ordinary functions that do IO work unchanged inside tasks.
 // See docs/internals/tasks.md.
 use prelude::task::{task_scope_open, task_scope_close, task_scope_error, task_spawn, task_join, task_error, task_sleep, task_yield, task_cancel, task_shield_enter, task_shield_exit, task_cond_new, task_cond_wait, task_cond_notify};
-use thread::ThreadError;
-use thread::spawn as thread_spawn;
-use thread::join as thread_join;
+use thread::{ThreadError, spawn as thread_spawn, join as thread_join};
 
 // Status codes from the scheduler natives.
 fn status_panicked() -> int {

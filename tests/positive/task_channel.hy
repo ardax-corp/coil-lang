@@ -1,8 +1,7 @@
 // T3 cross-boundary waits: `task::channel` between tasks, `task::blocking`,
 // and `thread` channels / join / locks that suspend only the waiting task.
 use task::{scope, Scope, TaskError, Channel, ChannelError};
-use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, ThreadError};
-use thread::channel as thread_channel;
+use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, ThreadError, channel as thread_channel};
 use clock::sleep_ms;
 
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
@@ -48,14 +47,17 @@ test("a full channel suspends the sender until the receiver takes a value") {
     let ch: Channel<int> = task::channel(1);
     let r = scope(
         fn (Scope s) use (ch, log) {
-            s.spawn(fn () use (ch, log) {
-                put(ch, 1);
-                log.push("sent 1");
-                put(ch, 2);
-                log.push("sent 2");
-                ch.close();
-                0
-            });
+            s
+                .spawn(
+                    fn () use (ch, log) {
+                        put(ch, 1);
+                        log.push("sent 1");
+                        put(ch, 2);
+                        log.push("sent 2");
+                        ch.close();
+                        0
+                    },
+                );
             let total = 0;
             task::yield_now();
             log.push("receiving");
@@ -106,13 +108,16 @@ test("values are shared, not copied") {
     let v: Vec<int> = Vec::new();
     let r = scope(
         fn (Scope s) use (ch, v) {
-            s.spawn(fn () use (ch) {
-                match ch.recv() {
-                    Result::Ok(got) => got.push(42),
-                    Result::Err(_) => {},
-                }
-                0
-            });
+            s
+                .spawn(
+                    fn () use (ch) {
+                        match ch.recv() {
+                            Result::Ok(got) => got.push(42),
+                            Result::Err(_) => {},
+                        }
+                        0
+                    },
+                );
             match ch.send(v) {
                 Result::Ok(_) => {},
                 Result::Err(_) => {},
@@ -128,18 +133,24 @@ test("blocking runs on a worker while other tasks keep going") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (log) {
-            let b = s.spawn(fn () use (log) {
-                let n = match task::blocking_with(slow_square, 6) {
-                    Result::Ok(v) => v,
-                    Result::Err(_) => -1,
-                };
-                log.push("blocking done");
-                n
-            });
-            s.spawn(fn () use (log) {
-                log.push("other task ran");
-                0
-            });
+            let b = s
+                .spawn(
+                    fn () use (log) {
+                        let n = match task::blocking_with(slow_square, 6) {
+                            Result::Ok(v) => v,
+                            Result::Err(_) => -1,
+                        };
+                        log.push("blocking done");
+                        n
+                    },
+                );
+            s
+                .spawn(
+                    fn () use (log) {
+                        log.push("other task ran");
+                        0
+                    },
+                );
             let seven = match task::blocking(slow_seven) {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,
@@ -165,16 +176,22 @@ test("a thread channel recv suspends only the receiving task") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (rx, log) {
-            let reader = s.spawn(fn () use (rx, log) {
-                let a = got(recv(rx));
-                log.push("got first");
-                let b = got(recv(rx));
-                a + b
-            });
-            s.spawn(fn () use (log) {
-                log.push("ticker");
-                0
-            });
+            let reader = s
+                .spawn(
+                    fn () use (rx, log) {
+                        let a = got(recv(rx));
+                        log.push("got first");
+                        let b = got(recv(rx));
+                        a + b
+                    },
+                );
+            s
+                .spawn(
+                    fn () use (log) {
+                        log.push("ticker");
+                        0
+                    },
+                );
             ok_or(reader.join(), -100)
         },
     );
@@ -193,16 +210,22 @@ test("a contended with_lock suspends only the waiting task") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (m, log) {
-            let locker = s.spawn(fn () use (m, log) {
-                let before = got(with_lock(m, bump));
-                log.push("locked");
-                before
-            });
-            s.spawn(fn () use (m, log) {
-                log.push("unlocking");
-                let _ = unlock(m);
-                0
-            });
+            let locker = s
+                .spawn(
+                    fn () use (m, log) {
+                        let before = got(with_lock(m, bump));
+                        log.push("locked");
+                        before
+                    },
+                );
+            s
+                .spawn(
+                    fn () use (m, log) {
+                        log.push("unlocking");
+                        let _ = unlock(m);
+                        0
+                    },
+                );
             ok_or(locker.join(), -100)
         },
     );
@@ -214,18 +237,24 @@ test("join on a running thread suspends only the joining task") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (log) {
-            let joiner = s.spawn(fn () use (log) {
-                let n = match spawn(slow_square, 4) {
-                    Result::Ok(t) => got(join(t)),
-                    Result::Err(_) => -1,
-                };
-                log.push("joined");
-                n
-            });
-            s.spawn(fn () use (log) {
-                log.push("ticker");
-                0
-            });
+            let joiner = s
+                .spawn(
+                    fn () use (log) {
+                        let n = match spawn(slow_square, 4) {
+                            Result::Ok(t) => got(join(t)),
+                            Result::Err(_) => -1,
+                        };
+                        log.push("joined");
+                        n
+                    },
+                );
+            s
+                .spawn(
+                    fn () use (log) {
+                        log.push("ticker");
+                        0
+                    },
+                );
             ok_or(joiner.join(), -100)
         },
     );
