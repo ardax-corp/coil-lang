@@ -93,6 +93,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
             aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
         }
+        // A higher-kinded parameter's instance (`F<A>` in a shared body):
+        // the instance's one word, only moved and passed to its dictionary.
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)) => Some(ValueClass::Opaque),
         Ty::App(head, args) => {
             let Ty::Con(name) = head.as_ref() else {
                 return None;
