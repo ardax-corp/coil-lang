@@ -24,6 +24,7 @@ pub mod inline;
 pub mod lower;
 pub mod match_tree;
 pub mod print;
+pub mod stage;
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;
@@ -82,6 +83,8 @@ pub enum BodyKind {
     Test,
     /// Top-level statements and static initializers.
     TopLevel,
+    /// One static's initializer, returning its value.
+    Static,
 }
 
 /// One function, method, lambda or test body.
@@ -99,6 +102,10 @@ pub struct HirBody {
     /// Generic over type parameters. Built once; a mono clone lowers a
     /// copy with the instance's types (`Compiler::hir_instance`).
     pub is_generic: bool,
+    /// A parameter or result declared as a bare type parameter was typed
+    /// ground: the checker unified the parameter with a ground type in the
+    /// body (coil-lang#801), so its types do not hold for every instance.
+    pub pinned_param: bool,
     /// Lambda captures, outer local in the parent body to inner local.
     pub captures: Vec<(LocalId, LocalId)>,
     /// `pure fn` / `uses {…}` on the function.
@@ -123,6 +130,9 @@ pub struct HirLocal {
     pub name: String,
     pub ty: Option<Ty>,
     pub kind: LocalKind,
+    /// A lambda in this body captures it, so it stays one plain word in
+    /// its own slot.
+    pub captured: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

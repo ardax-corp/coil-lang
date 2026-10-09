@@ -93,6 +93,9 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
             aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
         }
+        // A higher-kinded parameter's instance (`F<A>` in a shared body):
+        // the instance's one word, only moved and passed to its dictionary.
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)) => Some(ValueClass::Opaque),
         Ty::App(head, args) => {
             let Ty::Con(name) = head.as_ref() else {
                 return None;
@@ -177,13 +180,16 @@ pub fn poly_fun(ty: &Ty) -> bool {
     }
 }
 
-/// A closed function type whose parameters and result are plain words:
-/// no enum (its layout may be niche or a pair), no unit, no type variable.
+/// A function type whose parameters and result are plain words: no enum
+/// (its layout may be niche or a pair), no unit; a bare type variable is
+/// one word.
 /// The result may also be a closed enum: a call through the function
 /// returns a one-word enum as that word, any other boxed.
 fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    // A bare type parameter (a shared generic body's own `T -> U`
+    // parameter) is one boxed word too.
     let plain = |t: &Ty, seen: &mut Vec<String>| {
-        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..)))
+        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
             && matches!(
                 classify_in(checker, t, seen),
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
@@ -196,7 +202,8 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
             let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
                 super::layout::ty_is_closed(t) && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
-            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
+            (unit(param) || plain(param, seen) || closed_enum(param, seen))
+                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
         }
         _ => false,
     }
@@ -399,7 +406,7 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             else {
                 continue;
             };
-            if body.local(local).kind != LocalKind::Let {
+            if body.local(local).kind != LocalKind::Let || body.local(local).captured {
                 continue;
             }
             match &body.expr(init).kind {
@@ -633,7 +640,9 @@ fn reassigned(body: &HirBody, local: LocalId) -> bool {
 /// Whether `let local = init` keeps its fields in frame slots: a
 /// [`sroa_class`] that is only a field base, or one [`class_boxes`] boxes.
 pub fn sroa_local(body: &HirBody, checker: &Checker, boxed: &std::collections::HashSet<u32>, local: LocalId, init: HirId) -> bool {
-    sroa_class(body, checker, init).is_some() && (only_field_base(body, local) || boxed.contains(&local.0))
+    !body.local(local).captured
+        && sroa_class(body, checker, init).is_some()
+        && (only_field_base(body, local) || boxed.contains(&local.0))
 }
 
 fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
@@ -709,7 +718,8 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
 pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
     body.expr(arg).ty.as_ref().is_some_and(|t| {
         let t = apply_ty_prune(checker.subst(), t);
-        super::layout::ty_is_closed(&t) && !Checker::is_structural_len_ty_for_codegen(&t)
+        // A bare type parameter's `len` is its `Length` dictionary call.
+        (super::layout::ty_is_closed(&t) || matches!(t, Ty::Var(_))) && !Checker::is_structural_len_ty_for_codegen(&t)
     })
 }
 
@@ -938,6 +948,35 @@ pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr
         })
 }
 
+/// Each `break` / `continue` outside every loop of `body` and of the
+/// anonymous `fn`s in it (E0801), with whether it is a `break`.
+pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, bool)> {
+    fn walk(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
+        match &body.expr(id).kind {
+            HirKind::Break | HirKind::Continue if loops == 0 => {
+                out.push((id, matches!(body.expr(id).kind, HirKind::Break)));
+            }
+            HirKind::Lambda { body: lam } => {
+                let lam = &module.bodies[*lam];
+                if let Some(root) = lam.root {
+                    walk(module, lam, root, 0, out);
+                }
+            }
+            kind => {
+                let inner = loops + u32::from(matches!(kind, HirKind::Loop { .. } | HirKind::ForIn { .. }));
+                for k in children(body, id) {
+                    walk(module, body, k, inner, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(root) = body.root {
+        walk(module, body, root, 0, &mut out);
+    }
+    out
+}
+
 /// Every node of `id`'s subtree, `id` first.
 pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
     f(body.expr(id));
@@ -1082,13 +1121,16 @@ pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, a
     Some(payload.iter().map(|t| super::layout::bind_params(t, params, args)).collect())
 }
 
-/// A ground instance of a generic user enum (`Tree<int>`): laid out as a
-/// closed enum with its parameters bound, as the AST's instance is.
+/// An instance of a generic user enum (`Tree<int>`, or `Tree<T>` in a
+/// shared body): laid out as a closed enum with its parameters bound, as
+/// the AST's instance is.
 fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<String>) -> Option<ValueClass> {
     if checker.is_class(name) && checker.enum_variants(name).is_none() {
         return None;
     }
-    if !args.iter().all(super::layout::ty_is_closed) {
+    // Open only in type parameters: a shared generic body's instance,
+    // each parameter one boxed word.
+    if !args.iter().all(params_closed) {
         return None;
     }
     let key = format!("{name}<{args:?}>");
@@ -1102,9 +1144,9 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
     seen.push(key);
     let ok = variants.iter().all(|(variant, _, _)| {
         generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
-            payload.iter().all(|field| {
-                super::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some_and(is_word)
-            })
+            payload
+                .iter()
+                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some_and(is_word))
         })
     });
     seen.pop();
@@ -1204,26 +1246,35 @@ pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     )
 }
 
+/// Depth refusals [`refusal_at`] names an operand for.
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "range-depth"];
+
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
-    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda) {
-        return Some("body-kind");
+    refusal_at(body, checker).map(|(reason, _)| reason)
+}
+
+/// [`refusal`], with the operand that would lower if it were staged into a
+/// temp ahead of its statement ([`super::stage`]).
+pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Option<HirId>)> {
+    if !matches!(body.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test | BodyKind::Lambda | BodyKind::Static) {
+        return Some(("body-kind", None));
     }
-    if body.is_generic {
-        return Some("generic");
+    if body.pinned_param {
+        return Some(("pinned-type-param", None));
     }
     // A lambda's captures sit in its frame's first slots.
     if !body.captures.is_empty() && body.kind != BodyKind::Lambda {
-        return Some("captures");
+        return Some(("captures", None));
     }
     if body.ret.as_ref().and_then(|ty| classify(checker, ty)).is_none() {
-        return Some("return-type");
+        return Some(("return-type", None));
     }
     // A `()` local (`let _ = f()`, the `Ok(ok)` of a `?`) has no slot: it
     // is only read as a statement, and a value read is refused as a value
     // type.
     if body.locals.iter().any(|l| l.ty.as_ref().and_then(|ty| classify(checker, ty)).is_none()) {
-        return Some("local-type");
+        return Some(("local-type", None));
     }
     let root = body.root?;
     let mut walk = Walk {
@@ -1234,6 +1285,7 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
         box_at: HashMap::new(),
         class_boxed: std::collections::HashSet::new(),
         class_box_at: std::collections::HashSet::new(),
+        stage_at: None,
     };
     let boxes = class_boxes(body, checker);
     walk.class_box_at = boxes.keys().copied().collect();
@@ -1241,7 +1293,9 @@ pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
     let stacks = stack_arrays(body, checker);
     walk.stack = stacks.len;
     walk.box_at = stacks.box_at;
-    walk.effect(root, 0).err()
+    walk.effect(root, 0)
+        .err()
+        .map(|reason| (reason, walk.stage_at.filter(|_| STAGED.contains(&reason))))
 }
 
 /// The builtin opaque types the `io` and `thread` modules export.
@@ -1286,6 +1340,15 @@ pub fn is_byte_vec(ty: &Ty) -> bool {
         }
         _ => false,
     }
+}
+
+/// `[T; N]` with `N > 0`: a fixed array, which a local copies on
+/// assignment.
+pub fn is_fixed_array(checker: &Checker, ty: &Ty) -> bool {
+    matches!(
+        strip_readonly(&apply_ty_prune(checker.subst(), ty)),
+        Ty::Array { length: coil_ty::ArrayLength::Static(n), .. } if *n > 0
+    )
 }
 
 /// `[byte; N]` or `[byte]`: a string literal typed so is its bytes.
@@ -1676,6 +1739,8 @@ struct Walk<'b> {
     loops: u32,
     /// Frame-slot stack arrays: local to length.
     stack: HashMap<u32, usize>,
+    /// The operand a depth refusal names: staged into a temp, it lowers.
+    stage_at: Option<HirId>,
     /// Block statements an escaping stack array is boxed before.
     box_at: HashMap<u32, Vec<u32>>,
     /// Frame-slot class locals boxed at their escape ([`class_boxes`]).
@@ -1950,6 +2015,21 @@ impl Walk<'_> {
 
     /// `id` pushes its value on top of `depth` live operands.
     fn value(&mut self, id: HirId, depth: u32) -> Check {
+        let r = self.value_kind(id, depth);
+        // A call taking a range above live operands runs into a temp
+        // ahead of its statement, where nothing is below it.
+        if r == Err("range-depth")
+            && depth != 0
+            && self.stage_at.is_none()
+            && matches!(self.body.expr(id).kind, HirKind::Call { .. })
+            && !self.ty(id).is_some_and(is_range_pair)
+        {
+            self.stage_at = Some(id);
+        }
+        r
+    }
+
+    fn value_kind(&mut self, id: HirId, depth: u32) -> Check {
         let body = self.body;
         // A numeric range moves as `[start, end]` or a boxed object; the
         // re-encodings between them stage through temps, so a range value
@@ -2059,6 +2139,12 @@ impl Walk<'_> {
             }
             HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
                 self.aggregate_arith(id, *operand, None, depth)
+            }
+            // A type parameter's word in a shared body: the AST's plain
+            // `NEG` (coil-lang#803: negation has no dictionary entry).
+            HirKind::Un { op: UnOp::Neg, operand } if matches!(self.ty(*operand).map(strip_readonly), Some(Ty::Var(_))) => {
+                self.word(*operand)?;
+                self.value(*operand, depth)
             }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
@@ -2207,6 +2293,7 @@ impl Walk<'_> {
                     // A slot `LOAD`, or the index to a temp and a select,
                     // which runs with no operand below it.
                     if depth != 0 && stack_select(body, &self.stack, body.expr(id)) {
+                        self.stage_at = Some(id);
                         return Err("stack-select-depth");
                     }
                     // Once boxed: the box, then the index above it.
@@ -2403,8 +2490,10 @@ impl Walk<'_> {
             // `x++` / `--x` on an int or float local: one `INC` / `DEC`,
             // which leaves the old or new value, as the AST.
             HirKind::Assign { place, .. } if body.expr(id).flags.contains(HirFlags::ADJUST) => {
+                // Any other place splits into statements ahead of this one.
                 if !matches!(body.expr(*place).kind, HirKind::Local(_)) || self.stack_base(*place) {
-                    return Err("assign");
+                    self.stage_at = Some(id);
+                    return Err("adjust-value");
                 }
                 match self.ty(id).and_then(primitive) {
                     Some(coil_ty::INT | coil_ty::FLOAT) => Ok(()),
@@ -2528,10 +2617,6 @@ impl Walk<'_> {
                     }
                     return Ok(());
                 }
-                // Past 32 items the AST builds the array on the heap too.
-                if matches!(&body.expr(*init).kind, HirKind::Make { kind: MakeKind::Array, args } if (1..=32).contains(&args.len())) {
-                    return Err("stack-array");
-                }
                 // With no escape the fields live in frame slots (as the AST's
                 // unboxed class local); an escaping one is an object from the
                 // start, unless its fields are written first: the AST stores
@@ -2604,7 +2689,7 @@ impl Walk<'_> {
                         if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                             return Err("index-kind");
                         }
-                        if compound && (!pure_base(body, *base) || !pure_index(body, *index)) {
+                        if compound && (!read_base(body, *base) || !pure_index(body, *index)) {
                             return Err("assign-base");
                         }
                         self.word(*place)?;
@@ -2814,6 +2899,16 @@ impl Walk<'_> {
                 checked
             }
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
+            // A statement `resume` of a `()` coroutine: `ResumeCoro` still
+            // pushes a word, which is dropped.
+            HirKind::Resume { handle, value } if is_unit_value(body, self.checker, id) => {
+                if let Some(v) = value {
+                    self.word(*v)?;
+                    self.value(*v, depth)?;
+                }
+                self.word(*handle)?;
+                self.value(*handle, depth + u32::from(value.is_some()))
+            }
             // A statement `yield` leaves nothing: a send lands only where a
             // receiving `yield` takes it.
             HirKind::Yield { value, .. } => {
@@ -2833,6 +2928,7 @@ impl Walk<'_> {
             | HirKind::Index { .. }
             | HirKind::Call { .. }
             | HirKind::Resume { .. }
+            | HirKind::Lambda { .. }
             | HirKind::Builtin {
                 op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf,
                 ..

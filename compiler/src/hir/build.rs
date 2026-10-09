@@ -99,6 +99,8 @@ struct BodyBuilder {
     /// Result-mode with an `Ok` payload that is itself a `Result`: a
     /// returned `Result::Ok(..)` is the payload, so it is wrapped too.
     ok_is_result: bool,
+    /// The function's and its generic class's type parameter names.
+    type_params: Vec<String>,
 }
 
 impl BodyBuilder {
@@ -114,6 +116,7 @@ impl BodyBuilder {
                 result_mode: false,
                 is_coro: false,
                 is_generic: false,
+                pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
                 locals: Vec::new(),
@@ -123,6 +126,7 @@ impl BodyBuilder {
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
             ok_is_result: false,
+            type_params: Vec::new(),
         }
     }
 
@@ -151,6 +155,7 @@ impl BodyBuilder {
             name: name.to_string(),
             ty,
             kind,
+            captured: false,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), id);
@@ -164,6 +169,7 @@ impl BodyBuilder {
             name: name.to_string(),
             ty,
             kind: LocalKind::Temp,
+            captured: false,
         });
         id
     }
@@ -182,6 +188,7 @@ impl BodyBuilder {
                     name: name.to_string(),
                     ty: None,
                     kind: LocalKind::Capture,
+                    captured: false,
                 });
                 self.body.captures.push((outer_id, inner));
                 self.scopes[0].insert(name.to_string(), inner);
@@ -291,6 +298,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         }
     }
 
+    /// The element type an `index` node reads, from its base's type.
+    fn element_ty(&self, b: &BodyBuilder, id: HirId) -> Option<Ty> {
+        let HirKind::Index { base, .. } = b.body.exprs[id.0 as usize].kind else {
+            return None;
+        };
+        let base_ty = self.ty_at(b, base)?;
+        match strip_readonly(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &base_ty)) {
+            Ty::Array { element, .. } => Some(element.as_ref().clone()),
+            Ty::App(head, args) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.first().cloned(),
+            _ => None,
+        }
+    }
+
     fn ty_at(&self, b: &BodyBuilder, id: HirId) -> Option<Ty> {
         b.body.exprs[id.0 as usize].ty.clone()
     }
@@ -352,6 +372,8 @@ impl<'c, 'm> Cx<'c, 'm> {
                     .unwrap_or_default();
                 let span = node.0.into_range();
                 let instances = &self.checker.generics().instances;
+                // A package trait's instances are keyed by its path.
+                let class = self.checker.impl_trait_key(class);
                 let instance = instances
                     .iter()
                     .find(|inst| inst.class == *class && inst.range == span)
@@ -406,9 +428,22 @@ impl<'c, 'm> Cx<'c, 'm> {
                 tb.body.root = Some(root);
                 self.module.bodies.push(tb.finish());
             }
+            Expression::Class { name: class, fields, .. } => {
+                for field in fields {
+                    if let Expression::Field {
+                        modifier: parser::ast::FieldModifier::Static,
+                        init: Some(init),
+                        name,
+                        ..
+                    } = field.1.as_ref()
+                    {
+                        let full = join(&join(prefix, class), &name.1.to_string());
+                        self.static_init(&full, init);
+                    }
+                }
+            }
             // Declarations with no body.
-            Expression::Class { .. }
-            | Expression::EnumDecl { .. }
+            Expression::EnumDecl { .. }
             | Expression::TypeAlias { .. }
             | Expression::Use { .. }
             | Expression::ExternBlock { .. }
@@ -424,6 +459,21 @@ impl<'c, 'm> Cx<'c, 'm> {
         }
     }
 
+    /// A static's initializer as its own body, keyed by the initializer's
+    /// span: it returns the value the setup region stores.
+    fn static_init(&mut self, name: &str, init: &Output<'_>) {
+        let mut b = BodyBuilder::new(&format!("{name}$init"), BodyKind::Static, span_of(init));
+        let ty = self.ty_of(init);
+        b.body.ret_layout = ty
+            .as_ref()
+            .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
+        b.body.ret = ty;
+        let value = self.expr(&mut b, init);
+        let root = b.push(HirKind::Return(Some(value)), Some(coil_ty::never()), span_of(init), None);
+        b.body.root = Some(root);
+        self.module.bodies.push(b.finish());
+    }
+
     /// Build one function body. `owner` is set for inherent methods, whose
     /// `self` is implicit; `keys` are the checker's names for its scheme.
     fn function(&mut self, node: &Output<'_>, full: &str, kind: BodyKind, owner: Option<&str>, keys: &[String]) {
@@ -432,6 +482,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             is_static,
             type_params,
             args,
+            returns,
             effects,
             body,
             ..
@@ -445,7 +496,20 @@ impl<'c, 'm> Cx<'c, 'm> {
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
         b.body.is_generic = !type_params.is_empty();
-        let ret = keys.iter().find_map(|k| self.checker.fn_return_ty(k));
+        // A trait's default method body has only the trait method's scheme.
+        let default_sig = keys.first().and_then(|k| k.split_once("__default__")).and_then(|(class, m)| {
+            let mut ty = &self.checker.typeclass_method_scheme(class, m)?.ty;
+            let mut params = Vec::new();
+            while let Ty::Fun(p, r) = ty {
+                params.push(p.as_ref().clone());
+                ty = r;
+            }
+            Some((params, ty.clone()))
+        });
+        let ret = keys
+            .iter()
+            .find_map(|k| self.checker.fn_return_ty(k))
+            .or_else(|| default_sig.as_ref().map(|(_, ret)| ret.clone()));
         b.body.ret_layout = ret
             .as_ref()
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
@@ -462,8 +526,21 @@ impl<'c, 'm> Cx<'c, 'm> {
             let id = b.local("self", Some(Ty::Con(owner.to_string())), LocalKind::Param);
             b.body.params.push(id);
         }
-        let param_tys = keys.iter().find_map(|k| self.checker.fn_param_tys(k));
+        b.type_params = type_params.iter().map(|p| p.name.to_string()).collect();
+        if let Some(owner) = owner {
+            let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
+            if let Some(params) = self.checker.generics().generic_type_ctors.get(&key) {
+                b.type_params.extend(params.iter().cloned());
+            }
+        }
+        let param_tys = keys
+            .iter()
+            .find_map(|k| self.checker.fn_param_tys(k))
+            .or_else(|| default_sig.map(|(params, _)| params));
         self.params(&mut b, args, param_tys.as_deref());
+        if Self::pinned(&b, returns.as_ref(), b.body.ret.as_ref()) {
+            b.body.pinned_param = true;
+        }
         let root = self.expr(&mut b, body);
         self.implicit_ok_return(&mut b, root);
         b.body.root = Some(root);
@@ -523,16 +600,34 @@ impl<'c, 'm> Cx<'c, 'm> {
         };
         let skip = b.body.params.len();
         for (i, item) in items.into_iter().enumerate() {
-            if let Expression::Argument { name, .. } = item.1.as_ref() {
+            if let Expression::Argument { name, ty: ty_ann, is_rest, .. } = item.1.as_ref() {
                 let ty = tys
                     .and_then(|t| t.get(skip + i).or_else(|| t.get(i)))
                     .cloned()
                     .filter(|t| !matches!(t, Ty::Con(n) if n == coil_ty::UNIT))
                     .or_else(|| self.ty_of(item));
+                // `T... xs` declares the pack's element.
+                let declared = match (&ty, *is_rest) {
+                    (Some(Ty::List(elem) | Ty::Array { element: elem, .. }), true) => Some(elem.as_ref()),
+                    (_, true) => None,
+                    (ty, false) => ty.as_ref(),
+                };
+                if Self::pinned(b, ty_ann.as_ref(), declared) {
+                    b.body.pinned_param = true;
+                }
                 let id = b.local(name, ty, LocalKind::Param);
                 b.body.params.push(id);
             }
         }
+    }
+
+    /// A bare type parameter annotation (`K`) the checker typed ground.
+    fn pinned(b: &BodyBuilder, ann: Option<&Output<'_>>, ty: Option<&Ty>) -> bool {
+        let Some(Expression::Type(declared)) = ann.map(|t| peel(t).1.as_ref()) else {
+            return false;
+        };
+        b.type_params.iter().any(|p| p == declared)
+            && ty.is_some_and(|t| !matches!(t, Ty::Var(_)) && !matches!(t, Ty::Con(n) if n == declared))
     }
 
     // ----- expressions -------------------------------------------------
@@ -636,6 +731,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                 self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()))
             }
             E::StaticDecl { name, init, .. } => {
+                self.static_init(name, init);
                 let ty = self.ty_of(init);
                 let local = b.local(name, ty, LocalKind::Const);
                 let init = self.expr(b, init);
@@ -1033,7 +1129,13 @@ impl<'c, 'm> Cx<'c, 'm> {
     /// node's value is the old or new `x`.
     fn adjust(&mut self, b: &mut BodyBuilder, node: &Output<'_>, op: AdjustOp, prefix: bool, target: &Output<'_>) -> HirId {
         let read = self.expr(b, target);
-        let ty = self.ty_at(b, read);
+        // An element or field read may carry no type of its own; the
+        // adjust's own value has the place's type.
+        let ty = self.ty_at(b, read).or_else(|| self.ty_of(node)).or_else(|| self.element_ty(b, read));
+        if b.body.exprs[read.0 as usize].ty.is_none() {
+            b.body.exprs[read.0 as usize].ty = ty.clone();
+            self.stamp(b, read);
+        }
         let is_float = matches!(ty.as_ref().map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::FLOAT);
         let one = if is_float {
             self.synth(b, span_of(node), HirKind::Lit(Lit::Float(1.0)), Some(coil_ty::float()))
@@ -1771,6 +1873,13 @@ impl<'c, 'm> Cx<'c, 'm> {
         for (i, name) in captured.iter().enumerate() {
             if let Some(outer) = b.lookup(name) {
                 inner.body.captures[i].0 = outer;
+                b.body.locals[outer.0 as usize].captured = true;
+                // A capture `b` only relays to this lambda has no read of
+                // its own to type it.
+                let inner_local = inner.body.captures[i].1;
+                if b.body.locals[outer.0 as usize].ty.is_none() {
+                    b.body.locals[outer.0 as usize].ty = inner.body.locals[inner_local.0 as usize].ty.clone();
+                }
             }
         }
         let index = self.module.bodies.len();

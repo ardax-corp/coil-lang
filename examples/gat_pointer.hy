@@ -10,23 +10,23 @@ use string::{format, to_bytes};
 
 trait Pointer<P: * -> *> {
     type Ref<T>;
-    fn deref<T>(P<T> ptr) -> Ref<T> {}
+    fn deref<T>(P<T> ptr, T fallback) -> Ref<T> {}
 }
 
 impl Pointer for Option {
     type Ref<T> = T;
-    pub fn deref<T>(Option<T> ptr) -> T {
+    pub fn deref<T>(Option<T> ptr, T fallback) -> T {
         return match ptr {
             Option::Some(v) => v,
-            Option::None => 0,
+            Option::None => fallback,
         };
     }
 }
 
-fn get<P: * -> *, Pointer, A>(P<A> ptr) -> P::Ref<A> {
-    return deref(ptr);
+fn get<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
+    return deref(ptr, fallback);
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", get(Option::Some(42)))));
+    write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
 }
