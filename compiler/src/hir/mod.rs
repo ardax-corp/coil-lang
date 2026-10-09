@@ -52,6 +52,9 @@ pub struct HirModule {
     /// bound every impl of `T::m` is checked against, and what a call that
     /// dispatches through `T` costs.
     pub trait_effects: Vec<TraitEffects>,
+    /// A trait instance's method bodies by the key its calls name
+    /// (`Class__Ty__method`, the instance's `method_fqns`).
+    pub instance_fns: std::collections::HashMap<String, usize>,
 }
 
 /// A trait method and its declared effects (`None`: undeclared, so a call

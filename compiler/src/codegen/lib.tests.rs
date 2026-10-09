@@ -1229,6 +1229,8 @@ fn typeclass_impl_method_registers_fqn_function() {
         )
         .expect("parse failed");
     let mut compiler = Compiler::default();
+    // Typed inlining would splice `bar` into `use_bar`'s clone.
+    compiler.set_hir_inline(false);
     let bc = compiler.compile("", &mut ast);
     assert!(
         compiler.messages.is_empty(),
@@ -9287,6 +9289,60 @@ fn hir_inline_folds_guard_returns_but_keeps_recursive_callees() {
         call_count(&on) + 2,
         call_count(&off),
         "guard callees inline, the recursive one does not; off={} on={}",
+        call_count(&off),
+        call_count(&on)
+    );
+}
+
+const HIR_INLINE_INSTANCES: &str = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+trait Measure<S> {
+    fn size(S s, int k) -> int {}
+
+    fn twice(S s, int k) -> int {
+        return s.size(k) * 2;
+    }
+}
+impl Measure for int {
+    pub fn size(int s, int k) -> int {
+        let t = s * k;
+        return t + 1;
+    }
+}
+impl Measure for Point {
+    pub fn size(Point p, int k) -> int {
+        let t = p.x * k;
+        return t + p.y;
+    }
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc = acc + i.size(3) + p.size(i) + i.twice(2);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    return hot();
+}
+"#;
+
+#[test]
+fn hir_inline_splices_ground_trait_instance_methods() {
+    let (off, _) = compile_src_tuned(HIR_INLINE_INSTANCES, |c| c.set_hir_inline(false));
+    let (on, _) = compile_src_tuned(HIR_INLINE_INSTANCES, |c| c.set_hir_inline(true));
+    // `i.size(3)` and `p.size(i)` splice their instance bodies into `hot`;
+    // the default `twice` is one body shared by every instance and stays.
+    assert_eq!(
+        call_count(&on) + 2,
+        call_count(&off),
+        "ground instance methods inline, the default method does not; off={} on={}",
         call_count(&off),
         call_count(&on)
     );

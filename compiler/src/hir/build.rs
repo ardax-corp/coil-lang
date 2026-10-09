@@ -395,6 +395,10 @@ impl<'c, 'm> Cx<'c, 'm> {
                     }
                     let full = join(&path, m);
                     self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                    if let Some(fqn) = keys.pop() {
+                        let index = self.module.bodies.len() - 1;
+                        self.module.instance_fns.insert(fqn, index);
+                    }
                 }
             }
             Expression::TypeClass { name, methods, .. } => {

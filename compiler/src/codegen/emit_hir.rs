@@ -501,7 +501,10 @@ impl Compiler {
         let folded: HashMap<usize, crate::hir::HirBody> = emit
             .calls
             .values()
-            .filter_map(|call| self.hir_fn_names.get(strip_overload_key(&call.key)).copied().flatten())
+            .filter_map(|call| match call.instance {
+                Some(_) => module.instance_fns.get(&call.key).copied(),
+                None => self.hir_fn_names.get(strip_overload_key(&call.key)).copied().flatten(),
+            })
             .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
             .collect();
@@ -529,7 +532,7 @@ impl Compiler {
                 (call.pair.is_some() && !self.hir_inline_pair, "pair"),
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
-                (call.instance.is_some(), "instance"),
+                (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
                 (!call.ranges.is_empty(), "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
             ];
@@ -538,6 +541,10 @@ impl Compiler {
             }
             let callee = match instances.get(&id.0) {
                 Some(inst) => inst,
+                None if call.instance.is_some() => {
+                    let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
+                    folded.get(&index).unwrap_or(&module.bodies[index])
+                }
                 None => {
                     let name = strip_overload_key(&call.key);
                     if self.checker.is_overloaded(name) {
@@ -551,11 +558,15 @@ impl Compiler {
                     folded.get(&index).unwrap_or(&module.bodies[index])
                 }
             };
-            // Trait instance and default method bodies dispatch; a generic
-            // class's methods share one body.
+            // A ground trait instance's method is a plain body at the
+            // instance's types; a default method's or an open instance's
+            // body is shared across instances and dispatches.
+            let shared = |b: &crate::hir::HirBody| {
+                b.locals.iter().any(|l| l.ty.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))))
+            };
             if callee.name == hir.name
                 || callee.result_mode && !self.hir_inline_pair
-                || callee.name.contains(" for ")
+                || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
                 || home(callee) != here
                 || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
                     && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
