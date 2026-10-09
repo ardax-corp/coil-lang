@@ -112,9 +112,10 @@ Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is
 
 After SSA lower, **GVN** runs on the numeric function before dense emit
 (and before P3 LIR emit). P2 numbered same-block; P10 walks the dominator
-tree and adds fully-anticipated fork PRE. Stack-IL `local_cse` / `ssa_gvn`
-still refuse `DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here.
-Fuse-IL InstCombine / CSE / LICM are unchanged for non-MIR bodies. Hit
+tree and adds fully-anticipated fork PRE. Stack-IL `local_cse` still
+refuses `DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here.
+Fuse-IL CSE / LICM are unchanged for non-MIR bodies (stack-IL InstCombine
+was removed 2026-10). Hit
 benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
 
 ## P6 — MIR LICM + widen specialize (COI-280)

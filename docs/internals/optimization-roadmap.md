@@ -96,16 +96,12 @@ titles can oversell.
 
 | Area | What landed | Ceiling (do not overshoot in docs or code) |
 |------|-------------|--------------------------------------------|
-| **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, escape, unroll, GVN). |
-| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. `Load; Dup` stays; fuse-select reads `Dup` as the second operand. |
-| **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
-| **`instcombine`** (`opt/instcombine.rs`, [#304](https://github.com/ardax-corp/coil-lang/pull/304)) | Local peeps: const-cond branches, known-tag EQ, pair-match payload identity (`POP` tag) | No new opcodes. Mid-body try-flatten peep **removed** (convoy risk). |
+| **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, scalar replacement, unroll). |
 | **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
-| **`local_cse`** (`opt/early_cse.rs`, [#317](https://github.com/ardax-corp/coil-lang/pull/317)) | Intra-block EarlyCSE after InstCombine: stored pure `BinSlot*` / stack bin / cast / `ArrayLen` / `Index` → `Load` | Effect / call / residual `Byte` barriers. No cross-block, no cheap Const→Load (fuse). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
-| **`dest_prop`** (`opt/dest_prop.rs`, [#318](https://github.com/ardax-corp/coil-lang/pull/318)) | After `copy_prop`: slot aliases (`LOAD src; STORE dest`) through `GetField` / `SetField` / `Make*` / `BoxValue` | Basic+. Does not clone `Const`/`BinSlot*`. Hit: `dest_prop_field_alias`. |
-| **`licm` + `strength_reduce`** ([#315](https://github.com/ardax-corp/coil-lang/pull/315)) | LICM iterates invariant expr chains; integer `i*c` → add recurrence after `loop_bounds` | Float affine `cast(i)` SR refused. Hit: `licm_nested_chains`, `iv_mul_sr`. |
+| **`local_cse`** (`opt/early_cse.rs`, [#317](https://github.com/ardax-corp/coil-lang/pull/317)) | Intra-block EarlyCSE: stored pure `BinSlot*` / stack bin / cast / `ArrayLen` / `Index` → `Load` | Effect / call / residual `Byte` barriers. No cross-block, no cheap Const→Load (fuse). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
+| **`licm`** ([#315](https://github.com/ardax-corp/coil-lang/pull/315)) | LICM iterates invariant expr chains | Hit: `licm_nested_chains`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
+| **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
-| **`escape_analysis`** | Shared Q1 answer (`escape::ArrayEscape`): non-escaping immediate `MakeArray` (arity ≤ 32) → slots; named escape → **box once** | Grow dest / private-after-escape stay heap (**Q3**: `[T; N]` grow is a type error). Computed zip/ADD elems stay heap (S2i). Unproven `xs[k]`: leftover MakeArray stays heap; codegen `[T;N]` uses S2h OOB-safe select + Q4 Euclidean `i % N`. Named class SROA is codegen / `local_escape` + `escape::ClassEscape` (S2j / **Q2** box-once). |
 | **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13). Sidecar `index_facts` extend Unchecked/pin to helpers, for-in, and `i += k` when `0 <= i < len` is proven | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield (`YieldCoro` / `YieldFromCoro`), growing-array, alias-push, and **impure** helper-call loops stay checked. Pure user helpers on `b[i]` are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)). Pins are not saved across yield or on `ObjCoroutine`. |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
@@ -155,15 +151,8 @@ Priority: highest. **Status: Phases 1–4 of register-win harvest landed**
 (`perf/register-wins-harvest`; docs ledger in § Opcode candidate ledger below).
 
 The shared operand/local stack still makes repeated `LOAD` / `STORE` traffic
-expensive. Two GVN layers share the **COI-82 ceiling** — no real SSA slot rename:
-
-- **`cfg_gvn`** (`gvn.rs`) — intra-block CSE plus identical-tail join-sink when
-  SP-in agrees at the join; effectful ops are barriers.
-- **`ssa_gvn`** (`gvn_ssa.rs`) — virtual `Phi(block,slot)` value numbers; only
-  rewrites a redundant pure `Const`/`Load`+`Bin` tail back to `Load` when that
-  value already lives in a slot (`DIV`/`MOD` excluded). **Not rename.**
-
-Copy propagation in `opt/dce.rs` stays straight-line and tell-safe only.
+expensive. Stack-IL GVN (`cfg_gvn` / `ssa_gvn`) and copy propagation were
+removed 2026-10 (no bench effect); there is no SSA slot rename (COI-82).
 
 **Landed (Phases 1–4, IL-only — no new opcodes):**
 
@@ -178,10 +167,9 @@ Copy propagation in `opt/dce.rs` stays straight-line and tell-safe only.
 - fuse windows intact across mandelbrot / tak / numeric / nsieve.
 
 **Overlapping live-range φ shuffles — closed (not building a stack-IL SSA
-rename).** The motivating case, mandelbrot `tr`→`zr`, is gone twice over:
-TOS-carry reclaims it on fuse-IL (`perf_phase0_mandelbrot_shape_inventory`
-pins `loop_carried_phi_shuffle == 0`), and the body now lowers to dense MIR,
-where `zr`/`zi` are registers and the update writes `zr` in place. A census of
+rename).** The motivating case, mandelbrot `tr`→`zr`, is gone: the body
+now lowers to dense MIR (the stack-IL TOS-carry pass that reclaimed it on
+fuse-IL was removed 2026-10), where `zr`/`zi` are registers and the update writes `zr` in place. A census of
 every `examples/perf` function (2026-09) found no hot overlapping carry left.
 Residual slot copies near a back-edge are:
 
@@ -189,7 +177,7 @@ Residual slot copies near a back-edge are:
   chunk workers (`mandelbrot_ipa`, `for_in_range`, `for_in_dict`, …) — two
   dispatches next to a `CALL` / `RETURN` into a much larger callee;
 - copies into never-read slots (`tail_sibling`, `gc_churn::build_list`) that
-  `dead_store` keeps because the loop header cursor is `Unknown`;
+  `dead_store_at` keeps because the loop header cursor is `Unknown`;
 - genuine branch assignments (`s2g_escape_edges::pack_field`).
 
 None clears the hit-bench bar. Revisit only if a fuse-IL body with a hot
@@ -198,19 +186,13 @@ across a `CALL` when `a` is below the callee frame and slot liveness proves `t`
 dead) is the smallest candidate. **Real** rename across disagreeing joins and
 operand-stack retention across calls stay deferred for the same reason.
 
-A second, narrower slice sits at the end of the pipeline: `slot_promote_at`
-uses `tell` as the whole safety proof — a `STORE t` reached with the cursor at
-`t + 1` writes TOS back to its own address, and the reload run in front of a
-`TailCall` re-pushes values the call already finds on the stack. Together those
-take argument-materialization temps out of the frame (`tak`: 4 LOAD words / 9
-slots / 3 STOREs → 3 LOAD words / 6 slots / 0 STOREs). Joins are free: `tell`
-poisons a point whose predecessors disagree, so `Known` is agreement.
-Operand height (`il::sp`) is a different quantity — `STORE` floors tell without
-raising height — and stays split (COI-81); see
-[limitations](limitations.md#il-optimizations-low).
+Operand height (`il::sp`) is a different quantity from the `tell` cursor —
+`STORE` floors tell without raising height — and stays split (COI-81); see
+[limitations](limitations.md#il-optimizations-low). The cursor-only
+`slot_promote_at` slice was removed 2026-10 (no bench effect).
 
-What neither slice does yet (see
-[limitations](limitations.md#il-optimizations-low) for the full refusal table):
+What slot promotion does not do yet (see
+[limitations](limitations.md#il-optimizations-low)):
 
 - **Real slot liveness.** Without it, promotion must leave every slot with a
   visible def, which rules out `CALL` operand runs (the callee frame base is
@@ -220,8 +202,8 @@ What neither slice does yet (see
   latch drops `cr`'s store and splits `FloatChainStore`. The `seek_back_edge`
   prototype was removed after it measured as a large loss at `-O3`.
 - **Scheduling.** `mandelbrot`'s `tr → zr` copy cannot coalesce because `zr` is
-  read between the def and the copy; **`tos_carry`** delays `STORE tr` across
-  slot-addressed ops and stack `Bin` so the latch pops TOS (no `MoveSlot` opcode).
+  read between the def and the copy (dense MIR handles it; no `MoveSlot`
+  opcode).
 - **`Bin(slot, TOS)` operand shapes.** `mandelbrot`'s remaining `LOAD 5` / `LOAD
   6` feed an `ADDF` whose other operand is on the stack, which no existing fused
   form accepts. That is an opcode question, not a promotion one.
@@ -390,9 +372,9 @@ existing opcode; fits append-only opcode ABI.
 | `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** ([COI-87](https://linear.app/ardax/issue/COI-87)) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
 | Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **removed** | `il::cast_spill` only fed `FloatChainStore`; once that opcode was retired the pass was forced off at every level and has been deleted. |
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
-| Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
+| Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store_at` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
-| `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle` (was `tr`→`zr` LOAD+STORE latch) | ~2.56M dispatches/run before TOS-carry | **IL rewrite landed** (`tos_carry`); opcode still unproven | Straight-line TOS-carry delays `STORE t` across `BinSlot*` and stack `Bin` so the latch pops TOS. Keep the pass even if only mandelbrot matches. Do **not** append `MoveSlot` until a universal residual remains. |
+| `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle` (was `tr`→`zr` LOAD+STORE latch) | ~2.56M dispatches/run before dense MIR | **closed** (dense MIR registers; the `tos_carry` IL rewrite was removed 2026-10, no bench effect); opcode still unproven | Do **not** append `MoveSlot` until a universal residual remains. |
 | Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | `il::bounds` proofs + `IndexPin*` (minor 13) on proven loops |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |

@@ -26,8 +26,8 @@ Dumps: `artifacts/superinstructions/`.
 ## S1–S8 (refine these tickets)
 
 Layer key: **dense emit** = pack in `mir/emit.rs` / `vectorize.rs` before
-ops become residual `IlOp::Byte`. **IL peep** = `fuse_select` / convoy /
-instcombine on typed `IlOp`. **Gate lift** = typed-IL / SP / refuse table.
+ops become residual `IlOp::Byte`. **IL peep** = `fuse_select` /
+`clone_shared_return` on typed `IlOp`. **Gate lift** = typed-IL / SP / refuse table.
 
 **S8 fact that binds every dense ticket ([COI-385](https://linear.app/ardax/issue/COI-385), landed):**
 fusion is **not** blocked on specialize keep. Cost / `lir_eligible` do not
@@ -97,7 +97,7 @@ production.
 | `BinSlotSlotStore` | `LOAD; LOAD; bin; STORE` | fuse-select (int+float) |
 | `BinSlotImm` | `LOAD; CONST; int-bin` **or** `CONST; LOAD; commute-int-bin` | fuse-select (**int only**; const-left is COI-384) |
 | `BinSlotSlot` | `LOAD; LOAD\|DUP; bin` | fuse-select (int+float) |
-| `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` / `MakeEnumReturn` | producer + one-word `RETURN` | fuse-select + convoy (`MakeEnumReturn` is fuse-select only) |
+| `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` / `MakeEnumReturn` | producer + one-word `RETURN` | fuse-select + `clone_shared_return` (`MakeEnumReturn` is fuse-select only) |
 | packed `LOAD`/`STORE` n=2/3 | adjacent singles | fuse-select |
 
 `invert_branch_over_jump`: `JMPF A; JMP B; A:` → `JMPT B`. **Loop headers

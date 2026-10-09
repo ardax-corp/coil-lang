@@ -52,7 +52,8 @@ and always-heap are non-goals.
 
 Compiler (A1 [COI-334](https://linear.app/ardax/issue/COI-334) + Q1
 [COI-323](https://linear.app/ardax/issue/COI-323)): codegen
-`emit_escape_stack_array` and IL `escape_analysis` box once. A refused
+`emit_escape_stack_array` boxes once (the IL `escape_analysis` pass was
+removed 2026-10). A refused
 tiny-inline / peel must not leave a stale box cache (that was a fresh
 `LOAD` of an unwritten slot). S2g's old fresh-`MakeArray`-per-edge policy
 is gone.
@@ -199,5 +200,5 @@ board: [opt-generalization.md](opt-generalization.md) B0
 
 Related opt notes: [opt-generalization.md](opt-generalization.md) (A0 doctrine),
 [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md) (S2f–S2l),
-[optimization-roadmap.md](optimization-roadmap.md) (`escape_analysis`),
+[optimization-roadmap.md](optimization-roadmap.md),
 [limitations.md](limitations.md) (COI-84 / S2j).

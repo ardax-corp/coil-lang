@@ -2,8 +2,8 @@
 //!
 //! **Landed**
 //! - Straight-line alias forwarding: `LOAD a; STORE b` rewrites later `LOAD` /
-//!   `BinSlot*` uses of `b` to `a`. Const/ConstPool clones at LOAD sites are
-//!   left to `copy_prop` (re-cloning after LICM breaks call-arg peel packing).
+//!   `BinSlot*` uses of `b` to `a`. Const/ConstPool LOAD sites are not
+//!   cloned (re-cloning after LICM breaks call-arg peel packing).
 //! - Same-def joins: seed a block's binding map when every predecessor is a
 //!   forward edge and all agree on the same binding for a slot. Disagreeing
 //!   preds drop the binding (fail-closed — no φ in bytecode).
@@ -29,7 +29,7 @@
 //!   self-stores. Off on Standard because the header cursor is `Unknown` without
 //!   Seek — not to protect fused opcodes. `Aggressive` / `-O3` turns it on.
 //! - Uses `il::tell` known-cursor as a gate on LOAD→producer replacement
-//!   (same proof surface as `copy_prop`); dead stores are left to
+//!   (the cursor proof `dead_store_at` uses); dead stores are left to
 //!   `dead_store_at` except for the alias-elide cleanup above.
 //!
 //! **Deferred**
@@ -475,8 +475,8 @@ fn transfer_block(
                 // Keep values in slots: rewrite to the alias source LOAD rather
                 // than cloning Const/ConstPool onto the stack. Cloning constants
                 // here undoes call-arg peel packing (`LOAD n=3` of temps) and
-                // staged Index reloads that copy_prop intentionally leaves when
-                // the use is a multi-slot LOAD / residual form.
+                // staged Index reloads when the use is a multi-slot LOAD /
+                // residual form.
                 Binding::Alias { src } => {
                     let src = resolve_alias(&bindings, src);
                     if src != slot {
@@ -507,9 +507,8 @@ fn transfer_block(
                     ops[i] = replacement;
                 }
                 Binding::Producer { .. } => {
-                    // Const / ConstPool / String: leave the LOAD. Straight-line
-                    // copy_prop already handles safe cases; re-cloning here after
-                    // LICM breaks peel/staging shapes.
+                    // Const / ConstPool / String: leave the LOAD. Re-cloning
+                    // here after LICM breaks peel/staging shapes.
                 }
             }
         }
@@ -1351,7 +1350,7 @@ mod tests {
 
     #[test]
     fn forwards_alias_load_through_store_load() {
-        // LOAD src; STORE t; LOAD t → LOAD src (Const clones stay with copy_prop).
+        // LOAD src; STORE t; LOAD t → LOAD src (Const LOAD sites are not cloned).
         let mut ops = vec![
             IlOp::Load {
                 slot: 0,

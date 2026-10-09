@@ -1971,7 +1971,7 @@ fn logical_and_if_fuses_bin_slot_slot_jmpf() {
 }
 
 /// `i = i + 1` fuses to `BinSlotImmStore(ADD)`, or elides the store when
-/// `mem_fwd` + dead-store keep the value on stack for `return i`.
+/// the value stays on stack for `return i`.
 #[test]
 fn assign_add_imm_fuses_bin_slot_imm_store() {
     use common::Instruction;
