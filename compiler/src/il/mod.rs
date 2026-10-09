@@ -19,7 +19,6 @@ mod func;
 mod gvn;
 mod gvn_ssa;
 mod licm;
-mod strength;
 mod lower;
 pub(crate) mod module;
 mod op;
