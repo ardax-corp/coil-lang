@@ -8,7 +8,8 @@
 
 use crate::ast::{
     AdjustOp, AssignOp, Attribute, QuotePart, EnumConstructPayload, EnumVariantPayload, Expression,
-    ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, RecordFieldDecl,
+    ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, PatternField,
+    PatternPayload, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility, WhereConstraint,
 };
 use crate::comments::{self, Comment};
@@ -1818,7 +1819,10 @@ impl<'s> Formatter<'s> {
             EnumConstructPayload::Tuple(args) => {
                 self.fmt_delimited_outputs("(", ")", args, false);
             }
-            EnumConstructPayload::Record(parts) => self.fmt_record_list(parts),
+            EnumConstructPayload::Record(parts) => {
+                self.push_str(" ");
+                self.fmt_record_list(parts);
+            }
         }
     }
 
@@ -2353,8 +2357,63 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// A constructor pattern stays on one line while it fits and every payload
+    /// in it is short: at most four shorthand fields or tuple elements, three
+    /// once a field binds a sub-pattern (`r: _`). Otherwise each element goes
+    /// on its own line with a trailing comma.
     fn fmt_pattern(&mut self, pattern: &(SimpleSpan, Pattern<'_>)) {
-        self.push_str(&pattern.1.to_string());
+        let flat = pattern.1.to_string();
+        if pattern_is_short(&pattern.1) && self.fits_flat(&flat) {
+            self.push_str(&flat);
+            return;
+        }
+        let Pattern::Constructor {
+            enum_name,
+            variant_name,
+            payload,
+        } = &pattern.1
+        else {
+            self.push_str(&flat);
+            return;
+        };
+        self.push_str(enum_name);
+        self.push_str("::");
+        self.push_str(variant_name);
+        match payload {
+            PatternPayload::Unit => {}
+            PatternPayload::Tuple(parts) => {
+                self.push_str("(");
+                self.newline();
+                self.with_indent(|f| {
+                    for part in parts {
+                        f.write_indent();
+                        f.fmt_pattern(part);
+                        f.push_str(",");
+                        f.newline();
+                    }
+                });
+                self.write_indent();
+                self.push_str(")");
+            }
+            PatternPayload::Record(fields) => {
+                self.push_str(" {");
+                self.newline();
+                self.with_indent(|f| {
+                    for field in fields {
+                        f.write_indent();
+                        f.push_str(field.name);
+                        if !is_shorthand_field(field) {
+                            f.push_str(": ");
+                            f.fmt_pattern(&field.pattern);
+                        }
+                        f.push_str(",");
+                        f.newline();
+                    }
+                });
+                self.write_indent();
+                self.push_str("}");
+            }
+        }
     }
 
     fn fmt_let_pattern(&mut self, pattern: &LetPattern<'_>) {
@@ -2556,6 +2615,29 @@ fn binary_op(expr: &Expression<'_>) -> &'static str {
 }
 
 /// Numbers and short strings: list items worth packing several per line.
+/// Shorthand `x` in `Foo { x }` (binds the field to a local of its name).
+fn is_shorthand_field(field: &PatternField<'_>) -> bool {
+    matches!(field.pattern.1, Pattern::Binding { name } if name == field.name)
+}
+
+/// Whether every constructor payload in `pattern` is short enough to stay on
+/// one line (see [`Formatter::fmt_pattern`]).
+fn pattern_is_short(pattern: &Pattern<'_>) -> bool {
+    let Pattern::Constructor { payload, .. } = pattern else {
+        return true;
+    };
+    match payload {
+        PatternPayload::Unit => true,
+        PatternPayload::Tuple(parts) => {
+            parts.len() <= 4 && parts.iter().all(|p| pattern_is_short(&p.1))
+        }
+        PatternPayload::Record(fields) => {
+            let limit = if fields.iter().all(is_shorthand_field) { 4 } else { 3 };
+            fields.len() <= limit && fields.iter().all(|f| pattern_is_short(&f.pattern.1))
+        }
+    }
+}
+
 fn is_short_literal(expr: &Expression<'_>) -> bool {
     match expr {
         Expression::Integer(_) | Expression::Float(_) | Expression::Bool(_) => true,
@@ -2705,6 +2787,21 @@ mod tests {
         let formatted = format_source(src).expect("format failed");
         let ast2 = parse_exprs(&formatted);
         assert_eq!(ast1, ast2, "formatted:\n{formatted}");
+    }
+
+    #[test]
+    fn short_constructor_patterns_stay_on_one_line() {
+        let src = "fn f(S s) -> int {\n    let t = S::C { r: 1 };\n    return match s {\n        S::C { r: _ } => 1,\n        S::B { a, b, c, d } => 2,\n        S::B { a: x, b: y, c: z } => 3,\n        S::T(a, b, c, d) => 4,\n    };\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+        round_trip(src);
+    }
+
+    #[test]
+    fn long_constructor_patterns_put_one_element_per_line() {
+        let src = "fn f(S s) -> int {\n    return match s {\n        S::B{a, b, c, d, e} => 1,\n        S::B{a: x, b, c, d} => 2,\n        S::T(a, b, c, d, S::U(e)) => 3,\n    };\n}\n";
+        let want = "fn f(S s) -> int {\n    return match s {\n        S::B {\n            a,\n            b,\n            c,\n            d,\n            e,\n        } => 1,\n        S::B {\n            a: x,\n            b,\n            c,\n            d,\n        } => 2,\n        S::T(\n            a,\n            b,\n            c,\n            d,\n            S::U(e),\n        ) => 3,\n    };\n}\n";
+        assert_eq!(format_source(src).unwrap(), want);
+        round_trip(want);
     }
 
     #[test]
