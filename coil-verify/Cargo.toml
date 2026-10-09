@@ -1,0 +1,15 @@
+[package]
+name = "coil-verify"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "coil-verify"
+path = "src/main.rs"
+
+[dependencies]
+compiler = { path = "../compiler", default-features = false }
+reporting = { path = "../reporting" }
+coil-args = { path = "../coil-args" }
+clap = { version = "4.5", features = ["derive"] }
+comptime = { path = "../comptime" }
