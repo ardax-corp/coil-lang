@@ -158,7 +158,7 @@ impl Show for Sh {
             Sh::Dot => string::format("Sh::Dot"),
             Sh::Circle(s_p0) => string::format("Sh::Circle(%v)", s_p0),
             Sh::Pair(s_p0, s_p1) => string::format("Sh::Pair(%v, %v)", s_p0, s_p1),
-            Sh::Rect{ w: _, h: _ } => string::format(
+            Sh::Rect { w: _, h: _ } => string::format(
                 "Sh::Rect { w: %v, h: %v }",
                 __show_Sh.w,
                 __show_Sh.h,
@@ -182,9 +182,9 @@ impl Eq for Sh {
                 Sh::Pair(b_p0, b_p1) => ((a_p0 == b_p0) && (a_p1 == b_p1)),
                 default => false,
             },
-            Sh::Rect{ w: _, h: _ } => match __eq_b_Sh {
-                Sh::Rect{ w: _, h: _ } => ((__eq_a_Sh.w == __eq_b_Sh.w) &&
-                                           (__eq_a_Sh.h == __eq_b_Sh.h)),
+            Sh::Rect { w: _, h: _ } => match __eq_b_Sh {
+                Sh::Rect { w: _, h: _ } => ((__eq_a_Sh.w == __eq_b_Sh.w) &&
+                                            (__eq_a_Sh.h == __eq_b_Sh.h)),
                 default => false,
             },
             default => false,
@@ -202,14 +202,14 @@ impl Lt for Sh {
                 Sh::Dot => false,
                 Sh::Circle(_) => true,
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
             Sh::Circle(a_p0) => match __ord_lt_b_Sh {
                 Sh::Dot => false,
                 Sh::Circle(b_p0) => ((a_p0 < b_p0) || ((a_p0 == b_p0) && false)),
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
             Sh::Pair(a_p0, a_p1) => match __ord_lt_b_Sh {
@@ -218,17 +218,17 @@ impl Lt for Sh {
                 Sh::Pair(b_p0, b_p1) => ((a_p0 < b_p0) ||
                                          ((a_p0 == b_p0) &&
                                           ((a_p1 < b_p1) || ((a_p1 == b_p1) && false)))),
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
-            Sh::Rect{ w: _, h: _ } => match __ord_lt_b_Sh {
+            Sh::Rect { w: _, h: _ } => match __ord_lt_b_Sh {
                 Sh::Dot => false,
                 Sh::Circle(_) => false,
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => ((__ord_lt_a_Sh.w < __ord_lt_b_Sh.w) ||
-                                           ((__ord_lt_a_Sh.w == __ord_lt_b_Sh.w) &&
-                                            ((__ord_lt_a_Sh.h < __ord_lt_b_Sh.h) ||
-                                             ((__ord_lt_a_Sh.h == __ord_lt_b_Sh.h) && false)))),
+                Sh::Rect { w: _, h: _ } => ((__ord_lt_a_Sh.w < __ord_lt_b_Sh.w) ||
+                                            ((__ord_lt_a_Sh.w == __ord_lt_b_Sh.w) &&
+                                             ((__ord_lt_a_Sh.h < __ord_lt_b_Sh.h) ||
+                                              ((__ord_lt_a_Sh.h == __ord_lt_b_Sh.h) && false)))),
                 default => false,
             },
             default => false,
@@ -243,14 +243,14 @@ impl Le for Sh {
                 Sh::Dot => true,
                 Sh::Circle(_) => true,
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
             Sh::Circle(a_p0) => match __ord_le_b_Sh {
                 Sh::Dot => false,
                 Sh::Circle(b_p0) => ((a_p0 < b_p0) || ((a_p0 == b_p0) && true)),
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
             Sh::Pair(a_p0, a_p1) => match __ord_le_b_Sh {
@@ -259,17 +259,17 @@ impl Le for Sh {
                 Sh::Pair(b_p0, b_p1) => ((a_p0 < b_p0) ||
                                          ((a_p0 == b_p0) &&
                                           ((a_p1 < b_p1) || ((a_p1 == b_p1) && true)))),
-                Sh::Rect{ w: _, h: _ } => true,
+                Sh::Rect { w: _, h: _ } => true,
                 default => false,
             },
-            Sh::Rect{ w: _, h: _ } => match __ord_le_b_Sh {
+            Sh::Rect { w: _, h: _ } => match __ord_le_b_Sh {
                 Sh::Dot => false,
                 Sh::Circle(_) => false,
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => ((__ord_le_a_Sh.w < __ord_le_b_Sh.w) ||
-                                           ((__ord_le_a_Sh.w == __ord_le_b_Sh.w) &&
-                                            ((__ord_le_a_Sh.h < __ord_le_b_Sh.h) ||
-                                             ((__ord_le_a_Sh.h == __ord_le_b_Sh.h) && true)))),
+                Sh::Rect { w: _, h: _ } => ((__ord_le_a_Sh.w < __ord_le_b_Sh.w) ||
+                                            ((__ord_le_a_Sh.w == __ord_le_b_Sh.w) &&
+                                             ((__ord_le_a_Sh.h < __ord_le_b_Sh.h) ||
+                                              ((__ord_le_a_Sh.h == __ord_le_b_Sh.h) && true)))),
                 default => false,
             },
             default => false,
@@ -284,14 +284,14 @@ impl Gt for Sh {
                 Sh::Dot => false,
                 Sh::Circle(_) => false,
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
             Sh::Circle(a_p0) => match __ord_gt_b_Sh {
                 Sh::Dot => true,
                 Sh::Circle(b_p0) => ((a_p0 > b_p0) || ((a_p0 == b_p0) && false)),
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
             Sh::Pair(a_p0, a_p1) => match __ord_gt_b_Sh {
@@ -300,17 +300,17 @@ impl Gt for Sh {
                 Sh::Pair(b_p0, b_p1) => ((a_p0 > b_p0) ||
                                          ((a_p0 == b_p0) &&
                                           ((a_p1 > b_p1) || ((a_p1 == b_p1) && false)))),
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
-            Sh::Rect{ w: _, h: _ } => match __ord_gt_b_Sh {
+            Sh::Rect { w: _, h: _ } => match __ord_gt_b_Sh {
                 Sh::Dot => true,
                 Sh::Circle(_) => true,
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => ((__ord_gt_a_Sh.w > __ord_gt_b_Sh.w) ||
-                                           ((__ord_gt_a_Sh.w == __ord_gt_b_Sh.w) &&
-                                            ((__ord_gt_a_Sh.h > __ord_gt_b_Sh.h) ||
-                                             ((__ord_gt_a_Sh.h == __ord_gt_b_Sh.h) && false)))),
+                Sh::Rect { w: _, h: _ } => ((__ord_gt_a_Sh.w > __ord_gt_b_Sh.w) ||
+                                            ((__ord_gt_a_Sh.w == __ord_gt_b_Sh.w) &&
+                                             ((__ord_gt_a_Sh.h > __ord_gt_b_Sh.h) ||
+                                              ((__ord_gt_a_Sh.h == __ord_gt_b_Sh.h) && false)))),
                 default => false,
             },
             default => false,
@@ -325,14 +325,14 @@ impl Ge for Sh {
                 Sh::Dot => true,
                 Sh::Circle(_) => false,
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
             Sh::Circle(a_p0) => match __ord_ge_b_Sh {
                 Sh::Dot => true,
                 Sh::Circle(b_p0) => ((a_p0 > b_p0) || ((a_p0 == b_p0) && true)),
                 Sh::Pair(_, _) => false,
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
             Sh::Pair(a_p0, a_p1) => match __ord_ge_b_Sh {
@@ -341,17 +341,17 @@ impl Ge for Sh {
                 Sh::Pair(b_p0, b_p1) => ((a_p0 > b_p0) ||
                                          ((a_p0 == b_p0) &&
                                           ((a_p1 > b_p1) || ((a_p1 == b_p1) && true)))),
-                Sh::Rect{ w: _, h: _ } => false,
+                Sh::Rect { w: _, h: _ } => false,
                 default => false,
             },
-            Sh::Rect{ w: _, h: _ } => match __ord_ge_b_Sh {
+            Sh::Rect { w: _, h: _ } => match __ord_ge_b_Sh {
                 Sh::Dot => true,
                 Sh::Circle(_) => true,
                 Sh::Pair(_, _) => true,
-                Sh::Rect{ w: _, h: _ } => ((__ord_ge_a_Sh.w > __ord_ge_b_Sh.w) ||
-                                           ((__ord_ge_a_Sh.w == __ord_ge_b_Sh.w) &&
-                                            ((__ord_ge_a_Sh.h > __ord_ge_b_Sh.h) ||
-                                             ((__ord_ge_a_Sh.h == __ord_ge_b_Sh.h) && true)))),
+                Sh::Rect { w: _, h: _ } => ((__ord_ge_a_Sh.w > __ord_ge_b_Sh.w) ||
+                                            ((__ord_ge_a_Sh.w == __ord_ge_b_Sh.w) &&
+                                             ((__ord_ge_a_Sh.h > __ord_ge_b_Sh.h) ||
+                                              ((__ord_ge_a_Sh.h == __ord_ge_b_Sh.h) && true)))),
                 default => false,
             },
             default => false,
@@ -374,7 +374,7 @@ impl Hash for Sh {
             Sh::Dot => 0,
             Sh::Circle(h_p0) => ((1 * 31) + h_p0.hash()),
             Sh::Pair(h_p0, h_p1) => ((((2 * 31) + h_p0.hash()) * 31) + h_p1.hash()),
-            Sh::Rect{ w: _, h: _ } => ((((3 * 31) + __hash_Sh.w.hash()) * 31) + __hash_Sh.h.hash()),
+            Sh::Rect { w: _, h: _ } => ((((3 * 31) + __hash_Sh.w.hash()) * 31) + __hash_Sh.h.hash()),
             default => 0,
         };
     }
@@ -386,7 +386,7 @@ impl String for Sh {
             Sh::Dot => string::format("Sh::Dot"),
             Sh::Circle(s_p0) => string::format("Sh::Circle(%v)", s_p0),
             Sh::Pair(s_p0, s_p1) => string::format("Sh::Pair(%v, %v)", s_p0, s_p1),
-            Sh::Rect{ w: _, h: _ } => string::format(
+            Sh::Rect { w: _, h: _ } => string::format(
                 "Sh::Rect { w: %v, h: %v }",
                 __str_Sh.w,
                 __str_Sh.h,
@@ -650,7 +650,7 @@ test("enum Show / String") {
     assert(Sh::Dot.show() == "Sh::Dot")?;
     assert(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show())?;
     assert(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)", Sh::Pair(1, 2).show())?;
-    assert(Sh::Rect{ w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
+    assert(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
 }
 
 test("enum Eq / Ord") {
@@ -660,9 +660,9 @@ test("enum Eq / Ord") {
     assert(Sh::Dot != Sh::Circle(0))?;
     assert(Sh::Dot < Sh::Circle(0))?;
     assert(Sh::Circle(1) < Sh::Circle(2))?;
-    assert(Sh::Rect{ w: 1, h: 2 } < Sh::Rect{ w: 1, h: 3 })?;
-    assert(Sh::Rect{ w: 1, h: 2 } >= Sh::Rect{ w: 1, h: 2 })?;
-    assert(Sh::Rect{ w: 0, h: 0 } > Sh::Pair(9, 9))?;
+    assert(Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 })?;
+    assert(Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 })?;
+    assert(Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, 9))?;
 }
 
 test("enum Hash") {

@@ -27,6 +27,6 @@ fn main() {
     show_it("hi");
     show_it(1.5);
     show_it(true);
-    show_it(Point::Point{ x: 3, y: 4 });
+    show_it(Point::Point { x: 3, y: 4 });
     show_it(99);
 }

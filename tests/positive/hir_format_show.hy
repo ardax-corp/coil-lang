@@ -30,7 +30,7 @@ fn describe(Shape s, Pt p, int n) -> string {
 test("user, derived and builtin Show") {
     let p = new Pt(1, 2);
     assert(describe(Shape::Circle(3), p, 4) == "Shape::Circle(3) <1 2> 4 5")?;
-    assert(format("%v", Shape::Square{ side: 2 }) == "Shape::Square { side: 2 }")?;
+    assert(format("%v", Shape::Square { side: 2 }) == "Shape::Square { side: 2 }")?;
 }
 
 test("Show inside a call's arguments") {

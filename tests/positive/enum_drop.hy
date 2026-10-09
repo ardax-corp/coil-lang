@@ -92,9 +92,9 @@ impl Shape {
 }
 
 fn area() -> int {
-    let s = Shape::Rect{ w: 3, h: 4 };
+    let s = Shape::Rect { w: 3, h: 4 };
     return match s {
-        Shape::Rect{ w, h } => w * h,
+        Shape::Rect { w, h } => w * h,
         Shape::Dot => 0,
     };
 }

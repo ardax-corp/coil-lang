@@ -43,6 +43,26 @@ line, still with a trailing comma.
 
 Class and enum bodies are always multiline when non-empty and use trailing commas after each field/variant. Match arms are one per line with a trailing comma after every arm, including the last.
 
+Record payloads keep one space before `{` and one inside each brace
+(`Shape::Circle { r: 1 }`, `{ a: 1, b: 2 }`); tuple payloads attach `(` to the
+name (`Shape::Pair(a, b)`). A constructor pattern (`match` arm, `if let`,
+`while let`) stays on one line only while it fits and every payload in it is
+short: at most four shorthand fields or tuple elements, at most three fields
+once any field binds a sub-pattern (`r: _`). Past that, or when a comment
+sits inside it, each field or element goes on its own line at +1 indent with a
+trailing comma, so wide patterns read well in a narrow split. Comments stay
+with their element (a `// c` after `a,` trails `a`; `/* c */ b` leads `b`):
+
+```hy
+Shape::Big {
+    a,
+    b,
+    c,
+    d,
+    e,
+} => 1,
+```
+
 ## Normalization
 
 - A statement-position `match` loses its trailing `;` (it ends at `}` like `if`).

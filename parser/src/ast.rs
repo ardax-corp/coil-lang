@@ -1033,7 +1033,11 @@ impl<'a> Display for Pattern<'a> {
                                 _ => format!("{}: {}", pf.name, pf.pattern.1),
                             })
                             .collect();
-                        write!(f, "{{ {} }}", parts.join(", "))
+                        if parts.is_empty() {
+                            write!(f, " {{}}")
+                        } else {
+                            write!(f, " {{ {} }}", parts.join(", "))
+                        }
                     }
                 }
             }

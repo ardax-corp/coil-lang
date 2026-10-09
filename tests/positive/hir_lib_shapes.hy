@@ -10,13 +10,13 @@ test("ordered comparison on a module's scalar enum") {
 }
 
 test("a match whose arms all raise fits the value's word") {
-    assert(hir_lib_shapes::decode(Raw::Good{ value: 7 })? == 7)?;
-    let first = match hir_lib_shapes::decode(Raw::Bad{ code: 1 }) {
+    assert(hir_lib_shapes::decode(Raw::Good { value: 7 })? == 7)?;
+    let first = match hir_lib_shapes::decode(Raw::Bad { code: 1 }) {
         Result::Ok(_) => "ok",
         Result::Err(e) => hir_lib_shapes::message(e),
     };
     assert(first == "one")?;
-    let second = match hir_lib_shapes::decode(Raw::Bad{ code: 5 }) {
+    let second = match hir_lib_shapes::decode(Raw::Bad { code: 5 }) {
         Result::Ok(_) => "ok",
         Result::Err(e) => hir_lib_shapes::message(e),
     };

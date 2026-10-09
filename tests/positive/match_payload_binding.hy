@@ -69,15 +69,15 @@ fn quad(int i) -> int {
     let q = Quad::Four(id(i), id(i + 1), id(i + 2), id(i + 3));
     return match q {
         Quad::Four(a, b, c, d) => a * 1000 + b * 100 + c * 10 + d,
-        Quad::Named{ a, b, c } => a + b + c,
+        Quad::Named { a, b, c } => a + b + c,
     };
 }
 
 fn named(int i) -> int {
-    let q = Quad::Named{ a: id(i), b: id(i + 1), c: id(i + 2) };
+    let q = Quad::Named { a: id(i), b: id(i + 1), c: id(i + 2) };
     return match q {
         Quad::Four(a, b, c, d) => a + b + c + d,
-        Quad::Named{ a, b, c } => a * 100 + b * 10 + c,
+        Quad::Named { a, b, c } => a * 100 + b * 10 + c,
     };
 }
 

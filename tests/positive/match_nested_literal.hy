@@ -54,8 +54,8 @@ fn moves(Msg m) -> int {
         Msg::Move(0, 0) => 0,
         Msg::Move(0, y) => y,
         Msg::Move(x, 0) => x * 10,
-        Msg::Paint{ color: Color::Red, times: 3 } => 300,
-        Msg::Paint{ color: _, times } => times,
+        Msg::Paint { color: Color::Red, times: 3 } => 300,
+        Msg::Paint { color: _, times } => times,
         Msg::Move(x, y) => x * 100 + y,
     };
 }
@@ -64,7 +64,7 @@ fn moves(Msg m) -> int {
 fn second(Msg m) -> int {
     return match m {
         Msg::Move(_, y) => y,
-        Msg::Paint{ color: _, times } => times,
+        Msg::Paint { color: _, times } => times,
     };
 }
 
@@ -145,11 +145,11 @@ test("literals in tuple and record payloads") {
     assert(moves(Msg::Move(0, 5)) == 5)?;
     assert(moves(Msg::Move(4, 0)) == 40)?;
     assert(moves(Msg::Move(4, 5)) == 405)?;
-    assert(moves(Msg::Paint{ color: Color::Red, times: 3 }) == 300)?;
-    assert(moves(Msg::Paint{ color: Color::Red, times: 4 }) == 4)?;
-    assert(moves(Msg::Paint{ color: Color::Green, times: 3 }) == 3)?;
+    assert(moves(Msg::Paint { color: Color::Red, times: 3 }) == 300)?;
+    assert(moves(Msg::Paint { color: Color::Red, times: 4 }) == 4)?;
+    assert(moves(Msg::Paint { color: Color::Green, times: 3 }) == 3)?;
     assert(second(Msg::Move(3, 4)) == 4)?;
-    assert(second(Msg::Paint{ color: Color::Red, times: 6 }) == 6)?;
+    assert(second(Msg::Paint { color: Color::Red, times: 6 }) == 6)?;
 }
 
 test("doubly nested patterns") {

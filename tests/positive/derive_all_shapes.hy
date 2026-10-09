@@ -62,7 +62,7 @@ test("enum Show / String") {
     assert(Sh::Dot.show() == "Sh::Dot")?;
     assert(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show())?;
     assert(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)", Sh::Pair(1, 2).show())?;
-    assert(Sh::Rect{ w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
+    assert(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
 }
 
 test("enum Eq / Ord") {
@@ -72,9 +72,9 @@ test("enum Eq / Ord") {
     assert(Sh::Dot != Sh::Circle(0))?;
     assert(Sh::Dot < Sh::Circle(0))?;
     assert(Sh::Circle(1) < Sh::Circle(2))?;
-    assert(Sh::Rect{ w: 1, h: 2 } < Sh::Rect{ w: 1, h: 3 })?;
-    assert(Sh::Rect{ w: 1, h: 2 } >= Sh::Rect{ w: 1, h: 2 })?;
-    assert(Sh::Rect{ w: 0, h: 0 } > Sh::Pair(9, 9))?;
+    assert(Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 })?;
+    assert(Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 })?;
+    assert(Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, 9))?;
 }
 
 test("enum Hash") {
