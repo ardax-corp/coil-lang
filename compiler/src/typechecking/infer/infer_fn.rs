@@ -587,6 +587,9 @@ impl Checker {
         // If generic, build a poly scheme and re-insert into env.
         if is_generic {
             self.reroot_type_params(&param_vars);
+            let named: Vec<(String, TyVarId)> =
+                type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
+            self.reject_bound_type_params(&named, &mut Vec::new(), range);
             let mut bounds = param_vars;
             bounds.extend(fn_assoc_projections.iter().map(|p| p.var));
             let mut kinds = param_kinds;
