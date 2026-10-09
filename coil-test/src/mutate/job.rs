@@ -57,10 +57,11 @@ pub fn run_job(
         .map(|k| (k.clone(), job.patched.clone()))
         .collect();
     for (file, cases) in &job.files {
-        let prepared = match compile_test_file(config, options, reactor, file, None, &overlays) {
+        let prepared = match compile_test_file(config, options, reactor, file, None, &overlays, None) {
             Compiled::Ready(prepared) => prepared,
-            // The mutated source no longer type-checks (or compiles).
-            Compiled::Decided(..) => return (Status::Unviable, None),
+            // The mutated source no longer type-checks (or compiles), or
+            // its contract tests are gone (it gained an effect).
+            Compiled::Decided(..) | Compiled::Nothing => return (Status::Unviable, None),
         };
         for (name, budget) in cases {
             for (_, entry) in prepared.cases.iter().filter(|(n, _)| n == name) {

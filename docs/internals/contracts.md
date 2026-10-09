@@ -3,7 +3,8 @@
 `requires` and `ensures` clauses on functions and methods, `old(e)` in
 `ensures`, `invariant` on classes and loops and `decreases` on `while`
 loops, and clauses on trait methods that every impl inherits, checked at
-run time (plan steps C0 to C2). Generated tests are C3; a prover is C4.
+run time (plan steps C0 to C2), and tests generated from them (C3). A
+prover is C4.
 
 ```coil
 fn isqrt(int n) -> int
@@ -145,6 +146,96 @@ everything. `-O2` and above (the default) check only `requires`: cheap entry
 checks that protect a library from its callers. `coil test` checks
 everything unless told otherwise. The level reaches HIR build through
 `hir::set_contract_level`, set at the start of every compile.
+
+## Generated tests
+
+`coil test` turns contracts into test cases: each function with a
+`requires` or `ensures` is called with random arguments, and a failed
+`ensures` (or any other panic) fails the case with the arguments that
+caused it.
+
+```text
+> Test "contract: clamp" failed: clamp(x = 0, lo = -1, hi = -1): contract violated: ensures result >= lo && result <= hi in clamp
+```
+
+### `arbitrary`
+
+`compiler/src/prelude/arbitrary.hy` is embedded as module `arbitrary`
+(`<coil>/arbitrary.hy`, like `task`):
+
+| Item | Meaning |
+|------|---------|
+| `Gen` | seeded xorshift source; `size` bounds values (ints in `[-size, size]`, lengths up to `size`), `depth` tracks nesting |
+| `Gen::new(seed)`, `g.resize(n)`, `g.below(n)`, `g.int_in(lo, hi)`, `g.one_in(n)`, `g.len()`, `g.enter()` / `g.leave()` / `g.deep()` | building blocks for instances |
+| `trait Arbitrary<T> { static fn arbitrary(Gen g) -> T }` | instances for `int`, `byte`, `bool`, `float`, `string`, `Vec<T>` and `Option<T>` |
+| `any(g)` | `T::arbitrary(g)`, `T` chosen by the expected type: `let v: Vec<int> = any(g);` |
+| `#[derive(Arbitrary)]` | after `use arbitrary::Arbitrary`: a class draws each field, an enum picks a variant and draws its payloads |
+
+Ints avoid huge values: an overflow in the code under test aborts the VM
+rather than failing a case. Below `deep()` (depth 4) collections are empty
+and derived enums take their first variant without payloads, so recursive
+types end. A derived class value may break the class's `invariant`; such a
+class needs a hand-written instance. The derive is a macro of the module
+itself, so macro resolution follows `use` into embedded modules
+(`Pipeline::resolve_macro`).
+
+### Cases
+
+`Pipeline::add_contract_tests` (`pipeline_contract_tests.rs`) runs after
+trait contracts are inherited, when `set_contract_runs(n)` is above 0
+(`coil test --contract-runs`, default 100), tests are included and the
+contract level is not `off`. For the entry file it picks every function
+and `pub static` method that:
+
+- has a `requires` or `ensures`, no type parameters, and is not a `gen fn`;
+- takes only parameters whose types have an `Arbitrary` instance: the
+  primitives, `Vec` / `Option` of such types, and types with an
+  `impl Arbitrary` anywhere in the program (derived ones included);
+- lives in a file without `fn main` (test cases cannot share a file with
+  it).
+
+Instance methods are left out: their receiver must keep the class
+invariant. Each target gets `test("contract: f") { … }`, parsed as
+generated text with the function's header as its site, plus one aliased
+`use arbitrary::{…}` at the top of the file. The case:
+
+1. seeds a `Gen` from the case name (the same arguments every run) and
+   grows its size with the calls made, so the first failures are small;
+2. draws each argument with `any`, and draws again while a `requires` is
+   false (at most ten draws per call over the whole case);
+3. calls the function in a child task (`arbitrary::run_case`), so a panic
+   comes back as a message instead of ending the job;
+4. on a panic, fails with the arguments: primitives and types with a
+   `Show` instance print their value (strings quoted, `Vec` / `Option` of
+   those via `show_vec` / `show_option`), anything else prints its type.
+
+A function with no parameters is called once. Draws are not shrunk.
+
+### Effects
+
+Random arguments must not delete files or open sockets. Codegen asks the
+HIR effect summary of the target (`Compiler::contract_case_allowed`) when it
+emits a generated case: anything visible besides `read` and `mutate` (or a
+call through a function parameter) and the case is dropped from the
+runnable cases in `finalize_bytecode`. Its body is still emitted and listed
+until then, so labels and node ids stay in step.
+
+### Project sources
+
+Contracts usually sit in `src/`, which the test root only imports. While
+compiling a test file, the pipeline lists the other modules that would get
+cases (`Pipeline::contract_sources`). The runner keeps those under the
+current directory, outside the test root and `.deps/`, and after the suite
+compiles each as the entry (`contracts of N project files`). A file outside
+the test root runs only its `contract: ` cases, never its `main` or its own
+`test` blocks; none left is `Compiled::Nothing`.
+
+### Mutation testing
+
+`coil mutate`'s baseline is a `coil test` run, so the generated cases cover
+project lines like any test and a mutant that breaks an `ensures` is killed
+by them (`killed … (src/mathx.hy: contract: twice)`). Clauses themselves
+are never mutated: the site walker does not visit them.
 
 ## Elsewhere
 

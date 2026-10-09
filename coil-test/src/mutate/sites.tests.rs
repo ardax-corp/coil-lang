@@ -114,3 +114,11 @@ fn operator_names_round_trip() {
     }
     assert_eq!(Operator::parse("nope"), None);
 }
+
+#[test]
+fn contract_clauses_are_not_mutated() {
+    // The clauses are the oracle a mutant must break, not code under test.
+    let src = "fn f(int x) -> int\n    requires x >= 0\n    ensures result > x\n{\n    return x + 1;\n}\n";
+    let lines: Vec<u32> = patches(src, &Operator::ALL).into_iter().map(|(line, _)| line).collect();
+    assert_eq!(lines, [5, 5]);
+}

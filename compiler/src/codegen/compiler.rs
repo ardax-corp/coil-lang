@@ -392,6 +392,28 @@ impl Compiler {
     }
 
     /// Include harness `test("…")` / `#[test]` declarations in the compile unit.
+    /// Whether test case `desc` may run: any case but a generated contract
+    /// test of a function with effects beyond reads and mutation.
+    fn contract_case_allowed(&self, desc: &str) -> bool {
+        let Some(target) = self.contract_cases.get(desc) else { return true };
+        let ns = self.namespace.as_str();
+        let key = if ns.is_empty() { target.clone() } else { format!("{ns}::{target}") };
+        let Some(summary) = self
+            .program_effects
+            .summary_named(&key)
+            .or_else(|| self.program_effects.summary_named(target))
+        else {
+            return false;
+        };
+        let harmless = common::EffectFlags::READ | common::EffectFlags::HOST | common::EffectFlags::HEAP_MUT;
+        summary.visible.bits() & !harmless == 0 && summary.latent == 0
+    }
+
+    /// Generated contract test cases: case name to the function it calls.
+    pub fn set_contract_cases(&mut self, cases: HashMap<String, String>) {
+        self.contract_cases = cases;
+    }
+
     pub fn set_include_tests(&mut self, include: bool) {
         self.include_tests = include;
     }
@@ -8127,6 +8149,13 @@ impl Compiler {
                 let fn_name = crate::typechecking::Checker::test_case_fn_name(case_index);
                 let (offset, _) = self.bind_function_entry(fn_name.clone());
                 let offset = offset as u32;
+                // A generated contract test calls its function with random
+                // arguments: only when it cannot write, do IO or the like.
+                // Its body is still emitted and listed until
+                // `finalize_bytecode`, which drops it from the runnable cases.
+                if !self.contract_case_allowed(&desc) {
+                    self.skipped_contract_cases.insert(desc.clone());
+                }
                 self.test_cases.push((desc, offset));
 
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
@@ -8497,6 +8526,10 @@ impl Compiler {
         let _ = self.finalize_bytecode_inner(false);
         #[cfg(not(any(test, feature = "dissect")))]
         self.finalize_bytecode_inner(false);
+        if !self.skipped_contract_cases.is_empty() {
+            let skipped = std::mem::take(&mut self.skipped_contract_cases);
+            self.test_cases.retain(|(desc, _)| !skipped.contains(desc));
+        }
     }
 
     /// Retain post-opt pre-fuse IL on the next [`Self::finalize_bytecode`].

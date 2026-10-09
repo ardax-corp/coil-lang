@@ -11799,3 +11799,30 @@ fn main() {
         compiler::ErrorCode::GenericTypeError,
     );
 }
+
+#[test]
+fn ensures_on_a_body_that_ends_in_an_endless_loop() {
+    // Every exit is a `return` inside `while true`: the loop is the body's
+    // unit-typed tail, which must not be taken for the returned value.
+    let src = r#"
+fn find(int k) -> int
+    ensures result >= 0
+{
+    let cur = 0;
+    while true {
+        if k == cur {
+            return cur - OFFSET;
+        }
+        cur = cur + 1;
+    }
+}
+
+fn main() {
+    assert(find(3) >= 0);
+}
+"#;
+    use compiler::ContractLevel::All;
+    assert_eq!(run_contracts_src(&src.replace("OFFSET", "0"), All), "");
+    let out = run_contracts_src(&src.replace("OFFSET", "5"), All);
+    assert!(out.contains("contract violated: ensures result >= 0 in find"), "got {out:?}");
+}

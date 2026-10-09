@@ -22,6 +22,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         coverage: None,
         opt_level: OptLevel::Standard,
         contracts: None,
+        contract_runs: 0,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),
         report: Report::Human,
@@ -390,3 +391,111 @@ fn compile_fail_passes_only_on_a_declared_code() {
     assert!(why.unwrap().contains("no expected error code"));
 }
 
+
+#[test]
+fn contract_runs_generate_a_case_per_function_with_contracts() {
+    let root = unique_tmp("contract_cases");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("props.hy"),
+        r#"use io::{stdout, write};
+use string::{to_bytes};
+
+fn clamp(int x, int lo, int hi) -> int
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+{
+    if x < lo {
+        return lo;
+    }
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+
+// Wrong below -2.
+fn bad_abs(int x) -> int
+    ensures result >= 0
+{
+    if x < -2 {
+        return x;
+    }
+    if x < 0 {
+        return 0 - x;
+    }
+    return x;
+}
+
+// Does IO: never called with random arguments.
+fn noisy(int x) -> int
+    ensures result == 0
+{
+    write(stdout(), to_bytes("noisy"));
+    return x;
+}
+
+// No contracts: no case.
+fn plain(int x) -> int {
+    return x;
+}
+
+test("hand-written") {
+    assert(clamp(5, 0, 3) == 3)?;
+}
+"#,
+    )
+    .unwrap();
+    let mut opts = options(&root, false);
+    opts.contract_runs = 100;
+    let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+    let mut names: Vec<(String, bool)> =
+        result.cases.iter().map(|c| (c.name.clone(), c.passed)).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            ("contract: bad_abs".to_string(), false),
+            ("contract: clamp".to_string(), true),
+            ("hand-written".to_string(), true),
+        ]
+    );
+    // Off: only the hand-written case.
+    opts.contract_runs = 0;
+    let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+    assert_eq!((result.passed, result.failed), (1, 0));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_source_outside_the_test_root_runs_only_its_contract_tests() {
+    let root = unique_tmp("contract_source");
+    let tests = root.join("tests");
+    let src = root.join("src");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("lib.hy");
+    std::fs::write(
+        &file,
+        "fn twice(int x) -> int\n    ensures result == x + x\n{\n    return x * 2;\n}\n\n\
+         fn plain(int x) -> int {\n    return x;\n}\n\n\
+         test(\"own case\") {\n    assert(false)?;\n}\n",
+    )
+    .unwrap();
+    let mut opts = options(&tests, false);
+    opts.contract_runs = 10;
+    let reactor = Reactor::new(1);
+    let names = |compiled: Compiled| match compiled {
+        Compiled::Ready(p) => p.cases.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+        Compiled::Nothing => Vec::new(),
+        Compiled::Decided(ok, m) => panic!("decided {ok} {m:?}"),
+    };
+    let compiled = compile_test_file(&ReportConfig::default(), &opts, &reactor, &file, None, &[], None);
+    assert_eq!(names(compiled), ["contract: twice"]);
+    // Without contract tests there is nothing to run there.
+    opts.contract_runs = 0;
+    let compiled = compile_test_file(&ReportConfig::default(), &opts, &reactor, &file, None, &[], None);
+    assert!(names(compiled).is_empty());
+    reactor.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

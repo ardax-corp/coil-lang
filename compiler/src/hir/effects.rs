@@ -120,6 +120,11 @@ pub struct ProgramEffects {
 }
 
 impl ProgramEffects {
+    /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
+    pub fn summary_named(&self, name: &str) -> Option<Summary> {
+        self.by_name.get(name).copied()
+    }
+
     /// Keep `module`'s summaries for the modules compiled after it.
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
         self.traits.extend(module.trait_effects.iter().cloned());

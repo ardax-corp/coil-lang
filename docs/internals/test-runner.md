@@ -35,6 +35,7 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | any `.hy` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// Expected: E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case |
+| a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
 
 A case body is checked in `Result<(), string>` mode, but its `?` is
 looser than a function's (#628). The checker records each such site in

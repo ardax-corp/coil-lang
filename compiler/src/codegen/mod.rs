@@ -475,6 +475,11 @@ pub struct Compiler {
     /// are stripped before typecheck/codegen. Set true for `coil test`
     /// or `compile --include-tests`.
     include_tests: bool,
+    /// Generated contract test cases (`Pipeline::set_contract_runs`): case
+    /// name to the function it calls, for the effect gate at `TestCase`.
+    contract_cases: HashMap<String, String>,
+    /// Contract cases whose function has effects: not run.
+    skipped_contract_cases: HashSet<String>,
     /// Coverage compiles: functions whose body lies in a source file this
     /// accepts are tree-shake roots, so never-called code is still emitted
     /// (and reported uncovered) instead of dropped.
@@ -694,6 +699,8 @@ impl Default for Compiler {
             test_cases: Vec::new(),
             user_main_defined: false,
             include_tests: false,
+            contract_cases: HashMap::new(),
+            skipped_contract_cases: HashSet::new(),
             keep_fns_in: None,
             fn_source_files: HashMap::new(),
             polyfn_vars: HashSet::new(),

@@ -816,20 +816,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             // The body's value (a unit function's tail is a statement).
             Some(t)
                 if b.body.ret.as_ref().is_some_and(|r| !layout::is_unit(r))
-                    && ty(b, t).is_some_and(|t| t != Ty::Never) =>
+                    && ty(b, t).is_some_and(|t| t != Ty::Never && !layout::is_unit(&t)) =>
             {
                 let checked = self.ensured_value(b, Some(t), end, ensures, fname);
                 if let HirKind::Block { tail, .. } = &mut b.body.exprs[root.0 as usize].kind {
                     *tail = Some(checked);
                 }
             }
-            // A unit body that runs off its end.
+            // A unit body that runs off its end. A body of another type
+            // cannot (it ends in `while true` with every exit a `return`).
             tail => {
                 stmts.extend(tail);
                 let diverges = stmts
                     .last()
                     .is_some_and(|&last| matches!(ty(b, last), Some(Ty::Never)));
-                if !diverges {
+                let unit = b.body.ret.as_ref().is_none_or(layout::is_unit);
+                if !diverges && unit {
                     let checked = self.ensured_value(b, None, end, ensures, fname);
                     stmts.push(checked);
                 }

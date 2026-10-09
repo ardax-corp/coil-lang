@@ -456,6 +456,28 @@ fn virtual_import_is_not_shadowed_by_another_modules_fn() {
 }
 
 #[test]
+fn module_fn_calls_a_fn_declared_later_in_its_module() {
+    // From the body and from a contract clause: both name `twice` before
+    // its declaration.
+    let manifest = manifest_src_and_stdlib();
+    let files = &[
+        (
+            "src/main.hy",
+            "use foo::{four};\nuse io::{stdout, write};\nuse string::{format, to_bytes};\n\
+             fn main() { write(stdout(), to_bytes(format(\"%i\", four()))); }\n",
+        ),
+        (
+            "src/foo.hy",
+            "fn four() -> int\n    ensures result == twice(2)\n{\n    return twice(2);\n}\n\n\
+             fn twice(int x) -> int {\n    return x * 2;\n}\n",
+        ),
+    ];
+    let (root, entry) = build_project("module_forward_fn", &manifest, files, "src/main.hy");
+    let output = run_project(&root, &entry);
+    assert_eq!(output, "4");
+}
+
+#[test]
 fn use_module_file_does_not_reach_subdirectory_files() {
     let manifest = manifest_src_and_stdlib();
     let files = &[

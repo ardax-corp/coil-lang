@@ -35,6 +35,9 @@ pub const MUTATE: &str = "mutate";
 /// Default `--timeout-factor`.
 pub const DEFAULT_TIMEOUT_FACTOR: u64 = 10;
 
+/// Default `--contract-runs`.
+pub const DEFAULT_CONTRACT_RUNS: u32 = 100;
+
 /// Default `--wall-timeout` (seconds per mutant).
 pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
 
@@ -83,6 +86,10 @@ struct TestCli {
     /// Also write test -> file -> lines JSON (implies --coverage)
     #[arg(long, value_name = "FILE")]
     coverage_per_test: Option<PathBuf>,
+    /// Calls per generated contract test (functions with `requires` /
+    /// `ensures`; default 100, 0: none)
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_CONTRACT_RUNS)]
+    contract_runs: u32,
     /// NDJSON events on stdout (start, file, summary, error)
     #[arg(long)]
     json: bool,
@@ -139,6 +146,10 @@ struct MutateCli {
     /// Exit 1 when the mutation score is below P percent
     #[arg(long, value_name = "P", value_parser = parse_min_score)]
     min_score: Option<f64>,
+    /// Calls per generated contract test (functions with `requires` /
+    /// `ensures`; default 100, 0: none)
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_CONTRACT_RUNS)]
+    contract_runs: u32,
     /// NDJSON events on stdout (plan, mutant, summary, error)
     #[arg(long)]
     json: bool,
@@ -198,6 +209,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         coverage: cli.coverage,
         coverage_out: cli.coverage_out,
         per_test_out: cli.coverage_per_test,
+        contract_runs: cli.contract_runs,
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -228,6 +240,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         coverage: false,
         coverage_out: None,
         per_test_out: None,
+        contract_runs: cli.contract_runs,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -269,6 +282,7 @@ struct RunParts {
     coverage: bool,
     coverage_out: Option<PathBuf>,
     per_test_out: Option<PathBuf>,
+    contract_runs: u32,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -304,6 +318,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             }),
             opt_level: parts.opt.level(),
             contracts: parts.opt.contracts,
+            contract_runs: parts.contract_runs,
             grants: parts.grants.into_grants(),
             extra_roots: parts.roots.root,
             report: if parts.json {
