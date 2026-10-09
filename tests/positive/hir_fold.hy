@@ -29,6 +29,19 @@ fn wide_product() -> int {
     return 4000000 * 4000000;
 }
 
+fn steps(int x) -> int {
+    return x + 1 + 2 + 3 + (x + -4 + -5) + (x + 2 + -2);
+}
+
+fn step_stmts(int x) -> int {
+    let t = x;
+    t = t + 1;
+    t = t + 2;
+    t = t + -3;
+    t = t + 4;
+    return t;
+}
+
 fn floats(float x) -> float {
     return x * 1.0 + 1.5 * 2.0 + x / 1.0;
 }
@@ -70,6 +83,12 @@ test("a call times zero still runs") {
 test("results past 32 bits are computed at run time") {
     assert(wide() == 2147483648)?;
     assert(wide_product() == 16000000000000)?;
+}
+
+test("constant steps add once") {
+    assert(steps(10) == 27)?;
+    assert(steps(-1) == -6)?;
+    assert(step_stmts(5) == 9)?;
 }
 
 test("float folds") {
