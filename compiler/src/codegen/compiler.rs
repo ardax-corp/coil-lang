@@ -2459,8 +2459,7 @@ impl Compiler {
             return Some(kind.to_string());
         }
         let lookup = strip_overload_key(callee);
-        if std::env::var_os("COIL_NO_PAIR_PARAMS").is_some()
-            || self.checker.is_overloaded(lookup)
+        if self.checker.is_overloaded(lookup)
             || self.checker.is_generic_fn(lookup)
             || self.coroutine_fns.contains(callee)
             || self.coroutine_fns.contains(lookup)
