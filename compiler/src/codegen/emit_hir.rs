@@ -614,8 +614,33 @@ impl Compiler {
             {
                 return Err("drop-class".to_string());
             }
+            // A finalizer runs when its object becomes unreachable: spliced
+            // code would hold the object in the caller's frame (in a temp,
+            // past any clear) and delay its `drop`.
+            fn finalized(this: &Compiler, ty: &Ty) -> bool {
+                match ty {
+                    Ty::Con(n) => this.checker.class_has_drop(n) || this.checker.enum_has_drop(n),
+                    Ty::App(h, args) => finalized(this, h) || args.iter().any(|a| finalized(this, a)),
+                    Ty::Tuple(items) => items.iter().any(|t| finalized(this, t)),
+                    Ty::List(inner) | Ty::Readonly(inner) => finalized(this, inner),
+                    Ty::Array { element, .. } => finalized(this, element),
+                    Ty::Sum { name, .. } => this.checker.enum_has_drop(name),
+                    _ => false,
+                }
+            }
+            if callee
+                .exprs
+                .iter()
+                .filter_map(|e| e.ty.as_ref())
+                .chain(callee.locals.iter().filter_map(|l| l.ty.as_ref()))
+                .any(|t| finalized(self, &apply_ty_prune(self.checker.subst(), t)))
+            {
+                return Err("drop-value".to_string());
+            }
             // Spliced locals live on in the caller's frame, where a heap
-            // value would stay reachable: only scalars become new slots.
+            // value would stay reachable: those are cleared after the
+            // statement (`HirKind::Clear`), or without that only scalars
+            // become new slots.
             let scalar = |ty: &Option<Ty>| {
                 ty.as_ref().is_some_and(|t| {
                     matches!(
@@ -627,9 +652,14 @@ impl Compiler {
             let HirKind::Call { args, .. } = &hir.expr(id).kind else {
                 return Err("not-call".to_string());
             };
+            let mut heap = Vec::new();
             for (k, l) in callee.locals.iter().enumerate() {
                 let local = LocalId(k as u32);
                 if scalar(&l.ty) {
+                    continue;
+                }
+                heap.push(local);
+                if self.hir_inline_heap {
                     continue;
                 }
                 let bound = match callee.params.iter().position(|&p| p == local) {
@@ -643,7 +673,9 @@ impl Compiler {
                     return Err(format!("heap local `{}`", l.name));
                 }
             }
-            let shape = inline::inlinable(callee, budget)?.with_heap_result(!scalar(&hir.expr(id).ty));
+            let shape = inline::inlinable(callee, budget)?
+                .with_heap_result(!scalar(&hir.expr(id).ty))
+                .with_heap_locals(heap);
             Ok((callee, shape))
         };
         let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
@@ -654,13 +686,18 @@ impl Compiler {
             }
             found.ok()
         };
-        let (body, sites) = inline::inline_calls(hir, callee_of, hir.exprs.len().max(32) * 2)?;
+        let (body, spliced) = inline::inline_calls(hir, callee_of, hir.exprs.len().max(32) * 2)?;
+        let sites = spliced.len();
         let replanned = lower::refusal(&body, &self.checker)
             .map_or_else(|| self.plan_hir_body(&body), Err)
             .and_then(|mut emit| self.plan_hir_lambdas(module, &body, &mut emit).map(|()| emit));
         match replanned {
             Ok(emit) => {
                 crate::il::opt::note_hir_inlined(sites);
+                for (name, (start, end)) in spliced {
+                    let file = self.loc_from_span(SimpleSpan::from(start..end)).file;
+                    self.inlined_bodies.push((file, start..end, name));
+                }
                 if std::env::var_os("COIL_HIR_WHY").is_some() {
                     eprintln!("hir inline `{}`: {sites} sites", hir.name);
                 }
@@ -4843,6 +4880,7 @@ impl Compiler {
 
     fn hir_check_effect(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
         match &hir.expr(id).kind {
+            HirKind::Clear(_) => Ok(()),
             HirKind::Block { stmts, tail } => {
                 for &s in stmts.iter().chain(tail) {
                     self.hir_check_effect(hir, emit, s)?;
@@ -7503,6 +7541,33 @@ impl Compiler {
                             self.bytecode.push_store_pop(slot);
                         }
                         None => self.bytecode.push_pop(),
+                    }
+                }
+            }
+            HirKind::Clear(locals) => {
+                // Every word the local was bound to: its slot, a class
+                // local's field slots or a stack array's element slots, and
+                // the object a boxed stack array became.
+                for &local in locals {
+                    let Some(base) = emit.slots[local.0 as usize] else {
+                        continue;
+                    };
+                    let key = self.context.variables.resolve(base as usize).clone();
+                    let words = match (emit.stacks.get(&local.0), self.context.unboxed_class_locals.get(&key)) {
+                        (Some(&n), _) => n,
+                        (None, Some(&(_, n, _))) if emit.sroa.contains_key(&local.0) => n,
+                        _ => 1,
+                    };
+                    let boxed = emit.boxes.get(&local.0).copied();
+                    for slot in (base..base + words as u32).chain(boxed) {
+                        self.bytecode.push_const(0);
+                        // An opaque store: dead-store elimination and the
+                        // dense backend would drop a plain one (the slot is
+                        // never read again), but the GC still scans it.
+                        self.bytecode.push_op(crate::il::IlOp::Byte {
+                            byte: Byte::new(Instruction::STORE).with_load_store_slot(slot),
+                            loc: common::DebugLoc::unknown(),
+                        });
                     }
                 }
             }

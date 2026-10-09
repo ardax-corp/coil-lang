@@ -36,6 +36,16 @@ pub(crate) fn pair_from_env() -> bool {
     )
 }
 
+/// Inlining callees with heap locals (cleared after the statement that
+/// splices them) is on unless `COIL_HIR_INLINE_HEAP=0` (or `false` / `off` /
+/// `no`).
+pub(crate) fn heap_from_env() -> bool {
+    !matches!(
+        std::env::var("COIL_HIR_INLINE_HEAP").as_deref(),
+        Ok("0" | "false" | "off" | "no")
+    )
+}
+
 /// What a callee's body splices in as: its statements and its result.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -46,11 +56,19 @@ pub struct Shape {
     /// The result is a heap value: a temp holding it past the statement
     /// would keep it alive, so the call must be the statement's operand.
     heap_result: bool,
+    /// Callee locals holding heap values: the caller's frame would keep
+    /// them alive past the call, so they are cleared after the statement.
+    heap_locals: Vec<LocalId>,
 }
 
 impl Shape {
     pub fn with_heap_result(mut self, heap: bool) -> Self {
         self.heap_result = heap;
+        self
+    }
+
+    pub fn with_heap_locals(mut self, locals: Vec<LocalId>) -> Self {
+        self.heap_locals = locals;
         self
     }
 }
@@ -123,6 +141,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         result,
         ret,
         heap_result: false,
+        heap_locals: Vec::new(),
     })
 }
 
@@ -283,12 +302,13 @@ fn push_expr(b: &mut HirBody, kind: HirKind, ty: Option<ty::Ty>, span: super::Sp
 /// Rewrite every eligible call site of `caller`. `callee_of(call)` names
 /// the callee body and its [`Shape`] for a direct call the planner may
 /// inline; `growth` caps how many nodes the rewrite may add. Returns the
-/// body and how many sites it inlined; `None` when nothing was.
+/// body and the name and span of the callee at each site it inlined; `None`
+/// when nothing was.
 pub fn inline_calls<'a>(
     caller: &HirBody,
     callee_of: impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     growth: usize,
-) -> Option<(HirBody, usize)> {
+) -> Option<(HirBody, Vec<(String, super::Span)>)> {
     // Defer thunks are planned against the caller's own statements.
     if caller.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })) {
         return None;
@@ -297,6 +317,8 @@ pub fn inline_calls<'a>(
         body: caller.clone(),
         original: caller.exprs.len(),
         sites: 0,
+        spliced: Vec::new(),
+        clear: Vec::new(),
     };
     for i in 0..b.original {
         if b.body.exprs.len() - b.original > growth {
@@ -311,12 +333,22 @@ pub fn inline_calls<'a>(
             if let Some(s) = s {
                 out.push(s);
             }
+            // The spliced heap locals die with the statement that read them,
+            // as they did when the callee returned.
+            let clear = std::mem::take(&mut b.clear);
+            let returns = s.is_some_and(|s| matches!(b.body.expr(s).kind, HirKind::Return(_)));
+            if !clear.is_empty() && !returns {
+                let span = b.body.exprs[i].span;
+                out.push(b.push(HirKind::Clear(clear), Some(ty::unit()), span));
+            }
         }
-        // A tail's calls hoist into the statements; the tail itself stays.
+        // A tail's calls hoist into the statements; the tail itself stays,
+        // and its spliced locals live to the end of the frame.
         let tail = tail.and_then(|t| b.statement(t, &callee_of, growth, &mut out));
+        b.clear.clear();
         b.body.exprs[i].kind = HirKind::Block { stmts: out, tail };
     }
-    (b.sites > 0).then_some((b.body, b.sites))
+    (!b.spliced.is_empty()).then_some((b.body, b.spliced))
 }
 
 struct Inliner {
@@ -324,6 +356,10 @@ struct Inliner {
     /// Nodes before the rewrite; only these call sites are inlined.
     original: usize,
     sites: usize,
+    /// Each inlined callee's name and span.
+    spliced: Vec<(String, super::Span)>,
+    /// Heap locals spliced into the current statement.
+    clear: Vec<LocalId>,
 }
 
 /// Where the inlined call sits in its statement.
@@ -496,6 +532,7 @@ impl Inliner {
     /// the caller puts in place of the statement or the operand.
     fn splice(&mut self, call: HirId, callee: &HirBody, shape: &Shape, site: Site, out: &mut Vec<HirId>) -> Option<HirId> {
         self.sites += 1;
+        self.spliced.push((callee.name.clone(), callee.span));
         let tag = self.sites;
         let off = self.body.exprs.len() as u32;
         let loff = self.body.locals.len() as u32;
@@ -534,6 +571,10 @@ impl Inliner {
             };
             self.body.exprs.push(HirExpr { kind, ..e.clone() });
         }
+        // A substituted parameter has no slot of its own.
+        let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());
+        let heap = shape.heap_locals.iter().filter(|l| !substituted(l)).map(|l| LocalId(l.0 + loff));
+        self.clear.extend(heap);
         let mut hoisted = Vec::new();
         for (k, (&p, &a)) in callee.params.iter().zip(&args).enumerate() {
             if subst[k].is_some() {
@@ -628,6 +669,7 @@ fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
             kind.clone()
         }
         HirKind::Local(x) => HirKind::Local(l(x)),
+        HirKind::Clear(xs) => HirKind::Clear(xs.iter().map(l).collect()),
         HirKind::Field { base, name } => HirKind::Field {
             base: h(base),
             name: name.clone(),
