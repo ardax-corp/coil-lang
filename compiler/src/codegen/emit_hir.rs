@@ -83,7 +83,7 @@ struct HirCall {
     instance: Option<Box<HirInstanceCall>>,
     /// Per parameter of a free function taking numeric ranges unboxed: the
     /// `[start, end]` kind it takes as two words (empty when none does).
-    ranges: Vec<Option<&'static str>>,
+    ranges: Vec<Option<String>>,
     /// A mono clone call: the generic function's name and its type
     /// variables bound to this call's types, for typed inlining.
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
@@ -1238,11 +1238,6 @@ impl Compiler {
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
-        // A call passing `[start, end]` pairs is neither a tail call nor
-        // staged above stack-array boxes (`emit_call_args_range_pairs`).
-        if emit.calls.values().any(|c| !c.ranges.is_empty()) && !emit.box_at.is_empty() {
-            return Err("range-args-boxes");
-        }
         // Calls above stack-array boxes do not stage, so a `format` that
         // shows through temps could run above live operands.
         if !emit.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
@@ -1254,7 +1249,6 @@ impl Compiler {
                 !call.method
                     && call.builtin.is_none()
                     && call.generic.is_none()
-                    && call.ranges.is_empty()
                     && Self::hir_call_rep(call) == emit.ret
                     && !self.coroutine_fns.contains(&call.key)
                     && self.hir_tail_call_ok(&call.key)
@@ -1296,21 +1290,15 @@ impl Compiler {
         for (stmt, locals) in class_boxes {
             emit.box_at.entry(stmt).or_default().extend(locals);
         }
-        let unboxed_ranges = self.current_fn_unboxes_range_params();
         for &param in &hir.params {
             let local = hir.local(param);
-            // A free function's numeric range parameter is `[start, end]`
-            // (`argument_unboxed_range_kind`).
-            let range = local
-                .ty
-                .as_ref()
-                .and_then(crate::typechecking::return_layout::two_word_range_kind)
-                .filter(|_| unboxed_ranges);
-            if let Some(kind) = range {
+            // A two-word parameter (`argument_unboxed_range_kind`) holds
+            // `[start, end]` / `[payload, tag]` in two slots.
+            if let Some(kind) = self.unboxed_enum_kind(&local.name).map(str::to_string) {
                 let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
                 emit.slots[param.0 as usize] = Some(start);
                 emit.tag_slots.insert(param.0, end);
-                emit.pair_locals.insert(param.0, kind.to_string());
+                emit.pair_locals.insert(param.0, kind);
                 continue;
             }
             let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
@@ -2837,12 +2825,12 @@ impl Compiler {
         }
         // As `emit_call_args_range_pairs`: a plain free function takes its
         // numeric range parameters as `[start, end]`.
-        let ranges = if self_layout.is_none()
-            && (self.callee_has_unboxed_range_params(&key) || self.callee_has_unboxed_range_params(&lookup))
-        {
-            param_tys.iter().map(crate::typechecking::return_layout::two_word_range_kind).collect()
-        } else {
+        let ranges = if self_layout.is_some() {
             Vec::new()
+        } else if self.callee_has_unboxed_range_params(&key) {
+            self.callee_param_pairs(&key)
+        } else {
+            self.callee_param_pairs(&lookup)
         };
         if coro && !ranges.is_empty() {
             return Err("callee-coroutine");
@@ -3096,7 +3084,7 @@ impl Compiler {
 
     /// A two-word kind the lowering builds and matches: a numeric range,
     /// an arity-2 immediate product, or a declared enum.
-    fn hir_pair_kind(&self, kind: &str) -> bool {
+    pub(super) fn hir_pair_kind(&self, kind: &str) -> bool {
         crate::typechecking::return_layout::is_range_kind(kind)
             || Self::hir_product(kind)
             || self.hir_pair_enum(kind)
@@ -3191,8 +3179,8 @@ impl Compiler {
 
     /// How argument `i` of `call` is passed.
     fn hir_arg_rep(call: &HirCall, i: usize) -> Rep {
-        match call.ranges.get(i).copied().flatten() {
-            Some(kind) => Rep::Pair(kind.to_string()),
+        match call.ranges.get(i).cloned().flatten() {
+            Some(kind) => Rep::Pair(kind),
             None => Rep::Word(call.params[i]),
         }
     }
@@ -6219,9 +6207,10 @@ impl Compiler {
                     // AST, each argument to a temp, then all of them
                     // parked above the boxes so the callee's frame cannot
                     // overwrite one.
-                    let mut temps = Vec::with_capacity(args.len());
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
-                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
+                    let mut temps = Vec::with_capacity(words as usize);
+                    for (i, &arg) in args.iter().enumerate() {
+                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        self.hir_value(hir, emit, arg, &rep, depth);
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
                         }
@@ -6230,17 +6219,23 @@ impl Compiler {
                         {
                             self.hir_adapt_fn_arg(unbox);
                         }
-                        self.expr_depth = depth;
-                        let tmp = self.alloc_temp_slot();
-                        self.bytecode.push_store_pop(tmp);
-                        temps.push(tmp);
+                        // A pair's words to temps, top word first.
+                        let mut pair = Vec::with_capacity(rep.words() as usize);
+                        self.expr_depth = depth + rep.words() - 1;
+                        for _ in 0..rep.words() {
+                            pair.push(self.alloc_temp_slot());
+                        }
+                        for &tmp in pair.iter().rev() {
+                            self.bytecode.push_store_pop(tmp);
+                        }
+                        temps.extend(pair);
                     }
                     for &tmp in &temps {
                         self.bytecode.push_load(tmp);
                     }
                     self.expr_depth = depth;
                     let mut bc = std::mem::take(&mut self.bytecode);
-                    self.park_args_above_stack_array_boxes(&mut bc, args.len() as u32);
+                    self.park_args_above_stack_array_boxes(&mut bc, words);
                     self.bytecode = bc;
                 }
                 let dicts = generic.as_deref().map_or(0, |g| self.hir_push_dicts(g));

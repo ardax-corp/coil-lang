@@ -71,6 +71,18 @@ fn poison(into: &mut HashSet<String>, aliases: &HashMap<String, Vec<String>>, na
     }
 }
 
+fn poison_arity(
+    into: &mut HashSet<String>,
+    aliases: &HashMap<String, Vec<String>>,
+    name: &str,
+    argc: usize,
+) {
+    into.insert(format!("{name}#{argc}"));
+    for m in aliases.get(name).into_iter().flatten() {
+        into.insert(format!("{m}#{argc}"));
+    }
+}
+
 /// `in_call_name` is true exactly for the `name` position of a `Call` — the
 /// one context that does not escape.
 fn walk(
@@ -94,6 +106,17 @@ fn walk(
             walk(recv, false, into, aliases);
         }
         Expression::Call { name, args } => {
+            // `f#n`: some call passes `f` only `n` arguments, which may be
+            // a partial application (a function value) when `f` takes more.
+            let argc = args.as_ref().map_or(0, Vec::len);
+            match name.1.as_ref() {
+                Expression::Identifier(n) => poison_arity(into, aliases, n, argc),
+                Expression::QualifiedAccess { owner, member } => {
+                    poison_arity(into, aliases, member, argc);
+                    poison_arity(into, aliases, &format!("{owner}::{member}"), argc);
+                }
+                _ => {}
+            }
             walk(name, true, into, aliases);
             if let Some(args) = args {
                 for a in args {
@@ -332,6 +355,15 @@ fn main() { let _ = f(1); }
 "#;
         assert!(!escaped(src).contains("f"));
         assert!(!escaped_via_checker(src).contains("f"));
+    }
+
+    #[test]
+    fn call_records_its_argument_count() {
+        let s = escaped(
+            "fn f(int a, int b) -> int { return a; }\nfn main() { let g = f(1); let _ = f(1, 2); }",
+        );
+        assert!(s.contains("f#1") && s.contains("f#2"), "{s:?}");
+        assert!(!s.contains("f"), "{s:?}");
     }
 
     #[test]

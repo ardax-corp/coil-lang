@@ -513,7 +513,8 @@ fn main() {
 #[test]
 fn return_match_keeps_fusion_barrier() {
     use common::Instruction;
-    // Parameter ABI is boxed `ObjEnum`. A two-slot `let r = make()`
+    // `foo` taken as a value keeps the boxed `ObjEnum` parameter ABI
+    // (a direct-only callee takes `[payload, tag]`). A two-slot `let r = make()`
     // would stay a pair and skip JumpIfMatch ,  this test needs the
     // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
     // stays observable.
@@ -526,6 +527,7 @@ fn foo(Option<int> r) -> int {
     };
 }
 fn main() {
+    let _g = foo;
     let _ = foo(Option::Some(1));
 }
 "#,
@@ -1446,7 +1448,8 @@ fn construct_emits_make_enum_with_correct_tag_and_arity() {
 #[test]
 fn match_emits_jump_if_match_cascade() {
     use common::Instruction;
-    // Boxed param keeps JumpIfMatch; two-slot `let r = f()` would not.
+    // Boxed param (`consume` taken as a value) keeps JumpIfMatch; a pair
+    // param or two-slot `let r = f()` would not.
     let (bc, _pool) = compile_src(
         "fn consume(Option<int> r) -> int { \
  return match r { \
@@ -1454,7 +1457,7 @@ fn match_emits_jump_if_match_cascade() {
  Option::Some(v) => v, \
  }; \
  } \
- fn main() { let _ = consume(Option::Some(1)); }",
+ fn main() { let _g = consume; let _ = consume(Option::Some(1)); }",
     );
 
     // Two arms, both constructor. Two JUMP_IF_MATCH should
@@ -2473,7 +2476,7 @@ fn match_jump_if_match_targets_are_patched_to_arm_offsets() {
  Option::Some(v) => v, \
  }; \
  } \
- fn main() { let _ = consume(Option::Some(1)); }",
+ fn main() { let _g = consume; let _ = consume(Option::Some(1)); }",
     );
 
     // Find every JUMP_IF_MATCH. For each, the target
@@ -2547,7 +2550,7 @@ fn nested_match_in_loop_emits_expected_opcodes() {
  } \
  return 0; \
  } \
- fn main() { let _ = consume(Option::Some(0)); }",
+ fn main() { let _g = consume; let _ = consume(Option::Some(0)); }",
     );
 
     let exit_branch_count = loop_exit_branch_count(&bc);
@@ -2776,7 +2779,7 @@ fn empty_record_pattern_does_not_emit_unpack() {
  E::Foo(_) => 1, \
  }; \
  } \
- fn main() { let _ = consume(E::Empty); }",
+ fn main() { let _g = consume; let _ = consume(E::Empty); }",
     );
 
     // At most 1 UNPACK (for the Foo arm, which is the last arm and
@@ -2829,7 +2832,7 @@ fn match_with_simple_binding_subpatterns_keeps_current_layout() {
  E::B(v) => v, \
  }; \
  } \
- fn main() { let _ = consume(E::A(5)); }",
+ fn main() { let _g = consume; let _ = consume(E::A(5)); }",
     );
     let jimp_count = bc
         .iter()
@@ -7526,9 +7529,8 @@ fn main() {
 }
 
 #[test]
-fn local_option_escape_at_call_still_make_enum() {
-    let (bc, _) = compile_src(
-        r#"
+fn local_option_at_direct_call_stays_pair() {
+    let src = r#"
 fn take(Option<int> o) -> int {
     return match o {
         Option::Some(v) => v,
@@ -7539,12 +7541,24 @@ fn main() {
     let x = Option::Some(1);
     let y = take(x);
 }
-"#,
-    );
-    assert!(
+"#;
+    let boxes = |bc: &[common::Byte]| {
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
-        "escaping Some at a call must still box; opcodes={:?}",
+            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
+    };
+    // A direct-only callee takes `[payload, tag]`: nothing boxes.
+    let (bc, _) = compile_src(src);
+    assert!(
+        !boxes(&bc),
+        "pair param must not box; opcodes={:?}",
+        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+    );
+    // Taken as a value, `take` keeps the boxed ABI and the call boxes.
+    let (bc, _) =
+        compile_src(&src.replace("let y = take(x);", "let y = take(x);\n    let _g = take;"));
+    assert!(
+        boxes(&bc),
+        "escaped callee must box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -8803,13 +8817,14 @@ fn take(Option<int> o) -> int {
 fn main() {
     let x = give();
     let _ = take(x);
+    let _g = take;
 }
 "#,
     );
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
-        "escaping two-slot bind must box at the call; opcodes={:?}",
+        "two-slot bind passed to a boxed param must box at the call; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
 }
