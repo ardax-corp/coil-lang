@@ -2,10 +2,8 @@
 // (`ascii`, `num`): their calls inside are named by key, so the next
 // round inlines them too.
 
-use ascii::is_alnum;
-use ascii::is_space;
-use num::abs;
-use num::rem_euclid;
+use ascii::{is_alnum, is_space};
+use num::{abs, rem_euclid};
 
 fn words(string s) -> int {
     let n = 0;
