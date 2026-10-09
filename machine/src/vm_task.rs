@@ -498,6 +498,7 @@ impl<const S: usize> Machine<S> {
         let waker = std::sync::Arc::clone(&s.waker);
         if has_io && has_thread {
             timeout = Some(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)));
+            self.reactor.help_local_once();
         }
         if has_io {
             reactor.wait_any(timeout);
@@ -512,7 +513,11 @@ impl<const S: usize> Machine<S> {
                 }
             }
         } else if has_thread {
-            waker.wait(timeout);
+            // The thread a task waits for may be a job queued on this very
+            // worker: run queued jobs before sleeping.
+            if !self.reactor.help_local_once() {
+                waker.wait(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)).into());
+            }
         } else if let Some(t) = timeout {
             std::thread::sleep(t);
         }

@@ -138,8 +138,8 @@ use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
 use crate::io::alloc_result_err;
 use crate::memory::{
-    EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjInstance, ObjReceiver, ObjRwLock, ObjSender,
-    ObjThread, ObjThreadMutex, ObjTuple, Object,
+    EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
+    ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
 use crate::vm::Machine;
 
@@ -279,6 +279,12 @@ pub enum SpawnArg {
     Receiver(Arc<ChannelInner>),
     Mutex(Arc<MutexInner>),
     RwLock(Arc<RwLockInner>),
+    /// A function value; its `use` captures are copied like arguments.
+    Fn {
+        entry: u32,
+        arity: u32,
+        captures: Vec<SpawnArg>,
+    },
 }
 
 /// Join state for a spawned worker.
@@ -1030,6 +1036,25 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
     }
 }
 
+/// A function value `spawn` can run on another thread: its entry, arity and
+/// `use` captures (sendable values, copied). Partial applications and rest
+/// functions are not sendable.
+fn spawn_fn_from_value(heap: &Heap, v: Value) -> Result<(u32, u32, Vec<SpawnArg>), ThreadErrorTag> {
+    let Some(Object::Fn(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
+        return Err(ThreadErrorTag::NotSendable);
+    };
+    let f = gc.as_ref();
+    if f.is_rest || !f.captured_args.is_empty() || f.filled_mask != 0 {
+        return Err(ThreadErrorTag::NotSendable);
+    }
+    let captures = f
+        .captures
+        .iter()
+        .map(|c| value_to_spawn_arg(heap, *c))
+        .collect::<Result<_, _>>()?;
+    Ok((f.entry, f.arity, captures))
+}
+
 pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadErrorTag> {
     if let Some(obj) = heap.find_object_by_addr(v.raw() as u64) {
         match obj {
@@ -1044,6 +1069,14 @@ pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadError
             }
             Object::RwLock(gc) => {
                 return Ok(SpawnArg::RwLock(Arc::clone(&gc.as_ref().inner)));
+            }
+            Object::Fn(_) => {
+                let (entry, arity, captures) = spawn_fn_from_value(heap, v)?;
+                return Ok(SpawnArg::Fn {
+                    entry,
+                    arity,
+                    captures,
+                });
             }
             _ => {}
         }
@@ -1069,6 +1102,26 @@ pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value
         }
         SpawnArg::RwLock(inner) => {
             let (obj, _) = heap.alloc(ObjRwLock { inner }, Object::RwLock);
+            Ok(Value::from(obj.addr()))
+        }
+        SpawnArg::Fn {
+            entry,
+            arity,
+            captures,
+        } => {
+            let captures = captures
+                .into_iter()
+                .map(|c| spawn_arg_to_value(heap, c))
+                .collect::<Result<_, _>>()?;
+            let f = ObjFn {
+                entry,
+                arity,
+                is_rest: false,
+                filled_mask: 0,
+                captured_args: Vec::new(),
+                captures,
+            };
+            let (obj, _) = heap.alloc(f, Object::Fn);
             Ok(Value::from(obj.addr()))
         }
     }
@@ -1142,18 +1195,16 @@ pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
-    let (entry, arity) = fn_entry_from_value(heap, args[0])?;
-    let spawn_args: Vec<SpawnArg> = if args.len() == 1 {
-        Vec::new()
-    } else {
+    // A closure's frame starts with its captures, then its parameters.
+    let (entry, arity, mut spawn_args) = spawn_fn_from_value(heap, args[0])?;
+    if args.len() > 1 {
         if args.len() - 1 != arity as usize {
             return Err(ThreadErrorTag::Other);
         }
-        args[1..]
-            .iter()
-            .map(|v| value_to_spawn_arg(heap, *v))
-            .collect::<Result<_, _>>()?
-    };
+        for v in &args[1..] {
+            spawn_args.push(value_to_spawn_arg(heap, *v)?);
+        }
+    }
     let ctx = host_spawn_context()?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
