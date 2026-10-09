@@ -398,3 +398,30 @@ fn number_and_eliminate_api() {
     assert_eq!(vns.produced.len(), ops.len());
     eliminate_redundant(&mut ops, &vns);
 }
+
+/// `t = x + 1`, then a residual byte `STORE t` (an inliner slot clear):
+/// recomputing `x + 1` must not read `t` back.
+#[test]
+fn ssa_gvn_byte_store_kills_slot_value() {
+    let load = |slot| IlOp::Load { slot, loc: loc() };
+    let store = |slot| IlOp::StorePop { slot, loc: loc() };
+    let add = || IlOp::Bin { op: Instruction::ADD, loc: loc() };
+    let mut ops = vec![
+        load(0),
+        IlOp::Const { imm: 1, loc: loc() },
+        add(),
+        store(1),
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Byte {
+            byte: common::Byte::new(Instruction::STORE).with_load_store_slot(1),
+            loc: loc(),
+        },
+        load(0),
+        IlOp::Const { imm: 1, loc: loc() },
+        add(),
+        IlOp::Return { loc: loc(), ret_words: 1 },
+    ];
+    ssa_gvn(&mut ops);
+    let adds = ops.iter().filter(|op| matches!(op, IlOp::Bin { op: Instruction::ADD, .. })).count();
+    assert_eq!(adds, 2);
+}

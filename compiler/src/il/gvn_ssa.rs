@@ -46,7 +46,15 @@ enum VExpr {
     Bin { op: u16, a: u32, b: u32 },
     BinSlotImm { op: u16, slot: u32, imm: i16 },
     BinSlotSlot { op: u16, a: u32, b: u32 },
+    /// What `slot` holds after the op at `at` wrote it.
+    Def { at: u32, slot: u32 },
+    /// What `slot` holds when first read after the opaque op numbered `mark`.
+    After { mark: u32, slot: u32 },
 }
+
+/// Key in the slot map marking an op whose writes are unknown: a slot first
+/// read after it is numbered `After`, not as its entry value.
+const OPAQUE: u32 = u32::MAX;
 
 struct Intern {
     map: HashMap<VExpr, u32>,
@@ -224,11 +232,7 @@ fn step(
             Some(v)
         }
         IlOp::Load { slot, .. } => {
-            let v = slots
-                .get(slot)
-                .copied()
-                .unwrap_or_else(|| intern.intern(VExpr::InitSlot(*slot)));
-            slots.entry(*slot).or_insert(v);
+            let v = slot_value(slots, *slot, intern);
             stack.push(v);
             Some(v)
         }
@@ -272,10 +276,7 @@ fn step(
             }
         }
         IlOp::BinSlotImm { op, slot, imm, .. } if cse_binop_u8(*op) => {
-            let sv = slots
-                .get(&u32::from(*slot))
-                .copied()
-                .unwrap_or_else(|| intern.intern(VExpr::InitSlot(u32::from(*slot))));
+            let sv = slot_value(slots, u32::from(*slot), intern);
             let v = intern.intern(VExpr::BinSlotImm {
                 op: *op as u16,
                 slot: sv,
@@ -285,14 +286,8 @@ fn step(
             Some(v)
         }
         IlOp::BinSlotSlot { op, a, b, .. } if cse_binop_u8(*op) => {
-            let av = slots
-                .get(&u32::from(*a))
-                .copied()
-                .unwrap_or_else(|| intern.intern(VExpr::InitSlot(u32::from(*a))));
-            let bv = slots
-                .get(&u32::from(*b))
-                .copied()
-                .unwrap_or_else(|| intern.intern(VExpr::InitSlot(u32::from(*b))));
+            let av = slot_value(slots, u32::from(*a), intern);
+            let bv = slot_value(slots, u32::from(*b), intern);
             let v = intern.intern(VExpr::BinSlotSlot {
                 op: *op as u16,
                 a: av,
@@ -309,11 +304,41 @@ fn step(
             stack.clear();
             None
         }
+        op @ IlOp::Byte { .. } => {
+            // A residual byte may write slots (`STORE`, a fused store): what
+            // they held is no longer known.
+            let at = i as u32;
+            let (_, defs, opaque) = super::analysis::op_slot_use_def(op);
+            if opaque {
+                for (&slot, v) in slots.iter_mut() {
+                    *v = intern.intern(VExpr::Def { at, slot });
+                }
+                slots.insert(OPAQUE, intern.intern(VExpr::Def { at, slot: OPAQUE }));
+            }
+            for slot in defs {
+                slots.insert(slot, intern.intern(VExpr::Def { at, slot }));
+            }
+            stack.clear();
+            None
+        }
         _ => {
             stack.clear();
             None
         }
     }
+}
+
+/// The value number `slot` holds, numbering it on first read.
+fn slot_value(slots: &mut HashMap<u32, u32>, slot: u32, intern: &mut Intern) -> u32 {
+    if let Some(&v) = slots.get(&slot) {
+        return v;
+    }
+    let v = match slots.get(&OPAQUE) {
+        Some(&mark) => intern.intern(VExpr::After { mark, slot }),
+        None => intern.intern(VExpr::InitSlot(slot)),
+    };
+    slots.insert(slot, v);
+    v
 }
 
 /// Number values from an SSA form.

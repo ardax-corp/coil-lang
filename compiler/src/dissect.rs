@@ -223,7 +223,13 @@ fn format_operands(
         }
         Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
             let (bop, a, pool_idx) = byte.bin_slot_slot_jmpf_parts();
-            format!("op={} a={a} pool_idx={pool_idx}", bin_op_name(bop))
+            let packed = constants.get(pool_idx).copied().unwrap_or(0);
+            format!(
+                "op={} a={a} b={} target={} pool_idx={pool_idx}",
+                bin_op_name(bop),
+                packed as u32 & 0xFF,
+                packed >> 32
+            )
         }
         Instruction::BinSlotSlotConstJmpf | Instruction::BinSlotSlotConstJmpt => {
             let (bop, a, pool_idx) = byte.bin_slot_slot_const_jmpf_parts();
