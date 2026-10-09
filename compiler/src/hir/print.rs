@@ -383,6 +383,10 @@ impl Printer<'_> {
                     self.node(a, d);
                 }
             }
+            HirKind::Clear(locals) => {
+                let names: Vec<String> = locals.iter().map(|&l| self.local(l)).collect();
+                self.line(depth, id, format!("clear {}", names.join(", ")));
+            }
             HirKind::Unsupported(what) => {
                 self.line(depth, id, format!("UNSUPPORTED {what}"));
             }

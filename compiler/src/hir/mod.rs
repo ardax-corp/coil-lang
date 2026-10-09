@@ -363,6 +363,10 @@ pub enum HirKind {
     /// frame holds the captures (`None`: a name that did not resolve).
     Defer { captures: Vec<Option<LocalId>>, body: HirId },
     Builtin { op: Builtin, args: Vec<HirId> },
+    /// Zero every frame word of these locals (spliced callee locals past
+    /// their last use), so the caller's frame no longer keeps their heap
+    /// values alive. Reads nothing.
+    Clear(Vec<LocalId>),
     /// A construct this phase does not build yet.
     Unsupported(&'static str),
 }

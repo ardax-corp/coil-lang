@@ -2686,6 +2686,7 @@ impl Walk<'_> {
                 self.value(*init, depth)
             }
             HirKind::Let { init: None, .. } => Err("uninitialized-let"),
+            HirKind::Clear(_) => Ok(()),
             // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
             // each name read from it (`Index` / `GetField`).
             HirKind::LetPat { pat, init } => {
@@ -3022,6 +3023,7 @@ fn kind_name(kind: &HirKind) -> &'static str {
         HirKind::Resume { .. } => "resume",
         HirKind::Defer { .. } => "defer",
         HirKind::Builtin { .. } => "builtin",
+        HirKind::Clear(_) => "clear",
         HirKind::Unsupported(_) => "unsupported",
     }
 }

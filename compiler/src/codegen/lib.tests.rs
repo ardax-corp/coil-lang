@@ -57,6 +57,12 @@ fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
 }
 
+/// Tests of a callee's own code: one with heap locals would splice into its
+/// caller.
+fn compile_src_heap_calls(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.hir_inline_heap = false)
+}
+
 /// Tests of how an enum value is built: a local built in place would
 /// otherwise stay in two slots with no `MakeEnum`.
 fn compile_src_boxed_locals(src: &str) -> (Vec<Byte>, Vec<u64>) {
@@ -2868,7 +2874,7 @@ fn match_with_simple_binding_subpatterns_keeps_current_layout() {
 #[test]
 fn access_field_emits_receiver_then_load_field() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_heap_calls(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn get_x(Point p) -> int { return p.x; } \
  fn main() { return get_x(Point::Point { x: 42, y: 7 }); }",
@@ -4360,6 +4366,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -4679,6 +4687,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -4857,6 +4867,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(load).expect("compile");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     pipeline.wire_host_natives(&mut vm);
@@ -4987,6 +4999,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline
         .compiler_mut()
@@ -5031,6 +5045,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline
         .compiler_mut()
@@ -5074,6 +5090,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The callees are looked up by name: keep them calls.
+    pipeline.compiler_mut().hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline.compiler_mut().get_function("poke").expect("poke");
     let body = &bc[off..];
@@ -5381,7 +5399,7 @@ fn main() {
 #[test]
 fn access_chained_field_emits_two_load_fields() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_heap_calls(
         "enum Inner { Inner { v: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5411,7 +5429,7 @@ fn access_chained_field_emits_two_load_fields() {
 #[test]
 fn access_chained_field_second_load_field_targets_inner_enum() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_heap_calls(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5454,7 +5472,7 @@ fn access_chained_field_second_load_field_targets_inner_enum() {
 #[test]
 fn access_chained_field_with_correct_field_index() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_heap_calls(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_w(Outer o) -> int { return o.x.w; } \
@@ -6627,7 +6645,7 @@ fn main() {
 #[test]
 fn rest_call_emits_make_array_before_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_heap_calls(
         r#"
 fn sum(int... xs) -> int { return len(xs); }
 fn main() {
@@ -9346,6 +9364,52 @@ fn hir_inline_splices_ground_trait_instance_methods() {
         call_count(&off),
         call_count(&on)
     );
+}
+
+const HIR_INLINE_HEAP: &str = r#"
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+fn pair_sum(int a, int b) -> int {
+    let m = new Node(b, Option::None);
+    let n = new Node(a, Option::Some(m));
+    return n.v + m.v;
+}
+fn hot(int k) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < k {
+        acc = acc + pair_sum(i, 10);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    return hot(100);
+}
+"#;
+
+#[test]
+fn hir_inline_splices_heap_locals_and_clears_them() {
+    let (off, _) = compile_src_tuned(HIR_INLINE_HEAP, |c| {
+        c.set_hir_inline(true);
+        c.hir_inline_heap = false;
+    });
+    let (on, _) = compile_src_tuned(HIR_INLINE_HEAP, |c| c.set_hir_inline(true));
+    assert_eq!(call_count(&on) + 1, call_count(&off), "`pair_sum` splices into `hot`");
+    // Each spliced heap local's slot is zeroed after the statement, so
+    // `hot`'s frame does not keep the nodes alive.
+    let clears = |bc: &[Byte]| {
+        bc.windows(2)
+            .filter(|w| {
+                matches!(w[0].bytecode(), Instruction::CONST)
+                    && w[0].operand_u32() == 0
+                    && matches!(w[1].bytecode(), Instruction::STORE)
+            })
+            .count()
+    };
+    assert!(clears(&on) >= clears(&off) + 2, "both nodes' slots are cleared");
 }
 
 #[test]

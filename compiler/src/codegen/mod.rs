@@ -611,6 +611,12 @@ pub struct Compiler {
     /// Typed inlining takes callees returning a two-word `Option`, `Result`
     /// or enum (`COIL_HIR_INLINE_PAIR=0` off).
     hir_inline_pair: bool,
+    /// Typed inlining takes callees with heap locals, cleared after the
+    /// splicing statement (`COIL_HIR_INLINE_HEAP=0` off).
+    hir_inline_heap: bool,
+    /// Callee bodies typed inlining spliced (file, source range, name), so
+    /// a capability chain still names the function a host call is in.
+    inlined_bodies: Vec<(u32, std::ops::Range<usize>, String)>,
     /// An enum local built in place (`let r = if c { Some(x) } else { None }`)
     /// lives in two slots when its type is a two-word pair
     /// (`COIL_HIR_PAIR_LOCALS=0` off).
@@ -740,6 +746,8 @@ impl Default for Compiler {
             debugger_attached: false,
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
             hir_inline_pair: crate::hir::inline::pair_from_env(),
+            hir_inline_heap: crate::hir::inline::heap_from_env(),
+            inlined_bodies: Vec::new(),
             hir_inline_mono: !matches!(
                 std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
                 Ok("0" | "false" | "off" | "no")

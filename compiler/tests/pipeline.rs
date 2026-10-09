@@ -11319,6 +11319,21 @@ fn reachable_host_calls_need_their_capabilities() {
     }
 }
 
+/// E4: a gated call in a callee that typed inlining spliced into `main` is
+/// still reached, through the callee it was written in (the callee's own,
+/// now unreached, body must not hide it).
+#[test]
+fn inlined_host_calls_still_need_their_capabilities() {
+    let src = "use io::fs::{exists};\nfn probe() -> int {\n    let _ = exists(\"cfg.toml\");\n    return 1;\n}\nfn main() {\n    if probe() == 1 {\n        return 1;\n    }\n    return 0;\n}\n";
+    let mut pipeline = deny_pipeline();
+    assert!(pipeline.compile_src(src).is_err());
+    let msgs: Vec<String> = pipeline.messages().iter().map(|m| m.message().to_string()).collect();
+    assert!(
+        msgs.iter().any(|m| m == "`io::fs::exists` requires `--allow-read`: reached from `main` → `probe`"),
+        "{msgs:?}"
+    );
+}
+
 /// E4: `open` needs read or write by its literal mode, both when the mode
 /// is not a literal; a static initializer always runs.
 #[test]
