@@ -607,7 +607,6 @@ mod tests {
             invert_guard_branch: false,
             slot_promote_tell: false,
             loop_unroll: false,
-            invariant_store_elim: false,
             ssa_gvn: false,
             escape_analysis: false,
             branch_optimization: false,

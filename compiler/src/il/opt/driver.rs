@@ -181,15 +181,6 @@ fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
 
-fn apply_invariant_store_elim(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    super::invariant_store_elim::eliminate_invariant_stores(ops, ctx.entry_sp);
-    0
-}
-
 fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::gvn_ssa::ssa_gvn(ops);
     0
@@ -362,16 +353,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_loop_unroll),
     },
     PassSpec {
-        name: "invariant_store_elim",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.invariant_store_elim,
-        set_flag: |o| o.invariant_store_elim = true,
-        apply: ApplyFn::Grow(apply_invariant_store_elim),
-    },
-    PassSpec {
         name: "escape_analysis",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -505,7 +486,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "licm",
     "loop_bounds",
     "loop_unroll",
-    "invariant_store_elim",
     "escape_analysis",
     "slot_promote",
     "tos_carry",
@@ -549,7 +529,6 @@ mod tests {
                 "licm",
                 "loop_bounds",
                 "loop_unroll",
-                "invariant_store_elim",
                 "escape_analysis",
                 "slot_promote",
                 "tos_carry",

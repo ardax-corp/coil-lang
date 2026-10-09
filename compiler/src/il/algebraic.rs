@@ -1225,7 +1225,6 @@ mod tests {
                 slot_promote_tell: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
-                invariant_store_elim: false,
                 ssa_gvn: false,
                 escape_analysis: false,
                 branch_optimization: false,

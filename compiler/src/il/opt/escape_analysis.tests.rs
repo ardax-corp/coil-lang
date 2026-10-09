@@ -40,7 +40,6 @@ fn isolated() -> OptimizeOptions {
         slot_promote_tell: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
-        invariant_store_elim: false,
         ssa_gvn: false,
         escape_analysis: true,
                 branch_optimization: false,

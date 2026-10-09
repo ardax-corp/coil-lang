@@ -53,8 +53,6 @@ pub struct OptimizeOptions {
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
-    /// Sink or drop loop stores of an invariant value that is not read in the loop.
-    pub invariant_store_elim: bool,
     /// SSA-style global CSE of pure binops whose result already lives in a slot.
     pub ssa_gvn: bool,
     /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
@@ -219,7 +217,6 @@ mod convoy;
 mod dce;
 mod early_cse;
 pub(crate) mod escape_analysis;
-mod invariant_store_elim;
 mod loop_unroll;
 mod slot_promote;
 mod tos_carry;
