@@ -14073,8 +14073,13 @@ impl Checker {
                 self.forward_free_fn_schemes.insert(key, scheme);
             }
         } else {
-            self.forward_free_fn_schemes
-                .insert(key, Scheme::mono(fun_ty));
+            // Bare too: a module's own body calls a later `fn` by its short
+            // name (generic ones above already were).
+            let scheme = Scheme::mono(fun_ty);
+            if key != name {
+                self.forward_free_fn_schemes.insert(name.to_string(), scheme.clone());
+            }
+            self.forward_free_fn_schemes.insert(key, scheme);
         }
         self.messages.truncate(msg_len);
     }
