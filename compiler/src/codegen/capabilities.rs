@@ -184,10 +184,26 @@ impl Compiler {
             let key = (loc.file, loc.start_byte, loc.end_byte);
             let Some(gated) = self.gated_host_calls.get(&key) else { return };
             let needed = gated.caps.without(granted);
+            // An unreached copy of a call (the callee's own body, once its
+            // call was inlined) does not hide a reached one.
+            let Some(mut chain) = chain else { return };
             if needed.is_empty() || !seen.insert(key) {
                 return;
             }
-            let Some(chain) = chain else { return };
+            // A call typed inlining spliced into its caller: the function
+            // it was written in.
+            let at = loc.start_byte as usize..loc.end_byte as usize;
+            let spliced = self
+                .inlined_bodies
+                .iter()
+                .filter(|(file, range, _)| *file == loc.file && range.start <= at.start && at.end <= range.end)
+                .min_by_key(|(_, range, _)| range.len());
+            if let Some((_, _, name)) = spliced
+                && !chain.is_empty()
+                && chain.last() != Some(&shown(name))
+            {
+                chain.push(shown(name));
+            }
             found.push(CapViolation {
                 file: self.source_file_list.get(loc.file as usize).cloned().unwrap_or_default(),
                 range: loc.start_byte as usize..loc.end_byte as usize,
