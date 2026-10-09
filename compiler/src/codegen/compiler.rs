@@ -5386,6 +5386,19 @@ impl Compiler {
                 emit(self, class, ty, method, tag, op, false);
             }
         }
+        // `Neg` takes one operand (plus the ignored trailing dictionary).
+        for (ty, tag, op) in [("int", ValueTag::Int, Instruction::NEG), ("float", ValueTag::Float, Instruction::NEGF)] {
+            let fqn = Generics::builtin_instance_fqn("Neg", ty, "neg");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.bind_function_entry(fqn);
+            self.bytecode.push_load(0);
+            self.bytecode.push_unbox_value(tag as u32);
+            self.bytecode.push(Byte::new(op));
+            self.bytecode.push_box_value(tag as u32);
+            self.bytecode.push_return();
+        }
         for (ty, tag) in [
             ("string", ValueTag::String),
             ("bool", ValueTag::Bool),

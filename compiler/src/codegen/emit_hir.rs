@@ -1216,6 +1216,25 @@ impl Compiler {
                 emit.ops.insert(i as u32, HirOp::Aggregate(info));
                 continue;
             }
+            if let HirKind::Un { op: UnOp::Neg, operand } = expr.kind
+                && let Some(hint) = self.bound_operator_hint(expr.node, expr.span.0, expr.span.1)
+                && let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index))
+            {
+                // `-a` on a bound type parameter: its `Neg` dictionary
+                // method on the operand's one word.
+                let ty = Self::hir_ty(hir, operand).ok_or("operator-bound")?;
+                if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
+                    return Err("operator-bound");
+                }
+                emit.ops.insert(
+                    i as u32,
+                    HirOp::Bound {
+                        dict,
+                        method: hint.method_slot as u32,
+                    },
+                );
+                continue;
+            }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
                 emit.lens.insert(i as u32, len);
                 continue;
@@ -2330,7 +2349,9 @@ impl Compiler {
                 }
                 member
             }
-            None if self.lookup_slot(name).is_some() || self.functions.contains_key(name) => return Ok(None),
+            // A free function of that name (a generic one included) wins
+            // over the trait method (`fn add<T: Num>(T a)` is not `Add::add`).
+            None if self.lookup_slot(name).is_some() || known(name) || self.checker.is_generic_fn(name) => return Ok(None),
             None => name,
         };
         let Some((class, inst_args, fqn)) = self
@@ -5404,6 +5425,16 @@ impl Compiler {
             HirKind::Un { operand, .. } if let Some(HirOp::Aggregate(info)) = emit.ops.get(&id.0) => {
                 let info = info.clone();
                 self.hir_aggregate(hir, emit, &info, *operand, None);
+            }
+            HirKind::Un { operand, .. } if let Some(&HirOp::Bound { dict, method }) = emit.ops.get(&id.0) => {
+                let ty = Self::hir_ty(hir, *operand).expect("planned bound operand");
+                let want = Rep::Word(self.value_layout(ty));
+                self.hir_value(hir, emit, *operand, &want, depth);
+                self.bytecode.push_load(dict);
+                self.bytecode.push_load(dict);
+                self.bytecode.push_const(method as i32);
+                self.bytecode.push_index();
+                self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(2));
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);

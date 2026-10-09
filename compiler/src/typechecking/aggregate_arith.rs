@@ -139,7 +139,7 @@ pub fn classify_arith(ty: &Ty) -> ArithShape {
 
 /// Traits that the numeric tower lifts from element to homogeneous aggregate.
 pub fn is_liftable_arith_trait(class: &str) -> bool {
-    matches!(class, "Add" | "Sub" | "Mul" | "Div" | "Num")
+    matches!(class, "Add" | "Sub" | "Mul" | "Div" | "Neg" | "Num")
 }
 
 /// If `ty` is a homogeneous tuple or array of a single element type, return
