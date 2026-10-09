@@ -272,9 +272,12 @@ jobs:
       - name: Leak smoke (`coil test` under ulimit -v)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
-          ulimit -v 65536
+          # The cap is 48 MiB above the harness's own code, which grows with
+          # every change (a fixed 64 MiB cap had shrunk to ~35 MiB of room).
+          code_kb=$(( $(size -d target/debug/coil-test | awk 'NR==2 {print $4}') / 1024 ))
+          ulimit -v $(( code_kb + 49152 ))
           # One job: every extra thread reserves a glibc malloc arena (64 MiB
-          # of address space), which alone exceeds the cap.
+          # of address space), which alone exceeds the room left.
           ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
