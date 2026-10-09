@@ -633,14 +633,15 @@ fn float_arithmetic_emits_float_opcode() {
 fn float_unary_minus_emits_negf_not_neg() {
     use common::Instruction;
     let (bc, _pool) = compile_src("fn n(float x) -> float { return -x; }");
+    // The builtin `Neg` thunks (both lanes) come first; `n`'s is the last.
+    let last_neg = bc
+        .iter()
+        .rev()
+        .map(|b| b.bytecode())
+        .find(|op| matches!(op, Instruction::NEG | Instruction::NEGF));
     assert!(
-        bc.iter().any(|b| matches!(b.bytecode(), Instruction::NEGF)),
+        matches!(last_neg, Some(Instruction::NEGF)),
         "expected NEGF for float unary minus; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    assert!(
-        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::NEG)),
-        "float unary minus must not emit int NEG; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -649,14 +650,14 @@ fn float_unary_minus_emits_negf_not_neg() {
 fn int_unary_minus_still_emits_neg() {
     use common::Instruction;
     let (bc, _pool) = compile_src("fn n(int x) -> int { return -x; }");
+    let last_neg = bc
+        .iter()
+        .rev()
+        .map(|b| b.bytecode())
+        .find(|op| matches!(op, Instruction::NEG | Instruction::NEGF));
     assert!(
-        bc.iter().any(|b| matches!(b.bytecode(), Instruction::NEG)),
+        matches!(last_neg, Some(Instruction::NEG)),
         "expected NEG for int unary minus; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    assert!(
-        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::NEGF)),
-        "int unary minus must not emit NEGF; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }

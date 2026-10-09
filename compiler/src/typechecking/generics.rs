@@ -444,12 +444,13 @@ impl Generics {
 
         // Individual arithmetic traits so a type can implement only the
         // operations it supports. `Num` is a convenience supertrait that
-        // implies all four (see below).
+        // implies all of them (see below); `Neg` is unary `-`.
         for (name, method) in [
             ("Add", "add"),
             ("Sub", "sub"),
             ("Mul", "mul"),
             ("Div", "div"),
+            ("Neg", "neg"),
         ] {
             self.typeclasses.insert(
                 name.into(),
@@ -469,8 +470,8 @@ impl Generics {
             );
         }
 
-        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div via
-        // the flattened superclass dictionary layout. Num itself has no
+        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg
+        // via the flattened superclass dictionary layout. Num itself has no
         // methods; call sites resolve operators through the op traits.
         self.typeclasses.insert(
             "Num".into(),
@@ -479,7 +480,7 @@ impl Generics {
                 defined_module: PRELUDE_OPS_MODULE.into(),
                 type_params: vec!["T".into()],
                 param_kinds: vec![Kind::Type],
-                superclasses: vec!["Add".into(), "Sub".into(), "Mul".into(), "Div".into()],
+                superclasses: vec!["Add".into(), "Sub".into(), "Mul".into(), "Div".into(), "Neg".into()],
                 assoc_types: vec![],
                 methods: vec![],
             },
@@ -732,6 +733,7 @@ impl Generics {
                 ("Sub", "sub"),
                 ("Mul", "mul"),
                 ("Div", "div"),
+                ("Neg", "neg"),
                 ("Lt", "lt"),
                 ("Le", "le"),
                 ("Gt", "gt"),

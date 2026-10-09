@@ -2279,6 +2279,17 @@ impl Checker {
             }
         }
 
+        // Neg::neg : ∀T. Neg T => T → T (unary `-`)
+        let var = self.counter.fresh();
+        self.typeclass_method_schemes.insert(
+            ("Neg".to_string(), "neg".to_string()),
+            Scheme::poly(
+                vec![var],
+                vec![Constraint::unary("Neg", var)],
+                Ty::Fun(Box::new(Ty::Var(var)), Box::new(Ty::Var(var))),
+            ),
+        );
+
         let var = self.counter.fresh();
         self.typeclass_method_schemes.insert(
             ("Show".to_string(), "show".to_string()),
@@ -2641,6 +2652,9 @@ impl Checker {
                 if matches!(&pruned, Ty::Tuple(_) | Ty::Array { .. }) {
                     self.infer_aggregate_neg(pruned, id, range)
                 } else {
+                    if let Ty::Var(v) = pruned {
+                        self.record_bound_negate(id, &range, v);
+                    }
                     pruned
                 }
             }
@@ -5228,14 +5242,26 @@ impl Checker {
                 (id, range),
             );
         }
-        let candidates = self.bound_method_candidates(&ident, None);
+        // A free fn of the same name wins over a compiler-provided trait's
+        // method: `fn add<T: Num>(T a)` called under a `T: Num` bound is
+        // that function, not `Add::add`.
+        let shadowed = self.lookup_fn_scheme(&ident).is_some();
+        let keep = |candidates: Vec<(usize, String, String, usize, Scheme)>| {
+            candidates
+                .into_iter()
+                .filter(|(_, _, owner, _, _)| !(shadowed && Self::is_builtin_class(owner)))
+                .collect::<Vec<_>>()
+        };
+        let candidates = keep(self.bound_method_candidates(&ident, None));
         if !candidates.is_empty() {
             let receiver_var = arg_tys
                 .first()
                 .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
-            let candidates = receiver_var
-                .map(|v| self.bound_method_candidates(&ident, Some(v)))
-                .unwrap_or_else(|| self.bound_method_candidates(&ident, None));
+            let candidates = keep(
+                receiver_var
+                    .map(|v| self.bound_method_candidates(&ident, Some(v)))
+                    .unwrap_or_else(|| self.bound_method_candidates(&ident, None)),
+            );
             if let Some((dict_index, dict_class, class, method_slot, scheme)) =
                 self.select_bound_method(candidates, &ident, &range)
             {
@@ -5870,6 +5896,28 @@ impl Checker {
         }
         self.bound_operator_calls_by_span
             .insert((range.start, range.end), hint);
+    }
+
+    /// `-a` on a type variable goes through its `Neg` dictionary in a shared
+    /// generic body (`T: Num` implies `Neg`); a type parameter without the
+    /// bound is an error, as for the binary operators.
+    fn record_bound_negate(&mut self, id: Option<NodeId>, range: &Range<usize>, var: TyVarId) {
+        if self.user_dict_index(var, "Neg").is_none() {
+            self.bind_matching_abstract_constraints(Some(var), "Neg");
+        }
+        if self.user_dict_index(var, "Neg").is_some() {
+            self.record_bound_operator(id, range, var, "Neg", "neg");
+        } else if self
+            .type_params_in_scope
+            .iter()
+            .any(|frame| frame.values().any(|&candidate| candidate == var))
+        {
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                "Cannot apply unary `-` to value of generic type without bound `Neg`".to_string(),
+                range.clone(),
+            ));
+        }
     }
 
     fn record_bound_display(&mut self, range: &Range<usize>, var: TyVarId) {
@@ -17751,6 +17799,7 @@ impl Checker {
                 | "Sub"
                 | "Mul"
                 | "Div"
+                | "Neg"
                 | "Num"
                 | "Lt"
                 | "Le"
