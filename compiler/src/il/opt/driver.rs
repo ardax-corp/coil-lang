@@ -179,11 +179,6 @@ fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
 
-fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::escape_analysis::escape_analysis(ops);
-    0
-}
-
 fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::slot_promote::slot_promote(ops, ctx.entry_tell);
     super::dce::dead_store_at(ops, ctx.entry_tell);
@@ -304,16 +299,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_loop_unroll),
     },
     PassSpec {
-        name: "escape_analysis",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.escape_analysis,
-        set_flag: |o| o.escape_analysis = true,
-        apply: ApplyFn::Grow(apply_escape_analysis),
-    },
-    PassSpec {
         name: "slot_promote",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -367,7 +352,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "licm",
     "loop_bounds",
     "loop_unroll",
-    "escape_analysis",
     "slot_promote",
     "clone_shared_return",
     "branch_optimization",
@@ -403,7 +387,6 @@ mod tests {
                 "licm",
                 "loop_bounds",
                 "loop_unroll",
-                "escape_analysis",
                 "slot_promote",
                 "clone_shared_return",
                 "branch_optimization",

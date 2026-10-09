@@ -38,7 +38,9 @@ pub struct OptimizeOptions {
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
-    /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
+    /// HIR scalar replacement: split local enums / tuples into field locals
+    /// before emit (`hir::enum_sroa`, `hir::tuple_sroa`). Not an IL pass; on
+    /// at Standard and above (and Size), off at None / Basic / Debug.
     pub escape_analysis: bool,
     /// Heuristic branch layout (COI-128).
     /// Default **on**: invert only Known-SP terminating then-arms, and mint
@@ -196,7 +198,6 @@ mod cfg;
 mod convoy;
 mod dce;
 mod early_cse;
-pub(crate) mod escape_analysis;
 mod loop_unroll;
 mod slot_promote;
 
