@@ -41,6 +41,11 @@ impl ValueTag {
     }
 }
 
+/// `UnboxValue` operand that unwraps a boxed word whatever its tag: a shared
+/// generic body normalizes a type parameter's value to its raw word without
+/// knowing the instance's type.
+pub const UNBOX_ANY_TAG: u32 = 0xFFFF;
+
 type Storage = u64;
 
 #[derive(Default, Copy, Clone, Eq)]
