@@ -175,37 +175,17 @@ The shared bytecode/symbolic-IL tell model is validated differentially: `tell_cu
 
 **Cursor-only slot promotion (`slot_promote_tell`)** was removed 2026-10 (measurement showed no bench effect). `opt::slot_promote` (alias / producer forwarding) stays.
 
-**Counted-loop bounds analysis proves length invariance and rewrites proven indices.** `il::bounds` answers one question per natural loop: can the length of the arrays this loop addresses change while it runs? Element writes cannot — `StoreIndex` overwrites a slot in place — so `while i < len(a) { a[i] = 0; }` has an invariant `len(a)` even though the array is mutated. On that proof two invariant materializations move to the preheader: the `LOAD a; ArrayLen; STORE t` triple codegen leaves in the loop header, and the `CONST imm; STORE t` pair that materializes a constant addressing operand (`vec_scan` 6.58M → 5.01M dispatches, `nsieve` 545.6k → 469.9k). Proven `LOAD arr; LOAD i; Index` / `StoreIndex` sites in a unit-increment or
-invariant-stride counted loop rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
-(archive minor 12), then to `IndexPinUnchecked` / `StoreIndexPinUnchecked` when
-the array slot is length-invariant (archive minor 13). Unproven dynamic indices
-keep the checked opcodes: out-of-range read or write **panics** (archive major 4). Constant-index OOB stays a compile error.
-Helper-call loops stay checked unless the callee is a proven-pure user `fn`
-([COI-99](https://linear.app/ardax/issue/COI-99)); host, FFI, yield, growing-array, and
-alias-push loops stay checked. **Length/index sidecar facts** (`index_facts`)
-mark `arr[i]` NodeIds when `0 <= i < len(arr)` is proven in a counted loop,
-a callee `i < a.len()` guard, a caller that always passes a proven pair, or a
-length-stable `for-in`. Lowering consumes those facts as `IndexUnchecked` /
-`ArrayPin` / `IndexPinUnchecked`. Yield remains a barrier. Computed `MakeArray`
-(arity > 32 or non-immediates), `ArrayPush`, and host refuse the fact. [#192](https://github.com/ardax-corp/coil-lang/pull/192)
-nsieve checked `Index` went to 0; leftover cost on those sites was
-`find_object_by_addr` (stack `IndexPin*` for fuse-IL; dense native reuses the
-same `frame_pins` table on `DenseIndex` / `DenseStoreIndex`, COI-372).
-
-The safety argument is the cursor, not liveness: the preheader `STORE t` floors the cursor at `t + 1`, and because the cursor is monotone in its input, proving every in-loop stack height stays at or above the header's proves every in-loop push lands above `t`. That is why the pass needs only `il::sp`, and why it works where `slot_promote` cannot — it *adds* a floor instead of removing one. Deliberately refused:
+**Counted-loop bounds proofs run on HIR.** Two HIR passes after inlining replace the stack-IL `loop_bounds` pass (removed 2026-10). `hir::licm` moves `len(a)` of an array, `Vec` or string out of a loop that cannot change a length: element and field writes are fine (`StoreIndex` overwrites in place), an append, a call that may resize (`purity::LengthStability` plus HIR effect summaries without `RESIZE`), a yield or an unknown call is not. `hir::bounds` flags `a[i]` as in bounds (`HirFlags::IN_BOUNDS`, lowered to `IndexUnchecked` / `StoreIndexUnchecked`) in `while i < B { … }` and `for i in lo..B`, where `B` is `len(a)`, a local from `let n = len(a)` before the loop, or the `n` of a preceding `while i < n { a.push(x); i = i + 1 }` fill from an empty `a`; `i` starts at a non-negative literal (or a small value) and only grows by a positive literal or by a small local the loop does not write (`k = k + p` with `p` in `0..len`, so the sum cannot overflow); and the site runs before anything in the iteration writes `i`. A store's proof is used only when its value expression has no call or write (the value is evaluated first). Unproven dynamic indices keep the checked opcodes: out-of-range read or write **panics** (archive major 4). Constant-index OOB stays a compile error. When some `fn drop()` may resize an array, no length is treated as steady (finalizers run at allocation). **Length/index sidecar facts** (`index_facts`) still mark `arr[i]` NodeIds on the AST (counted loops, callee guards, proven caller pairs, length-stable `for-in`); lowering consumes them as `IndexUnchecked` / `ArrayPin` / `IndexPinUnchecked`. The IL pass's in-loop `ArrayPin` / `IndexPin*` rewrite went with it: loop sites take plain `IndexUnchecked`, and MIR-dense bodies use `DenseIndex` with the shared pin table (COI-372). Bench parity was measured before the removal. Refused, fail closed:
 
 | Refused | Why |
 |---------|-----|
-| A call that may resize, a host native, or an unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. **Length-stable** user helpers are allowed even when impure (field / element writes, output) — `purity::LengthStability`; pure helpers were first ([COI-99](https://linear.app/ardax/issue/COI-99)). Method calls other than `len` / `capacity` still refuse (receiver type unknown to the name-keyed walk). `GetField` / `SetField` / `FORMAT` refuse only when some `fn drop()` may resize (finalizers run at allocation) |
-| `YieldCoro` / `YieldFromCoro` in the body | Pins are not saved across yield; fail closed so the loop does not get `ArrayPin` / `IndexPin*` / `IndexUnchecked`. Pins are not saved on `ObjCoroutine` |
-| `ArrayPush` / `MakeArray` / `MakeDict` / `CodePtr` / `MakePolyFn` in the body | Length can change (`tests/positive/while_len_grow.hy`) or user code can run |
-| A rebound `Vec` local (`slots_stored_in_loop`) | A different array each pass, so its length is not invariant |
-| An `Index` / `StoreIndex` whose target is not a plain slot load | Nested `a[i][j]`, a `Dup`, a call result: the walk-back cannot name the array, so the whole loop is refused |
-| A loop that computes `len(a)` but addresses no array | Outside P2's remit; nothing licenses reasoning about aliasing there |
-| A body whose stack height dips below the header's | The preheader floor would not survive, so a later push could land on the temp |
-| A temp read before its def in the body, or outside the loop | The hoist changes what the earlier read observes; the cursor floor also stops protecting the slot once control leaves the loop |
-| **`0 <= i < len` with non-unit stride** | Implemented for invariant positive stride slots (`k += p`); dynamic or stored stride steps stay checked |
-| The `find_object_by_addr` lookup each unchecked `Index` still paid | **Addressed** for proven stack loops: `ArrayPin` + `IndexPin*` (archive minor 13). Dense `HEAP_UNCHECKED` loops reuse the same pin table (COI-372) keyed by the array register, with an address check so a reused slot re-probes. Unproven / non-loop `Index` still goes through header poison + mapped-slab range check — [heap-identity.md](heap-identity.md), not a HashSet. No second ArrayPtr — [array-pin.md](array-pin.md); not [COI-99](https://linear.app/ardax/issue/COI-99) |
+| A call that may resize, a host native or an unknown callee in the loop | The callee could hold another reference to the array and `push`/`pop` it |
+| `yield` / `resume` in the loop | Lengths may change while suspended |
+| An append anywhere in the loop | Length can change (`tests/positive/while_len_grow.hy`) |
+| A rebound array or bound local | A different array each pass |
+| `i <= n` headers | `i <= len` allows `i == len` (COI-85 / COI-98) |
+| A site after a write to `i` in the iteration, or inside a lambda / `defer` | `i` may already be past the bound |
+| A stride of unknown size | `i + s` could overflow past the test |
 
 **The caller-side predicate peel only pays when it spills nothing.** When a callee opens with a pure guard over its parameters and returns an immediate or a parameter from that arm, codegen evaluates the guard at the call site so base cases skip the frame. Arguments that compile to a single pure byte (one slot load, one constant) are re-materialized in both the guard and the argument prep instead of being stored to a temp, which drops one `STORE` plus one spill `LOAD` per argument and leaves the guard reading the caller's own locals (peel-heavy loop: 4.28G → 3.29G instructions, 189ms → 152ms). Anything longer than a byte still takes a temp, because the guard copy and the call copy would each pay for it.
 
