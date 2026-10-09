@@ -112,8 +112,9 @@ Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is
 
 After SSA lower, **GVN** runs on the numeric function before dense emit
 (and before P3 LIR emit). P2 numbered same-block; P10 walks the dominator
-tree and adds fully-anticipated fork PRE. Stack-IL `local_cse` still
-refuses `DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here.
+tree and adds fully-anticipated fork PRE. HIR CSE (`hir::cse`) only sees
+source-level expressions within a block; this pass also numbers values
+lowering introduces and `DIV`/`MOD`/`DIVF`/`MODF` across blocks.
 Fuse-IL CSE / LICM are unchanged for non-MIR bodies (stack-IL InstCombine
 was removed 2026-10). Hit
 benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
@@ -210,8 +211,8 @@ Hit bench: `examples/perf/mir_dense_call.hy`.
 ## P7 — MIR InstCombine (COI-281)
 
 After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` / `i32` /
-`i64`). Fuse-IL `algebraic` only matches Load/Const/ConstPool windows; this
-pass folds binop results too.
+`i64`). HIR folding (`hir::fold`) only sees literal operands in the source
+tree; this pass folds binop results too.
 
 Proving set (P11 float peeps live in the same pass):
 
@@ -393,8 +394,8 @@ after stack-IL opts: `emit_lir` keeps single-use return/cmp values on the
 stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
 `slot ⊕ imm` bins emit `BinSlotImm` so pre-fuse cost matches opted
 fuse-IL. A body is kept only when emitting cost does not grow.
-Stack-IL opts are **not** re-run on the reconstruct (`local_cse`
-refuses `MOD` and rematerialized `pair_int_churn`). Callers
+Stack-IL opts are **not** re-run on the reconstruct (CSE and LICM run on HIR
+before lowering; the reconstruct rematerializes `pair_int_churn`). Callers
 (`match f()`, `?`, I/O) stay on fuse-IL.
 Hit bench: `examples/perf/result_int_churn.hy`.
 
