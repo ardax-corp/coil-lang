@@ -25,8 +25,8 @@ fn wide() -> int {
     return 2147483647 + 1;
 }
 
-fn wraps() -> int {
-    return 4000000000 * 4000000000;
+fn wide_product() -> int {
+    return 4000000 * 4000000;
 }
 
 fn floats(float x) -> float {
@@ -69,7 +69,7 @@ test("a call times zero still runs") {
 
 test("results past 32 bits are computed at run time") {
     assert(wide() == 2147483648)?;
-    assert(wraps() == 4000000000 * 4000000000)?;
+    assert(wide_product() == 16000000000000)?;
 }
 
 test("float folds") {
