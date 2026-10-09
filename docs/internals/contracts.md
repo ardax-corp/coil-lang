@@ -1,9 +1,9 @@
 # Contracts
 
-`requires` and `ensures` clauses on functions and methods, checked at run
-time (plan steps C0 and C1). Class and loop invariants, `decreases`,
-`old(e)` and trait-method contracts are C2; generated tests are C3; a
-prover is C4.
+`requires` and `ensures` clauses on functions and methods, `old(e)` in
+`ensures`, `invariant` on classes and loops and `decreases` on `while`
+loops, checked at run time (plan steps C0 to C2). Contracts on trait
+methods are still to come; generated tests are C3; a prover is C4.
 
 ```coil
 fn isqrt(int n) -> int
@@ -20,9 +20,17 @@ fn isqrt(int n) -> int
 Clauses come after `where` and `uses {…}`, in any number and order:
 
 ```
-function_decl ::= … where_clause? effect_clause? contract* (block | ';')
-contract      ::= ('requires' | 'ensures') expr (',' string)?
+function_decl ::= … where_clause? effect_clause? fn_clause* (block | ';')
+fn_clause     ::= ('requires' | 'ensures') expr (',' string)?
+while_loop    ::= 'while' expr (('invariant' | 'decreases') expr (',' string)?)* block
+for_loop      ::= 'for' pat 'in' expr ('invariant' expr (',' string)?)* block
+class_decl    ::= 'class' name type_params? ('invariant' expr (',' string)?)* '{' fields '}'
 ```
+
+A loop parses its clauses with the expression parser it already has
+(`Pratt::contracts_with`): building a fresh one inside an expression
+recurses without end. A clause's span runs from its keyword to the end of
+its expression or message.
 
 `requires`, `ensures` and `result` are contextual words, so code that names
 a variable `result` keeps working. `coil fmt` puts each clause on its own
@@ -69,10 +77,44 @@ Calls of a function with a `requires` are not tiny-inlined
 (`Compiler::caller_blame_fns`), and the HIR inliner refuses any body with a
 `Builtin`, so the caller always has its own frame.
 
+## `old(e)`
+
+Inside `ensures`, `old(e)` is `e` as it was on entry. The checker types the
+call as `e` (`Checker::in_ensures`); HIR build evaluates every `old(e)` into
+a local after the `requires` checks (`Cx::old_values`) and lowers the call
+to a read of it (`BodyBuilder::olds`, keyed by the call node's address).
+
+## Loops
+
+`Cx::checked_loop` runs the invariants, then the `decreases` checks, at the
+top of every iteration, before a `while` loop's condition and before a
+`for` loop takes its next item; a `for` loop checks its invariants once
+more after the last item. An invariant therefore holds whenever the
+condition is tested; a `break` skips the final check. `decreases d` keeps
+the previous value in a temp: `d` must be non-negative and lower than last
+time, or the panic says `(went negative)` / `(did not decrease)`. A `for`
+loop takes no `decreases`: it ends when its items do. Loop clauses are typed
+in the scope around the loop, so a `for` binding is not visible in them.
+
+## Class invariants
+
+`class C invariant e { … }` is typed with `self: C` and the class's private
+fields visible (`Checker::infer_class_invariants`). HIR build collects the
+clauses per class (`class_invariants`) and checks them:
+
+- on every return of a `pub` instance method of an inherent impl, like an
+  `ensures` (private helpers may break the invariant for a while; `drop`
+  and static methods are not checked);
+- after `new C(…)`, as `{ let self = new C(…); checks; self }`, reported as
+  `in new C`.
+
+A violation is reported once, however many bodies check the clause.
+
 ## Levels
 
 `--contracts=all|requires|off` on `coil`, `coil test` and `coil dissect`
-sets `Pipeline::set_contracts`. With no flag, `-O0`, `-O1` and `-Og` check
+sets `Pipeline::set_contracts`. `all` adds `ensures`, `old`, invariants and
+`decreases` to `requires`. With no flag, `-O0`, `-O1` and `-Og` check
 everything. `-O2` and above (the default) check only `requires`: cheap entry
 checks that protect a library from its callers. `coil test` checks
 everything unless told otherwise. The level reaches HIR build through
