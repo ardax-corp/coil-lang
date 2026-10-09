@@ -73,8 +73,8 @@ struct HirCall {
     /// `recv.m(args)`: the receiver is argument 0; never inlined or a
     /// tail call (as in the AST codegen).
     method: bool,
-    /// A mono clone of a generic function: never tiny-inlined (as in the
-    /// AST codegen).
+    /// A mono clone of a generic function (typed inlining takes it only
+    /// as its generic body at the call's types).
     mono: bool,
     /// A compiler builtin emitted in place of a `CALL`.
     builtin: Option<HirBuiltin>,
@@ -5665,8 +5665,7 @@ impl Compiler {
                     .push(Byte::new_with_value(Instruction::CONST, Value::from(!*and).raw() as _));
                 self.bytecode.bind_label(end);
             }
-            // A negated literal is one constant, as in the AST codegen (it
-            // keeps small leaves inside the tiny-inline budget).
+            // A negated literal is one constant, as in the AST codegen.
             HirKind::Un { op: UnOp::Neg, operand } if matches!(hir.expr(*operand).kind, HirKind::Lit(Lit::Int(_) | Lit::Float(_))) => {
                 match hir.expr(*operand).kind {
                     HirKind::Lit(Lit::Int(n)) => self.hir_push_int(n.wrapping_neg()),
@@ -6400,7 +6399,6 @@ impl Compiler {
             }
             HirKind::Call { args, .. } => {
                 let call = &emit.calls[&id.0];
-                let params = call.params.clone();
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let tail = emit.tail_calls.contains(&id.0);
@@ -6418,11 +6416,7 @@ impl Compiler {
                     return;
                 }
                 let call = &emit.calls[&id.0];
-                // Only with no operands below: the arg and result temps are
-                // `STORE`s, which would lift the cursor over live operands.
-                let mono = call.mono;
                 let generic = call.generic.clone();
-                let ranges = !call.ranges.is_empty();
                 let words = Self::hir_arg_words(call, args.len());
                 if let Some(g) = &generic {
                     for (&arg, unbox) in args.iter().zip(&g.adapt) {
@@ -6432,32 +6426,6 @@ impl Compiler {
                             emit.lambda_unbox.insert(arg.0, unbox.clone());
                         }
                     }
-                }
-                let inline = if tail || depth != 0 || mono || ranges || generic.is_some() || self.coroutine_fns.contains(&key) {
-                    None
-                } else {
-                    self.tiny_inline_body(&key, natural.words())
-                };
-                if let Some((start, end, diamond)) = inline {
-                    // Arguments to temps, as the AST tiny-inline does.
-                    let mark = self.bytecode.len();
-                    let mut temps = Vec::with_capacity(args.len());
-                    for (&arg, &param) in args.iter().zip(&params) {
-                        self.hir_value(hir, emit, arg, &Rep::Word(param), depth);
-                        self.expr_depth = depth;
-                        let tmp = self.alloc_temp_slot();
-                        self.bytecode.push_store_pop(tmp);
-                        temps.push(tmp);
-                    }
-                    let mut body = CodeBuf::new();
-                    if self.emit_tiny_inline_body(start, end, diamond, &temps, &mut body, natural.words()) {
-                        self.bytecode.append(&mut body);
-                        self.hir_convert(&natural, want, depth);
-                        return;
-                    }
-                    // A refused inline drops the staging, as the AST rolls
-                    // its attempt back (the temps stay allocated).
-                    self.bytecode.truncate(mark);
                 }
                 if self.hir_stages_args(hir, emit, args, depth) {
                     // Each argument (one or two words) to temps, then
@@ -8884,7 +8852,6 @@ impl Compiler {
             || Self::hir_call_rep(call).words() != 1
             || self.coroutine_fns.contains(&call.key)
             || !(self.functions.contains_key(&call.key) || self.functions.contains_key(strip_overload_key(&call.key)))
-            || self.callee_is_tiny_inlineable(&call.key)
         {
             return false;
         }

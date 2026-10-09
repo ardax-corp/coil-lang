@@ -1,8 +1,6 @@
 //! Typed inlining (HIR phase 7): copy a small callee's HIR into its caller.
 //!
-//! The IL tiny-inline copies emitted instructions and so only takes leaf
-//! bodies at depth zero with no locals. Here a callee's body is spliced in
-//! before lowering: its locals become caller locals, its parameters become
+//! A callee's body is spliced in before lowering: its locals become caller locals, its parameters become
 //! `let`s (or the argument itself, when that is a literal or a local the
 //! callee never rebinds), and the call becomes its result. The caller then
 //! lowers the inlined code with its own context, so a receiver that is
@@ -82,7 +80,7 @@ impl Shape {
     }
 }
 
-/// HIR call weight in [`inlinable`]'s cost, as the IL tiny-inline counts a call.
+/// HIR call weight in [`inlinable`]'s cost.
 const CALL_COST: usize = 25;
 
 /// Whether `callee` can be inlined within `budget`, and how.

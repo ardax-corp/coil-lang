@@ -532,10 +532,6 @@ pub struct Compiler {
     current_function_table_key: Option<String>,
     /// Peel/unroll spans for the module currently being compiled.
     fn_bytecode_spans: HashMap<String, (usize, usize)>,
-    /// Callee spans kept across files for tiny-inline (COI-125).
-    fn_inline_spans: HashMap<String, (usize, usize)>,
-    /// Module namespace that defined each [`Self::fn_inline_spans`] key.
-    fn_defining_module: HashMap<String, String>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
     /// `dissect --il-post` snapshot from the last capturing finalize.
@@ -581,7 +577,7 @@ pub struct Compiler {
     /// IL optimization preset (COI-127).
     opt_options: crate::il::opt::OptimizeOptions,
 
-    /// Cost budgets for tiny-inline (COI-124).
+    /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
 
     /// When true, [`Self::finalize_bytecode`] keeps post-opt pre-fuse IL.
@@ -716,8 +712,6 @@ impl Default for Compiler {
             current_function_qualified: None,
             current_function_table_key: None,
             fn_bytecode_spans: HashMap::new(),
-            fn_inline_spans: HashMap::new(),
-            fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
             #[cfg(any(test, feature = "dissect"))]
             post_il_snapshot: None,
