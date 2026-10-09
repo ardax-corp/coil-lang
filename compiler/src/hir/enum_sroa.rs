@@ -318,18 +318,19 @@ fn plan(body: &mut HirBody, local: LocalId) -> Option<Split> {
 /// Replace every build and match of `local` with its split locals.
 fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
     let parent = parents(body);
+    let stage = super::tuple_sroa::self_reads(body, local);
     for (i, &up) in parent.iter().enumerate() {
         let id = HirId(i as u32);
         match body.exprs[i].kind.clone() {
             HirKind::Let { local: l, init: Some(v) } if l == local => {
-                let stmts = build(body, v, split, true);
+                let stmts = build(body, v, false, split, true);
                 set_block(body, id, stmts);
             }
             HirKind::Local(l) if l == local => {
                 let Some(p) = up else { continue };
                 match body.expr(p).kind.clone() {
                     HirKind::Assign { place, value } if place == id => {
-                        let stmts = build(body, value, split, false);
+                        let stmts = build(body, value, stage.contains(&value), split, false);
                         set_block(body, p, stmts);
                     }
                     HirKind::Match { scrutinee, arms } if scrutinee == id => {
@@ -370,7 +371,7 @@ fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
 /// The statements of a variant build `v`: each argument into its field,
 /// then the tag. A first definition (`define`) also zeroes every other
 /// field, so each split local is set before any read.
-fn build(body: &mut HirBody, v: HirId, split: &Split, define: bool) -> Vec<HirId> {
+fn build(body: &mut HirBody, v: HirId, stage: bool, split: &Split, define: bool) -> Vec<HirId> {
     let span = body.expr(v).span;
     let HirKind::Make {
         kind: MakeKind::Variant { tag: Some(tag), .. },
@@ -389,6 +390,13 @@ fn build(body: &mut HirBody, v: HirId, split: &Split, define: bool) -> Vec<HirId
             HirKind::Assign { place, value }
         };
         push(body, kind, Some(ty::unit()), span)
+    };
+    // A reassignment whose payload reads the local (`s = A(match s {..})`,
+    // `stage`) computes it before any field changes.
+    let args = if stage {
+        super::tuple_sroa::staged(body, &args, &mut stmts, span)
+    } else {
+        args
     };
     let own = split.fields.get(&tag).cloned().unwrap_or_default();
     for (&f, &a) in own.iter().zip(&args) {
