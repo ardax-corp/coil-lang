@@ -46,12 +46,27 @@ fn a_nested_operand_moves_to_a_temp_before_its_statement() {
     assert_eq!(staged.expr(target).kind, HirKind::Local(local));
 }
 
+/// A call that runs before the operand moves into its own temp first, so
+/// the call still runs first.
 #[test]
-fn an_operand_after_a_call_stays() {
+fn an_operand_after_a_call_stages_the_call_first() {
     let src = "fn g() -> int { return 1; }
         fn f([int; 3] idx, [int; 3] vals, int i) -> int { return g() + vals[idx[i]]; }";
     let body = body_of(src, "f");
-    assert!(stage(&body, index_of(&body, "idx")).is_none());
+    let staged = stage(&body, index_of(&body, "idx")).expect("staged");
+    let HirKind::Block { stmts, .. } = &staged.expr(staged.root.unwrap()).kind else {
+        panic!("block root")
+    };
+    let inits: Vec<_> = stmts
+        .iter()
+        .map(|&s| match staged.expr(s).kind {
+            HirKind::Let { init: Some(init), .. } => staged.expr(init).kind.clone(),
+            _ => panic!("lets first"),
+        })
+        .take(2)
+        .collect();
+    assert!(matches!(inits[0], HirKind::Call { .. }));
+    assert!(matches!(inits[1], HirKind::Index { .. }));
 }
 
 /// A `while` condition is the loop body's first `if`, so it stages inside

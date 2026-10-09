@@ -600,13 +600,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         };
         let skip = b.body.params.len();
         for (i, item) in items.into_iter().enumerate() {
-            if let Expression::Argument { name, ty: ty_ann, .. } = item.1.as_ref() {
+            if let Expression::Argument { name, ty: ty_ann, is_rest, .. } = item.1.as_ref() {
                 let ty = tys
                     .and_then(|t| t.get(skip + i).or_else(|| t.get(i)))
                     .cloned()
                     .filter(|t| !matches!(t, Ty::Con(n) if n == coil_ty::UNIT))
                     .or_else(|| self.ty_of(item));
-                if Self::pinned(b, ty_ann.as_ref(), ty.as_ref()) {
+                // `T... xs` declares the pack's element.
+                let declared = match (&ty, *is_rest) {
+                    (Some(Ty::List(elem) | Ty::Array { element: elem, .. }), true) => Some(elem.as_ref()),
+                    (_, true) => None,
+                    (ty, false) => ty.as_ref(),
+                };
+                if Self::pinned(b, ty_ann.as_ref(), declared) {
                     b.body.pinned_param = true;
                 }
                 let id = b.local(name, ty, LocalKind::Param);

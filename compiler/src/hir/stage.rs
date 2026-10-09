@@ -18,7 +18,13 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
     if body.expr(target).flags.contains(HirFlags::ADJUST) {
         return split_adjust(body, target);
     }
-    let (block, at) = statement_of(body, target)?;
+    let (block, at) = match statement_of(body, target) {
+        Ok(found) => found,
+        // An operand with an effect runs first: staging it, in place, keeps
+        // the order and leaves only a pure read ahead of `target`.
+        Err(Some(first)) => return stage(&stage(body, first)?, target),
+        Err(None) => return None,
+    };
     let mut b = body.clone();
     let moved = b.expr(target).clone();
     let temp = LocalId(b.locals.len() as u32);
@@ -56,17 +62,23 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
 
 /// The block (by node index) and the position in it of the statement whose
 /// evaluation reaches `target` with only pure reads before it.
-fn statement_of(body: &HirBody, target: HirId) -> Option<(usize, usize)> {
-    body.exprs.iter().enumerate().find_map(|(i, e)| {
+/// `Err(Some(op))` when `target` is reached only past `op`, an operand
+/// with an effect that always runs first.
+fn statement_of(body: &HirBody, target: HirId) -> Result<(usize, usize), Option<HirId>> {
+    let mut first = None;
+    for (i, e) in body.exprs.iter().enumerate() {
         let HirKind::Block { stmts, tail } = &e.kind else {
-            return None;
+            continue;
         };
-        stmts
-            .iter()
-            .chain(tail)
-            .position(|&s| root_of(body, s).is_some_and(|r| reaches(body, r, target) == Ok(true)))
-            .map(|at| (i, at))
-    })
+        for (at, &s) in stmts.iter().chain(tail).enumerate() {
+            match root_of(body, s).map(|r| reaches(body, r, target)) {
+                Some(Ok(true)) => return Ok((i, at)),
+                Some(Err(Some(op))) => first = first.or(Some(op)),
+                _ => {}
+            }
+        }
+    }
+    Err(first)
 }
 
 /// A `x++` / `--x` value on a place other than a local, as statements
@@ -83,7 +95,7 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
     if !repeatable(body, place) {
         return None;
     }
-    let (block, at) = statement_of(body, target)?;
+    let (block, at) = statement_of(body, target).ok()?;
     let prefix = body.expr(target).flags.contains(HirFlags::PREFIX);
     let mut b = body.clone();
     let node = b.expr(target).clone();
@@ -205,21 +217,26 @@ fn root_of(body: &HirBody, s: HirId) -> Option<HirId> {
 
 /// Walk `e` in evaluation order: `Ok(true)` at `target`, `Ok(false)` when
 /// `e` holds no `target` and has no effect, `Err` at an effect or a node
-/// whose operands do not all run, unconditionally, first.
-fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, ()> {
+/// whose operands do not all run, unconditionally, first; `Err(Some(op))`
+/// when `target` is an operand after `op`, an earlier one with an effect.
+fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, Option<HirId>> {
     if e == target {
         return Ok(true);
     }
-    let seq = |ids: &[HirId]| -> Result<bool, ()> {
+    let seq = |ids: &[HirId]| -> Result<bool, Option<HirId>> {
+        let mut effect = None;
         for &a in ids {
-            if reaches(body, a, target)? {
-                return Ok(true);
-            }
-            if !pure(body, a) {
-                return Err(());
+            match reaches(body, a, target) {
+                Ok(true) => return effect.map_or(Ok(true), |op| Err(Some(op))),
+                Ok(false) if pure(body, a) => {}
+                Ok(false) | Err(None) => effect = effect.or(Some(a)),
+                Err(Some(op)) => return Err(Some(effect.unwrap_or(op))),
             }
         }
-        Ok(false)
+        match effect {
+            Some(_) => Err(None),
+            None => Ok(false),
+        }
     };
     match &body.expr(e).kind {
         HirKind::Lit(_) | HirKind::Local(_) => Ok(false),
@@ -228,7 +245,7 @@ fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, ()> {
             args,
         } => match seq(args)? {
             true => Ok(true),
-            false => Err(()),
+            false => Err(None),
         },
         HirKind::Bin { lhs, rhs, .. } => seq(&[*lhs, *rhs]),
         HirKind::Index { base, index, .. } => seq(&[*base, *index]),
@@ -236,10 +253,10 @@ fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, ()> {
         HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } => reaches(body, *x, target),
         HirKind::Match { scrutinee: x, .. } | HirKind::If { cond: x, .. } => match reaches(body, *x, target)? {
             true => Ok(true),
-            false => Err(()),
+            false => Err(None),
         },
         _ if pure(body, e) => Ok(false),
-        _ => Err(()),
+        _ => Err(None),
     }
 }
 

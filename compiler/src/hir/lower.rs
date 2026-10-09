@@ -202,7 +202,8 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
             let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
                 super::layout::ty_is_closed(t) && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
-            (unit(param) || plain(param, seen)) && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
+            (unit(param) || plain(param, seen) || closed_enum(param, seen))
+                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
         }
         _ => false,
     }
@@ -947,6 +948,35 @@ pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr
         })
 }
 
+/// Each `break` / `continue` outside every loop of `body` and of the
+/// anonymous `fn`s in it (E0801), with whether it is a `break`.
+pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, bool)> {
+    fn walk(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
+        match &body.expr(id).kind {
+            HirKind::Break | HirKind::Continue if loops == 0 => {
+                out.push((id, matches!(body.expr(id).kind, HirKind::Break)));
+            }
+            HirKind::Lambda { body: lam } => {
+                let lam = &module.bodies[*lam];
+                if let Some(root) = lam.root {
+                    walk(module, lam, root, 0, out);
+                }
+            }
+            kind => {
+                let inner = loops + u32::from(matches!(kind, HirKind::Loop { .. } | HirKind::ForIn { .. }));
+                for k in children(body, id) {
+                    walk(module, body, k, inner, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(root) = body.root {
+        walk(module, body, root, 0, &mut out);
+    }
+    out
+}
+
 /// Every node of `id`'s subtree, `id` first.
 pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
     f(body.expr(id));
@@ -1217,7 +1247,7 @@ pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "range-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -1985,6 +2015,21 @@ impl Walk<'_> {
 
     /// `id` pushes its value on top of `depth` live operands.
     fn value(&mut self, id: HirId, depth: u32) -> Check {
+        let r = self.value_kind(id, depth);
+        // A call taking a range above live operands runs into a temp
+        // ahead of its statement, where nothing is below it.
+        if r == Err("range-depth")
+            && depth != 0
+            && self.stage_at.is_none()
+            && matches!(self.body.expr(id).kind, HirKind::Call { .. })
+            && !self.ty(id).is_some_and(is_range_pair)
+        {
+            self.stage_at = Some(id);
+        }
+        r
+    }
+
+    fn value_kind(&mut self, id: HirId, depth: u32) -> Check {
         let body = self.body;
         // A numeric range moves as `[start, end]` or a boxed object; the
         // re-encodings between them stage through temps, so a range value
