@@ -372,6 +372,8 @@ impl<'c, 'm> Cx<'c, 'm> {
                     .unwrap_or_default();
                 let span = node.0.into_range();
                 let instances = &self.checker.generics().instances;
+                // A package trait's instances are keyed by its path.
+                let class = self.checker.impl_trait_key(class);
                 let instance = instances
                     .iter()
                     .find(|inst| inst.class == *class && inst.range == span)

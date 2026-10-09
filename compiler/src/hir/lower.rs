@@ -714,7 +714,8 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
 pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
     body.expr(arg).ty.as_ref().is_some_and(|t| {
         let t = apply_ty_prune(checker.subst(), t);
-        super::layout::ty_is_closed(&t) && !Checker::is_structural_len_ty_for_codegen(&t)
+        // A bare type parameter's `len` is its `Length` dictionary call.
+        (super::layout::ty_is_closed(&t) || matches!(t, Ty::Var(_))) && !Checker::is_structural_len_ty_for_codegen(&t)
     })
 }
 

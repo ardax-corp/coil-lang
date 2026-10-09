@@ -2612,9 +2612,10 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
         }
-        // An `async fn` call is `MakeCoro`: its result is the handle word.
+        // An `async fn` call is `MakeCoro`: its result is the handle word
+        // (from a shared body, of the shared coroutine).
         let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
-        if coro && (open || !self.coroutine_fns.contains(&key)) {
+        if coro && !self.coroutine_fns.contains(&key) {
             return Err("callee-coroutine");
         }
         let pair = if coro { None } else { self.two_word_return_kind(&key) };
