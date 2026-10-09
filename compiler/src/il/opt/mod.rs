@@ -195,7 +195,6 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
-mod loop_unroll;
 mod slot_promote;
 
 

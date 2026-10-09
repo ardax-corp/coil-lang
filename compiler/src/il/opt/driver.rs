@@ -48,7 +48,7 @@ pub struct PassSpec {
     pub phase: Phase,
     pub kind: PassKind,
     pub floor: OptFloor,
-    /// Size omits growth passes (`loop_unroll`, `clone_shared_return`).
+    /// Size omits growth passes (`clone_shared_return`).
     pub omit_from_size: bool,
     gate: fn(&OptimizeOptions) -> bool,
     set_flag: fn(&mut OptimizeOptions),
@@ -156,10 +156,6 @@ fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) 
     0
 }
 
-fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
-}
-
 fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::slot_promote::slot_promote(ops, ctx.entry_tell);
     super::dce::dead_store_at(ops, ctx.entry_tell);
@@ -230,16 +226,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_canon),
     },
     PassSpec {
-        name: "loop_unroll",
-        phase: Phase::Decision,
-        kind: PassKind::Unroll,
-        floor: OptFloor::Standard,
-        omit_from_size: true,
-        gate: |o| o.loop_unroll,
-        set_flag: |o| o.loop_unroll = true,
-        apply: ApplyFn::Grow(apply_loop_unroll),
-    },
-    PassSpec {
         name: "slot_promote",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -288,7 +274,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
     "stack_dce",
     "canon",
-    "loop_unroll",
     "slot_promote",
     "clone_shared_return",
     "branch_optimization",
@@ -319,7 +304,6 @@ mod tests {
                 "dead_block",
                 "stack_dce",
                 "canon",
-                "loop_unroll",
                 "slot_promote",
                 "clone_shared_return",
                 "branch_optimization",
