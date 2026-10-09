@@ -24,8 +24,6 @@ pub struct OptimizeOptions {
     pub stack_dce: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
-    /// Delay `STORE t` across slot-addressed ops so `LOAD t; STORE s` pops TOS.
-    pub tos_carry: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
     pub canon: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
@@ -219,7 +217,6 @@ mod early_cse;
 pub(crate) mod escape_analysis;
 mod loop_unroll;
 mod slot_promote;
-mod tos_carry;
 
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
 pub(crate) use convoy::multi_op_join_convoy;

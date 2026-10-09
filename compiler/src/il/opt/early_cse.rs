@@ -595,7 +595,6 @@ mod tests {
             dead_block: false,
             stack_dce: false,
             slot_promote: false,
-            tos_carry: false,
             canon: false,
             algebraic: false,
             licm: false,

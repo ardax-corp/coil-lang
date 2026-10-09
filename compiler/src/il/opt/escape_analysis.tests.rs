@@ -26,7 +26,6 @@ fn isolated() -> OptimizeOptions {
         dead_block: false,
         stack_dce: false,
         slot_promote: false,
-        tos_carry: false,
         canon: false,
         algebraic: false,
         local_cse: false,
