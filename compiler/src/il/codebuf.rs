@@ -79,11 +79,6 @@ impl CodeBuf {
         self.il.push_return();
     }
 
-    pub fn push_return_at(&mut self, loc: DebugLoc) {
-        self.invalidate_lowered();
-        self.il.push_return_at(loc);
-    }
-
     /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
     pub fn push_return_two_word(&mut self) {
         self.invalidate_lowered();
@@ -123,11 +118,6 @@ impl CodeBuf {
     pub fn push_index_pin_unchecked(&mut self, slot: u32) {
         self.invalidate_lowered();
         self.il.push_index_pin_unchecked(slot);
-    }
-
-    pub fn push_store_index_unchecked(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_store_index_unchecked();
     }
 
     pub fn push_make_tuple(&mut self, arity: u32) {
@@ -674,23 +664,6 @@ impl CodeBuf {
         self.entry_at_offset = next;
     }
 
-    pub fn last_byte(&self) -> Option<Byte> {
-        for op in self.il.ops().iter().rev() {
-            if let Some(b) = op.as_plain_byte() {
-                return Some(b);
-            }
-            if op.emits_code() {
-                return None;
-            }
-        }
-        None
-    }
-
-    /// Remove the last emitting op (labels after it are left in place).
-    pub fn pop_last_emitting(&mut self) -> Option<IlOp> {
-        self.invalidate_lowered();
-        self.il.remove_last_emitting()
-    }
 }
 
 #[cfg(test)]

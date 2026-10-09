@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use common::{Byte, DebugLoc, Instruction};
+use common::{Byte, DebugLoc};
 
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 
@@ -136,18 +136,6 @@ impl IlBuilder {
             .map_or(self.ops.len(), |i| i + 1)
     }
 
-    /// Remove the last emitting op (labels after it stay).
-    pub fn remove_last_emitting(&mut self) -> Option<IlOp> {
-        let idx = self.ops.iter().rposition(|op| op.emits_code())?;
-        let op = self.ops.remove(idx);
-        let index = self.code_index.get_mut();
-        if index.scanned > idx {
-            index.positions.pop();
-            index.scanned -= 1;
-        }
-        Some(op)
-    }
-
     pub fn clear(&mut self) {
         *self.code_index.get_mut() = CodeIndex::default();
         self.ops.clear();
@@ -266,10 +254,6 @@ impl IlBuilder {
         });
     }
 
-    pub fn push_return_at(&mut self, loc: DebugLoc) {
-        self.push_op(IlOp::Return { loc, ret_words: 1 });
-    }
-
     /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
     pub fn push_return_two_word(&mut self) {
         self.push_op(IlOp::Return {
@@ -322,10 +306,6 @@ impl IlBuilder {
             slot,
             loc: DebugLoc::unknown(),
         });
-    }
-
-    pub fn push_store_index_unchecked(&mut self) {
-        self.push_byte(Byte::new(Instruction::StoreIndexUnchecked));
     }
 
     pub fn push_make_tuple(&mut self, arity: u32) {
@@ -630,19 +610,4 @@ mod tests {
         assert_eq!(il.raw_insert_point(9), il.raw_len());
     }
 
-    #[test]
-    fn index_follows_pushes_truncation_and_edits() {
-        let mut il = sample();
-        assert_eq!(il.raw_index_of_code(2), Some(5));
-        il.truncate_raw(3);
-        assert_eq!(il.code_len(), 1);
-        il.push_const(7);
-        assert_eq!(il.code_len(), 2);
-        assert_eq!(il.raw_index_of_code(1), Some(3));
-        assert!(il.remove_last_emitting().is_some());
-        assert_eq!(il.code_len(), 1);
-        il.ops_mut().insert(0, IlOp::Pop { loc: DebugLoc::unknown() });
-        assert_eq!(il.code_len(), 2);
-        assert_eq!(il.raw_index_of_code(0), Some(0));
-    }
 }

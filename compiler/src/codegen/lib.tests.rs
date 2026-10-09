@@ -1206,7 +1206,7 @@ fn register_native_visible_to_emitter() {
     c.register("native_print", &[string()], &unit());
     // Native calls registered with the checker should compile without errors.
     let mut ast = Pratt::default()
-        .parse("native_print(\"hi\");")
+        .parse("fn main() { native_print(\"hi\"); }")
         .expect("parse failed");
     let _bc = c.compile("test", &mut ast);
     let msgs = std::mem::take(&mut c.messages);
@@ -1418,32 +1418,6 @@ fn main() {
     );
 }
 
-#[test]
-fn emit_call_indirect_pushes_target_then_opcode() {
-    use common::Instruction;
-    let mut bc = CodeBuf::new();
-    Compiler::emit_call_indirect(&mut bc, 42, 2);
-    let ops = bc.ops();
-    assert_eq!(ops.len(), 2);
-    let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
-        panic!("expected CodePtr byte");
-    };
-    assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
-    assert_eq!(code_ptr.operand_u32(), 42);
-    let IlOp::Byte {
-        byte: call_indirect,
-        ..
-    } = ops[1]
-    else {
-        panic!("expected CallIndirect byte");
-    };
-    assert!(matches!(
-        call_indirect.bytecode(),
-        Instruction::CallIndirect
-    ));
-    assert_eq!(call_indirect.operand_u32(), 2);
-}
-
 // sum types and pattern matching codegen
 
 /// Codegen test 1: a constructor call emits a `MAKE_ENUM`
@@ -1452,7 +1426,7 @@ fn emit_call_indirect_pushes_target_then_opcode() {
 #[test]
 fn construct_emits_make_enum_with_correct_tag_and_arity() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("let x = Option::Some(42);");
+    let (bc, _pool) = compile_src("fn keep(int x) -> [Option<int>] { return [Option::Some(x)]; }");
 
     // Find the MAKE_ENUM instruction. Its operands encode
     // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
@@ -1539,11 +1513,11 @@ fn default_match_arm_emits_pop() {
 fn match_with_nested_constructor_pattern_emits_unpack_cascade() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "match Result::Ok(Option::Some(1)) { \
+        "fn pick(Result<Option<int>, string> r) -> int { return match r { \
  Result::Err(_) => 0, \
  Result::Ok(Option::Some(v)) => v, \
  Result::Ok(Option::None) => -1, \
- };",
+ }; }",
     );
 
     // The outer match arm (`Result::Ok(Option::Some(v))`) is
@@ -2999,67 +2973,6 @@ fn predicate_peel_does_not_spill_leaf_args() {
     assert!(
         stores <= 4,
         "peel spilled args: expected 3 locals + join temp, got {stores} STOREs"
-    );
-}
-
-/// The peel replaces the callee's `return`, so a matched base-case value must
-/// actually be returned ,  a bare value falling through is not a base case.
-#[test]
-fn predicate_peel_shape_requires_returned_base_value() {
-    let mut buf = CodeBuf::default();
-    let target = buf.fresh_label();
-    let guard = |tail: Vec<IlOp>| {
-        let mut ops = vec![
-            IlOp::Load {
-                slot: 0,
-                loc: DebugLoc::unknown(),
-            },
-            IlOp::Const {
-                imm: 0,
-                loc: DebugLoc::unknown(),
-            },
-            IlOp::Bin {
-                op: Instruction::LE,
-                loc: DebugLoc::unknown(),
-            },
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse,
-                target,
-                loc: DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-            IlOp::Load {
-                slot: 1,
-                loc: DebugLoc::unknown(),
-            },
-        ];
-        ops.extend(tail);
-        ops
-    };
-    let returned = guard(vec![
-        IlOp::Return {
-            loc: DebugLoc::unknown(),
-            ret_words: 1,
-        },
-        IlOp::Load {
-            slot: 2,
-            loc: DebugLoc::unknown(),
-        },
-    ]);
-    assert!(
-        Compiler::match_predicate_peel_shape(&returned, true).is_some(),
-        "cond + JMPF + value + RETURN is a peelable base case"
-    );
-    let falls_through = guard(vec![
-        IlOp::Label(target),
-        IlOp::Load {
-            slot: 2,
-            loc: DebugLoc::unknown(),
-        },
-    ]);
-    assert!(
-        Compiler::match_predicate_peel_shape(&falls_through, true).is_none(),
-        "a base-case value that is not returned must not be peeled"
     );
 }
 
@@ -6294,35 +6207,6 @@ fn dictionary_entries_emit_code_ptr() {
             bc.len()
         );
     }
-}
-
-/// Direct instance-method / CallIndirect sites push `CodePtr` targets.
-#[test]
-fn call_indirect_sites_use_code_ptr_targets() {
-    use common::Instruction;
-    let mut bc = CodeBuf::new();
-    Compiler::emit_call_indirect(&mut bc, 100_000, 1);
-    let ops = bc.ops();
-    let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
-        panic!("expected CodePtr byte");
-    };
-    assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
-    assert_eq!(
-        code_ptr.operand_u32(),
-        100_000,
-        "CodePtr must carry full 32-bit targets (> u16::MAX)"
-    );
-    let IlOp::Byte {
-        byte: call_indirect,
-        ..
-    } = ops[1]
-    else {
-        panic!("expected CallIndirect byte");
-    };
-    assert!(matches!(
-        call_indirect.bytecode(),
-        Instruction::CallIndirect
-    ));
 }
 
 /// Nested IO HostInvoke (`read(stdin(), buf)`) stages args before pushing

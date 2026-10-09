@@ -5,7 +5,7 @@ use std::{
 
 use common::{
     Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, Value, ValueTag,
-    encode_tag_operand, likely, tag, unlikely,
+    encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
 
@@ -16,9 +16,9 @@ use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
     SimpleSpan,
-    ast::{Expression, MatchArm, Output, Pattern, PatternPayload},
+    ast::{Expression, Output},
 };
-use reporting::{ErrorCode, Message};
+use reporting::Message;
 
 /// Max native recursion depth for [`compiler::Compiler::do_compile`]. Chosen
 /// well under what a debug-build stack of a few MiB can hold even with
@@ -31,54 +31,10 @@ const CODEGEN_RECURSION_LIMIT: u32 = 2000;
 /// way a genuine native stack overflow does.
 struct CodegenRecursionLimitExceeded;
 
-macro_rules! unary {
-    ($result: expr, $self: expr, $rhs: expr, $instruction: expr) => {
-        $result.append(&mut $self.do_compile($rhs));
-
-        $result.push($instruction);
-    };
-}
-macro_rules! binary {
-    ($result: expr, $self: expr, $lhs: expr, $rhs: expr, $instruction: expr) => {
-        let _ = $self.compile_binary_operands(&mut $result, $lhs, $rhs);
-        $result.push($instruction);
-    };
-}
-
-
-/// Arms grouped by outer variant tag for dispatch and inner-pattern tests.
-#[derive(Debug, Clone)]
-struct TagGroup {
-    tag: u32,
-    /// Payload words the VM pushes when `tag` matches (IL tell / MIR edges).
-    arity: u32,
-    arm_indices: Vec<usize>,
-    is_single_arm_group: bool,
-}
 
 /// Map FFI type expressions to runtime `(tag, aux)` for declare/invoke codegen.
 fn ffi_type_tag_from_output(checker: &Checker, expr: &Output) -> Option<(u32, u32)> {
     checker.ffi_type_tag_from_output(expr)
-}
-
-/// Fallback FFI tag from a call-site expression when the typechecker did not
-/// record tags (recovery / missing side-table entry).
-                        ///
-/// Returns `None` for unknown shapes, callers must not invent `INT` and
-/// silently mis-promote; prefer skipping the variadic tag tuple or emitting
-/// a diagnostic instead.
-fn ffi_tag_for_expr_fallback(expr: &Output) -> Option<(u32, u32)> {
-    use common::tag;
-    match expr.1.as_ref() {
-        Expression::Float(_) => Some((tag::FLOAT, 0)),
-        Expression::String(_) => Some((tag::STRING, 0)),
-        Expression::Bool(_) => Some((tag::BOOL, 0)),
-        Expression::Integer(_) => Some((tag::INT, 0)),
-        Expression::Expr(inner) | Expression::Group(inner) | Expression::Statement(inner) => {
-            ffi_tag_for_expr_fallback(inner)
-        }
-        _ => None,
-    }
 }
 
 /// Decode escape sequences in a coil string literal (`\n`, `\x41`, `\u{1F}`, …).
@@ -170,27 +126,6 @@ pub enum StringLiteralByteError {
     NotSingleByte,
 }
 
-fn primitive_name_from_type_ann(ty: &Output) -> Option<&'static str> {
-    match ty.1.as_ref() {
-        Expression::Type(name) => primitive_type_name(&Ty::Con((*name).into())),
-        _ => None,
-    }
-}
-
-fn primitive_type_name(ty: &Ty) -> Option<&'static str> {
-    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT};
-    match ty {
-        Ty::Con(name) => match name.as_str() {
-            INT => Some("int"),
-            FLOAT => Some("float"),
-            BYTE => Some("byte"),
-            BOOL => Some("bool"),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 pub(crate) fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction> {
     match (from, to) {
         ("int", "float") => Some(Instruction::CastIntToFloat),
@@ -212,43 +147,6 @@ fn emit_ffi_type_const(bytecode: &mut impl EmitBuf, tag: u32, aux: u32) {
     bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(encode_tag_operand(tag, aux)));
 }
 
-/// Resolve variadic FFI arg tags from the typechecker side-table, falling back
-/// to literal shapes only. Unknown expressions yield no tags (and a diagnostic)
-/// rather than silently promoting as `INT`.
-fn resolve_variadic_ffi_tags(
-    checker: &Checker,
-    span: (usize, usize),
-    args: &[&Output<'_>],
-    messages: &mut Vec<Message>,
-) -> Option<Vec<(u32, u32)>> {
-    if let Some(tags) = checker.variadic_arg_tags_at(span) {
-        return Some(tags.to_vec());
-    }
-    let mut tags = Vec::with_capacity(args.len());
-    for arg in args {
-        match ffi_tag_for_expr_fallback(arg) {
-            Some(t) => tags.push(t),
-            None => {
-                let range = arg.0.start..arg.0.end;
-                let mut m = Message::error(
-                    ErrorCode::GenericTypeError,
-                    "cannot determine FFI type tag for variadic argument".into(),
-                    range.clone(),
-                );
-                m.push(DiagLabel::new(
-                    "variadic FFI arg tags missing from typechecker; \
-                     use a literal or ensure the call is typechecked"
-                        .to_string(),
-                    range,
-                ));
-                messages.push(m);
-                return None;
-            }
-        }
-    }
-    Some(tags)
-}
-
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
     checker.generics().instances.iter().any(|instance| {
         instance
@@ -256,142 +154,6 @@ fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
             .values()
             .any(|method_fqn| method_fqn == name)
     })
-}
-
-fn group_arms_by_outer_tag(arms: &[&MatchArm], checker: &Checker) -> Vec<TagGroup> {
-    let mut groups: Vec<TagGroup> = Vec::new();
-    let mut tag_to_idx: HashMap<u32, usize> = HashMap::new();
-    for (i, arm) in arms.iter().enumerate() {
-        let (tag, arity) = match &arm.pattern.1 {
-            Pattern::Constructor {
-                enum_name,
-                variant_name,
-                ..
-            } => (
-                checker.tag_for(enum_name, variant_name).unwrap_or(u32::MAX),
-                checker.arity_for(enum_name, variant_name).unwrap_or(0) as u32,
-            ),
-            _ => (u32::MAX, 0),
-        };
-        if let Some(&idx) = tag_to_idx.get(&tag) {
-            groups[idx].arm_indices.push(i);
-        } else {
-            tag_to_idx.insert(tag, groups.len());
-            groups.push(TagGroup {
-                tag,
-                arity,
-                arm_indices: vec![i],
-                is_single_arm_group: false,
-            });
-        }
-    }
-    for g in &mut groups {
-        g.is_single_arm_group = g.arm_indices.len() == 1;
-    }
-    groups
-}
-
-/// Collect `name → Ty` for every binding in a match pattern.
-                        ///
-/// Used so Access codegen (`p.y`) sees the *current arm's* binding type
-/// rather than whatever last arm wrote into the flat
-/// `codegen_var_types` side-table (same name reused across arms with
-/// different payload types would otherwise emit the wrong `LoadField`).
-                        ///
-/// Open schema placeholders (`Ty::Var`, or `Ty::Con("T")` type-param
-/// markers from poly enums like `Option` / `Result` / `Box<T>`) are
-/// **not** inserted, they would shadow the instantiated binding type
-/// that `infer_pattern` already wrote into `codegen_var_types`.
-fn collect_pattern_binding_types(
-    checker: &Checker,
-    pattern: &Pattern<'_>,
-    out: &mut HashMap<String, Ty>,
-) {
-    match pattern {
-        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
-        Pattern::Binding { .. } => {
-            // Bare `name =>` needs the scrutinee type from the side-table;
-            // caller may fill that in. Constructor/record payloads below
-            // carry declared field types.
-        }
-        Pattern::Constructor {
-            enum_name,
-            variant_name,
-            payload,
-        } => {
-            let decl = checker.payload_tys_for(enum_name, variant_name);
-            match payload {
-                PatternPayload::Unit => {}
-                PatternPayload::Tuple(parts) => {
-                    for (i, part) in parts.iter().enumerate() {
-                        let expected = decl.get(i).map(|(_, ty)| ty);
-                        collect_pattern_binding_types_with_expected(
-                            checker, enum_name, &part.1, expected, out,
-                        );
-                    }
-                }
-                PatternPayload::Record(fields) => {
-                    let by_name: HashMap<&str, &Ty> =
-                        decl.iter().map(|(n, ty)| (n.as_str(), ty)).collect();
-                    for pf in fields {
-                        let expected = by_name.get(pf.name).copied();
-                        collect_pattern_binding_types_with_expected(
-                            checker,
-                            enum_name,
-                            &pf.pattern.1,
-                            expected,
-                            out,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// True when `ty` is a poly-enum schema placeholder for `enum_name`
-/// (type-param `Con("T")` / `Con("E")` / …) or an open `Ty::Var`.
-/// A declared payload type that mentions the enum's own type parameters
-/// anywhere (`T`, and nested `Tree<T>` / `(T, int)`), so it does not describe
-/// a particular instantiation: the binding's use sites keep the checker's type.
-fn is_open_schema_ty(checker: &Checker, enum_name: &str, ty: &Ty) -> bool {
-    let open = |t: &Ty| is_open_schema_ty(checker, enum_name, t);
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Con(name) => checker
-            .generics()
-            .generic_type_ctors
-            .get(enum_name)
-            .is_some_and(|params| params.iter().any(|p| p == name)),
-        Ty::App(head, args) => open(head) || args.iter().any(open),
-        Ty::Fun(a, b) => open(a) || open(b),
-        Ty::Tuple(items) => items.iter().any(open),
-        Ty::List(inner) | Ty::Readonly(inner) => open(inner),
-        Ty::Array { element, .. } => open(element),
-        Ty::Record { fields } => fields.iter().any(|(_, t)| open(t)),
-        _ => false,
-    }
-}
-
-fn collect_pattern_binding_types_with_expected(
-    checker: &Checker,
-    enum_name: &str,
-    pattern: &Pattern<'_>,
-    expected: Option<&Ty>,
-    out: &mut HashMap<String, Ty>,
-) {
-    match pattern {
-        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
-        Pattern::Binding { name } => {
-            if let Some(ty) = expected
-                && !is_open_schema_ty(checker, enum_name, ty) {
-                    out.insert(name.to_string(), ty.clone());
-                }
-        }
-        Pattern::Constructor { .. } => {
-            collect_pattern_binding_types(checker, pattern, out);
-        }
-    }
 }
 
 /// Bytecode table key for an overload: `name#2.0` or `name#rest1.0`.
@@ -449,11 +211,8 @@ fn fn_arity_from_args(args: &Output<'_>) -> (usize, bool) {
 
 #[derive(Default, Clone)]
 struct Context {
-    current: Option<String>,
     variables: Interner<String>,
     symbols: Interner<String>,
-    assignments: HashMap<String, bool>,
-    constants: HashMap<usize, bool>,
     classes: HashMap<String, Vec<(String, usize)>>,
     impementations: HashMap<String, String>,
     methods: HashMap<String, HashMap<String, String>>,
@@ -484,49 +243,10 @@ struct Context {
 }
 
 
-/// Speculative call-site emit: buffer prefix plus Q1/Q2 box-once caches.
-struct EmitAttempt {
-    bytecode: Option<CodeBuf>,
-    stack_array_box: HashMap<String, u32>,
-    unboxed_class_box: HashMap<String, u32>,
-}
-
 /// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
 /// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
 /// fresh compile (safe to clear the shared constant pool).
 pub const PROLOGUE_BYTECODE_LEN: usize = 3;
-
-/// Matched base-case opening for caller-side predicate peel (2B).
-struct PredicatePeel {
-    cond: Vec<IlOp>,
-    then_value: IlOp,
-    /// One past the highest callee slot referenced by cond/then.
-    arity_hint: usize,
-}
-
-/// A peeled guard op rewritten against the caller's argument expressions.
-enum PeelRematOp {
-    /// Re-materialize argument `idx`.
-    Arg(usize),
-    /// Argument `idx`, then `imm`, then the binary op (unfused `BinSlotImm`).
-    ArgImm {
-        op: Instruction,
-        idx: usize,
-        imm: i32,
-    },
-    /// Arguments `a` then `b`, then the binary op (unfused `BinSlotSlot`).
-    ArgArg { op: Instruction, a: usize, b: usize },
-    /// Argument-independent op, copied as the callee emitted it.
-    Copy(IlOp),
-}
-
-/// A callee guard ready to emit at a call site without spilling arguments.
-struct PeelRematPlan {
-    cond: Vec<PeelRematOp>,
-    then_value: PeelRematOp,
-    /// Argument indices the guard reads (must be re-materializable).
-    guard_args: Vec<usize>,
-}
 
 /// How one expression should represent the enum value it builds or loads,
 /// when its consumer needs something other than the value's own layout.
@@ -670,18 +390,6 @@ pub struct Compiler {
     /// memory).
     expr_depth: u32,
 
-    /// First escapes (Q1/Q2 box-once) seen while compiling the current block
-    /// statement. `Some` inside a statement; the block re-emits it with the
-    /// boxes hoisted to its start so box slots never land on live operands.
-    escape_hoist: Option<Vec<String>>,
-    /// Nesting of [`Compiler::compile_block_stmt`] frames: a statement in a
-    /// loop body or `if` arm is one deeper than the loop / `if` itself.
-    stmt_depth: u32,
-    /// Statement depth of the `let` that bound each local (block-scoped).
-    /// A first escape deeper than its local's `let` must box at the `let`'s
-    /// depth: boxing inside a loop body re-boxes stale slots every pass, and
-    /// inside an `if` arm only one path boxes.
-    escape_decl_depth: HashMap<String, u32>,
 
     /// Top-level functions whose frames can never hold a heap word
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
@@ -745,21 +453,6 @@ pub struct Compiler {
     /// The [`ReprCtx`] the node now inside [`Compiler::do_compile`] was
     /// entered with. Its operands see [`ReprCtx::default`] instead.
     repr_here: ReprCtx,
-    /// Per enclosing `match`: the [`ReprCtx`] its arm bodies compile under.
-    arm_repr: Vec<ReprCtx>,
-    /// Spans of generic-call arguments whose parameter is not a bare type
-    /// parameter: the shared body does not unbox them, so they are not boxed.
-    generic_arg_no_box: HashSet<(usize, usize)>,
-    /// Pending generic-boundary layout conversions for call arguments, keyed
-    /// by argument span: `(from, to)` applied right after the argument is
-    /// compiled (see [`Compiler::generic_enum_layout`]).
-    boundary_arg_convs: HashMap<
-        (usize, usize),
-        (
-            crate::typechecking::value_layout::ValueLayout,
-            crate::typechecking::value_layout::ValueLayout,
-        ),
-    >,
 
     /// Kind when the function whose body is being compiled uses the
     /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
@@ -777,8 +470,6 @@ pub struct Compiler {
     /// True when a user-written `fn main` was emitted this compile.
     user_main_defined: bool,
 
-    /// When true, [`Expression::Match`] arm bodies may emit tail calls.
-    match_tail_call: bool,
 
     /// When false (default), harness `test("…")` blocks and `#[test]` functions
     /// are stripped before typecheck/codegen. Set true for `coil test`
@@ -866,19 +557,7 @@ pub struct Compiler {
     /// in it.
     source_text: String,
 
-    /// When true, [`Expression::Match`] binds `end` as a plain label instead of
-    /// a value-join (`JoinLabel`). Set while compiling a match whose value is
-    /// consumed immediately by `StorePop` / `StoreStatic` (e.g. `let x = match …`).
-    suppress_match_fusion_barrier: bool,
 
-    /// Set by a statement `match` (`ExprStatement(Match)`) for the next
-    /// [`Expression::Match`] compiled; taken at its entry so the scrutinee
-    /// and nested matches never see it.
-    statement_match_pending: bool,
-    /// Per match being compiled (innermost last): whether each arm discards
-    /// its own value. Arm bodies of a statement match need not push a value
-    /// (`B => {}`), so a single POP after the match would pop a local.
-    arm_discard: Vec<bool>,
 
     /// User `fn` names that sit on a call-graph cycle (self or mutual).
     recursive_fns: HashSet<String>,
@@ -987,9 +666,6 @@ impl Default for Compiler {
             field_key_slots: HashMap::new(),
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
-            escape_hoist: None,
-            stmt_depth: 0,
-            escape_decl_depth: HashMap::new(),
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
             codegen_depth: 0,
@@ -1005,9 +681,6 @@ impl Default for Compiler {
             compiling_result_ok_is_result: false,
             repr: ReprCtx::default(),
             repr_here: ReprCtx::default(),
-            arm_repr: Vec::new(),
-            generic_arg_no_box: HashSet::new(),
-            boundary_arg_convs: HashMap::new(),
             compiling_two_word_enum: None,
             compiling_try_fail: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
@@ -1047,10 +720,6 @@ impl Default for Compiler {
             debug_stmt_start: 0,
             source_base: (0, 0),
             source_text: String::new(),
-            suppress_match_fusion_barrier: false,
-            statement_match_pending: false,
-            arm_discard: Vec::new(),
-            match_tail_call: false,
             recursive_fns: HashSet::new(),
             recursive_pure: HashSet::new(),
             pure_fns: HashSet::new(),
@@ -1089,47 +758,7 @@ impl Default for Compiler {
     }
 }
 
-impl Context {
-    fn child(&self) -> Self {
-        Self {
-            current: self.current.clone(),
-            impementations: self.impementations.clone(),
-            methods: self.methods.clone(),
-            constants: self.constants.clone(),
-            assignments: self.assignments.clone(),
-            variables: self.variables.clone(),
-            symbols: self.symbols.clone(),
-            classes: self.classes.clone(),
-            match_bindings: self.match_bindings.clone(),
-            // Fresh overlay so inner `let` / destructure can shadow outer names.
-            block_bindings: Some(HashMap::new()),
-            stack_array_locals: self.stack_array_locals.clone(),
-            stack_array_box: self.stack_array_box.clone(),
-            unboxed_enum_locals: self.unboxed_enum_locals.clone(),
-            unboxed_class_locals: self.unboxed_class_locals.clone(),
-            unboxed_class_box: self.unboxed_class_box.clone(),
-            prev: Some(Box::new(self.to_owned())),
-        }
-    }
-}
 
-impl Context {
-    pub fn get_prev(&self) -> &Option<Box<Self>> {
-        &self.prev
-    }
-}
-
-fn unwrap_expr_output<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
-    match expr.1.as_ref() {
-        Expression::Expr(inner)
-        | Expression::Group(inner)
-        | Expression::Statement(inner)
-        | Expression::ExprStatement(inner) => unwrap_expr_output(inner),
-        // Parenthesized conditions often parse as a one-element Fragment.
-        Expression::Fragment(items) if items.len() == 1 => unwrap_expr_output(&items[0]),
-        _ => expr,
-    }
-}
 
 /// `COIL_AUTO_PAR=0` disables automatic fork-join of pure recursive binops.
 fn auto_par_enabled() -> bool {
@@ -1137,13 +766,6 @@ fn auto_par_enabled() -> bool {
         std::env::var("COIL_AUTO_PAR"),
         Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
     )
-}
-
-fn unwrapped_identifier<'a>(expr: &'a Output<'a>) -> Option<&'a str> {
-    match unwrap_expr_output(expr).1.as_ref() {
-        Expression::Identifier(name) => Some(name),
-        _ => None,
-    }
 }
 
 /// Extract enum name from `Ty::Con` / `Ty::Sum` / nested `Ty::Constructor`.
