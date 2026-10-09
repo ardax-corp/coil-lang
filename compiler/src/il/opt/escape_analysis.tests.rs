@@ -34,7 +34,6 @@ fn isolated() -> OptimizeOptions {
         clone_shared_return: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
-        ssa_gvn: false,
         escape_analysis: true,
                 branch_optimization: false,
                 block_reordering: false,

@@ -4,9 +4,8 @@
 //! (order matches D1 README). Each [`driver::Pass`] returns a
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
-//! [`super::IlModule::optimize_and_flatten`] still defers
-//! `ssa_gvn` after per-body `cfg_gvn` — those are not folded into
-//! the OptLevel table. Fuse-select stays in `lower_optimized`.
+//! [`super::IlModule::optimize_and_flatten`] runs the table per body; every
+//! production IL pass is a table row. Fuse-select stays in `lower_optimized`.
 //!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
 
@@ -39,8 +38,6 @@ pub struct OptimizeOptions {
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
-    /// SSA-style global CSE of pure binops whose result already lives in a slot.
-    pub ssa_gvn: bool,
     /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
     pub escape_analysis: bool,
     /// Heuristic branch layout (COI-128).

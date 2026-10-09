@@ -2,9 +2,8 @@
 //!
 //! Cheap split of one [`super::CodeBuf`] — not a second IL language.
 //! Codegen keeps a flat [`super::CodeBuf`] stream. At lower time the buffer is
-//! split into owned function bodies (plus prologue / glue / epilogue), opts and
-//! CFG GVN run per body, then the stream is concatenated for a single
-//! fuse/PC lower.
+//! split into owned function bodies (plus prologue / glue / epilogue), opts
+//! run per body, then the stream is concatenated for a single fuse/PC lower.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,7 +23,7 @@ pub struct IlFuncBody {
 
 /// Flat stream partitioned into prologue, function bodies, and glue.
 ///
-/// Rebuilt at finalize; bodies are the source of truth for per-func opts/GVN
+/// Rebuilt at finalize; bodies are the source of truth for per-func opts
 /// until [`Self::optimize_and_flatten`] concatenates for lower.
 #[derive(Clone, Default)]
 pub struct IlModule {
@@ -318,7 +317,7 @@ impl IlModule {
         }
     }
 
-    /// Per-func opts + CFG GVN on each body, then concatenate the bodies.
+    /// Per-func opts on each body, then concatenate the bodies.
     ///
     /// `pool` is the module const pool (`f64` / boxed int bits) for algebraic
     /// float identity / const-fold peeps (may push folded float results).
@@ -327,10 +326,6 @@ impl IlModule {
         opts: &OptimizeOptions,
         pool: &mut Vec<u64>,
     ) -> FlatIl {
-        let mut per = opts.clone();
-        let run_ssa_gvn = per.ssa_gvn;
-        per.ssa_gvn = false;
-
         if self.funcs.is_empty() {
             let (mut ops, remap, func_maps) = self.to_flat();
             opt::optimize(&mut ops, opts, pool);
@@ -352,15 +347,11 @@ impl IlModule {
             drop_jumps_to_next_label(&mut body.ops);
             opt::optimize_at_with_labels(
                 &mut body.ops,
-                &per,
+                opts,
                 body.meta.entry_sp as i32,
                 pool,
                 &mut next_label,
             );
-            super::gvn::cfg_gvn_with(&mut body.ops, false);
-            if run_ssa_gvn {
-                super::gvn::ssa_gvn(&mut body.ops);
-            }
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
@@ -1586,7 +1577,6 @@ mod tests {
             clone_shared_return: false,
             loop_unroll: false,
             loop_unroll_factor: 8,
-            ssa_gvn: false,
             escape_analysis: false,
             branch_optimization: false,
             block_reordering: false,

@@ -1219,7 +1219,6 @@ mod tests {
                 clone_shared_return: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
-                ssa_gvn: false,
                 escape_analysis: false,
                 branch_optimization: false,
                 block_reordering: false,

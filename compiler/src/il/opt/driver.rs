@@ -5,10 +5,8 @@
 //! is on. [`PassDelta`] is what `collect_stats`
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
-//! `IlModule::optimize_and_flatten` still defers
-//! `ssa_gvn`
-//! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
-//! in `lower_optimized`.
+//! `IlModule::optimize_and_flatten` runs this table on each function body.
+//! Fuse-select stays in `lower_optimized`.
 
 use super::super::op::IlOp;
 use super::OptimizeOptions;
@@ -179,11 +177,6 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
 
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
-}
-
-fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::gvn_ssa::ssa_gvn(ops);
-    0
 }
 
 fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
@@ -360,16 +353,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         set_flag: |o| o.block_reordering = true,
         apply: ApplyFn::Grow(apply_block_reordering),
     },
-    PassSpec {
-        name: "ssa_gvn",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.ssa_gvn,
-        set_flag: |o| o.ssa_gvn = true,
-        apply: ApplyFn::Grow(apply_ssa_gvn),
-    },
 ];
 
 /// D1 README production order (cleanup then decision).
@@ -389,7 +372,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "clone_shared_return",
     "branch_optimization",
     "block_reordering",
-    "ssa_gvn",
 ];
 
 #[cfg(test)]
@@ -426,7 +408,6 @@ mod tests {
                 "clone_shared_return",
                 "branch_optimization",
                 "block_reordering",
-                "ssa_gvn",
             ]
         );
     }

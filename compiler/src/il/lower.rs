@@ -148,7 +148,7 @@ fn try_lower_with_funcs(
 
 /// Optimize an owning [`super::IlModule`] and lower once (fuse-select + PC assign).
 ///
-/// Pipeline: per-body opts/GVN → concat → single lower.
+/// Pipeline: per-body opts → concat → single lower.
 #[cfg(test)]
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
     try_lower_module(module, pool).unwrap_or_else(|e| panic!("{e}"))
@@ -2300,7 +2300,7 @@ mod tests {
     /// `lower_module` must keep the join value (`slot 3`) as the return.
     /// LOAD count is not pinned — LIR reconstruct may rematerialize or fold.
     #[test]
-    fn lower_module_runs_gvn_load_join_cse_before_lower() {
+    fn lower_module_keeps_join_value_return() {
         let loc = DebugLoc::unknown();
         let ops = vec![
             IlOp::Load { slot: 1, loc },

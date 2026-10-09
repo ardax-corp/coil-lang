@@ -2,7 +2,7 @@
 //!
 //! Recorded at function finalize on the flat [`super::CodeBuf`]. At lower time
 //! [`super::IlModule::from_flat`] takes ownership of each body's ops for scoped
-//! opts / CFG GVN; emitting spans are the split keys until then.
+//! opts; emitting spans are the split keys until then.
 
 use super::Label;
 

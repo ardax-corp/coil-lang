@@ -26,7 +26,7 @@ pub enum OptLevel {
     Aggressive,
     /// Standard with unrolling and return cloning off (less code growth).
     Size,
-    /// Basic cleanup only; no slot promotion, escape SROA, unroll, or GVN.
+    /// Basic cleanup only; no slot promotion, scalar replacement, or unroll.
     Debug,
 }
 
@@ -132,7 +132,6 @@ fn all_off() -> OptimizeOptions {
         clone_shared_return: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
-        ssa_gvn: false,
         escape_analysis: false,
         branch_optimization: false,
         block_reordering: false,
@@ -180,7 +179,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.loop_bounds,
         o.clone_shared_return,
         o.loop_unroll,
-        o.ssa_gvn,
         o.escape_analysis,
         o.branch_optimization,
         o.block_reordering,
@@ -248,7 +246,7 @@ mod tests {
     fn basic_enables_dce_and_jump_threading() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
-        assert!(!o.licm && !o.slot_promote && !o.ssa_gvn && !o.escape_analysis);
+        assert!(!o.licm && !o.slot_promote && !o.escape_analysis);
     }
 
     #[test]
@@ -269,7 +267,7 @@ mod tests {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic && o.dead_block);
         assert!(!o.slot_promote);
-        assert!(!o.escape_analysis && !o.ssa_gvn && !o.loop_unroll);
+        assert!(!o.escape_analysis && !o.loop_unroll);
         assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);
     }

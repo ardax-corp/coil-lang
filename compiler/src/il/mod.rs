@@ -16,8 +16,6 @@ mod codebuf;
 pub(crate) mod effects;
 mod emit_buf;
 mod func;
-mod gvn;
-mod gvn_ssa;
 mod licm;
 mod lower;
 pub(crate) mod module;
