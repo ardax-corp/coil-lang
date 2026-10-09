@@ -71,8 +71,9 @@ A task switch happens only at:
 7. `io::net::tcp::connect` / `connect_timeout` (`connect_in_task` in
    `machine/src/task.rs`). A host name (not an IP literal) is looked up on
    a resolver thread (at most four, started on demand, kept for the
-   process) while the task waits like a thread wait. On Unix each address
-   then gets a non-blocking connect: the task waits on the reactor until
+   process) while the task waits like a thread wait. Each address then gets
+   a non-blocking connect (`io::connect_start`: libc on Unix, Winsock on
+   Windows): the task waits on the reactor until
    the socket is writable (`Block::IoRetry`), then the native runs again
    and reads `SO_ERROR`. A slow lookup or a backlogged connect stalls only
    its own task (coil-lang#832). A `connect_timeout` deadline starts after

@@ -764,13 +764,13 @@ pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<C
         let Some(addr) = p.addrs.pop_front() else {
             return Some(Some(Err(p.last_err)));
         };
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         match crate::io::connect_start(addr) {
             Ok(sock) => p.sock = Some(sock),
             Err(e) => p.last_err = e,
         }
         // No non-blocking connect here yet: connect in place.
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let attempt = match p.deadline {
                 None => std::net::TcpStream::connect(addr),
@@ -818,7 +818,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn connect_in_task_parks_then_returns_the_stream() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = i64::from(listener.local_addr().expect("addr").port());
@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn connect_in_task_reports_a_refused_connect() {
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");

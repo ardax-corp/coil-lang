@@ -704,7 +704,7 @@ pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
 /// Connect with an optional millisecond deadline (`ms <= 0` waits forever).
 ///
 /// Under a task scheduler only the calling task waits for the name lookup
-/// and (on Unix) the connect; see [`crate::task::connect_in_task`].
+/// and the connect; see [`crate::task::connect_in_task`].
 pub fn tcp_connect_timeout(
     heap: &mut Heap,
     host: &str,
@@ -821,6 +821,112 @@ pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
         let err = io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EINPROGRESS) {
             return Err(IoErrorTag::from_kind(err.kind()));
+        }
+    }
+    Ok(stream)
+}
+
+/// Windows: the same, through Winsock (`WSAEWOULDBLOCK` means in progress).
+#[cfg(windows)]
+pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
+    use std::os::windows::io::{AsRawSocket, FromRawSocket};
+    const AF_INET: i32 = 2;
+    const AF_INET6: i32 = 23;
+    const SOCK_STREAM: i32 = 1;
+    const IPPROTO_TCP: i32 = 6;
+    const INVALID_SOCKET: usize = !0;
+    const WSA_FLAG_OVERLAPPED: u32 = 0x01;
+    const WSA_FLAG_NO_HANDLE_INHERIT: u32 = 0x80;
+    const WSAEWOULDBLOCK: i32 = 10035;
+    #[repr(C)]
+    struct SockaddrIn {
+        family: u16,
+        port: u16,
+        addr: [u8; 4],
+        zero: [u8; 8],
+    }
+    #[repr(C)]
+    struct SockaddrIn6 {
+        family: u16,
+        port: u16,
+        flowinfo: u32,
+        addr: [u8; 16],
+        scope_id: u32,
+    }
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAStartup(version: u16, data: *mut u8) -> i32;
+        fn WSASocketW(af: i32, ty: i32, proto: i32, info: *mut u8, group: u32, flags: u32) -> usize;
+        fn connect(s: usize, name: *const u8, len: i32) -> i32;
+        fn WSAGetLastError() -> i32;
+    }
+    // std starts Winsock on its first socket call; a raw socket may come first.
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let mut data = [0u8; 1024];
+        // SAFETY: `data` is larger than WSADATA; the startup is never undone.
+        unsafe { WSAStartup(0x0202, data.as_mut_ptr()) };
+    });
+    let wsa_err = |code: i32| IoErrorTag::from_kind(io::Error::from_raw_os_error(code).kind());
+    let af = if addr.is_ipv4() { AF_INET } else { AF_INET6 };
+    // SAFETY: plain Winsock call; the result is checked.
+    let sock = unsafe {
+        WSASocketW(
+            af,
+            SOCK_STREAM,
+            IPPROTO_TCP,
+            std::ptr::null_mut(),
+            0,
+            WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,
+        )
+    };
+    if sock == INVALID_SOCKET {
+        return Err(wsa_err(unsafe { WSAGetLastError() }));
+    }
+    // SAFETY: `sock` is a fresh socket nothing else owns.
+    let stream = unsafe { TcpStream::from_raw_socket(sock as _) };
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    let rc = match addr {
+        SocketAddr::V4(a) => {
+            let sin = SockaddrIn {
+                family: AF_INET as u16,
+                port: a.port().to_be(),
+                addr: a.ip().octets(),
+                zero: [0; 8],
+            };
+            // SAFETY: `sin` is a valid SOCKADDR_IN for the call's duration.
+            unsafe {
+                connect(
+                    stream.as_raw_socket() as usize,
+                    &sin as *const SockaddrIn as *const u8,
+                    std::mem::size_of::<SockaddrIn>() as i32,
+                )
+            }
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = SockaddrIn6 {
+                family: AF_INET6 as u16,
+                port: a.port().to_be(),
+                flowinfo: a.flowinfo(),
+                addr: a.ip().octets(),
+                scope_id: a.scope_id(),
+            };
+            // SAFETY: `sin6` is a valid SOCKADDR_IN6 for the call's duration.
+            unsafe {
+                connect(
+                    stream.as_raw_socket() as usize,
+                    &sin6 as *const SockaddrIn6 as *const u8,
+                    std::mem::size_of::<SockaddrIn6>() as i32,
+                )
+            }
+        }
+    };
+    if rc != 0 {
+        let code = unsafe { WSAGetLastError() };
+        if code != WSAEWOULDBLOCK {
+            return Err(wsa_err(code));
         }
     }
     Ok(stream)

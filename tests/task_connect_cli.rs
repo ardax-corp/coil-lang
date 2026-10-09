@@ -1,9 +1,8 @@
 //! Task connects past the listen backlog (coil-lang#832), through `coil test`.
 //!
-//! Unix only: a connect suspends just its task there. On Windows it still
-//! connects in place, so clients past the backlog stall the server task
-//! too (see `docs/internals/tasks.md`).
-#![cfg(unix)]
+//! Unix and Windows: a connect suspends just its task there (see
+//! `docs/internals/tasks.md`).
+#![cfg(any(unix, windows))]
 
 use std::path::PathBuf;
 use std::process::Command;
