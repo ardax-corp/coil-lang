@@ -1,6 +1,5 @@
 // `&&` / `||` evaluate the right operand only when the left does not decide
 // the result (#718). Pure, trap-free operands may still lower eagerly.
-// HIR only: coil-lang#785 (the AST codegen does not carry this fix).
 class Log {
     pub n: int,
 }

@@ -47,8 +47,6 @@ pub struct TestOptions {
     /// Line coverage (`--coverage`); `None` = off.
     pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
-    /// `--hir` / `--ast-codegen`; `None` keeps the default (HIR, or `COIL_HIR`).
-    pub hir: Option<bool>,
     pub grants: HostGrants,
     /// Extra `--root` module search directories.
     pub extra_roots: Vec<PathBuf>,
@@ -108,15 +106,6 @@ pub fn declared_error_codes(src: &str) -> Vec<String> {
         .filter(|l| l.contains("Expected"))
         .flat_map(error_codes_in)
         .collect()
-}
-
-/// A file whose leading comment header has a `// HIR only: …` line tests a
-/// fix the AST codegen does not carry (the line names its tracking issue);
-/// the harness skips it under `--ast-codegen`.
-pub fn is_hir_only(src: &str) -> bool {
-    src.lines()
-        .take_while(|l| l.starts_with("//"))
-        .any(|l| l.trim_start_matches('/').trim_start().starts_with("HIR only:"))
 }
 
 /// Every `E` + four digits in `text`, in order.
@@ -482,15 +471,6 @@ pub(crate) fn compile_test_file(
     };
     pipeline.set_include_tests(true);
     pipeline.set_opt_level(options.opt_level);
-    if let Some(on) = options.hir {
-        pipeline.set_hir_lowering(on);
-    }
-    if !pipeline.hir_lowering()
-        && !expect_compile_fail
-        && is_hir_only(&std::fs::read_to_string(path).unwrap_or_default())
-    {
-        return Compiled::Decided(true, None);
-    }
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling
     // coil-stdlib checkout, when those directories exist.

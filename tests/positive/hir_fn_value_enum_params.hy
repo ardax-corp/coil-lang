@@ -1,4 +1,3 @@
-// HIR only: coil-lang#785 (the AST codegen crashes on these in the harness).
 // A function value whose parameters are enums: each enum argument goes
 // through `CallIndirect` as its one word (a niche enum as its niche word,
 // any other boxed), as the AST's escaped-function ABI.

@@ -518,12 +518,6 @@ impl Compiler {
         self.auto_par = on;
     }
 
-    /// Lower function bodies through HIR where the HIR lowering covers them
-    /// (`--hir`); every other body keeps the AST walk.
-    pub fn set_hir_lowering(&mut self, on: bool) {
-        self.hir_lowering = on;
-    }
-
     /// Turn typed inlining of HIR bodies on or off (default `COIL_HIR_INLINE`).
     pub fn set_hir_inline(&mut self, on: bool) {
         self.hir_inline = on;
@@ -12463,8 +12457,7 @@ impl Compiler {
         let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
-            let mut c = self.do_compile(body);
-            self.bytecode.append(&mut c);
+            self.report_unlowered(&method.0, &qualified);
         }
 
         let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
@@ -12923,8 +12916,7 @@ impl Compiler {
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
             if !lowered {
-                let mut c = self.do_compile(body);
-                self.bytecode.append(&mut c);
+                self.report_unlowered(span, &mono_name);
             }
 
             let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
@@ -15046,9 +15038,7 @@ impl Compiler {
         self.record_fn_span(name.clone(), body_start, body_start);
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
-            let mut init_bc = self.do_compile(init);
-            self.bytecode.append(&mut init_bc);
-            self.bytecode.push_return();
+            self.report_unlowered(&init.0, &fqn);
         }
         self.emit_shared_try_fail_epilogue();
         let body_end = self.bytecode.len();
@@ -16695,8 +16685,10 @@ impl Compiler {
             self.begin_fn_defers(body);
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
-                let mut c = self.do_compile(body);
-                self.bytecode.append(&mut c);
+                if !prev_fn_table_key_was_none {
+                    self.hir_refusal = Some("nested-fn");
+                }
+                self.report_unlowered(span, &table_key);
             }
             self.active_fn_name = prev_active;
 
@@ -18852,8 +18844,7 @@ impl Compiler {
                 self.begin_fn_defers(body);
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
-                    let mut body_bc = self.do_compile(body);
-                    self.bytecode.append(&mut body_bc);
+                    self.report_unlowered(span, &fn_name);
                 }
 
                 // A lowered body can end on an unreachable join label.
@@ -19630,19 +19621,6 @@ impl Compiler {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
-        // E3: `pure fn` / `uses {…}` hold whichever backend compiles the
-        // module; without HIR lowering, build HIR for the effects alone
-        // (every module, so later modules see the same summaries).
-        let check_only = self
-            .hir_module
-            .is_none()
-            .then(|| crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast));
-        if let Some(hir) = check_only.as_ref() {
-            let fx = crate::hir::effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
-            self.messages.extend(fx.violation_messages());
-            let summaries = fx.summaries;
-            self.program_effects.record(hir, &self.checker, module, &summaries);
-        }
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {

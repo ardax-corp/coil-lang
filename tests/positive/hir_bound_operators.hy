@@ -1,4 +1,3 @@
-// HIR only: coil-lang#785 (the AST walk evaluates a bound `<` after a false `&&` left side).
 // A bound type parameter's operators in a generic class's shared method
 // body dispatch through the hidden dictionary, for every key type.
 class Sorted<K> {

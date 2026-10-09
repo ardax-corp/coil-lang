@@ -1,4 +1,3 @@
-// HIR only: coil-lang#785 (the AST codegen miscomputes these).
 // Compound assigns through an indexed base: the base is read twice.
 test("compound assign through computed index bases") {
     let rows = Vec::from([Vec::from([1, 2]), Vec::from([3, 4])]);

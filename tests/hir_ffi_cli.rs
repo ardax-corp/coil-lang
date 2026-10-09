@@ -1,17 +1,15 @@
-//! `extern` calls and `dload` / `declare` / `invoke` under `--hir`: the
-//! HIR path emits them itself (no AST fallback) and runs them as the AST
-//! path does.
+//! `extern` calls and `dload` / `declare` / `invoke`: the HIR lowering
+//! emits them and they run at every opt level.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Compiles `src` under `--hir` with no fallback, then runs it in each mode.
+/// Compiles `src` with no HIR refusal, then runs it in each mode.
 fn check(bin: &str, tmp: &Path, src: &Path) {
     let why = Command::new(bin)
         .env("COIL_HIR_WHY", "1")
         .args([
             "compile",
-            "--hir",
             "--allow-dload",
             "sum",
             "--ffi-search-path",
@@ -21,7 +19,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .arg("-o")
         .arg(tmp.join("main.hyc"))
         .output()
-        .expect("coil compile --hir");
+        .expect("coil compile");
     let why_err = String::from_utf8_lossy(&why.stderr);
     assert!(why.status.success(), "compile failed: {why_err}");
     assert!(
@@ -29,7 +27,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         "FFI calls fell back: {why_err}"
     );
 
-    for mode in [&[][..], &["--hir"][..], &["--hir", "-O", "0"][..]] {
+    for mode in [&[][..], &["-O", "0"][..]] {
         let run = Command::new(bin)
             .args(mode)
             .args(["--allow-dload", "sum", "--ffi-search-path"])

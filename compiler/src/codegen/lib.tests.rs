@@ -57,17 +57,21 @@ fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
 }
 
-/// Tests of a call-site peephole only the AST codegen does (predicate
-/// peel, pure-arg reorder, self-unroll). The HIR codegen leaves these calls
-/// plain; a guarded-call loop ran faster that way than with the peel.
-fn compile_src_ast(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.set_hir_lowering(false))
-}
-
 /// Tests of how an enum value is built: a local built in place would
 /// otherwise stay in two slots with no `MakeEnum`.
 fn compile_src_boxed_locals(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |c| c.set_hir_pair_locals(false))
+}
+
+/// A whole program through the pipeline, with the workspace's stdlib roots
+/// (for sources that `use` stdlib modules, as the perf examples do).
+fn compile_src_pipeline(src: &str, inline: bool) -> (Vec<Byte>, Vec<u64>) {
+    let mut pipeline = crate::Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    if !inline {
+        pipeline.set_inline_max_cost(0);
+    }
+    pipeline.compile_src(src).expect("compile")
 }
 
 fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Vec<u64>) {
@@ -94,6 +98,10 @@ fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>,
     grants.grant_dload_allow("noop");
     grants.grant_dload_allow("sum");
     compiler.set_host_grants(grants, Vec::new());
+    // The standard host natives, as `Pipeline` registers them.
+    for (name, id) in common::host_native_ids() {
+        compiler.register_native_id(name, id);
+    }
     // Stable placeholder ids so Approach A packed HostInvoke lowering
     // fires in unit tests (Pipeline assigns real ids at runtime).
     compiler.register_native_id(machine::PACKED_DOT, 9001);
@@ -831,7 +839,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
     );
     let len_at = bc
         .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::ArrayLen))
+        .position(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen))
         .expect("ArrayLen");
     let header = bc
         .iter()
@@ -841,6 +849,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
                 Instruction::CmpJmpf
                     | Instruction::BinSlotImmJmpf
                     | Instruction::BinSlotSlotJmpf
+                    | Instruction::DenseBinJmpf
                     | Instruction::JMPF
             )
         })
@@ -856,7 +865,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
         .unwrap();
     let lens_in_loop = bc[header..=latch]
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::ArrayLen))
+        .filter(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen))
         .count();
     assert_eq!(lens_in_loop, 0, "no ArrayLen inside loop body/latch");
 }
@@ -2229,7 +2238,7 @@ fn for_in_array_emits_array_len_index_and_back_edge() {
     );
     let has_len = bc
         .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::ArrayLen));
+        .any(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen));
     let has_index = bc.iter().any(|b| {
         matches!(
             b.bytecode(),
@@ -2237,6 +2246,8 @@ fn for_in_array_emits_array_len_index_and_back_edge() {
                 | Instruction::IndexUnchecked
                 | Instruction::IndexPin
                 | Instruction::IndexPinUnchecked
+                | Instruction::DenseIndex
+                | Instruction::DenseIndexJmpf
         )
     });
     let jmp = bc
@@ -2962,41 +2973,6 @@ fn let_x_then_print_x_emits_store_pop() {
     run_src_ok("fn main() { let x = 42; let y = x; if y != 42 { panic \"let\"; } }");
 }
 
-/// Call-site arg prep `add(x, y, z)` packs three LOADs into one `LOAD` with `n=3`.
-#[test]
-fn call_arg_prep_packs_three_loads() {
-    use common::Instruction;
-    // Two early-return guards → not a single tiny-inline diamond.
-    // Predicate peel (2B) still applies, and since every arg is a plain
-    // local the re-materializing peel reads them in place ,  the packed
-    // LOAD feeding the CALL names `x, y, z`, not argument spills.
-    let (bc, _pool) = compile_src_ast(
-        "fn add(int a, int b, int c) -> int { \
- if a < 0 { return 0; } \
- if b < 0 { return 0; } \
- return a + b + c; \
- } \
- fn main() { \
- let x = 1; \
- let y = 2; \
- let z = 3; \
- let result = add(x, y, z); \
- }",
-    );
-    let packed = bc
-        .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::LOAD) && b.load_store_count() == 3);
-    let packed = packed.expect("expected one LOAD with n=3 for add(x,y,z) arg prep");
-    let (n, s0, s1, s2) = packed.load_store_parts();
-    assert_eq!(n, 3, "packed LOAD must carry three slots");
-    // Locals x,y,z are 0,1,2 and need no spill.
-    assert_eq!(
-        (s0, s1, s2),
-        (0, 1, 2),
-        "peel arg prep should LOAD the locals in original order"
-    );
-}
-
 /// A peel over leaf args spills nothing: the only STOREs `main` emits are the
 /// three `let`s and the peel's join temp (`let result` is never read, so its
 /// store is elided). The spilling peel needed three more, one per argument.
@@ -3023,35 +2999,6 @@ fn predicate_peel_does_not_spill_leaf_args() {
     assert!(
         stores <= 4,
         "peel spilled args: expected 3 locals + join temp, got {stores} STOREs"
-    );
-}
-
-/// An argument the guard reads but that needs more than one byte keeps its
-/// spill ,  `x + 1` is staged to a temp, so the packed LOAD names temps.
-#[test]
-fn predicate_peel_spills_computed_guard_arg() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src_ast(
-        "fn add(int a, int b, int c) -> int { \
- if a < 0 { return 0; } \
- if b < 0 { return 0; } \
- return a + b + c; \
- } \
- fn main() { \
- let x = 1; \
- let y = 2; \
- let z = 3; \
- let result = add(x + 1, y, z); \
- }",
-    );
-    let packed = bc
-        .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::LOAD) && b.load_store_count() == 3)
-        .expect("expected one LOAD with n=3 for the peeled arg prep");
-    let (_, s0, s1, s2) = packed.load_store_parts();
-    assert!(
-        s0 > 2 && s1 > 2 && s2 > 2,
-        "computed guard arg should fall back to the spilling peel; got ({s0}, {s1}, {s2})"
     );
 }
 
@@ -3866,88 +3813,6 @@ fn is_tiny_inline_il_accepts_compare_branch_diamond() {
     assert!(Compiler::is_tiny_inline_il(&ops));
 }
 
-/// Self-recursive call from `main` peels one level; nested recursion remains CALL.
-#[test]
-fn self_unroll_peels_one_level_at_call_site() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src_ast(
-        "fn fib(int n) -> int { \
-               if n <= 2 { return 1; } \
-               return fib(n - 1) + fib(n - 2); \
-             } \
-             fn main() { return fib(5); }",
-    );
-    let calls = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::CALL | Instruction::TailCall))
-        .count();
-    assert!(
-        calls >= 2,
-        "peeled fib must retain nested CALLs; call_count={calls}; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    // Peel copies the base-case compare into main's stream.
-    assert!(
-        bc.iter().any(|b| matches!(
-            b.bytecode(),
-            Instruction::JMPF
-                | Instruction::CmpJmpf
-                | Instruction::BinSlotImmJmpf
-                | Instruction::BinSlotSlotJmpf
-                | Instruction::LEQ
-                | Instruction::LE
-        )),
-        "self-unroll should copy compare/branch into caller; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-}
-
-/// Pure-arg reorder (2A): pure args are stored before effectful arg codegen.
-#[test]
-fn pure_arg_reorder_stores_pure_before_effectful() {
-    use common::Instruction;
-    // `sink` is non-tiny so the CALL path runs reorder.
-    let (bc, _pool) = compile_src_ast(
-        "fn effect() -> int { let acc = 0; while acc < 2 { acc = acc + 1; } return acc; } \
-             fn sink(int a, int b) -> int { let sum = a + b; if sum < 0 { return 0; } return sum; } \
-             fn main() { let result = sink(effect(), 10); }",
-    );
-    // Prologue CALL is index 0 (arity 0). The effect() CALL is the next arity-0 CALL.
-    let effect_call = bc
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| matches!(b.bytecode(), Instruction::CALL) && b.call_parts().0 == 0)
-        .nth(1)
-        .map(|(i, _)| i);
-    let pure_const = bc.iter().position(|b| {
-        matches!(b.bytecode(), Instruction::CONST)
-            && (b.operand_u32() & Byte::POOL_FLAG) == 0
-            && b.operand_u32() as i32 == 10
-    });
-    let Some(effect_i) = effect_call else {
-        panic!(
-            "expected arity-0 CALL to effect after prologue; opcodes: {:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-    };
-    let Some(pure_i) = pure_const else {
-        panic!(
-            "expected CONST 10 for pure arg; opcodes: {:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-    };
-    assert!(
-        pure_i < effect_i,
-        "pure CONST 10 (at {pure_i}) must be emitted before effect CALL (at {effect_i}); opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    assert!(
-        bc.iter()
-            .any(|b| { matches!(b.bytecode(), Instruction::CALL) && b.call_parts().0 == 2 }),
-        "expected CALL sink with arity 2"
-    );
-}
-
 /// Predicate peel (2B): base-case cmp-jmp is duplicated at the call site.
 #[test]
 fn predicate_peel_emits_cmp_jmp_before_call() {
@@ -4084,15 +3949,17 @@ fn const_while_false_eliminates_loop() {
 fn for_with_break_is_not_unrolled() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn main() { \
+        // A bound the compiler cannot fold, so the exit test stays.
+        "fn f(int n) -> int { \
 let s = 0; \
 let i = 0; \
-while i < 3 { \
+while i < n { \
   s = s + i; \
   break; \
 } \
-write(stdout(), to_bytes(format(\"%i\", s))); \
-}",
+return s; \
+} \
+fn main() { write(stdout(), to_bytes(format(\"%i\", f(3)))); }",
     );
     // Peephole may fuse JMPF into CmpJmpf / BinSlotImmJmpf / LogNotJmpf.
     let has_cond_jump = bc.iter().any(|b| {
@@ -4102,6 +3969,9 @@ write(stdout(), to_bytes(format(\"%i\", s))); \
                 | Instruction::CmpJmpf
                 | Instruction::BinSlotImmJmpf
                 | Instruction::BinSlotSlotJmpf
+                | Instruction::DenseBinJmpf
+                | Instruction::BinSlotImmJmpt
+                | Instruction::BinSlotSlotJmpt
                 | Instruction::LogNotJmpf
         )
     });
@@ -5382,73 +5252,6 @@ fn main() {
     assert!(!vm.panicked(), "zip() elems sum 10; opcodes={names:?}");
 }
 
-/// Fixed `[T; N]` locals use consecutive LOAD/STORE for const indices;
-/// escaping the local into a call boxes via MakeArray.
-#[test]
-fn fixed_array_local_uses_slots_and_boxes_on_escape() {
-    use common::Instruction;
-    // The HIR codegen folds the constant stores and builds the escaping
-    // array straight from them, so this pins the AST's slot shape.
-    let mut pipeline = crate::Pipeline::new();
-    pipeline.set_hir_lowering(false);
-    let (bc, _pool) = pipeline
-        .compile_src(
-            "fn take([int; 3] xs) -> int { return xs[0]; } \
-fn main() { \
-let a = [10, 20, 30]; \
-a[1] = 99; \
-let x = a[1]; \
-let _ = take(a); \
-}",
-        )
-        .expect("compile");
-    let main_off = pipeline.compiler_mut().get_function("main").expect("main");
-    let main_bc = &bc[main_off..];
-    assert!(
-        !main_bc
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::StoreIndex)),
-        "const store on stack-array local should avoid StoreIndex; ops={:?}",
-        main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    let makes = main_bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
-        .count();
-    let inlined = main_bc
-        .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::ConstReturnImm));
-    assert!(
-        makes >= 1 || inlined,
-        "take(a) must box via MakeArray, or tiny-inline + escape analysis may fold it; ops={:?}",
-        main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    if makes >= 1 {
-        let loads: Vec<_> = main_bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::LOAD))
-            .collect();
-        let packed = loads
-            .iter()
-            .any(|b| b.load_store_single_slot().is_none() || b.load_store_count() >= 3);
-        assert!(
-            packed || loads.len() >= 3,
-            "escape should LOAD three slots (packed or unfused); got {}; ops={:?}",
-            loads.len(),
-            main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        assert!(
-            main_bc
-                .iter()
-                .filter(|b| matches!(b.bytecode(), Instruction::STORE))
-                .count()
-                >= 3,
-            "expected per-element STOREs for stack init; ops={:?}",
-            main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-    }
-}
-
 /// Float / large-N / nested: outer spine is multi-slot; nested elems MakeArray.
 #[test]
 fn stack_array_scalars_and_nested_heap_elems() {
@@ -6531,7 +6334,7 @@ fn nested_io_host_invoke_emits_outer_const_before_inner_host_invoke() {
     let src = "\
 use io::{stdin, read}; \
 fn main() { \
-  let buf = Vec::from([0 as byte]); \
+  let buf: Vec<byte> = Vec::new(); \
   let _ = read(stdin(), buf); \
 }";
     let mut ast = Pratt::default().parse(src).expect("parse failed");
@@ -6800,8 +6603,8 @@ fn polyfn_plus_fib_style_body_still_fuses() {
 /// leave the inner invoke above the outer id.
 ///
 /// Mirrors `nested_io_host_invoke_emits_outer_const_before_inner_host_invoke`:
-/// require two `HostInvoke`s and assert the outer id `CONST` precedes the
-/// *inner* `HostInvoke` (not merely the first one).
+/// require two `HostInvoke`s and assert the outer id `CONST` sits under the
+/// *inner* `HostInvoke`'s value (not merely the first one).
 #[test]
 fn nested_generic_host_invoke_emits_outer_id_before_inner_invoke() {
     use crate::typechecking::ty::int;
@@ -6844,10 +6647,15 @@ fn main() {
         .copied()
         .find(|&i| i < outer_host)
         .expect("inner HostInvoke before outer");
+    // The id sits under the argument: pushed ahead of the inner call, or
+    // the inner result staged into a temp and loaded back after it.
+    let staged = matches!(bc[inner_host + 1].bytecode(), Instruction::STORE)
+        && bc[outer_const..outer_host].iter().any(|b| matches!(b.bytecode(), Instruction::LOAD));
     assert!(
-        outer_const < inner_host,
-        "outer native-id CONST must precede nested HostInvoke \
-             (const@{outer_const} vs inner@{inner_host})"
+        outer_const < inner_host || staged,
+        "outer native-id CONST must sit under the nested HostInvoke's value \
+             (const@{outer_const} vs inner@{inner_host}); opcodes: {:?}",
+        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
 
@@ -7157,17 +6965,21 @@ fn tuple_zip_add_emits_elementwise_add() {
 use io::{stdout};
 
 use string::{format, to_bytes};
+fn f((int, int) x, (int, int) y) -> int {
+    let a = x + y;
+    return a[0];
+}
 fn main() {
-    let a = (1, 1) + (1, 1);
-    write(stdout(), to_bytes(format("%i", a[0])));
+    write(stdout(), to_bytes(format("%i", f((1, 1), (1, 1)))));
 }
 "#,
     );
-    // `a` is only read with a constant index, so its elements stay in slots.
+    // `a` is only read with a constant index, so only its first elements
+    // are added, with no tuple built.
     let has_add = bc.iter().any(|b| {
         matches!(
             b.bytecode(),
-            Instruction::ADD | Instruction::BinSlotImm | Instruction::BinSlotSlot
+            Instruction::ADD | Instruction::BinSlotImm | Instruction::BinSlotSlot | Instruction::DenseBin
         )
     });
     assert!(
@@ -7285,14 +7097,19 @@ fn main() {
 
 fn packed_host_meta(bc: &[common::Byte]) -> u32 {
     use common::Instruction;
-    let hi = bc
-        .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
-        .expect("expected HostInvoke");
-    // Layout: … CONST meta, HostInvoke
+    // Layout: CONST packed id (9001..=9005 in `compile_src_tuned`), the
+    // operands, CONST meta, HostInvoke.
+    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && (9001..=9005).contains(&b.operand_u32());
+    let id_at = bc.iter().position(packed_id).expect("expected a packed native id");
+    let hi = id_at
+        + bc[id_at..]
+            .iter()
+            .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .expect("expected HostInvoke");
     assert!(
-        hi >= 1 && matches!(bc[hi - 1].bytecode(), Instruction::CONST),
-        "HostInvoke must follow meta CONST"
+        matches!(bc[hi - 1].bytecode(), Instruction::CONST),
+        "HostInvoke must follow meta CONST: {:?}",
+        bc.iter().map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
     );
     bc[hi - 1].operand_u32()
 }
@@ -8072,6 +7889,9 @@ fn main() {
     let mut grants = crate::HostGrants::deny_all();
     grants.allow_attach = true;
     compiler.set_host_grants(grants, Vec::new());
+    for (name, id) in common::host_native_ids() {
+        compiler.register_native_id(name, id);
+    }
     compiler.register_native_id(common::STREAM_ATTACH_NATIVE, 119);
     compiler.register_native_id(common::STREAM_PARK_NATIVE, 120);
     compiler.register_native_id(common::STREAM_FD_NATIVE, 138);
@@ -9113,7 +8933,7 @@ fn main() {
 #[test]
 fn result_try_churn_does_not_make_enum() {
     let src = include_str!("../../../examples/perf/result_try_churn.hy");
-    let (bc, _) = compile_src_no_inline(src);
+    let (bc, _) = compile_src_pipeline(src, false);
     assert!(
         !bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
@@ -9291,7 +9111,7 @@ fn main() {
 #[test]
 fn pair_int_churn_stays_two_slot() {
     let src = include_str!("../../../examples/perf/pair_int_churn.hy");
-    let (bc, _) = compile_src(src);
+    let (bc, _) = compile_src_pipeline(src, true);
     assert!(
         bc.iter()
             .any(|b| { matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2 }),

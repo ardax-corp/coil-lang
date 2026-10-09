@@ -1,4 +1,3 @@
-// HIR only: coil-lang#785 (the AST codegen miscomputes generic rest calls).
 // Overloads with a rest parameter or named arguments, named partials, spreads
 // into a partial, and generic rest calls: all lowered by the HIR.
 use string::format;
