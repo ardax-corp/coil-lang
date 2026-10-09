@@ -2,12 +2,11 @@
 
 ## What it shows
 
-Single-process TCP echo: `io::net::tcp` listen/connect/accept_wait, length-prefixed
-framing (`protocol.hy`), pure server/client helpers, and a coroutine that
-supplies payload bytes. Stream IO currently lives in `main.hy` for clarity;
-dependency modules may call IO HostInvoke + `?` (see regression
-`multi_file_io_hostinvoke_try_in_dependency`). Sibling free-fn `use` from a
-non-entry module is also supported (`multi_file_sibling_use_free_fn_from_dependency`).
+Single-process TCP echo on `task::scope`: a server task (`accept_wait`, read
+one frame, echo it) and a client task (`connect`, send a frame, read the
+echo) run concurrently on one thread. Each `io::sync` wait suspends only its
+own task. Length-prefixed framing is in `protocol.hy`; the server and client
+policies are pure helpers.
 
 ## Run
 
@@ -31,12 +30,11 @@ Always under `timeout` (the script wraps it).
 |------|------|
 | `src/protocol.hy` | `encode_frame` / `frame_len` / `payload_eq` (sibling calls) |
 | `src/server.hy` | Pure echo policy (`echo_reply`) |
-| `src/client.hy` | Pure request body + fixed port |
-| `src/main.hy` | listen → connect → accept → exchange (Stream IO) |
+| `src/client.hy` | Pure request body |
+| `src/main.hy` | listen on port 0 → server and client tasks in one `task::scope` |
 
-## Ergonomics / gaps noticed
+## Notes
 
-1. TCP has **no `local_port`** — fixed port `41235`.
-2. Preferred order: `listen` → `connect` → `accept_wait`.
-3. Prefer `push` / one-byte reads over index assign.
-4. Test harness is CWD-`./tests` only.
+1. The listener binds port 0; `local_addr` gives the port to connect to.
+2. The demo needs `--allow-net` (sockets are a capability).
+3. Test harness is CWD-`./tests` only.
