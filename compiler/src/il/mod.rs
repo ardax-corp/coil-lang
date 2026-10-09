@@ -32,6 +32,7 @@ mod treeshake;
 pub use bounds::{BoundsStats, last_bounds_stats};
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
+#[cfg(any(test, feature = "dissect"))]
 pub(crate) use sp::stack_delta;
 pub use pure_call::PureCallCtx;
 
