@@ -48,9 +48,10 @@ Record payloads keep one space before `{` and one inside each brace
 name (`Shape::Pair(a, b)`). A constructor pattern (`match` arm, `if let`,
 `while let`) stays on one line only while it fits and every payload in it is
 short: at most four shorthand fields or tuple elements, at most three fields
-once any field binds a sub-pattern (`r: _`). Past that each field or element
-goes on its own line at +1 indent with a trailing comma, so wide patterns read
-well in a narrow split:
+once any field binds a sub-pattern (`r: _`). Past that, or when a comment
+sits inside it, each field or element goes on its own line at +1 indent with a
+trailing comma, so wide patterns read well in a narrow split. Comments stay
+with their element (a `// c` after `a,` trails `a`; `/* c */ b` leads `b`):
 
 ```hy
 Shape::Big {

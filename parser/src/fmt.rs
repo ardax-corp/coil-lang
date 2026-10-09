@@ -276,14 +276,18 @@ impl<'s> Formatter<'s> {
         let Some(c) = self.pending() else {
             return;
         };
-        // Same source line, and not past a closer: `return 1; }, // c`
-        // belongs to the arm, not to the statement inside its block.
+        // Same source line, past nothing but separators, and last on its
+        // line: `return 1; }, // c` belongs to the arm, not to the statement
+        // inside its block, and `a, /* x */ b` to `b`.
         let same_line = c.span.start >= end
-            && !self
+            && self
                 .src
                 .get(end..c.span.start)
-                .unwrap_or("\n")
-                .contains(['\n', '}', ')', ']']);
+                .is_some_and(|gap| gap.chars().all(|ch| matches!(ch, ' ' | '\t' | ',' | ';')))
+            && self.src[c.span.end..]
+                .split('\n')
+                .next()
+                .is_some_and(|rest| rest.trim().is_empty());
         if same_line {
             let (end, text) = (c.span.end, c.text);
             self.push_str(" ");
@@ -2357,16 +2361,13 @@ impl<'s> Formatter<'s> {
         }
     }
 
-    /// A constructor pattern stays on one line while it fits and every payload
-    /// in it is short: at most four shorthand fields or tuple elements, three
-    /// once a field binds a sub-pattern (`r: _`). Otherwise each element goes
-    /// on its own line with a trailing comma.
+    /// A constructor pattern stays on one line while it fits, has no
+    /// comments inside, and every payload in it is short: at most four
+    /// shorthand fields or tuple elements, three once a field binds a
+    /// sub-pattern (`r: _`). Otherwise each element goes on its own line with
+    /// a trailing comma, keeping its comments.
     fn fmt_pattern(&mut self, pattern: &(SimpleSpan, Pattern<'_>)) {
         let flat = pattern.1.to_string();
-        if pattern_is_short(&pattern.1) && self.fits_flat(&flat) {
-            self.push_str(&flat);
-            return;
-        }
         let Pattern::Constructor {
             enum_name,
             variant_name,
@@ -2376,44 +2377,68 @@ impl<'s> Formatter<'s> {
             self.push_str(&flat);
             return;
         };
+        let (open, close, spans): (u8, u8, Vec<SimpleSpan>) = match payload {
+            PatternPayload::Unit => (0, 0, Vec::new()),
+            PatternPayload::Tuple(parts) => (b'(', b')', parts.iter().map(|p| p.0).collect()),
+            PatternPayload::Record(fields) => (
+                b'{',
+                b'}',
+                fields.iter().map(|f| self.field_span(f.name, f.pattern.0)).collect(),
+            ),
+        };
+        let open_at = spans
+            .first()
+            .and_then(|first| self.opening_before(self.content_start(*first), open));
+        let close_at = spans
+            .last()
+            .and_then(|last| self.closing_after(self.content_end(*last), close));
+        let has_comments = match (open_at, close_at) {
+            (Some(open_at), Some(close_at)) => self.has_comment_in(open_at, close_at),
+            _ => false,
+        };
+        if spans.is_empty()
+            || (!has_comments && pattern_is_short(&pattern.1) && self.fits_flat(&flat))
+        {
+            self.push_str(&flat);
+            return;
+        }
         self.push_str(enum_name);
         self.push_str("::");
         self.push_str(variant_name);
-        match payload {
-            PatternPayload::Unit => {}
-            PatternPayload::Tuple(parts) => {
-                self.push_str("(");
-                self.newline();
-                self.with_indent(|f| {
-                    for part in parts {
-                        f.write_indent();
-                        f.fmt_pattern(part);
-                        f.push_str(",");
-                        f.newline();
-                    }
-                });
-                self.write_indent();
-                self.push_str(")");
-            }
-            PatternPayload::Record(fields) => {
-                self.push_str(" {");
-                self.newline();
-                self.with_indent(|f| {
-                    for field in fields {
-                        f.write_indent();
-                        f.push_str(field.name);
-                        if !is_shorthand_field(field) {
-                            f.push_str(": ");
-                            f.fmt_pattern(&field.pattern);
-                        }
-                        f.push_str(",");
-                        f.newline();
-                    }
-                });
-                self.write_indent();
-                self.push_str("}");
-            }
+        self.push_str(if open == b'{' { " {" } else { "(" });
+        if let Some(open_at) = open_at {
+            // `S::B { // why` keeps its comment on the opening line.
+            self.trailing_comment(open_at + 1);
         }
+        self.newline();
+        self.with_indent(|f| {
+            match payload {
+                PatternPayload::Unit => {}
+                PatternPayload::Tuple(parts) => {
+                    for (part, span) in parts.iter().zip(&spans) {
+                        f.body_item(*span, |f| {
+                            f.fmt_pattern(part);
+                            f.push_str(",");
+                        });
+                    }
+                }
+                PatternPayload::Record(fields) => {
+                    for (field, span) in fields.iter().zip(&spans) {
+                        f.body_item(*span, |f| {
+                            f.push_str(field.name);
+                            if !is_shorthand_field(field) {
+                                f.push_str(": ");
+                                f.fmt_pattern(&field.pattern);
+                            }
+                            f.push_str(",");
+                        });
+                    }
+                }
+            }
+            f.body_close(spans.last().copied(), close);
+        });
+        self.write_indent();
+        self.push_str(if close == b'}' { "}" } else { ")" });
     }
 
     fn fmt_let_pattern(&mut self, pattern: &LetPattern<'_>) {
@@ -2800,6 +2825,14 @@ mod tests {
     fn long_constructor_patterns_put_one_element_per_line() {
         let src = "fn f(S s) -> int {\n    return match s {\n        S::B{a, b, c, d, e} => 1,\n        S::B{a: x, b, c, d} => 2,\n        S::T(a, b, c, d, S::U(e)) => 3,\n    };\n}\n";
         let want = "fn f(S s) -> int {\n    return match s {\n        S::B {\n            a,\n            b,\n            c,\n            d,\n            e,\n        } => 1,\n        S::B {\n            a: x,\n            b,\n            c,\n            d,\n        } => 2,\n        S::T(\n            a,\n            b,\n            c,\n            d,\n            S::U(e),\n        ) => 3,\n    };\n}\n";
+        assert_eq!(format_source(src).unwrap(), want);
+        round_trip(want);
+    }
+
+    #[test]
+    fn comments_inside_patterns_stay_with_their_elements() {
+        let src = "fn f(S s) -> int {\n    return match s {\n        S::B { // why\n            a, // first\n            // lead\n            b,\n            // before close\n        } => 1,\n        S::T(a, /* x */ b) => 2,\n        S::N(S::B { a }, S::T(x, // inner\n            y)) => 3,\n    };\n}\n";
+        let want = "fn f(S s) -> int {\n    return match s {\n        S::B { // why\n            a, // first\n            // lead\n            b,\n            // before close\n        } => 1,\n        S::T(\n            a,\n            /* x */\n            b,\n        ) => 2,\n        S::N(\n            S::B { a },\n            S::T(\n                x, // inner\n                y,\n            ),\n        ) => 3,\n    };\n}\n";
         assert_eq!(format_source(src).unwrap(), want);
         round_trip(want);
     }
