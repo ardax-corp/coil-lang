@@ -310,8 +310,11 @@ fn step(
             let at = i as u32;
             let (_, defs, opaque) = super::analysis::op_slot_use_def(op);
             if opaque {
-                for (&slot, v) in slots.iter_mut() {
-                    *v = intern.intern(VExpr::Def { at, slot });
+                // In slot order: value numbers are interned as they come.
+                let mut held: Vec<u32> = slots.keys().copied().collect();
+                held.sort_unstable();
+                for slot in held {
+                    slots.insert(slot, intern.intern(VExpr::Def { at, slot }));
                 }
                 slots.insert(OPAQUE, intern.intern(VExpr::Def { at, slot: OPAQUE }));
             }
@@ -380,7 +383,9 @@ pub fn eliminate_redundant(ops: &mut Vec<IlOp>, value_numbers: &ValueNumbers) {
             i += 1;
             continue;
         }
-        let Some((&slot, _)) = slots_before[i - 2].iter().find(|(_, v)| **v == vn) else {
+        // The lowest slot holding it, so the choice does not follow the
+        // map's iteration order.
+        let Some(slot) = slots_before[i - 2].iter().filter(|(_, v)| **v == vn).map(|(&s, _)| s).min() else {
             i += 1;
             continue;
         };
