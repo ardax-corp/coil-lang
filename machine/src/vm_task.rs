@@ -215,10 +215,12 @@ impl<const S: usize> Machine<S> {
         TaskFlow::Switched
     }
 
-    /// The running task's waker and the key its next thread wait gets.
-    fn task_waiter(&self) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64)> {
+    /// The running task's waker, the key its next thread wait gets, and its id.
+    fn task_waiter(
+        &self,
+    ) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64, crate::task::TaskId)> {
         let s = self.sched.as_ref()?;
-        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key()))
+        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key(), s.current))
     }
 
     /// A native parked the task on a `thread` object (its arguments are

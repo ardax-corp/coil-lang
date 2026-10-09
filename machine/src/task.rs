@@ -542,13 +542,83 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// A native registered the task with [`ThreadWaiters::park_current`].
     static THREAD_PARKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The task running the native (with `TASK_WAITER`).
+    static CURRENT_TASK: std::cell::Cell<TaskId> = const { std::cell::Cell::new(ROOT) };
+    /// Connects tasks started on helper threads, by (scheduler, task).
+    static PENDING_CONNECTS: std::cell::RefCell<
+        std::collections::HashMap<(usize, TaskId), std::sync::Arc<PendingConnect>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Around a native the VM runs where it can switch tasks: `Some` arms
 /// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
-pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64)>) {
+pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, TaskId)>) {
     TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
+    let waiter = waiter.map(|(waker, key, task)| {
+        CURRENT_TASK.with(|c| c.set(task));
+        (waker, key)
+    });
     TASK_WAITER.with(|w| *w.borrow_mut() = waiter);
+}
+
+/// A TCP connect a task started on a helper thread.
+struct PendingConnect {
+    host: String,
+    port: i64,
+    ms: i64,
+    result: std::sync::Mutex<Option<ConnectResult>>,
+    waiters: ThreadWaiters,
+}
+
+type ConnectResult = Result<std::net::TcpStream, crate::io::IoErrorTag>;
+
+/// `io::net::tcp::connect` from a task: name lookup and connect run on a
+/// helper thread so the other tasks keep going. `None`: no scheduler, so
+/// connect in place. `Some(None)`: the task is parked (the native returns
+/// `Ok(None)` and runs again once the connect finishes). `Some(Some(r))`:
+/// the connect finished.
+///
+/// A task cancelled while it waits leaves its entry behind; the next
+/// connect of the same task id with other arguments replaces it.
+pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<ConnectResult>> {
+    use std::sync::Arc;
+    let (waker, _) = TASK_WAITER.with(|w| w.borrow().clone())?;
+    let key = (Arc::as_ptr(&waker) as usize, CURRENT_TASK.with(|c| c.get()));
+    let started = PENDING_CONNECTS.with(|m| m.borrow().get(&key).cloned());
+    let job = match started {
+        Some(job) if job.host == host && job.port == port && job.ms == ms => job,
+        _ => {
+            let job = Arc::new(PendingConnect {
+                host: host.to_string(),
+                port,
+                ms,
+                result: std::sync::Mutex::new(None),
+                waiters: ThreadWaiters::default(),
+            });
+            let helper = Arc::clone(&job);
+            let spawned = std::thread::Builder::new()
+                .name("coil-connect".into())
+                .spawn(move || {
+                    let r = crate::io::connect_socket(&helper.host, helper.port, helper.ms);
+                    *helper.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    helper.waiters.wake_all();
+                });
+            if spawned.is_err() {
+                return None;
+            }
+            PENDING_CONNECTS.with(|m| m.borrow_mut().insert(key, Arc::clone(&job)));
+            job
+        }
+    };
+    let mut done = None;
+    let ready = job.waiters.park_unless(|| {
+        done = job.result.lock().unwrap_or_else(|e| e.into_inner()).take();
+        done.is_some()
+    })?;
+    if ready {
+        PENDING_CONNECTS.with(|m| m.borrow_mut().remove(&key));
+    }
+    Some(done)
 }
 
 /// A native parked the task on a thread object (its result is a dummy).
@@ -563,4 +633,36 @@ pub(crate) fn take_thread_parked() -> bool {
 
 pub(crate) fn tasks_active() -> bool {
     TASKS_ACTIVE.with(|c| c.get())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn connect_in_task_parks_then_returns_the_stream() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = i64::from(listener.local_addr().expect("addr").port());
+        let waker = Arc::new(TaskWaker::default());
+        set_task_waiter(Some((Arc::clone(&waker), 5, 7)));
+        let stream = loop {
+            match connect_in_task("127.0.0.1", port, 0) {
+                Some(Some(r)) => break r.expect("connect"),
+                Some(None) => {
+                    assert!(take_thread_parked());
+                    waker.wait(Some(std::time::Duration::from_secs(5)));
+                    assert_eq!(waker.take(), vec![5]);
+                }
+                None => panic!("a task waiter is set"),
+            }
+        };
+        set_task_waiter(None);
+        assert_eq!(
+            stream.peer_addr().expect("peer").port(),
+            listener.local_addr().expect("addr").port()
+        );
+        assert!(PENDING_CONNECTS.with(|m| m.borrow().is_empty()));
+        assert!(connect_in_task("127.0.0.1", port, 0).is_none());
+    }
 }

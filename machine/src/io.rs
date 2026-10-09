@@ -702,12 +702,22 @@ pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
 }
 
 /// Connect with an optional millisecond deadline (`ms <= 0` waits forever).
+///
+/// Under a task scheduler the connect (and name lookup) runs on a helper
+/// thread and only the calling task waits; see [`crate::task::connect_in_task`].
 pub fn tcp_connect_timeout(
     heap: &mut Heap,
     host: &str,
     port: i64,
     ms: i64,
 ) -> Result<Value, IoErrorTag> {
+    let stream = connect_socket(host, port, ms)?;
+    alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+}
+
+/// Resolve and connect, blocking this thread; the stream is non-blocking.
+pub(crate) fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTag> {
     use std::net::ToSocketAddrs;
     if !(0..=65535).contains(&port) {
         return Err(IoErrorTag::InvalidInput);
@@ -769,6 +779,11 @@ pub fn tcp_connect_timeout(
     stream
         .set_nonblocking(true)
         .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    Ok(stream)
+}
+
+/// A connected socket from [`connect_socket`] as a `Stream`.
+pub(crate) fn alloc_tcp_stream(heap: &mut Heap, stream: TcpStream) -> Result<Value, IoErrorTag> {
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
         .map_err(|e| IoErrorTag::from_kind(e.kind()))
 }

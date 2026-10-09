@@ -67,7 +67,11 @@ A task switch happens only at:
 5. `send` on a full / `recv` on an empty `task::channel`;
 6. a wait on another OS thread: `thread::recv`, `thread::join`,
    `thread::with_lock` / `thread::lock` on a held mutex, and so
-   `task::blocking`.
+   `task::blocking`;
+7. `io::net::tcp::connect` / `connect_timeout`: name lookup and the connect
+   run on a helper thread (`connect_in_task` in `machine/src/task.rs`) and the native runs
+   again once it finishes, so a slow or backlogged connect stalls only its
+   own task (coil-lang#832). Outside a scope it blocks in place as before.
 
 Nothing else switches: no preemption. A CPU loop without a suspension point
 runs until it ends.
@@ -187,6 +191,9 @@ functions); a partial application is not sendable.
   readers-writer lock still block every task.
 - A `thread` wait never counts as a deadlock: another thread may still
   release it.
+- Each connect inside a scope starts one helper OS thread. A task cancelled
+  mid-connect leaves its finished socket in a per-thread table until the
+  same task id connects again.
 - No detached tasks, no preemption.
 - `task::timeout` reads its task through the natives instead of `join`
   (coil-lang#786), and spawns its timer from a plain `gen fn` (coil-lang#787).
