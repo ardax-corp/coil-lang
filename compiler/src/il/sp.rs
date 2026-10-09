@@ -5,7 +5,7 @@
 //! counts eval-stack values. Nested `CALL`/`MakeCoro` reset height to 1
 //! (return value only), not `before + (1 - arity)`.
 //!
-//! Used by return-join convoys, fuse/canon, and mem_fwd. Do not substitute
+//! Used by fuse/canon and the IL opt passes. Do not substitute
 //! tell here — a STORE floor is not height (COI-81).
 
 use common::Instruction;
@@ -319,7 +319,7 @@ pub fn analyze(ops: &[IlOp]) -> SpInfo {
 /// Like [`analyze`], but seed height at `entry_sp` (function arity / frame base).
 ///
 /// Per-function bodies begin with args already on the shared locals/operand
-/// stack; starting at 0 understates height and lets `mem_fwd` emit `Dup;Store`
+/// stack; starting at 0 understates height and lets a store-forwarding rewrite emit `Dup;Store`
 /// that aliases a local with TOS.
 pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
     let n = ops.len();
@@ -368,7 +368,7 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
             let before = sp_in[i].unwrap_or(Sp::Unknown);
             // Nested CALL/MakeCoro return seeks to frame_base and pushes one
             // result → relative height is always 1, not `before + (1 - arity)`.
-            // Modeling the arithmetic delta lets mem_fwd emit Dup;Store that
+            // Modeling the arithmetic delta lets a forwarding rewrite emit Dup;Store that
             // later operand pops destroy (http parse_url / bytes_slice hang).
             let after = if let Some(ret_words) = nested_call_return_words(op) {
                 Sp::Known(ret_words)

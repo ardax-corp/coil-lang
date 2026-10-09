@@ -2,7 +2,7 @@
 //!
 //! Production passes live in [`PRODUCTION_PASSES`] (order matches D1 README).
 //! The driver walks that table; a pass runs when its [`OptimizeOptions`] flag
-//! is on (`dead_store` shares `mem_fwd`). [`PassDelta`] is what `collect_stats`
+//! is on. [`PassDelta`] is what `collect_stats`
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
 //! `IlModule::optimize_and_flatten` still defers `multi_op_join_convoy`,
@@ -52,8 +52,6 @@ pub struct PassSpec {
     pub floor: OptFloor,
     /// Size omits growth passes (`loop_unroll`, `clone_shared_return`).
     pub omit_from_size: bool,
-    /// After this row, seed `entry_tell` from `entry_sp` (the `mem_fwd` slot).
-    pub seed_entry_tell_after: bool,
     gate: fn(&OptimizeOptions) -> bool,
     set_flag: fn(&mut OptimizeOptions),
     apply: ApplyFn,
@@ -115,8 +113,7 @@ pub fn run_once(
 ) {
     let mut ctx = PassCtx {
         entry_sp,
-        // Same formula as today; copy_prop onward uses it. Re-seeded after
-        // the mem_fwd row (even if that pass is off).
+        // Cursor seed for the slot-tracking passes (`slot_promote`).
         entry_tell: entry_sp.max(0) as u32,
         pool,
         next_label,
@@ -136,9 +133,6 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
                 stats::collect_delta(&delta);
             }
         }
-        if spec.seed_entry_tell_after {
-            ctx.entry_tell = ctx.entry_sp.max(0) as u32;
-        }
     }
 }
 
@@ -156,16 +150,6 @@ fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_
 
 fn apply_stack_dce(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::dce::stack_dce(ops);
-    0
-}
-
-fn apply_mem_fwd(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::mem_fwd(ops, ctx.entry_sp);
-    0
-}
-
-fn apply_dead_store(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::dead_store_at(ops, ctx.entry_tell);
     0
 }
 
@@ -305,7 +289,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.jump_thread,
         set_flag: |o| o.jump_thread = true,
         apply: ApplyFn::Slice(apply_jump_thread),
@@ -316,7 +299,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.dead_block,
         set_flag: |o| o.dead_block = true,
         apply: ApplyFn::Grow(apply_dead_block),
@@ -327,32 +309,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.stack_dce,
         set_flag: |o| o.stack_dce = true,
         apply: ApplyFn::Grow(apply_stack_dce),
-    },
-    PassSpec {
-        name: "mem_fwd",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: true,
-        gate: |o| o.mem_fwd,
-        set_flag: |o| o.mem_fwd = true,
-        apply: ApplyFn::Slice(apply_mem_fwd),
-    },
-    PassSpec {
-        name: "dead_store",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.mem_fwd,
-        set_flag: |o| o.mem_fwd = true,
-        apply: ApplyFn::Grow(apply_dead_store),
     },
     PassSpec {
         name: "canon",
@@ -360,7 +319,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.canon,
         set_flag: |o| o.canon = true,
         apply: ApplyFn::Grow(apply_canon),
@@ -371,7 +329,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::None,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.algebraic,
         set_flag: |o| o.algebraic = true,
         apply: ApplyFn::Grow(apply_algebraic),
@@ -382,7 +339,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.instcombine,
         set_flag: |o| o.instcombine = true,
         apply: ApplyFn::Grow(apply_instcombine),
@@ -393,7 +349,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.local_cse,
         set_flag: |o| o.local_cse = true,
         apply: ApplyFn::Grow(apply_local_cse),
@@ -404,7 +359,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.licm,
         set_flag: |o| o.licm = true,
         apply: ApplyFn::Grow(apply_licm),
@@ -415,7 +369,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.loop_bounds,
         set_flag: |o| o.loop_bounds = true,
         apply: ApplyFn::Grow(apply_loop_bounds),
@@ -426,7 +379,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.strength_reduce,
         set_flag: |o| o.strength_reduce = true,
         apply: ApplyFn::Grow(apply_strength_reduce),
@@ -437,7 +389,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Unroll,
         floor: OptFloor::Standard,
         omit_from_size: true,
-        seed_entry_tell_after: false,
         gate: |o| o.loop_unroll,
         set_flag: |o| o.loop_unroll = true,
         apply: ApplyFn::Grow(apply_loop_unroll),
@@ -448,7 +399,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.invariant_store_elim,
         set_flag: |o| o.invariant_store_elim = true,
         apply: ApplyFn::Grow(apply_invariant_store_elim),
@@ -459,7 +409,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.escape_analysis,
         set_flag: |o| o.escape_analysis = true,
         apply: ApplyFn::Grow(apply_escape_analysis),
@@ -470,7 +419,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.slot_promote,
         set_flag: |o| o.slot_promote = true,
         apply: ApplyFn::Grow(apply_slot_promote),
@@ -481,7 +429,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.tos_carry,
         set_flag: |o| o.tos_carry = true,
         apply: ApplyFn::Grow(apply_tos_carry),
@@ -492,7 +439,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: true,
-        seed_entry_tell_after: false,
         gate: |o| o.clone_shared_return,
         set_flag: |o| o.clone_shared_return = true,
         apply: ApplyFn::Grow(apply_clone_shared_return),
@@ -503,7 +449,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.return_convoy,
         set_flag: |o| o.return_convoy = true,
         apply: ApplyFn::Grow(apply_return_convoy),
@@ -514,7 +459,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.bin_join_convoy,
         set_flag: |o| o.bin_join_convoy = true,
         apply: ApplyFn::Grow(apply_bin_join_convoy),
@@ -525,7 +469,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.multi_op_join_convoy,
         set_flag: |o| o.multi_op_join_convoy = true,
         apply: ApplyFn::Grow(apply_multi_op_join_convoy),
@@ -536,7 +479,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.invert_guard_branch,
         set_flag: |o| o.invert_guard_branch = true,
         apply: ApplyFn::Grow(apply_invert_guard_branch),
@@ -547,7 +489,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Branch,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.branch_optimization,
         set_flag: |o| o.branch_optimization = true,
         apply: ApplyFn::Grow(apply_branch_optimization),
@@ -558,7 +499,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::BlockOrder,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.block_reordering,
         set_flag: |o| o.block_reordering = true,
         apply: ApplyFn::Grow(apply_block_reordering),
@@ -569,7 +509,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.slot_promote_tell,
         set_flag: |o| o.slot_promote_tell = true,
         apply: ApplyFn::Grow(apply_slot_promote_tell),
@@ -580,7 +519,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.ssa_gvn,
         set_flag: |o| o.ssa_gvn = true,
         apply: ApplyFn::Grow(apply_ssa_gvn),
@@ -593,8 +531,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "jump_thread",
     "dead_block",
     "stack_dce",
-    "mem_fwd",
-    "dead_store",
     "canon",
     "algebraic",
     "instcombine",
@@ -641,8 +577,6 @@ mod tests {
                 "jump_thread",
                 "dead_block",
                 "stack_dce",
-                "mem_fwd",
-                "dead_store",
                 "canon",
                 "algebraic",
                 "instcombine",

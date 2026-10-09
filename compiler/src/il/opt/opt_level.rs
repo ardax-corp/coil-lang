@@ -17,7 +17,7 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// DCE, jump threading, store-to-load forwarding. Inlining stays modest.
+    /// DCE and jump threading. Inlining stays modest.
     Basic,
     /// All currently-on production passes. Backward-compatible default.
     #[default]
@@ -48,9 +48,8 @@ impl OptLevel {
 
     /// `OptimizeOptions` for this level.
     ///
-    /// Pass flags are derived from [`Self::pass_names`] via the driver table
-    /// (`dead_store` sets `mem_fwd`). Driver knobs (iteration cap, …) are not
-    /// pass names.
+    /// Pass flags are derived from [`Self::pass_names`] via the driver table.
+    /// Driver knobs (iteration cap, …) are not pass names.
     pub fn options(self) -> OptimizeOptions {
         use super::driver::PRODUCTION_PASSES;
         let mut o = base_knobs(self);
@@ -124,7 +123,6 @@ fn all_off() -> OptimizeOptions {
         jump_thread: false,
         dead_block: false,
         stack_dce: false,
-        mem_fwd: false,
         slot_promote: false,
         tos_carry: false,
         canon: false,
@@ -183,7 +181,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.jump_thread,
         o.dead_block,
         o.stack_dce,
-        o.mem_fwd,
         o.slot_promote,
         o.tos_carry,
         o.canon,
@@ -266,10 +263,9 @@ mod tests {
     }
 
     #[test]
-    fn basic_enables_dce_and_forwarding() {
+    fn basic_enables_dce_and_jump_threading() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
-        assert!(o.mem_fwd);
         assert!(!o.licm && !o.slot_promote && !o.ssa_gvn && !o.escape_analysis);
     }
 

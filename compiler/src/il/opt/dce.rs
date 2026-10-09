@@ -123,39 +123,6 @@ fn stack_dce_once(ops: &mut Vec<IlOp>) -> bool {
     changed
 }
 
-/// `StorePop s; Load s` → `Dup; StorePop s` when the value stays on stack after
-/// store. Refused when SP-in `h <= s + 1`: the store extends `tell` to `s + 1`,
-/// so a remaining Dup copy is no longer TOS and later pops (e.g. `CONST; CmpJmpf`)
-/// eat the local — classic shared-stack hazard after nested CALL returns
-/// (`tell == frame_base + 1`, store to a higher slot).
-pub(super) fn mem_fwd(ops: &mut [IlOp], entry_sp: i32) {
-    let sp = crate::il::sp::analyze_at(ops, entry_sp);
-    let mut i = 0;
-    while i + 1 < ops.len() {
-        let slot_loc = {
-            match (&ops[i], &ops[i + 1]) {
-                (IlOp::StorePop { slot: s0, loc }, IlOp::Load { slot: s1, .. }) if s0 == s1 => {
-                    Some((*s0, *loc))
-                }
-                _ => None,
-            }
-        };
-        if let Some((slot, loc)) = slot_loc {
-            let refuse = match sp.sp_before(i) {
-                crate::il::sp::Sp::Known(h) => h <= slot as i32 + 1,
-                crate::il::sp::Sp::Unknown => true,
-            } || mem_fwd_load_feeds_index(ops, i + 1);
-            if !refuse {
-                ops[i] = IlOp::Dup { loc };
-                ops[i + 1] = IlOp::StorePop { slot, loc };
-                i += 2;
-                continue;
-            }
-        }
-        i += 1;
-    }
-}
-
 fn slot_used_by(op: &IlOp, slot: u32) -> bool {
     match op {
         IlOp::Load { slot: s, .. } | IlOp::LoadReturnSlot { slot: s, .. } => *s == slot,
@@ -300,22 +267,6 @@ fn try_mark_dead_store(
         }
         _ => {}
     }
-}
-
-/// True when `Load` at `load_idx` is the tuple-destructure reload (`Const; Index`).
-pub(super) fn mem_fwd_load_feeds_index(ops: &[IlOp], load_idx: usize) -> bool {
-    matches!(ops.get(load_idx + 1), Some(IlOp::Const { .. }))
-        && matches!(
-            ops.get(load_idx + 2),
-            Some(IlOp::Index { .. } | IlOp::IndexUnchecked { .. })
-        )
-}
-
-/// Drop `StorePop s` (and a preceding dead producer / Dup) when `s` is unused
-/// before the next store to `s` or a control/effect barrier. Straight-line only.
-#[cfg(test)]
-pub(super) fn dead_store(ops: &mut Vec<IlOp>) {
-    dead_store_at(ops, 0);
 }
 
 /// Cursor-seeded dead-store elimination for an IL function body.

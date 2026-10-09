@@ -1,134 +1,11 @@
     use super::*;
-    use crate::il::opt::{OptimizeOptions, optimize_at, optimize_per_func};
+    use crate::il::opt::{OptimizeOptions, optimize_per_func};
     use crate::il::opt::cfg::{eliminate_dead_blocks, invert_branch_over_jump, jump_thread};
-    use crate::il::opt::dce::{dead_store, dead_store_at, mem_fwd, stack_dce};
+    use crate::il::opt::dce::{dead_store_at, stack_dce};
     use common::{Byte, Instruction};
 
     fn is_insn(op: &IlOp, i: Instruction) -> bool {
         op.as_encode_byte().is_some_and(|b| *b.bytecode() == i)
-    }
-
-    #[test]
-    fn mem_fwd_refuses_when_load_feeds_index() {
-        let mut ops = vec![
-            IlOp::StorePop {
-                slot: 5,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Load {
-                slot: 5,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Const {
-                imm: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Index {
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Return {
-                loc: common::DebugLoc::unknown(), ret_words: 1,},
-        ];
-        mem_fwd(&mut ops, 0);
-        assert!(matches!(ops[0], IlOp::StorePop { slot: 5, .. }));
-        assert!(matches!(ops[1], IlOp::Load { slot: 5, .. }));
-    }
-
-    #[test]
-    fn mem_fwd_refuses_when_tos_aliases_store_slot() {
-        let mut ops = vec![
-            IlOp::Const {
-                imm: 1,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Const {
-                imm: 2,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::MakeTuple {
-                kinds: 0,
-                arity: 2,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::StorePop {
-                slot: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Load {
-                slot: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Const {
-                imm: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Index {
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Return {
-                loc: common::DebugLoc::unknown(), ret_words: 1,},
-        ];
-        let before = ops.clone();
-        mem_fwd(&mut ops, 0);
-        assert!(matches!(ops[3], IlOp::StorePop { slot: 0, .. }));
-        assert!(matches!(ops[4], IlOp::Load { slot: 0, .. }));
-        assert_eq!(ops.len(), before.len());
-    }
-
-    /// After nested CALL return (`tell == frame_base + 1`), StorePop to a higher
-    /// slot must not become Dup;Store — tell extension makes later operand pops
-    /// consume the local (e.g. `let x = f(); if x == k`).
-    #[test]
-    fn mem_fwd_refuses_store_above_tos_after_call_return_height() {
-        let loc = common::DebugLoc::unknown();
-        // Model post-return height 1 (return value only) then store to slot 3.
-        let mut ops = vec![
-            IlOp::Const { imm: 4, loc },
-            IlOp::StorePop { slot: 3, loc },
-            IlOp::Load { slot: 3, loc },
-            IlOp::Const { imm: 999999, loc },
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse,
-                target: Label(0),
-                loc,
-                hint: Default::default(),
-            },
-            IlOp::Label(Label(0)),
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        mem_fwd(&mut ops, 0);
-        assert!(
-            matches!(ops[1], IlOp::StorePop { slot: 3, .. }),
-            "StorePop;Load at height 1 to slot 3 must not become Dup;StorePop"
-        );
-        assert!(matches!(ops[2], IlOp::Load { slot: 3, .. }));
-    }
-
-    /// Nested CALL resets height to 1; StorePop to a higher slot must not
-    /// become Dup;Store (arithmetic `1 - arity` would overestimate height).
-    #[test]
-    fn mem_fwd_refuses_post_call_store_that_aliases_tos() {
-        let loc = common::DebugLoc::unknown();
-        let mut ops = vec![
-            IlOp::Load { slot: 0, loc },
-            IlOp::Load { slot: 1, loc },
-            IlOp::Load { slot: 2, loc },
-            IlOp::Entry {
-                kind: crate::il::op::EntryKind::Call,
-                arity: 0,
-                target: Label(0),
-                loc, ret_words: 1,},
-            IlOp::StorePop { slot: 4, loc },
-            IlOp::Load { slot: 4, loc },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        // Deep frame; nullary CALL must not leave modeled height 6.
-        mem_fwd(&mut ops, 5);
-        assert!(
-            matches!(ops[4], IlOp::StorePop { slot: 4, .. }),
-            "must keep StorePop;Load when CALL resets height to 1"
-        );
-        assert!(matches!(ops[5], IlOp::Load { slot: 4, .. }));
     }
 
     #[test]
@@ -1252,21 +1129,6 @@
     }
 
     #[test]
-    fn mem_fwd_store_pop_load_becomes_dup_store() {
-        // Need height before StorePop > slot+1 (cursor-safe Dup;Store).
-        let loc = common::DebugLoc::unknown();
-        let mut ops = vec![
-            IlOp::Const { imm: 7, loc },
-            IlOp::StorePop { slot: 3, loc },
-            IlOp::Load { slot: 3, loc },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        mem_fwd(&mut ops, 5);
-        assert!(matches!(ops[1], IlOp::Dup { .. }));
-        assert!(matches!(ops[2], IlOp::StorePop { slot: 3, .. }));
-    }
-
-    #[test]
     fn dead_store_removes_unused_bin_slot_producer_when_cursor_allows() {
         let loc = common::DebugLoc::unknown();
         let mut ops = vec![
@@ -1368,30 +1230,11 @@
             IlOp::Return {
                 loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
-        dead_store(&mut ops);
+        dead_store_at(&mut ops, 0);
         assert!(
             ops.iter()
                 .any(|op| matches!(op, IlOp::StorePop { slot: 9, .. }))
         );
-    }
-
-    #[test]
-    fn mem_fwd_skips_mismatched_slots() {
-        let mut ops = vec![
-            IlOp::StorePop {
-                slot: 1,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Load {
-                slot: 2,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Return {
-                loc: common::DebugLoc::unknown(), ret_words: 1,},
-        ];
-        let before = ops.clone();
-        mem_fwd(&mut ops, 0);
-        assert!(ops == before);
     }
 
     #[test]
@@ -1443,7 +1286,7 @@
             IlOp::Return {
                 loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
-        dead_store(&mut ops);
+        dead_store_at(&mut ops, 0);
         assert!(
             ops.iter()
                 .any(|op| matches!(op, IlOp::StorePop { slot: 0, .. }))
@@ -1562,63 +1405,11 @@
             IlOp::Return {
                 loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
-        dead_store(&mut ops);
+        dead_store_at(&mut ops, 0);
         assert!(
             ops.iter()
                 .any(|op| matches!(op, IlOp::StorePop { slot: 3, .. }))
         );
-    }
-
-    #[test]
-    fn mem_fwd_then_dead_store_via_optimize() {
-        // StorePop;Load same slot → Dup;StorePop (needs h > slot+1), then dead.
-        let loc = common::DebugLoc::unknown();
-        let mut ops = vec![
-            IlOp::Const { imm: 5, loc },
-            IlOp::StorePop { slot: 1, loc },
-            IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        optimize_at(
-            &mut ops,
-            &OptimizeOptions {
-                jump_thread: false,
-                dead_block: false,
-                stack_dce: false,
-                mem_fwd: true,
-                slot_promote: false,
-                tos_carry: false,
-                canon: false,
-                algebraic: false,
-                instcombine: false,
-                local_cse: false,
-                licm: false,
-                loop_bounds: false,
-                strength_reduce: false,
-                return_convoy: false,
-                clone_shared_return: false,
-                bin_join_convoy: false,
-                multi_op_join_convoy: false,
-                invert_guard_branch: false,
-                slot_promote_tell: false,
-                loop_unroll: false,
-                loop_unroll_factor: 8,
-                invariant_store_elim: false,
-                ssa_gvn: false,
-                escape_analysis: false,
-                branch_optimization: false,
-                block_reordering: false,
-                collect_stats: false,
-                pure_call_ctx: None,
-                mir_specialize: false,
-            },
-            3,
-            &mut Vec::new(),
-        );
-        assert!(!ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
-        assert!(!ops.iter().any(|op| matches!(op, IlOp::Load { .. })));
-        assert!(matches!(ops[0], IlOp::Const { imm: 5, .. }));
-        assert!(matches!(ops[1], IlOp::Return { .. }));
     }
 
     fn load_const_add_suffix() -> Vec<IlOp> {

@@ -22,8 +22,6 @@ pub struct OptimizeOptions {
     pub dead_block: bool,
     /// Drop redundant `DUPLICATE; POP` and `LOAD s; StorePop s`.
     pub stack_dce: bool,
-    /// `StorePop s; Load s` → `Dup; StorePop s`; dead-store elimination.
-    pub mem_fwd: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
     /// Delay `STORE t` across slot-addressed ops so `LOAD t; STORE s` pops TOS.

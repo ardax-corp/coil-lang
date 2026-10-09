@@ -1210,7 +1210,6 @@ mod tests {
                 jump_thread: false,
                 dead_block: false,
                 stack_dce: false,
-                mem_fwd: false,
                 slot_promote: false,
                 tos_carry: false,
                 canon: false,

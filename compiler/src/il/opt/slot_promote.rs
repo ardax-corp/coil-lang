@@ -1557,7 +1557,7 @@ mod tell {
                     .collect();
                 let refs = references.get(slot).map(Vec::as_slice).unwrap_or_default();
                 // A store with no reader is dead code, not a promotion — leave it to
-                // `dead_store`, whose cursor proof is the one that owns that call.
+                // `dead_store_at`, whose cursor proof is the one that owns that call.
                 let promotable = refs.iter().any(|r| drop.contains(r))
                     && refs
                         .iter()
@@ -1569,7 +1569,7 @@ mod tell {
             // After Seek-normalize the header is Known, so in-loop `STORE t` at
             // tell `t+1` is a no-op write. Named-slot readers keep working
             // because the push already landed on `t`. Straight-line surviving
-            // readers stay with TailCall promotion / `dead_store`.
+            // readers stay with TailCall promotion / `dead_store_at`.
             let loops = find_natural_loops(ops);
             for (idx, _) in &self_stores {
                 if drop.contains(idx) {
@@ -1659,7 +1659,7 @@ mod tell {
             assert_eq!(counts(&ops), (1, 1));
         }
 
-        /// A store with no reader is dead code, not a promotion — `dead_store` owns it.
+        /// A store with no reader is dead code, not a promotion — `dead_store_at` owns it.
         #[test]
         fn store_to_a_slot_nobody_reads_is_left_alone() {
             let mut ops = vec![
