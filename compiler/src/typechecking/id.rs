@@ -331,9 +331,13 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
                 visit(m);
             }
         }
-        Expression::Class { fields, .. } => {
+        Expression::Class { fields, invariants, .. } => {
             for f in fields {
                 visit(f);
+            }
+            // Typed after the fields (`infer_class_invariants`).
+            for c in invariants {
+                visit(&c.expr);
             }
         }
 

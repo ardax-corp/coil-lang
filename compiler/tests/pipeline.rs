@@ -11703,3 +11703,56 @@ fn main() {
         compiler::ErrorCode::EffectMismatch,
     );
 }
+
+#[test]
+fn class_invariants_hold_after_construction_and_pub_methods() {
+    let src = r#"
+class Account
+    invariant self.balance >= 0, "no overdraft"
+{
+    balance: int,
+}
+
+impl Account {
+    pub static fn open(int start) -> Account {
+        return new Account(start);
+    }
+
+    pub fn deposit(int amount) {
+        self.balance = self.balance + amount;
+    }
+
+    pub fn withdraw(int amount) -> int {
+        // A private helper may break the invariant for a while.
+        self.take(amount + 1);
+        self.balance = self.balance + 1;
+        return self.balance;
+    }
+
+    fn take(int amount) {
+        self.balance = self.balance - amount;
+    }
+}
+
+fn main() {
+    let a = Account::open(10);
+    a.deposit(5);
+    assert(a.withdraw(15) == 0);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    let out = run_contracts_src(&src.replace("CASE", "a.withdraw(1);"), All);
+    assert!(
+        out.contains("contract violated: invariant self.balance >= 0 (\"no overdraft\") in Account::withdraw"),
+        "got {out:?}"
+    );
+    let out = run_contracts_src(&src.replace("CASE", "let _ = Account::open(-1);"), All);
+    assert!(out.contains("in new Account"), "got {out:?}");
+    assert_eq!(run_contracts_src(&src.replace("CASE", "a.withdraw(1);"), Requires), "");
+    assert_compile_fails(
+        "class C\n    invariant self.n\n{\n    pub n: int,\n}\n\nfn main() {\n    let _ = new C(1);\n}\n",
+        compiler::ErrorCode::TypeMismatch,
+    );
+}

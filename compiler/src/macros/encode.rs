@@ -339,6 +339,7 @@ pub fn type_decl(w: &mut Wire, node: &Output<'_>, source: &str, module: &str, st
             name,
             type_params,
             fields,
+            ..
         } => ("class", name, type_params, attrs, docs, class_fields(fields), None, String::new()),
         Expression::EnumDecl {
             docs,

@@ -1324,13 +1324,22 @@ impl<'s> Formatter<'s> {
                 name,
                 type_params,
                 fields,
+                invariants,
             } => {
                 self.fmt_docs(docs);
                 self.fmt_attrs(attrs);
                 self.push_str("class ");
                 self.push_str(name);
                 self.fmt_type_params(type_params);
-                self.fmt_comma_body(fields);
+                if invariants.is_empty() {
+                    self.fmt_comma_body(fields);
+                } else {
+                    // The brace goes on its own line under the clauses.
+                    self.fmt_contracts(invariants);
+                    let at = self.out.len();
+                    self.fmt_comma_body(fields);
+                    self.out.remove(at);
+                }
             }
             Expression::Field {
                 docs,

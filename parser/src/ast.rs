@@ -82,7 +82,8 @@ impl Display for EffectDecl<'_> {
 pub enum ContractKind {
     Requires,
     Ensures,
-    /// On a loop: holds before every test of the loop's condition.
+    /// On a loop: holds before every test of the loop's condition. On a
+    /// class: holds after construction and after every `pub` method.
     Invariant,
     /// On a `while` loop: a non-negative `int` that every iteration lowers.
     Decreases,
@@ -565,6 +566,8 @@ pub enum Expression<'expr> {
         name: &'expr str,
         type_params: Vec<TypeParam<'expr>>,
         fields: Vec<Output<'expr>>,
+        /// `invariant` clauses between the header and the fields.
+        invariants: Vec<Contract<'expr>>,
     },
     Implementation {
         /// Unused trait slot (`""` for inherent impls).
@@ -1642,6 +1645,7 @@ impl<'a> Display for Expression<'a> {
                 name,
                 type_params,
                 fields,
+                invariants,
             } => {
                 let tp = if type_params.is_empty() {
                     String::new()
@@ -1650,12 +1654,14 @@ impl<'a> Display for Expression<'a> {
                 };
                 let attr_prefix = format!("{}{}", fmt_docs(docs), fmt_attrs(attrs));
                 let fs: Vec<String> = fields.iter().map(|f| f.1.to_string()).collect();
+                let inv: String = invariants.iter().map(|c| format!(" {c}")).collect();
                 write!(
                     f,
-                    "{}class {}{} {{ {} }}",
+                    "{}class {}{}{} {{ {} }}",
                     attr_prefix,
                     name,
                     tp,
+                    inv,
                     fs.join(", ")
                 )
             }

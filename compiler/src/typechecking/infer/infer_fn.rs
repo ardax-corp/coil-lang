@@ -162,6 +162,37 @@ impl Checker {
         }
     }
 
+    /// A class `invariant` is a `bool` over `self`, read with the class's
+    /// own (private) fields visible.
+    pub(super) fn infer_class_invariants(
+        &mut self,
+        key: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        invariants: &[Contract<'_>],
+    ) {
+        let self_ty = if type_params.is_empty() {
+            Ty::Con(key.to_string())
+        } else {
+            let frame = self.type_params_in_scope.last().cloned().unwrap_or_default();
+            let args = type_params
+                .iter()
+                .map(|tp| frame.get(tp.name).map_or_else(|| Ty::Var(self.counter.fresh()), |v| Ty::Var(*v)))
+                .collect();
+            Ty::App(Box::new(Ty::Con(key.to_string())), args)
+        };
+        let prev_owner = self.impl_owner.replace(key.to_string());
+        self.push_scope();
+        self.env.insert_top("self".to_string(), Scheme::mono(self_ty));
+        for c in invariants {
+            let prev_expected = self.current_expected.take();
+            let ty = self.infer(&c.expr);
+            self.current_expected = prev_expected;
+            self.unify(&crate::typechecking::ty::boolean(), &ty, &c.span.into_range(), c.kind.keyword());
+        }
+        self.pop_scope();
+        self.impl_owner = prev_owner;
+    }
+
     /// A loop's `invariant` is a `bool` and its `decreases` an `int`, in the
     /// scope around the loop (a `for` binding is not visible).
     pub(super) fn infer_loop_contracts(&mut self, contracts: &[Contract<'_>]) {

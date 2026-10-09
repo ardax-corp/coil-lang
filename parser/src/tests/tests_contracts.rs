@@ -88,3 +88,17 @@ fn loops_take_invariant_and_decreases() {
     assert!(Pratt::default().parse("fn f() invariant true { }").is_err());
     assert!(Pratt::default().parse("fn f() { while true requires true { } }").is_err());
 }
+
+#[test]
+fn classes_take_invariants() {
+    let src = "class Account\n    invariant self.balance >= 0, \"no overdraft\"\n{\n    balance: int,\n}\n";
+    assert_eq!(crate::format_source(src).expect("format"), src);
+    let out = Pratt::default().parse(src).expect("parse failed");
+    let Expression::Program(items) = *out.1 else { panic!("expected program") };
+    let Expression::Class { invariants, .. } = items[0].1.as_ref() else { panic!("expected a class") };
+    assert_eq!(invariants.len(), 1);
+    assert_eq!(invariants[0].text, "self.balance >= 0");
+    let plain = "class P {\n    x: int,\n}\n";
+    assert_eq!(crate::format_source(plain).expect("format"), plain);
+    assert!(Pratt::default().parse("class C requires true { x: int }").is_err());
+}

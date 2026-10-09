@@ -472,7 +472,12 @@ impl<'a> ModuleEffects<'a> {
                 continue;
             }
             let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
-            out.extend(self.contract_violations(i));
+            // A class invariant is checked in many bodies; report it once.
+            for v in self.contract_violations(i) {
+                if !out.iter().any(|o: &Violation| o.span == v.span && o.message == v.message) {
+                    out.push(v);
+                }
+            }
             let visible = self.summaries[i].visible;
             if let Some(d) = &body.declared
                 && let Some(v) = self.violation(i, visible, d, || format!("`{local}` is declared `{}`", d.text), d.span)
@@ -498,7 +503,7 @@ impl<'a> ModuleEffects<'a> {
         out
     }
 
-    /// A `requires` / `ensures` clause that does more than read memory: a
+    /// A contract clause that does more than read memory: a
     /// check must not change what the program does.
     fn contract_violations(&self, index: usize) -> Vec<Violation> {
         let body = &self.cx.module.bodies[index];

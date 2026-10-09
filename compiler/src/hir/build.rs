@@ -38,12 +38,15 @@ use crate::typechecking::ty::{
 /// Build HIR for every body in `ast` (a checked module's `Program`).
 /// `module` is the namespace path codegen compiles it under (`""` for the
 /// entry file); it prefixes body names and finds the checker's schemes.
-pub fn build_module(checker: &Checker, sidecar: &TypedSidecar, module_path: &str, ast: &Output<'_>) -> HirModule {
+pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: &str, ast: &'a Output<'a>) -> HirModule {
     let mut module = HirModule::default();
+    let mut invariants = HashMap::new();
+    class_invariants(ast, &mut invariants);
     let mut cx = Cx {
         checker,
         sidecar,
         module: &mut module,
+        invariants,
     };
     let mut top = BodyBuilder::new(&join(module_path, "<top>"), BodyKind::TopLevel, span_of(ast));
     let mut top_stmts = Vec::new();
@@ -85,10 +88,32 @@ fn span_of(node: &Output<'_>) -> Span {
     (node.0.start, node.0.end)
 }
 
-struct Cx<'c, 'm> {
+struct Cx<'c, 'm, 'ast> {
     checker: &'c Checker,
     sidecar: &'c TypedSidecar,
     module: &'m mut HirModule,
+    /// Each class's `invariant` clauses, by class name.
+    invariants: HashMap<String, Vec<&'ast Contract<'ast>>>,
+}
+
+/// Collect the `invariant` clauses of every class in `node`.
+fn class_invariants<'a>(node: &'a Output<'a>, out: &mut HashMap<String, Vec<&'a Contract<'a>>>) {
+    match node.1.as_ref() {
+        Expression::Class { name, invariants, .. } => {
+            if !invariants.is_empty() {
+                out.insert(name.to_string(), invariants.iter().collect());
+            }
+        }
+        Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
+            for item in items {
+                class_invariants(item, out);
+            }
+        }
+        Expression::Expr(inner) | Expression::Statement(inner) | Expression::Group(inner) | Expression::Module(_, inner) => {
+            class_invariants(inner, out)
+        }
+        _ => {}
+    }
 }
 
 /// One body under construction, plus its lexical scopes.
@@ -237,7 +262,7 @@ fn is_result_construct(node: &Output<'_>, ok_is_result: bool) -> bool {
     }
 }
 
-impl<'c, 'm> Cx<'c, 'm> {
+impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     // ----- facts -------------------------------------------------------
 
     fn ty_of(&self, node: &Output<'_>) -> Option<Ty> {
@@ -355,7 +380,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             Expression::Function { name, .. } => {
                 let full = join(prefix, name);
                 let keys = vec![full.clone(), name.to_string()];
-                self.function(node, &full, BodyKind::Function, None, &keys);
+                self.function(node, &full, BodyKind::Function, None, &keys, &[]);
             }
             Expression::Method(_, inner) => self.items(inner, prefix, top, stmts),
             Expression::Implementation { owner, methods, .. } => {
@@ -363,7 +388,12 @@ impl<'c, 'm> Cx<'c, 'm> {
                     let Some(m) = fn_name(method) else { continue };
                     let full = join(&join(prefix, owner), m);
                     let keys = vec![full.clone(), format!("{owner}::{m}")];
-                    self.function(fn_node(method), &full, BodyKind::Method, Some(owner), &keys);
+                    let public = matches!(method.1.as_ref(), Expression::Method(parser::ast::Visibility::Public, _));
+                    let invariants = match self.invariants.get(*owner) {
+                        Some(inv) if public && m != "drop" => inv.clone(),
+                        _ => Vec::new(),
+                    };
+                    self.function(fn_node(method), &full, BodyKind::Method, Some(owner), &keys, &invariants);
                 }
             }
             Expression::TypeClassImpl {
@@ -400,7 +430,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                         keys.push(fqn.clone());
                     }
                     let full = join(&path, m);
-                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys, &[]);
                     if let Some(fqn) = keys.pop() {
                         let index = self.module.bodies.len() - 1;
                         self.module.instance_fns.insert(fqn, index);
@@ -422,7 +452,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                     let Some(m) = fn_name(method) else { continue };
                     let keys = vec![crate::typechecking::generics::Generics::default_method_fqn(name, m)];
                     let full = join(&join(prefix, name), m);
-                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys, &[]);
                 }
             }
             Expression::TestCase { name, body } => {
@@ -486,7 +516,17 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     /// Build one function body. `owner` is set for inherent methods, whose
     /// `self` is implicit; `keys` are the checker's names for its scheme.
-    fn function(&mut self, node: &Output<'_>, full: &str, kind: BodyKind, owner: Option<&str>, keys: &[String]) {
+    /// `invariants` are the owning class's clauses, checked on every return
+    /// like an `ensures` (a `pub` instance method's).
+    fn function(
+        &mut self,
+        node: &Output<'_>,
+        full: &str,
+        kind: BodyKind,
+        owner: Option<&str>,
+        keys: &[String],
+        invariants: &[&Contract<'_>],
+    ) {
         let Expression::Function {
             is_coro,
             is_static,
@@ -559,10 +599,14 @@ impl<'c, 'm> Cx<'c, 'm> {
             .filter(|c| c.kind == ContractKind::Requires && level.checks_requires())
             .map(|c| self.contract_check(&mut b, c, full))
             .collect();
-        let ensures: Vec<&Contract<'_>> = contracts
+        let mut ensures: Vec<&Contract<'_>> = contracts
             .iter()
             .filter(|c| c.kind == ContractKind::Ensures && level.checks_ensures() && !is_coro)
             .collect();
+        if level.checks_ensures() && !is_coro && !is_static {
+            ensures.extend(invariants.iter().copied());
+            b.body.contract_spans.extend(invariants.iter().map(|c| (c.span.start, c.span.end)));
+        }
         let mut entry = requires;
         entry.extend(self.old_values(&mut b, &ensures));
         let root = self.expr(&mut b, body);
@@ -1113,7 +1157,28 @@ impl<'c, 'm> Cx<'c, 'm> {
                     other => other.to_string(),
                 };
                 let args = args.as_ref().map_or_else(Vec::new, |a| self.exprs(b, a));
-                self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args })
+                let invariants = match self.invariants.get(&name) {
+                    Some(inv) if super::contract_level().checks_ensures() => inv.clone(),
+                    _ => Vec::new(),
+                };
+                let fname = format!("new {name}");
+                let made = self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args });
+                if invariants.is_empty() {
+                    return made;
+                }
+                // `{ let self = new C(…); invariants; self }`
+                b.body.contract_spans.extend(invariants.iter().map(|c| (c.span.start, c.span.end)));
+                let span = span_of(node);
+                let ty = b.body.exprs[made.0 as usize].ty.clone();
+                b.scopes.push(HashMap::new());
+                let this = b.local("self", ty.clone(), LocalKind::Let);
+                let mut stmts = vec![self.synth(b, span, HirKind::Let { local: this, init: Some(made) }, Some(coil_ty::unit()))];
+                for c in &invariants {
+                    stmts.push(self.contract_check(b, c, &fname));
+                }
+                b.scopes.pop();
+                let tail = self.synth(b, span, HirKind::Local(this), ty.clone());
+                self.synth(b, span, HirKind::Block { stmts, tail: Some(tail) }, ty)
             }
 
             E::Access(base, field) => {
@@ -1211,7 +1276,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             E::Function { name, .. } => {
                 let full = join(&b.body.name, name);
                 let keys = vec![full.clone(), name.to_string()];
-                self.function(node, &full, BodyKind::Function, None, &keys);
+                self.function(node, &full, BodyKind::Function, None, &keys, &[]);
                 self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit()))
             }
             E::Class { .. } | E::EnumDecl { .. } | E::TypeAlias { .. } | E::Use { .. } => {

@@ -2508,6 +2508,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(keyword!("class"))
             .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
+            .then(self.contracts(CLASS_CONTRACTS))
             .then(
                 self.field_decl()
                     .separated_by(op!(','))
@@ -2515,7 +2516,7 @@ impl<'pratt> Pratt<'pratt> {
                     .collect::<Vec<_>>()
                     .delimited_by(op!("{"), op!("}")),
             )
-            .map_with(|(((((docs, attrs), _), name), type_params), fields), e| {
+            .map_with(|((((((docs, attrs), _), name), type_params), invariants), fields), e| {
                 (
                     e.span(),
                     Box::new(Expression::Class {
@@ -2524,6 +2525,7 @@ impl<'pratt> Pratt<'pratt> {
                         name,
                         type_params,
                         fields,
+                        invariants,
                     }),
                 )
             })
@@ -3755,6 +3757,7 @@ fn found_text(c: char) -> String {
 const FN_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Requires, ast::ContractKind::Ensures];
 const WHILE_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Invariant, ast::ContractKind::Decreases];
 const FOR_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Invariant];
+const CLASS_CONTRACTS: &[ast::ContractKind] = &[ast::ContractKind::Invariant];
 
 const EXPRESSION_LABELS: &[&str] = &[
     "array",

@@ -3198,12 +3198,16 @@ impl Checker {
                 name,
                 type_params,
                 fields,
+                invariants,
                 ..
             } => {
                 let key = self.qualify_module_name(name);
                 let _ = self.register_generic_type_ctor(&key, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
                 self.register_class(name, fields, &range);
+                if !invariants.is_empty() {
+                    self.infer_class_invariants(&key, type_params, invariants);
+                }
                 self.pop_type_params_for_type_parsing(pushed);
                 unit_ty()
             }
