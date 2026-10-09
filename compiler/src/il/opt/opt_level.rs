@@ -130,7 +130,6 @@ fn all_off() -> OptimizeOptions {
         licm: false,
         loop_bounds: false,
         clone_shared_return: false,
-        slot_promote_tell: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
         ssa_gvn: false,
@@ -180,7 +179,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.licm,
         o.loop_bounds,
         o.clone_shared_return,
-        o.slot_promote_tell,
         o.loop_unroll,
         o.ssa_gvn,
         o.escape_analysis,
@@ -270,7 +268,7 @@ mod tests {
     fn debug_preserves_slots() {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic && o.dead_block);
-        assert!(!o.slot_promote && !o.slot_promote_tell);
+        assert!(!o.slot_promote);
         assert!(!o.escape_analysis && !o.ssa_gvn && !o.loop_unroll);
         assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);

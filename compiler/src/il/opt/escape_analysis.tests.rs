@@ -32,7 +32,6 @@ fn isolated() -> OptimizeOptions {
         licm: false,
         loop_bounds: false,
         clone_shared_return: false,
-        slot_promote_tell: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
         ssa_gvn: false,

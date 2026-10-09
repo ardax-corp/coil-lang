@@ -6,7 +6,7 @@
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
 //! `IlModule::optimize_and_flatten` still defers
-//! `slot_promote_tell` and `ssa_gvn`
+//! `ssa_gvn`
 //! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
 //! in `lower_optimized`.
 
@@ -218,15 +218,6 @@ fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut Pass
     super::block_order::reorder_basic_blocks(ops)
 }
 
-fn apply_slot_promote_tell(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    super::slot_promote::slot_promote_at(ops, ctx.entry_tell);
-    0
-}
-
 /// Production opt passes. Order matches D1 README.
 pub static PRODUCTION_PASSES: &[PassSpec] = &[
     PassSpec {
@@ -370,16 +361,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_block_reordering),
     },
     PassSpec {
-        name: "slot_promote_tell",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.slot_promote_tell,
-        set_flag: |o| o.slot_promote_tell = true,
-        apply: ApplyFn::Grow(apply_slot_promote_tell),
-    },
-    PassSpec {
         name: "ssa_gvn",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -408,7 +389,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "clone_shared_return",
     "branch_optimization",
     "block_reordering",
-    "slot_promote_tell",
     "ssa_gvn",
 ];
 
@@ -446,7 +426,6 @@ mod tests {
                 "clone_shared_return",
                 "branch_optimization",
                 "block_reordering",
-                "slot_promote_tell",
                 "ssa_gvn",
             ]
         );

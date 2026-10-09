@@ -5,7 +5,7 @@
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
 //! [`super::IlModule::optimize_and_flatten`] still defers
-//! `slot_promote_tell` and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
+//! `ssa_gvn` after per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
 //!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
@@ -35,9 +35,6 @@ pub struct OptimizeOptions {
     pub loop_bounds: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
     pub clone_shared_return: bool,
-    /// Drop `LOAD`/`STORE` the shared cursor proves redundant, promoting the
-    /// slot out of the frame. Runs last, after every slot-tracking pass.
-    pub slot_promote_tell: bool,
     /// Full-unroll counted natural loops with a known trip count ≤ 8.
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
@@ -206,7 +203,6 @@ pub(crate) mod escape_analysis;
 mod loop_unroll;
 mod slot_promote;
 
-pub(crate) use slot_promote::slot_promote_at;
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]

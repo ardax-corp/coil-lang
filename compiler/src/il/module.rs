@@ -328,11 +328,7 @@ impl IlModule {
         pool: &mut Vec<u64>,
     ) -> FlatIl {
         let mut per = opts.clone();
-        // GVN reasons about slot defs; promotion removes the store that makes one
-        // visible, so it runs after GVN has seen the body.
-        let run_slot_promote_tell = per.slot_promote_tell;
         let run_ssa_gvn = per.ssa_gvn;
-        per.slot_promote_tell = false;
         per.ssa_gvn = false;
 
         if self.funcs.is_empty() {
@@ -362,9 +358,6 @@ impl IlModule {
                 &mut next_label,
             );
             super::gvn::cfg_gvn_with(&mut body.ops, false);
-            if run_slot_promote_tell {
-                opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
-            }
             if run_ssa_gvn {
                 super::gvn::ssa_gvn(&mut body.ops);
             }
@@ -1591,7 +1584,6 @@ mod tests {
             licm: false,
             loop_bounds: false,
             clone_shared_return: false,
-            slot_promote_tell: true,
             loop_unroll: false,
             loop_unroll_factor: 8,
             ssa_gvn: false,
