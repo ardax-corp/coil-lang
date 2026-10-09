@@ -1155,6 +1155,27 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: SUSPEND,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "task_cond_new",
+        arity: 0,
+        id: 156,
+        effects: SUSPEND,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "task_cond_wait",
+        arity: 1,
+        id: 157,
+        effects: SUSPEND,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "task_cond_notify",
+        arity: 1,
+        id: 158,
+        effects: SUSPEND,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1212,6 +1233,12 @@ pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
 pub const TASK_CANCEL_ID: u16 = 153;
 /// Last cancellation native (`task_shield_exit`).
 pub const TASK_SHIELD_EXIT_ID: u16 = 155;
+/// First wait-condition native (`task_cond_new`); the block runs through
+/// [`TASK_COND_NOTIFY_ID`] (archive minor 34). `HostOp::Task`: a wait
+/// suspends the task until a notify (`task::channel`).
+pub const TASK_COND_NEW_ID: u16 = 156;
+/// Last wait-condition native (`task_cond_notify`).
+pub const TASK_COND_NOTIFY_ID: u16 = 158;
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1259,7 +1286,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 156);
+    assert!(HOST_NATIVES.len() == 159);
+    assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);
+    assert!(HOST_NATIVES[TASK_COND_NOTIFY_ID as usize].id == TASK_COND_NOTIFY_ID);
     assert!(HOST_NATIVES[UNWIND_RESUME_ID as usize].id == UNWIND_RESUME_ID);
     assert!(HOST_NATIVES[TASK_CANCEL_ID as usize].id == TASK_CANCEL_ID);
     assert!(HOST_NATIVES[TASK_SHIELD_EXIT_ID as usize].id == TASK_SHIELD_EXIT_ID);

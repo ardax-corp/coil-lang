@@ -22,7 +22,8 @@ fn total(string a, string b) -> Result<int, TaskError> {
 
 Design and rationale: the task-model spec and the implementation plan
 (steps T0–T5) in the project docs. This page describes what is implemented
-(T1, and T2's unwinding and cancellation).
+(T1, T2's unwinding and cancellation, and T3's channels and waits on other
+threads).
 
 ## Surface
 
@@ -36,6 +37,11 @@ Design and rationale: the task-model spec and the implementation plan
 | `t.cancel()` | Cancels the task (see [Cancellation](#cancellation)); a finished task stays as it is |
 | `task::timeout(int ms, fn () -> T) -> Result<T, TaskError>` | Runs the body as a task, cancelled after `ms`: `Err(TaskError::TimedOut)` if the deadline came first |
 | `task::shield(fn () -> T) -> T` | Runs a section a cancel waits for instead of interrupting |
+| `task::channel<T>(int capacity) -> Channel<T>` | Bounded queue between tasks (see [Channels](#channels-and-other-threads)) |
+| `ch.send(T)` / `ch.recv()` | Wait while full / empty (suspension points); `Err(ChannelError::Closed)` after `ch.close()` |
+| `ch.try_send(T)` / `ch.try_recv()` | Never wait: `Err(ChannelError::Full)` / `Err(ChannelError::Empty)` |
+| `task::blocking(fn () -> T) -> Result<T, ThreadError>` | Runs the function on a CPU worker thread; only this task waits |
+| `task::blocking_with(fn (A) -> T, A) -> Result<T, ThreadError>` | Same, with one sendable argument |
 | `TaskError` | `Cancelled`, `Panicked(string)`, `TimedOut` |
 
 Closures passed to `spawn` share the heap: they capture locals, classes and
@@ -44,9 +50,10 @@ Closures passed to `spawn` share the heap: they capture locals, classes and
 `task` is an embedded Coil module
 ([`compiler/src/prelude/task.hy`](../../compiler/src/prelude/task.hy)), like
 `macro`. It wraps VM natives from virtual `prelude::task`
-(HostInvoke **144–151**, archive minor 32, and **153–155** `task_cancel` /
-`task_shield_enter` / `task_shield_exit`, archive minor 33), which the VM
-runs itself (`HostOp::Task`) because they can switch tasks.
+(HostInvoke **144–151**, archive minor 32, **153–155** `task_cancel` /
+`task_shield_enter` / `task_shield_exit`, archive minor 33, and **156–158**
+`task_cond_new` / `task_cond_wait` / `task_cond_notify`, archive minor 34),
+which the VM runs itself (`HostOp::Task`) because they can switch tasks.
 
 ## Suspension points
 
@@ -56,7 +63,11 @@ A task switch happens only at:
    `wait_writable`, so every `io::sync` adapter), and `Stream.park`;
 2. `task::sleep`, and `clock::sleep_ms` inside a scope;
 3. `join` on an unfinished task, and the end of a scope with unfinished children;
-4. `task::yield_now`.
+4. `task::yield_now`;
+5. `send` on a full / `recv` on an empty `task::channel`;
+6. a wait on another OS thread: `thread::recv`, `thread::join`,
+   `thread::with_lock` / `thread::lock` on a held mutex, and so
+   `task::blocking`.
 
 Nothing else switches: no preemption. A CPU loop without a suspension point
 runs until it ends.
@@ -134,11 +145,48 @@ Implementation: [`machine/src/vm_unwind.rs`](../../machine/src/vm_unwind.rs).
 When every task waits on another task (a join cycle) and no IO or timer can
 wake one, the waiting `join` / scope end panics with `task deadlock`.
 
+## Channels and other threads
+
+`task::channel<T>(capacity)` is a bounded FIFO between tasks of one VM. It
+is an ordinary Coil class in the `task` module (a ring of `Option<T>`), so
+values are shared, not copied. A full `send` and an empty `recv` wait on a
+*wait condition*: `task_cond_wait` blocks the task on a condition id
+(`Block::Cond`), `task_cond_notify` makes every task waiting on it ready,
+and the waiter checks again. `close` notifies both sides. Waiting with no
+other task that could notify (outside a scope, or every task blocked) is a
+`task deadlock` panic.
+
+Waits on another OS thread suspend only the waiting task. Under a scheduler
+that can switch, the VM arms a thread-local *waiter* (the scheduler's
+`TaskWaker` and a fresh key) around every native call. A `thread` native
+that would block registers that waiter with the object it waits on (a
+channel's queue, a `JoinState`, a mutex) under the lock the other side
+takes to release it, and returns without a result; the VM then suspends
+the task at the `HostInvoke` itself, its arguments still on the stack
+(`Block::Thread`, `Wake::Retry`). The releasing thread (a `send`, a
+`close`, the end of a spawned thread, an unlock) posts every registered
+key; the scheduler takes posted keys when it looks for work and runs the
+`HostInvoke` again, which now finds its value, or registers again.
+
+While only threads can wake a task, the scheduler first runs queued jobs of
+the CPU pool itself (`Reactor::help_local_once`): with one worker
+(`CI=1`), the spawned thread may be a job queued on the very worker that
+waits. With nothing to run it sleeps on the waker; with IO waits too, it
+polls IO in 2 ms slices to notice posted keys.
+
+`task::blocking(work)` is `thread::spawn(work)` followed by that
+task-aware `thread::join`. `thread::spawn` copies a closure's `use`
+captures to the new thread like its argument (the same sendability rules:
+immediates, strings, aggregates of them, channel and lock handles,
+functions); a partial application is not sendable.
+
 ## Limitations
 
-- One OS thread; `thread::spawn` stays the tool for CPU parallelism.
-  `thread::recv` / `join` / `with_lock` called from a task block every task
-  (T3 makes them task-aware).
+- One OS thread runs the tasks; `thread::spawn` and `task::blocking` are
+  the tools for CPU parallelism. `thread::with_read` / `with_write` on a
+  readers-writer lock still block every task.
+- A `thread` wait never counts as a deadlock: another thread may still
+  release it.
 - No detached tasks, no preemption.
 - `task::timeout` reads its task through the natives instead of `join`
   (coil-lang#786), and spawns its timer from a plain `gen fn` (coil-lang#787).

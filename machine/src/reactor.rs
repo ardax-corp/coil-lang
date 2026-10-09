@@ -267,6 +267,23 @@ impl Reactor {
         }
     }
 
+    /// Run one queued job on this thread, this worker's own deque first.
+    /// False when none was queued. A task scheduler waiting for a spawned
+    /// thread helps this way: on a one-worker pool the job may sit in the
+    /// deque of the very worker that waits.
+    pub fn help_local_once(self: &Arc<Self>) -> bool {
+        let job = with_owned_local_worker(self, |local| self.find_job(local))
+            .flatten()
+            .or_else(|| self.steal_job());
+        match job {
+            Some(job) => {
+                run_help_job(self, job);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Block until `state` completes, helping run stolen jobs meanwhile.
     pub fn wait_join(self: &Arc<Self>, state: &JoinState) -> Result<PortableValue, ThreadErrorTag> {
         if is_pool_worker() {

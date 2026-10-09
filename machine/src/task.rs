@@ -72,6 +72,22 @@ pub(crate) enum Block {
     Sleep,
     /// Cancelled: waits for the tasks of its scopes to stop before it unwinds.
     Cancel,
+    /// `task_cond_wait`: until a `task_cond_notify` of this condition.
+    Cond(CondId),
+    /// A `thread` channel, join or lock another OS thread will release:
+    /// until that thread posts this key to the scheduler's [`TaskWaker`].
+    /// The task then runs the native again.
+    Thread(u64),
+}
+
+pub(crate) type CondId = i64;
+
+/// Next wait-condition id (process wide: a `task::channel` can be made
+/// before the scheduler that waits on it exists).
+static NEXT_COND: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+pub(crate) fn new_cond() -> CondId {
+    NEXT_COND.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The value a task's suspension point returns when it runs again.
@@ -80,6 +96,9 @@ pub(crate) enum Wake {
     Unit,
     Status(i64),
     Io(Result<(), IoErrorTag>, HostEnumLayout),
+    /// Run the suspended HostInvoke again (its arguments are still on the
+    /// stack): a [`Block::Thread`] wait ended.
+    Retry,
 }
 
 pub(crate) struct TaskRec {
@@ -149,6 +168,12 @@ pub(crate) struct Scheduler {
     /// `(deadline, seq, task)`: earliest first.
     pub timers: BinaryHeap<Reverse<(Instant, u64, TaskId)>>,
     pub io_waits: HashMap<WaitToken, TaskId>,
+    /// Tasks waiting in `task_cond_wait`, by condition.
+    pub cond_waits: HashMap<CondId, Vec<TaskId>>,
+    /// [`Block::Thread`] waits by key; other OS threads post keys to `waker`.
+    pub thread_waits: HashMap<u64, TaskId>,
+    pub waker: std::sync::Arc<TaskWaker>,
+    next_thread_key: u64,
     /// Readiness waits of this scheduler's tasks. Its own reactor: test cases
     /// on pool workers share the VM's, and must not take each other's tokens.
     pub reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
@@ -174,6 +199,10 @@ impl Scheduler {
             run_queue: VecDeque::new(),
             timers: BinaryHeap::new(),
             io_waits: HashMap::new(),
+            cond_waits: HashMap::new(),
+            thread_waits: HashMap::new(),
+            waker: std::sync::Arc::new(TaskWaker::default()),
+            next_thread_key: 1,
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
             base_nested,
@@ -347,6 +376,59 @@ impl Scheduler {
             .collect()
     }
 
+    /// The key the next [`Block::Thread`] wait gets.
+    pub(crate) fn peek_thread_key(&self) -> u64 {
+        self.next_thread_key
+    }
+
+    /// Record that `task` waits for `key` (taken from [`Self::peek_thread_key`]).
+    pub(crate) fn add_thread_wait(&mut self, task: TaskId, key: u64) {
+        self.next_thread_key = key + 1;
+        self.thread_waits.insert(key, task);
+    }
+
+    /// Wake every task waiting on condition `cond`.
+    pub(crate) fn notify_cond(&mut self, cond: CondId) {
+        for id in self.cond_waits.remove(&cond).unwrap_or_default() {
+            if self.tasks.get(&id).is_some_and(|r| r.block == Some(Block::Cond(cond))) {
+                self.make_ready(id, Wake::Status(STATUS_OK));
+            }
+        }
+    }
+
+    /// Wake the tasks whose thread waits were posted. True when one was.
+    pub(crate) fn take_posted(&mut self) -> bool {
+        let mut any = false;
+        for key in self.waker.take() {
+            if let Some(id) = self.thread_waits.remove(&key)
+                && self.tasks.get(&id).is_some_and(|r| r.block == Some(Block::Thread(key)))
+            {
+                self.make_ready(id, Wake::Retry);
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Forget the wait behind `block` (the task is cancelled or its timer fired).
+    pub(crate) fn drop_wait(&mut self, id: TaskId, block: Option<Block>) {
+        match block {
+            Some(Block::Io(token, _)) => {
+                self.io_waits.remove(&token);
+                self.reactor.cancel_wait(token);
+            }
+            Some(Block::Cond(cond)) => {
+                if let Some(w) = self.cond_waits.get_mut(&cond) {
+                    w.retain(|t| *t != id);
+                }
+            }
+            Some(Block::Thread(key)) => {
+                self.thread_waits.remove(&key);
+            }
+            _ => {}
+        }
+    }
+
     /// Earliest live timer deadline.
     pub(crate) fn next_deadline(&mut self) -> Option<Instant> {
         while let Some(Reverse((deadline, seq, task))) = self.timers.peek().copied() {
@@ -376,14 +458,107 @@ impl Scheduler {
     }
 }
 
+/// Lets other OS threads wake tasks: a thread that releases what a task
+/// waits on (sends on a `thread` channel, finishes a joined thread, unlocks
+/// a mutex) posts the task's key; the scheduler takes it when it next looks
+/// for work, or wakes up for it while every task waits.
+#[derive(Default)]
+pub(crate) struct TaskWaker {
+    posted: std::sync::Mutex<Vec<u64>>,
+    cvar: std::sync::Condvar,
+}
+
+impl TaskWaker {
+    pub(crate) fn post(&self, key: u64) {
+        let mut p = self.posted.lock().unwrap_or_else(|e| e.into_inner());
+        p.push(key);
+        self.cvar.notify_all();
+    }
+
+    fn take(&self) -> Vec<u64> {
+        std::mem::take(&mut *self.posted.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Block until a key is posted or `timeout` passes.
+    pub(crate) fn wait(&self, timeout: Option<std::time::Duration>) {
+        let p = self.posted.lock().unwrap_or_else(|e| e.into_inner());
+        if !p.is_empty() {
+            return;
+        }
+        match timeout {
+            Some(t) => drop(self.cvar.wait_timeout(p, t)),
+            None => drop(self.cvar.wait(p)),
+        }
+    }
+}
+
+/// Tasks (on any thread's scheduler) waiting for a `thread` object.
+#[derive(Default)]
+pub struct ThreadWaiters(std::sync::Mutex<Vec<(std::sync::Arc<TaskWaker>, u64)>>);
+
+impl ThreadWaiters {
+    /// Register the running task, if the native runs under a scheduler that
+    /// can switch tasks. True when it did: the native then returns
+    /// `Ok(None)` and the VM suspends the task, running the native again
+    /// once the key is posted. Call it while holding the lock that the
+    /// releasing side takes before [`Self::wake_all`], so no wake is lost.
+    pub(crate) fn park_current(&self) -> bool {
+        let Some(waiter) = TASK_WAITER.with(|w| w.borrow().clone()) else {
+            return false;
+        };
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(waiter);
+        THREAD_PARKED.with(|p| p.set(true));
+        true
+    }
+
+    /// [`Self::park_current`] unless `ready()`, checked under this list's
+    /// lock (for a releasing side that only takes that lock). `Some(true)`:
+    /// ready; `Some(false)`: parked; `None`: no scheduler to park on.
+    pub(crate) fn park_unless(&self, ready: impl FnOnce() -> bool) -> Option<bool> {
+        let waiter = TASK_WAITER.with(|w| w.borrow().clone())?;
+        let mut list = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if ready() {
+            return Some(true);
+        }
+        list.push(waiter);
+        THREAD_PARKED.with(|p| p.set(true));
+        Some(false)
+    }
+
+    pub(crate) fn wake_all(&self) {
+        let waiters = std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()));
+        for (waker, key) in waiters {
+            waker.post(key);
+        }
+    }
+}
+
 thread_local! {
     /// Set while child tasks can be switched to on this thread, so natives
     /// that would block in place (`stream_park`) request a park instead.
     static TASKS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The running task's waker and the key its next thread wait gets.
+    static TASK_WAITER: std::cell::RefCell<Option<(std::sync::Arc<TaskWaker>, u64)>> =
+        const { std::cell::RefCell::new(None) };
+    /// A native registered the task with [`ThreadWaiters::park_current`].
+    static THREAD_PARKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(crate) fn set_tasks_active(on: bool) {
-    TASKS_ACTIVE.with(|c| c.set(on));
+/// Around a native the VM runs where it can switch tasks: `Some` arms
+/// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
+pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64)>) {
+    TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
+    TASK_WAITER.with(|w| *w.borrow_mut() = waiter);
+}
+
+/// A native parked the task on a thread object (its result is a dummy).
+pub(crate) fn thread_parked() -> bool {
+    THREAD_PARKED.with(|p| p.get())
+}
+
+/// The native just run parked the task on a thread object (clears the flag).
+pub(crate) fn take_thread_parked() -> bool {
+    THREAD_PARKED.with(|p| p.replace(false))
 }
 
 pub(crate) fn tasks_active() -> bool {
