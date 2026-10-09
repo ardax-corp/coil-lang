@@ -136,7 +136,6 @@ fn all_off() -> OptimizeOptions {
         branch_optimization: false,
         block_reordering: false,
         collect_stats: false,
-        pure_call_ctx: None,
         mir_specialize: false,
     }
 }
@@ -157,8 +156,8 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
-    // every level), scalar replacement (enum / tuple SROA), local CSE and
-    // loop-invariant code motion.
+    // every level), scalar replacement (enum / tuple SROA), local CSE,
+    // loop-invariant code motion and counted-loop bounds proofs.
     o.algebraic = true;
     let standard = matches!(
         level,
@@ -167,6 +166,7 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.escape_analysis = standard;
     o.local_cse = standard;
     o.licm = standard;
+    o.loop_bounds = standard;
     o
 }
 

@@ -30,7 +30,7 @@ pub struct OptimizeOptions {
     pub local_cse: bool,
     /// Loop-invariant code motion in the HIR (`hir::licm`), not an IL pass.
     pub licm: bool,
-    /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
+    /// HIR counted-loop in-bounds proofs (`hir::bounds`).
     pub loop_bounds: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
     pub clone_shared_return: bool,
@@ -51,8 +51,6 @@ pub struct OptimizeOptions {
     pub block_reordering: bool,
     /// Record per-pass counters into [`stats::OptStats`] (COI-131). Default **off**.
     pub collect_stats: bool,
-    /// Pure user `fn` names + entry labels for COI-99 length-proof barriers.
-    pub pure_call_ctx: Option<super::pure_call::PureCallCtx>,
     /// Dense specialize + MIR→LIR body replace. On for every named
     /// opt level, including `-Og` (B8). Debugger-attached compiles
     /// keep this on; the VM debugger steps the reconstruct.

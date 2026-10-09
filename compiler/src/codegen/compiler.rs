@@ -8356,6 +8356,8 @@ impl Compiler {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
+        self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
+        self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -8372,6 +8374,7 @@ impl Compiler {
             }
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
+            self.steady_fns.extend(effects::steady_names(hir, module, &summaries, &self.pure_fns));
             self.program_effects.record(hir, &self.checker, module, &summaries);
         }
         if self.auto_par && auto_par_enabled() {
@@ -8686,33 +8689,6 @@ impl Compiler {
             None
         };
 
-        let label_callees = self
-            .fn_entry_labels
-            .iter()
-            .map(|(name, label)| (label.0, name.clone()))
-            .collect();
-        let offset_callees = self
-            .functions
-            .iter()
-            .map(|(name, off)| (*off as u32, name.clone()))
-            .collect();
-        let stability = self.typed_sidecar.length_stability();
-        // CSE and LICM treat a pure call as a value: two calls become one.
-        // A call that returns a fresh mutable object (array, Vec, class)
-        // is not one, so only scalar- and string-returning fns qualify.
-        let pure_fns = self
-            .pure_fns
-            .iter()
-            .filter(|name| self.checker.fn_return_ty(name).is_some_and(|ty| returns_value(&ty)))
-            .cloned()
-            .collect();
-        self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
-            pure_fns,
-            label_callees,
-            offset_callees,
-            length_stable_fns: stability.fns.clone(),
-            alloc_length_stable: stability.alloc_stable,
-        });
         self.bytecode.set_opt_options(self.opt_options.clone());
         let entry_sps: HashMap<String, u32> = self
             .bytecode
@@ -9098,12 +9074,5 @@ fn cleanup_ranges_for(
     }
     push(lo, pad);
     out
-}
-
-/// A return type whose values are immutable: merging two calls that return
-/// one cannot be observed.
-fn returns_value(ty: &crate::typechecking::ty::Ty) -> bool {
-    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, Ty, UNIT};
-    matches!(ty, Ty::Con(name) if [INT, FLOAT, BOOL, BYTE, STRING, UNIT].contains(&name.as_str()))
 }
 
