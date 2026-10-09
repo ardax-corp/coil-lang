@@ -2536,7 +2536,7 @@ impl Compiler {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     // A tuple or record shows through temps at depth zero
                     // ([`lower::shows_through_temps`]).
-                    if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() {
+                    if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
                     }
                     continue;
@@ -2921,6 +2921,19 @@ impl Compiler {
         let hint = self.bound_display_hint(e.node, e.span.0, e.span.1)?;
         let dict = self.lookup_slot(&format!("__dict{}", hint.dict_index))?;
         Some((dict, hint.method_slot as u32))
+    }
+
+    /// An open type whose `Show` is a bounded generic instance
+    /// (`Show for Tree<T: Show>` inside its own body): the instance's
+    /// shared `show` with the frame's dictionaries, as the AST.
+    fn hir_generic_show(&self, ty: &Ty) -> bool {
+        if matches!(ty, Ty::Var(_) | Ty::Tuple(_) | Ty::Record { .. }) {
+            return false;
+        }
+        let lookup = Self::show_lookup_ty_for_instance(ty);
+        self.find_show_instance(&lookup)
+            .and_then(|instance| instance.method_fqns.get("show").cloned())
+            .is_some_and(|fqn| self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
     }
 
     /// `Show` the value on top of the stack, leaving its string.

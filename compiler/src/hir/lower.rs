@@ -2095,6 +2095,12 @@ impl Walk<'_> {
             HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
                 self.aggregate_arith(id, *operand, None, depth)
             }
+            // A type parameter's word in a shared body: the AST's plain
+            // `NEG` (coil-lang#803: negation has no dictionary entry).
+            HirKind::Un { op: UnOp::Neg, operand } if matches!(self.ty(*operand).map(strip_readonly), Some(Ty::Var(_))) => {
+                self.word(*operand)?;
+                self.value(*operand, depth)
+            }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
                 self.value(*operand, depth)

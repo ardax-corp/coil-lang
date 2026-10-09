@@ -8648,7 +8648,7 @@ impl Compiler {
         Some(Ty::App(Box::new(Ty::Con(name.clone())), args?))
     }
 
-    fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
+    pub(super) fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
         match ty {
             Ty::Sum { name, .. } => Ty::Con(name.clone()),
             Ty::Constructor { owner, .. } => Self::show_lookup_ty_for_instance(owner),
@@ -8712,7 +8712,7 @@ impl Compiler {
 
     /// `Show` instance for a `%v` value: exact, else a generic instance
     /// (`Show for Box<T: Show>` for a `Box<int>`).
-    fn find_show_instance(&self, lookup_ty: &Ty) -> Option<crate::typechecking::generics::InstanceDef> {
+    pub(super) fn find_show_instance(&self, lookup_ty: &Ty) -> Option<crate::typechecking::generics::InstanceDef> {
         let generics = self.checker.generics();
         generics
             .find_instance("Show", std::slice::from_ref(lookup_ty))
