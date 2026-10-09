@@ -703,8 +703,8 @@ pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
 
 /// Connect with an optional millisecond deadline (`ms <= 0` waits forever).
 ///
-/// Under a task scheduler the connect (and name lookup) runs on a helper
-/// thread and only the calling task waits; see [`crate::task::connect_in_task`].
+/// Under a task scheduler (Unix) the connect is non-blocking and only the
+/// calling task waits; see [`crate::task::connect_in_task`].
 pub fn tcp_connect_timeout(
     heap: &mut Heap,
     host: &str,
@@ -716,8 +716,9 @@ pub fn tcp_connect_timeout(
         .map_err(|e| IoErrorTag::from_kind(e.kind()))
 }
 
-/// Resolve and connect, blocking this thread; the stream is non-blocking.
-pub(crate) fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTag> {
+/// The addresses a connect tries, in order. An IP literal parses in place;
+/// a name blocks this thread on the system resolver.
+pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, IoErrorTag> {
     use std::net::ToSocketAddrs;
     if !(0..=65535).contains(&port) {
         return Err(IoErrorTag::InvalidInput);
@@ -738,6 +739,84 @@ pub(crate) fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream
     if addrs.is_empty() {
         return Err(IoErrorTag::NotFound);
     }
+    Ok(addrs)
+}
+
+/// Start a non-blocking connect to `addr`. The connect may still be in
+/// progress: the socket turns writable once it ends, and `take_error` then
+/// says whether it failed.
+#[cfg(unix)]
+pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let os_err = || IoErrorTag::from_kind(io::Error::last_os_error().kind());
+    let domain = match addr {
+        SocketAddr::V4(_) => libc::AF_INET,
+        SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(os_err());
+    }
+    // SAFETY: `fd` is a fresh socket nothing else owns.
+    let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    unsafe {
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return Err(os_err());
+        }
+    }
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    // SAFETY: all-zero is a valid `sockaddr_in` / `sockaddr_in6`.
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let len = match addr {
+        SocketAddr::V4(a) => {
+            let sin = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in) };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = a.port().to_be();
+            sin.sin_addr.s_addr = u32::from_ne_bytes(a.ip().octets());
+            std::mem::size_of::<libc::sockaddr_in>()
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in6) };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = a.port().to_be();
+            sin6.sin6_flowinfo = a.flowinfo();
+            sin6.sin6_addr.s6_addr = a.ip().octets();
+            sin6.sin6_scope_id = a.scope_id();
+            std::mem::size_of::<libc::sockaddr_in6>()
+        }
+    };
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        storage.ss_len = len as u8;
+    }
+    let rc = unsafe {
+        libc::connect(
+            stream.as_raw_fd(),
+            &storage as *const _ as *const libc::sockaddr,
+            len as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(IoErrorTag::from_kind(err.kind()));
+        }
+    }
+    Ok(stream)
+}
+
+/// Resolve and connect, blocking this thread; the stream is non-blocking.
+fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTag> {
+    let addrs = connect_addrs(host, port)?;
     // One absolute deadline across all resolved addresses (not per-addr).
     let deadline = duration_from_timeout_ms(ms).map(|d| Instant::now() + d);
     let mut last_err = IoErrorTag::Other;
@@ -782,7 +861,7 @@ pub(crate) fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream
     Ok(stream)
 }
 
-/// A connected socket from [`connect_socket`] as a `Stream`.
+/// A connected socket as a `Stream`.
 pub(crate) fn alloc_tcp_stream(heap: &mut Heap, stream: TcpStream) -> Result<Value, IoErrorTag> {
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
         .map_err(|e| IoErrorTag::from_kind(e.kind()))

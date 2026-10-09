@@ -253,6 +253,21 @@ impl<const S: usize> Machine<S> {
         self.task_suspend(Some(crate::task::Block::Io(token, layout)), ip, sp);
     }
 
+    /// A native asked to wait for IO readiness with its arguments still on
+    /// the stack (a connect in progress): suspend at the HostInvoke itself, so
+    /// it runs again once the handle is ready or the timeout passed.
+    fn task_suspend_io_retry(&mut self, req: crate::io::IoParkRequest, ip: &mut usize, sp: &mut usize) {
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let token = s.reactor.register_wait(req.handle, req.interest);
+        let current = s.current;
+        s.io_waits.insert(token, current);
+        if let Some(t) = req.timeout {
+            s.add_timer(current, std::time::Instant::now() + t);
+        }
+        *ip -= 1;
+        self.task_suspend_at(Some(crate::task::Block::IoRetry(token)), false, ip, sp);
+    }
+
     /// Suspend the current task at a HostInvoke whose args are consumed.
     /// `block: None` is `yield_now` (ready again at the back of the queue).
     ///
@@ -507,11 +522,12 @@ impl<const S: usize> Machine<S> {
             let s = self.sched.as_mut().expect("scheduler");
             for token in reactor.take_ready() {
                 if let Some(id) = s.io_waits.remove(&token) {
-                    let layout = match s.tasks.get(&id).and_then(|r| r.block) {
-                        Some(Block::Io(_, layout)) => layout,
-                        _ => Default::default(),
+                    let wake = match s.tasks.get(&id).and_then(|r| r.block) {
+                        Some(Block::IoRetry(_)) => Wake::Retry,
+                        Some(Block::Io(_, layout)) => Wake::Io(Ok(()), layout),
+                        _ => Wake::Io(Ok(()), Default::default()),
                     };
-                    s.make_ready(id, Wake::Io(Ok(()), layout));
+                    s.make_ready(id, wake);
                 }
             }
         } else if has_thread {
@@ -531,6 +547,11 @@ impl<const S: usize> Machine<S> {
                     s.drop_wait(id, block);
                     let err = Err(crate::io::IoErrorTag::TimedOut);
                     s.make_ready(id, Wake::Io(err, layout));
+                }
+                Some(Block::IoRetry(_)) => {
+                    // The native runs again and reports the timeout itself.
+                    s.drop_wait(id, block);
+                    s.make_ready(id, Wake::Retry);
                 }
                 Some(Block::Sleep) => s.make_ready(id, Wake::Unit),
                 _ => {}
@@ -694,7 +715,7 @@ impl<const S: usize> Machine<S> {
         rec.state = TaskState::Ready;
         // A thread wait left no result slot to write.
         rec.wake = Some(match block {
-            Some(Block::Thread(_)) => Wake::Retry,
+            Some(Block::Thread(_) | Block::IoRetry(_)) => Wake::Retry,
             _ => Wake::Unit,
         });
         s.run_queue.push_back(id);
@@ -834,7 +855,7 @@ impl<const S: usize> Machine<S> {
                     (TaskState::Running, _) => "running".to_string(),
                     (TaskState::Ready, _) => "ready".to_string(),
                     (TaskState::Ending, _) => "ending".to_string(),
-                    (_, Some(Block::Io(..))) => "blocked (IO)".to_string(),
+                    (_, Some(Block::Io(..) | Block::IoRetry(_))) => "blocked (IO)".to_string(),
                     (_, Some(Block::Join(t))) => format!("blocked (join task {t})"),
                     (_, Some(Block::Scope(_))) => "blocked (end of scope)".to_string(),
                     (_, Some(Block::Sleep)) => "blocked (sleep)".to_string(),

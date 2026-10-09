@@ -607,6 +607,15 @@ impl<const S: usize> Machine<S> {
                                     *sp_out = sp;
                                     return dispatch::RestFlow::Continue;
                                 }
+                                Ok(None) if park_tasks && crate::task::io_retry_parked() => {
+                                    // A connect in progress: the arguments stay and
+                                    // the HostInvoke runs again on readiness.
+                                    let req = crate::task::take_io_retry_park().expect("checked");
+                                    self.task_suspend_io_retry(req, &mut ip, &mut sp);
+                                    *ip_out = ip;
+                                    *sp_out = sp;
+                                    return dispatch::RestFlow::Continue;
+                                }
                                 Ok(None) => {
                                     self.stack.seek(tell - consume);
                                     if let Some(req) = crate::io::take_pending_io_park() {
