@@ -310,9 +310,25 @@ impl Compiler {
                     .entry(body.name.clone())
                     .and_modify(|seen| *seen = None)
                     .or_insert(Some(i));
+                // An overload also under its table key (`name#arity.id`).
+                if body.kind == BodyKind::Function
+                    && self.checker.is_overloaded(&body.name)
+                    && let Some((id, fixed, rest)) = self.checker.overload_decl_at(body.span.0, body.span.1)
+                {
+                    self.hir_fn_names.insert(overload_fn_key(&body.name, fixed, rest, id), Some(i));
+                }
             }
         }
         self.hir_module = Some(hir);
+    }
+
+    /// The body index of the function `key` names: an overload by its
+    /// table key, any other by its name when that is unique.
+    fn hir_fn_body(&self, key: &str) -> Option<usize> {
+        match self.hir_fn_names.get(key) {
+            Some(&index) => index,
+            None => self.hir_fn_names.get(strip_overload_key(key)).copied().flatten(),
+        }
     }
 
     /// The error for a body [`Self::try_lower_hir_function`] did not lower:
@@ -533,7 +549,7 @@ impl Compiler {
             .values()
             .filter_map(|call| match call.instance {
                 Some(_) => module.instance_fns.get(&call.key).copied(),
-                None => self.hir_fn_names.get(strip_overload_key(&call.key)).copied().flatten(),
+                None => self.hir_fn_body(&call.key),
             })
             .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
@@ -577,14 +593,10 @@ impl Compiler {
                 }
                 None => {
                     let name = strip_overload_key(&call.key);
-                    if self.checker.is_overloaded(name) {
-                        return Err("overloaded".to_string());
+                    if !self.hir_fn_names.contains_key(name) && !self.hir_fn_names.contains_key(&call.key) {
+                        return Err(format!("no body `{name}`"));
                     }
-                    let index = self
-                        .hir_fn_names
-                        .get(name)
-                        .ok_or_else(|| format!("no body `{name}`"))?
-                        .ok_or("ambiguous")?;
+                    let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
                     folded.get(&index).unwrap_or(&module.bodies[index])
                 }
             };
