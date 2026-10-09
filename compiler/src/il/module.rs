@@ -2,9 +2,8 @@
 //!
 //! Cheap split of one [`super::CodeBuf`] — not a second IL language.
 //! Codegen keeps a flat [`super::CodeBuf`] stream. At lower time the buffer is
-//! split into owned function bodies (plus prologue / glue / epilogue), opts and
-//! CFG GVN run per body, then the stream is concatenated for whole-buffer
-//! `multi_op_join_convoy` and a single fuse/PC lower.
+//! split into owned function bodies (plus prologue / glue / epilogue), opts
+//! run per body, then the stream is concatenated for a single fuse/PC lower.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,8 +23,8 @@ pub struct IlFuncBody {
 
 /// Flat stream partitioned into prologue, function bodies, and glue.
 ///
-/// Rebuilt at finalize; bodies are the source of truth for per-func opts/GVN
-/// until [`Self::optimize_and_flatten`] concatenates for multi_op + lower.
+/// Rebuilt at finalize; bodies are the source of truth for per-func opts
+/// until [`Self::optimize_and_flatten`] concatenates for lower.
 #[derive(Clone, Default)]
 pub struct IlModule {
     pub prologue: Vec<IlOp>,
@@ -318,8 +317,7 @@ impl IlModule {
         }
     }
 
-    /// Per-func opts (excluding multi_op) + CFG GVN on each body, then
-    /// whole-buffer [`opt::multi_op_join_convoy`] on the concatenated stream.
+    /// Per-func opts on each body, then concatenate the bodies.
     ///
     /// `pool` is the module const pool (`f64` / boxed int bits) for algebraic
     /// float identity / const-fold peeps (may push folded float results).
@@ -328,19 +326,6 @@ impl IlModule {
         opts: &OptimizeOptions,
         pool: &mut Vec<u64>,
     ) -> FlatIl {
-        let mut per = opts.clone();
-        let run_multi = per.multi_op_join_convoy;
-        per.multi_op_join_convoy = false;
-        // Guard inversion removes JMPs that whole-buffer multi_op matches on.
-        let run_invert = per.invert_guard_branch;
-        per.invert_guard_branch = false;
-        // GVN reasons about slot defs; promotion removes the store that makes one
-        // visible, so it runs after GVN has seen the body.
-        let run_slot_promote_tell = per.slot_promote_tell;
-        let run_ssa_gvn = per.ssa_gvn;
-        per.slot_promote_tell = false;
-        per.ssa_gvn = false;
-
         if self.funcs.is_empty() {
             let (mut ops, remap, func_maps) = self.to_flat();
             opt::optimize(&mut ops, opts, pool);
@@ -362,18 +347,11 @@ impl IlModule {
             drop_jumps_to_next_label(&mut body.ops);
             opt::optimize_at_with_labels(
                 &mut body.ops,
-                &per,
+                opts,
                 body.meta.entry_sp as i32,
                 pool,
                 &mut next_label,
             );
-            super::gvn::cfg_gvn_with(&mut body.ops, false);
-            if run_slot_promote_tell {
-                opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
-            }
-            if run_ssa_gvn {
-                super::gvn::ssa_gvn(&mut body.ops);
-            }
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
@@ -546,14 +524,7 @@ impl IlModule {
         } else {
             self.apply_loop_cursor_raises(&vec!["fuse"; self.funcs.len()]);
         }
-        let (mut flat, remap, func_maps) = self.to_flat();
-        if run_multi {
-            opt::multi_op_join_convoy(&mut flat);
-        }
-        if run_invert {
-            opt::invert_guard_branch(&mut flat);
-        }
-        (flat, remap, func_maps)
+        self.to_flat()
     }
 }
 
@@ -964,24 +935,10 @@ fn il_may_collect(op: &IlOp) -> bool {
 mod tests {
     use super::*;
     use crate::il::op::{EntryKind, IlJumpKind, IlOp, Label};
-    use common::{Byte, DebugLoc, Instruction};
+    use common::{DebugLoc, Instruction};
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()
-    }
-
-    fn load_const_add_suffix() -> Vec<IlOp> {
-        vec![
-            IlOp::Load {
-                slot: 0,
-                loc: loc(),
-            },
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Bin {
-                op: Instruction::ADD,
-                loc: loc(),
-            },
-        ]
     }
 
     /// `JMP L` straight into `L` (past other labels) is a fall-through and
@@ -1568,150 +1525,12 @@ mod tests {
         ];
         let funcs = vec![IlFunc::new("f", None, 2, 6)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(
-            &OptimizeOptions {
-                multi_op_join_convoy: false,
-                ..OptimizeOptions::default()
-            },
-            &mut Vec::new(),
-        );
+        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
         assert!(matches!(flat[0], IlOp::Dup { .. }));
         assert!(matches!(flat[1], IlOp::Pop { .. }));
         assert!(!flat[2..].iter().any(|op| matches!(op, IlOp::Dup { .. })));
         let _ = IlJumpKind::Unconditional;
         let _ = Label(0);
-    }
-
-    #[test]
-    fn multi_op_on_full_buffer_refuses_when_prologue_poisons_sp() {
-        let suf = load_const_add_suffix();
-        let cond = IlOp::Const { imm: 1, loc: loc() };
-        let mut ops = vec![IlOp::byte(Byte::new(Instruction::PRINT))];
-        let body_start = ops.len();
-        ops.extend(suf.clone());
-        ops.push(cond.clone());
-        ops.push(IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(0),
-            loc: loc(),
-            hint: Default::default(),
-        });
-        ops.push(IlOp::Pop { loc: loc() });
-        ops.extend(suf);
-        ops.push(cond);
-        ops.push(IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(0),
-            loc: loc(),
-            hint: Default::default(),
-        });
-        ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc: loc(), ret_words: 1});
-        let body_emit_end = ops.iter().filter(|op| op.emits_code()).count();
-
-        let mut body_only: Vec<IlOp> = ops[body_start..].to_vec();
-        opt::multi_op_join_convoy(&mut body_only);
-        let scoped_loads = body_only
-            .iter()
-            .filter(|op| matches!(op, IlOp::Load { .. }))
-            .count();
-        assert_eq!(
-            scoped_loads, 1,
-            "precondition: body-only multi_op sinks (Known SP)"
-        );
-
-        let funcs = vec![IlFunc::new("f", None, 1, body_emit_end)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        // Stack IL only: the LIR tier would take this body and fold both
-        // `slot0 + 1` arms into one.
-        let (flat, _, _) = m.optimize_and_flatten(
-            &OptimizeOptions {
-                mir_specialize: false,
-                ..OptimizeOptions::default()
-            },
-            &mut Vec::new(),
-        );
-        let loads = flat
-            .iter()
-            .filter(|op| matches!(op, IlOp::Load { .. }))
-            .count();
-        assert_eq!(
-            loads, 2,
-            "full-buffer multi_op must refuse when prologue poisons SP"
-        );
-    }
-
-    #[test]
-    fn multi_op_on_full_buffer_still_sinks_clean_body() {
-        let suf = load_const_add_suffix();
-        let cond = IlOp::Const { imm: 1, loc: loc() };
-        let mut ops = Vec::new();
-        ops.extend(suf.clone());
-        ops.push(cond.clone());
-        ops.push(IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(0),
-            loc: loc(),
-            hint: Default::default(),
-        });
-        ops.push(IlOp::Pop { loc: loc() });
-        ops.extend(suf);
-        ops.push(cond);
-        ops.push(IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(0),
-            loc: loc(),
-            hint: Default::default(),
-        });
-        ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc: loc(), ret_words: 1});
-        let emit_end = ops.iter().filter(|op| op.emits_code()).count();
-        let funcs = vec![IlFunc::new("f", None, 0, emit_end)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(
-            &OptimizeOptions {
-                jump_thread: false,
-                dead_block: false,
-                stack_dce: false,
-                mem_fwd: false,
-                copy_prop: false,
-                dest_prop: false,
-                slot_promote: false,
-                tos_carry: false,
-                canon: false,
-                algebraic: false,
-                instcombine: false,
-                local_cse: false,
-                licm: false,
-                loop_bounds: false,
-                strength_reduce: false,
-                return_convoy: false,
-                clone_shared_return: false,
-                bin_join_convoy: false,
-                multi_op_join_convoy: true,
-                invert_guard_branch: false,
-                slot_promote_tell: false,
-                loop_unroll: false,
-                loop_unroll_factor: 8,
-                invariant_store_elim: false,
-                ssa_gvn: false,
-                escape_analysis: false,
-                branch_optimization: false,
-                block_reordering: false,
-                collect_stats: false,
-                pure_call_ctx: None,
-                mir_specialize: true,
-            },
-            &mut Vec::new(),
-        );
-        let loads = flat
-            .iter()
-            .filter(|op| matches!(op, IlOp::Load { .. }))
-            .count();
-        assert_eq!(
-            loads, 1,
-            "clean body must still sink via whole-buffer multi_op"
-        );
     }
 
     /// Raising loop used by Seek-normalize tests. Mandelbrot's innermost loop
@@ -1749,28 +1568,15 @@ mod tests {
             jump_thread: false,
             dead_block: false,
             stack_dce: false,
-            mem_fwd: false,
-            copy_prop: false,
-            dest_prop: false,
             slot_promote: false,
-            tos_carry: false,
             canon: false,
             algebraic: false,
-            instcombine: false,
             local_cse: false,
             licm: false,
             loop_bounds: false,
-            strength_reduce: false,
-            return_convoy: false,
             clone_shared_return: false,
-            bin_join_convoy: false,
-            multi_op_join_convoy: false,
-            invert_guard_branch: false,
-            slot_promote_tell: true,
             loop_unroll: false,
             loop_unroll_factor: 8,
-            invariant_store_elim: false,
-            ssa_gvn: false,
             escape_analysis: false,
             branch_optimization: false,
             block_reordering: false,

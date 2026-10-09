@@ -5,9 +5,18 @@ a `Vec<IlOp>` in place. They must **not** invent a new IR. Labels stay
 symbolic until [`crate::il::lower`] assigns PCs once.
 
 This page inventories every **production** step that actually runs from
-`optimize_once_at` (gated by an [`OptimizeOptions`] flag) plus the two named
-post-opt steps that live next to lower / module flatten: **`cfg_gvn`** and
-**fuse-select**. Driver knobs are listed once below and are **not** passes.
+`optimize_once_at` (gated by an [`OptimizeOptions`] flag) plus the named
+post-opt step that lives next to lower: **fuse-select**. Driver knobs are
+listed once below and are **not** passes.
+
+**Removed 2026-10** (measurement showed no bench effect): `copy_prop`,
+`dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`,
+`invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`,
+`multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`,
+`ssa_gvn`, `cfg_gvn`, and the IL `escape_analysis` pass. MIR instcombine /
+strength reduction / GVN are separate and unaffected. The `escape_analysis`
+option survives: it now only gates HIR enum / tuple scalar replacement
+(`hir::enum_sroa`, `hir::tuple_sroa`) in `emit_hir`.
 
 **Hit-bench prove:** if a pass is sound but flagship `.hyc` do not change, add
 focused `examples/perf` benches and prove those — do not skip merge because
@@ -30,8 +39,8 @@ not change pass behavior.
 | **`sp`** | [`crate::il::sp`] | Eval-stack *height*. Nested `CALL`/`MakeCoro` reset to 1 (return value). `STORE` does **not** floor height. |
 | **`tell`** | [`crate::il::tell`] | Shared operand/local *cursor*. `STORE` raises the cursor to `slot + 1` even when height is lower. |
 
-Do not substitute one for the other (COI-81). Fuse/canon/convoy/mem_fwd need
-height; slot promotion / dead-store / copy-prop need the cursor. `Tell::Unknown`
+Do not substitute one for the other (COI-81). Fuse/canon/branch layout need
+height; slot promotion / `dead_store_at` need the cursor. `Tell::Unknown`
 at a join is often the correct answer (a raising loop header), not a gap.
 
 Entry seed: `optimize` / `optimize_at` use `entry_sp` (usually `0` in unit
@@ -58,6 +67,7 @@ pipeline. No solo “pass” tests.
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
 | `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
 | `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |
+| `escape_analysis` | on at Standard+ / Size | Gates HIR enum / tuple scalar replacement in `emit_hir`. Not an IL pass. |
 
 ## Pipeline order
 
@@ -65,24 +75,19 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
-5. `copy_prop` → 6. `dest_prop` → 7. `dead_store` (same flag as `mem_fwd`) →
-8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `local_cse`
+1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `canon` →
+5. `algebraic` → 6. `local_cse`
 
 **Decision** (`decision_once_at`), in order:
 
-12. `licm` → 13. `loop_bounds` → 14. `strength_reduce` → 15. `loop_unroll`
-→ 16. `invariant_store_elim` → 17. `escape_analysis` → 18. `slot_promote`
-(+ `dead_store`) → 19. `tos_carry` → 20. `clone_shared_return` →
-21. `return_convoy` → 22. `bin_join_convoy` → 23. `multi_op_join_convoy` →
-24. `invert_guard_branch` → 25. `branch_optimization` → 26. `block_reordering`
-→ 27. `slot_promote_tell` → 28. `ssa_gvn`
+7. `licm` → 8. `loop_bounds` → 9. `loop_unroll` → 10. `slot_promote`
+(+ `dead_store_at`) → 11. `clone_shared_return` → 12. `branch_optimization`
+→ 13. `block_reordering`
 
-**Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
-opts run with `multi_op_join_convoy`, `invert_guard_branch`,
-and `slot_promote_tell` **deferred**. Then per-body **`cfg_gvn`**, then
-slot_promote_tell, then concat, then whole-buffer multi_op + invert. Bare-buffer
-`optimize()` (empty `funcs` / unit tests) does **not** run `cfg_gvn`.
+**Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
+table runs per body, then the bodies are concatenated. Bare-buffer
+`optimize()` (empty `funcs` / unit tests) runs the same table on the whole
+buffer.
 
 **After opt:** a single `lower_optimized` fuse-select + PC assign.
 
@@ -140,67 +145,6 @@ Invariants every pass must preserve unless its section says otherwise:
 - **Tests:** `opt/convoy.tests.rs` `stack_dce_removes_dup_pop`,
   `stack_dce_removes_typed_dup_pop`.
 
-## `mem_fwd`
-
-**Flag:** `mem_fwd` (default on). **Fn:** `dce::mem_fwd`. Uses **`sp`**.
-
-- **Input:** Adjacent `StorePop s; Load s`. SP-in at the store must be Known
-  and `h > s + 1` (TOS after store is not the stored slot).
-- **Output:** `Dup; StorePop s`. Height unchanged (`StorePop; Load` and
-  `Dup; StorePop` are both net 0).
-- **Refusals:** Unknown SP; `h <= s + 1` (shared-stack / post-CALL return
-  height); load that feeds `Index`; mismatched slots. Residual `Byte` store/load
-  is not rewritten here (typed only).
-- **Tests:** `opt/convoy.tests.rs` `mem_fwd_store_pop_load_becomes_dup_store`,
-  `mem_fwd_refuses_when_load_feeds_index`.
-
-### Companion: `dead_store` (same flag)
-
-Not an `OptimizeOptions` field. Gated by `mem_fwd` in cleanup; run again after
-`slot_promote`. **Fn:** `dce::dead_store_at`. Uses **`tell`**.
-
-- **Input:** `StorePop s` whose slot is unread to the next barrier, with a
-  cursor proof that dropping the store does not lower a later floor.
-- **Output:** Removes the store (and a feeding `Dup` when the slot is unused).
-- **Refusals:** Unknown cursor; opaque `Byte` / host / call / FFI; slot still
-  loaded or used by `BinSlot*`; loop-carried store before a jump when a later
-  load exists.
-- **Tests:** `opt/convoy.tests.rs` `dead_store_drops_dup_store_when_slot_unused`,
-  `dead_store_keeps_store_before_opaque_byte_barrier`.
-
-## `copy_prop`
-
-**Flag:** `copy_prop` (default on). **Fn:** `dce::copy_prop`. Uses **`tell`**.
-
-- **Input:** Straight-line `producer; StorePop s` then later `Load s` with Known
-  tell-in. Producers: `Const` / `ConstPool` / `String` / `Load` / `BinSlotImm` /
-  `BinSlotSlot`.
-- **Output:** Replaces the `Load` with a clone of the producer. Does not itself
-  drop the store (that is `dead_store`). Height at each remaining op is
-  unchanged (clone has the same delta as `Load`).
-- **Refusals:** Unknown tell; labels / jumps / `Entry` / `HostInvoke` / `Print`
-  / fields / `Make*` / box / returns / residual `Byte` (binding map cleared);
-  shape-sensitive `Load` before `GetField` or `MakeArray`/`MakeTuple`/`MakeEnum`;
-  store that aliases a producer dependency; self-alias `Load s; StorePop s`.
-- **Tests:** `opt/convoy.tests.rs` `copy_prop_replaces_load_and_cursor_safe_dead_store`,
-  `copy_prop_refuses_control_flow_boundaries`, `copy_prop_clears_bindings_across_host_invoke`.
-
-## `dest_prop`
-
-**Flag:** `dest_prop` (default on; Basic+). **Fn:** `dest_prop::dest_prop`.
-Does not use tell for rewrite (alias map only).
-
-- **Input:** Straight-line `LOAD src; StorePop dest` then later `LOAD dest` /
-  `BinSlot*` after `GetField` / `SetField` / `LoadField` / `Make*` / `BoxValue`.
-- **Output:** Consumers read `src`. Does not clone `Const` / `BinSlot*`
-  producers. Store elision stays with `dead_store`.
-- **Refusals:** Calls, host, print, jumps, labels, returns, packed `STORE`,
-  residual `Byte` (map cleared). Store to `src` or `dest` kills that alias.
-- **Tests:** `opt/dest_prop.tests.rs` (forwards across GetField / MakeEnum /
-  SetField; refuses host / CALL / CFG; no Const clone; copy_prop leaves
-  GetField-shaped loads). Hit bench: `examples/perf/dest_prop_field_alias.hy`
-  ([#318](https://github.com/ardax-corp/coil-lang/pull/318)).
-
 ## `canon`
 
 **Flag:** `canon` (default on). **Fn:** `il::canon::canonicalize_operand_order`.
@@ -237,36 +181,16 @@ float identities / pool fold.
 - **Tests:** `il/algebraic.rs` `add_zero_folds_to_load`, `refuses_when_sp_unknown`.
   Isolated flag: `float_const_pool_add_via_optimize_pipeline`.
 
-## `instcombine`
-
-**Flag:** `instcombine` (default on at Standard). **Fn:**
-`opt::instcombine::instcombine`. Cleanup, after `algebraic`.
-
-- **Input:** Adjacent typed IL windows. No cursor analysis.
-- **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
-  EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
-  diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
-  → `POP` of the tag. Two-slot Result/Option `?` flatten is codegen
-  (`emit_try_two_word_pair`), not this peep — a mid-body `RETURN` rewrite
-  invites invert/convoy to sink later args onto the fail path.
-  `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
-- **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
-  unknown tags. No new opcodes.
-- **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
-  `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
-  Landed [#304](https://github.com/ardax-corp/coil-lang/pull/304).
-
 ## `local_cse`
 
 **Flag:** `local_cse` (default on at Standard). **Fn:**
-`opt::early_cse::early_cse`. Cleanup, after `instcombine`.
+`opt::early_cse::early_cse`. Cleanup, after `algebraic`.
 
-- **Input:** One basic block at a time (`gvn_cfg` leaders). Available map of
+- **Input:** One basic block at a time (`analysis::build_blocks` leaders). Available map of
   pure expressions whose result was stored (`BinSlot*`, stack `Bin` of loads,
   `CastIntToFloat`, `ArrayLen`, `Index` / `IndexPin*`, `LoadField`).
 - **Output:** Second identical compute → `Load` of the slot that still holds
   the first result. Height of each rewrite matches the original window.
-  Cheap `Const`/`Load` TOS-Dup stays in `cfg_gvn` (fuse).
 - **Refusals:** `DIV`/`MOD`/`DIVF`/`MODF`; store to an operand or to the
   holding slot; `StoreIndex` / `ArrayPush` kill memory exprs; `HostInvoke` /
   `CALL` / residual effectful `Byte` / jumps clear the map. Does not cross
@@ -317,23 +241,6 @@ float identities / pool fold.
   `IndexUnchecked` / `ArrayPin` for helpers, for-in, and stride; pipeline
   tests in `compiler/src/pipeline.rs`.
 
-## `strength_reduce`
-
-**Flag:** `strength_reduce` (default on at Standard). **Fn:**
-`il::strength::strength_reduce`. Uses **`sp`**. Runs after `loop_bounds`.
-
-- **Input:** Known-SP natural loops with a proven additive IV (`i += k` or
-  invariant `i += p`) and a header `i < n` / post-canon `n > i`.
-- **Output:** integer `i * c` becomes an add recurrence
-  (`acc += f(i+step)-f(i)`). Body reloads `acc`.
-- **Refusals:** Host / FFI / impure call / yield / `ArrayPush` / `MakeArray`;
-  non-additive IV updates; `i * i`; float `cast(i)` affine (not IEEE-exact);
-  unknown SP.
-- **Tests:** `il/strength.rs` `reduces_iv_times_invariant`,
-  `refuses_host_invoke`, `refuses_array_push`, `refuses_float_cast_of_iv`.
-  Hit bench: `examples/perf/iv_mul_sr.hy` ([#315](https://github.com/ardax-corp/coil-lang/pull/315)).
-  Heuristic only — no PGO.
-
 ## `loop_unroll`
 
 **Flag:** `loop_unroll` (default on; off at `-Os`). **Fn:**
@@ -350,70 +257,6 @@ float identities / pool fold.
 - **Tests:** `opt/loop_unroll.tests.rs` `unrolls_simple_const_bound_while`,
   `call_disables_unroll`, `break_disables_unroll`, `nested_loops_are_not_unrolled`.
 
-## `invariant_store_elim`
-
-**Flag:** `invariant_store_elim` (default on). **Fn:**
-`invariant_store_elim::eliminate_invariant_stores`.
-
-- **Input:** Natural loop containing `producer; StorePop s` where the producer
-  is loop-invariant and `s` is not loaded in the body.
-- **Output:** Drop the pair if `s` is never loaded anywhere; otherwise sink it
-  to the unique forward exit label. Loop-carried height at the header is
-  unchanged (the store no longer runs per trip).
-- **Refusals:** Variant producer; slot loaded in the loop; extra exits when the
-  store is live after the loop (no unique sink); no structured exit and the
-  slot is loaded later. Residual `Byte` stores are not matched (`StorePop`
-  only).
-- **Tests:** `opt/invariant_store_elim.tests.rs`
-  `eliminates_unused_invariant_store`, `sinks_live_invariant_store_out_of_loop`,
-  `keeps_variant_store`. Isolated pipeline:
-  `optimize_pipeline_eliminates_unused_invariant_store`.
-
-## `ssa_gvn`
-
-**Flag:** `ssa_gvn` (default on). **Fn:** `il::gvn_ssa::ssa_gvn`. Also invoked
-from `cfg_gvn_with` when the flag is on.
-
-- **Input:** Stack IL with labels. Virtual `Phi(block, slot)` VNs at joins
-  (no φ opcode, no slot rename).
-- **Output:** Redundant pure binop whose result already lives in a slot becomes
-  `Load`. Height: `Bin` (−1) is replaced by `Load` (+1) only when the original
-  operands are already consumed / the value is in a slot — the rewrite is the
-  CSE of a recompute, so join height matches the stored value.
-- **Refusals:** `DIV`/`MOD`/`DIVF`/`MODF`; pred disagreement on a slot (φ);
-  effectful ops. Residual `Byte` is not numbered as a binop.
-- **Tests:** `il/gvn.tests.rs` `ssa_gvn_cse_across_basic_blocks`,
-  `ssa_gvn_preserves_div`, `ssa_gvn_skips_join_when_operand_phi_disagrees`.
-
-## `escape_analysis`
-
-**Flag:** `escape_analysis` (default on). **Fn:**
-`escape_analysis::escape_analysis`.
-
-- **Input:** `MakeArray { arity: 1..=32 }; StorePop s` whose elements are
-  immediates (`Const` / pool / string).
-- **Output:** Explodes the array into consecutive high frame slots; rewrites
-  local `Index` / `len` / `StoreIndex` of that local. A named escape rewrites
-  the whole-array `LOAD` to `LOAD` slots + `MakeArray` (S2g). Slot ids for
-  other locals unchanged; new slots are GC roots.
-- **Refusals:** Growing `ArrayPush` dest; private use after an escape;
-  unproven `xs[k]` on leftover heap `MakeArray` (S2h keeps Index/StoreIndex);
-  computed elements (S2i: observed/escape `vec_array.hy` stays heap);
-  second store to `s`; opaque / residual
-  `Byte` use that is not a local element op or named edge; arity 0 or > 32;
-  frame would exceed slot 256. Named class SROA is S2j (`local_escape`).
-  Codegen `[T; N]` locals handle unproven `xs[k]` with a runtime bound +
-  slot-select (OOB heap Index/StoreIndex). Zip/broadcast operands that are
-  literals or stack-array locals load elements directly; the result is still
-  a heap `MakeArray`.
-- **Tests:** `opt/escape_analysis.tests.rs` `scalarizes_non_escaping_index`,
-  `boxes_at_return_edge`, `boxes_at_call_arg_edge`, `boxes_at_field_store_edge`,
-  `boxes_at_host_edge`, `boxes_array_push_value_not_dest`,
-  `refuses_array_push_grow_dest`, `refuses_private_use_after_escape`,
-  `keeps_heap_for_unproven_index`, `keeps_heap_when_elements_are_computed`,
-  `keeps_heap_when_computed_elems_escape`.
-  Isolated flag: `isolated_optimize_flag_runs_pass`.
-
 ## `slot_promote`
 
 **Flag:** `slot_promote` (default on). **Fn:** `slot_promote::slot_promote`.
@@ -425,34 +268,12 @@ Uses **`tell`**. Cleanup `dead_store_at` runs immediately after.
 - **Output:** Rewrites later `LOAD` / `BinSlot*` uses to the source; elides
   unused alias stores when tell or a higher store covers the floor. Peel param
   copies may raise the producer into a dead high slot then elide. Labels
-  unchanged. TOS-at-`t+1` `STORE t` is *not* this pass — that is
-  `slot_promote_tell`.
+  unchanged.
 - **Refusals:** Unknown tell; `CALL`/host without a raise proof; residual
   `Byte` between copy-shuffle ops; overlapping live ranges (mandelbrot
   `tr`/`zr`); multi-pred φ merges; address-taken / aggregate promotion.
 - **Tests:** `opt/slot_promote.rs` `forwards_alias_load_through_store_load`,
   `rewrites_bin_slot_through_alias`,   `same_def_join_forwards_alias_across_diamond`.
-
-## `tos_carry`
-
-**Flag:** `tos_carry` (default on at Standard). **Fn:** `tos_carry::tos_carry`.
-Uses **`sp`**. Runs after `slot_promote` coalescing.
-
-- **Input:** Known-SP `producer; STORE t` then a straight-line region, then
-  `LOAD t; STORE s` (`t != s`). The region may bury TOS under `Const` /
-  `ConstPool` / `Load` / `BinSlot*` pushes and recover it with stack `Bin` and
-  `STORE dest` (`extra` depth must be 0 at the copy). Residual `Byte`
-  `BinSlotSlotStore` is TOS-neutral when `extra == 0`.
-- **Output:** Drops `STORE t` and `LOAD t` so the producer value stays on TOS
-  under the region and the final `STORE s` pops it. Height-neutral
-  (remove −1 store and +1 load). No new opcode.
-- **Refusals:** Empty region; labels / jumps / `CALL` / host / `Dup` / `Pop` /
-  `Index*` / unknown `Byte`; `LOAD t` or `STORE t` in the region; `BinSlot*`
-  that reads `t`; `STORE s` in the region; unknown SP at the early store;
-  `t` still live after `STORE s`.
-- **Tests:** `opt/tos_carry.tests.rs` `delays_store_across_bin_slot_then_drops_reload`,
-  `delays_store_across_const_and_stack_bin`,
-  `refuses_load_of_carried_slot_in_region`, `refuses_control_flow_in_region`.
 
 ## `clone_shared_return`
 
@@ -465,79 +286,15 @@ Uses **`sp`**. Runs after `slot_promote` coalescing.
   has no jump preds, fuses a lone fall-through `CONST`/`LOAD` into `*Return`.
   Each arm’s height at return is unchanged (the jump-only arm already had the
   value on stack).
-- **Refusals:** No jump-only preds; not a mixed join (jump-only only). Convoy
-  mixed-class joins stay refused until this clone runs.
+- **Refusals:** No jump-only preds; not a mixed join (jump-only only).
 - **Tests:** `opt/convoy.tests.rs`
   `clone_shared_return_fuses_const_arm_after_jump_only_clone`.
-
-## `return_convoy`
-
-**Flag:** `return_convoy` (default on). **Fn:** `convoy::return_convoy`. Uses
-**`sp`** at the join.
-
-- **Input:** Identical immediate `LOAD s` (`s ≤ 255`) or inline `CONST` on every
-  pred of a return-label cluster (`JMP`, or all-`JMPF`/`JMPT` with value under
-  the cond, or all-`JumpIfMatch`).
-- **Output:** Sink the producer and fuse `LoadReturnSlot` / `ConstReturnImm`.
-  Join height becomes the terminator’s.
-- **Refusals:** Disagreeing consts/slots; mixed jump classes; jump-only arm
-  without a producer; Unknown join SP on cond/match/jump-only preds; pool
-  `CONST`; `LOAD` slot > 255; residual `Byte` that is not a return producer.
-- **Tests:** `opt/convoy.tests.rs` `return_convoy_fuses_agreeing_const_join`,
-  `return_convoy_skips_disagreeing_consts`,
-  `return_convoy_skips_jump_if_match_unknown_join_sp`.
-
-## `bin_join_convoy`
-
-**Flag:** `bin_join_convoy` (default on). **Fn:** `convoy::bin_join_convoy`.
-Uses **`sp`**.
-
-- **Input:** Identical plain binop or `BinSlot*` tail on every pred of a return
-  cluster (same pred/SP gates as return convoy).
-- **Output:** `BinReturn`, or one shared `BinSlot*` immediately before `RETURN`.
-- **Refusals:** Disagreeing ops; mixed jump classes; Unknown join SP on
-  jump-pred-only templates; conditional jump into the cluster when SP-in is not
-  proven. Residual `Byte` tails are accepted when `as_encode_byte` is a listed
-  binop / `BinSlot*`.
-- **Tests:** `opt/convoy.tests.rs` `bin_join_convoy_fuses_agreeing_binop_to_bin_return`,
-  `bin_join_convoy_skips_disagreeing_binops`.
-
-## `multi_op_join_convoy`
-
-**Flag:** `multi_op_join_convoy` (default on). **Fn:**
-`convoy::multi_op_join_convoy`. Uses **`sp`**. Production runs this on the
-**concatenated** module (scoped run can mis-sink `JMPF`/fall-through diamonds).
-
-- **Input:** Identical 2..=4-op suffixes at return or non-return joins.
-  Preds: `JMP` / `JMPF` / `JMPT` / `JumpIfMatch`.
-- **Output:** Suffix sunk once after the join labels. Preds lose the suffix;
-  join height matches the sunk ops.
-- **Refusals:** Disagreeing suffixes; Unknown SP (including mixed
-  `JMPF`+`JMP` without a known join height); `EQ`-fed `JMPF` suffix (keeps the
-  compare on the pred); residual `Byte` that is not a suffix op (unary
-  NOT/NEG/NEGF `Byte` *is* allowed as compute).
-- **Tests:** `opt/convoy.tests.rs` `multi_op_join_convoy_sinks_identical_suffix`,
-  `multi_op_join_convoy_skips_jmpf_fallthrough_unknown_sp`.
-
-## `invert_guard_branch`
-
-**Flag:** `invert_guard_branch` (default on). **Fn:**
-`cfg::invert_branch_over_jump` (re-exported as `invert_guard_branch`).
-Production runs this on the concatenated buffer **after** multi_op.
-
-- **Input:** `JMPF A; JMP B; A:` (labels may cluster). No cursor.
-- **Output:** `JMPT B`, dropping the trailing `JMP`. Fusable guards invert too
-  (`*Jmpt` twins at fuse-select, COI-87). Height: both shapes pop the cond.
-- **Refusals:** False target not bound at the next real instruction; not the
-  `JMPF; JMP` pair.
-- **Tests:** `opt/convoy.tests.rs` `inverts_guard_branch_over_unconditional_jump`,
-  `refuses_guard_inversion_when_false_target_is_not_next`.
 
 ## `branch_optimization`
 
 **Flag:** `branch_optimization` (default on). **Fn:**
 `branch_opt::optimize_branches_at`. Uses **`sp`**. Last among IL consumers
-except block reorder / seek / tell-promote. Heuristic only (no profile).
+except block reorder / seek. Heuristic only (no profile).
 
 - **Input:** `JMPF`/`JMPT` whose fall-through is a terminating then-arm
   (no internal jumps/labels) with Known SP at the jump and along the moved arm.
@@ -546,7 +303,7 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Refusals:** Unknown SP / empty stack at the cond; then-arm with an internal
   jump or label; suffix that could fall into the moved region;
   `ValueUnderJmp` / `nofuse` pair-`?` tag jumps (cold invert would turn the
-  shared fail `RETURN` into a convoy join).
+  shared fail `RETURN` into a join).
 - **Tests:** `opt/branch_opt.rs` `heuristic_moves_return_off_jmpf_fallthrough`,
   `value_under_jmp_try_refuses_cold_invert`,
   `refuses_when_cond_jump_has_empty_stack`.
@@ -564,44 +321,7 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
   `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
 
-## `slot_promote_tell`
-
-**Flag:** `slot_promote_tell` (default on). **Fn:** `slot_promote::slot_promote_at`.
-Uses **`tell`**. Runs last after every slot-tracking pass; production runs it
-**after** `cfg_gvn`.
-
-- **Input:** Known-cursor `LOAD` of a slot that already *is* TOS (`tell == slot
-  + 1`), and `STORE t` reached with the cursor at `t + 1` (TOS already is slot
-  `t`), including TailCall reload runs and (after Seek) in-loop self-stores.
-- **Output:** Drops those `LOAD`/`STORE` words when **every** remaining
-  reference to the slot is also dropped. Packed `LOAD` of n≤3 is dropped as one
-  word. Height: a redundant TOS load is +1 that must not happen — dropping it
-  keeps TOS as the local.
-- **Refusals:** Unknown cursor (whole body refused if any slot operand is
-  unresolvable); surviving reader of a self-store; CALL reload run; return
-  reload; store nobody reads (left to `dead_store`).
-- **Tests:** `opt/slot_promote.rs` `tail_call_argument_temps_leave_the_frame`,
-  `unknown_cursor_refuses_the_promotion`, `self_store_stays_when_a_reader_survives`.
-
 ---
-
-## `cfg_gvn` (production, not an `OptimizeOptions` flag)
-
-**Fn:** `il::gvn::cfg_gvn_with(ops, ssa_gvn_flag)`. Always run per body in
-`IlModule::optimize_and_flatten` after per-body opts. Inner `ssa_gvn` follows
-the `ssa_gvn` flag.
-
-- **Input:** One function body. Intra-block + join-sink CSE of pure producers
-  (`Const`/`Load`/`Bin`/`BinSlot*`/`Index`/`LoadField`/`Dup`). Join sink
-  requires agreeing pred tails and agreeing SP-in.
-- **Output:** Second identical producer → `Dup`; join-sunk redundant tail.
-  `Load; Dup` stays; fuse-select reads `Dup` as the second binop operand
-  (COI-82). No slot rename. Height preserved (`Dup` vs second
-  `Const`/`Load` is the same +1).
-- **Refusals:** `StorePop`, calls, `HostInvoke`, `SetField`, `Make*`, box,
-  residual effectful `Byte` — barriers. Does not replace convoy refuse rules.
-- **Tests:** `il/gvn.rs` `within_block_dup_replaces_second_identical_const`
-  (calls `cfg_gvn` directly). Dup-expand: `expands_dup_after_load_so_binop_can_fuse`.
 
 ## fuse-select (D4, named pass in `lower.rs`, not in `opt/` driver)
 
@@ -635,8 +355,7 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
   `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
   `lower_refuses_const_return_across_value_join`,
   `fuse_select_refuses_residual_byte_in_window`. Retired float chain:
-  `cast_float_chain_is_not_fused`. Invert-guard: `opt/convoy.tests.rs`
-  `invert_guard_refuses_value_under_jmp_hint`.
+  `cast_float_chain_is_not_fused`.
 
 ---
 
@@ -650,30 +369,16 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | jump_thread | `convoy.tests.rs` | no |
 | dead_block | `convoy.tests.rs` | no |
 | stack_dce | `convoy.tests.rs` | no |
-| mem_fwd (+ dead_store) | `convoy.tests.rs` | no |
-| copy_prop | `convoy.tests.rs` | no |
-| dest_prop | `dest_prop.tests.rs` | yes |
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
-| instcombine | `instcombine.rs` | yes |
 | local_cse | `early_cse.rs` | yes |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
-| strength_reduce | `strength.rs` | yes |
 | loop_unroll | `loop_unroll.tests.rs` | no |
-| invariant_store_elim | `invariant_store_elim.tests.rs` | no |
-| ssa_gvn | `gvn.tests.rs` | no |
-| escape_analysis | `escape_analysis.tests.rs` | no |
 | slot_promote | `slot_promote.rs` | no |
 | clone_shared_return | `convoy.tests.rs` | no |
-| return_convoy | `convoy.tests.rs` | no |
-| bin_join_convoy | `convoy.tests.rs` | no |
-| multi_op_join_convoy | `convoy.tests.rs` | no |
-| invert_guard_branch | `convoy.tests.rs` | no |
 | branch_optimization | `branch_opt.rs` | no |
 | block_reordering | `block_order.rs` | no |
-| slot_promote_tell | `slot_promote.rs` | no |
-| cfg_gvn | `gvn.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |
 
 Run (from repo root):

@@ -2,13 +2,11 @@
 //!
 //! Production passes live in [`PRODUCTION_PASSES`] (order matches D1 README).
 //! The driver walks that table; a pass runs when its [`OptimizeOptions`] flag
-//! is on (`dead_store` shares `mem_fwd`). [`PassDelta`] is what `collect_stats`
+//! is on. [`PassDelta`] is what `collect_stats`
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
-//! `IlModule::optimize_and_flatten` still defers `multi_op_join_convoy`,
-//! `invert_guard_branch`, `slot_promote_tell`, and `ssa_gvn`
-//! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
-//! in `lower_optimized`.
+//! `IlModule::optimize_and_flatten` runs this table on each function body.
+//! Fuse-select stays in `lower_optimized`.
 
 use super::super::op::IlOp;
 use super::OptimizeOptions;
@@ -52,8 +50,6 @@ pub struct PassSpec {
     pub floor: OptFloor,
     /// Size omits growth passes (`loop_unroll`, `clone_shared_return`).
     pub omit_from_size: bool,
-    /// After this row, seed `entry_tell` from `entry_sp` (the `mem_fwd` slot).
-    pub seed_entry_tell_after: bool,
     gate: fn(&OptimizeOptions) -> bool,
     set_flag: fn(&mut OptimizeOptions),
     apply: ApplyFn,
@@ -115,8 +111,7 @@ pub fn run_once(
 ) {
     let mut ctx = PassCtx {
         entry_sp,
-        // Same formula as today; copy_prop onward uses it. Re-seeded after
-        // the mem_fwd row (even if that pass is off).
+        // Cursor seed for the slot-tracking passes (`slot_promote`).
         entry_tell: entry_sp.max(0) as u32,
         pool,
         next_label,
@@ -135,9 +130,6 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
             if opts.collect_stats {
                 stats::collect_delta(&delta);
             }
-        }
-        if spec.seed_entry_tell_after {
-            ctx.entry_tell = ctx.entry_sp.max(0) as u32;
         }
     }
 }
@@ -159,26 +151,6 @@ fn apply_stack_dce(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>
     0
 }
 
-fn apply_mem_fwd(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::mem_fwd(ops, ctx.entry_sp);
-    0
-}
-
-fn apply_copy_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::copy_prop(ops, ctx.entry_tell);
-    0
-}
-
-fn apply_dest_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dest_prop::dest_prop(ops, ctx.entry_tell);
-    0
-}
-
-fn apply_dead_store(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::dead_store_at(ops, ctx.entry_tell);
-    0
-}
-
 fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     crate::il::canon::canonicalize_operand_order(ops, ctx.pool);
     0
@@ -187,10 +159,6 @@ fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) 
 fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     crate::il::algebraic::algebraic_simplify(ops, ctx.pool);
     0
-}
-
-fn apply_instcombine(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::instcombine::instcombine(ops)
 }
 
 fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
@@ -207,45 +175,13 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     0
 }
 
-fn apply_strength_reduce(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    crate::il::strength::strength_reduce(ops, ctx.pool, opts.pure_call_ctx.as_ref())
-}
-
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
-}
-
-fn apply_invariant_store_elim(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    super::invariant_store_elim::eliminate_invariant_stores(ops, ctx.entry_sp);
-    0
-}
-
-fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::gvn_ssa::ssa_gvn(ops);
-    0
-}
-
-fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::escape_analysis::escape_analysis(ops);
-    0
 }
 
 fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::slot_promote::slot_promote(ops, ctx.entry_tell);
     super::dce::dead_store_at(ops, ctx.entry_tell);
-    0
-}
-
-fn apply_tos_carry(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::tos_carry::tos_carry(ops, ctx.entry_sp);
     0
 }
 
@@ -255,34 +191,6 @@ fn apply_clone_shared_return(
     _: &mut PassCtx<'_>,
 ) -> usize {
     super::convoy::clone_shared_return(ops);
-    0
-}
-
-fn apply_return_convoy(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::convoy::return_convoy(ops);
-    0
-}
-
-fn apply_bin_join_convoy(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::convoy::bin_join_convoy(ops);
-    0
-}
-
-fn apply_multi_op_join_convoy(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
-) -> usize {
-    super::convoy::multi_op_join_convoy(ops);
-    0
-}
-
-fn apply_invert_guard_branch(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
-) -> usize {
-    super::cfg::invert_branch_over_jump(ops);
     0
 }
 
@@ -298,15 +206,6 @@ fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut Pass
     super::block_order::reorder_basic_blocks(ops)
 }
 
-fn apply_slot_promote_tell(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    super::slot_promote::slot_promote_at(ops, ctx.entry_tell);
-    0
-}
-
 /// Production opt passes. Order matches D1 README.
 pub static PRODUCTION_PASSES: &[PassSpec] = &[
     PassSpec {
@@ -315,7 +214,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.jump_thread,
         set_flag: |o| o.jump_thread = true,
         apply: ApplyFn::Slice(apply_jump_thread),
@@ -326,7 +224,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.dead_block,
         set_flag: |o| o.dead_block = true,
         apply: ApplyFn::Grow(apply_dead_block),
@@ -337,54 +234,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Basic,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.stack_dce,
         set_flag: |o| o.stack_dce = true,
         apply: ApplyFn::Grow(apply_stack_dce),
-    },
-    PassSpec {
-        name: "mem_fwd",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: true,
-        gate: |o| o.mem_fwd,
-        set_flag: |o| o.mem_fwd = true,
-        apply: ApplyFn::Slice(apply_mem_fwd),
-    },
-    PassSpec {
-        name: "copy_prop",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.copy_prop,
-        set_flag: |o| o.copy_prop = true,
-        apply: ApplyFn::Slice(apply_copy_prop),
-    },
-    PassSpec {
-        name: "dest_prop",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.dest_prop,
-        set_flag: |o| o.dest_prop = true,
-        apply: ApplyFn::Slice(apply_dest_prop),
-    },
-    PassSpec {
-        name: "dead_store",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.mem_fwd,
-        set_flag: |o| o.mem_fwd = true,
-        apply: ApplyFn::Grow(apply_dead_store),
     },
     PassSpec {
         name: "canon",
@@ -392,7 +244,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.canon,
         set_flag: |o| o.canon = true,
         apply: ApplyFn::Grow(apply_canon),
@@ -403,21 +254,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::None,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.algebraic,
         set_flag: |o| o.algebraic = true,
         apply: ApplyFn::Grow(apply_algebraic),
-    },
-    PassSpec {
-        name: "instcombine",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.instcombine,
-        set_flag: |o| o.instcombine = true,
-        apply: ApplyFn::Grow(apply_instcombine),
     },
     PassSpec {
         name: "local_cse",
@@ -425,7 +264,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.local_cse,
         set_flag: |o| o.local_cse = true,
         apply: ApplyFn::Grow(apply_local_cse),
@@ -436,7 +274,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.licm,
         set_flag: |o| o.licm = true,
         apply: ApplyFn::Grow(apply_licm),
@@ -447,21 +284,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.loop_bounds,
         set_flag: |o| o.loop_bounds = true,
         apply: ApplyFn::Grow(apply_loop_bounds),
-    },
-    PassSpec {
-        name: "strength_reduce",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.strength_reduce,
-        set_flag: |o| o.strength_reduce = true,
-        apply: ApplyFn::Grow(apply_strength_reduce),
     },
     PassSpec {
         name: "loop_unroll",
@@ -469,32 +294,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Unroll,
         floor: OptFloor::Standard,
         omit_from_size: true,
-        seed_entry_tell_after: false,
         gate: |o| o.loop_unroll,
         set_flag: |o| o.loop_unroll = true,
         apply: ApplyFn::Grow(apply_loop_unroll),
-    },
-    PassSpec {
-        name: "invariant_store_elim",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.invariant_store_elim,
-        set_flag: |o| o.invariant_store_elim = true,
-        apply: ApplyFn::Grow(apply_invariant_store_elim),
-    },
-    PassSpec {
-        name: "escape_analysis",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.escape_analysis,
-        set_flag: |o| o.escape_analysis = true,
-        apply: ApplyFn::Grow(apply_escape_analysis),
     },
     PassSpec {
         name: "slot_promote",
@@ -502,21 +304,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.slot_promote,
         set_flag: |o| o.slot_promote = true,
         apply: ApplyFn::Grow(apply_slot_promote),
-    },
-    PassSpec {
-        name: "tos_carry",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.tos_carry,
-        set_flag: |o| o.tos_carry = true,
-        apply: ApplyFn::Grow(apply_tos_carry),
     },
     PassSpec {
         name: "clone_shared_return",
@@ -524,54 +314,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Generic,
         floor: OptFloor::Standard,
         omit_from_size: true,
-        seed_entry_tell_after: false,
         gate: |o| o.clone_shared_return,
         set_flag: |o| o.clone_shared_return = true,
         apply: ApplyFn::Grow(apply_clone_shared_return),
-    },
-    PassSpec {
-        name: "return_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.return_convoy,
-        set_flag: |o| o.return_convoy = true,
-        apply: ApplyFn::Grow(apply_return_convoy),
-    },
-    PassSpec {
-        name: "bin_join_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.bin_join_convoy,
-        set_flag: |o| o.bin_join_convoy = true,
-        apply: ApplyFn::Grow(apply_bin_join_convoy),
-    },
-    PassSpec {
-        name: "multi_op_join_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.multi_op_join_convoy,
-        set_flag: |o| o.multi_op_join_convoy = true,
-        apply: ApplyFn::Grow(apply_multi_op_join_convoy),
-    },
-    PassSpec {
-        name: "invert_guard_branch",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.invert_guard_branch,
-        set_flag: |o| o.invert_guard_branch = true,
-        apply: ApplyFn::Grow(apply_invert_guard_branch),
     },
     PassSpec {
         name: "branch_optimization",
@@ -579,7 +324,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::Branch,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.branch_optimization,
         set_flag: |o| o.branch_optimization = true,
         apply: ApplyFn::Grow(apply_branch_optimization),
@@ -590,32 +334,9 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         kind: PassKind::BlockOrder,
         floor: OptFloor::Standard,
         omit_from_size: false,
-        seed_entry_tell_after: false,
         gate: |o| o.block_reordering,
         set_flag: |o| o.block_reordering = true,
         apply: ApplyFn::Grow(apply_block_reordering),
-    },
-    PassSpec {
-        name: "slot_promote_tell",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.slot_promote_tell,
-        set_flag: |o| o.slot_promote_tell = true,
-        apply: ApplyFn::Grow(apply_slot_promote_tell),
-    },
-    PassSpec {
-        name: "ssa_gvn",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.ssa_gvn,
-        set_flag: |o| o.ssa_gvn = true,
-        apply: ApplyFn::Grow(apply_ssa_gvn),
     },
 ];
 
@@ -625,31 +346,16 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "jump_thread",
     "dead_block",
     "stack_dce",
-    "mem_fwd",
-    "copy_prop",
-    "dest_prop",
-    "dead_store",
     "canon",
     "algebraic",
-    "instcombine",
     "local_cse",
     "licm",
     "loop_bounds",
-    "strength_reduce",
     "loop_unroll",
-    "invariant_store_elim",
-    "escape_analysis",
     "slot_promote",
-    "tos_carry",
     "clone_shared_return",
-    "return_convoy",
-    "bin_join_convoy",
-    "multi_op_join_convoy",
-    "invert_guard_branch",
     "branch_optimization",
     "block_reordering",
-    "slot_promote_tell",
-    "ssa_gvn",
 ];
 
 #[cfg(test)]
@@ -675,31 +381,16 @@ mod tests {
                 "jump_thread",
                 "dead_block",
                 "stack_dce",
-                "mem_fwd",
-                "copy_prop",
-                "dest_prop",
-                "dead_store",
                 "canon",
                 "algebraic",
-                "instcombine",
                 "local_cse",
                 "licm",
                 "loop_bounds",
-                "strength_reduce",
                 "loop_unroll",
-                "invariant_store_elim",
-                "escape_analysis",
                 "slot_promote",
-                "tos_carry",
                 "clone_shared_return",
-                "return_convoy",
-                "bin_join_convoy",
-                "multi_op_join_convoy",
-                "invert_guard_branch",
                 "branch_optimization",
                 "block_reordering",
-                "slot_promote_tell",
-                "ssa_gvn",
             ]
         );
     }

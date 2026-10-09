@@ -2,7 +2,7 @@
 //!
 //! Not an IR: passes still rewrite the op buffer in place. One natural-loop
 //! finder and one block/liveness implementation replace the copies that used
-//! to live in licm, bounds, unroll, invariant_store_elim, and slot_promote.
+//! to live in licm, bounds, unroll, and slot_promote.
 
 use std::collections::{HashMap, HashSet};
 

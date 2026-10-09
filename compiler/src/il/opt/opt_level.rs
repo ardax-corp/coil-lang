@@ -17,7 +17,7 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// DCE, jump threading, copy/mem/dest forwarding. Inlining stays modest.
+    /// DCE and jump threading. Inlining stays modest.
     Basic,
     /// All currently-on production passes. Backward-compatible default.
     #[default]
@@ -26,7 +26,7 @@ pub enum OptLevel {
     Aggressive,
     /// Standard with unrolling and return cloning off (less code growth).
     Size,
-    /// Basic cleanup only; no slot promotion, escape SROA, unroll, or GVN.
+    /// Basic cleanup only; no slot promotion, scalar replacement, or unroll.
     Debug,
 }
 
@@ -48,9 +48,8 @@ impl OptLevel {
 
     /// `OptimizeOptions` for this level.
     ///
-    /// Pass flags are derived from [`Self::pass_names`] via the driver table
-    /// (`dead_store` sets `mem_fwd`). Driver knobs (iteration cap, …) are not
-    /// pass names.
+    /// Pass flags are derived from [`Self::pass_names`] via the driver table.
+    /// Driver knobs (iteration cap, …) are not pass names.
     pub fn options(self) -> OptimizeOptions {
         use super::driver::PRODUCTION_PASSES;
         let mut o = base_knobs(self);
@@ -124,28 +123,15 @@ fn all_off() -> OptimizeOptions {
         jump_thread: false,
         dead_block: false,
         stack_dce: false,
-        mem_fwd: false,
-        copy_prop: false,
-        dest_prop: false,
         slot_promote: false,
-        tos_carry: false,
         canon: false,
         algebraic: false,
-        instcombine: false,
         local_cse: false,
         licm: false,
         loop_bounds: false,
-        strength_reduce: false,
-        return_convoy: false,
         clone_shared_return: false,
-        bin_join_convoy: false,
-        multi_op_join_convoy: false,
-        invert_guard_branch: false,
-        slot_promote_tell: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
-        invariant_store_elim: false,
-        ssa_gvn: false,
         escape_analysis: false,
         branch_optimization: false,
         block_reordering: false,
@@ -167,9 +153,15 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
 }
 
 /// Knobs that are not pass names.
-fn base_knobs(_level: OptLevel) -> OptimizeOptions {
+fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
+    // Gates HIR scalar replacement (enum / tuple SROA in `emit_hir`), not an
+    // IL table row.
+    o.escape_analysis = matches!(
+        level,
+        OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size
+    );
     o
 }
 
@@ -185,27 +177,14 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.jump_thread,
         o.dead_block,
         o.stack_dce,
-        o.mem_fwd,
-        o.copy_prop,
-        o.dest_prop,
         o.slot_promote,
-        o.tos_carry,
         o.canon,
         o.algebraic,
-        o.instcombine,
         o.local_cse,
         o.licm,
         o.loop_bounds,
-        o.strength_reduce,
-        o.return_convoy,
         o.clone_shared_return,
-        o.bin_join_convoy,
-        o.multi_op_join_convoy,
-        o.invert_guard_branch,
-        o.slot_promote_tell,
         o.loop_unroll,
-        o.invariant_store_elim,
-        o.ssa_gvn,
         o.escape_analysis,
         o.branch_optimization,
         o.block_reordering,
@@ -266,15 +245,14 @@ mod tests {
         assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
-        assert!(!o.instcombine && !o.local_cse);
+        assert!(!o.local_cse);
     }
 
     #[test]
-    fn basic_enables_dce_and_forwarding() {
+    fn basic_enables_dce_and_jump_threading() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
-        assert!(o.mem_fwd && o.copy_prop && o.dest_prop);
-        assert!(!o.licm && !o.slot_promote && !o.ssa_gvn && !o.escape_analysis);
+        assert!(!o.licm && !o.slot_promote && !o.escape_analysis);
     }
 
     #[test]
@@ -294,8 +272,8 @@ mod tests {
     fn debug_preserves_slots() {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic && o.dead_block);
-        assert!(!o.slot_promote && !o.slot_promote_tell);
-        assert!(!o.escape_analysis && !o.ssa_gvn && !o.loop_unroll);
+        assert!(!o.slot_promote);
+        assert!(!o.escape_analysis && !o.loop_unroll);
         assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);
     }

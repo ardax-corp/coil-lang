@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use common::Instruction;
 
+use crate::il::analysis::build_blocks;
 use crate::il::effects::{Effects, effects};
-use crate::il::gvn::gvn_cfg;
 use crate::il::op::{EntryKind, IlOp};
 use crate::il::pure_call::PureCallCtx;
 
@@ -21,11 +21,11 @@ pub(crate) fn early_cse_with(ops: &mut Vec<IlOp>, purity: Option<&PureCallCtx>) 
     if ops.len() < 2 {
         return 0;
     }
-    let (ranges, _) = gvn_cfg(ops);
+    let blocks = build_blocks(ops);
     let mut out = Vec::with_capacity(ops.len());
     let mut hits = 0usize;
-    for (start, end) in ranges {
-        let (block, n) = cse_block(&ops[start..end], purity);
+    for b in blocks {
+        let (block, n) = cse_block(&ops[b.start..b.end], purity);
         hits += n;
         out.extend(block);
     }
@@ -594,26 +594,13 @@ mod tests {
             jump_thread: false,
             dead_block: false,
             stack_dce: false,
-            mem_fwd: false,
-            copy_prop: false,
-            dest_prop: false,
             slot_promote: false,
-            tos_carry: false,
             canon: false,
             algebraic: false,
-            instcombine: false,
             licm: false,
             loop_bounds: false,
-            strength_reduce: false,
-            return_convoy: false,
             clone_shared_return: false,
-            bin_join_convoy: false,
-            multi_op_join_convoy: false,
-            invert_guard_branch: false,
-            slot_promote_tell: false,
             loop_unroll: false,
-            invariant_store_elim: false,
-            ssa_gvn: false,
             escape_analysis: false,
             branch_optimization: false,
             block_reordering: false,

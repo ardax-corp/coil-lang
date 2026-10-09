@@ -3488,6 +3488,9 @@ fn main() {
     assert!(!vm.panicked(), "pack_store checksum; opcodes={names:?}");
 }
 
+/// `pick(0, 2)` skips the loop, so `xs[2]` is `3`. This test used to expect
+/// `6`: stack-IL `copy_prop` / `dest_prop` (removed 2026-10) miscompiled
+/// `pick` at `-O2`, and the checksum encoded that wrong answer.
 #[test]
 fn s2d_mapped_looping_makearray_lir_when_compare_only() {
     let src = r#"
@@ -3500,7 +3503,7 @@ fn pick(int go, int k) -> int {
     return xs[k];
 }
 fn main() {
-    if pick(1, 1) != 5 || pick(0, 2) != 6 {
+    if pick(1, 1) != 5 || pick(0, 2) != 3 {
         panic "pick checksum";
     }
 }

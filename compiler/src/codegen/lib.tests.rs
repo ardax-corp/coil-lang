@@ -796,7 +796,9 @@ fn repeated_field_keys_materialize_once_per_function() {
     let first_load = bc
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.bytecode(), Instruction::LoadField))
+        .filter(|(_, b)| {
+            matches!(b.bytecode(), Instruction::LoadField | Instruction::DenseFieldLoad)
+        })
         .find(|(i, _)| {
             let end = (*i + 24).min(bc.len());
             !bc[*i..end]
@@ -822,7 +824,7 @@ fn repeated_field_keys_materialize_once_per_function() {
         .count();
     let load_fields = region
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::LoadField))
+        .filter(|b| matches!(b.bytecode(), Instruction::LoadField | Instruction::DenseFieldLoad))
         .count();
     let get_fields = region
         .iter()
@@ -1969,7 +1971,7 @@ fn logical_and_if_fuses_bin_slot_slot_jmpf() {
 }
 
 /// `i = i + 1` fuses to `BinSlotImmStore(ADD)`, or elides the store when
-/// `mem_fwd` + dead-store keep the value on stack for `return i`.
+/// the value stays on stack for `return i`.
 #[test]
 fn assign_add_imm_fuses_bin_slot_imm_store() {
     use common::Instruction;
@@ -2157,9 +2159,10 @@ fn assignment_statement_does_not_emit_duplicate_before_store_pop() {
     );
 }
 
-/// `if !flag { break }` inverts fused LogNot;JMPF into LogNotJmpt (COI-87).
+/// `if !flag { break }` fuses `LogNot; JMPF` into `LogNotJmpf`. (Inversion to
+/// `LogNotJmpt` was `invert_guard_branch`, removed 2026-10.)
 #[test]
-fn not_flag_break_emits_log_not_jmpt() {
+fn not_flag_break_fuses_log_not_jmpf() {
     use common::Instruction;
     let (bc, _) = compile_src(
         // A parameter, not a literal: MIR→LIR would fold a constant flag away.
@@ -2175,8 +2178,8 @@ fn main() { spin(false); }",
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpt)),
-        "expected LogNotJmpt for inverted `if !flag {{ break }}`; opcodes={:?}",
+            .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpf)),
+        "expected LogNotJmpf for `if !flag {{ break }}`; opcodes={:?}",
         bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
     );
     assert!(
@@ -3027,16 +3030,18 @@ fn self_recursive_sites_are_not_predicate_peeled() {
 
 /// Codegen test 25 : two `let` bindings in the same
 /// scope emit two `STORE_POP`s ,  one per binding, with
-/// distinct slot operands (0 and 1).
+/// distinct slot operands (0 and 1). Fuse-IL only: dense MIR folds the
+/// dead body away.
 #[test]
 fn let_two_bindings_emit_two_store_pops() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_tuned(
         "fn main() { \
  let x = 5; \
  let y = 10; \
  let z = x + y; \
  }",
+        |c| c.opt_options.mir_specialize = false,
     );
 
     let store_pops: Vec<u32> = bc
@@ -3119,16 +3124,21 @@ fn const_if_strict_lt_does_not_take_then_branch() {
     );
 }
 
-/// Constant `if` condition emits only the taken branch (no JMPF cascade).
+/// Constant `if` condition folds to a constant (no compare at runtime).
+/// The `CONST; JMPF` that remains was dropped by the stack-IL `instcombine`
+/// pass, removed 2026-10.
 #[test]
-fn const_if_emits_only_taken_branch() {
+fn const_if_condition_folds_to_const() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         "fn main() { if 4 < 5 { write(stdout(), to_bytes(format(\"%i\", 1))); } else { write(stdout(), to_bytes(format(\"%i\", 0))); } }",
     );
     assert!(
-        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::JMPF)),
-        "folded `if 4 < 5` should not emit JMPF; opcodes: {:?}",
+        !bc.iter().any(|b| matches!(
+            b.bytecode(),
+            Instruction::LE | Instruction::LEQ | Instruction::GT | Instruction::GEQ | Instruction::CmpJmpf
+        )),
+        "folded `if 4 < 5` should not compare at runtime; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -6935,11 +6945,11 @@ fn main() {
         .count();
     let makes = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert!(
         mul_count >= 7 || makes >= 1,
-        "scalar unroll (MUL or const-fold + heap MakeArray); mul={mul_count} ops={names:?}"
+        "scalar unroll (MUL or const-fold + heap MakeArray / DenseMake); mul={mul_count} ops={names:?}"
     );
 }
 

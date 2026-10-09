@@ -5049,9 +5049,10 @@ fn main() {
     assert_eq!(output, "18");
 }
 
-/// `if !done { break }` must take LogNotJmpt polarity (COI-87).
+/// `if !done { break }` fuses `LogNot; JMPF` and runs. (`LogNotJmpt` came
+/// from `invert_guard_branch`, removed 2026-10.)
 #[test]
-fn not_flag_break_log_not_jmpt_runs() {
+fn not_flag_break_log_not_jmpf_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -5070,8 +5071,8 @@ fn main() {
     assert!(
         bytecode
             .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::LogNotJmpt)),
-        "expected LogNotJmpt in bytecode"
+            .any(|b| matches!(b.bytecode(), common::Instruction::LogNotJmpf)),
+        "expected LogNotJmpf in bytecode"
     );
     assert_eq!(run_example_src(src), "0");
 }
@@ -10246,9 +10247,10 @@ fn main() {
     assert_eq!(run_example_src(src), "7,30");
 }
 
-/// Repeated reads of the same field load it once and reuse the value.
+/// Repeated reads of the same field run correctly. (Reusing the loaded value
+/// via `Dup` was `cfg_gvn`, removed 2026-10.)
 #[test]
-fn repeated_field_read_reuses_loaded_value() {
+fn repeated_field_read_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -10263,16 +10265,6 @@ fn main() {
     write(stdout(), to_bytes(format("%i", twice(new Point(3, 4)))));
 }
 "#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    // Value reuse: one field load then DUPLICATE (not a second load of x).
-    let has_load_dup = bytecode.windows(2).any(|w| {
-        matches!(
-            w[0].bytecode(),
-            common::Instruction::GetField | common::Instruction::LoadField
-        ) && matches!(w[1].bytecode(), common::Instruction::DUPLICATE)
-    });
-    assert!(has_load_dup, "p.x + p.x should load x once then DUPLICATE");
     assert_eq!(run_example_src(src), "6");
 }
 

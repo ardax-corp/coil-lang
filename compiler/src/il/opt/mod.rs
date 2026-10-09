@@ -4,10 +4,8 @@
 //! (order matches D1 README). Each [`driver::Pass`] returns a
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
-//! [`super::IlModule::optimize_and_flatten`] still defers
-//! `multi_op_join_convoy`, `invert_guard_branch`,
-//! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
-//! the OptLevel table. Fuse-select stays in `lower_optimized`.
+//! [`super::IlModule::optimize_and_flatten`] runs the table per body; every
+//! production IL pass is a table row. Fuse-select stays in `lower_optimized`.
 //!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
 
@@ -22,52 +20,27 @@ pub struct OptimizeOptions {
     pub dead_block: bool,
     /// Drop redundant `DUPLICATE; POP` and `LOAD s; StorePop s`.
     pub stack_dce: bool,
-    /// `StorePop s; Load s` → `Dup; StorePop s`; dead-store elimination.
-    pub mem_fwd: bool,
-    /// Forward pure producer copies through cursor-safe straight-line regions.
-    pub copy_prop: bool,
-    /// Forward `LOAD src; STORE dest` aliases through GetField / Make* / Box.
-    pub dest_prop: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
-    /// Delay `STORE t` across slot-addressed ops so `LOAD t; STORE s` pops TOS.
-    pub tos_carry: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
     pub canon: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
-    /// Local InstCombine / peephole (const-cond branches, pair-match identity).
-    pub instcombine: bool,
     /// Intra-block EarlyCSE of pure expressions (stored result → `Load`).
     pub local_cse: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
     pub loop_bounds: bool,
-    /// Lite IV strength reduction (integer `i*c` → add recurrence).
-    pub strength_reduce: bool,
-    /// Sink identical `LOAD`/`CONST` producers into a join `RETURN` and fuse.
-    pub return_convoy: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
     pub clone_shared_return: bool,
-    /// Sink identical binop / BinSlot* tails into a return-label cluster.
-    pub bin_join_convoy: bool,
-    /// Sink identical multi-op suffixes (len 2..=4) at return / non-return joins.
-    pub multi_op_join_convoy: bool,
-    /// `JMPF A; JMP B; A:` → `JMPT B` for non-fusable guard conditions.
-    pub invert_guard_branch: bool,
-    /// Drop `LOAD`/`STORE` the shared cursor proves redundant, promoting the
-    /// slot out of the frame. Runs last, after every slot-tracking pass.
-    pub slot_promote_tell: bool,
     /// Full-unroll counted natural loops with a known trip count ≤ 8.
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
-    /// Sink or drop loop stores of an invariant value that is not read in the loop.
-    pub invariant_store_elim: bool,
-    /// SSA-style global CSE of pure binops whose result already lives in a slot.
-    pub ssa_gvn: bool,
-    /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
+    /// HIR scalar replacement: split local enums / tuples into field locals
+    /// before emit (`hir::enum_sroa`, `hir::tuple_sroa`). Not an IL pass; on
+    /// at Standard and above (and Size), off at None / Basic / Debug.
     pub escape_analysis: bool,
     /// Heuristic branch layout (COI-128).
     /// Default **on**: invert only Known-SP terminating then-arms, and mint
@@ -138,9 +111,6 @@ fn optimize_once_at(
 /// Production lower uses [`super::CodeBuf::lower_in_place`] /
 /// [`super::lower::lower_module_inner`] on an owning module; this
 /// stays for unit tests that mutate a bare `Vec<IlOp>`.
-///
-/// Whole-buffer [`multi_op_join_convoy`] is required: scoped multi_op can treat
-/// JMPF/fall-through diamonds as SP-known and mis-sink (e.g. `examples/fib.hy`).
 #[cfg(test)]
 pub fn optimize_per_func(
     ops: &mut Vec<IlOp>,
@@ -227,18 +197,10 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
-mod dest_prop;
-mod instcombine;
 mod early_cse;
-pub(crate) mod escape_analysis;
-mod invariant_store_elim;
 mod loop_unroll;
 mod slot_promote;
-mod tos_carry;
 
-pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
-pub(crate) use convoy::multi_op_join_convoy;
-pub(crate) use slot_promote::slot_promote_at;
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]
