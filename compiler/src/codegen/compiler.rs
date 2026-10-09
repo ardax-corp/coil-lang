@@ -5408,15 +5408,28 @@ impl Compiler {
             emit(self, "Eq", ty, "ne", tag, Instruction::NEQ, false);
         }
 
-        // Show thunks: accept a boxed (or heap-string) argument at slot 0,
+        // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
         // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
-        for ty in ["int", "float", "string", "bool", "unit", "byte"] {
+        // An immediate is re-boxed with its tag first: a shared generic body
+        // passes raw words (#802), and STRINGIFY reads a float or bool by tag.
+        for (ty, tag) in [
+            ("int", Some(ValueTag::Int)),
+            ("float", Some(ValueTag::Float)),
+            ("string", None),
+            ("bool", Some(ValueTag::Bool)),
+            ("unit", Some(ValueTag::Unit)),
+            ("byte", Some(ValueTag::Int)),
+        ] {
             let fqn = Generics::builtin_instance_fqn("Show", ty, "show");
             if self.functions.contains_key(&fqn) {
                 continue;
             }
             self.bind_function_entry(fqn);
             self.bytecode.push_load(0);
+            if let Some(tag) = tag {
+                self.bytecode.push_unbox_value(tag as u32);
+                self.bytecode.push_box_value(tag as u32);
+            }
             self.bytecode.push(Byte::new(Instruction::STRINGIFY));
             self.bytecode.push_return();
         }

@@ -438,6 +438,20 @@ impl Compiler {
                     self.hir_convert(&Rep::Word(from), &Rep::Word(to), 0);
                     self.bytecode.push_store_pop(slot);
                 }
+                // A shared generic body keeps a type parameter's values as
+                // raw words: the call boxed them (`hir_generic_abi`), and a
+                // boxed word stored into a field or container would reach a
+                // ground reader as the box (#802).
+                if self.hir_shared_generic() {
+                    for &param in &hir.params {
+                        if self.hir_open_ty(hir.local(param).ty.as_ref()) {
+                            let slot = Self::hir_slot(&emit, param);
+                            self.bytecode.push_load(slot);
+                            self.bytecode.push_unbox_value(common::UNBOX_ANY_TAG);
+                            self.bytecode.push_store_pop(slot);
+                        }
+                    }
+                }
                 if let Some(root) = hir.root {
                     self.hir_effect(hir, &mut emit, root);
                 }
@@ -5103,6 +5117,18 @@ impl Compiler {
     /// Push `id` as `want`, on top of `depth` live operands.
     fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
         self.hir_value_unpacked(hir, emit, id, want, depth);
+        // A call or dictionary operator typed a bare type parameter can
+        // return its value boxed (an instance thunk, a closure adapter);
+        // a shared generic body keeps such values raw (#802).
+        let expr = hir.expr(id);
+        let produced = match expr.kind {
+            HirKind::Call { .. } => true,
+            HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.ops.get(&id.0), Some(HirOp::Bound { .. })),
+            _ => false,
+        };
+        if produced && self.hir_open_ty(expr.ty.as_ref()) && self.hir_shared_generic() {
+            self.bytecode.push_unbox_value(common::UNBOX_ANY_TAG);
+        }
         // A concrete value where a bare-class existential is expected packs
         // as `[boxed value, dictionary]` (`append_with_existential_pack`).
         if let Some(pack) = self.hir_existential_pack(hir, id) {
@@ -5110,6 +5136,17 @@ impl Compiler {
             self.emit_existential_pack_recipe(&mut bc, &pack);
             self.bytecode = bc;
         }
+    }
+
+    /// Whether the body being lowered is a generic one's shared body (it
+    /// takes dictionaries; a mono clone takes none).
+    fn hir_shared_generic(&self) -> bool {
+        !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
+    }
+
+    /// Whether `ty` is a bare type variable.
+    fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
+        ty.is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), ty), Ty::Var(_)))
     }
 
     /// The checker's existential pack recipe for `id`, when `id` is the
