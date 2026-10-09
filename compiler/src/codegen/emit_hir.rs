@@ -569,6 +569,27 @@ impl Compiler {
             }
             plan => plan,
         };
+        // Loop-invariant expressions move in front of their loops, when the
+        // moved body plans.
+        let plan = match plan {
+            Ok(emit) if self.opt_options.licm && !self.debugger_attached && !hir.is_coro => {
+                let body = inlined.as_ref().unwrap_or(hir);
+                match crate::hir::licm::hoist(body, |n| crate::il::pure_call::name_in(&self.pure_fns, n)) {
+                    Some(next) => match lower::refusal(&next, &self.checker)
+                        .map_or_else(|| self.plan_hir_body(&next), Err)
+                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
+                    {
+                        Ok(replanned) => {
+                            inlined = Some(next);
+                            Ok(replanned)
+                        }
+                        Err(_) => Ok(emit),
+                    },
+                    None => Ok(emit),
+                }
+            }
+            plan => plan,
+        };
         let hir = inlined.as_ref().unwrap_or(hir);
         // Another module may splice this body, as inlined here.
         if !self.namespace.is_empty()

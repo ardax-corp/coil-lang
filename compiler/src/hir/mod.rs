@@ -25,6 +25,7 @@ pub mod lower;
 pub mod match_tree;
 pub mod print;
 pub mod stage;
+pub mod licm;
 pub mod tuple_sroa;
 
 use crate::typechecking::def_id::DefId;
