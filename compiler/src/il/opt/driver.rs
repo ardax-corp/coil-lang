@@ -164,16 +164,6 @@ fn apply_mem_fwd(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -
     0
 }
 
-fn apply_copy_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dce::copy_prop(ops, ctx.entry_tell);
-    0
-}
-
-fn apply_dest_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    super::dest_prop::dest_prop(ops, ctx.entry_tell);
-    0
-}
-
 fn apply_dead_store(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dce::dead_store_at(ops, ctx.entry_tell);
     0
@@ -352,28 +342,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.mem_fwd,
         set_flag: |o| o.mem_fwd = true,
         apply: ApplyFn::Slice(apply_mem_fwd),
-    },
-    PassSpec {
-        name: "copy_prop",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.copy_prop,
-        set_flag: |o| o.copy_prop = true,
-        apply: ApplyFn::Slice(apply_copy_prop),
-    },
-    PassSpec {
-        name: "dest_prop",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.dest_prop,
-        set_flag: |o| o.dest_prop = true,
-        apply: ApplyFn::Slice(apply_dest_prop),
     },
     PassSpec {
         name: "dead_store",
@@ -626,8 +594,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
     "stack_dce",
     "mem_fwd",
-    "copy_prop",
-    "dest_prop",
     "dead_store",
     "canon",
     "algebraic",
@@ -676,8 +642,6 @@ mod tests {
                 "dead_block",
                 "stack_dce",
                 "mem_fwd",
-                "copy_prop",
-                "dest_prop",
                 "dead_store",
                 "canon",
                 "algebraic",

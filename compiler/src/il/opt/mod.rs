@@ -24,10 +24,6 @@ pub struct OptimizeOptions {
     pub stack_dce: bool,
     /// `StorePop s; Load s` → `Dup; StorePop s`; dead-store elimination.
     pub mem_fwd: bool,
-    /// Forward pure producer copies through cursor-safe straight-line regions.
-    pub copy_prop: bool,
-    /// Forward `LOAD src; STORE dest` aliases through GetField / Make* / Box.
-    pub dest_prop: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
     /// Delay `STORE t` across slot-addressed ops so `LOAD t; STORE s` pops TOS.
@@ -227,7 +223,6 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
-mod dest_prop;
 mod instcombine;
 mod early_cse;
 pub(crate) mod escape_analysis;
