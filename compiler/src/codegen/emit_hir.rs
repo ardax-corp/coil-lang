@@ -319,7 +319,104 @@ impl Compiler {
                 }
             }
         }
+        if !module.is_empty() {
+            for body in &hir.bodies {
+                if let Some((key, portable)) = self.hir_portable_body(body) {
+                    self.hir_portable.insert(key, portable);
+                }
+            }
+        }
         self.hir_module = Some(hir);
+    }
+
+    /// `body` as another module's inliner can splice it, under its table
+    /// key: a plain function over scalars whose expressions plan the same
+    /// in any module (no strings, globals, objects or builtins) and whose
+    /// calls name plain functions by their resolved key. Its guard returns
+    /// are folded ([`inline::single_exit`]). Spliced elsewhere, its nodes
+    /// take the call site's span, so no span-keyed sidecar fact of this
+    /// module is looked up in the caller's.
+    fn hir_portable_body(&self, body: &HirBody) -> Option<(String, HirBody)> {
+        use crate::hir::{BodyKind, inline};
+        if body.kind != BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.result_mode {
+            return None;
+        }
+        let ty = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let scalar = |t: &Option<Ty>| match ty(t) {
+            Some(Ty::Never) => true,
+            Some(t) => lower::primitive(&t).is_some() || matches!(&t, Ty::Con(n) if n == crate::typechecking::ty::UNIT),
+            None => false,
+        };
+        if !scalar(&body.ret) || !body.locals.iter().all(|l| scalar(&l.ty)) || !body.exprs.iter().all(|e| scalar(&e.ty)) {
+            return None;
+        }
+        let mut out = body.clone();
+        for (i, e) in body.exprs.iter().enumerate() {
+            match &e.kind {
+                HirKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Bool(_) | Lit::Unit)
+                | HirKind::Local(_)
+                | HirKind::Logic { .. }
+                | HirKind::Un { .. }
+                | HirKind::Cast { .. }
+                | HirKind::If { .. }
+                | HirKind::Block { .. }
+                | HirKind::Let { .. }
+                | HirKind::Return(_) => {}
+                // `"a"` typed `byte`: its code.
+                HirKind::Lit(Lit::Str(raw)) if lower::byte_literal(raw).is_some() && ty(&e.ty).and_then(|t| lower::primitive(&t)) == Some("byte") => {}
+                HirKind::Bin { op, .. } if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) => {}
+                HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(_)) => {}
+                HirKind::Call {
+                    callee: Callee::Named { name, def, overload },
+                    args,
+                } => {
+                    let (start, end) = e.span;
+                    if name == "len"
+                        || self.hir_builtin(name).is_some()
+                        || self.checker.is_overloaded(name)
+                        || self.checker.bare_construct_at(start, end).is_some()
+                        || self.sidecar_overload(e.node, start, end).is_some()
+                        || self.checker.partial_fill_at(start, end).is_some()
+                        || self.forwarded_dicts_hint(e.node, start, end).is_some()
+                        || self.bound_method_hint(e.node, start, end).is_some()
+                        || self.existential_method_hint(e.node, start, end).is_some()
+                    {
+                        return None;
+                    }
+                    let key = self.resolve_free_fn(name);
+                    if !key.contains("::")
+                        || self.checker.is_generic_fn(&key)
+                        || self.lookup_extern_runtime(&key).is_some()
+                        || self.checker.fn_has_rest(&key)
+                        || self.fn_arities.get(&key).is_some_and(|&(n, rest)| rest || n as usize != args.len())
+                    {
+                        return None;
+                    }
+                    out.exprs[i].kind = HirKind::Call {
+                        callee: Callee::Named { name: key, def: *def, overload: *overload },
+                        args: args.clone(),
+                    };
+                }
+                _ => return None,
+            }
+        }
+        for (e, o) in body.exprs.iter().zip(out.exprs.iter_mut()) {
+            o.ty = ty(&e.ty);
+            o.node = None;
+        }
+        for (l, o) in body.locals.iter().zip(out.locals.iter_mut()) {
+            o.ty = ty(&l.ty);
+        }
+        out.ret = ty(&body.ret);
+        let out = match inline::inlinable(&out, usize::MAX) {
+            Err("return") => inline::single_exit(&out)?,
+            _ => out,
+        };
+        let key = match self.checker.overload_decl_at(body.span.0, body.span.1) {
+            Some((id, fixed, rest)) if self.checker.is_overloaded(&body.name) => overload_fn_key(&body.name, fixed, rest, id),
+            _ => body.name.clone(),
+        };
+        Some((key, out))
     }
 
     /// The body index of the function `key` names: an overload by its
@@ -594,7 +691,28 @@ impl Compiler {
                 None => {
                     let name = strip_overload_key(&call.key);
                     if !self.hir_fn_names.contains_key(name) && !self.hir_fn_names.contains_key(&call.key) {
-                        return Err(format!("no body `{name}`"));
+                        // Another module's: its portable body, when the
+                        // call is plain (an overload's or a generic's
+                        // facts sit on the call's span, which the spliced
+                        // nodes take).
+                        let portable = self.hir_portable.get(&call.key).filter(|b| {
+                            !call.key.contains('#')
+                                || !b.exprs.iter().any(|e| matches!(e.kind, HirKind::Call { .. }))
+                        });
+                        let Some(callee) = portable else {
+                            return Err(format!("no body `{name}`"));
+                        };
+                        let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+                            return Err("not-call".to_string());
+                        };
+                        let recursive = callee.exprs.iter().any(|e| {
+                            matches!(&e.kind, HirKind::Call { callee: Callee::Named { name, .. }, .. } if *name == callee.name)
+                        });
+                        if callee.params.len() != args.len() || callee.name == hir.name || recursive {
+                            return Err(format!("callee `{}`", callee.name));
+                        }
+                        let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                        return Ok((callee, shape));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
                     folded.get(&index).unwrap_or(&module.bodies[index])
@@ -759,6 +877,10 @@ impl Compiler {
             Ok(emit) => {
                 crate::il::opt::note_hir_inlined(sites);
                 for (name, (start, end)) in spliced {
+                    // Another module's body is scalar code with no host call.
+                    if !self.hir_fn_names.contains_key(&name) {
+                        continue;
+                    }
                     let file = self.loc_from_span(SimpleSpan::from(start..end)).file;
                     self.inlined_bodies.push((file, start..end, name));
                 }

@@ -61,9 +61,16 @@ pub struct Shape {
     /// Callee locals holding heap values: the caller's frame would keep
     /// them alive past the call, so they are cleared after the statement.
     heap_locals: Vec<LocalId>,
+    /// The callee is another module's: its nodes take the call's span.
+    foreign: bool,
 }
 
 impl Shape {
+    pub fn with_foreign(mut self, foreign: bool) -> Self {
+        self.foreign = foreign;
+        self
+    }
+
     pub fn with_heap_result(mut self, heap: bool) -> Self {
         self.heap_result = heap;
         self
@@ -144,6 +151,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         ret,
         heap_result: false,
         heap_locals: Vec::new(),
+        foreign: false,
     })
 }
 
@@ -655,7 +663,8 @@ impl Inliner<'_> {
                 },
                 k => remap(k, off, loff),
             };
-            self.body.exprs.push(HirExpr { kind, ..e.clone() });
+            let (span, node) = if shape.foreign { (span, None) } else { (e.span, e.node) };
+            self.body.exprs.push(HirExpr { kind, span, node, ..e.clone() });
         }
         // A substituted parameter has no slot of its own.
         let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());
