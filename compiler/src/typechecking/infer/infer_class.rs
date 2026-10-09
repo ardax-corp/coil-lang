@@ -645,6 +645,7 @@ impl Checker {
                             is_coro,
                             method_owner: None,
                             is_static_method: false,
+                            contracts: super::infer_fn::decl_contracts(m),
                         });
                         self.record_instance_method_under_fqn(mname, &fqn);
                         self.unshield_bare_names(shield);
@@ -953,6 +954,7 @@ impl Checker {
                         is_coro: *is_coro,
                         method_owner: Some(&owner_key),
                         is_static_method: *is_static,
+                        contracts: super::infer_fn::decl_contracts(method),
                     });
                     // The impl's own parameters are rigid in every method.
                     let named: Vec<(String, TyVarId)> =

@@ -337,10 +337,14 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             }
         }
 
-        Expression::Function { args, body, .. } => {
+        Expression::Function { args, body, contracts, .. } => {
             visit(args);
             if let Some(body) = body {
                 visit(body);
+            }
+            // Typed after the body (`infer_contracts`).
+            for c in contracts {
+                visit(&c.expr);
             }
         }
         Expression::Lambda { args, body, .. } => {
