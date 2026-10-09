@@ -3,6 +3,7 @@
 // to call functions that have contracts. Embedded in the compiler as module
 // `arbitrary`; see docs/internals/contracts.md.
 use macro::{TypeDecl, Variant, TypeRef, Code, raw};
+use task::{scope, Scope, TaskError};
 
 // A seeded source of random values. `size` bounds how big values get
 // (ints in `[-size, size]`, lengths up to `size`); `coil test` grows it
@@ -192,6 +193,47 @@ impl Arbitrary for Option<T: Arbitrary> {
         }
         return Option::Some(T::arbitrary(g));
     }
+}
+
+// What generated contract tests (`coil test`) use around each call.
+
+// Call `body` in a child task: the panic message if it panicked.
+fn run_case(unit -> unit body) -> Option<string> {
+    let r = scope(fn (Scope s) use (body) {
+        s.spawn(body);
+    });
+    return match r {
+        Result::Ok(_) => Option::None,
+        Result::Err(TaskError::Panicked(m)) => Option::Some(m),
+        Result::Err(_) => Option::Some("the call was cancelled"),
+    };
+}
+
+// `"text"` as written in source.
+fn quote(string s) -> string {
+    return "\"" + s + "\"";
+}
+
+// `[1, 2, 3]`.
+fn show_vec<T: Show>(Vec<T> v) -> string {
+    let out = "[";
+    let i = 0;
+    for x in v {
+        if i > 0 {
+            out += ", ";
+        }
+        out += x.show();
+        i += 1;
+    }
+    return out + "]";
+}
+
+// `Some(1)` / `None`.
+fn show_option<T: Show>(Option<T> o) -> string {
+    return match o {
+        Option::Some(x) => "Some(" + x.show() + ")",
+        Option::None => "None",
+    };
 }
 
 // `let __arb_<prefix><i>: <ty> = arbitrary::any(__arb_g);` for each type.

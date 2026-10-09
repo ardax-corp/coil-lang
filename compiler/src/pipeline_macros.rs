@@ -59,6 +59,8 @@ impl Pipeline {
         self.expand_macro_rounds();
         // Generated impls get their trait's contracts too.
         self.inherit_trait_contracts();
+        // `coil test`: the entry file's contracts become test cases.
+        self.add_contract_tests();
     }
 
     fn expand_macro_rounds(&mut self) {

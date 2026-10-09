@@ -131,6 +131,7 @@ fn weak_suite_end_to_end() {
             coverage: None,
             opt_level: OptLevel::Standard,
             contracts: None,
+            contract_runs: 0,
             grants: HostGrants::deny_all(),
             extra_roots: vec![root.join("src")],
             report: Default::default(),

@@ -28,6 +28,9 @@ mod macros;
 #[path = "pipeline_contracts.rs"]
 mod contracts;
 
+#[path = "pipeline_contract_tests.rs"]
+mod contract_tests;
+
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
@@ -99,6 +102,8 @@ pub struct Pipeline {
     ast_cache: crate::ast_cache::AstCache,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
+    /// Calls per generated contract test case; 0 generates none.
+    contract_runs: u32,
     /// Coverage: keep every function defined in files this accepts.
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
@@ -713,6 +718,7 @@ impl Pipeline {
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
             include_tests: false,
+            contract_runs: 0,
             keep_fns_in: None,
             auto_par: true,
             hir_inline: crate::hir::inline::inline_from_env(),
@@ -1742,6 +1748,13 @@ impl Pipeline {
     pub fn set_include_tests(&mut self, include: bool) {
         self.include_tests = include;
         self.compiler_lazy_mut().set_include_tests(include);
+    }
+
+    /// Generate a test case per function of the entry file that has
+    /// contracts, calling it `runs` times with arbitrary arguments (0: none).
+    /// Only with [`Self::set_include_tests`].
+    pub fn set_contract_runs(&mut self, runs: u32) {
+        self.contract_runs = runs;
     }
 
     pub fn include_tests(&self) -> bool {
