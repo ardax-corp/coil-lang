@@ -6526,7 +6526,7 @@ impl Pointer for Option {
     pub fn deref<T>(Option<T> ptr) -> T {
         return match ptr {
             Option::Some(v) => v,
-            Option::None => 0,
+            Option::None => panic "none",
         };
     }
 }

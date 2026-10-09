@@ -13918,6 +13918,34 @@ impl Checker {
         }
     }
 
+    /// Type parameters are rigid inside their own body: one unified with a
+    /// concrete type (`idx < xs[0]` with `idx: int`, `xs: Vec<T>`) would
+    /// silently make every use of `T` that type (#801). Reports each such
+    /// parameter not already in `reported`, and adds it there.
+    pub(super) fn reject_bound_type_params(
+        &mut self,
+        params: &[(String, TyVarId)],
+        reported: &mut Vec<TyVarId>,
+        range: &Range<usize>,
+    ) {
+        for (name, p) in params {
+            if reported.contains(p) {
+                continue;
+            }
+            let bound = apply_ty_prune(&self.subst, &Ty::Var(*p));
+            if matches!(bound, Ty::Var(_)) {
+                continue;
+            }
+            reported.push(*p);
+            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound);
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Type parameter `{name}` is used as `{pretty}`; a type parameter stands for any type"),
+                range.clone(),
+            ));
+        }
+    }
+
     fn stub_free_function_signature(
         &mut self,
         name: &str,

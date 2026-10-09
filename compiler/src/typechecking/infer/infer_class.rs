@@ -897,6 +897,7 @@ impl Checker {
             .extend(impl_constraints.iter().cloned());
 
         let prev_impl_owner = self.impl_owner.replace(owner_key.clone());
+        let mut reported_params: Vec<TyVarId> = Vec::new();
         // Register method schemes on the outer env (not a temporary frame).
         // Call-site dict emission looks them up by `Owner::method` FQN;
         // a push/pop around the loop used to drop those schemes.
@@ -953,6 +954,10 @@ impl Checker {
                         method_owner: Some(&owner_key),
                         is_static_method: *is_static,
                     });
+                    // The impl's own parameters are rigid in every method.
+                    let named: Vec<(String, TyVarId)> =
+                        type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
+                    self.reject_bound_type_params(&named, &mut reported_params, &method.0.into_range());
                     // Method-level vars / bounds come after the impl's (the
                     // body's `__dict{i}` order: impl bounds were active first).
                     let (method_vars, method_constraints) = match shield {
