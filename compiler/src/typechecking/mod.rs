@@ -68,7 +68,7 @@ pub use ty::{ScalarBacking, Ty};
 #[allow(unused_imports)] // public API for Vec helpers / codegen
 pub use ty::{vec_app_ty, vec_element_ty};
 pub use virtual_modules::{
-    BuiltinExport, FfiBuiltin, IoBuiltin, PreludeFn, StringBuiltin, ThreadBuiltin, VirtualModules,
+    BuiltinExport, FfiBuiltin, PreludeFn, StringBuiltin, VirtualModules,
 };
 // Re-export for callers / tests that match on GC virtual exports.
 #[allow(unused_imports)]

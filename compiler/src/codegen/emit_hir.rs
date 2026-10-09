@@ -1446,7 +1446,7 @@ impl Compiler {
         // A native the embedder registered by name (`Compiler::register`):
         // `HostInvoke` by its id, as `compile_call_expr`.
         if !known(&key)
-            && let Some(id) = self.native_id(&key)
+            && let Some(id) = self.native_id(&key).or_else(|| self.native_id(name))
         {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
         }

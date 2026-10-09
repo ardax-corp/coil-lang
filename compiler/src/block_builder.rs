@@ -43,10 +43,6 @@ impl BlockBuilder {
         il.bind_label(label);
     }
 
-    /// Bind `label` as a value-producing join.
-    pub fn bind_join_label(&mut self, label: Label, il: &mut IlBuilder) {
-        il.bind_join_label(label);
-    }
 }
 
 #[cfg(test)]

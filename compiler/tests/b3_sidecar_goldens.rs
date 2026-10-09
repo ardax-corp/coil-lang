@@ -42,11 +42,11 @@ const CORPUS: &[&str] = &[
 /// Typed inlining of pair-returning callees (HIR phase 7f) splices
 /// `parse_pair` into `match_pair` and `chain_pair` (`option_pair.hy` grows).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "b926f5662cd82634_915"),
-    ("functions.hy", "6a84918ecd185078_304"),
-    ("loops.hy", "eb56ceb9c5453cc4_248"),
-    ("option_pair.hy", "9d55c0a16f5303ee_340"),
-    ("user_trait_dispatch.hy", "c09fa0597356adad_138"),
+    ("arithmetic.hy", "f8a5da737a70192f_915"),
+    ("functions.hy", "a1185b8127e3435d_304"),
+    ("loops.hy", "d91e9ca0105e4005_248"),
+    ("option_pair.hy", "9bd375f8a6acb9c1_340"),
+    ("user_trait_dispatch.hy", "530b8d9b5e6d84f4_138"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
