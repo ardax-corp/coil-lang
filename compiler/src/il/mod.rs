@@ -8,14 +8,12 @@
 //! encodings along the way — no post-shrink jump relocation.
 
 mod analysis;
-mod bounds;
 mod builder;
 mod canon;
 mod codebuf;
 pub(crate) mod effects;
 mod emit_buf;
 mod func;
-mod loops;
 mod lower;
 pub(crate) mod module;
 mod op;
@@ -25,12 +23,10 @@ mod sp;
 pub mod tell;
 mod treeshake;
 
-pub use bounds::{BoundsStats, last_bounds_stats};
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
 #[cfg(any(test, feature = "dissect"))]
 pub(crate) use sp::stack_delta;
-pub use pure_call::PureCallCtx;
 
 pub use builder::IlBuilder;
 #[cfg(test)]

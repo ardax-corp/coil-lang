@@ -1581,7 +1581,6 @@ mod tests {
             branch_optimization: false,
             block_reordering: false,
             collect_stats: false,
-            pure_call_ctx: None,
             mir_specialize: true,
         }
     }
