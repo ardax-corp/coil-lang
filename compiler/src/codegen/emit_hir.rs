@@ -545,12 +545,14 @@ impl Compiler {
             }
             plan => plan,
         };
-        // Local enums split into a tag and field locals, when the split
-        // body plans.
+        // Local enums split into a tag and field locals, and local tuples
+        // into element locals, when the split body plans.
         let plan = match plan {
             Ok(emit) if self.opt_options.escape_analysis && !self.debugger_attached && !hir.is_coro => {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let split = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
+                let enums = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
+                let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Self::ty_has_var(t));
+                let split = tuples.or(enums);
                 match split {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
