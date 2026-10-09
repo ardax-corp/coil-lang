@@ -77,6 +77,9 @@ struct Formatter<'s> {
     last_end: usize,
     /// Inside a type annotation (`[T; N]` vs the array literal `[a, b]`).
     type_ctx: bool,
+    /// Scratch formatter from [`Self::measure`]: patterns measure flat, so a
+    /// broken pattern does not change how the code around it is laid out.
+    measuring: bool,
 }
 
 impl<'s> Formatter<'s> {
@@ -90,6 +93,7 @@ impl<'s> Formatter<'s> {
             next_comment: 0,
             last_end: 0,
             type_ctx: false,
+            measuring: false,
         }
     }
 
@@ -100,6 +104,7 @@ impl<'s> Formatter<'s> {
         Formatter {
             indent,
             flat: true,
+            measuring: true,
             ..Formatter::new("", Vec::new())
         }
     }
@@ -2368,6 +2373,10 @@ impl<'s> Formatter<'s> {
     /// a trailing comma, keeping its comments.
     fn fmt_pattern(&mut self, pattern: &(SimpleSpan, Pattern<'_>)) {
         let flat = pattern.1.to_string();
+        if self.measuring {
+            self.push_str(&flat);
+            return;
+        }
         let Pattern::Constructor {
             enum_name,
             variant_name,
@@ -2827,6 +2836,12 @@ mod tests {
         let want = "fn f(S s) -> int {\n    return match s {\n        S::B {\n            a,\n            b,\n            c,\n            d,\n            e,\n        } => 1,\n        S::B {\n            a: x,\n            b,\n            c,\n            d,\n        } => 2,\n        S::T(\n            a,\n            b,\n            c,\n            d,\n            S::U(e),\n        ) => 3,\n    };\n}\n";
         assert_eq!(format_source(src).unwrap(), want);
         round_trip(want);
+    }
+
+    #[test]
+    fn broken_pattern_keeps_the_call_around_its_match() {
+        let src = "fn f(Vec<int> lines, S a) {\n    lines.push(match a {\n        S::T(\n            a,\n            b,\n            c,\n            d,\n            e,\n        ) => a,\n    });\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
     }
 
     #[test]
