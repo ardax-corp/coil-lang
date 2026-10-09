@@ -17,6 +17,16 @@ use protocol::{Message, read_message, write_message};
 
 const THREAD_ID: i64 = 1;
 
+/// DAP thread id of a task: the running task is [`THREAD_ID`] (the thread
+/// that stops); others are `1000 + task id`.
+fn task_thread_id(task: &machine::DebugTask) -> i64 {
+    if matches!(task.state.as_str(), "running") {
+        THREAD_ID
+    } else {
+        1000 + task.id as i64
+    }
+}
+
 struct DapServer {
     seq: i64,
     session: Option<DebugSession>,
@@ -249,20 +259,31 @@ impl DapServer {
                 }
             }
             "threads" => {
-                self.send_response(
-                    writer,
-                    request_seq,
-                    command,
-                    json!({
-                        "threads": [{ "id": THREAD_ID, "name": "main" }]
-                    }),
-                )?;
+                // Tasks show as threads: the running one is the thread that
+                // stops, the suspended ones are listed with their state.
+                let tasks = self.session.as_ref().map(DebugSession::tasks).unwrap_or_default();
+                let threads: Vec<Value> = if tasks.is_empty() {
+                    vec![json!({ "id": THREAD_ID, "name": "main" })]
+                } else {
+                    tasks
+                        .iter()
+                        .map(|t| json!({ "id": task_thread_id(t), "name": format!("{} [{}]", t.name, t.state) }))
+                        .collect()
+                };
+                self.send_response(writer, request_seq, command, json!({ "threads": threads }))?;
             }
             "stackTrace" => {
+                let thread = args.get("threadId").and_then(|v| v.as_i64()).unwrap_or(THREAD_ID);
                 let frames = self
                     .session
                     .as_ref()
-                    .map(DebugSession::stack_frames)
+                    .map(|s| {
+                        let tasks = s.tasks();
+                        match tasks.iter().find(|t| task_thread_id(t) == thread) {
+                            Some(task) => s.task_frames(task),
+                            None => s.stack_frames(),
+                        }
+                    })
                     .unwrap_or_default();
                 let stack: Vec<Value> = frames
                     .into_iter()
@@ -290,6 +311,11 @@ impl DapServer {
                     .get("frameId")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0) as usize;
+                if frame_id >= crate::session::SAVED_FRAME_BASE {
+                    // A suspended task's frame: its locals are saved off the stack.
+                    self.send_response(writer, request_seq, command, json!({ "scopes": [] }))?;
+                    return Ok(true);
+                }
                 let locals = self
                     .session
                     .as_ref()

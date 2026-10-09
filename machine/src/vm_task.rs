@@ -802,6 +802,73 @@ impl<const S: usize> Machine<S> {
         self.task_panic_message = None;
     }
 
+    /// The scheduler's tasks for a debugger, root first; empty without
+    /// child tasks.
+    #[cfg(feature = "debugger")]
+    pub fn debug_tasks(&self) -> Vec<crate::debug::DebugTask> {
+        use crate::debug::{DebugTask, DebugTaskFrames};
+        use crate::task::{Block, ROOT, TaskState};
+        let Some(s) = self.sched.as_ref() else {
+            return Vec::new();
+        };
+        if s.live == 0 {
+            return Vec::new();
+        }
+        // Frames below the running child belong to the root task.
+        let child_base = (s.current != ROOT)
+            .then(|| s.tasks.get(&s.current))
+            .flatten()
+            .and_then(|r| self.resume_stack.get(r.ctx_index))
+            .map(|ctx| ctx.frame_depth);
+        let mut ids: Vec<_> = s.tasks.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let rec = &s.tasks[&id];
+                if rec.state.finished() {
+                    return None;
+                }
+                let state = match (rec.state, rec.block) {
+                    (TaskState::Running, _) => "running".to_string(),
+                    (TaskState::Ready, _) => "ready".to_string(),
+                    (TaskState::Ending, _) => "ending".to_string(),
+                    (_, Some(Block::Io(..))) => "blocked (IO)".to_string(),
+                    (_, Some(Block::Join(t))) => format!("blocked (join task {t})"),
+                    (_, Some(Block::Scope(_))) => "blocked (end of scope)".to_string(),
+                    (_, Some(Block::Sleep)) => "blocked (sleep)".to_string(),
+                    (_, Some(Block::Cancel)) => "blocked (cancelling)".to_string(),
+                    (_, Some(Block::Cond(_))) => "blocked (channel)".to_string(),
+                    (_, Some(Block::Thread(_))) => "blocked (thread)".to_string(),
+                    _ => "blocked".to_string(),
+                };
+                let frames = if id == s.current {
+                    DebugTaskFrames::Live(child_base.unwrap_or(0)..self.frames.len())
+                } else if id == ROOT {
+                    DebugTaskFrames::Live(0..child_base.unwrap_or(self.frames.len()))
+                } else {
+                    let mut pcs = Vec::new();
+                    if let Some(coro) = rec.coro {
+                        Self::with_coroutine_mut(coro, |c| {
+                            pcs = c.saved_frames.iter().map(|(ip, _)| *ip).collect();
+                        });
+                    }
+                    DebugTaskFrames::Saved(pcs)
+                };
+                let name = if id == ROOT {
+                    "main".to_string()
+                } else {
+                    format!("task {id}")
+                };
+                Some(DebugTask {
+                    id,
+                    name,
+                    state,
+                    frames,
+                })
+            })
+            .collect()
+    }
+
     fn task_string(&mut self, text: String) -> Value {
         let s = self.heap.alloc_string(text);
         Value::from(s.as_ptr() as *mut u8 as u64)

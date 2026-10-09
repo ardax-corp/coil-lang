@@ -660,6 +660,78 @@ fn dap_let_locals_at_line_breakpoint_case() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Tasks show as threads: the running task is thread 1, suspended tasks are
+/// listed with their state and their saved call chain.
+fn dap_tasks_are_threads_case() {
+    let dir = case_dir("coil-dap-tasks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("tasks.hy");
+    std::fs::write(
+        &prog,
+        "use task::{scope, Scope};\n\nfn napper() -> int {\n    task::sleep(50);\n    return 1;\n}\n\nfn worker() -> int {\n    let x = 7;\n    return x;\n}\n\nfn main() {\n    let _ = scope(fn (Scope s) {\n        s.spawn(fn () => napper());\n        s.spawn(fn () => worker());\n        0\n    });\n}\n",
+    )
+    .unwrap();
+    let mut client = DapClient::spawn(&dir);
+    initialize_and_launch(&mut client, prog.to_str().unwrap(), dir.to_str().unwrap(), false);
+    let set_bp = client.request(
+        "setBreakpoints",
+        serde_json::json!({
+            "source": { "path": prog.to_string_lossy() },
+            "breakpoints": [{ "line": 10 }]
+        }),
+    );
+    assert_eq!(
+        set_bp.pointer("/body/breakpoints/0/verified").and_then(|v| v.as_bool()),
+        Some(true),
+        "setBreakpoints={set_bp}"
+    );
+    let _ = client.request("configurationDone", serde_json::json!({}));
+    let stopped = client.wait_for_event("stopped");
+    assert_eq!(stopped.pointer("/body/reason").and_then(|v| v.as_str()), Some("breakpoint"));
+
+    let threads = client.request("threads", serde_json::json!({}));
+    let list = threads.pointer("/body/threads").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let named = |id: i64| {
+        list.iter()
+            .find(|t| t.get("id").and_then(|i| i.as_i64()) == Some(id))
+            .and_then(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+    };
+    assert_eq!(list.len(), 3, "threads={threads}");
+    assert_eq!(named(1).as_deref(), Some("task 2 [running]"), "threads={threads}");
+    assert_eq!(named(1000).as_deref(), Some("main [blocked (end of scope)]"), "threads={threads}");
+    assert_eq!(named(1001).as_deref(), Some("task 1 [blocked (sleep)]"), "threads={threads}");
+
+    let frame_names = |thread: i64, client: &mut DapClient| -> Vec<String> {
+        let stack = client.request("stackTrace", serde_json::json!({ "threadId": thread }));
+        stack
+            .pointer("/body/stackFrames")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect()
+    };
+    let running = frame_names(1, &mut client);
+    assert_eq!(running.first().map(String::as_str), Some("worker"), "{running:?}");
+    // The running task's chain ends at its task body, not in the root's frames.
+    assert_eq!(running.last().map(String::as_str), Some("task::__task_body"), "{running:?}");
+    let root = frame_names(1000, &mut client);
+    assert!(root.iter().any(|n| n == "main"), "{root:?}");
+    let napper = frame_names(1001, &mut client);
+    assert!(napper.iter().any(|n| n == "napper"), "{napper:?}");
+
+    let clear = client.request(
+        "setBreakpoints",
+        serde_json::json!({ "source": { "path": prog.to_string_lossy() }, "breakpoints": [] }),
+    );
+    assert_eq!(clear.get("success"), Some(&serde_json::json!(true)));
+    let _ = client.request("continue", serde_json::json!({ "threadId": 1 }));
+    let _ = client.wait_for_event("terminated");
+    client.disconnect();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 dap_tests! {
     dap_stop_on_entry_and_continue_case => dap_stop_on_entry_and_continue;
     dap_function_breakpoint_stack_and_locals_case => dap_function_breakpoint_stack_and_locals;
@@ -669,4 +741,5 @@ dap_tests! {
     dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
     dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
     dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
+    dap_tasks_are_threads_case => dap_tasks_are_threads;
 }

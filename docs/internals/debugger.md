@@ -60,7 +60,17 @@ are not shipped in this repository.
 stack trace, locals, `stopOnEntry`, host grants. A panic is a `stopped` event
 with reason `exception` and the stack intact; the next resume sends `exited`
 (code 1) and `terminated`. **Not supported:** attach, evaluate, conditional
-breakpoints over DAP (REPL only), multi-thread.
+breakpoints over DAP (REPL only), OS threads (`thread::spawn` workers).
+
+**Tasks as threads.** While a `task::scope` has child tasks, `threads`
+lists every unfinished task with its state (`task 2 [running]`,
+`main [blocked (end of scope)]`, `task 1 [blocked (sleep)]`). The running
+task is thread `1` (the one that stops and steps); the others are
+`1000 + task id`. `stackTrace` on a task shows its own call chain: the
+running task's frames end at its task body, the root task's frames sit
+below it on the VM stack, and a suspended child's frames come from its
+saved coroutine. Locals are available for the frames on the stack; a
+suspended child's frames have none (`scopes` is empty).
 
 `stopOnEntry` starts the VM and pauses at PC 0 (prologue). `stackTrace` /
 `stepIn` work from that stop. A previous fake pause (no `start`) left those
