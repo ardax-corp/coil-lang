@@ -547,14 +547,50 @@ pub fn format_bytecode_section(
             pc += 2;
             continue;
         }
-        let _ = writeln!(
-            out,
-            "{}",
-            format_byte_line(pc, byte, constants, pc_names)
-        );
+        let mut line = format_byte_line(pc, byte, constants, pc_names);
+        if *byte.bytecode() == Instruction::HostInvoke
+            && let Some(name) = host_native_at(bytecode, start, pc, constants)
+        {
+            let _ = write!(line, "  ; {name}");
+        }
+        let _ = writeln!(out, "{line}");
         pc += 1;
     }
     out
+}
+
+/// The host native the `HostInvoke` at `pc` calls: its id is the `CONST`
+/// pushed just before the arguments. Best effort: found only when the
+/// argument code is straight-line (no jumps) with known stack effects.
+fn host_native_at(bytecode: &[Byte], start: usize, pc: usize, constants: &[u64]) -> Option<&'static str> {
+    let arity = (bytecode[pc].operand_u32() & 0xFFFF) as i32;
+    let mut depth = 0;
+    let mut i = pc;
+    while i > start && pc - i < 256 {
+        i -= 1;
+        let byte = bytecode[i];
+        if depth == arity {
+            if *byte.bytecode() != Instruction::CONST {
+                return None;
+            }
+            let op = byte.operand_u32();
+            let id = if op & Byte::POOL_FLAG != 0 {
+                *constants.get((op & !Byte::POOL_FLAG) as usize)? as i64
+            } else {
+                op as i32 as i64
+            };
+            let native = common::HOST_NATIVES.get(usize::try_from(id).ok()?)?;
+            let fits = i32::from(native.arity) == arity
+                || (native.name == "thread_spawn" && arity >= 1);
+            return fits.then_some(native.name);
+        }
+        let il = IlOp::byte(byte);
+        if matches!(il, IlOp::Jump { .. } | IlOp::Label(_) | IlOp::JoinLabel(_)) {
+            return None;
+        }
+        depth += crate::il::stack_delta(&il)?;
+    }
+    None
 }
 
 /// Format prologue / unlabeled prefix before the first function entry.
@@ -779,6 +815,19 @@ pub fn format_il(snapshot: &IlSnapshot, pat: Option<&str>) -> Result<String, Str
 mod tests {
     use super::*;
     use common::{Byte, ProgramDebug};
+
+    #[test]
+    fn host_invoke_names_its_native() {
+        let join = common::host_native_id("task_join").unwrap() as u32;
+        let code = vec![
+            Byte::new(Instruction::CONST).with_value_u32(join),
+            Byte::new(Instruction::LOAD).with_load_store_slot(0),
+            Byte::new(Instruction::HostInvoke).with_value_u32(1),
+            Byte::new(Instruction::RETURN),
+        ];
+        let out = format_bytecode_section("f", 0, code.len(), &code, &[], &HashMap::new());
+        assert!(out.contains("HostInvoke       arity=1  ; task_join"), "{out}");
+    }
 
     #[test]
     fn mnemonic_load_and_call_line() {
