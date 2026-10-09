@@ -16,27 +16,27 @@ fn text(int i) -> string {
     return match m {
         Msg::Text(s) => s,
         Msg::Code(c) => "code",
-        Msg::Pair{ lo, hi } => "pair",
+        Msg::Pair { lo, hi } => "pair",
         Msg::Blob(a, b, c) => "blob",
     };
 }
 
 fn record(int i) -> int {
-    let m = Msg::Pair{ lo: i, hi: i * 10 };
+    let m = Msg::Pair { lo: i, hi: i * 10 };
     if i == 0 {
         m = Msg::Code(7);
     }
     return match m {
-        Msg::Pair{ lo, hi } => hi - lo,
+        Msg::Pair { lo, hi } => hi - lo,
         Msg::Code(c) => c,
         default => -1,
     };
 }
 
 fn shuffled(int i) -> int {
-    let m = Msg::Pair{ hi: i * 10, lo: i };
+    let m = Msg::Pair { hi: i * 10, lo: i };
     return match m {
-        Msg::Pair{ lo, hi } => hi - lo,
+        Msg::Pair { lo, hi } => hi - lo,
         default => -1,
     };
 }
