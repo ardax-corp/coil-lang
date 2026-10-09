@@ -46,8 +46,8 @@ const CORPUS: &[&str] = &[
 /// Removing 16 no-effect stack-IL passes (2026-10: convoys, GVN, copy/dest
 /// prop, instcombine, …) retargets all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "690c09850057063c_1275"),
-    ("functions.hy", "ee294b2ac353155a_282"),
+    ("arithmetic.hy", "b7160450dc316466_1275"),
+    ("functions.hy", "80dfeef7d5f6f82e_274"),
     ("loops.hy", "df2931662258672f_250"),
     ("option_pair.hy", "7b0f8b444ec118db_340"),
     ("user_trait_dispatch.hy", "00233c336c0f1c62_123"),

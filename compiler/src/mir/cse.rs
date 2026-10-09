@@ -1,7 +1,7 @@
 //! GVN / CSE on numeric MIR (COI-269 same-block, COI-284 cross-block).
 //!
-//! Stack-IL `local_cse` refuses `DIV`/`MOD`/`DIVF`/`MODF`. After
-//! dense lower, those ops are ordinary SSA bins. Same-block numbering removes
+//! The stack-IL `local_cse` (now `hir::cse`) refused `DIV`/`MOD`/`DIVF`/`MODF`.
+//! After dense lower, those ops are ordinary SSA bins. Same-block numbering removes
 //! a second divide in one block (`mir_cse_divf`). Dominator availability plus
 //! fully-anticipated fork PRE share expressions across blocks
 //! (`mir_gvn_divf`).

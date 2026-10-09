@@ -26,7 +26,7 @@ pub struct OptimizeOptions {
     pub canon: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
-    /// Intra-block EarlyCSE of pure expressions (stored result → `Load`).
+    /// Local CSE in the HIR (`hir::cse`), not an IL pass.
     pub local_cse: bool,
     /// Loop-invariant code motion in the HIR (`hir::licm`), not an IL pass.
     pub licm: bool,
@@ -197,7 +197,6 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
-mod early_cse;
 mod loop_unroll;
 mod slot_promote;
 
