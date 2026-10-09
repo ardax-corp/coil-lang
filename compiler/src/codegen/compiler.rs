@@ -15038,7 +15038,7 @@ impl Compiler {
         self.record_fn_span(name.clone(), body_start, body_start);
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
-            self.report_unlowered(&init.0, &fqn);
+            self.report_unlowered(&init.0, fqn);
         }
         self.emit_shared_try_fail_epilogue();
         let body_end = self.bytecode.len();
