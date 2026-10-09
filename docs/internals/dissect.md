@@ -17,7 +17,7 @@ coil-dissect examples/fib.hy --fn fib --il
 
 | Flag | Effect |
 |------|--------|
-| (none) | Symbol index + full final fused bytecode (function headers interleaved), with the source line (`;; file:line │ text`) shown wherever it changes. Dense register ops are decoded (`r3 = r1`, `r5 = array(r15..r18)`, `r2 = len(r5)`) |
+| (none) | Symbol index + full final fused bytecode (function headers interleaved), with the source line (`;; file:line │ text`) shown wherever it changes. Dense register ops are decoded (`r3 = r1`, `r5 = array(r15..r18)`, `r2 = len(r5)`). A `HostInvoke` names the native it calls (`HostInvoke arity=1  ; task_join`) when the `CONST` that pushed its id is found before straight-line argument code |
 | `--no-source` | Bytecode without the interleaved source lines |
 | `--fn <pat>` | Case-insensitive FQN match (exact, substring, trailing segment, `name#N`) |
 | `--il` | Also print **pre-opt** stack IL (snapshot after finalize splices, before lower) |

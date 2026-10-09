@@ -215,10 +215,12 @@ impl<const S: usize> Machine<S> {
         TaskFlow::Switched
     }
 
-    /// The running task's waker and the key its next thread wait gets.
-    fn task_waiter(&self) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64)> {
+    /// The running task's waker, the key its next thread wait gets, and its id.
+    fn task_waiter(
+        &self,
+    ) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64, crate::task::TaskId)> {
         let s = self.sched.as_ref()?;
-        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key()))
+        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key(), s.current))
     }
 
     /// A native parked the task on a `thread` object (its arguments are
@@ -249,6 +251,21 @@ impl<const S: usize> Machine<S> {
             s.add_timer(current, std::time::Instant::now() + t);
         }
         self.task_suspend(Some(crate::task::Block::Io(token, layout)), ip, sp);
+    }
+
+    /// A native asked to wait for IO readiness with its arguments still on
+    /// the stack (a connect in progress): suspend at the HostInvoke itself, so
+    /// it runs again once the handle is ready or the timeout passed.
+    fn task_suspend_io_retry(&mut self, req: crate::io::IoParkRequest, ip: &mut usize, sp: &mut usize) {
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let token = s.reactor.register_wait(req.handle, req.interest);
+        let current = s.current;
+        s.io_waits.insert(token, current);
+        if let Some(t) = req.timeout {
+            s.add_timer(current, std::time::Instant::now() + t);
+        }
+        *ip -= 1;
+        self.task_suspend_at(Some(crate::task::Block::IoRetry(token)), false, ip, sp);
     }
 
     /// Suspend the current task at a HostInvoke whose args are consumed.
@@ -505,11 +522,12 @@ impl<const S: usize> Machine<S> {
             let s = self.sched.as_mut().expect("scheduler");
             for token in reactor.take_ready() {
                 if let Some(id) = s.io_waits.remove(&token) {
-                    let layout = match s.tasks.get(&id).and_then(|r| r.block) {
-                        Some(Block::Io(_, layout)) => layout,
-                        _ => Default::default(),
+                    let wake = match s.tasks.get(&id).and_then(|r| r.block) {
+                        Some(Block::IoRetry(_)) => Wake::Retry,
+                        Some(Block::Io(_, layout)) => Wake::Io(Ok(()), layout),
+                        _ => Wake::Io(Ok(()), Default::default()),
                     };
-                    s.make_ready(id, Wake::Io(Ok(()), layout));
+                    s.make_ready(id, wake);
                 }
             }
         } else if has_thread {
@@ -529,6 +547,11 @@ impl<const S: usize> Machine<S> {
                     s.drop_wait(id, block);
                     let err = Err(crate::io::IoErrorTag::TimedOut);
                     s.make_ready(id, Wake::Io(err, layout));
+                }
+                Some(Block::IoRetry(_)) => {
+                    // The native runs again and reports the timeout itself.
+                    s.drop_wait(id, block);
+                    s.make_ready(id, Wake::Retry);
                 }
                 Some(Block::Sleep) => s.make_ready(id, Wake::Unit),
                 _ => {}
@@ -692,7 +715,7 @@ impl<const S: usize> Machine<S> {
         rec.state = TaskState::Ready;
         // A thread wait left no result slot to write.
         rec.wake = Some(match block {
-            Some(Block::Thread(_)) => Wake::Retry,
+            Some(Block::Thread(_) | Block::IoRetry(_)) => Wake::Retry,
             _ => Wake::Unit,
         });
         s.run_queue.push_back(id);
@@ -800,6 +823,73 @@ impl<const S: usize> Machine<S> {
     fn task_teardown(&mut self) {
         self.sched = None;
         self.task_panic_message = None;
+    }
+
+    /// The scheduler's tasks for a debugger, root first; empty without
+    /// child tasks.
+    #[cfg(feature = "debugger")]
+    pub fn debug_tasks(&self) -> Vec<crate::debug::DebugTask> {
+        use crate::debug::{DebugTask, DebugTaskFrames};
+        use crate::task::{Block, ROOT, TaskState};
+        let Some(s) = self.sched.as_ref() else {
+            return Vec::new();
+        };
+        if s.live == 0 {
+            return Vec::new();
+        }
+        // Frames below the running child belong to the root task.
+        let child_base = (s.current != ROOT)
+            .then(|| s.tasks.get(&s.current))
+            .flatten()
+            .and_then(|r| self.resume_stack.get(r.ctx_index))
+            .map(|ctx| ctx.frame_depth);
+        let mut ids: Vec<_> = s.tasks.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let rec = &s.tasks[&id];
+                if rec.state.finished() {
+                    return None;
+                }
+                let state = match (rec.state, rec.block) {
+                    (TaskState::Running, _) => "running".to_string(),
+                    (TaskState::Ready, _) => "ready".to_string(),
+                    (TaskState::Ending, _) => "ending".to_string(),
+                    (_, Some(Block::Io(..) | Block::IoRetry(_))) => "blocked (IO)".to_string(),
+                    (_, Some(Block::Join(t))) => format!("blocked (join task {t})"),
+                    (_, Some(Block::Scope(_))) => "blocked (end of scope)".to_string(),
+                    (_, Some(Block::Sleep)) => "blocked (sleep)".to_string(),
+                    (_, Some(Block::Cancel)) => "blocked (cancelling)".to_string(),
+                    (_, Some(Block::Cond(_))) => "blocked (channel)".to_string(),
+                    (_, Some(Block::Thread(_))) => "blocked (thread)".to_string(),
+                    _ => "blocked".to_string(),
+                };
+                let frames = if id == s.current {
+                    DebugTaskFrames::Live(child_base.unwrap_or(0)..self.frames.len())
+                } else if id == ROOT {
+                    DebugTaskFrames::Live(0..child_base.unwrap_or(self.frames.len()))
+                } else {
+                    let mut pcs = Vec::new();
+                    if let Some(coro) = rec.coro {
+                        Self::with_coroutine_mut(coro, |c| {
+                            pcs = c.saved_frames.iter().map(|(ip, _)| *ip).collect();
+                        });
+                    }
+                    DebugTaskFrames::Saved(pcs)
+                };
+                let name = if id == ROOT {
+                    "main".to_string()
+                } else {
+                    format!("task {id}")
+                };
+                Some(DebugTask {
+                    id,
+                    name,
+                    state,
+                    frames,
+                })
+            })
+            .collect()
     }
 
     fn task_string(&mut self, text: String) -> Value {

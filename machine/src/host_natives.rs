@@ -733,7 +733,12 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                             return Ok(Some(as_result_value(heap, Err(tag))));
                         }
                     };
-                    let r = tcp_connect(heap, &host, args[1].as_int());
+                    let (port, ms) = (args[1].as_int(), 0);
+                    let r = match crate::task::connect_in_task(&host, port, ms) {
+                        Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
+                        Some(None) => return Ok(None),
+                        None => tcp_connect(heap, &host, port),
+                    };
                     as_result_value(heap, r)
                 }
                 IoKind::TcpConnectTimeout => {
@@ -743,7 +748,12 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                             return Ok(Some(as_result_value(heap, Err(tag))));
                         }
                     };
-                    let r = tcp_connect_timeout(heap, &host, args[1].as_int(), args[2].as_int());
+                    let (port, ms) = (args[1].as_int(), args[2].as_int());
+                    let r = match crate::task::connect_in_task(&host, port, ms) {
+                        Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
+                        Some(None) => return Ok(None),
+                        None => tcp_connect_timeout(heap, &host, port, ms),
+                    };
                     as_result_value(heap, r)
                 }
                 IoKind::TcpListen => {

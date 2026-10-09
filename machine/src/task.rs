@@ -78,6 +78,9 @@ pub(crate) enum Block {
     /// until that thread posts this key to the scheduler's [`TaskWaker`].
     /// The task then runs the native again.
     Thread(u64),
+    /// IO readiness for a native that runs again afterwards (its arguments
+    /// stay on the stack): a connect in progress.
+    IoRetry(WaitToken),
 }
 
 pub(crate) type CondId = i64;
@@ -97,7 +100,7 @@ pub(crate) enum Wake {
     Status(i64),
     Io(Result<(), IoErrorTag>, HostEnumLayout),
     /// Run the suspended HostInvoke again (its arguments are still on the
-    /// stack): a [`Block::Thread`] wait ended.
+    /// stack): a [`Block::Thread`] or [`Block::IoRetry`] wait ended.
     Retry,
 }
 
@@ -413,7 +416,7 @@ impl Scheduler {
     /// Forget the wait behind `block` (the task is cancelled or its timer fired).
     pub(crate) fn drop_wait(&mut self, id: TaskId, block: Option<Block>) {
         match block {
-            Some(Block::Io(token, _)) => {
+            Some(Block::Io(token, _) | Block::IoRetry(token)) => {
                 self.io_waits.remove(&token);
                 self.reactor.cancel_wait(token);
             }
@@ -542,13 +545,257 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// A native registered the task with [`ThreadWaiters::park_current`].
     static THREAD_PARKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The task running the native (with `TASK_WAITER`).
+    static CURRENT_TASK: std::cell::Cell<TaskId> = const { std::cell::Cell::new(ROOT) };
+    /// Connects in progress, by (scheduler, task).
+    static PENDING_CONNECTS: std::cell::RefCell<
+        std::collections::HashMap<(usize, TaskId), PendingConnect>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// A native asked to wait for IO readiness and then run again.
+    static IO_RETRY_PARK: std::cell::RefCell<Option<crate::io::IoParkRequest>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Around a native the VM runs where it can switch tasks: `Some` arms
 /// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
-pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64)>) {
+pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, TaskId)>) {
     TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
+    let waiter = waiter.map(|(waker, key, task)| {
+        CURRENT_TASK.with(|c| c.set(task));
+        (waker, key)
+    });
     TASK_WAITER.with(|w| *w.borrow_mut() = waiter);
+}
+
+/// A TCP connect a task started without blocking the VM thread.
+struct PendingConnect {
+    host: String,
+    port: i64,
+    ms: i64,
+    /// The name lookup the task waits for, on a resolver thread.
+    lookup: Option<std::sync::Arc<Lookup>>,
+    /// Addresses not tried yet.
+    addrs: std::collections::VecDeque<std::net::SocketAddr>,
+    /// The attempt in progress.
+    sock: Option<std::net::TcpStream>,
+    /// Set once the lookup is done: `ms` counts from there, as in place.
+    deadline: Option<std::time::Instant>,
+    last_err: crate::io::IoErrorTag,
+}
+
+type ConnectResult = Result<std::net::TcpStream, crate::io::IoErrorTag>;
+
+type LookupResult = Result<Vec<std::net::SocketAddr>, crate::io::IoErrorTag>;
+
+/// A name lookup a task waits for.
+#[derive(Default)]
+struct Lookup {
+    result: std::sync::Mutex<Option<LookupResult>>,
+    waiters: ThreadWaiters,
+}
+
+/// Most resolver threads at once. `getaddrinfo` blocks on every platform,
+/// so lookups run on these instead of the VM thread. They start on demand
+/// and stay for the process (one malloc arena each, not one per connect).
+const RESOLVER_THREADS: usize = 4;
+
+#[derive(Default)]
+struct ResolverQueue {
+    jobs: std::collections::VecDeque<(String, i64, std::sync::Arc<Lookup>)>,
+    threads: usize,
+    idle: usize,
+}
+
+struct Resolver {
+    queue: std::sync::Mutex<ResolverQueue>,
+    more: std::sync::Condvar,
+}
+
+static RESOLVER: std::sync::OnceLock<Resolver> = std::sync::OnceLock::new();
+
+/// Queue a lookup for a resolver thread. False when no thread could run it
+/// (none running and none could start).
+fn resolve_on_pool(host: &str, port: i64, lookup: &std::sync::Arc<Lookup>) -> bool {
+    let r = RESOLVER.get_or_init(|| Resolver {
+        queue: std::sync::Mutex::new(ResolverQueue::default()),
+        more: std::sync::Condvar::new(),
+    });
+    let mut q = r.queue.lock().unwrap_or_else(|e| e.into_inner());
+    if q.idle == 0 && q.threads < RESOLVER_THREADS {
+        let started = std::thread::Builder::new()
+            .name("coil-resolve".into())
+            .spawn(move || resolver_loop(r));
+        if started.is_ok() {
+            q.threads += 1;
+        } else if q.threads == 0 {
+            return false;
+        }
+    }
+    q.jobs
+        .push_back((host.to_string(), port, std::sync::Arc::clone(lookup)));
+    r.more.notify_one();
+    true
+}
+
+fn resolver_loop(r: &'static Resolver) {
+    loop {
+        let (host, port, lookup) = {
+            let mut q = r.queue.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(job) = q.jobs.pop_front() {
+                    break job;
+                }
+                q.idle += 1;
+                q = r.more.wait(q).unwrap_or_else(|e| e.into_inner());
+                q.idle -= 1;
+            }
+        };
+        let addrs = crate::io::connect_addrs(&host, port);
+        *lookup.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(addrs);
+        lookup.waiters.wake_all();
+    }
+}
+
+/// `io::net::tcp::connect` from a task. A host name is looked up on a
+/// resolver thread while the task waits like a thread wait. Each address
+/// then gets a non-blocking connect (Unix) and the task waits on the
+/// reactor until the socket is writable (`SO_ERROR` says whether it
+/// connected); Windows connects in place. `None`: no scheduler, so connect
+/// in place. `Some(None)`: the task is parked (the native returns `Ok(None)`
+/// and runs again on a wake or at the deadline). `Some(Some(r))`: the
+/// connect finished.
+///
+/// A task cancelled while it waits leaves its entry behind; the next
+/// connect of the same task id with other arguments replaces it.
+pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<ConnectResult>> {
+    use crate::io::IoErrorTag;
+    use crate::io_reactor::Interest;
+    use std::time::{Duration, Instant};
+    let (waker, _) = TASK_WAITER.with(|w| w.borrow().clone())?;
+    let key = (
+        std::sync::Arc::as_ptr(&waker) as usize,
+        CURRENT_TASK.with(|c| c.get()),
+    );
+    let started = PENDING_CONNECTS
+        .with(|m| m.borrow_mut().remove(&key))
+        .filter(|p| p.host == host && p.port == port && p.ms == ms);
+    let mut p = match started {
+        Some(p) => p,
+        None => {
+            let mut p = PendingConnect {
+                host: host.to_string(),
+                port,
+                ms,
+                lookup: None,
+                addrs: Default::default(),
+                sock: None,
+                deadline: None,
+                last_err: IoErrorTag::Other,
+            };
+            match crate::io::connect_literal_addr(host, port) {
+                Ok(Some(addr)) => p.addrs.push_back(addr),
+                Ok(None) => {
+                    let lookup = std::sync::Arc::new(Lookup::default());
+                    if !resolve_on_pool(host, port, &lookup) {
+                        return None;
+                    }
+                    p.lookup = Some(lookup);
+                }
+                Err(e) => return Some(Some(Err(e))),
+            }
+            p
+        }
+    };
+    if let Some(lookup) = p.lookup.take() {
+        let mut done = None;
+        let ready = lookup.waiters.park_unless(|| {
+            done = lookup.result.lock().unwrap_or_else(|e| e.into_inner()).take();
+            done.is_some()
+        })?;
+        if !ready {
+            p.lookup = Some(lookup);
+            PENDING_CONNECTS.with(|m| m.borrow_mut().insert(key, p));
+            return Some(None);
+        }
+        match done.expect("ready") {
+            Ok(addrs) => p.addrs = addrs.into(),
+            Err(e) => return Some(Some(Err(e))),
+        }
+    }
+    if p.deadline.is_none() {
+        p.deadline = crate::io::duration_from_timeout_ms(ms).map(|d| Instant::now() + d);
+    }
+    loop {
+        let expired = p.deadline.is_some_and(|d| Instant::now() >= d);
+        if let Some(sock) = p.sock.take() {
+            let handle = crate::io_handle::WaitHandle::from_tcp(&sock);
+            // A direct poll: the helping wait times out a zero timeout before it polls.
+            let probe = crate::io::reactor_wait_fd_no_help(
+                handle,
+                Interest::Writable,
+                Some(Duration::ZERO),
+            );
+            match probe {
+                Ok(()) => match sock.take_error() {
+                    Ok(None) => return Some(Some(Ok(sock))),
+                    Ok(Some(e)) | Err(e) => p.last_err = IoErrorTag::from_kind(e.kind()),
+                },
+                Err(IoErrorTag::TimedOut) if !expired => {
+                    let timeout = p
+                        .deadline
+                        .map(|d| d.saturating_duration_since(Instant::now()));
+                    IO_RETRY_PARK.with(|r| {
+                        *r.borrow_mut() = Some(crate::io::IoParkRequest {
+                            handle,
+                            interest: Interest::Writable,
+                            timeout,
+                        });
+                    });
+                    p.sock = Some(sock);
+                    PENDING_CONNECTS.with(|m| m.borrow_mut().insert(key, p));
+                    return Some(None);
+                }
+                Err(e) => p.last_err = e,
+            }
+        }
+        if expired {
+            return Some(Some(Err(IoErrorTag::TimedOut)));
+        }
+        let Some(addr) = p.addrs.pop_front() else {
+            return Some(Some(Err(p.last_err)));
+        };
+        #[cfg(any(unix, windows))]
+        match crate::io::connect_start(addr) {
+            Ok(sock) => p.sock = Some(sock),
+            Err(e) => p.last_err = e,
+        }
+        // No non-blocking connect here yet: connect in place.
+        #[cfg(not(any(unix, windows)))]
+        {
+            let attempt = match p.deadline {
+                None => std::net::TcpStream::connect(addr),
+                Some(d) => std::net::TcpStream::connect_timeout(
+                    &addr,
+                    d.saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1)),
+                ),
+            };
+            match attempt.and_then(|s| s.set_nonblocking(true).map(|()| s)) {
+                Ok(sock) => p.sock = Some(sock),
+                Err(e) => p.last_err = IoErrorTag::from_kind(e.kind()),
+            }
+        }
+    }
+}
+
+/// The native just run asked to wait for IO readiness and run again.
+pub(crate) fn io_retry_parked() -> bool {
+    IO_RETRY_PARK.with(|r| r.borrow().is_some())
+}
+
+/// The request behind [`io_retry_parked`] (clears it).
+pub(crate) fn take_io_retry_park() -> Option<crate::io::IoParkRequest> {
+    IO_RETRY_PARK.with(|r| r.borrow_mut().take())
 }
 
 /// A native parked the task on a thread object (its result is a dummy).
@@ -563,4 +810,102 @@ pub(crate) fn take_thread_parked() -> bool {
 
 pub(crate) fn tasks_active() -> bool {
     TASKS_ACTIVE.with(|c| c.get())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn connect_in_task_parks_then_returns_the_stream() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = i64::from(listener.local_addr().expect("addr").port());
+        let waker = Arc::new(TaskWaker::default());
+        set_task_waiter(Some((Arc::clone(&waker), 5, 7)));
+        let stream = loop {
+            match connect_in_task("127.0.0.1", port, 0) {
+                Some(Some(r)) => break r.expect("connect"),
+                Some(None) => {
+                    let req = take_io_retry_park().expect("parked on the socket");
+                    assert_eq!(req.interest, crate::io_reactor::Interest::Writable);
+                    crate::io::reactor_wait_fd(
+                        req.handle,
+                        req.interest,
+                        Some(std::time::Duration::from_secs(5)),
+                    )
+                    .expect("writable");
+                }
+                None => panic!("a task waiter is set"),
+            }
+        };
+        set_task_waiter(None);
+        assert_eq!(
+            stream.peer_addr().expect("peer").port(),
+            listener.local_addr().expect("addr").port()
+        );
+        assert!(PENDING_CONNECTS.with(|m| m.borrow().is_empty()));
+        assert!(connect_in_task("127.0.0.1", port, 0).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn connect_in_task_looks_up_a_name_off_the_vm_thread() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = i64::from(listener.local_addr().expect("addr").port());
+        let waker = Arc::new(TaskWaker::default());
+        let mut lookup_waits = 0;
+        set_task_waiter(Some((Arc::clone(&waker), 9, 11)));
+        let stream = loop {
+            match connect_in_task("localhost", port, 5000) {
+                Some(Some(r)) => break r.expect("connect"),
+                Some(None) if take_thread_parked() => {
+                    // The resolver thread posts the key once the lookup is done.
+                    lookup_waits += 1;
+                    waker.wait(Some(std::time::Duration::from_secs(5)));
+                    assert_eq!(waker.take(), vec![9]);
+                }
+                Some(None) => {
+                    let req = take_io_retry_park().expect("parked on the socket");
+                    let _ = crate::io::reactor_wait_fd(req.handle, req.interest, req.timeout);
+                }
+                None => panic!("a task waiter is set"),
+            }
+        };
+        set_task_waiter(None);
+        assert_eq!(lookup_waits, 1, "the lookup ran on a resolver thread");
+        assert_eq!(
+            stream.peer_addr().expect("peer").port(),
+            listener.local_addr().expect("addr").port()
+        );
+        assert!(PENDING_CONNECTS.with(|m| m.borrow().is_empty()));
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn connect_in_task_reports_a_refused_connect() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            i64::from(l.local_addr().expect("addr").port())
+        };
+        let waker = Arc::new(TaskWaker::default());
+        set_task_waiter(Some((Arc::clone(&waker), 5, 8)));
+        // Windows retries a refused SYN for about two seconds before it
+        // reports the refusal, so the deadline leaves room for that.
+        let r = loop {
+            match connect_in_task("127.0.0.1", port, 10_000) {
+                Some(Some(r)) => break r,
+                Some(None) => {
+                    let req = take_io_retry_park().expect("parked on the socket");
+                    let _ = crate::io::reactor_wait_fd(req.handle, req.interest, req.timeout);
+                }
+                None => panic!("a task waiter is set"),
+            }
+        };
+        set_task_waiter(None);
+        // Refused has no own tag.
+        assert_eq!(r.err(), Some(crate::io::IoErrorTag::Other));
+        assert!(PENDING_CONNECTS.with(|m| m.borrow().is_empty()));
+    }
 }

@@ -1,5 +1,5 @@
 // Client-side pure helpers for the echo demo.
-// TCP connect/send/recv stays in `main.hy` for layout clarity.
+// TCP connect/send/recv is in `main.hy` (the client task).
 
 fn request_body() -> Vec<byte> {
     let a: byte = 65;
@@ -8,8 +8,4 @@ fn request_body() -> Vec<byte> {
     body.push(a);
     body.push(b);
     return body;
-}
-
-fn client_port() -> int {
-    return 41235;
 }

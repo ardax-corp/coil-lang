@@ -702,32 +702,239 @@ pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
 }
 
 /// Connect with an optional millisecond deadline (`ms <= 0` waits forever).
+///
+/// Under a task scheduler only the calling task waits for the name lookup
+/// and the connect; see [`crate::task::connect_in_task`].
 pub fn tcp_connect_timeout(
     heap: &mut Heap,
     host: &str,
     port: i64,
     ms: i64,
 ) -> Result<Value, IoErrorTag> {
-    use std::net::ToSocketAddrs;
+    let stream = connect_socket(host, port, ms)?;
+    alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+}
+
+/// The connect address when `host` is an IP literal (`[…]` allowed for
+/// IPv6); `None` when it is a name the resolver must look up.
+pub(crate) fn connect_literal_addr(host: &str, port: i64) -> Result<Option<SocketAddr>, IoErrorTag> {
     if !(0..=65535).contains(&port) {
         return Err(IoErrorTag::InvalidInput);
     }
-    let port = port as u16;
     let bare = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    let addrs: Vec<SocketAddr> = if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        vec![SocketAddr::new(ip, port)]
-    } else {
-        (bare, port)
-            .to_socket_addrs()
-            .map_err(|e| IoErrorTag::from_kind(e.kind()))?
-            .collect()
-    };
+    Ok(bare
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, port as u16)))
+}
+
+/// The addresses a connect tries, in order. An IP literal parses in place;
+/// a name blocks this thread on the system resolver (`getaddrinfo` on
+/// every platform).
+pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, IoErrorTag> {
+    use std::net::ToSocketAddrs;
+    if let Some(addr) = connect_literal_addr(host, port)? {
+        return Ok(vec![addr]);
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs: Vec<SocketAddr> = (bare, port as u16)
+        .to_socket_addrs()
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?
+        .collect();
     if addrs.is_empty() {
         return Err(IoErrorTag::NotFound);
     }
+    Ok(addrs)
+}
+
+/// Start a non-blocking connect to `addr`. The connect may still be in
+/// progress: the socket turns writable once it ends, and `take_error` then
+/// says whether it failed.
+#[cfg(unix)]
+pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let os_err = || IoErrorTag::from_kind(io::Error::last_os_error().kind());
+    let domain = match addr {
+        SocketAddr::V4(_) => libc::AF_INET,
+        SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(os_err());
+    }
+    // SAFETY: `fd` is a fresh socket nothing else owns.
+    let stream = TcpStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    unsafe {
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            return Err(os_err());
+        }
+    }
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    // SAFETY: all-zero is a valid `sockaddr_in` / `sockaddr_in6`.
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let len = match addr {
+        SocketAddr::V4(a) => {
+            let sin = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in) };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = a.port().to_be();
+            sin.sin_addr.s_addr = u32::from_ne_bytes(a.ip().octets());
+            std::mem::size_of::<libc::sockaddr_in>()
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = unsafe { &mut *(&mut storage as *mut _ as *mut libc::sockaddr_in6) };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = a.port().to_be();
+            sin6.sin6_flowinfo = a.flowinfo();
+            sin6.sin6_addr.s6_addr = a.ip().octets();
+            sin6.sin6_scope_id = a.scope_id();
+            std::mem::size_of::<libc::sockaddr_in6>()
+        }
+    };
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        storage.ss_len = len as u8;
+    }
+    let rc = unsafe {
+        libc::connect(
+            stream.as_raw_fd(),
+            &storage as *const _ as *const libc::sockaddr,
+            len as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(IoErrorTag::from_kind(err.kind()));
+        }
+    }
+    Ok(stream)
+}
+
+/// Windows: the same, through Winsock (`WSAEWOULDBLOCK` means in progress).
+#[cfg(windows)]
+pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
+    use std::os::windows::io::{AsRawSocket, FromRawSocket};
+    const AF_INET: i32 = 2;
+    const AF_INET6: i32 = 23;
+    const SOCK_STREAM: i32 = 1;
+    const IPPROTO_TCP: i32 = 6;
+    const INVALID_SOCKET: usize = !0;
+    const WSA_FLAG_OVERLAPPED: u32 = 0x01;
+    const WSA_FLAG_NO_HANDLE_INHERIT: u32 = 0x80;
+    const WSAEWOULDBLOCK: i32 = 10035;
+    #[repr(C)]
+    struct SockaddrIn {
+        family: u16,
+        port: u16,
+        addr: [u8; 4],
+        zero: [u8; 8],
+    }
+    #[repr(C)]
+    struct SockaddrIn6 {
+        family: u16,
+        port: u16,
+        flowinfo: u32,
+        addr: [u8; 16],
+        scope_id: u32,
+    }
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAStartup(version: u16, data: *mut u8) -> i32;
+        fn WSASocketW(af: i32, ty: i32, proto: i32, info: *mut u8, group: u32, flags: u32) -> usize;
+        fn connect(s: usize, name: *const u8, len: i32) -> i32;
+        fn WSAGetLastError() -> i32;
+    }
+    // std starts Winsock on its first socket call; a raw socket may come first.
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let mut data = [0u8; 1024];
+        // SAFETY: `data` is larger than WSADATA; the startup is never undone.
+        unsafe { WSAStartup(0x0202, data.as_mut_ptr()) };
+    });
+    let wsa_err = |code: i32| IoErrorTag::from_kind(io::Error::from_raw_os_error(code).kind());
+    let af = if addr.is_ipv4() { AF_INET } else { AF_INET6 };
+    // SAFETY: plain Winsock call; the result is checked.
+    let sock = unsafe {
+        WSASocketW(
+            af,
+            SOCK_STREAM,
+            IPPROTO_TCP,
+            std::ptr::null_mut(),
+            0,
+            WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,
+        )
+    };
+    if sock == INVALID_SOCKET {
+        return Err(wsa_err(unsafe { WSAGetLastError() }));
+    }
+    // SAFETY: `sock` is a fresh socket nothing else owns.
+    let stream = unsafe { TcpStream::from_raw_socket(sock as _) };
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    let rc = match addr {
+        SocketAddr::V4(a) => {
+            let sin = SockaddrIn {
+                family: AF_INET as u16,
+                port: a.port().to_be(),
+                addr: a.ip().octets(),
+                zero: [0; 8],
+            };
+            // SAFETY: `sin` is a valid SOCKADDR_IN for the call's duration.
+            unsafe {
+                connect(
+                    stream.as_raw_socket() as usize,
+                    &sin as *const SockaddrIn as *const u8,
+                    std::mem::size_of::<SockaddrIn>() as i32,
+                )
+            }
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = SockaddrIn6 {
+                family: AF_INET6 as u16,
+                port: a.port().to_be(),
+                flowinfo: a.flowinfo(),
+                addr: a.ip().octets(),
+                scope_id: a.scope_id(),
+            };
+            // SAFETY: `sin6` is a valid SOCKADDR_IN6 for the call's duration.
+            unsafe {
+                connect(
+                    stream.as_raw_socket() as usize,
+                    &sin6 as *const SockaddrIn6 as *const u8,
+                    std::mem::size_of::<SockaddrIn6>() as i32,
+                )
+            }
+        }
+    };
+    if rc != 0 {
+        let code = unsafe { WSAGetLastError() };
+        if code != WSAEWOULDBLOCK {
+            return Err(wsa_err(code));
+        }
+    }
+    Ok(stream)
+}
+
+/// Resolve and connect, blocking this thread; the stream is non-blocking.
+fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTag> {
+    let addrs = connect_addrs(host, port)?;
     // One absolute deadline across all resolved addresses (not per-addr).
     let deadline = duration_from_timeout_ms(ms).map(|d| Instant::now() + d);
     let mut last_err = IoErrorTag::Other;
@@ -769,6 +976,11 @@ pub fn tcp_connect_timeout(
     stream
         .set_nonblocking(true)
         .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    Ok(stream)
+}
+
+/// A connected socket as a `Stream`.
+pub(crate) fn alloc_tcp_stream(heap: &mut Heap, stream: TcpStream) -> Result<Value, IoErrorTag> {
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
         .map_err(|e| IoErrorTag::from_kind(e.kind()))
 }

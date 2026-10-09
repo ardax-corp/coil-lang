@@ -1,106 +1,100 @@
-// 03-echo — single-process TCP echo (listen + connect + exchange).
+// 03-echo — single-process TCP echo, client and server as tasks.
 //
 // Modules: protocol (framing), server/client (pure helpers).
-// Stream IO is in this entry file for clarity (deps may also call IO + `?`).
+// `task::scope` runs the server and the client as two tasks on one thread:
+// while one waits for the socket, the other runs.
 //
 // Expected output: ok
 
 use io::close;
 use io::stdout;
+use io::Stream;
 use io::net::tcp::connect;
 use io::net::tcp::listen;
+use io::net::tcp::local_addr;
 use io::sync::accept_wait;
 use io::sync::read_exact;
 use io::sync::write_all;
 
-use protocol::{encode_frame, payload_eq};
+use protocol::{encode_frame, frame_len, payload_eq};
 
 use server::echo_reply;
 
-use client::{client_port, request_body};
+use client::request_body;
 
-use string::{format, to_bytes};
+use string::to_bytes;
 
-gen fn greeting_bytes() {
-    yield 65;
-    yield 66;
-    return 0;
+use task::{scope, Scope, Task, TaskError};
+
+// Read one length-prefixed frame (`[n][payload…]`).
+fn read_frame(Stream s) -> Result<Vec<byte>, IoError> {
+    let z: byte = 0;
+    let head = Vec::from([z]);
+    read_exact(s, head)?;
+    let frame: Vec<byte> = Vec::new();
+    frame.push(head[0]);
+    let n = frame_len(frame);
+    let i = 0;
+    while i < n {
+        let b = Vec::from([z]);
+        read_exact(s, b)?;
+        frame.push(b[0]);
+        i = i + 1;
+    }
+    return Result::Ok(frame);
 }
 
-fn run_echo() {
-    let port = client_port();
-    let listener = listen("127.0.0.1", port)?;
-    let client = connect("127.0.0.1", port)?;
-    let server = accept_wait(listener)?;
+// Accept one connection and echo one frame back.
+fn serve_one(Stream listener) -> Result<int, IoError> {
+    let conn = accept_wait(listener)?;
+    let frame = read_frame(conn)?;
+    write_all(conn, echo_reply(frame))?;
+    close(conn)?;
+    return Result::Ok(0);
+}
 
-    let h = greeting_bytes();
-    let ya = resume h;
-    let yb = resume h;
-    let _done = resume h;
-    if ya != 65 {
-        close(client)?;
-        close(server)?;
-        close(listener)?;
-        return "bad-coro";
-    }
-    if yb != 66 {
-        close(client)?;
-        close(server)?;
-        close(listener)?;
-        return "bad-coro";
-    }
+// Send the request frame and return the echoed frame.
+fn ask(int port, Vec<byte> body) -> Result<Vec<byte>, IoError> {
+    let conn = connect("127.0.0.1", port)?;
+    write_all(conn, encode_frame(body))?;
+    let back = read_frame(conn)?;
+    close(conn)?;
+    return Result::Ok(back);
+}
 
+fn served(Task<Result<int, IoError>> t) -> bool {
+    return match t.join() {
+        Result::Ok(Result::Ok(_)) => true,
+        default => false,
+    };
+}
+
+fn run_echo() -> Result<string, IoError> {
+    let listener = listen("127.0.0.1", 0)?;
+    let port = local_addr(listener)?[1];
     let body = request_body();
-    let frame = encode_frame(body);
-    write_all(client, frame)?;
-
-    let z: byte = 0;
-    let s0 = Vec::from([z]);
-    let s1 = Vec::from([z]);
-    let s2 = Vec::from([z]);
-    read_exact(server, s0)?;
-    read_exact(server, s1)?;
-    read_exact(server, s2)?;
-
-    let inbound: Vec<byte> = Vec::new();
-    inbound.push(s0[0]);
-    inbound.push(s1[0]);
-    inbound.push(s2[0]);
-    let reply = echo_reply(inbound);
-    write_all(server, reply)?;
-
-    let c0 = Vec::from([z]);
-    let c1 = Vec::from([z]);
-    let c2 = Vec::from([z]);
-    read_exact(client, c0)?;
-    read_exact(client, c1)?;
-    read_exact(client, c2)?;
-
-    close(client)?;
-    close(server)?;
+    let r = scope(
+        fn (Scope s) use (listener, port, body) {
+            let server = s.spawn(fn () use (listener) => serve_one(listener));
+            let client = s.spawn(fn () use (port, body) => ask(port, body));
+            let back = match client.join() {
+                Result::Ok(Result::Ok(frame)) => frame,
+                default => Vec::new(),
+            };
+            served(server) && payload_eq(back, body) == 1
+        },
+    );
     close(listener)?;
-
-    let back: Vec<byte> = Vec::new();
-    back.push(c0[0]);
-    back.push(c1[0]);
-    back.push(c2[0]);
-    if payload_eq(back, body) == 1 {
-        return "ok";
-    }
-    return "bad";
+    return match r {
+        Result::Ok(true) => Result::Ok("ok"),
+        default => Result::Ok("bad"),
+    };
 }
 
 fn main() {
-    write_all(
-        stdout(),
-        to_bytes(
-            format(
-                "%s",
-                match run_echo() {
-                    Result::Ok(s) => s,
-                    Result::Err(_) => "err",
-                },
-            ),
-        ),
-    );
+    let text = match run_echo() {
+        Result::Ok(s) => s,
+        Result::Err(_) => "err",
+    };
+    write_all(stdout(), to_bytes(text));
 }

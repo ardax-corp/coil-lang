@@ -14,4 +14,4 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 rm -f "$ROOT/out.hyc" "$HERE/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" "$HERE/src/main.hy"
+timeout "${TIMEOUT_SECS}s" "$BIN" --allow-net "$HERE/src/main.hy"

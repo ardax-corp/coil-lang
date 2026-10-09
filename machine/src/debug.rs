@@ -282,3 +282,24 @@ pub enum DebugObject {
     /// Some other object kind (stream, thread, …).
     Other(&'static str),
 }
+
+/// A task of the scheduler, for a debugger (DAP lists them as threads).
+#[derive(Clone, Debug)]
+pub struct DebugTask {
+    pub id: u64,
+    /// `main` for the root task, else `task N`.
+    pub name: String,
+    /// `running`, `ready`, `blocked (join)`, …
+    pub state: String,
+    pub frames: DebugTaskFrames,
+}
+
+/// Where a task's call chain is.
+#[derive(Clone, Debug)]
+pub enum DebugTaskFrames {
+    /// Live frames on the VM stack (machine frame indices, bottom first):
+    /// the running task, and the root task while a child runs above it.
+    Live(std::ops::Range<usize>),
+    /// A suspended child task's saved frames: their pcs, bottom first.
+    Saved(Vec<usize>),
+}

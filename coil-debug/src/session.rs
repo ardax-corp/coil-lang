@@ -39,6 +39,15 @@ pub struct StackFrameInfo {
     pub column: Option<u32>,
 }
 
+/// First frame id of suspended tasks' saved frames (live frames use their
+/// machine index, far below).
+pub const SAVED_FRAME_BASE: usize = 1 << 24;
+
+/// Frame id of saved frame `k` (bottom first) of suspended task `task`.
+pub fn saved_frame_id(task: u64, k: usize) -> usize {
+    SAVED_FRAME_BASE + (task as usize) * 4096 + k
+}
+
 /// Named local in the current frame.
 #[derive(Clone, Debug)]
 pub struct LocalInfo {
@@ -553,13 +562,56 @@ impl DebugSession {
     }
 
     pub fn stack_frames(&self) -> Vec<StackFrameInfo> {
+        self.live_frames(0..self.machine.debug_frame_depth())
+    }
+
+    /// The scheduler's tasks (empty without child tasks): the running one
+    /// and the suspended ones, which a DAP client shows as threads.
+    pub fn tasks(&self) -> Vec<machine::DebugTask> {
+        self.machine.debug_tasks()
+    }
+
+    /// Frames of `task`, top first. Live frames keep their machine index;
+    /// a suspended task's saved frames get `saved_frame_id` ids (no locals).
+    pub fn task_frames(&self, task: &machine::DebugTask) -> Vec<StackFrameInfo> {
+        match &task.frames {
+            machine::DebugTaskFrames::Live(range) => self.live_frames(range.clone()),
+            machine::DebugTaskFrames::Saved(pcs) => pcs
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(k, &pc)| self.frame_info(saved_frame_id(task.id, k), pc))
+                .collect(),
+        }
+    }
+
+    fn frame_info(&self, index: usize, ip: usize) -> StackFrameInfo {
+        let name = symbol_at_pc(&self.artifacts.functions, ip)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let (path, line, column) = self
+            .machine
+            .resolve_pc_location(ip)
+            .map(|(p, l, c)| (Some(p), Some(l), Some(c)))
+            .unwrap_or((None, None, None));
+        StackFrameInfo {
+            index,
+            name,
+            pc: ip,
+            path,
+            line,
+            column,
+        }
+    }
+
+    fn live_frames(&self, frames: std::ops::Range<usize>) -> Vec<StackFrameInfo> {
         let depth = self.machine.debug_frame_depth();
         if depth == 0 {
             return Vec::new();
         }
         // Top frame first for display; `index` is the machine frame id so DAP
         // scopes/variables can pass it straight to `locals_for_frame`.
-        (0..depth)
+        frames
             .rev()
             // The bootstrap frame (prologue `CALL main` at pc 0..3) is VM
             // plumbing: hide it under user frames (at a stop-on-entry it is
@@ -573,22 +625,7 @@ impl DebugSession {
             })
             .map(|frame_idx| {
                 let ip = self.machine.debug_frame_ip(frame_idx).unwrap_or(0);
-                let name = symbol_at_pc(&self.artifacts.functions, ip)
-                    .unwrap_or("<unknown>")
-                    .to_string();
-                let (path, line, column) = self
-                    .machine
-                    .resolve_pc_location(ip)
-                    .map(|(p, l, c)| (Some(p), Some(l), Some(c)))
-                    .unwrap_or((None, None, None));
-                StackFrameInfo {
-                    index: frame_idx,
-                    name,
-                    pc: ip,
-                    path,
-                    line,
-                    column,
-                }
+                self.frame_info(frame_idx, ip)
             })
             .collect()
     }

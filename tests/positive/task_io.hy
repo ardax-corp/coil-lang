@@ -118,3 +118,31 @@ test("IO inside a generator without tasks parks the VM until data arrives") {
     join(peer)?;
     assert(n == 9)?;
 }
+
+test("connects from many tasks finish while the server task accepts") {
+    let listener = listen("127.0.0.1", 0)?;
+    let port = local_addr(listener)?[1];
+    let r = scope(
+        fn (Scope s) use (listener, port) {
+            let server = s
+                .spawn(
+                    fn () use (listener) {
+                        let total = 0;
+                        let i = 0;
+                        while i < 8 {
+                            total = total + body_len(accept_one(listener));
+                            i = i + 1;
+                        }
+                        total
+                    },
+                );
+            let i = 0;
+            while i < 8 {
+                s.spawn(fn () use (port) => send_later(port, 0, "abc"));
+                i = i + 1;
+            }
+            ok_or(server.join(), -100)
+        },
+    );
+    assert(ok_or(r, -1) == 24)?;
+}
