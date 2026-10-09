@@ -165,12 +165,10 @@ fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<
     super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
 }
 
-fn apply_licm(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::licm::licm_with(ops, opts.pure_call_ctx.as_ref());
-    0
-}
-
 fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    // Invariant `len(a)` moves out of its loop first, which is what lets
+    // the bounds proofs below see a fixed length.
+    crate::il::bounds::hoist_loop_invariants_with(ops, opts.pure_call_ctx.as_ref());
     crate::il::bounds::loop_bounds_with(ops, opts.pure_call_ctx.as_ref());
     0
 }
@@ -269,16 +267,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_local_cse),
     },
     PassSpec {
-        name: "licm",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.licm,
-        set_flag: |o| o.licm = true,
-        apply: ApplyFn::Grow(apply_licm),
-    },
-    PassSpec {
         name: "loop_bounds",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -349,7 +337,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "canon",
     "algebraic",
     "local_cse",
-    "licm",
     "loop_bounds",
     "loop_unroll",
     "slot_promote",
@@ -384,8 +371,7 @@ mod tests {
                 "canon",
                 "algebraic",
                 "local_cse",
-                "licm",
-                "loop_bounds",
+                            "loop_bounds",
                 "loop_unroll",
                 "slot_promote",
                 "clone_shared_return",

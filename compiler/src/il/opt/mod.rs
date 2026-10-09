@@ -28,7 +28,7 @@ pub struct OptimizeOptions {
     pub algebraic: bool,
     /// Intra-block EarlyCSE of pure expressions (stored result → `Load`).
     pub local_cse: bool,
-    /// Hoist invariant Const/Load out of Known-SP natural loops.
+    /// Loop-invariant code motion in the HIR (`hir::licm`), not an IL pass.
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
     pub loop_bounds: bool,
