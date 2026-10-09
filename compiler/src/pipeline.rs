@@ -25,6 +25,9 @@ use crate::Compiler;
 #[path = "pipeline_macros.rs"]
 mod macros;
 
+#[path = "pipeline_contracts.rs"]
+mod contracts;
+
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
@@ -1493,9 +1496,11 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
-        // Derives and attribute macros run in the discovery stage, which works
-        // on cached files: compile attribute-bearing input as an in-memory file.
-        if src.contains("#[") {
+        // Derives, attribute macros and trait contract copies run in the
+        // discovery stage, which works on cached files: compile such input
+        // as an in-memory file.
+        let trait_contracts = src.contains("trait ") && (src.contains("requires") || src.contains("ensures"));
+        if src.contains("#[") || trait_contracts {
             let path = PathBuf::from("<input>.hy");
             self.overlays.insert(path.clone(), src.to_string());
             let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));

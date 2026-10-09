@@ -11756,3 +11756,53 @@ fn main() {
         compiler::ErrorCode::TypeMismatch,
     );
 }
+
+#[test]
+fn trait_method_contracts_apply_to_every_impl() {
+    let src = r#"
+trait Area<T> {
+    fn area(T x) -> int
+        requires x > 0, "positive"
+        ensures result >= 0
+    {}
+}
+
+impl Area for int {
+    pub fn area(int n) -> int ensures result < 100 {
+        return n * n - 5;
+    }
+}
+
+fn show<T: Area>(T x) -> int {
+    return x.area();
+}
+
+fn main() {
+    assert(show(3) == 4);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    // The trait's `requires` blames the caller, under the impl's parameter name.
+    let out = run_contracts_src(&src.replace("CASE", "show(0);"), All);
+    assert!(
+        out.contains("contract violated: requires x > 0 (\"positive\") in Area for int::area, called from "),
+        "got {out:?}"
+    );
+    // The trait's `ensures`, reported at the impl method.
+    let out = run_contracts_src(&src.replace("CASE", "show(2);"), All);
+    assert!(
+        out.contains("contract violated: ensures result >= 0 in Area for int::area at ") && out.contains("contracts.hy:10:4"),
+        "got {out:?}"
+    );
+    // The impl's own `ensures` is checked too.
+    let out = run_contracts_src(&src.replace("CASE", "show(11);"), All);
+    assert!(out.contains("contract violated: ensures result < 100 in Area for int::area"), "got {out:?}");
+    assert_eq!(run_contracts_src(&src.replace("CASE", "show(2);"), Requires), "");
+    // An impl cannot strengthen the precondition.
+    assert_compile_fails(
+        "trait Area<T> {\n    fn area(T x) -> int requires x > 0 {}\n}\n\nimpl Area for int {\n    pub fn area(int n) -> int requires n < 10 { return n; }\n}\n\nfn main() {\n    let _ = area(2);\n}\n",
+        compiler::ErrorCode::GenericTypeError,
+    );
+}
