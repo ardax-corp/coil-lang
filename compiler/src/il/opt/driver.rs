@@ -5,7 +5,7 @@
 //! is on. [`PassDelta`] is what `collect_stats`
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
-//! `IlModule::optimize_and_flatten` still defers `multi_op_join_convoy`,
+//! `IlModule::optimize_and_flatten` still defers
 //! `invert_guard_branch`, `slot_promote_tell`, and `ssa_gvn`
 //! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
 //! in `lower_optimized`.
@@ -206,25 +206,6 @@ fn apply_clone_shared_return(
     0
 }
 
-fn apply_return_convoy(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::convoy::return_convoy(ops);
-    0
-}
-
-fn apply_bin_join_convoy(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::convoy::bin_join_convoy(ops);
-    0
-}
-
-fn apply_multi_op_join_convoy(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
-) -> usize {
-    super::convoy::multi_op_join_convoy(ops);
-    0
-}
-
 fn apply_invert_guard_branch(
     ops: &mut Vec<IlOp>,
     _: &OptimizeOptions,
@@ -378,36 +359,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_clone_shared_return),
     },
     PassSpec {
-        name: "return_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.return_convoy,
-        set_flag: |o| o.return_convoy = true,
-        apply: ApplyFn::Grow(apply_return_convoy),
-    },
-    PassSpec {
-        name: "bin_join_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.bin_join_convoy,
-        set_flag: |o| o.bin_join_convoy = true,
-        apply: ApplyFn::Grow(apply_bin_join_convoy),
-    },
-    PassSpec {
-        name: "multi_op_join_convoy",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.multi_op_join_convoy,
-        set_flag: |o| o.multi_op_join_convoy = true,
-        apply: ApplyFn::Grow(apply_multi_op_join_convoy),
-    },
-    PassSpec {
         name: "invert_guard_branch",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -474,9 +425,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "escape_analysis",
     "slot_promote",
     "clone_shared_return",
-    "return_convoy",
-    "bin_join_convoy",
-    "multi_op_join_convoy",
     "invert_guard_branch",
     "branch_optimization",
     "block_reordering",
@@ -516,9 +464,6 @@ mod tests {
                 "escape_analysis",
                 "slot_promote",
                 "clone_shared_return",
-                "return_convoy",
-                "bin_join_convoy",
-                "multi_op_join_convoy",
                 "invert_guard_branch",
                 "branch_optimization",
                 "block_reordering",

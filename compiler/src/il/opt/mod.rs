@@ -5,7 +5,7 @@
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
 //! [`super::IlModule::optimize_and_flatten`] still defers
-//! `multi_op_join_convoy`, `invert_guard_branch`,
+//! `invert_guard_branch`,
 //! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
 //!
@@ -34,14 +34,8 @@ pub struct OptimizeOptions {
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
     pub loop_bounds: bool,
-    /// Sink identical `LOAD`/`CONST` producers into a join `RETURN` and fuse.
-    pub return_convoy: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
     pub clone_shared_return: bool,
-    /// Sink identical binop / BinSlot* tails into a return-label cluster.
-    pub bin_join_convoy: bool,
-    /// Sink identical multi-op suffixes (len 2..=4) at return / non-return joins.
-    pub multi_op_join_convoy: bool,
     /// `JMPF A; JMP B; A:` → `JMPT B` for non-fusable guard conditions.
     pub invert_guard_branch: bool,
     /// Drop `LOAD`/`STORE` the shared cursor proves redundant, promoting the
@@ -124,9 +118,6 @@ fn optimize_once_at(
 /// Production lower uses [`super::CodeBuf::lower_in_place`] /
 /// [`super::lower::lower_module_inner`] on an owning module; this
 /// stays for unit tests that mutate a bare `Vec<IlOp>`.
-///
-/// Whole-buffer [`multi_op_join_convoy`] is required: scoped multi_op can treat
-/// JMPF/fall-through diamonds as SP-known and mis-sink (e.g. `examples/fib.hy`).
 #[cfg(test)]
 pub fn optimize_per_func(
     ops: &mut Vec<IlOp>,
@@ -219,7 +210,6 @@ mod loop_unroll;
 mod slot_promote;
 
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
-pub(crate) use convoy::multi_op_join_convoy;
 pub(crate) use slot_promote::slot_promote_at;
 
 #[cfg(test)]
