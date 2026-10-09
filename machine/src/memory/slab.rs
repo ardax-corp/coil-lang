@@ -781,9 +781,33 @@ fn map_chunk(len: usize) -> *mut u8 {
         )
     };
     if ptr == libc::MAP_FAILED {
+        // Say why before the abort: `memory allocation of 65536 bytes failed`
+        // alone does not tell an exhausted map count from exhausted memory
+        // (coil-lang#804).
+        let err = std::io::Error::last_os_error();
+        eprintln!("coil: mmap of a {len}-byte heap chunk failed: {err}{}", process_memory_note());
         std::alloc::handle_alloc_error(Layout::from_size_align(len, 4096).expect("layout"));
     }
     ptr.cast()
+}
+
+/// The process's mapped and resident size and its mapping count, where
+/// `/proc` has them.
+#[cfg(unix)]
+fn process_memory_note() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let maps = std::fs::read_to_string("/proc/self/maps").map_or(0, |m| m.lines().count());
+    if status.is_empty() {
+        return String::new();
+    }
+    format!(" (VmSize {}, VmRSS {}, {maps} mappings)", field("VmSize:"), field("VmRSS:"))
 }
 
 #[cfg(unix)]

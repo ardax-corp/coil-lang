@@ -242,6 +242,9 @@ jobs:
 
       - name: Language harness (`coil test`)
         if: matrix.features.id == 'default'
+        env:
+          # A worker abort (coil-lang#804) prints where it happened.
+          RUST_BACKTRACE: "1"
         run: |
           ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
