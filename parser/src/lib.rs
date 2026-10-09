@@ -1115,6 +1115,36 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
     }
 
+    /// `requires expr` / `ensures expr` clauses after `uses`, each with an
+    /// optional `, "message"`. Both words are contextual.
+    fn contracts(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Vec<ast::Contract<'pratt>>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
+        let kind = text::ident().padded_by(trivia()).try_map(|w: &'pratt str, span| match w {
+            "requires" => Ok(ast::ContractKind::Requires),
+            "ensures" => Ok(ast::ContractKind::Ensures),
+            _ => Err(Rich::custom(span, "expected `requires` or `ensures`")),
+        });
+        let expr = self.expr().map_with(|e, x| (e, x.slice().trim()));
+        let message = op!(',')
+            .ignore_then(just('"').ignore_then(self.string_lit_body()).then_ignore(just('"')))
+            .padded_by(trivia())
+            .or_not();
+        kind.then(expr)
+            .then(message)
+            .map_with(|((kind, (expr, text)), message), e| ast::Contract {
+                kind,
+                expr,
+                text,
+                message,
+                span: e.span(),
+            })
+            .repeated()
+            .collect()
+    }
+
     /// `pure` before `fn`, and the `uses {…}` clause: one or neither. Both
     /// is an error, reported without stopping the parse.
     fn effect_decl(
@@ -1170,13 +1200,17 @@ impl<'pratt> Pratt<'pratt> {
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
             .then(self.uses_clause())
+            .then(self.contracts())
             .validate(
                 |(
                     (
-                        ((((((((docs, is_coro), is_static), pure), _), name), type_params), args), returns),
-                        where_constraints,
+                        (
+                            ((((((((docs, is_coro), is_static), pure), _), name), type_params), args), returns),
+                            where_constraints,
+                        ),
+                        uses,
                     ),
-                    uses,
+                    contracts,
                 ),
                  e,
                  emitter| {
@@ -1195,6 +1229,7 @@ impl<'pratt> Pratt<'pratt> {
                             returns,
                             where_constraints,
                             effects,
+                            contracts,
                             body: Some(empty_block),
                         }),
                     )
@@ -1450,18 +1485,22 @@ impl<'pratt> Pratt<'pratt> {
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
             .then(self.uses_clause())
+            .then(self.contracts())
             .then(self.block(stmt).labelled("function body `{ ... }`"))
             .validate(|full, e, emitter| {
                 let (
                     (
                         (
                             (
-                                (((((((attrs, is_coro), is_static), pure), _), name), type_params), args),
-                                returns,
+                                (
+                                    (((((((attrs, is_coro), is_static), pure), _), name), type_params), args),
+                                    returns,
+                                ),
+                                where_constraints,
                             ),
-                            where_constraints,
+                            uses,
                         ),
-                        uses,
+                        contracts,
                     ),
                     body,
                 ) = full;
@@ -1479,6 +1518,7 @@ impl<'pratt> Pratt<'pratt> {
                         returns,
                         where_constraints,
                         effects,
+                        contracts,
                         body: Some(body),
                     }),
                 )
@@ -3866,6 +3906,9 @@ mod tests_diagnostics;
 #[cfg(test)]
 #[path = "tests/tests_effects.rs"]
 mod tests_effects;
+#[cfg(test)]
+#[path = "tests/tests_contracts.rs"]
+mod tests_contracts;
 #[cfg(test)]
 #[path = "tests/tests_error_handling.rs"]
 mod tests_error_handling;

@@ -77,6 +77,46 @@ impl Display for EffectDecl<'_> {
     }
 }
 
+/// Which contract clause: checked on entry or on every return.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContractKind {
+    Requires,
+    Ensures,
+}
+
+impl ContractKind {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Requires => "requires",
+            Self::Ensures => "ensures",
+        }
+    }
+}
+
+/// `requires expr` / `ensures expr`, with an optional `, "message"`.
+/// `requires`, `ensures` and `result` (inside `ensures`) are contextual.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Contract<'expr> {
+    pub kind: ContractKind,
+    pub expr: Output<'expr>,
+    /// The clause's expression as written: the failure message without one.
+    pub text: &'expr str,
+    /// The optional string after the expression, without quotes.
+    pub message: Option<&'expr str>,
+    /// The whole clause, keyword included.
+    pub span: SimpleSpan,
+}
+
+impl Display for Contract<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.kind.keyword(), self.expr.1)?;
+        if let Some(m) = self.message {
+            write!(f, ", \"{m}\"")?;
+        }
+        Ok(())
+    }
+}
+
 /// A `where` clause constraint: `Convert<A, B>` or unary `Num<T>`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct WhereConstraint<'expr> {
@@ -451,6 +491,8 @@ pub enum Expression<'expr> {
         where_constraints: Vec<WhereConstraint<'expr>>,
         /// `pure fn` or a `uses {…}` clause (after `where`).
         effects: Option<EffectDecl<'expr>>,
+        /// `requires` / `ensures` clauses (after `uses`), in source order.
+        contracts: Vec<Contract<'expr>>,
         /// `None` = signature-only (`fn f(...) -> T;`); `Some` = block body.
         body: Option<Output<'expr>>,
     },
@@ -1146,15 +1188,19 @@ impl<'a> Display for Expression<'a> {
                 returns,
                 where_constraints,
                 effects,
+                contracts,
                 body,
             } => {
                 let async_kw = if *is_coro { "gen " } else { "" };
                 let static_kw = if *is_static { "static " } else { "" };
-                let (pure_kw, uses_str) = match effects {
+                let (pure_kw, mut uses_str) = match effects {
                     Some(e) if e.pure => ("pure ", String::new()),
                     Some(e) => ("", format!(" {e}")),
                     None => ("", String::new()),
                 };
+                for c in contracts {
+                    uses_str.push_str(&format!(" {c}"));
+                }
                 let tp = if type_params.is_empty() {
                     String::new()
                 } else {

@@ -2222,6 +2222,7 @@ impl<'s> Formatter<'s> {
             returns,
             where_constraints,
             effects,
+            contracts,
             body,
         } = expr
         else {
@@ -2253,9 +2254,28 @@ impl<'s> Formatter<'s> {
         if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
             self.push_str(&format!(" {e}"));
         }
+        // Each contract on its own line, one level in; then the body brace
+        // on a line of its own.
+        self.with_indent(|f| {
+            for c in contracts {
+                f.newline();
+                f.write_indent();
+                f.push_str(c.kind.keyword());
+                f.push_str(" ");
+                f.fmt_expression(c.expr.1.as_ref());
+                if let Some(m) = c.message {
+                    f.push_str(&format!(", \"{m}\""));
+                }
+            }
+        });
         match body {
             Some(b) => {
-                self.push_str(" ");
+                if contracts.is_empty() {
+                    self.push_str(" ");
+                } else {
+                    self.newline();
+                    self.write_indent();
+                }
                 self.fmt_block_or_inline(b);
             }
             None => self.push_str(";"),
