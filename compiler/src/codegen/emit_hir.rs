@@ -569,16 +569,22 @@ impl Compiler {
             }
             plan => plan,
         };
-        // A repeated pure expression reads the local that holds its first
-        // value, and loop-invariant expressions move in front of their
+        // Constants fold, a repeated pure expression reads the local that
+        // holds its first value, and loop-invariant expressions move in front of their
         // loops, when the rewritten body plans.
         let plan = match plan {
-            Ok(emit) if (self.opt_options.local_cse || self.opt_options.licm) && !self.debugger_attached && !hir.is_coro => {
+            Ok(emit)
+                if (self.opt_options.algebraic || self.opt_options.local_cse || self.opt_options.licm)
+                    && !self.debugger_attached
+                    && !hir.is_coro =>
+            {
                 let body = inlined.as_ref().unwrap_or(hir);
                 let pure = |n: &str| crate::il::pure_call::name_in(&self.pure_fns, n);
-                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body, pure)).flatten();
-                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(cse.as_ref().unwrap_or(body), pure)).flatten();
-                match licm.or(cse) {
+                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body)).flatten();
+                let body_f = folded.as_ref().unwrap_or(body);
+                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
+                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(cse.as_ref().unwrap_or(body_f), pure)).flatten();
+                match licm.or(cse).or(folded) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
