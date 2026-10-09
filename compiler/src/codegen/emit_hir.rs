@@ -545,6 +545,28 @@ impl Compiler {
             }
             plan => plan,
         };
+        // Local enums split into a tag and field locals, when the split
+        // body plans.
+        let plan = match plan {
+            Ok(emit) if self.opt_options.escape_analysis && !self.debugger_attached && !hir.is_coro => {
+                let body = inlined.as_ref().unwrap_or(hir);
+                let split = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
+                match split {
+                    Some(next) => match lower::refusal(&next, &self.checker)
+                        .map_or_else(|| self.plan_hir_body(&next), Err)
+                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
+                    {
+                        Ok(replanned) => {
+                            inlined = Some(next);
+                            Ok(replanned)
+                        }
+                        Err(_) => Ok(emit),
+                    },
+                    None => Ok(emit),
+                }
+            }
+            plan => plan,
+        };
         let hir = inlined.as_ref().unwrap_or(hir);
         // Another module may splice this body, as inlined here.
         if !self.namespace.is_empty()

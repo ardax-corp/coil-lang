@@ -18,6 +18,7 @@
 pub mod build;
 pub mod check;
 pub mod effects;
+pub mod enum_sroa;
 pub mod layout;
 pub mod inline;
 pub mod lower;
