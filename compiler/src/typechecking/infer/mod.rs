@@ -286,6 +286,8 @@ pub struct Checker {
     ids: IdTable,
 
     next_id_idx: usize,
+    /// Inside an `ensures` clause, where `old(e)` reads `e` at entry.
+    in_ensures: bool,
 
     /// Native call-stack depth of [`infer`](Self::infer)'s recursion, guarded
     /// against a fixed limit so a pathologically nested expression gets a

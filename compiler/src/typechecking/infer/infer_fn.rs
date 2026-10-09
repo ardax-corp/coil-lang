@@ -151,7 +151,9 @@ impl Checker {
                     .insert_top("result".to_string(), Scheme::mono(ret_ty.clone()));
             }
             let prev_expected = self.current_expected.take();
+            self.in_ensures = ensures;
             let ty = self.infer(&c.expr);
+            self.in_ensures = false;
             self.current_expected = prev_expected;
             self.unify(&crate::typechecking::ty::boolean(), &ty, &range, c.kind.keyword());
             if ensures {

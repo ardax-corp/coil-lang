@@ -11560,3 +11560,49 @@ fn main() {
     );
     assert_eq!(out, "");
 }
+
+#[test]
+fn old_reads_a_value_from_entry() {
+    let src = r#"
+class Account {
+    pub balance: int,
+}
+
+impl Account {
+    pub fn deposit(int amount)
+        ensures self.balance == old(self.balance) + amount
+    {
+        self.balance = self.balance + amount;
+    }
+
+    pub fn skim(int amount)
+        ensures self.balance == old(self.balance) + amount, "skimmed"
+    {
+        self.balance = self.balance + amount - 1;
+    }
+}
+
+fn push_two(Vec<int> v) -> int
+    ensures result == old(v.len()) + 2
+{
+    v.push(1);
+    v.push(2);
+    return v.len();
+}
+
+fn main() {
+    let a = new Account(10);
+    a.deposit(5);
+    let v: Vec<int> = Vec::new();
+    assert(push_two(v) == 2);
+    CASE
+}
+"#;
+    let ok = run_contracts_src(&src.replace("CASE", ""), compiler::ContractLevel::All);
+    assert_eq!(ok, "");
+    let out = run_contracts_src(&src.replace("CASE", "a.skim(3);"), compiler::ContractLevel::All);
+    assert!(
+        out.contains("contract violated: ensures self.balance == old(self.balance) + amount (\"skimmed\") in Account::skim"),
+        "got {out:?}"
+    );
+}

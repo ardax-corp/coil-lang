@@ -126,6 +126,7 @@ impl Checker {
             static_methods: std::collections::HashMap::new(),
             ids: IdTable::new(),
             next_id_idx: 0,
+            in_ensures: false,
             infer_depth: 0,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
@@ -4701,6 +4702,13 @@ impl Checker {
         id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
+        // `old(e)` in an `ensures`: `e` as it was on entry.
+        if self.in_ensures
+            && let Expression::Identifier("old") = name.1.as_ref()
+            && let Some([arg]) = args.as_deref()
+        {
+            return self.infer(arg);
+        }
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
                 && arg_list.len() == 1

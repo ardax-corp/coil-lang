@@ -102,6 +102,9 @@ struct BodyBuilder {
     ok_is_result: bool,
     /// The function's and its generic class's type parameter names.
     type_params: Vec<String>,
+    /// `old(e)` calls in the `ensures` clauses (by node address) and the
+    /// local that holds `e` from entry.
+    olds: HashMap<usize, LocalId>,
 }
 
 impl BodyBuilder {
@@ -129,6 +132,7 @@ impl BodyBuilder {
             outer: Vec::new(),
             ok_is_result: false,
             type_params: Vec::new(),
+            olds: HashMap::new(),
         }
     }
 
@@ -555,16 +559,18 @@ impl<'c, 'm> Cx<'c, 'm> {
             .filter(|c| c.kind == ContractKind::Requires && level.checks_requires())
             .map(|c| self.contract_check(&mut b, c, full))
             .collect();
+        let ensures: Vec<&Contract<'_>> = contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Ensures && level.checks_ensures() && !is_coro)
+            .collect();
+        let mut entry = requires;
+        entry.extend(self.old_values(&mut b, &ensures));
         let root = self.expr(&mut b, body);
         self.implicit_ok_return(&mut b, root);
         if let HirKind::Block { stmts, .. } = &mut b.body.exprs[root.0 as usize].kind {
-            stmts.splice(0..0, requires);
+            stmts.splice(0..0, entry);
         }
-        let ensures: Vec<&Contract<'_>> = contracts
-            .iter()
-            .filter(|c| c.kind == ContractKind::Ensures && level.checks_ensures())
-            .collect();
-        if !ensures.is_empty() && !is_coro {
+        if !ensures.is_empty() {
             self.check_ensures(&mut b, root, &ensures, full);
         }
         b.body.root = Some(root);
@@ -588,6 +594,35 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     /// A Result-mode body with a unit `Ok` that can fall off its end returns
     /// `Ok(())` there; make that return explicit.
+    /// `let old$k = e` at entry for every `old(e)` in the `ensures` clauses;
+    /// the clauses then read the local (see `call`).
+    fn old_values(&mut self, b: &mut BodyBuilder, ensures: &[&Contract<'_>]) -> Vec<HirId> {
+        fn find<'n, 's>(node: &'n Output<'s>, out: &mut Vec<&'n Output<'s>>) {
+            if let Expression::Call { name, args: Some(args) } = node.1.as_ref()
+                && matches!(name.1.as_ref(), Expression::Identifier("old"))
+                && args.len() == 1
+            {
+                out.push(node);
+                return;
+            }
+            crate::typechecking::id::walk_children(node, &mut |c| find(c, out));
+        }
+        let mut calls = Vec::new();
+        for c in ensures {
+            find(&c.expr, &mut calls);
+        }
+        let mut stmts = Vec::new();
+        for call in calls {
+            let Expression::Call { args: Some(args), .. } = call.1.as_ref() else { continue };
+            let value = self.expr(b, &args[0]);
+            let ty = b.body.exprs[value.0 as usize].ty.clone();
+            let local = b.local(&format!("old${}", b.olds.len()), ty, LocalKind::Let);
+            b.olds.insert(std::ptr::from_ref(call) as usize, local);
+            stmts.push(self.synth(b, span_of(call), HirKind::Let { local, init: Some(value) }, Some(coil_ty::unit())));
+        }
+        stmts
+    }
+
     /// `if !(cond) { panic "contract violated: …" }` for one clause. A
     /// `requires` panic blames the caller (`contract_fail` in the VM); an
     /// `ensures` panic is reported at its clause.
@@ -1281,6 +1316,10 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     fn call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &Output<'_>, args: &[Output<'_>]) -> HirId {
         use Expression as E;
+        if let Some(&local) = b.olds.get(&(std::ptr::from_ref(node) as usize)) {
+            let ty = b.body.locals[local.0 as usize].ty.clone();
+            return self.emit_ty(b, node, HirKind::Local(local), ty);
+        }
         let callee_node = peel(name);
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
