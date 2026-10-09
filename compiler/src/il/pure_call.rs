@@ -65,7 +65,7 @@ impl PureCallCtx {
 
 /// Exact bind name, `$mono$` clone of a listed bind, or a single `::` suffix
 /// against the AST short name.
-fn name_in(set: &HashSet<String>, name: &str) -> bool {
+pub(crate) fn name_in(set: &HashSet<String>, name: &str) -> bool {
     let stem = name.split("$mono$").next().unwrap_or(name);
     if set.contains(stem) {
         return true;
@@ -101,13 +101,6 @@ pub fn op_blocks_length_proof(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
             | Effects::FIELD_WRITE
             | Effects::YIELD
             | Effects::MATCH,
-    )
-}
-
-/// True when `op` blocks LICM / field-sensitive hoists.
-pub fn op_blocks_licm(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
-    effects(op, ctx).any(
-        Effects::CALL | Effects::HOST | Effects::FIELD_READ | Effects::FIELD_WRITE | Effects::MATCH,
     )
 }
 
@@ -222,10 +215,6 @@ mod tests {
             loc: loc(), ret_words: 1,};
         assert!(!op_blocks_length_proof(&op, Some(&pure)));
         assert!(op_blocks_length_proof(&op, Some(&impure)));
-        assert!(op_blocks_licm(&op, Some(&impure)));
-        assert!(!op_blocks_licm(&op, Some(&pure)));
-        let host = IlOp::HostInvoke { arity: 1, layout: 0, loc: loc() };
-        assert!(op_blocks_licm(&host, Some(&pure)));
     }
 
     #[test]
@@ -240,7 +229,7 @@ mod tests {
         assert!(ctx.call_is_pure(Label(5)));
     }
 
-    /// Impure but length-stable: passes the length proof, still blocks LICM.
+    /// Impure but length-stable: passes the length proof.
     #[test]
     fn length_stable_call_passes_length_proof_only() {
         let mut ctx = PureCallCtx::default();
@@ -260,7 +249,6 @@ mod tests {
         };
         for op in [&entry, &byte] {
             assert!(!op_blocks_length_proof(op, Some(&ctx)));
-            assert!(op_blocks_licm(op, Some(&ctx)));
         }
         // A tail call to the same name is still a barrier.
         let tail = IlOp::Entry {

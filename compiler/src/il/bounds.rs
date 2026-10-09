@@ -170,9 +170,9 @@ fn header_lt_bound_for_test(ops: &[IlOp], lp: &NaturalLoop) -> Option<(u32, u32)
 }
 
 /// Slots written in the loop, including match payload slots (see
-/// [`super::licm::slots_stored_in_loop`]).
+/// [`super::loops::slots_stored_in_loop`]).
 fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
-    super::licm::slots_stored_in_loop(ops, lp)
+    super::loops::slots_stored_in_loop(ops, lp)
 }
 
 fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> usize {
@@ -1048,7 +1048,7 @@ fn store_index_at_proven(ops: &[IlOp], store_op: usize, cl: &CountedLoop) -> boo
 mod hoist {
     use common::Instruction;
 
-    use crate::il::licm::{
+    use crate::il::loops::{
         NaturalLoop, find_natural_loops, insert_preheader_ops, slots_stored_in_loop,
         store_count_in_loop,
     };
