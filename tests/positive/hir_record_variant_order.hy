@@ -9,17 +9,17 @@ fn two() -> int {
 }
 
 fn mk(int a) -> E {
-    return E::Foo{ z: a, y: "m", x: a + 1 };
+    return E::Foo { z: a, y: "m", x: a + 1 };
 }
 
 fn parts(E e) -> int {
     return match e {
-        E::Foo{ x, y, z } => x * 100 + y.len() * 10 + z,
+        E::Foo { x, y, z } => x * 100 + y.len() * 10 + z,
     };
 }
 
 test("shuffled record variant fields") {
-    assert(parts(E::Foo{ z: 1, x: 2, y: "s" }) == 211)?;
-    assert(parts(E::Foo{ y: "t", z: 3, x: two() }) == 213)?;
+    assert(parts(E::Foo { z: 1, x: 2, y: "s" }) == 211)?;
+    assert(parts(E::Foo { y: "t", z: 3, x: two() }) == 213)?;
     assert(parts(mk(4)) == 514)?;
 }

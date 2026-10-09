@@ -25,7 +25,7 @@ fn pick(Result<Option<int>, string> r) -> int {
 fn deep(Option<Option<Shape>> o) -> int {
     return match o {
         Option::Some(Option::Some(Shape::Line(Color::Blue, n))) => n,
-        Option::Some(Option::Some(Shape::Box{ color: Color::Red, w, h })) => w * h,
+        Option::Some(Option::Some(Shape::Box { color: Color::Red, w, h })) => w * h,
         Option::Some(Option::Some(_)) => 1,
         Option::Some(Option::None) => 2,
         Option::None => 3,
@@ -39,7 +39,7 @@ fn total([Shape] shapes) -> int {
             Shape::Line(Color::Red, n) => {
                 acc = acc + n;
             },
-            Shape::Box{ color: Color::Blue, w, h } => {
+            Shape::Box { color: Color::Blue, w, h } => {
                 acc = acc + w + h;
             },
             default => {
@@ -60,7 +60,7 @@ test("nested literal and binding in a result payload") {
 test("three levels deep") {
     assert(deep(Option::Some(Option::Some(Shape::Line(Color::Blue, 4)))) == 4)?;
     assert(deep(Option::Some(Option::Some(Shape::Line(Color::Red, 4)))) == 1)?;
-    assert(deep(Option::Some(Option::Some(Shape::Box{ color: Color::Red, w: 3, h: 5 }))) == 15)?;
+    assert(deep(Option::Some(Option::Some(Shape::Box { color: Color::Red, w: 3, h: 5 }))) == 15)?;
     assert(deep(Option::Some(Option::Some(Shape::Dot(Color::Red)))) == 1)?;
     assert(deep(Option::Some(Option::None)) == 2)?;
     assert(deep(Option::None) == 3)?;
@@ -69,7 +69,7 @@ test("three levels deep") {
 test("statement match in a loop") {
     let shapes = [
         Shape::Line(Color::Red, 2),
-        Shape::Box{ color: Color::Blue, w: 3, h: 4 },
+        Shape::Box { color: Color::Blue, w: 3, h: 4 },
         Shape::Dot(Color::Blue),
         Shape::Line(Color::Blue, 9),
     ];

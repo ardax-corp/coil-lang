@@ -36,13 +36,13 @@ enum Raw {
 }
 
 fn invalid(string message) -> ShapeError {
-    return ShapeError::Invalid{ message: message };
+    return ShapeError::Invalid { message: message };
 }
 
 fn decode(Raw raw) -> Result<int, ShapeError> {
     return match raw {
-        Raw::Good{ value } => value,
-        Raw::Bad{ code } => match code {
+        Raw::Good { value } => value,
+        Raw::Bad { code } => match code {
             1 => raise invalid("one"),
             default => raise invalid("other"),
         },
@@ -51,6 +51,6 @@ fn decode(Raw raw) -> Result<int, ShapeError> {
 
 fn message(ShapeError e) -> string {
     return match e {
-        ShapeError::Invalid{ message } => message,
+        ShapeError::Invalid { message } => message,
     };
 }

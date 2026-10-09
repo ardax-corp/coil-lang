@@ -20,11 +20,11 @@ enum Wrap {
 
 fn get_v(Wrap w) -> int {
     return match w {
-        Wrap::W{ inner: Inner::I{ v }, name } => v,
+        Wrap::W { inner: Inner::I { v }, name } => v,
     };
 }
 
 fn main() {
-    let w = Wrap::W{ inner: Inner::I{ v: 99 }, name: "x" };
+    let w = Wrap::W { inner: Inner::I { v: 99 }, name: "x" };
     write_all(stdout(), to_bytes(format("%i", get_v(w))));
 }

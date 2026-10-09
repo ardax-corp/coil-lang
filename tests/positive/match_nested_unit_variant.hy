@@ -105,8 +105,8 @@ fn pair(Pair p) -> int {
         Pair::Two(Color::Red, _) => 2,
         Pair::Two(_, Color::Blue) => 3,
         Pair::Two(_, _) => 4,
-        Pair::Tagged{ color: Color::Green, n } => 100 + n,
-        Pair::Tagged{ color: _, n } => 200 + n,
+        Pair::Tagged { color: Color::Green, n } => 100 + n,
+        Pair::Tagged { color: _, n } => 200 + n,
     };
 }
 
@@ -125,8 +125,8 @@ test("two nested variants in one arm") {
 }
 
 test("record payload with a nested variant") {
-    assert(pair(Pair::Tagged{ color: Color::Green, n: 5 }) == 105, "green")?;
-    assert(pair(Pair::Tagged{ color: Color::Blue, n: 5 }) == 205, "blue")?;
+    assert(pair(Pair::Tagged { color: Color::Green, n: 5 }) == 105, "green")?;
+    assert(pair(Pair::Tagged { color: Color::Blue, n: 5 }) == 205, "blue")?;
 }
 
 test("Option::None nested in a multi-field payload") {

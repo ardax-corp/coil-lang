@@ -11,7 +11,7 @@ class Config {
 impl FromNode for Config {
     pub fn from_node(Config proto, Node n) -> Result<Config, DecodeError> {
         if n.i < 0 {
-            return Result::Err(DecodeError::Missing{ key: "port" });
+            return Result::Err(DecodeError::Missing { key: "port" });
         }
         return Result::Ok(new Config(n.i, n.s));
     }

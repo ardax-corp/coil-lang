@@ -29,9 +29,9 @@ fn main() {
     write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Blue)));
     write_all(stdout(), to_bytes(format("%z,", Color::Red < Color::Blue)));
 
-    let p = Point::Point{ x: 5, y: 12 };
+    let p = Point::Point { x: 5, y: 12 };
     write_all(stdout(), to_bytes(format("%v,", p)));
-    write_all(stdout(), to_bytes(format("%z,", p == Point::Point{ x: 5, y: 12 })));
+    write_all(stdout(), to_bytes(format("%z,", p == Point::Point { x: 5, y: 12 })));
     write_all(stdout(), to_bytes(format("%z,", p == Point::Origin)));
 
     let c = new Cell(42);

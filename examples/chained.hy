@@ -26,7 +26,7 @@ fn read_y(Outer o) -> int {
 }
 
 fn main() {
-    let p = Outer::Outer{ x: Inner::Inner{ v: 42 }, y: 7 };
+    let p = Outer::Outer { x: Inner::Inner { v: 42 }, y: 7 };
     write_all(stdout(), to_bytes(format("%i", read_x_v(p))));
     write_all(stdout(), to_bytes(format("%i", read_y(p))));
 }
