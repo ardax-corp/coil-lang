@@ -80,9 +80,9 @@ pipeline. No solo “pass” tests.
 
 **Decision** (`decision_once_at`), in order:
 
-7. `licm` → 8. `loop_bounds` → 9. `loop_unroll` → 10. `slot_promote`
-(+ `dead_store_at`) → 11. `clone_shared_return` → 12. `branch_optimization`
-→ 13. `block_reordering`
+7. `loop_bounds` → 8. `loop_unroll` → 9. `slot_promote`
+(+ `dead_store_at`) → 10. `clone_shared_return` → 11. `branch_optimization`
+→ 12. `block_reordering`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -201,29 +201,17 @@ float identities / pool fold.
   `isolated_optimize_flag_runs_pass`. Hit benches: `examples/perf/cse_index_recompute.hy`,
   `cse_cast_recompute.hy` ([#317](https://github.com/ardax-corp/coil-lang/pull/317)).
 
-## `licm`
+## `licm` (moved to the HIR)
 
-**Flag:** `licm` (default on). **Fn:** `il::licm::licm`. Uses **`sp`**.
-
-- **Input:** Natural loops (back-edge JMP to a header label) whose header SP is
-  Known. Also runs `bounds::hoist_loop_invariants` first.
-- **Output:** Hoists invariant `Const`/`Load`, `BinSlot*`, tuple/array/dict
-  construction, non-trapping int arith, FORMAT concat, `len`, and invariant
-  float chains into a preheader (may mint a preheader and retarget the external
-  entry). Sinks table-indexed `STRING` field keys. CSE of `LOAD; CastIntToFloat`.
-  Loop body height at the header/latch is preserved (moved ops are height-neutral
-  or rewritten to loads of the hoisted temp).
-- **Refusals:** Unknown SP; `HostInvoke` in the loop; `JumpIfMatch` in the loop;
-  `Load` of a slot stored in the loop; load still needed as a stack producer;
-  effectful / residual `Byte` that is not a recognized hoist form.
-- **Tests:** `il/licm.rs` `hoists_const_out_of_while_shaped_loop`,
-  `refuses_when_host_invoke_in_loop`, `refuses_when_jump_if_match_in_loop`.
-  Iterates invariant float/int chains ([#315](https://github.com/ardax-corp/coil-lang/pull/315)).
-  Hit bench: `examples/perf/licm_nested_chains.hy`.
+Loop-invariant code motion runs on the HIR (`hir::licm`, after inlining and
+scalar replacement in `emit_hir`), still under the `licm` flag. The stack-IL
+pass was removed 2026-10; the invariant `len(a)` hoist the bounds proofs need
+(`bounds::hoist_loop_invariants`) now runs at the start of `loop_bounds`.
+Hit benches: `examples/perf/licm_nested_chains.hy`, `tail_sibling.hy`.
 
 ## `loop_bounds`
 
-**Flag:** `loop_bounds` (default on). **Fn:** `il::bounds::loop_bounds`. Uses
+**Flag:** `loop_bounds` (default on). **Fn:** `il::bounds::loop_bounds` (after `bounds::hoist_loop_invariants`). Uses
 **`sp`**. Reads `pure_call_ctx` for length-proof barriers.
 
 - **Input:** Counted / `0..len` natural loops with an invariant array.
@@ -372,7 +360,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | local_cse | `early_cse.rs` | yes |
-| licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
 | loop_unroll | `loop_unroll.tests.rs` | no |
 | slot_promote | `slot_promote.rs` | no |
