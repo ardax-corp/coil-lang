@@ -832,8 +832,14 @@ pub fn rebinds(callee: &HirBody, p: LocalId) -> bool {
 
 /// `kind` with every child id shifted by `off` and local by `loff`.
 fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
-    let h = |id: &HirId| HirId(id.0 + off);
-    let l = |id: &LocalId| LocalId(id.0 + loff);
+    map_ids(kind, &|id| HirId(id.0 + off), &|id| LocalId(id.0 + loff))
+}
+
+/// `kind` with each expression id passed through `hf` and each local
+/// through `lf` (a lambda's body, another body, stays as it is).
+pub(crate) fn map_ids(kind: &HirKind, hf: &dyn Fn(HirId) -> HirId, lf: &dyn Fn(LocalId) -> LocalId) -> HirKind {
+    let h = |id: &HirId| hf(*id);
+    let l = |id: &LocalId| lf(*id);
     let hs = |ids: &[HirId]| ids.iter().map(h).collect::<Vec<_>>();
     match kind {
         HirKind::Lit(_) | HirKind::Global { .. } | HirKind::Break | HirKind::Continue | HirKind::Unsupported(_) => {
@@ -890,7 +896,7 @@ fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
             init: init.as_ref().map(h),
         },
         HirKind::LetPat { pat, init } => HirKind::LetPat {
-            pat: remap_pat(pat, loff),
+            pat: map_pat(pat, lf),
             init: h(init),
         },
         HirKind::Assign { place, value } => HirKind::Assign {
@@ -913,7 +919,7 @@ fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
             body,
             kind,
         } => HirKind::ForIn {
-            pat: remap_pat(pat, loff),
+            pat: map_pat(pat, lf),
             iterable: h(iterable),
             body: h(body),
             kind: kind.clone(),
@@ -924,7 +930,7 @@ fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
             arms: arms
                 .iter()
                 .map(|a| HirArm {
-                    pat: remap_pat(&a.pat, loff),
+                    pat: map_pat(&a.pat, lf),
                     body: h(&a.body),
                 })
                 .collect(),
@@ -946,11 +952,11 @@ fn remap(kind: &HirKind, off: u32, loff: u32) -> HirKind {
     }
 }
 
-fn remap_pat(pat: &HirPat, loff: u32) -> HirPat {
-    let fields = |fs: &[(String, HirPat)]| fs.iter().map(|(n, p)| (n.clone(), remap_pat(p, loff))).collect();
+fn map_pat(pat: &HirPat, lf: &dyn Fn(LocalId) -> LocalId) -> HirPat {
+    let fields = |fs: &[(String, HirPat)]| fs.iter().map(|(n, p)| (n.clone(), map_pat(p, lf))).collect();
     match pat {
         HirPat::Wild | HirPat::Int(_) => pat.clone(),
-        HirPat::Bind(l) => HirPat::Bind(LocalId(l.0 + loff)),
+        HirPat::Bind(l) => HirPat::Bind(lf(*l)),
         HirPat::Variant {
             enum_name,
             variant,
@@ -962,11 +968,11 @@ fn remap_pat(pat: &HirPat, loff: u32) -> HirPat {
             tag: *tag,
             fields: match f {
                 HirPatFields::Unit => HirPatFields::Unit,
-                HirPatFields::Tuple(ps) => HirPatFields::Tuple(ps.iter().map(|p| remap_pat(p, loff)).collect()),
+                HirPatFields::Tuple(ps) => HirPatFields::Tuple(ps.iter().map(|p| map_pat(p, lf)).collect()),
                 HirPatFields::Record(fs) => HirPatFields::Record(fields(fs)),
             },
         },
-        HirPat::Tuple(ps) => HirPat::Tuple(ps.iter().map(|p| remap_pat(p, loff)).collect()),
+        HirPat::Tuple(ps) => HirPat::Tuple(ps.iter().map(|p| map_pat(p, lf)).collect()),
         HirPat::Record(fs) => HirPat::Record(fields(fs)),
     }
 }
