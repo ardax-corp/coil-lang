@@ -4171,6 +4171,28 @@ impl Compiler {
         Some((args.clone(), tys, at))
     }
 
+    /// `E::V { .. }.f` on a one-variant enum: the variant's arguments and
+    /// the position of `f`'s. As the AST, the variant is never built: its
+    /// arguments run in order and only `f`'s is kept.
+    fn hir_field_of_variant(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, usize)> {
+        let HirKind::Make {
+            kind: MakeKind::Variant {
+                enum_name,
+                fields: Some(names),
+                ..
+            },
+            args,
+        } = &hir.expr(base).kind
+        else {
+            return None;
+        };
+        if self.checker.enum_variants(enum_name)?.len() != 1 || names.len() != args.len() {
+            return None;
+        }
+        let at = names.iter().position(|n| n == field)?;
+        Some((args.clone(), at))
+    }
+
     /// The field-slot words of a planned `new C(args)`.
     fn hir_check_new_args(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
         let (_, tys) = self.hir_new_layout(hir, id).ok_or("class-layout")?;
@@ -4428,6 +4450,17 @@ impl Compiler {
                 };
                 for (i, &arg) in args.iter().enumerate().take(call.params.len()) {
                     self.hir_check_value(hir, emit, arg, &Self::hir_arg_rep(call, i))?;
+                }
+            }
+            HirKind::Field { base, name } if let Some((args, at)) = self.hir_field_of_variant(hir, *base, name) => {
+                let want = self.hir_natural(hir, emit, id).ok_or("value-shape")?;
+                for (i, &arg) in args.iter().enumerate() {
+                    let rep = if i == at {
+                        want.clone()
+                    } else {
+                        self.hir_natural(hir, emit, arg).ok_or("value-shape")?
+                    };
+                    self.hir_check_value(hir, emit, arg, &rep)?;
                 }
             }
             HirKind::Field { base, name } => {
@@ -5617,6 +5650,20 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 if let Some(slot) = self.hir_sroa_slot(hir, emit, *base, name) {
                     self.bytecode.push_load(slot);
+                } else if let Some((args, at)) = self.hir_field_of_variant(hir, *base, name) {
+                    let want = self.hir_natural(hir, emit, id).expect("planned field");
+                    for (i, &arg) in args.iter().enumerate() {
+                        let d = depth + u32::from(i > at);
+                        if i == at {
+                            self.hir_value(hir, emit, arg, &want, d);
+                            continue;
+                        }
+                        let rep = self.hir_natural(hir, emit, arg).expect("planned variant argument");
+                        self.hir_value(hir, emit, arg, &rep, d);
+                        for _ in 0..rep.words() {
+                            self.bytecode.push_pop();
+                        }
+                    }
                 } else if let Some((args, tys, at)) = self.hir_field_of_new(hir, *base, name) {
                     // As the AST's `try_emit_direct_class_field_access`: the
                     // object is never observed, so each argument runs in
@@ -7677,6 +7724,14 @@ impl Compiler {
             }
             // A `()` binding has no slot and its read pushes nothing.
             HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => {}
+            HirKind::Resume { handle, value } if lower::is_unit_value(hir, &self.checker, id) => {
+                for (i, &v) in value.iter().chain([handle]).enumerate() {
+                    self.hir_value(hir, emit, v, &BOXED, i as u32);
+                }
+                self.bytecode
+                    .push(Byte::new(Instruction::ResumeCoro).with_operand_u32(u32::from(value.is_some())));
+                self.bytecode.push_pop();
+            }
             _ => {
                 let natural = self
                     .hir_natural(hir, emit, id)

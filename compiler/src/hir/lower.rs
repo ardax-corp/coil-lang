@@ -2899,6 +2899,16 @@ impl Walk<'_> {
                 checked
             }
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
+            // A statement `resume` of a `()` coroutine: `ResumeCoro` still
+            // pushes a word, which is dropped.
+            HirKind::Resume { handle, value } if is_unit_value(body, self.checker, id) => {
+                if let Some(v) = value {
+                    self.word(*v)?;
+                    self.value(*v, depth)?;
+                }
+                self.word(*handle)?;
+                self.value(*handle, depth + u32::from(value.is_some()))
+            }
             // A statement `yield` leaves nothing: a send lands only where a
             // receiving `yield` takes it.
             HirKind::Yield { value, .. } => {
