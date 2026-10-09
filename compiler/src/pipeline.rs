@@ -1786,7 +1786,7 @@ impl Pipeline {
         }
     }
 
-    /// Cap the tiny-inline cost; 0 keeps every direct `CALL`. Tests that pin
+    /// Cap the typed-inlining cost; 0 keeps every direct `CALL`. Tests that pin
     /// the two-slot `CALL` ABI use it, since small leaf callees inline.
     pub fn set_inline_max_cost(&mut self, cost: usize) {
         let opts = &mut self.compiler_lazy_mut().inline_cost;

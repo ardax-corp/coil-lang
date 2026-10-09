@@ -17,7 +17,7 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// DCE, jump threading, copy/mem/dest forwarding. Tiny-inline stays modest.
+    /// DCE, jump threading, copy/mem/dest forwarding. Inlining stays modest.
     Basic,
     /// All currently-on production passes. Backward-compatible default.
     #[default]
@@ -62,7 +62,7 @@ impl OptLevel {
         o
     }
 
-    /// Tiny-inline budgets. Lives here so CLI tests can check mapping without
+    /// Typed-inlining budgets. Lives here so CLI tests can check mapping without
     /// constructing a `Compiler` (codegen would create an IL cycle).
     pub fn inline_max_cost(self) -> usize {
         match self {

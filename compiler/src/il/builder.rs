@@ -71,17 +71,6 @@ impl IlBuilder {
         &mut self.ops
     }
 
-    /// Drop every op from raw index `keep` on.
-    pub fn truncate_raw(&mut self, keep: usize) {
-        self.ops.truncate(keep);
-        let index = self.code_index.get_mut();
-        if index.scanned > keep {
-            index.scanned = keep;
-            let n = index.positions.partition_point(|&p| p < keep);
-            index.positions.truncate(n);
-        }
-    }
-
     /// Index every emitting op pushed since the last query.
     fn indexed(&self) -> std::cell::Ref<'_, CodeIndex> {
         {
@@ -169,12 +158,6 @@ impl IlBuilder {
     pub fn bind_label(&mut self, label: Label) {
         self.bound.insert(label.0);
         self.ops.push(IlOp::Label(label));
-    }
-
-    /// Bind `label` as a value-producing join (match / `?` end).
-    pub fn bind_join_label(&mut self, label: Label) {
-        self.bound.insert(label.0);
-        self.ops.push(IlOp::JoinLabel(label));
     }
 
     /// Insert a bound label marker at raw op index `raw_idx` (does not append).

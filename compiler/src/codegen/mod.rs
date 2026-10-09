@@ -535,10 +535,6 @@ pub struct Compiler {
     current_function_table_key: Option<String>,
     /// Peel/unroll spans for the module currently being compiled.
     fn_bytecode_spans: HashMap<String, (usize, usize)>,
-    /// Callee spans kept across files for tiny-inline (COI-125).
-    fn_inline_spans: HashMap<String, (usize, usize)>,
-    /// Module namespace that defined each [`Self::fn_inline_spans`] key.
-    fn_defining_module: HashMap<String, String>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
     /// `dissect --il-post` snapshot from the last capturing finalize.
@@ -584,7 +580,7 @@ pub struct Compiler {
     /// IL optimization preset (COI-127).
     opt_options: crate::il::opt::OptimizeOptions,
 
-    /// Cost budgets for tiny-inline (COI-124).
+    /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
 
     /// When true, [`Self::finalize_bytecode`] keeps post-opt pre-fuse IL.
@@ -630,6 +626,10 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// Scalar function bodies of modules compiled so far, by table key,
+    /// with their calls named by key: callees another module's typed
+    /// inlining may splice ([`Compiler::hir_portable_body`]).
+    hir_portable: HashMap<String, crate::hir::HirBody>,
 }
 
 impl Default for Compiler {
@@ -716,8 +716,6 @@ impl Default for Compiler {
             current_function_qualified: None,
             current_function_table_key: None,
             fn_bytecode_spans: HashMap::new(),
-            fn_inline_spans: HashMap::new(),
-            fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
             #[cfg(any(test, feature = "dissect"))]
             post_il_snapshot: None,
@@ -762,6 +760,7 @@ impl Default for Compiler {
             ),
             hir_int_search: crate::hir::match_tree::int_search_from_env(),
             hir_fn_names: HashMap::new(),
+            hir_portable: HashMap::new(),
         }
     }
 }
