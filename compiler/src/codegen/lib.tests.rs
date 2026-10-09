@@ -1228,6 +1228,8 @@ fn typeclass_impl_method_registers_fqn_function() {
         )
         .expect("parse failed");
     let mut compiler = Compiler::default();
+    // Typed inlining would splice `bar` into `use_bar`'s clone.
+    compiler.set_hir_inline(false);
     let bc = compiler.compile("", &mut ast);
     assert!(
         compiler.messages.is_empty(),
