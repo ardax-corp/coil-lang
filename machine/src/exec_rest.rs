@@ -1758,7 +1758,7 @@ impl<const S: usize> Machine<S> {
                         Self::find_object_by_addr(&self.heap, addr)
                     {
                         let b = gc.as_ref();
-                        if b.tag == expected_tag {
+                        if b.tag == expected_tag || u32::from(expected_tag) == common::UNBOX_ANY_TAG {
                             match &b.payload {
                                 Member::Value(inner) => *inner,
                                 Member::Object(o) => Value::from(o.addr()),
