@@ -99,6 +99,8 @@ struct BodyBuilder {
     /// Result-mode with an `Ok` payload that is itself a `Result`: a
     /// returned `Result::Ok(..)` is the payload, so it is wrapped too.
     ok_is_result: bool,
+    /// The function's and its generic class's type parameter names.
+    type_params: Vec<String>,
 }
 
 impl BodyBuilder {
@@ -124,6 +126,7 @@ impl BodyBuilder {
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
             ok_is_result: false,
+            type_params: Vec::new(),
         }
     }
 
@@ -521,12 +524,19 @@ impl<'c, 'm> Cx<'c, 'm> {
             let id = b.local("self", Some(Ty::Con(owner.to_string())), LocalKind::Param);
             b.body.params.push(id);
         }
+        b.type_params = type_params.iter().map(|p| p.name.to_string()).collect();
+        if let Some(owner) = owner {
+            let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
+            if let Some(params) = self.checker.generics().generic_type_ctors.get(&key) {
+                b.type_params.extend(params.iter().cloned());
+            }
+        }
         let param_tys = keys
             .iter()
             .find_map(|k| self.checker.fn_param_tys(k))
             .or_else(|| default_sig.map(|(params, _)| params));
         self.params(&mut b, args, param_tys.as_deref());
-        if self.pinned(returns.as_ref(), b.body.ret.as_ref()) {
+        if Self::pinned(&b, returns.as_ref(), b.body.ret.as_ref()) {
             b.body.pinned_param = true;
         }
         let root = self.expr(&mut b, body);
@@ -594,7 +604,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                     .cloned()
                     .filter(|t| !matches!(t, Ty::Con(n) if n == coil_ty::UNIT))
                     .or_else(|| self.ty_of(item));
-                if self.pinned(ty_ann.as_ref(), ty.as_ref()) {
+                if Self::pinned(b, ty_ann.as_ref(), ty.as_ref()) {
                     b.body.pinned_param = true;
                 }
                 let id = b.local(name, ty, LocalKind::Param);
@@ -604,13 +614,11 @@ impl<'c, 'm> Cx<'c, 'm> {
     }
 
     /// A bare type parameter annotation (`K`) the checker typed ground.
-    fn pinned(&self, ann: Option<&Output<'_>>, ty: Option<&Ty>) -> bool {
+    fn pinned(b: &BodyBuilder, ann: Option<&Output<'_>>, ty: Option<&Ty>) -> bool {
         let Some(Expression::Type(declared)) = ann.map(|t| peel(t).1.as_ref()) else {
             return false;
         };
-        declared.starts_with(|c: char| c.is_ascii_uppercase())
-            && !self.checker.is_class(declared)
-            && self.checker.enum_variants(declared).is_none()
+        b.type_params.iter().any(|p| p == declared)
             && ty.is_some_and(|t| !matches!(t, Ty::Var(_)) && !matches!(t, Ty::Con(n) if n == declared))
     }
 
