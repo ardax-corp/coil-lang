@@ -108,7 +108,7 @@ fn main() {
     let config = match ReportConfig::from_cli_flags(cli.log.log_json, cli.log.log_lsp) {
         Ok(c) => c,
         Err(e) => {
-            print_cli_error(&e.to_string());
+            print_cli_error(e);
             exit(1);
         }
     };

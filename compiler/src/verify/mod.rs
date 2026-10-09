@@ -82,8 +82,11 @@ pub struct Options {
     pub overflow_traps: bool,
 }
 
+/// The options and `(module path, goals)` captured so far.
+type Capture = (Options, Vec<(String, Vec<FnCheck>)>);
+
 thread_local! {
-    static VERIFY_CAPTURE: std::cell::RefCell<Option<(Options, Vec<(String, Vec<FnCheck>)>)>> =
+    static VERIFY_CAPTURE: std::cell::RefCell<Option<Capture>> =
         const { std::cell::RefCell::new(None) };
 }
 

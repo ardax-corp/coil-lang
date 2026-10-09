@@ -80,6 +80,9 @@ struct St {
 
 type Out = Option<(V, St)>;
 
+/// Places a `for` loop's variable in a state.
+type Bind<'a, 'm> = &'a dyn Fn(&mut Enc<'m>, &mut St);
+
 #[derive(Default)]
 struct LoopCx {
     breaks: Vec<St>,
@@ -208,6 +211,7 @@ impl<'m> Enc<'m> {
             });
             goals[i].queries.push(Query { smt, exact: ob.exact });
         }
+        goals.sort_by_key(|g| g.span.0);
         goals
     }
 
@@ -926,7 +930,7 @@ impl<'m> Enc<'m> {
     /// A call to a function of this module: its `requires` are goals here,
     /// then its `ensures` hold of a fresh result.
     fn modular_call(&mut self, callee: &'m HirBody, args: &[V], span: Span, mut st: St) -> Out {
-        let Some(root) = callee.root else { return None };
+        let root = callee.root?;
         let HirKind::Block { stmts, .. } = &callee.expr(root).kind else {
             let v = self.invent(callee.ret.as_ref(), &mut st);
             return Some((v, st));
@@ -1090,7 +1094,7 @@ impl<'m> Enc<'m> {
     }
 
     /// `loop { head; rest }`, with `bind` placing the loop variable.
-    fn loop_(&mut self, f: &Frame<'m>, body: HirId, bind: Option<&dyn Fn(&mut Self, &mut St)>, st: St) -> Out {
+    fn loop_(&mut self, f: &Frame<'m>, body: HirId, bind: Option<Bind<'_, 'm>>, st: St) -> Out {
         let b = f.body;
         let (stmts, tail) = match &b.expr(body).kind {
             HirKind::Block { stmts, tail } => (stmts.clone(), *tail),
