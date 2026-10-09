@@ -2417,9 +2417,8 @@ impl Compiler {
     }
 
     /// A free function's parameter of a two-word type (a numeric range,
-    /// `Option<int>`, `Result<int, E>`, a small payload enum, an immediate
-    /// pair) takes two CALL slots, `[payload, tag]` / `[start, end]`, when
-    /// every call reaches the function directly: not a fn value, method,
+    /// `Option<int>`, `Result<int, E>`, a small payload enum) takes two CALL
+    /// slots, `[payload, tag]` / `[start, end]`, when every call reaches the function directly: not a fn value, method,
     /// overload, generic or coroutine, which keep the one-word boxed ABI.
     fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
         let Some(params) = self.callee_param_tys_for_pairs(name) else {
@@ -2466,8 +2465,10 @@ impl Compiler {
         {
             return None;
         }
+        // A boxed tuple splits into `[a, b]` through a temp slot, which is
+        // unsafe above live operands, so products stay one boxed word.
         crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind))
+            .filter(|kind| self.hir_pair_kind(kind) && !crate::typechecking::return_layout::is_two_word_product_kind(kind))
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it

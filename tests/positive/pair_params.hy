@@ -1,6 +1,8 @@
-// `Option<int>`, `Result<int, E>`, small payload enums and immediate pairs
-// passed straight to a function travel as two words; fn values, partial
-// application and deep tail recursion still see the same values.
+// `Option<int>`, `Result<int, E>` and small payload enums passed straight
+// to a function travel as two words; fn values, partial application, deep
+// tail recursion and calls above live operands still see the same values.
+use string::format;
+
 enum Phase {
     Low(int),
     Mid(int),
@@ -66,6 +68,10 @@ fn apply(Option<int> -> int f, Option<int> o) -> int {
     return f(o);
 }
 
+fn sum_point((int, int) p) -> int {
+    return p[0] + p[1];
+}
+
 fn reads_back(Option<int> o) -> int {
     let alias = o;
     let total = 0;
@@ -121,4 +127,12 @@ test("partial application and fn values") {
     assert(f(Option::Some(1)) == 11)?;
     assert(f(Option::None) == 9)?;
     assert(apply(score_opt, Option::Some(7)) == 7)?;
+}
+
+test("params passed above live operands") {
+    let p = (3, 4);
+    let opts = [Option::Some(2), Option::None];
+    let s = format("%i %i %i", sum_point(p), score_opt(opts[0]), score_opt(opts[1]));
+    assert(s == "7 2 -1")?;
+    assert(10 + score_phase(Phase::Mid(1)) * 2 == 212)?;
 }
