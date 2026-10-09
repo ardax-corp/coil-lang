@@ -163,10 +163,6 @@ fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'
     0
 }
 
-fn apply_instcombine(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::instcombine::instcombine(ops)
-}
-
 fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
 }
@@ -332,16 +328,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.algebraic,
         set_flag: |o| o.algebraic = true,
         apply: ApplyFn::Grow(apply_algebraic),
-    },
-    PassSpec {
-        name: "instcombine",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.instcombine,
-        set_flag: |o| o.instcombine = true,
-        apply: ApplyFn::Grow(apply_instcombine),
     },
     PassSpec {
         name: "local_cse",
@@ -533,7 +519,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "stack_dce",
     "canon",
     "algebraic",
-    "instcombine",
     "local_cse",
     "licm",
     "loop_bounds",
@@ -579,7 +564,6 @@ mod tests {
                 "stack_dce",
                 "canon",
                 "algebraic",
-                "instcombine",
                 "local_cse",
                 "licm",
                 "loop_bounds",

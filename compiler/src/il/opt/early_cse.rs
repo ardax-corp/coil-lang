@@ -598,7 +598,6 @@ mod tests {
             tos_carry: false,
             canon: false,
             algebraic: false,
-            instcombine: false,
             licm: false,
             loop_bounds: false,
             strength_reduce: false,

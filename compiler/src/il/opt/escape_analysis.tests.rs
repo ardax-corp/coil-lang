@@ -29,7 +29,6 @@ fn isolated() -> OptimizeOptions {
         tos_carry: false,
         canon: false,
         algebraic: false,
-        instcombine: false,
         local_cse: false,
         licm: false,
         loop_bounds: false,

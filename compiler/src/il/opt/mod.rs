@@ -30,8 +30,6 @@ pub struct OptimizeOptions {
     pub canon: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
-    /// Local InstCombine / peephole (const-cond branches, pair-match identity).
-    pub instcombine: bool,
     /// Intra-block EarlyCSE of pure expressions (stored result → `Load`).
     pub local_cse: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
@@ -221,7 +219,6 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
-mod instcombine;
 mod early_cse;
 pub(crate) mod escape_analysis;
 mod invariant_store_elim;

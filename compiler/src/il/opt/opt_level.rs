@@ -127,7 +127,6 @@ fn all_off() -> OptimizeOptions {
         tos_carry: false,
         canon: false,
         algebraic: false,
-        instcombine: false,
         local_cse: false,
         licm: false,
         loop_bounds: false,
@@ -185,7 +184,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.tos_carry,
         o.canon,
         o.algebraic,
-        o.instcombine,
         o.local_cse,
         o.licm,
         o.loop_bounds,
@@ -259,7 +257,7 @@ mod tests {
         assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
-        assert!(!o.instcombine && !o.local_cse);
+        assert!(!o.local_cse);
     }
 
     #[test]

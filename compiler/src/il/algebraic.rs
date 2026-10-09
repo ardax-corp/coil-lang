@@ -1214,7 +1214,6 @@ mod tests {
                 tos_carry: false,
                 canon: false,
                 algebraic: true,
-                instcombine: false,
                 local_cse: false,
                 licm: false,
                 loop_bounds: false,
