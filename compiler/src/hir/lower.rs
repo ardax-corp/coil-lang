@@ -1246,6 +1246,45 @@ pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     )
 }
 
+/// Whether the fn id `f` (a local, or a class field a `declare` was stored
+/// in) names a variadic `declare`.
+pub fn ffi_fn_variadic(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    match &body.expr(f).kind {
+        HirKind::Local(local) => checker.ffi_fn_id_variadic(&body.local(*local).name).unwrap_or(false),
+        HirKind::Field { base, name } => body
+            .expr(*base)
+            .ty
+            .as_ref()
+            .map(|t| apply_ty_prune(checker.subst(), t))
+            .and_then(|t| match strip_readonly(&t) {
+                Ty::Con(class) => checker.ffi_field_fn_id_variadic(class, name),
+                _ => None,
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// A variadic `invoke`'s per-argument FFI type tags: the checker's for the
+/// call, else each argument's literal kind (the AST's
+/// `resolve_variadic_ffi_tags`).
+pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: &[HirId]) -> Option<Vec<(u32, u32)>> {
+    use common::tag;
+    if let Some(tags) = checker.variadic_arg_tags_at(body.expr(call).span) {
+        return Some(tags.to_vec());
+    }
+    items
+        .iter()
+        .map(|&a| match body.expr(a).kind {
+            HirKind::Lit(Lit::Float(_)) => Some((tag::FLOAT, 0)),
+            HirKind::Lit(Lit::Str(_)) => Some((tag::STRING, 0)),
+            HirKind::Lit(Lit::Bool(_)) => Some((tag::BOOL, 0)),
+            HirKind::Lit(Lit::Int(_)) => Some((tag::INT, 0)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Depth refusals [`refusal_at`] names an operand for.
 const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "range-depth"];
 
@@ -1955,8 +1994,8 @@ impl Walk<'_> {
     /// `dload(path)`, `declare(lib, name, (T, ..), R)` or
     /// `invoke(lib, f, (a, ..))`, as the AST's `emit_ffi_declare` /
     /// `emit_ffi_invoke`: the value operands in order, a signature's tags
-    /// as constants, the argument tuple packed. A variadic `declare` or
-    /// `invoke` and a function passed as a callback stay on the AST.
+    /// as constants, the argument tuple packed. A variadic `declare` takes
+    /// a `bool` literal fifth; a variadic `invoke` passes its arguments' tags.
     fn ffi_call(&mut self, id: HirId, kind: crate::typechecking::FfiBuiltin, args: &[HirId], depth: u32) -> Check {
         use crate::typechecking::FfiBuiltin;
         let body = self.body;
@@ -1969,7 +2008,13 @@ impl Walk<'_> {
                 self.args(&[*path], depth, false)
             }
             FfiBuiltin::Declare => {
-                let [lib, name, sig, ret] = args else { return Err("callee-arity") };
+                let (lib, name, sig, ret) = match args {
+                    [lib, name, sig, ret] => (lib, name, sig, ret),
+                    [lib, name, sig, ret, variadic] if matches!(body.expr(*variadic).kind, HirKind::Lit(Lit::Bool(_))) => {
+                        (lib, name, sig, ret)
+                    }
+                    _ => return Err("callee-arity"),
+                };
                 let items = tuple_items(body, *sig).ok_or("ffi-signature")?;
                 if items.iter().chain([ret]).any(|&t| ffi_tag(body, self.checker, t).is_none()) {
                     return Err("ffi-signature");
@@ -1979,10 +2024,11 @@ impl Walk<'_> {
             FfiBuiltin::Invoke => {
                 let [lib, f, values] = args else { return Err("callee-arity") };
                 let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
-                let HirKind::Local(local) = body.expr(*f).kind else {
+                if !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
                     return Err("ffi-function");
-                };
-                if self.checker.ffi_fn_id_variadic(&body.local(local).name).unwrap_or(false) {
+                }
+                if ffi_fn_variadic(body, self.checker, *f) && ffi_variadic_tags(body, self.checker, id, items).is_none()
+                {
                     return Err("callee-variadic");
                 }
                 self.args(&[*lib, *f], depth, false)?;
