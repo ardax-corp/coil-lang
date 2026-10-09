@@ -157,12 +157,13 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
     // Gate HIR passes in `emit_hir`, not IL table rows: scalar replacement
-    // (enum / tuple SROA) and loop-invariant code motion.
+    // (enum / tuple SROA), local CSE and loop-invariant code motion.
     let standard = matches!(
         level,
         OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size
     );
     o.escape_analysis = standard;
+    o.local_cse = standard;
     o.licm = standard;
     o
 }

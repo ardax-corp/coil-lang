@@ -76,13 +76,13 @@ pipeline. No solo “pass” tests.
 **Cleanup** (`cleanup_once_at`), in order:
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `canon` →
-5. `algebraic` → 6. `local_cse`
+5. `algebraic`
 
 **Decision** (`decision_once_at`), in order:
 
-7. `loop_bounds` → 8. `loop_unroll` → 9. `slot_promote`
-(+ `dead_store_at`) → 10. `clone_shared_return` → 11. `branch_optimization`
-→ 12. `block_reordering`
+6. `loop_bounds` → 7. `loop_unroll` → 8. `slot_promote`
+(+ `dead_store_at`) → 9. `clone_shared_return` → 10. `branch_optimization`
+→ 11. `block_reordering`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -181,25 +181,12 @@ float identities / pool fold.
 - **Tests:** `il/algebraic.rs` `add_zero_folds_to_load`, `refuses_when_sp_unknown`.
   Isolated flag: `float_const_pool_add_via_optimize_pipeline`.
 
-## `local_cse`
+## `local_cse` (moved to the HIR)
 
-**Flag:** `local_cse` (default on at Standard). **Fn:**
-`opt::early_cse::early_cse`. Cleanup, after `algebraic`.
-
-- **Input:** One basic block at a time (`analysis::build_blocks` leaders). Available map of
-  pure expressions whose result was stored (`BinSlot*`, stack `Bin` of loads,
-  `CastIntToFloat`, `ArrayLen`, `Index` / `IndexPin*`, `LoadField`).
-- **Output:** Second identical compute → `Load` of the slot that still holds
-  the first result. Height of each rewrite matches the original window.
-- **Refusals:** `DIV`/`MOD`/`DIVF`/`MODF`; store to an operand or to the
-  holding slot; `StoreIndex` / `ArrayPush` kill memory exprs; `HostInvoke` /
-  `CALL` / residual effectful `Byte` / jumps clear the map. Does not cross
-  labels. Does not replace cheap `Const`/`Load` with a slot load (fuse).
-- **Tests:** `opt/early_cse.rs` `binslot_store_reused_as_load`,
-  `store_to_operand_kills_expr`, `host_invoke_is_barrier`,
-  `does_not_cross_basic_block`. Isolated flag:
-  `isolated_optimize_flag_runs_pass`. Hit benches: `examples/perf/cse_index_recompute.hy`,
-  `cse_cast_recompute.hy` ([#317](https://github.com/ardax-corp/coil-lang/pull/317)).
+Local CSE runs on the HIR (`hir::cse`, after inlining and scalar
+replacement, before `hir::licm`), still under the `local_cse` flag. The
+stack-IL EarlyCSE pass was removed 2026-10. Hit benches:
+`examples/perf/cse_index_recompute.hy`, `for_in_iter.hy`.
 
 ## `licm` (moved to the HIR)
 
@@ -359,7 +346,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | stack_dce | `convoy.tests.rs` | no |
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
-| local_cse | `early_cse.rs` | yes |
 | loop_bounds | `bounds.rs` | no |
 | loop_unroll | `loop_unroll.tests.rs` | no |
 | slot_promote | `slot_promote.rs` | no |

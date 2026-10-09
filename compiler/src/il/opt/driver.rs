@@ -161,10 +161,6 @@ fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'
     0
 }
 
-fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
-}
-
 fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     // Invariant `len(a)` moves out of its loop first, which is what lets
     // the bounds proofs below see a fixed length.
@@ -257,16 +253,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_algebraic),
     },
     PassSpec {
-        name: "local_cse",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.local_cse,
-        set_flag: |o| o.local_cse = true,
-        apply: ApplyFn::Grow(apply_local_cse),
-    },
-    PassSpec {
         name: "loop_bounds",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -336,7 +322,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "stack_dce",
     "canon",
     "algebraic",
-    "local_cse",
     "loop_bounds",
     "loop_unroll",
     "slot_promote",
@@ -370,8 +355,7 @@ mod tests {
                 "stack_dce",
                 "canon",
                 "algebraic",
-                "local_cse",
-                            "loop_bounds",
+                                        "loop_bounds",
                 "loop_unroll",
                 "slot_promote",
                 "clone_shared_return",
