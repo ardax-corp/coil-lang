@@ -703,8 +703,8 @@ pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
 
 /// Connect with an optional millisecond deadline (`ms <= 0` waits forever).
 ///
-/// Under a task scheduler (Unix) the connect is non-blocking and only the
-/// calling task waits; see [`crate::task::connect_in_task`].
+/// Under a task scheduler only the calling task waits for the name lookup
+/// and (on Unix) the connect; see [`crate::task::connect_in_task`].
 pub fn tcp_connect_timeout(
     heap: &mut Heap,
     host: &str,
@@ -716,26 +716,38 @@ pub fn tcp_connect_timeout(
         .map_err(|e| IoErrorTag::from_kind(e.kind()))
 }
 
-/// The addresses a connect tries, in order. An IP literal parses in place;
-/// a name blocks this thread on the system resolver.
-pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, IoErrorTag> {
-    use std::net::ToSocketAddrs;
+/// The connect address when `host` is an IP literal (`[…]` allowed for
+/// IPv6); `None` when it is a name the resolver must look up.
+pub(crate) fn connect_literal_addr(host: &str, port: i64) -> Result<Option<SocketAddr>, IoErrorTag> {
     if !(0..=65535).contains(&port) {
         return Err(IoErrorTag::InvalidInput);
     }
-    let port = port as u16;
     let bare = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    let addrs: Vec<SocketAddr> = if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        vec![SocketAddr::new(ip, port)]
-    } else {
-        (bare, port)
-            .to_socket_addrs()
-            .map_err(|e| IoErrorTag::from_kind(e.kind()))?
-            .collect()
-    };
+    Ok(bare
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, port as u16)))
+}
+
+/// The addresses a connect tries, in order. An IP literal parses in place;
+/// a name blocks this thread on the system resolver (`getaddrinfo` on
+/// every platform).
+pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, IoErrorTag> {
+    use std::net::ToSocketAddrs;
+    if let Some(addr) = connect_literal_addr(host, port)? {
+        return Ok(vec![addr]);
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs: Vec<SocketAddr> = (bare, port as u16)
+        .to_socket_addrs()
+        .map_err(|e| IoErrorTag::from_kind(e.kind()))?
+        .collect();
     if addrs.is_empty() {
         return Err(IoErrorTag::NotFound);
     }
