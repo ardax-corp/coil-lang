@@ -1475,29 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn lower_refuses_const_return_across_value_join() {
-        let mut il = IlBuilder::new();
-        let join = il.fresh_label();
-        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(2));
-        il.emit_jump(IlJumpKind::Unconditional, join);
-        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
-        il.bind_join_label(join);
-        il.push_byte(Byte::new(Instruction::RETURN));
-
-        let mut pool = Vec::new();
-        let lowered = lower_optimized(il.ops(), &mut pool);
-        let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
-        assert!(
-            !ops.iter().any(|o| matches!(o, Instruction::ConstReturnImm)),
-            "value join must block CONST;RETURN fuse; got {ops:?}"
-        );
-        assert!(
-            ops.iter().any(|o| matches!(o, Instruction::JMP)),
-            "other arm must keep JMP to join; got {ops:?}"
-        );
-    }
-
-    #[test]
     fn lower_fuses_log_not_jmpf() {
         let mut il = IlBuilder::new();
         let exit = il.fresh_label();

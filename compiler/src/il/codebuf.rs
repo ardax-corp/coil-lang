@@ -462,10 +462,6 @@ impl CodeBuf {
         self.il.bind_label(label);
     }
 
-    pub fn bind_join_label(&mut self, label: Label) {
-        self.il.bind_join_label(label);
-    }
-
     /// Bind a fresh label at the current emit position (fn / lambda / thunk entry).
     /// Labels do not advance [`Self::len`], so absolute PC tables stay aligned.
     /// Records the binding so later packed CALL/CodePtr Bytes rewrite to Entry.
@@ -597,57 +593,6 @@ impl CodeBuf {
         self.il.ops()
     }
 
-    /// Truncate to `code_len` emitting ops. Labels bound at PC `code_len`
-    /// (entry labels for the next instruction) are preserved; emitting ops
-    /// at that PC and beyond are dropped.
-    pub fn truncate(&mut self, code_len: usize) {
-        assert!(self.lowered.is_none());
-        // Keep labels/markers at PCs `<= code_len` (incl. entry binds): cut
-        // at the op at `code_len`, or nothing when there is none.
-        let keep = self
-            .il
-            .raw_index_of_code(code_len)
-            .unwrap_or_else(|| self.il.raw_len());
-        self.il.truncate_raw(keep);
-        // Keep entries bound at `code_len` (next-emit PC). `discard_compile` of
-        // a const-`if` condition often truncates back to a function's entry PC;
-        // `pc < code_len` would drop that bind and leave later CALLs as stale
-        // absolute PCs (breaks under BinSlotImm fusion).
-        self.entry_at_offset.retain(|&pc, _| pc <= code_len);
-    }
-
-    /// Plain bytes in the emitting-op range `[start, end)` (labels skipped).
-    /// Jump/Entry ops are omitted from the returned vec — callers that need
-    /// a faithful body copy must judge candidacy via [`Self::code_slice_ops`].
-    pub fn code_slice_bytes(&self, start: usize, end: usize) -> Vec<Byte> {
-        let range = self.il.raw_range_of_code(start, end);
-        self.il.ops()[range]
-            .iter()
-            .filter_map(|op| op.as_plain_byte())
-            .collect()
-    }
-
-    /// Emitting ops in `[start, end)` (labels skipped; Jump/Entry included).
-    pub fn code_slice_ops(&self, start: usize, end: usize) -> Vec<super::IlOp> {
-        let range = self.il.raw_range_of_code(start, end);
-        self.il.ops()[range]
-            .iter()
-            .filter(|op| op.emits_code())
-            .cloned()
-            .collect()
-    }
-
-    /// Ops in emitting range `[start, end)`, including [`IlOp::Label`] markers
-    /// that sit at those emitting positions (needed to copy jump diamonds).
-    pub fn code_slice_raw_ops(&self, start: usize, end: usize) -> Vec<super::IlOp> {
-        let range = self.il.raw_range_of_code(start, end);
-        self.il.ops()[range]
-            .iter()
-            .filter(|op| op.emits_code() || matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-            .cloned()
-            .collect()
-    }
-
     /// Shift [`Self::entry_at_offset`] keys after a splice that inserts `delta`
     /// emitting ops at `threshold`. Entry ops themselves are symbolic and need
     /// no rewrite; leftover abs CALL/CodePtr Bytes (missing fn CodePtr 0) are
@@ -670,22 +615,6 @@ impl CodeBuf {
 mod tests {
     use super::*;
     use common::Instruction;
-
-    #[test]
-    fn truncate_keeps_entry_bound_at_code_len() {
-        let mut buf = CodeBuf::new();
-        let label = buf.bind_fresh_entry();
-        let pc = buf.len();
-        assert_eq!(buf.entry_label_for_offset(pc), Some(label));
-        // Simulate discard_compile at a function entry (const-if cond).
-        buf.push(Byte::new(Instruction::CONST).with_operand_u32(1));
-        buf.truncate(pc);
-        assert_eq!(
-            buf.entry_label_for_offset(pc),
-            Some(label),
-            "entry at truncate point must survive for CALL→Entry rewrite"
-        );
-    }
 
     #[test]
     fn push_lifts_hot_set_bytes_to_typed_ops() {

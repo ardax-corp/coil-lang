@@ -50,7 +50,7 @@ pub struct BodyTier {
     pub lir_reason: Option<String>,
 }
 
-/// Counters from IL opts (and tiny-inline when compiling). COI-176.
+/// Counters from IL opts (and typed inlining when compiling). COI-176.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
     pub ops_eliminated: usize,
@@ -268,10 +268,6 @@ pub fn begin_opt_stats() {
 /// Snapshot of the current window, or zeros if collection is off.
 pub fn last_opt_stats() -> OptStats {
     LAST_STATS.with(|c| c.borrow().clone().unwrap_or_default())
-}
-
-pub(crate) fn note_function_inlined() {
-    with_stats(|s| s.functions_inlined += 1);
 }
 
 fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
