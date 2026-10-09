@@ -6216,16 +6216,6 @@ impl Compiler {
         Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
     }
 
-    fn emit_shared_try_fail_epilogue(&mut self) {
-        let Some((lab, fail_tag)) = self.compiling_try_fail.take() else {
-            return;
-        };
-        let mut bb = BlockBuilder::new();
-        bb.bind_label(lab, self.bytecode.il_mut());
-        self.bytecode.push_const(fail_tag);
-        self.push_return_two_word();
-    }
-
     /// Return type of the function whose body is being compiled.
     fn compiling_fn_return_ty(&self) -> Option<crate::typechecking::Ty> {
         let qualified = self.current_function_qualified.as_deref();
@@ -6393,7 +6383,6 @@ impl Compiler {
         self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
         self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
-        let prev_try_fail = self.compiling_try_fail.take();
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
             None
@@ -6440,7 +6429,6 @@ impl Compiler {
         if ends_on_label || !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
-        self.emit_shared_try_fail_epilogue();
         let pinned = self.finish_fn_defers(&qualified);
 
         let body_end = self.bytecode.len();
@@ -6457,7 +6445,6 @@ impl Compiler {
         self.compiling_result_mode = prev_result_mode;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_two_word_enum = prev_two_word_enum;
-        self.compiling_try_fail = prev_try_fail;
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
@@ -7328,7 +7315,6 @@ impl Compiler {
         let prev_result_ok_is_result =
             std::mem::replace(&mut self.compiling_result_ok_is_result, false);
         let prev_two_word_enum = self.compiling_two_word_enum.take();
-        let prev_try_fail = self.compiling_try_fail.take();
         let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
 
         let body_start = self.bytecode.len();
@@ -7337,7 +7323,6 @@ impl Compiler {
         if !self.try_lower_hir_function(&init.0, init) {
             self.report_unlowered(&init.0, fqn);
         }
-        self.emit_shared_try_fail_epilogue();
         let body_end = self.bytecode.len();
         self.record_fn_span(name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&name).copied();
@@ -7345,7 +7330,6 @@ impl Compiler {
             .record_func_with_sp(name, entry, body_start, body_end, 0);
 
         self.expr_depth = prev_depth;
-        self.compiling_try_fail = prev_try_fail;
         self.compiling_two_word_enum = prev_two_word_enum;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_result_mode = prev_result_mode;
@@ -8417,7 +8401,6 @@ impl Compiler {
             self.compiling_result_mode = self.checker.fn_is_result_mode(name);
             self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
             let prev_two_word_enum = self.compiling_two_word_enum.clone();
-            let prev_try_fail = self.compiling_try_fail.take();
             self.compiling_two_word_enum = if *is_coro {
                 self.pin_two_word_return_kind(&table_key, None);
                 None
@@ -8474,7 +8457,6 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
             }
-            self.emit_shared_try_fail_epilogue();
             let pinned = self.finish_fn_defers(&table_key);
             self.debug_scope_exit(saved_debug_scope);
 
@@ -8482,7 +8464,6 @@ impl Compiler {
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_two_word_enum = prev_two_word_enum;
-            self.compiling_try_fail = prev_try_fail;
             self.pop_const_env();
             if !self.compiling_method {
                 self.checker.set_current_function(prev_checker_fn);
@@ -9057,7 +9038,6 @@ impl Compiler {
                 self.compiling_result_mode = self.checker.fn_is_result_mode(&fn_name);
                 self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(&fn_name);
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
-                let prev_try_fail = self.compiling_try_fail.take();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
                 let body_op_start = self.bytecode.ops().len();
@@ -9076,7 +9056,6 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
-                self.emit_shared_try_fail_epilogue();
                 let pinned = self.finish_fn_defers(&fn_name);
                 self.fn_defers = prev_fn_defers;
 
@@ -9100,7 +9079,6 @@ impl Compiler {
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
                 self.compiling_two_word_enum = prev_two_word_enum;
-                self.compiling_try_fail = prev_try_fail;
                 self.field_key_slots = prev_field_keys;
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
