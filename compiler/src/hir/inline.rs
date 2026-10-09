@@ -406,7 +406,7 @@ impl Inliner<'_> {
     ) -> Option<HirId> {
         while self.body.exprs.len() - self.original <= growth {
             let Some((call, callee, shape)) = self.site_in(s, callee_of) else {
-                match self.in_place.then(|| self.in_place_site(s, callee_of)).flatten() {
+                match self.in_place.then(|| self.in_place_site(s, callee_of, true)).flatten() {
                     Some((call, callee, shape)) => {
                         self.splice_in_place(call, callee, &shape);
                         continue;
@@ -550,45 +550,73 @@ impl Inliner<'_> {
     /// (an operand the hoisting in [`Inliner::site_in`] cannot move ahead
     /// of: past an effect, under `&&` / `||`, ...), whose callee then runs
     /// in place as a block value: its parameters' `let`s and statements,
-    /// then its result. Those `let`s need the empty operand stack.
+    /// then its result. Those `let`s need the empty operand stack, so above
+    /// live operands (`zero` false) only an [`Inliner::expression_only`]
+    /// callee splices, as its result expression.
     fn in_place_site<'a>(
         &self,
         s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        zero: bool,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
         let b = &self.body;
         let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::lower::primitive).is_some();
+        let at = |x: HirId, zero: bool| self.in_place_site(x, callee_of, zero);
         match &b.expr(s).kind {
             HirKind::Call {
                 callee: Callee::Named { .. } | Callee::Method { .. },
                 args,
-            } if (s.0 as usize) < self.original => {
-                let (callee, shape) = callee_of(s)?;
-                (callee.params.len() == args.len()).then_some((s, callee, shape))
+            } if (s.0 as usize) < self.original
+                && let Some((callee, shape)) = callee_of(s)
+                && callee.params.len() == args.len()
+                && (zero || self.expression_only(callee, &shape, args)) =>
+            {
+                Some((s, callee, shape))
             }
-            HirKind::Let { init: Some(x), .. } | HirKind::Return(Some(x)) => self.in_place_site(*x, callee_of),
-            HirKind::Assign { place, value } if matches!(b.expr(*place).kind, HirKind::Local(_)) => {
-                self.in_place_site(*value, callee_of)
-            }
-            HirKind::Logic { lhs, rhs, .. } => self
-                .in_place_site(*lhs, callee_of)
-                .or_else(|| self.in_place_site(*rhs, callee_of)),
-            HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } if scalar(s) && scalar(*x) => {
-                self.in_place_site(*x, callee_of)
-            }
+            HirKind::Let { init: Some(x), .. } | HirKind::Return(Some(x)) => at(*x, zero),
+            HirKind::Assign { place, value } if matches!(b.expr(*place).kind, HirKind::Local(_)) => at(*value, zero),
+            HirKind::Logic { lhs, rhs, .. } => at(*lhs, zero).or_else(|| at(*rhs, zero)),
+            HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } if scalar(s) && scalar(*x) => at(*x, zero),
             HirKind::Bin { op, lhs, rhs }
                 if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) && scalar(*lhs) && scalar(*rhs) =>
             {
-                self.in_place_site(*lhs, callee_of)
+                at(*lhs, zero).or_else(|| at(*rhs, false))
             }
-            HirKind::If { cond: x, .. } | HirKind::Match { scrutinee: x, .. } => self.in_place_site(*x, callee_of),
+            HirKind::If { cond: x, .. } | HirKind::Match { scrutinee: x, .. } if zero => {
+                at(*x, true).or_else(|| self.operands(s, callee_of))
+            }
             // A block spliced in place: its statements run in turn.
-            HirKind::Block { stmts, tail } if (s.0 as usize) >= self.original => stmts
-                .iter()
-                .chain(tail)
-                .find_map(|&x| self.in_place_site(x, callee_of)),
-            _ => None,
+            HirKind::Block { stmts, tail } if (s.0 as usize) >= self.original => {
+                stmts.iter().chain(tail).find_map(|&x| at(x, zero))
+            }
+            HirKind::Lambda { .. } | HirKind::Defer { .. } => None,
+            // An original block's statements are inlined as its own.
+            HirKind::Block { .. } | HirKind::Loop { .. } => None,
+            _ => self.operands(s, callee_of),
         }
+    }
+
+    /// [`Inliner::in_place_site`] in the operands of `e`, above live ones.
+    fn operands<'a>(
+        &self,
+        e: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+    ) -> Option<(HirId, &'a HirBody, Shape)> {
+        super::lower::children(&self.body, e)
+            .into_iter()
+            .find_map(|x| self.in_place_site(x, callee_of, false))
+    }
+
+    /// `callee` splices as its result expression alone: no statements, and
+    /// every argument stands in for its parameter. That runs above any
+    /// operands, as the call did.
+    fn expression_only(&self, callee: &HirBody, shape: &Shape, args: &[HirId]) -> bool {
+        shape.stmts.is_empty()
+            && shape.result.is_some()
+            && shape.heap_locals.is_empty()
+            && callee.params.iter().zip(args).all(|(&p, &a)| {
+                matches!(self.body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) && !rebinds(callee, p)
+            })
     }
 
     /// Splice `callee` in for `call` as a block value in the call's place:
@@ -598,9 +626,17 @@ impl Inliner<'_> {
         let mut stmts = Vec::new();
         let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
         let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
-        // The call's node becomes the block, so its parent still reads it.
+        // The call's node becomes the block (or the bare result), so its
+        // parent still reads it.
+        let kind = if stmts.is_empty() {
+            let kind = self.body.expr(tail).kind.clone();
+            self.tombstone(tail);
+            kind
+        } else {
+            HirKind::Block { stmts, tail: Some(tail) }
+        };
         let e = &mut self.body.exprs[call.0 as usize];
-        e.kind = HirKind::Block { stmts, tail: Some(tail) };
+        e.kind = kind;
         e.node = None;
     }
 

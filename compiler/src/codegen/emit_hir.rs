@@ -679,6 +679,8 @@ impl Compiler {
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
                 (!call.ranges.is_empty(), "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
+                // An auto-parallel callee's call runs its split worker.
+                (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
             ];
             if let Some((_, what)) = kind.iter().find(|(hit, _)| *hit) {
                 return Err(format!("call-kind {what}"));
