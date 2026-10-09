@@ -4753,14 +4753,7 @@ impl Compiler {
                     None => Ok(()),
                 }
             }
-            HirKind::Loop { body } => {
-                // A parallel `while` site keeps the AST's `try_emit_par_loop`.
-                let (start, end) = hir.expr(id).span;
-                if self.loop_par_sites.contains_key(&(start, end)) {
-                    return Err("while-par");
-                }
-                self.hir_check_effect(hir, emit, *body)
-            }
+            HirKind::Loop { body } => self.hir_check_effect(hir, emit, *body),
             // Each capture is one frame word the thunk's frame copies.
             HirKind::Defer { captures, body } => {
                 for local in captures.iter().flatten() {
@@ -4782,11 +4775,6 @@ impl Compiler {
                     && self.hir_local_layout(hir, *local) != ValueLayout::Boxed
                 {
                     return Err("for-in-coroutine");
-                }
-                let (start, end) = hir.expr(id).span;
-                // A parallel-loop site keeps the AST's `try_emit_par_loop`.
-                if self.loop_par_sites.contains_key(&(start, end)) {
-                    return Err("for-in-par");
                 }
                 // `into_iter` is called as the AST calls it: a range comes
                 // back as `[start, end]`, anything else as one word.
@@ -7503,6 +7491,8 @@ impl Compiler {
             HirKind::Loop { body }
                 if lower::while_shape(hir, *body)
                     .is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
+            HirKind::Loop { body }
+                if lower::while_shape(hir, *body).is_some_and(|(cond, then)| self.hir_par_loop(hir, emit, id, cond, None, then)) => {}
             HirKind::Loop { body } => {
                 let top = self.bytecode.fresh_label();
                 let exit = self.bytecode.fresh_label();
@@ -7520,6 +7510,12 @@ impl Compiler {
                 self.hir_jump(IlJumpKind::Unconditional, top);
                 self.bytecode.bind_label(exit);
             }
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                ..
+            } if self.hir_par_loop(hir, emit, id, *iterable, Some(*local), *body) => {}
             HirKind::ForIn {
                 pat,
                 iterable,
@@ -7663,6 +7659,129 @@ impl Compiler {
             DebugLoc::unknown(),
             crate::il::FuseHint::nofuse_value_under_jmp(),
         );
+    }
+
+    /// A parallel-loop site (`while` or counted `for`, test or iterable
+    /// `head`): the chunked fork-join of `Compiler::try_emit_par_loop`, with
+    /// `body` emitted into the chunk worker's frame. `false`, with nothing
+    /// emitted, when the body needs this frame (a lambda, an early exit, a
+    /// site local not in one plain slot) and the loop runs sequentially.
+    fn hir_par_loop(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, head: HirId, bind: Option<LocalId>, body: HirId) -> bool {
+        let e = hir.expr(id);
+        let Some(site) = self.par_loop_site(SimpleSpan::from(e.span.0..e.span.1), e.node) else {
+            return false;
+        };
+        if site.implicit_step != bind.is_some() {
+            return false;
+        }
+        let planned = |l: LocalId| {
+            emit.sroa.contains_key(&l.0)
+                || emit.stacks.contains_key(&l.0)
+                || emit.pair_locals.contains_key(&l.0)
+                || emit.tag_slots.contains_key(&l.0)
+        };
+        // The enclosing body's locals the loop reads, by name, as the site
+        // names them: one local each.
+        let mut outer: HashMap<String, LocalId> = HashMap::new();
+        let mut ok = true;
+        let note = |l: LocalId, outer: &mut HashMap<String, LocalId>, ok: &mut bool| {
+            // The body's own locals bind in the worker's frame.
+            if Some(l) == bind || emit.slots[l.0 as usize].is_none() {
+                return;
+            }
+            // A site local is one plain word the worker takes by slot.
+            if planned(l) {
+                *ok = false;
+                return;
+            }
+            let name = hir.local(l).name.clone();
+            if *outer.entry(name).or_insert(l) != l {
+                *ok = false;
+            }
+        };
+        lower::visit(hir, head, &mut |x| {
+            if let HirKind::Local(l) = x.kind {
+                note(l, &mut outer, &mut ok);
+            }
+        });
+        let heads = outer.clone();
+        let mut in_body = HashMap::new();
+        lower::visit(hir, body, &mut |x| match x.kind {
+            HirKind::Local(l) => note(l, &mut in_body, &mut ok),
+            HirKind::Lambda { .. }
+            | HirKind::Break
+            | HirKind::Continue
+            | HirKind::Return(_)
+            | HirKind::Defer { .. }
+            | HirKind::Yield { .. }
+            | HirKind::Resume { .. } => ok = false,
+            _ => {}
+        });
+        // The body reads only the site's index, accumulator and captures.
+        let names: HashSet<&str> = std::iter::once(site.index.as_str())
+            .chain([site.acc.as_str()])
+            .chain(site.live_captures.iter().map(String::as_str))
+            .chain(site.captures.iter().map(|(n, _)| n.as_str()))
+            .collect();
+        if !ok || in_body.keys().any(|n| !names.contains(n.as_str())) {
+            if std::env::var_os("COIL_HIR_WHY").is_some() {
+                eprintln!("hir par loop `{}`: sequential (body reads {:?})", hir.name, in_body.keys().collect::<Vec<_>>());
+            }
+            return false;
+        }
+        for (name, &l) in &in_body {
+            if *outer.entry(name.clone()).or_insert(l) != l {
+                return false;
+            }
+        }
+        let slot = |name: &String| outer.get(name).map(|&l| Self::hir_slot(emit, l));
+        let Some(acc) = slot(&site.acc) else {
+            return false;
+        };
+        let Some(live) = site.live_captures.iter().map(slot).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let bound = |name: &Option<String>| name.as_ref().map(|n| heads.get(n).map(|&l| Self::hir_slot(emit, l)));
+        let (begin, end) = (bound(&site.begin_local), bound(&site.end_local));
+        if matches!(begin, Some(None)) || matches!(end, Some(None)) {
+            return false;
+        }
+        let index = match bind {
+            Some(_) => None,
+            None => match slot(&site.index) {
+                Some(index) => Some(index),
+                None => return false,
+            },
+        };
+        let mut slots = ParLoopSlots { index: index.unwrap_or(0), acc, live, begin: begin.flatten(), end: end.flatten() };
+        let Some(natives) = self.par_loop_natives(&slots) else {
+            return false;
+        };
+        if let Some(local) = bind {
+            let index = self.hir_bind_local(hir, local);
+            emit.slots[local.0 as usize] = Some(index);
+            slots.index = index;
+        }
+
+        let mut bb = BlockBuilder::new();
+        let after_worker = bb.fresh_label(self.bytecode.il_mut());
+        bb.emit_jump_to(after_worker, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        let saved = emit.slots.clone();
+        let worker = self.par_worker_begin(&site);
+        // The worker's frame holds the site's names; the body's own locals
+        // bind in it as they are reached.
+        for (name, &l) in &outer {
+            emit.slots[l.0 as usize] = self.lookup_slot(name);
+        }
+        if let Some(local) = bind {
+            emit.slots[local.0 as usize] = Some(0);
+        }
+        self.hir_effect(hir, emit, body);
+        let worker = self.par_worker_end(&site, worker);
+        emit.slots = saved;
+        bb.bind_label(after_worker, self.bytecode.il_mut());
+        self.emit_par_loop_chunks(&site, &slots, natives, worker, bb);
+        true
     }
 
     /// `for x in a..b` / `for x in arr`, in the AST's counted-loop shapes
