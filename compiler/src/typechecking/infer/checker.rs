@@ -3632,8 +3632,11 @@ impl Checker {
                 })
                 .map(|(k, e)| (k.clone(), e.clone()))
                 .collect();
+            // The name this `use` imports always binds: a same-named fn
+            // another module brought into the env must not shadow it.
+            let imported = alias.as_deref().unwrap_or(name);
             for (local, export) in locals {
-                if self.env.lookup(&local).is_some() {
+                if local != imported && self.env.lookup(&local).is_some() {
                     continue;
                 }
                 if let Some(scheme) = self.virtual_callable_scheme(export, range.clone()) {
