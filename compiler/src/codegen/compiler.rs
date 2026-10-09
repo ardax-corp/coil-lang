@@ -8762,9 +8762,6 @@ impl Compiler {
                     .iter()
                     .map(|arg| self.codegen_instance_head_ty(arg))
                     .collect();
-                for arg in args {
-                    bytecode.append(&mut self.do_compile(arg));
-                }
                 let ty_part = arg_tys
                     .iter()
                     .map(|ty| ty.to_string())
@@ -8851,12 +8848,8 @@ impl Compiler {
                 // dlopen once per library short name for the compile unit.
                 if !self.extern_runtime_libs_loaded.contains(library.as_str()) {
                     self.extern_runtime_libs_loaded.insert(library.clone());
-                    let span: SimpleSpan = (0..0).into();
-                    let path_expr: parser::ast::Output = (
-                        span,
-                        Box::new(parser::ast::Expression::String(library.as_str())),
-                    );
-                    let mut bc = self.do_compile(&path_expr);
+                    let mut bc = CodeBuf::new();
+                    self.emit_raw_string_literal(&mut bc, &unescape_coil_string(library));
                     self.bytecode.append(&mut bc);
                     self.bytecode.push(Byte::new(Instruction::FfiLoad));
                     self.emit_result_unwrap_or_panic();
@@ -8892,11 +8885,9 @@ impl Compiler {
                         .alloc_synthetic_static_slot(fn_id_fqn, crate::typechecking::ty::int());
                     self.bytecode
                         .push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib_slot));
-                    let span: SimpleSpan = (0..0).into();
                     let sym = decl.symbol.unwrap_or(decl.name);
-                    let name_expr: parser::ast::Output =
-                        (span, Box::new(parser::ast::Expression::String(sym)));
-                    let mut name_bc = self.do_compile(&name_expr);
+                    let mut name_bc = CodeBuf::new();
+                    self.emit_raw_string_literal(&mut name_bc, &unescape_coil_string(sym));
                     self.bytecode.append(&mut name_bc);
                     let mut arg_type_tags: Vec<u32> = Vec::new();
                     if let Expression::Fragment(items) = decl.args.1.as_ref() {
@@ -9065,11 +9056,8 @@ impl Compiler {
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
             }
-            Expression::ExternStruct(decl) => {
-                for (_, ty) in &decl.fields {
-                    bytecode.append(&mut self.do_compile(ty));
-                }
-            }
+            // Layout comes from the typechecker; no bytes.
+            Expression::ExternStruct(_) => {}
             // Payload shapes are the typechecker's; no bytes.
             Expression::EnumVariant { .. } => {}
             Expression::TypeApp { .. } => {}
