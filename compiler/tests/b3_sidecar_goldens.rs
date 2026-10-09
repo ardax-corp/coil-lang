@@ -43,12 +43,14 @@ const CORPUS: &[&str] = &[
 /// `parse_pair` into `match_pair` and `chain_pair` (`option_pair.hy` grows).
 /// Typed inlining into test bodies retargets four (`arithmetic.hy` grows:
 /// its tests inline `opaque`).
+/// Removing 16 no-effect stack-IL passes (2026-10: convoys, GVN, copy/dest
+/// prop, instcombine, …) retargets all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "34e41e3bbb193dc0_1278"),
-    ("functions.hy", "070467521c6c32de_277"),
-    ("loops.hy", "d91e9ca0105e4005_248"),
-    ("option_pair.hy", "e410c0644929fe98_338"),
-    ("user_trait_dispatch.hy", "1514ed8b192197bd_120"),
+    ("arithmetic.hy", "690c09850057063c_1275"),
+    ("functions.hy", "ee294b2ac353155a_282"),
+    ("loops.hy", "df2931662258672f_250"),
+    ("option_pair.hy", "7b0f8b444ec118db_340"),
+    ("user_trait_dispatch.hy", "00233c336c0f1c62_123"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
