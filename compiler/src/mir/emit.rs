@@ -1,6 +1,6 @@
 //! Lower verified numeric MIR to dense bytecode (`IlOp` residuals + labels).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use common::{dense, Byte, DebugLoc, Instruction};
 
@@ -400,6 +400,61 @@ pub(super) fn coalesce_latch_overwrite(
             }
             if dest.index() < regs.len() && latch_val.index() < regs.len() {
                 regs[dest.index()] = regs[latch_val.index()];
+            }
+        }
+    }
+    coalesce_join_phis(func, regs, need_slot)
+}
+
+/// Alias a join φ dest with the φ of the next join that is its only use,
+/// when its block jumps straight there (`else if` chains): the inner join's
+/// incoming copies then land in the outer dest, and the copy between the
+/// joins disappears. Registers are one per value, so the outer dest holds
+/// nothing else on the paths into the inner join.
+fn coalesce_join_phis(func: &MirFunc, mut regs: Vec<u8>, need_slot: &[bool]) -> Vec<u8> {
+    let mut uses: HashMap<ValueId, usize> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for v in inst.operands() {
+                *uses.entry(v).or_default() += 1;
+            }
+        }
+        if let Some(term) = &block.term {
+            let mut t = term.clone();
+            t.rewrite_values(|v| {
+                *uses.entry(v).or_default() += 1;
+                v
+            });
+        }
+    }
+    let n = regs.len();
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < n;
+    let phis = |id: BlockId| {
+        func.block(id).insts.iter().filter_map(|inst| match inst {
+            MirInst::Phi { dest, args, .. } => Some((*dest, args)),
+            _ => None,
+        })
+    };
+    // Outer joins first, so a chain takes the outermost register.
+    for block in func.blocks.iter().rev() {
+        for (dest, args) in phis(block.id) {
+            for &(pred, v) in args.iter() {
+                let inner = func.block(pred);
+                let only_jump = matches!(inner.term, Some(Terminator::Jump { dest: to }) if to == block.id);
+                let forward = |b: &super::func::MirBlock| phis(b.id).all(|(_, a)| a.iter().all(|(p, _)| p.index() < b.id.index()));
+                if pred.index() < block.id.index()
+                    && only_jump
+                    && forward(inner)
+                    && phis(pred).any(|(d, _)| d == v)
+                    && uses.get(&v) == Some(&1)
+                    // A block branching to both joins would copy into the
+                    // shared register on each edge.
+                    && !phis(pred).any(|(_, a)| a.iter().any(|(p, _)| args.iter().any(|(q, _)| q == p)))
+                    && slot(v)
+                    && slot(dest)
+                {
+                    regs[v.index()] = regs[dest.index()];
+                }
             }
         }
     }
