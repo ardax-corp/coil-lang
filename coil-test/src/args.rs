@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Command, CommandFactory, Parser};
 use coil_args::{
-    HirFlags, HostGrantFlags, LogFlags, OptLevelFlags, RootFlags, expand_o_shorts, parse_with,
+    HostGrantFlags, LogFlags, OptLevelFlags, RootFlags, expand_o_shorts, parse_with,
     print_command_help,
 };
 use reporting::ReportConfig;
@@ -55,8 +55,6 @@ struct TestCli {
     log: LogFlags,
     #[command(flatten)]
     opt: OptLevelFlags,
-    #[command(flatten)]
-    hir: HirFlags,
     #[command(flatten)]
     grants: HostGrantFlags,
     #[command(flatten)]
@@ -112,8 +110,6 @@ struct MutateCli {
     log: LogFlags,
     #[command(flatten)]
     opt: OptLevelFlags,
-    #[command(flatten)]
-    hir: HirFlags,
     #[command(flatten)]
     grants: HostGrantFlags,
     #[command(flatten)]
@@ -190,7 +186,6 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
-        hir: cli.hir,
         grants: cli.grants,
         roots: cli.roots,
         seed: cli.seed,
@@ -221,7 +216,6 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
-        hir: cli.hir,
         grants: cli.grants,
         roots: cli.roots,
         seed: cli.seed,
@@ -263,7 +257,6 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
 struct RunParts {
     log: LogFlags,
     opt: OptLevelFlags,
-    hir: HirFlags,
     grants: HostGrantFlags,
     roots: RootFlags,
     seed: Option<u64>,
@@ -310,7 +303,6 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
             opt_level: parts.opt.level(),
-            hir: parts.hir.lowering(),
             grants: parts.grants.into_grants(),
             extra_roots: parts.roots.root,
             report: if parts.json {

@@ -48,35 +48,21 @@ fn fib_line(needle: &str) -> usize {
         + 1
 }
 
-thread_local! {
-    /// Whether the debugger under test compiles through HIR (`COIL_HIR`).
-    static HIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Each case runs on the AST path and again through HIR lowering, which
-/// must keep the same stops, frames and locals.
+/// One `#[test]` per case.
 macro_rules! dap_tests {
-    ($($case:ident => $ast:ident, $hir:ident;)*) => {
+    ($($case:ident => $test:ident;)*) => {
         $(
             #[test]
-            fn $ast() {
-                $case();
-            }
-
-            #[test]
-            fn $hir() {
-                HIR.set(true);
+            fn $test() {
                 $case();
             }
         )*
     };
 }
 
-/// A scratch directory for one case, apart from the same case on the
-/// other path (both run in one process).
+/// A scratch directory for one case.
 fn case_dir(tag: &str) -> PathBuf {
-    let path = if HIR.get() { "hir" } else { "ast" };
-    std::env::temp_dir().join(format!("{tag}-{path}-{}", std::process::id()))
+    std::env::temp_dir().join(format!("{tag}-{}", std::process::id()))
 }
 
 struct DapClient {
@@ -94,7 +80,6 @@ impl DapClient {
     fn spawn_with(cwd: &std::path::Path, extra: &[&str]) -> Self {
         let bin = coil_debug_bin();
         let mut cmd = Command::new(&bin);
-        cmd.env("COIL_HIR", if HIR.get() { "1" } else { "0" });
         cmd.arg("--dap");
         cmd.args(extra);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
@@ -661,11 +646,8 @@ fn dap_let_locals_at_line_breakpoint_case() {
             .and_then(|v| v.get("value").and_then(|x| x.as_str()).map(str::to_string))
     };
     assert_eq!(value("n").as_deref(), Some("20"), "variables={vars}");
-    // The AST path reports these still-live slots as optimized out.
-    if HIR.get() {
-        assert_eq!(value("doubled").as_deref(), Some("40"), "variables={vars}");
-        assert_eq!(value("total").as_deref(), Some("41"), "variables={vars}");
-    }
+    assert_eq!(value("doubled").as_deref(), Some("40"), "variables={vars}");
+    assert_eq!(value("total").as_deref(), Some("41"), "variables={vars}");
     assert!(value("label").is_some_and(|v| v.contains('x')), "variables={vars}");
     let clear = client.request(
         "setBreakpoints",
@@ -679,12 +661,12 @@ fn dap_let_locals_at_line_breakpoint_case() {
 }
 
 dap_tests! {
-    dap_stop_on_entry_and_continue_case => dap_stop_on_entry_and_continue, dap_stop_on_entry_and_continue_hir;
-    dap_function_breakpoint_stack_and_locals_case => dap_function_breakpoint_stack_and_locals, dap_function_breakpoint_stack_and_locals_hir;
-    dap_line_breakpoint_hit_case => dap_line_breakpoint_hit, dap_line_breakpoint_hit_hir;
-    dap_launch_compile_failure_case => dap_launch_compile_failure, dap_launch_compile_failure_hir;
-    dap_stop_on_entry_has_stack_and_step_case => dap_stop_on_entry_has_stack_and_step, dap_stop_on_entry_has_stack_and_step_hir;
-    dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant, dap_launch_allow_attach_grant_hir;
-    dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection, dap_panic_stops_for_inspection_hir;
-    dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint, dap_let_locals_at_line_breakpoint_hir;
+    dap_stop_on_entry_and_continue_case => dap_stop_on_entry_and_continue;
+    dap_function_breakpoint_stack_and_locals_case => dap_function_breakpoint_stack_and_locals;
+    dap_line_breakpoint_hit_case => dap_line_breakpoint_hit;
+    dap_launch_compile_failure_case => dap_launch_compile_failure;
+    dap_stop_on_entry_has_stack_and_step_case => dap_stop_on_entry_has_stack_and_step;
+    dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
+    dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
+    dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
 }

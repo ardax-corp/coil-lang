@@ -918,10 +918,9 @@ pub struct Compiler {
     stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
-    /// Lower function bodies from HIR instead of the AST walk (the default;
-    /// `COIL_HIR=0` keeps the AST walk).
-    hir_lowering: bool,
-    /// HIR of the module being compiled, when [`Self::hir_lowering`] is on.
+    /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
+    hir_refusal: Option<&'static str>,
+    /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
     hir_fns: HashMap<(usize, usize), usize>,
@@ -1069,7 +1068,7 @@ impl Default for Compiler {
             stack_maps: Vec::new(),
             stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
-            hir_lowering: crate::hir::lowering_from_env(),
+            hir_refusal: None,
             hir_module: None,
             hir_fns: HashMap::new(),
             hir_inline: crate::hir::inline::inline_from_env(),

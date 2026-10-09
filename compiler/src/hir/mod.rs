@@ -4,9 +4,8 @@
 //! query that decides how a value of a given type is represented, so the
 //! AST codegen, MIR and the future HIR lowering cannot disagree. Phase 1 is
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
-//! --hir`). Phase 2 is [`lower`]: by default (`--ast-codegen` / `COIL_HIR=0` opt out), codegen
-//! lowers the bodies inside the core subset from HIR and keeps the AST walk
-//! for every other body. Phase 3 widens that subset to enums, `Option` /
+//! --hir`). Phase 2 is [`lower`]: codegen lowers every function body from
+//! HIR (the AST walk is gone since phase 8). Phase 3 widens that subset to enums, `Option` /
 //! `Result` in every layout (boxed, niche, two-slot), `match`, `?`, `??` and
 //! Result-mode returns.
 //!
@@ -363,15 +362,6 @@ pub enum HirKind {
     Builtin { op: Builtin, args: Vec<HirId> },
     /// A construct this phase does not build yet.
     Unsupported(&'static str),
-}
-
-/// HIR lowering is on unless `COIL_HIR=0` (or `false` / `off` / `no`)
-/// picks the AST codegen.
-pub(crate) fn lowering_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
 }
 
 thread_local! {

@@ -1,5 +1,4 @@
 // A `gen fn` declared in an `impl` returns a coroutine, as a free one (#778).
-// HIR only: coil-lang#785 (the AST codegen does not carry this fix).
 class Counter {
     n: int,
 }

@@ -32,10 +32,8 @@ test("none") {
 "#,
     )
     .unwrap();
-    // The HIR lowering fails the case the same way.
-    for mode in [&[][..], &["--hir"][..]] {
+    {
         let out = Command::new(env!("CARGO_BIN_EXE_coil-test"))
-            .args(mode)
             .args(["--no-shuffle", "-j", "1", "--allow-read"])
             .arg(&root)
             .output()
@@ -45,7 +43,7 @@ test("none") {
             "> Test \"io\" failed: `?` got Err(NotFound)",
             "> Test \"none\" failed: `?` got None",
         ] {
-            assert!(err.contains(want), "expected {want:?} in stderr ({mode:?}): {err}");
+            assert!(err.contains(want), "expected {want:?} in stderr: {err}");
         }
         assert_eq!(out.status.code(), Some(1));
     }

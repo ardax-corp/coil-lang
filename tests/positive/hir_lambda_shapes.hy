@@ -1,4 +1,3 @@
-// HIR only: coil-lang#785 (the AST codegen gets the block body and class capture wrong).
 // Lambdas with block bodies, lambdas inside lambdas, captures relayed
 // through an outer lambda, and a captured class local.
 class Acc {

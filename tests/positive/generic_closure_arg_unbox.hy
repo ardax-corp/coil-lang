@@ -1,7 +1,6 @@
 // A ground closure passed where a generic callee takes `T -> U` gets its
 // `T` arguments boxed by the generic ABI; it is called with them unboxed
 // (#699), whether it is a lambda literal or a named function.
-// HIR only: coil-lang#785 (the AST codegen does not carry this fix).
 use string::format;
 
 fn apply_to<T, U>(T x, T -> U f) -> U {

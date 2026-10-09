@@ -100,9 +100,6 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
-    /// Lower function bodies from HIR (the default; `--ast-codegen` /
-    /// `COIL_HIR=0` keep the AST codegen).
-    hir_lowering: bool,
     /// Typed inlining of HIR bodies (the default; `COIL_HIR_INLINE=0` off).
     hir_inline: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
@@ -288,7 +285,6 @@ impl Pipeline {
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
-            c.set_hir_lowering(self.hir_lowering);
             c.set_hir_inline(self.hir_inline);
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
@@ -714,7 +710,6 @@ impl Pipeline {
             include_tests: false,
             keep_fns_in: None,
             auto_par: true,
-            hir_lowering: crate::hir::lowering_from_env(),
             hir_inline: crate::hir::inline::inline_from_env(),
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
@@ -1758,20 +1753,6 @@ impl Pipeline {
         self.auto_par = on;
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_auto_par(on);
-        }
-    }
-
-    /// Whether function bodies lower from HIR (off under `--ast-codegen`).
-    pub fn hir_lowering(&self) -> bool {
-        self.hir_lowering
-    }
-
-    /// Lower function bodies from HIR (`on`) or keep the AST codegen
-    /// (`--ast-codegen`). Defaults to on unless `COIL_HIR=0`.
-    pub fn set_hir_lowering(&mut self, on: bool) {
-        self.hir_lowering = on;
-        if self.compiler.get().is_some() {
-            self.compiler_lazy_mut().set_hir_lowering(on);
         }
     }
 

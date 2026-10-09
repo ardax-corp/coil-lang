@@ -11257,9 +11257,9 @@ fn main() {
 }
 
 /// E3: a function whose effects exceed its `pure fn` / `uses {…}` (or its
-/// trait method's) does not compile, with either backend.
+/// trait method's) does not compile.
 #[test]
-fn broken_effect_declarations_are_errors_on_both_backends() {
+fn broken_effect_declarations_are_errors() {
     let broken = [
         (
             "static let HITS: int = 0;\nfn bump() {\n    HITS = HITS + 1;\n}\npure fn twice(int x) -> int {\n    bump();\n    return x * 2;\n}\n",
@@ -11274,49 +11274,45 @@ fn broken_effect_declarations_are_errors_on_both_backends() {
             "`Area for Sq::area` implements `Area::area`, declared `pure` but needs read, mutate",
         ),
     ];
-    for hir in [true, false] {
+    {
         for (src, expected) in broken {
             let mut pipeline = test_pipeline();
-            pipeline.set_hir_lowering(hir);
             assert_compile_fails_pipeline(&mut pipeline, src, compiler::ErrorCode::EffectMismatch);
             assert!(
                 pipeline.messages().iter().any(|m| m.message().contains(expected)),
-                "hir={hir}: expected `{expected}` in {:?}",
+                "expected `{expected}` in {:?}",
                 pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
             );
         }
         let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    assert(true);\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
         let mut pipeline = test_pipeline();
-        pipeline.set_hir_lowering(hir);
         compile_ok(&mut pipeline, kept);
     }
 }
 
 /// E4: each gated host call the program reaches needs its capability, with
-/// the call chain in the message, on both backends; one nothing reaches
+/// the call chain in the message; one nothing reaches
 /// needs none.
 #[test]
 fn reachable_host_calls_need_their_capabilities() {
     let src = "use env::{exec, exit};\nuse io::{open};\nuse io::fs::{exists, remove_file};\nfn shell() {\n    let args: Vec<string> = Vec::new();\n    let _ = exec(\"true\", args);\n}\nfn load() -> bool {\n    let _ = open(\"cfg.toml\", \"r\");\n    let _ = exists(\"cfg.toml\");\n    return true;\n}\nfn main() {\n    if load() {\n        exit(0);\n    }\n}\n";
     let unused_cleanup = "fn cleanup() {\n    let _ = remove_file(\"x\");\n}\n";
     let src = format!("{src}{unused_cleanup}");
-    for hir in [true, false] {
+    {
         let mut pipeline = deny_pipeline();
-        pipeline.set_hir_lowering(hir);
-        assert!(pipeline.compile_src(&src).is_err(), "hir={hir}");
+        assert!(pipeline.compile_src(&src).is_err());
         let msgs: Vec<(Option<compiler::ErrorCode>, String)> = pipeline
             .messages()
             .iter()
             .map(|m| (m.code(), m.message().to_string()))
             .collect();
         let has = |code, text: &str| msgs.iter().any(|(c, m)| *c == Some(code) && m.contains(text));
-        assert!(has(compiler::ErrorCode::HostExitDenied, "`env::exit` requires `--allow-exit`: reached from `main`"), "hir={hir}: {msgs:?}");
-        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::open` requires `--allow-read`: reached from `main` → `load`"), "hir={hir}: {msgs:?}");
-        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::fs::exists` requires `--allow-read`"), "hir={hir}: {msgs:?}");
-        assert!(!msgs.iter().any(|(_, m)| m.contains("env::exec") || m.contains("remove_file")), "hir={hir}: unreached calls are free: {msgs:?}");
+        assert!(has(compiler::ErrorCode::HostExitDenied, "`env::exit` requires `--allow-exit`: reached from `main`"), "{msgs:?}");
+        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::open` requires `--allow-read`: reached from `main` → `load`"), "{msgs:?}");
+        assert!(has(compiler::ErrorCode::HostCapDenied, "`io::fs::exists` requires `--allow-read`"), "{msgs:?}");
+        assert!(!msgs.iter().any(|(_, m)| m.contains("env::exec") || m.contains("remove_file")), "unreached calls are free: {msgs:?}");
 
         let mut pipeline = deny_pipeline();
-        pipeline.set_hir_lowering(hir);
         assert!(pipeline.grant_capability("read"));
         pipeline.grant_exit();
         compile_ok(&mut pipeline, &src);

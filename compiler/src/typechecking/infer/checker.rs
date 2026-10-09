@@ -11699,6 +11699,13 @@ impl Checker {
 
     /// Whether a function-id local named `name` was declared variadic, as
     /// [`Self::is_ffi_declare_variadic_for_fn_id`] decides for an identifier.
+    /// Whether the fn id stored in `class`'s `field` was declared variadic
+    /// (`None` when no `declare` was stored there).
+    pub fn ffi_field_fn_id_variadic(&self, class: &str, field: &str) -> Option<bool> {
+        let key = Self::qualified_class_field_key(class, field);
+        self.ffi_fn_ret_by_field.contains_key(&key).then(|| self.ffi_fn_variadic_by_field.get(&key).copied().unwrap_or(false))
+    }
+
     pub fn ffi_fn_id_variadic(&self, name: &str) -> Option<bool> {
         if self.ffi_fn_ret_tys.contains_key(name) {
             return Some(self.ffi_fn_variadic.get(name).copied().unwrap_or(false));

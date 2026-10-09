@@ -82,8 +82,7 @@ A trait method's declaration bounds every impl (`Area for Sq::area` is
 checked against `Area::area`) and is what a call through the trait costs
 (`area(a)` on an existential, `a.area()`): all traits with that method must
 declare it, or the call stays unknown. Trait declarations are kept across
-modules in `ProgramEffects`. Codegen checks every module; with
-`--ast-codegen` it builds HIR for the effects alone. `coil-lsp` reports the
+modules in `ProgramEffects`. Codegen checks every module. `coil-lsp` reports the
 same errors for a well-typed file. Hover, `coil dissect --effects` and
 auto-par reasons print effects in this vocabulary (`uses {read, mutate}`).
 

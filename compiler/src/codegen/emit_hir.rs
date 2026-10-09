@@ -292,14 +292,11 @@ enum AggSrc {
 type Check = Result<(), &'static str>;
 
 impl Compiler {
-    /// Build the module's HIR for lowering when `--hir` is on.
+    /// Build the module's HIR for lowering.
     pub(super) fn build_hir_for_lowering(&mut self, module: &str, ast: &Output<'_>) {
         self.hir_fns.clear();
         self.hir_fn_names.clear();
         self.hir_module = None;
-        if !self.hir_lowering {
-            return;
-        }
         let hir = crate::hir::build_module(&self.checker, &self.typed_sidecar, module, ast);
         for (i, body) in hir.bodies.iter().enumerate() {
             use crate::hir::BodyKind;
@@ -316,17 +313,33 @@ impl Compiler {
         self.hir_module = Some(hir);
     }
 
+    /// The error for a body [`Self::try_lower_hir_function`] did not lower:
+    /// it uses a construct outside what the compiler can emit.
+    pub(super) fn report_unlowered(&mut self, span: &SimpleSpan, name: &str) {
+        let reason = self.hir_refusal.take().unwrap_or("no-hir-body");
+        let mut message = Message::error(
+            ErrorCode::CodegenError,
+            format!("the compiler cannot lower `{name}` yet ({reason})"),
+            span.into_range(),
+        );
+        message.push(DiagLabel::new(
+            "this body uses a construct code generation does not support; please report it".to_string(),
+            span.into_range(),
+        ));
+        self.messages.push(message);
+    }
+
     /// Lower the body of the function declared at `span` from HIR. `false`
-    /// leaves the body to the AST walk (lowering off, or the body is outside
-    /// the subset).
+    /// when the body is outside what the lowering emits; the caller reports
+    /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
-        if !self.hir_lowering {
-            return false;
-        }
+        self.hir_refusal = None;
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
+            self.hir_refusal = Some("no-hir-body");
             return false;
         };
         let Some(module) = self.hir_module.take() else {
+            self.hir_refusal = Some("no-hir-module");
             return false;
         };
         // A mono clone lowers the generic body's HIR at its type arguments.
@@ -336,6 +349,7 @@ impl Compiler {
             .flatten();
         if self.compiling_mono_clone && instance.is_none() {
             self.hir_module = Some(module);
+            self.hir_refusal = Some("mono-instance");
             return false;
         }
         // An `Option` / `Result` parameter whose generic type mentions a type
@@ -434,6 +448,7 @@ impl Compiler {
             }
             Err(reason) => {
                 crate::il::opt::note_hir_fallback(reason);
+                self.hir_refusal = Some(reason);
                 if std::env::var_os("COIL_HIR_WHY").is_some() {
                     eprintln!("hir fallback `{}`: {reason}", hir.name);
                     if reason == "result-mode" {
@@ -1134,7 +1149,7 @@ impl Compiler {
             .iter()
             .filter_map(|e| match &e.kind {
                 HirKind::Call { callee, args } => match lower::ffi_builtin(&self.checker, callee) {
-                    Some(crate::typechecking::FfiBuiltin::Declare) if args.len() == 4 => {
+                    Some(crate::typechecking::FfiBuiltin::Declare) if args.len() >= 4 => {
                         Some(lower::tuple_items(hir, args[2]).unwrap_or(&[]).iter().chain([&args[3]]).map(|t| t.0).collect::<Vec<_>>())
                     }
                     Some(crate::typechecking::FfiBuiltin::Invoke) if args.len() == 3 => Some(
@@ -1427,6 +1442,13 @@ impl Compiler {
                 return Err("callee-variadic");
             }
             return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func, variadic });
+        }
+        // A native the embedder registered by name (`Compiler::register`):
+        // `HostInvoke` by its id, as `compile_call_expr`.
+        if !known(&key)
+            && let Some(id) = self.native_id(&key)
+        {
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
         }
         if !known(&key) {
             if std::env::var_os("COIL_HIR_WHY").is_some() {
@@ -5885,8 +5907,9 @@ impl Compiler {
                                 self.bytecode.push_make_tuple(items.len() as u32);
                                 let (tag, aux) = lower::ffi_tag(hir, &self.checker, args[3]).expect("planned FFI tag");
                                 emit_ffi_type_const(&mut self.bytecode, tag, aux);
-                                self.bytecode
-                                    .push(Byte::new(Instruction::DeclareFFI).with_operand_u32(items.len() as u32 & 0xFFFF));
+                                let variadic = args.get(4).is_some_and(|&v| matches!(hir.expr(v).kind, HirKind::Lit(Lit::Bool(true))));
+                                let operand = (items.len() as u32 & 0xFFFF) | (u32::from(variadic) << 16);
+                                self.bytecode.push(Byte::new(Instruction::DeclareFFI).with_operand_u32(operand));
                             }
                             FfiBuiltin::Invoke => {
                                 let n = operands.len() as u32 - 2;
@@ -5899,7 +5922,18 @@ impl Compiler {
                                     }
                                 }
                                 self.bytecode.push_make_tuple(n);
-                                self.bytecode.push(Byte::new(Instruction::FfiInvoke).with_operand_u32(n & 0xFFFF));
+                                let mut operand = n & 0xFFFF;
+                                // A variadic function's call passes its arguments' tags.
+                                if lower::ffi_fn_variadic(hir, &self.checker, args[1]) {
+                                    let items = lower::tuple_items(hir, args[2]).expect("planned invoke arguments");
+                                    let tags = lower::ffi_variadic_tags(hir, &self.checker, id, items).expect("planned variadic tags");
+                                    for &(tag, aux) in &tags {
+                                        emit_ffi_type_const(&mut self.bytecode, tag, aux);
+                                    }
+                                    self.bytecode.push_make_tuple(tags.len() as u32);
+                                    operand |= 1 << 16;
+                                }
+                                self.bytecode.push(Byte::new(Instruction::FfiInvoke).with_operand_u32(operand));
                             }
                         }
                         // The VM pushes a boxed `Result`; a niche-shaped one
