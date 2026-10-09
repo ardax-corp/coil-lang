@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use parser::ast::{Expression, Output, TypeParam};
+use parser::ast::{Contract, ContractKind, Expression, Output, TypeParam};
 use reporting::{ErrorCode, Message};
 
 use crate::typechecking::ty::{Scheme, Ty, unit as unit_ty};
@@ -18,6 +18,7 @@ pub(super) struct InferFunctionExprArgs<'a> {
     pub(super) args: &'a Output<'a>,
     pub(super) returns: &'a Option<Output<'a>>,
     pub(super) where_constraints: &'a [parser::ast::WhereConstraint<'a>],
+    pub(super) contracts: &'a [Contract<'a>],
     pub(super) body: &'a Option<Output<'a>>,
     pub(super) range: Range<usize>,
 }
@@ -35,6 +36,17 @@ pub(super) struct InferFunctionArgs<'a> {
     /// Inherent `impl` method owner. Bare `name` must not shadow imports.
     pub method_owner: Option<&'a str>,
     pub is_static_method: bool,
+    /// `requires` / `ensures` clauses, typed after the body.
+    pub contracts: &'a [Contract<'a>],
+}
+
+/// The contract clauses of a function or method declaration node.
+pub(super) fn decl_contracts<'a>(node: &'a Output<'a>) -> &'a [Contract<'a>] {
+    match node.1.as_ref() {
+        Expression::Function { contracts, .. } => contracts,
+        Expression::Method(_, inner) => decl_contracts(inner),
+        _ => &[],
+    }
 }
 
 impl Checker {
@@ -49,6 +61,7 @@ impl Checker {
             args,
             returns,
             where_constraints,
+            contracts,
             body,
             range,
         } = args;
@@ -96,10 +109,103 @@ impl Checker {
             is_coro,
             method_owner: None,
             is_static_method: false,
+            contracts,
         });
 
         self.registering_overloadable_fn = prev_overloadable;
         unit_ty()
+    }
+
+    /// Type `requires` / `ensures` clauses: each is a `bool`, and `ensures`
+    /// sees the returned value as `result`. Params are in scope.
+    fn infer_contracts(
+        &mut self,
+        contracts: &[Contract<'_>],
+        arg_tys: &[(String, Ty)],
+        ret_ty: &Ty,
+        is_coro: bool,
+    ) {
+        let has_ensures = contracts.iter().any(|c| c.kind == ContractKind::Ensures);
+        if has_ensures && arg_tys.iter().any(|(n, _)| n == "result") {
+            let span = contracts.iter().find(|c| c.kind == ContractKind::Ensures).expect("ensures").span;
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                "a parameter named `result` hides the returned value in `ensures`; rename the parameter"
+                    .to_string(),
+                span.into_range(),
+            ));
+        }
+        for c in contracts {
+            let range = c.span.into_range();
+            let ensures = c.kind == ContractKind::Ensures;
+            if ensures && is_coro {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`ensures` on a `gen fn` is not supported yet".to_string(),
+                    range.clone(),
+                ));
+            }
+            if ensures {
+                self.push_scope();
+                self.env
+                    .insert_top("result".to_string(), Scheme::mono(ret_ty.clone()));
+            }
+            let prev_expected = self.current_expected.take();
+            self.in_ensures = ensures;
+            let ty = self.infer(&c.expr);
+            self.in_ensures = false;
+            self.current_expected = prev_expected;
+            self.unify(&crate::typechecking::ty::boolean(), &ty, &range, c.kind.keyword());
+            if ensures {
+                self.pop_scope();
+            }
+        }
+    }
+
+    /// A class `invariant` is a `bool` over `self`, read with the class's
+    /// own (private) fields visible.
+    pub(super) fn infer_class_invariants(
+        &mut self,
+        key: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        invariants: &[Contract<'_>],
+    ) {
+        let self_ty = if type_params.is_empty() {
+            Ty::Con(key.to_string())
+        } else {
+            let frame = self.type_params_in_scope.last().cloned().unwrap_or_default();
+            let args = type_params
+                .iter()
+                .map(|tp| frame.get(tp.name).map_or_else(|| Ty::Var(self.counter.fresh()), |v| Ty::Var(*v)))
+                .collect();
+            Ty::App(Box::new(Ty::Con(key.to_string())), args)
+        };
+        let prev_owner = self.impl_owner.replace(key.to_string());
+        self.push_scope();
+        self.env.insert_top("self".to_string(), Scheme::mono(self_ty));
+        for c in invariants {
+            let prev_expected = self.current_expected.take();
+            let ty = self.infer(&c.expr);
+            self.current_expected = prev_expected;
+            self.unify(&crate::typechecking::ty::boolean(), &ty, &c.span.into_range(), c.kind.keyword());
+        }
+        self.pop_scope();
+        self.impl_owner = prev_owner;
+    }
+
+    /// A loop's `invariant` is a `bool` and its `decreases` an `int`, in the
+    /// scope around the loop (a `for` binding is not visible).
+    pub(super) fn infer_loop_contracts(&mut self, contracts: &[Contract<'_>]) {
+        for c in contracts {
+            let prev_expected = self.current_expected.take();
+            let ty = self.infer(&c.expr);
+            self.current_expected = prev_expected;
+            let want = match c.kind {
+                ContractKind::Decreases => crate::typechecking::ty::int(),
+                _ => crate::typechecking::ty::boolean(),
+            };
+            self.unify(&want, &ty, &c.span.into_range(), c.kind.keyword());
+        }
     }
 
     #[inline(never)]
@@ -185,6 +291,7 @@ impl Checker {
             is_coro,
             method_owner,
             is_static_method,
+            contracts,
         } = args;
         if name == "drop" && method_owner.is_none() {
             self.messages.push(Message::error(
@@ -406,6 +513,7 @@ impl Checker {
             None
         };
         let _ = self.infer(body);
+        self.infer_contracts(contracts, &arg_tys, &ret_ty, is_coro);
         if method_owner.is_none() {
             self.current_function = prev_function;
         }

@@ -126,6 +126,7 @@ impl Checker {
             static_methods: std::collections::HashMap::new(),
             ids: IdTable::new(),
             next_id_idx: 0,
+            in_ensures: false,
             infer_depth: 0,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
@@ -2739,6 +2740,7 @@ impl Checker {
                 pattern,
                 iterable,
                 body,
+                contracts,
             } => {
                 if identifier.is_some() || pattern.is_some() {
                     // `for x in expr { body }` / `for (k, v) in …`
@@ -2762,11 +2764,13 @@ impl Checker {
                     }
                     let _ = self.infer(body);
                     self.env.pop();
+                    self.infer_loop_contracts(contracts);
                     unit_ty()
                 } else {
                     let it = self.infer(iterable);
                     self.unify(&it, &boolean(), &iterable.0.into_range(), "while condition");
                     let _ = self.infer(body);
+                    self.infer_loop_contracts(contracts);
                     let lookup = |name: &str| self.const_fold_env.get(name).copied();
                     if crate::typechecking::control_flow::is_infinite_loop(expr, &lookup) {
                         never()
@@ -3156,6 +3160,7 @@ impl Checker {
                 returns,
                 where_constraints,
                 effects: _,
+                contracts,
                 body,
             } => self.infer_function_expr(infer_fn::InferFunctionExprArgs {
                 attrs,
@@ -3166,6 +3171,7 @@ impl Checker {
                 args,
                 returns,
                 where_constraints,
+                contracts,
                 body,
                 range,
             }),
@@ -3192,12 +3198,16 @@ impl Checker {
                 name,
                 type_params,
                 fields,
+                invariants,
                 ..
             } => {
                 let key = self.qualify_module_name(name);
                 let _ = self.register_generic_type_ctor(&key, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
                 self.register_class(name, fields, &range);
+                if !invariants.is_empty() {
+                    self.infer_class_invariants(&key, type_params, invariants);
+                }
                 self.pop_type_params_for_type_parsing(pushed);
                 unit_ty()
             }
@@ -3622,8 +3632,11 @@ impl Checker {
                 })
                 .map(|(k, e)| (k.clone(), e.clone()))
                 .collect();
+            // The name this `use` imports always binds: a same-named fn
+            // another module brought into the env must not shadow it.
+            let imported = alias.as_deref().unwrap_or(name);
             for (local, export) in locals {
-                if self.env.lookup(&local).is_some() {
+                if local != imported && self.env.lookup(&local).is_some() {
                     continue;
                 }
                 if let Some(scheme) = self.virtual_callable_scheme(export, range.clone()) {
@@ -4699,6 +4712,13 @@ impl Checker {
         id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
+        // `old(e)` in an `ensures`: `e` as it was on entry.
+        if self.in_ensures
+            && let Expression::Identifier("old") = name.1.as_ref()
+            && let Some([arg]) = args.as_deref()
+        {
+            return self.infer(arg);
+        }
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
                 && arg_list.len() == 1
@@ -13733,6 +13753,7 @@ impl Checker {
                 self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
             }
             Expression::Loop {
+                contracts: _,
                 iterable,
                 body,
                 identifier,
@@ -14677,6 +14698,7 @@ impl Checker {
             }
 
             Expression::Loop {
+                contracts: _,
                 iterable,
                 body,
                 identifier,

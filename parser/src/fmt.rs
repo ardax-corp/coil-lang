@@ -1021,27 +1021,22 @@ impl<'s> Formatter<'s> {
                 pattern,
                 iterable,
                 body,
+                contracts,
             } => {
                 if let Some(ident) = identifier {
                     self.push_str("for ");
                     self.fmt_output(ident);
                     self.push_str(" in ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 } else if let Some(pat) = pattern {
                     self.push_str("for ");
                     self.fmt_let_pattern(pat);
                     self.push_str(" in ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 } else {
                     self.push_str("while ");
-                    self.fmt_condition(iterable);
-                    self.push_str(" ");
-                    self.fmt_block_or_inline(body);
                 }
+                self.fmt_condition(iterable);
+                self.fmt_contracts(contracts);
+                self.fmt_block_or_inline(body);
             }
 
             Expression::IfLet {
@@ -1329,13 +1324,22 @@ impl<'s> Formatter<'s> {
                 name,
                 type_params,
                 fields,
+                invariants,
             } => {
                 self.fmt_docs(docs);
                 self.fmt_attrs(attrs);
                 self.push_str("class ");
                 self.push_str(name);
                 self.fmt_type_params(type_params);
-                self.fmt_comma_body(fields);
+                if invariants.is_empty() {
+                    self.fmt_comma_body(fields);
+                } else {
+                    // The brace goes on its own line under the clauses.
+                    self.fmt_contracts(invariants);
+                    let at = self.out.len();
+                    self.fmt_comma_body(fields);
+                    self.out.remove(at);
+                }
             }
             Expression::Field {
                 docs,
@@ -2222,6 +2226,7 @@ impl<'s> Formatter<'s> {
             returns,
             where_constraints,
             effects,
+            contracts,
             body,
         } = expr
         else {
@@ -2253,12 +2258,38 @@ impl<'s> Formatter<'s> {
         if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
             self.push_str(&format!(" {e}"));
         }
+        self.fmt_contracts(contracts);
         match body {
             Some(b) => {
-                self.push_str(" ");
                 self.fmt_block_or_inline(b);
             }
-            None => self.push_str(";"),
+            None => {
+                self.out.truncate(self.out.trim_end().len());
+                self.push_str(";");
+            }
+        }
+    }
+
+    /// Each contract on its own line, one level in; then the body brace on a
+    /// line of its own. With no contracts, the space before the brace.
+    fn fmt_contracts(&mut self, contracts: &[crate::ast::Contract<'_>]) {
+        self.with_indent(|f| {
+            for c in contracts {
+                f.newline();
+                f.write_indent();
+                f.push_str(c.kind.keyword());
+                f.push_str(" ");
+                f.fmt_expression(c.expr.1.as_ref());
+                if let Some(m) = c.message {
+                    f.push_str(&format!(", \"{m}\""));
+                }
+            }
+        });
+        if contracts.is_empty() {
+            self.push_str(" ");
+        } else {
+            self.newline();
+            self.write_indent();
         }
     }
 

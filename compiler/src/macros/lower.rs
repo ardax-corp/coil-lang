@@ -138,6 +138,7 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
                 returns: returns.clone(),
                 where_constraints: Vec::new(),
                 effects: None,
+                contracts: Vec::new(),
                 body: Some(body.clone()),
             };
             *item.1 = func;
@@ -210,6 +211,7 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
                 returns: returns.clone(),
                 where_constraints: where_constraints.clone(),
                 effects: None,
+                contracts: Vec::new(),
                 body: Some(body.clone()),
             };
             *item.1 = func;
@@ -266,6 +268,7 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
                 returns: returns.clone(),
                 where_constraints: Vec::new(),
                 effects: None,
+                contracts: Vec::new(),
                 body: Some(body.clone()),
             };
             *item.1 = func;

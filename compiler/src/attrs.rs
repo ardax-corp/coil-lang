@@ -728,6 +728,7 @@ fn method_fn<'a>(
             returns: Some(ty_ret(span, ret)),
             where_constraints: vec![],
             effects: None,
+            contracts: Vec::new(),
             body: Some(body),
         },
     );

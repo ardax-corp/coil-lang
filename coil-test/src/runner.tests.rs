@@ -21,6 +21,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         show_output: false,
         coverage: None,
         opt_level: OptLevel::Standard,
+        contracts: None,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),
         report: Report::Human,

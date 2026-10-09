@@ -93,6 +93,7 @@ is OK (best-effort close_notify).
 | `unwind_resume` | **152** | end of a `defer` cleanup pad ([tasks](tasks.md#unwinding)); archive minor 33 |
 | `task_cancel`, `task_shield_enter`, `task_shield_exit` | **153–155** | embedded `task` module; archive minor 33 |
 | `task_cond_new`, `task_cond_wait`, `task_cond_notify` | **156–158** | `task::channel` wait conditions ([tasks](tasks.md#channels-and-other-threads)); archive minor 34 |
+| `contract_fail` | **159** | a failed `requires`, blaming the caller ([contracts](contracts.md#checks)); archive minor 35 |
 
 119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of

@@ -11367,3 +11367,443 @@ fn tests_are_entry_points_for_capabilities() {
         "{msgs:?}"
     );
 }
+
+/// Compile and run with contract checks at `level`, from a file so panics
+/// name their locations (`contracts.hy:LINE:COL`).
+fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "coil_contracts_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("contracts.hy");
+    std::fs::write(&file, src).expect("write source");
+    let mut pipeline = test_pipeline();
+    pipeline.set_contracts(level);
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(file.to_str().expect("utf-8 path"))
+        .expect("compile");
+    let out = run_bytecode(bytecode, constants, &pipeline, Some(file.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+const CONTRACTS_SRC: &str = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+fn num(int n) -> string {
+    return format("%i", n);
+}
+
+fn half(int n) -> int
+    requires n >= 0, "negative"
+{
+    return n / 2;
+}
+
+fn clamp(int n) -> int
+    ensures result >= 0 && result <= 10
+{
+    if n < 0 {
+        return n;
+    }
+    return match n {
+        0 => 0,
+        default => cap(n),
+    };
+}
+
+fn cap(int n) -> int {
+    if n > 10 {
+        return 10;
+    }
+    return n;
+}
+
+fn parse(int n) -> Result<int, string>
+    ensures match result { Result::Ok(v) => v > 0, Result::Err(_) => true }
+{
+    let v = checked(n)?;
+    return Result::Ok(v - 5);
+}
+
+fn checked(int n) -> Result<int, string> {
+    if n < 0 {
+        return Result::Err("neg");
+    }
+    return Result::Ok(n);
+}
+
+class Counter {
+    pub n: int,
+}
+
+impl Counter {
+    pub fn bump(int by)
+        requires by > 0
+        ensures self.n > 0
+    {
+        self.n = self.n + by;
+    }
+}
+
+fn main() {
+    say(num(half(8)));
+    say(num(clamp(4)) + num(clamp(40)));
+    let c = new Counter(0);
+    c.bump(2);
+    say(num(c.n));
+    let ok = match parse(-1) {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => e,
+    };
+    say(ok);
+    say("|");
+    CASE
+}
+"#;
+
+fn contracts_case(case: &str, level: compiler::ContractLevel) -> String {
+    run_contracts_src(&CONTRACTS_SRC.replace("CASE", case), level)
+}
+
+#[test]
+fn contracts_pass_when_they_hold() {
+    let out = contracts_case("say(\"end\");", compiler::ContractLevel::All);
+    assert_eq!(out, "44102neg|end");
+}
+
+#[test]
+fn a_failed_requires_blames_the_caller() {
+    let out = contracts_case("say(num(half(-2)));", compiler::ContractLevel::All);
+    assert!(
+        out.starts_with("44102neg|panic: contract violated: requires n >= 0 (\"negative\") in half, called from "),
+        "got {out:?}"
+    );
+    // The call site's line (main's last statement), not the clause's.
+    assert!(out.contains("contracts.hy:77:"), "got {out:?}");
+    let out = contracts_case("c.bump(0);", compiler::ContractLevel::All);
+    assert!(out.contains("requires by > 0 in Counter::bump, called from "), "got {out:?}");
+}
+
+#[test]
+fn ensures_checks_every_return() {
+    // An early `return`, a `?` error return and the body's tail value.
+    let out = contracts_case("say(num(clamp(-3)));", compiler::ContractLevel::All);
+    assert!(
+        out.starts_with("44102neg|panic: contract violated: ensures result >= 0 && result <= 10 in clamp at "),
+        "got {out:?}"
+    );
+    let out = contracts_case(
+        "let r = match parse(3) { Result::Ok(v) => v, Result::Err(_) => 0 }; say(num(r));",
+        compiler::ContractLevel::All,
+    );
+    assert!(out.contains("panic: contract violated: ensures match result"), "got {out:?}");
+}
+
+#[test]
+fn contract_levels_skip_clauses() {
+    let out = contracts_case("say(num(clamp(-3)));", compiler::ContractLevel::Requires);
+    assert_eq!(out, "44102neg|-3");
+    let out = contracts_case("say(num(half(-2)));", compiler::ContractLevel::Off);
+    assert_eq!(out, "44102neg|-1");
+}
+
+#[test]
+fn a_contract_clause_must_not_have_effects() {
+    assert_compile_fails(
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn noisy(int n) -> bool {
+    write(stdout(), to_bytes("x"));
+    return n > 0;
+}
+
+fn f(int n) -> int
+    requires noisy(n)
+{
+    return n;
+}
+
+fn main() {
+    let _ = f(1);
+}
+"#,
+        compiler::ErrorCode::EffectMismatch,
+    );
+    // Reading memory is no effect: a `pure fn` keeps its contracts.
+    let out = run_contracts_src(
+        r#"
+pure fn first(Vec<int> xs) -> int
+    requires xs.len() > 0
+    ensures result == xs[0]
+{
+    return xs[0];
+}
+
+fn main() {
+    let v: Vec<int> = Vec::new();
+    v.push(7);
+    assert(first(v) == 7);
+}
+"#,
+        compiler::ContractLevel::All,
+    );
+    assert_eq!(out, "");
+}
+
+#[test]
+fn old_reads_a_value_from_entry() {
+    let src = r#"
+class Account {
+    pub balance: int,
+}
+
+impl Account {
+    pub fn deposit(int amount)
+        ensures self.balance == old(self.balance) + amount
+    {
+        self.balance = self.balance + amount;
+    }
+
+    pub fn skim(int amount)
+        ensures self.balance == old(self.balance) + amount, "skimmed"
+    {
+        self.balance = self.balance + amount - 1;
+    }
+}
+
+fn push_two(Vec<int> v) -> int
+    ensures result == old(v.len()) + 2
+{
+    v.push(1);
+    v.push(2);
+    return v.len();
+}
+
+fn main() {
+    let a = new Account(10);
+    a.deposit(5);
+    let v: Vec<int> = Vec::new();
+    assert(push_two(v) == 2);
+    CASE
+}
+"#;
+    let ok = run_contracts_src(&src.replace("CASE", ""), compiler::ContractLevel::All);
+    assert_eq!(ok, "");
+    let out = run_contracts_src(&src.replace("CASE", "a.skim(3);"), compiler::ContractLevel::All);
+    assert!(
+        out.contains("contract violated: ensures self.balance == old(self.balance) + amount (\"skimmed\") in Account::skim"),
+        "got {out:?}"
+    );
+}
+
+#[test]
+fn loop_invariants_and_decreases_are_checked() {
+    let src = r#"
+fn sum_to(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n
+        invariant i <= n
+        decreases n - i
+    {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn stuck(int n) {
+    let i = 0;
+    while i < n
+        decreases n - i
+    {
+        if i == 2 {
+            continue;
+        }
+        i = i + 1;
+    }
+}
+
+fn total(Vec<int> xs) -> int {
+    let t = 0;
+    for x in xs
+        invariant t >= 0, "only positives"
+    {
+        t = t + x;
+    }
+    return t;
+}
+
+fn main() {
+    assert(sum_to(5) == 10);
+    let v: Vec<int> = Vec::new();
+    v.push(3);
+    v.push(4);
+    assert(total(v) == 7);
+    let w: Vec<int> = Vec::new();
+    w.push(3);
+    w.push(-9);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    // The invariant fails after the last item, outside the loop.
+    let out = run_contracts_src(&src.replace("CASE", "total(w);"), All);
+    assert!(
+        out.contains("contract violated: invariant t >= 0 (\"only positives\") in total"),
+        "got {out:?}"
+    );
+    let out = run_contracts_src(&src.replace("CASE", "stuck(5);"), All);
+    assert!(out.contains("contract violated: decreases n - i (did not decrease) in stuck"), "got {out:?}");
+    // Loop clauses are checked with `all` only.
+    assert_eq!(run_contracts_src(&src.replace("CASE", "total(w);"), Requires), "");
+}
+
+#[test]
+fn loop_clauses_are_typed() {
+    assert_compile_fails(
+        "fn main() {\n    let i = 0;\n    while i < 3\n        decreases i > 0\n    {\n        i = i + 1;\n    }\n}\n",
+        compiler::ErrorCode::TypeMismatch,
+    );
+    // Only clauses that are compiled in are checked for effects.
+    let mut pipeline = test_pipeline();
+    pipeline.set_contracts(compiler::ContractLevel::All);
+    assert_compile_fails_pipeline(
+        &mut pipeline,
+        r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn noisy() -> bool {
+    write(stdout(), to_bytes("x"));
+    return true;
+}
+
+fn main() {
+    let i = 0;
+    while i < 3
+        invariant noisy()
+    {
+        i = i + 1;
+    }
+}
+"#,
+        compiler::ErrorCode::EffectMismatch,
+    );
+}
+
+#[test]
+fn class_invariants_hold_after_construction_and_pub_methods() {
+    let src = r#"
+class Account
+    invariant self.balance >= 0, "no overdraft"
+{
+    balance: int,
+}
+
+impl Account {
+    pub static fn open(int start) -> Account {
+        return new Account(start);
+    }
+
+    pub fn deposit(int amount) {
+        self.balance = self.balance + amount;
+    }
+
+    pub fn withdraw(int amount) -> int {
+        // A private helper may break the invariant for a while.
+        self.take(amount + 1);
+        self.balance = self.balance + 1;
+        return self.balance;
+    }
+
+    fn take(int amount) {
+        self.balance = self.balance - amount;
+    }
+}
+
+fn main() {
+    let a = Account::open(10);
+    a.deposit(5);
+    assert(a.withdraw(15) == 0);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    let out = run_contracts_src(&src.replace("CASE", "a.withdraw(1);"), All);
+    assert!(
+        out.contains("contract violated: invariant self.balance >= 0 (\"no overdraft\") in Account::withdraw"),
+        "got {out:?}"
+    );
+    let out = run_contracts_src(&src.replace("CASE", "let _ = Account::open(-1);"), All);
+    assert!(out.contains("in new Account"), "got {out:?}");
+    assert_eq!(run_contracts_src(&src.replace("CASE", "a.withdraw(1);"), Requires), "");
+    assert_compile_fails(
+        "class C\n    invariant self.n\n{\n    pub n: int,\n}\n\nfn main() {\n    let _ = new C(1);\n}\n",
+        compiler::ErrorCode::TypeMismatch,
+    );
+}
+
+#[test]
+fn trait_method_contracts_apply_to_every_impl() {
+    let src = r#"
+trait Area<T> {
+    fn area(T x) -> int
+        requires x > 0, "positive"
+        ensures result >= 0
+    {}
+}
+
+impl Area for int {
+    pub fn area(int n) -> int ensures result < 100 {
+        return n * n - 5;
+    }
+}
+
+fn show<T: Area>(T x) -> int {
+    return x.area();
+}
+
+fn main() {
+    assert(show(3) == 4);
+    CASE
+}
+"#;
+    use compiler::ContractLevel::{All, Requires};
+    assert_eq!(run_contracts_src(&src.replace("CASE", ""), All), "");
+    // The trait's `requires` blames the caller, under the impl's parameter name.
+    let out = run_contracts_src(&src.replace("CASE", "show(0);"), All);
+    assert!(
+        out.contains("contract violated: requires x > 0 (\"positive\") in Area for int::area, called from "),
+        "got {out:?}"
+    );
+    // The trait's `ensures`, reported at the impl method.
+    let out = run_contracts_src(&src.replace("CASE", "show(2);"), All);
+    assert!(
+        out.contains("contract violated: ensures result >= 0 in Area for int::area at ") && out.contains("contracts.hy:10:4"),
+        "got {out:?}"
+    );
+    // The impl's own `ensures` is checked too.
+    let out = run_contracts_src(&src.replace("CASE", "show(11);"), All);
+    assert!(out.contains("contract violated: ensures result < 100 in Area for int::area"), "got {out:?}");
+    assert_eq!(run_contracts_src(&src.replace("CASE", "show(2);"), Requires), "");
+    // An impl cannot strengthen the precondition.
+    assert_compile_fails(
+        "trait Area<T> {\n    fn area(T x) -> int requires x > 0 {}\n}\n\nimpl Area for int {\n    pub fn area(int n) -> int requires n < 10 { return n; }\n}\n\nfn main() {\n    let _ = area(2);\n}\n",
+        compiler::ErrorCode::GenericTypeError,
+    );
+}

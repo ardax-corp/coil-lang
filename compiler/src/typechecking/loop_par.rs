@@ -276,6 +276,7 @@ impl Scan<'_> {
                 }
             }
             Expression::Loop {
+                contracts: _,
                 identifier: None,
                 pattern: None,
                 iterable,
@@ -287,6 +288,7 @@ impl Scan<'_> {
                 None => self.walk_loop_body(ast, body, consts, ints),
             },
             Expression::Loop {
+                contracts: _,
                 identifier: Some(binding),
                 pattern: None,
                 iterable,

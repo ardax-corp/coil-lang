@@ -732,6 +732,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
             EnumConstructPayload::Unit => {}
         },
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,
@@ -918,6 +919,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             EnumConstructPayload::Unit => {}
         },
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

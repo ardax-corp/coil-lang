@@ -257,7 +257,7 @@ impl<'s> Resolver<'s> {
                 self.walk(rhs);
                 self.bind_let_pattern(pattern, span);
             }
-            Expression::Loop { identifier, pattern, iterable, body } => {
+            Expression::Loop { identifier, pattern, iterable, body, contracts: _ } => {
                 self.walk(iterable);
                 self.push();
                 if let Some(identifier) = identifier

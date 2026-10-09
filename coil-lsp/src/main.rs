@@ -3049,7 +3049,38 @@ fn hover_from_source(
         (Some(fx), Some(docs)) => Some(format!("{fx}\n\n{docs}")),
         (fx, docs) => fx.or(docs),
     };
+    let docs = match (fn_contracts(&ast, name), docs) {
+        (Some(c), Some(docs)) => Some(format!("{c}\n\n{docs}")),
+        (c, docs) => c.or(docs),
+    };
     hover_markup(source, name, range, ty_text, docs)
+}
+
+/// The `requires` / `ensures` clauses of the one function or method named
+/// `name` in this file, as a code block.
+fn fn_contracts(ast: &Output<'_>, name: &str) -> Option<String> {
+    fn walk(node: &Output<'_>, name: &str, found: &mut Vec<String>) {
+        if let Expression::Function { name: n, contracts, .. } = node.1.as_ref()
+            && *n == name
+            && !contracts.is_empty()
+        {
+            let lines: Vec<String> = contracts
+                .iter()
+                .map(|c| match c.message {
+                    Some(m) => format!("{} {}, \"{m}\"", c.kind.keyword(), c.text),
+                    None => format!("{} {}", c.kind.keyword(), c.text),
+                })
+                .collect();
+            found.push(lines.join("\n"));
+        }
+        node.1.for_each_child(&mut |c| walk(c, name, found));
+    }
+    let mut found = Vec::new();
+    walk(ast, name, &mut found);
+    match found.as_slice() {
+        [one] => Some(format!("```coil\n{one}\n```")),
+        _ => None,
+    }
 }
 
 /// `**effects:** …` for a function or method named `name` in this file.
@@ -4542,6 +4573,23 @@ fn fib(int n) -> int {
         };
         assert!(value.contains("fib"));
         assert!(value.contains("Compute fibonacci"));
+    }
+
+    #[test]
+    fn hover_shows_a_functions_contracts() {
+        let document = Document {
+            text: "fn half(int n) -> int\n    requires n >= 0, \"negative\"\n    ensures result * 2 <= n\n{\n    return n / 2;\n}\n".into(),
+            version: 1,
+            last_good: None,
+        };
+        let hover = hover(&document, Position { line: 0, character: 4 }).expect("hover");
+        let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert!(
+            value.contains("requires n >= 0, \"negative\"\nensures result * 2 <= n"),
+            "{value}"
+        );
     }
 
     #[test]

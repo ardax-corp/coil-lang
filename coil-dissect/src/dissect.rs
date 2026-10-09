@@ -30,6 +30,7 @@ pub struct DissectArgs {
     /// Interleave source lines in the bytecode listing.
     pub source: bool,
     pub opt_level: OptLevel,
+    pub contracts: Option<compiler::ContractLevel>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test`.
@@ -83,6 +84,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     pipeline.bind_project_roots_with_default(dir, args.extra_roots);
     pipeline.set_opt_level(args.opt_level);
+    if let Some(level) = args.contracts {
+        pipeline.set_contracts(level);
+    }
     if args.opt_stats || args.opt_stats_json {
         pipeline.set_collect_opt_stats(true);
     }

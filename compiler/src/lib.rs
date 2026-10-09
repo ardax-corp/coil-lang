@@ -17,7 +17,7 @@ pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_st
 pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
 };
-pub use hir::{start_hir_capture, take_hir_capture};
+pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
 pub use mir::{start_mir_capture, take_mir_capture};
 pub(crate) mod hir;
 mod host_grants;

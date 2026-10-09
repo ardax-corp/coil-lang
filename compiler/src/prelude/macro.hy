@@ -415,6 +415,11 @@ class FnDecl {
     /// The names in `uses {…}`: `read`, `write`, `net`, `env`, `exec`,
     /// `ffi`, `thread`, `suspend`, `mutate`.
     pub effects: Vec<string>,
+    /// `requires` clauses as written after the keyword (`n >= 0` or
+    /// `n >= 0, "message"`), in order.
+    pub requires: Vec<string>,
+    /// `ensures` clauses, like `requires`.
+    pub ensures: Vec<string>,
     pub docs: Vec<string>,
     /// The body block as written, braces included.
     pub body: string,
@@ -468,7 +473,20 @@ impl FnDecl {
         if self.declares_effects && !self.is_pure {
             out += " " + self.uses_clause();
         }
-        return out + " " + self.body;
+        return out + self.contract_clauses() + " " + self.body;
+    }
+
+    /// The `requires` / `ensures` clauses, each as ` requires …` (empty
+    /// when there are none).
+    pub fn contract_clauses() -> string {
+        let out = "";
+        for c in self.requires {
+            out += " requires " + c;
+        }
+        for c in self.ensures {
+            out += " ensures " + c;
+        }
+        return out;
     }
 
     /// `uses {read, write}` as declared (`uses {}` for none).
@@ -758,6 +776,8 @@ impl Reader {
         let declares_effects = self.bool();
         let is_pure = self.bool();
         let effects = self.strings();
+        let requires = self.strings();
+        let ensures = self.strings();
         let docs = self.strings();
         let body = self.str();
         let source = self.str();
@@ -774,6 +794,8 @@ impl Reader {
             declares_effects,
             is_pure,
             effects,
+            requires,
+            ensures,
             docs,
             body,
             source,

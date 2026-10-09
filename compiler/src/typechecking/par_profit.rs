@@ -1281,6 +1281,7 @@ fn collect_const_calls(
             }
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

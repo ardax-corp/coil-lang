@@ -113,6 +113,9 @@ pub struct HirBody {
     pub captures: Vec<(LocalId, LocalId)>,
     /// `pure fn` / `uses {…}` on the function.
     pub declared: Option<DeclaredEffects>,
+    /// The function's `requires` / `ensures` clauses: what runs inside one
+    /// must have no visible effect.
+    pub contract_spans: Vec<Span>,
     pub locals: Vec<HirLocal>,
     pub exprs: Vec<HirExpr>,
     pub root: Option<HirId>,
@@ -370,6 +373,51 @@ pub enum HirKind {
     Clear(Vec<LocalId>),
     /// A construct this phase does not build yet.
     Unsupported(&'static str),
+}
+
+/// Which contract clauses compile to runtime checks (`--contracts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContractLevel {
+    /// `requires` and `ensures`.
+    #[default]
+    All,
+    /// Only `requires`: cheap entry checks that protect a library from its
+    /// callers.
+    Requires,
+    Off,
+}
+
+impl ContractLevel {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "all" => Ok(Self::All),
+            "requires" => Ok(Self::Requires),
+            "off" => Ok(Self::Off),
+            _ => Err(format!("invalid --contracts `{s}` (expected all|requires|off)")),
+        }
+    }
+
+    pub fn checks_requires(self) -> bool {
+        self != Self::Off
+    }
+
+    pub fn checks_ensures(self) -> bool {
+        self == Self::All
+    }
+}
+
+thread_local! {
+    static CONTRACT_LEVEL: std::cell::Cell<ContractLevel> =
+        const { std::cell::Cell::new(ContractLevel::All) };
+}
+
+/// The level HIR builds checks at on this thread (set per compile).
+pub(crate) fn set_contract_level(level: ContractLevel) {
+    CONTRACT_LEVEL.with(|c| c.set(level));
+}
+
+pub(crate) fn contract_level() -> ContractLevel {
+    CONTRACT_LEVEL.with(|c| c.get())
 }
 
 thread_local! {

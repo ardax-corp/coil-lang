@@ -437,6 +437,25 @@ fn use_brace_brings_items_into_scope() {
 }
 
 #[test]
+fn virtual_import_is_not_shadowed_by_another_modules_fn() {
+    // `foo` imports `task`, whose own `channel` must not replace the
+    // `thread::channel` that main imports by name.
+    let manifest = manifest_src_and_stdlib();
+    let files = &[
+        (
+            "src/main.hy",
+            "use thread::{channel};\nuse foo::{one};\nuse io::{stdout, write};\nuse string::{format, to_bytes};\n\
+             fn main() {\n    let pair = match channel() {\n        Result::Ok(p) => p,\n        Result::Err(_) => panic \"channel\",\n    };\n\
+             write(stdout(), to_bytes(format(\"%i\", one())));\n}\n",
+        ),
+        ("src/foo.hy", "use task::{scope, Scope};\nfn one() -> int { return 1; }\n"),
+    ];
+    let (root, entry) = build_project("virtual_import_shadow", &manifest, files, "src/main.hy");
+    let output = run_project(&root, &entry);
+    assert_eq!(output, "1");
+}
+
+#[test]
 fn use_module_file_does_not_reach_subdirectory_files() {
     let manifest = manifest_src_and_stdlib();
     let files = &[

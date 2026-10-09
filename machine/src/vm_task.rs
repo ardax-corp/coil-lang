@@ -61,8 +61,28 @@ impl<const S: usize> Machine<S> {
                 }
                 TaskFlow::Value(Value::default())
             }
+            15 => TaskFlow::Panic(self.contract_failure(args.first().copied().unwrap_or_default())),
             _ => TaskFlow::Panic(format!("HostInvoke: unknown task native id {fn_id}")),
         }
+    }
+
+    /// `contract_fail(msg)`: a failed `requires` blames the caller, so the
+    /// message names the call site (the frame below) instead of the clause.
+    fn contract_failure(&mut self, msg: Value) -> String {
+        let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
+        let mut text = unsafe { (*ptr).as_ref() }.to_string();
+        let n = self.frames.len();
+        if n >= 2 {
+            let ip = self.frames[n - 2].tell();
+            // The bootstrap frame (prologue `CALL main`) is not user code.
+            if (ip >= 3 || self.fn_symbol_at_ip(ip).is_some())
+                && let Some(loc) = self.format_panic_location(ip)
+            {
+                text.push_str(&format!(", called from {loc}"));
+            }
+        }
+        self.panic_without_location = true;
+        text
     }
 
     fn task_scope_open(&mut self) -> TaskFlow {

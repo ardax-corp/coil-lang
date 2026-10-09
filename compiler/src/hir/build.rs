@@ -18,7 +18,8 @@
 use std::collections::HashMap;
 
 use parser::ast::{
-    AdjustOp, AssignOp, EnumConstructPayload, Expression, LetPattern, MatchArm, Output, Pattern,
+    AdjustOp, AssignOp, Contract, ContractKind, EnumConstructPayload, Expression, LetPattern, MatchArm,
+    Output, Pattern,
     PatternPayload,
 };
 
@@ -37,12 +38,15 @@ use crate::typechecking::ty::{
 /// Build HIR for every body in `ast` (a checked module's `Program`).
 /// `module` is the namespace path codegen compiles it under (`""` for the
 /// entry file); it prefixes body names and finds the checker's schemes.
-pub fn build_module(checker: &Checker, sidecar: &TypedSidecar, module_path: &str, ast: &Output<'_>) -> HirModule {
+pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: &str, ast: &'a Output<'a>) -> HirModule {
     let mut module = HirModule::default();
+    let mut invariants = HashMap::new();
+    class_invariants(ast, &mut invariants);
     let mut cx = Cx {
         checker,
         sidecar,
         module: &mut module,
+        invariants,
     };
     let mut top = BodyBuilder::new(&join(module_path, "<top>"), BodyKind::TopLevel, span_of(ast));
     let mut top_stmts = Vec::new();
@@ -84,10 +88,32 @@ fn span_of(node: &Output<'_>) -> Span {
     (node.0.start, node.0.end)
 }
 
-struct Cx<'c, 'm> {
+struct Cx<'c, 'm, 'ast> {
     checker: &'c Checker,
     sidecar: &'c TypedSidecar,
     module: &'m mut HirModule,
+    /// Each class's `invariant` clauses, by class name.
+    invariants: HashMap<String, Vec<&'ast Contract<'ast>>>,
+}
+
+/// Collect the `invariant` clauses of every class in `node`.
+fn class_invariants<'a>(node: &'a Output<'a>, out: &mut HashMap<String, Vec<&'a Contract<'a>>>) {
+    match node.1.as_ref() {
+        Expression::Class { name, invariants, .. } => {
+            if !invariants.is_empty() {
+                out.insert(name.to_string(), invariants.iter().collect());
+            }
+        }
+        Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
+            for item in items {
+                class_invariants(item, out);
+            }
+        }
+        Expression::Expr(inner) | Expression::Statement(inner) | Expression::Group(inner) | Expression::Module(_, inner) => {
+            class_invariants(inner, out)
+        }
+        _ => {}
+    }
 }
 
 /// One body under construction, plus its lexical scopes.
@@ -101,6 +127,9 @@ struct BodyBuilder {
     ok_is_result: bool,
     /// The function's and its generic class's type parameter names.
     type_params: Vec<String>,
+    /// `old(e)` calls in the `ensures` clauses (by node address) and the
+    /// local that holds `e` from entry.
+    olds: HashMap<usize, LocalId>,
 }
 
 impl BodyBuilder {
@@ -119,6 +148,7 @@ impl BodyBuilder {
                 pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
+                contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),
                 root: None,
@@ -127,6 +157,7 @@ impl BodyBuilder {
             outer: Vec::new(),
             ok_is_result: false,
             type_params: Vec::new(),
+            olds: HashMap::new(),
         }
     }
 
@@ -231,7 +262,7 @@ fn is_result_construct(node: &Output<'_>, ok_is_result: bool) -> bool {
     }
 }
 
-impl<'c, 'm> Cx<'c, 'm> {
+impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     // ----- facts -------------------------------------------------------
 
     fn ty_of(&self, node: &Output<'_>) -> Option<Ty> {
@@ -349,7 +380,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             Expression::Function { name, .. } => {
                 let full = join(prefix, name);
                 let keys = vec![full.clone(), name.to_string()];
-                self.function(node, &full, BodyKind::Function, None, &keys);
+                self.function(node, &full, BodyKind::Function, None, &keys, &[]);
             }
             Expression::Method(_, inner) => self.items(inner, prefix, top, stmts),
             Expression::Implementation { owner, methods, .. } => {
@@ -357,7 +388,12 @@ impl<'c, 'm> Cx<'c, 'm> {
                     let Some(m) = fn_name(method) else { continue };
                     let full = join(&join(prefix, owner), m);
                     let keys = vec![full.clone(), format!("{owner}::{m}")];
-                    self.function(fn_node(method), &full, BodyKind::Method, Some(owner), &keys);
+                    let public = matches!(method.1.as_ref(), Expression::Method(parser::ast::Visibility::Public, _));
+                    let invariants = match self.invariants.get(*owner) {
+                        Some(inv) if public && m != "drop" => inv.clone(),
+                        _ => Vec::new(),
+                    };
+                    self.function(fn_node(method), &full, BodyKind::Method, Some(owner), &keys, &invariants);
                 }
             }
             Expression::TypeClassImpl {
@@ -394,7 +430,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                         keys.push(fqn.clone());
                     }
                     let full = join(&path, m);
-                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys, &[]);
                     if let Some(fqn) = keys.pop() {
                         let index = self.module.bodies.len() - 1;
                         self.module.instance_fns.insert(fqn, index);
@@ -416,7 +452,7 @@ impl<'c, 'm> Cx<'c, 'm> {
                     let Some(m) = fn_name(method) else { continue };
                     let keys = vec![crate::typechecking::generics::Generics::default_method_fqn(name, m)];
                     let full = join(&join(prefix, name), m);
-                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys);
+                    self.function(fn_node(method), &full, BodyKind::Method, None, &keys, &[]);
                 }
             }
             Expression::TestCase { name, body } => {
@@ -480,7 +516,17 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     /// Build one function body. `owner` is set for inherent methods, whose
     /// `self` is implicit; `keys` are the checker's names for its scheme.
-    fn function(&mut self, node: &Output<'_>, full: &str, kind: BodyKind, owner: Option<&str>, keys: &[String]) {
+    /// `invariants` are the owning class's clauses, checked on every return
+    /// like an `ensures` (a `pub` instance method's).
+    fn function(
+        &mut self,
+        node: &Output<'_>,
+        full: &str,
+        kind: BodyKind,
+        owner: Option<&str>,
+        keys: &[String],
+        invariants: &[&Contract<'_>],
+    ) {
         let Expression::Function {
             is_coro,
             is_static,
@@ -488,6 +534,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             args,
             returns,
             effects,
+            contracts,
             body,
             ..
         } = node.1.as_ref()
@@ -499,6 +546,7 @@ impl<'c, 'm> Cx<'c, 'm> {
         let mut b = BodyBuilder::new(full, kind, span_of(node));
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
+        b.body.contract_spans = contracts.iter().map(|c| (c.span.start, c.span.end)).collect();
         b.body.is_generic = !type_params.is_empty();
         // A trait's default method body has only the trait method's scheme.
         let default_sig = keys.first().and_then(|k| k.split_once("__default__")).and_then(|(class, m)| {
@@ -545,8 +593,30 @@ impl<'c, 'm> Cx<'c, 'm> {
         if Self::pinned(&b, returns.as_ref(), b.body.ret.as_ref()) {
             b.body.pinned_param = true;
         }
+        let level = super::contract_level();
+        let requires: Vec<HirId> = contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Requires && level.checks_requires())
+            .map(|c| self.contract_check(&mut b, c, full))
+            .collect();
+        let mut ensures: Vec<&Contract<'_>> = contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Ensures && level.checks_ensures() && !is_coro)
+            .collect();
+        if level.checks_ensures() && !is_coro && !is_static {
+            ensures.extend(invariants.iter().copied());
+            b.body.contract_spans.extend(invariants.iter().map(|c| (c.span.start, c.span.end)));
+        }
+        let mut entry = requires;
+        entry.extend(self.old_values(&mut b, &ensures));
         let root = self.expr(&mut b, body);
         self.implicit_ok_return(&mut b, root);
+        if let HirKind::Block { stmts, .. } = &mut b.body.exprs[root.0 as usize].kind {
+            stmts.splice(0..0, entry);
+        }
+        if !ensures.is_empty() {
+            self.check_ensures(&mut b, root, &ensures, full);
+        }
         b.body.root = Some(root);
         // In a generic class's shared method body `self` is the one object
         // word for every instance: its reads take the bare class type, not
@@ -568,6 +638,234 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     /// A Result-mode body with a unit `Ok` that can fall off its end returns
     /// `Ok(())` there; make that return explicit.
+    /// `let old$k = e` at entry for every `old(e)` in the `ensures` clauses;
+    /// the clauses then read the local (see `call`).
+    fn old_values(&mut self, b: &mut BodyBuilder, ensures: &[&Contract<'_>]) -> Vec<HirId> {
+        fn find<'n, 's>(node: &'n Output<'s>, out: &mut Vec<&'n Output<'s>>) {
+            if let Expression::Call { name, args: Some(args) } = node.1.as_ref()
+                && matches!(name.1.as_ref(), Expression::Identifier("old"))
+                && args.len() == 1
+            {
+                out.push(node);
+                return;
+            }
+            crate::typechecking::id::walk_children(node, &mut |c| find(c, out));
+        }
+        let mut calls = Vec::new();
+        for c in ensures {
+            find(&c.expr, &mut calls);
+        }
+        let mut stmts = Vec::new();
+        for call in calls {
+            let Expression::Call { args: Some(args), .. } = call.1.as_ref() else { continue };
+            let value = self.expr(b, &args[0]);
+            let ty = b.body.exprs[value.0 as usize].ty.clone();
+            let local = b.local(&format!("old${}", b.olds.len()), ty, LocalKind::Let);
+            b.olds.insert(std::ptr::from_ref(call) as usize, local);
+            stmts.push(self.synth(b, span_of(call), HirKind::Let { local, init: Some(value) }, Some(coil_ty::unit())));
+        }
+        stmts
+    }
+
+    /// `if !(cond) { panic "contract violated: …" }` for one clause. A
+    /// `requires` panic blames the caller (`contract_fail` in the VM); an
+    /// `ensures` panic is reported at its clause.
+    fn contract_check(&mut self, b: &mut BodyBuilder, c: &Contract<'_>, fname: &str) -> HirId {
+        let span = (c.span.start, c.span.end);
+        let cond = self.expr(b, &c.expr);
+        let not = self.synth(b, span, HirKind::Un { op: UnOp::Not, operand: cond }, Some(coil_ty::boolean()));
+        let text = Self::contract_text(c, fname);
+        let then = self.contract_panic(b, span, text, c.kind == ContractKind::Requires);
+        self.synth(b, span, HirKind::If { cond: not, then, els: None }, Some(coil_ty::unit()))
+    }
+
+    /// `contract violated: <keyword> <clause> ("<message>") in <function>`.
+    fn contract_text(c: &Contract<'_>, fname: &str) -> String {
+        Self::contract_text_why(c, fname, None)
+    }
+
+    fn contract_text_why(c: &Contract<'_>, fname: &str, why: Option<&str>) -> String {
+        let mut text = format!("contract violated: {} {}", c.kind.keyword(), c.text);
+        if let Some(m) = c.message {
+            text.push_str(&format!(" (\"{m}\")"));
+        }
+        if let Some(why) = why {
+            text.push_str(&format!(" ({why})"));
+        }
+        text.push_str(&format!(" in {fname}"));
+        text
+    }
+
+    /// `{ panic text }`; `blame_caller` reports the caller's location
+    /// (`contract_fail` in the VM) instead of the clause's.
+    fn contract_panic(&mut self, b: &mut BodyBuilder, span: Span, text: String, blame_caller: bool) -> HirId {
+        let msg = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
+        let mut args = vec![msg];
+        if blame_caller {
+            // A second argument marks the caller-blaming form.
+            args.push(self.synth(b, span, HirKind::Lit(Lit::Bool(true)), Some(coil_ty::boolean())));
+        }
+        let panic = self.synth(b, span, HirKind::Builtin { op: Builtin::Panic, args }, Some(coil_ty::never()));
+        self.synth(b, span, HirKind::Block { stmts: vec![panic], tail: None }, Some(coil_ty::unit()))
+    }
+
+    /// A loop with `invariant` / `decreases` clauses:
+    ///
+    /// ```text
+    /// { let first = true; let prev = 0;
+    ///   loop { invariants; let cur = d; cur >= 0; first || cur < prev;
+    ///          first = false; prev = cur; if cond { body } else { break } }
+    ///   invariants }   // `for` loops: after the last item
+    /// ```
+    ///
+    /// so an invariant holds before every test of the condition and the
+    /// `decreases` value is non-negative and falls on every iteration.
+    #[allow(clippy::too_many_arguments)]
+    fn checked_loop(
+        &mut self,
+        b: &mut BodyBuilder,
+        node: &Output<'_>,
+        identifier: Option<&Output<'_>>,
+        pattern: Option<&LetPattern<'_>>,
+        iterable: &Output<'_>,
+        body: &Output<'_>,
+        contracts: &[Contract<'_>],
+    ) -> HirId {
+        let span = span_of(node);
+        let fname = b.body.name.clone();
+        let unit = Some(coil_ty::unit());
+        let boolean = Some(coil_ty::boolean());
+        let int = Some(coil_ty::int());
+        b.body.contract_spans.extend(contracts.iter().map(|c| (c.span.start, c.span.end)));
+        let mut pre = Vec::new();
+        let mut checks = Vec::new();
+        for c in contracts.iter().filter(|c| c.kind == ContractKind::Invariant) {
+            checks.push(self.contract_check(b, c, &fname));
+        }
+        for c in contracts.iter().filter(|c| c.kind == ContractKind::Decreases) {
+            let cs = (c.span.start, c.span.end);
+            let first = b.temp("decreases$first", boolean.clone());
+            let prev = b.temp("decreases$prev", int.clone());
+            let t = self.synth(b, cs, HirKind::Lit(Lit::Bool(true)), boolean.clone());
+            pre.push(self.synth(b, cs, HirKind::Let { local: first, init: Some(t) }, unit.clone()));
+            let z = self.synth(b, cs, HirKind::Lit(Lit::Int(0)), int.clone());
+            pre.push(self.synth(b, cs, HirKind::Let { local: prev, init: Some(z) }, unit.clone()));
+
+            let cur = b.temp("decreases$cur", int.clone());
+            let value = self.expr(b, &c.expr);
+            checks.push(self.synth(b, cs, HirKind::Let { local: cur, init: Some(value) }, unit.clone()));
+            // cur >= 0
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            let z = self.synth(b, cs, HirKind::Lit(Lit::Int(0)), int.clone());
+            let neg = self.synth(b, cs, HirKind::Bin { op: BinOp::Lt, lhs: l, rhs: z }, boolean.clone());
+            let msg = Self::contract_text_why(c, &fname, Some("went negative"));
+            let fail = self.contract_panic(b, cs, msg, false);
+            checks.push(self.synth(b, cs, HirKind::If { cond: neg, then: fail, els: None }, unit.clone()));
+            // first || cur < prev
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            let p = self.synth(b, cs, HirKind::Local(prev), int.clone());
+            let ge = self.synth(b, cs, HirKind::Bin { op: BinOp::Ge, lhs: l, rhs: p }, boolean.clone());
+            let msg = Self::contract_text_why(c, &fname, Some("did not decrease"));
+            let fail = self.contract_panic(b, cs, msg, false);
+            let not_first = {
+                let f = self.synth(b, cs, HirKind::Local(first), boolean.clone());
+                self.synth(b, cs, HirKind::Un { op: UnOp::Not, operand: f }, boolean.clone())
+            };
+            let inner = self.synth(b, cs, HirKind::If { cond: ge, then: fail, els: None }, unit.clone());
+            let inner = self.synth(b, cs, HirKind::Block { stmts: vec![inner], tail: None }, unit.clone());
+            checks.push(self.synth(b, cs, HirKind::If { cond: not_first, then: inner, els: None }, unit.clone()));
+            // first = false; prev = cur
+            let place = self.synth(b, cs, HirKind::Local(first), boolean.clone());
+            let f = self.synth(b, cs, HirKind::Lit(Lit::Bool(false)), boolean.clone());
+            checks.push(self.synth(b, cs, HirKind::Assign { place, value: f }, unit.clone()));
+            let place = self.synth(b, cs, HirKind::Local(prev), int.clone());
+            let l = self.synth(b, cs, HirKind::Local(cur), int.clone());
+            checks.push(self.synth(b, cs, HirKind::Assign { place, value: l }, unit.clone()));
+        }
+        let is_for = identifier.is_some() || pattern.is_some();
+        let lp = self.loop_(b, node, identifier, pattern, iterable, body, &checks);
+        let mut stmts = pre;
+        stmts.push(lp);
+        if is_for {
+            for c in contracts.iter().filter(|c| c.kind == ContractKind::Invariant) {
+                stmts.push(self.contract_check(b, c, &fname));
+            }
+        }
+        self.synth(b, span, HirKind::Block { stmts, tail: None }, unit)
+    }
+
+    /// The `ensures` clauses, with `result` bound to the returned value: a
+    /// returned value `v` becomes `{ let result = v; checks; result }`, at
+    /// every `return` (`?` included) and at the body's end.
+    fn check_ensures(&mut self, b: &mut BodyBuilder, root: HirId, ensures: &[&Contract<'_>], fname: &str) {
+        let returns: Vec<HirId> = (0..b.body.exprs.len() as u32)
+            .map(HirId)
+            .filter(|&id| matches!(b.body.exprs[id.0 as usize].kind, HirKind::Return(_)))
+            .collect();
+        for id in returns {
+            let HirKind::Return(value) = b.body.exprs[id.0 as usize].kind else { continue };
+            let span = b.body.exprs[id.0 as usize].span;
+            let checked = self.ensured_value(b, value, span, ensures, fname);
+            b.body.exprs[id.0 as usize].kind = HirKind::Return(Some(checked));
+        }
+        let HirKind::Block { mut stmts, tail } = b.body.exprs[root.0 as usize].kind.clone() else { return };
+        let end = (b.body.span.1, b.body.span.1);
+        let ty = |b: &BodyBuilder, id: HirId| b.body.exprs[id.0 as usize].ty.clone();
+        match tail {
+            Some(t) if matches!(b.body.exprs[t.0 as usize].kind, HirKind::Return(_)) => {}
+            // The body's value (a unit function's tail is a statement).
+            Some(t)
+                if b.body.ret.as_ref().is_some_and(|r| !layout::is_unit(r))
+                    && ty(b, t).is_some_and(|t| t != Ty::Never) =>
+            {
+                let checked = self.ensured_value(b, Some(t), end, ensures, fname);
+                if let HirKind::Block { tail, .. } = &mut b.body.exprs[root.0 as usize].kind {
+                    *tail = Some(checked);
+                }
+            }
+            // A unit body that runs off its end.
+            tail => {
+                stmts.extend(tail);
+                let diverges = stmts
+                    .last()
+                    .is_some_and(|&last| matches!(ty(b, last), Some(Ty::Never)));
+                if !diverges {
+                    let checked = self.ensured_value(b, None, end, ensures, fname);
+                    stmts.push(checked);
+                }
+                b.body.exprs[root.0 as usize].kind = HirKind::Block { stmts, tail: None };
+            }
+        }
+    }
+
+    /// `{ let result = value; checks; result }` (`value: None` is unit).
+    fn ensured_value(
+        &mut self,
+        b: &mut BodyBuilder,
+        value: Option<HirId>,
+        span: Span,
+        ensures: &[&Contract<'_>],
+        fname: &str,
+    ) -> HirId {
+        let ret = match value {
+            Some(v) => b.body.exprs[v.0 as usize].ty.clone().or_else(|| b.body.ret.clone()),
+            None => Some(coil_ty::unit()),
+        };
+        let value = match value {
+            Some(v) => v,
+            None => self.synth(b, span, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
+        };
+        b.scopes.push(HashMap::new());
+        let result = b.local("result", ret.clone(), LocalKind::Let);
+        let mut stmts = vec![self.synth(b, span, HirKind::Let { local: result, init: Some(value) }, Some(coil_ty::unit()))];
+        for c in ensures {
+            stmts.push(self.contract_check(b, c, fname));
+        }
+        b.scopes.pop();
+        let tail = self.synth(b, span, HirKind::Local(result), ret.clone());
+        self.synth(b, span, HirKind::Block { stmts, tail: Some(tail) }, ret)
+    }
+
     fn implicit_ok_return(&self, b: &mut BodyBuilder, root: HirId) {
         if !b.body.result_mode {
             return;
@@ -859,7 +1157,28 @@ impl<'c, 'm> Cx<'c, 'm> {
                     other => other.to_string(),
                 };
                 let args = args.as_ref().map_or_else(Vec::new, |a| self.exprs(b, a));
-                self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args })
+                let invariants = match self.invariants.get(&name) {
+                    Some(inv) if super::contract_level().checks_ensures() => inv.clone(),
+                    _ => Vec::new(),
+                };
+                let fname = format!("new {name}");
+                let made = self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args });
+                if invariants.is_empty() {
+                    return made;
+                }
+                // `{ let self = new C(…); invariants; self }`
+                b.body.contract_spans.extend(invariants.iter().map(|c| (c.span.start, c.span.end)));
+                let span = span_of(node);
+                let ty = b.body.exprs[made.0 as usize].ty.clone();
+                b.scopes.push(HashMap::new());
+                let this = b.local("self", ty.clone(), LocalKind::Let);
+                let mut stmts = vec![self.synth(b, span, HirKind::Let { local: this, init: Some(made) }, Some(coil_ty::unit()))];
+                for c in &invariants {
+                    stmts.push(self.contract_check(b, c, &fname));
+                }
+                b.scopes.pop();
+                let tail = self.synth(b, span, HirKind::Local(this), ty.clone());
+                self.synth(b, span, HirKind::Block { stmts, tail: Some(tail) }, ty)
             }
 
             E::Access(base, field) => {
@@ -886,8 +1205,11 @@ impl<'c, 'm> Cx<'c, 'm> {
                 }
                 None => self.expr(b, body),
             },
-            E::Loop { identifier, pattern, iterable, body } => {
-                self.loop_(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body)
+            E::Loop { identifier, pattern, iterable, body, contracts } => {
+                if contracts.is_empty() || !super::contract_level().checks_ensures() {
+                    return self.loop_(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body, &[]);
+                }
+                self.checked_loop(b, node, identifier.as_ref(), pattern.as_ref(), iterable, body, contracts)
             }
             E::Break => self.emit_ty(b, node, HirKind::Break, Some(coil_ty::never())),
             E::Continue => self.emit_ty(b, node, HirKind::Continue, Some(coil_ty::never())),
@@ -954,7 +1276,7 @@ impl<'c, 'm> Cx<'c, 'm> {
             E::Function { name, .. } => {
                 let full = join(&b.body.name, name);
                 let keys = vec![full.clone(), name.to_string()];
-                self.function(node, &full, BodyKind::Function, None, &keys);
+                self.function(node, &full, BodyKind::Function, None, &keys, &[]);
                 self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit()))
             }
             E::Class { .. } | E::EnumDecl { .. } | E::TypeAlias { .. } | E::Use { .. } => {
@@ -1166,6 +1488,10 @@ impl<'c, 'm> Cx<'c, 'm> {
 
     fn call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &Output<'_>, args: &[Output<'_>]) -> HirId {
         use Expression as E;
+        if let Some(&local) = b.olds.get(&(std::ptr::from_ref(node) as usize)) {
+            let ty = b.body.locals[local.0 as usize].ty.clone();
+            return self.emit_ty(b, node, HirKind::Local(local), ty);
+        }
         let callee_node = peel(name);
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
@@ -1350,7 +1676,19 @@ impl<'c, 'm> Cx<'c, 'm> {
         els.unwrap_or_else(|| self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())))
     }
 
-    fn loop_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, identifier: Option<&Output<'_>>, pattern: Option<&LetPattern<'_>>, iterable: &Output<'_>, body: &Output<'_>) -> HirId {
+    /// `checks` are statements run at the start of every iteration, before a
+    /// `while` loop's condition and before a `for` loop's next item.
+    #[allow(clippy::too_many_arguments)]
+    fn loop_(
+        &mut self,
+        b: &mut BodyBuilder,
+        node: &Output<'_>,
+        identifier: Option<&Output<'_>>,
+        pattern: Option<&LetPattern<'_>>,
+        iterable: &Output<'_>,
+        body: &Output<'_>,
+        checks: &[HirId],
+    ) -> HirId {
         let span = span_of(node);
         if identifier.is_none() && pattern.is_none() {
             // `while cond { body }` is `loop { if cond { body } else { break } }`.
@@ -1360,7 +1698,9 @@ impl<'c, 'm> Cx<'c, 'm> {
             b.scopes.pop();
             let brk = self.synth(b, span, HirKind::Break, Some(coil_ty::never()));
             let test = self.synth(b, span, HirKind::If { cond, then, els: Some(brk) }, Some(coil_ty::unit()));
-            let block = self.synth(b, span, HirKind::Block { stmts: vec![test], tail: None }, Some(coil_ty::unit()));
+            let mut stmts = checks.to_vec();
+            stmts.push(test);
+            let block = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
             return self.emit_ty(b, node, HirKind::Loop { body: block }, Some(coil_ty::unit()));
         }
         let iter = self.expr(b, iterable);
@@ -1385,8 +1725,13 @@ impl<'c, 'm> Cx<'c, 'm> {
             HirPat::Wild => HirPat::Bind(b.temp("item", item_ty.clone())),
             pat => pat,
         };
-        let body = self.expr(b, body);
+        let mut body = self.expr(b, body);
         b.scopes.pop();
+        if !checks.is_empty() {
+            let mut stmts = checks.to_vec();
+            stmts.push(body);
+            body = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
+        }
         self.emit_ty(
             b,
             node,

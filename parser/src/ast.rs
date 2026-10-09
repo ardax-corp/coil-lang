@@ -77,6 +77,53 @@ impl Display for EffectDecl<'_> {
     }
 }
 
+/// Which contract clause: checked on entry or on every return.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContractKind {
+    Requires,
+    Ensures,
+    /// On a loop: holds before every test of the loop's condition. On a
+    /// class: holds after construction and after every `pub` method.
+    Invariant,
+    /// On a `while` loop: a non-negative `int` that every iteration lowers.
+    Decreases,
+}
+
+impl ContractKind {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Requires => "requires",
+            Self::Ensures => "ensures",
+            Self::Invariant => "invariant",
+            Self::Decreases => "decreases",
+        }
+    }
+}
+
+/// `requires expr` / `ensures expr`, with an optional `, "message"`.
+/// `requires`, `ensures` and `result` (inside `ensures`) are contextual.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Contract<'expr> {
+    pub kind: ContractKind,
+    pub expr: Output<'expr>,
+    /// The clause's expression as written: the failure message without one.
+    pub text: &'expr str,
+    /// The optional string after the expression, without quotes.
+    pub message: Option<&'expr str>,
+    /// The whole clause, keyword included.
+    pub span: SimpleSpan,
+}
+
+impl Display for Contract<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.kind.keyword(), self.expr.1)?;
+        if let Some(m) = self.message {
+            write!(f, ", \"{m}\"")?;
+        }
+        Ok(())
+    }
+}
+
 /// A `where` clause constraint: `Convert<A, B>` or unary `Num<T>`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct WhereConstraint<'expr> {
@@ -451,6 +498,8 @@ pub enum Expression<'expr> {
         where_constraints: Vec<WhereConstraint<'expr>>,
         /// `pure fn` or a `uses {…}` clause (after `where`).
         effects: Option<EffectDecl<'expr>>,
+        /// `requires` / `ensures` clauses (after `uses`), in source order.
+        contracts: Vec<Contract<'expr>>,
         /// `None` = signature-only (`fn f(...) -> T;`); `Some` = block body.
         body: Option<Output<'expr>>,
     },
@@ -480,6 +529,8 @@ pub enum Expression<'expr> {
         pattern: Option<LetPattern<'expr>>,
         iterable: Output<'expr>,
         body: Output<'expr>,
+        /// `invariant` / `decreases` clauses between the header and body.
+        contracts: Vec<Contract<'expr>>,
     },
 
     /// `if let P = e { then } [else …]`. `else_arm` is always present
@@ -515,6 +566,8 @@ pub enum Expression<'expr> {
         name: &'expr str,
         type_params: Vec<TypeParam<'expr>>,
         fields: Vec<Output<'expr>>,
+        /// `invariant` clauses between the header and the fields.
+        invariants: Vec<Contract<'expr>>,
     },
     Implementation {
         /// Unused trait slot (`""` for inherent impls).
@@ -1146,15 +1199,19 @@ impl<'a> Display for Expression<'a> {
                 returns,
                 where_constraints,
                 effects,
+                contracts,
                 body,
             } => {
                 let async_kw = if *is_coro { "gen " } else { "" };
                 let static_kw = if *is_static { "static " } else { "" };
-                let (pure_kw, uses_str) = match effects {
+                let (pure_kw, mut uses_str) = match effects {
                     Some(e) if e.pure => ("pure ", String::new()),
                     Some(e) => ("", format!(" {e}")),
                     None => ("", String::new()),
                 };
+                for c in contracts {
+                    uses_str.push_str(&format!(" {c}"));
+                }
                 let tp = if type_params.is_empty() {
                     String::new()
                 } else {
@@ -1331,15 +1388,18 @@ impl<'a> Display for Expression<'a> {
                 pattern,
                 iterable,
                 body,
-            } => match (identifier, pattern) {
-                (Some(ident), _) => {
-                    write!(f, "for {} in {} {{\n{}}}", ident.1, iterable.1, body.1)
+                contracts,
+            } => {
+                match (identifier, pattern) {
+                    (Some(ident), _) => write!(f, "for {} in {}", ident.1, iterable.1)?,
+                    (None, Some(pat)) => write!(f, "for {} in {}", pat, iterable.1)?,
+                    (None, None) => write!(f, "while {}", iterable.1)?,
                 }
-                (None, Some(pat)) => {
-                    write!(f, "for {} in {} {{\n{}}}", pat, iterable.1, body.1)
+                for c in contracts {
+                    write!(f, " {c}")?;
                 }
-                (None, None) => write!(f, "while {} {{\n{}}}", iterable.1, body.1),
-            },
+                write!(f, " {{\n{}}}", body.1)
+            }
             Self::IfLet {
                 scrutinee,
                 then_arm,
@@ -1585,6 +1645,7 @@ impl<'a> Display for Expression<'a> {
                 name,
                 type_params,
                 fields,
+                invariants,
             } => {
                 let tp = if type_params.is_empty() {
                     String::new()
@@ -1593,12 +1654,14 @@ impl<'a> Display for Expression<'a> {
                 };
                 let attr_prefix = format!("{}{}", fmt_docs(docs), fmt_attrs(attrs));
                 let fs: Vec<String> = fields.iter().map(|f| f.1.to_string()).collect();
+                let inv: String = invariants.iter().map(|c| format!(" {c}")).collect();
                 write!(
                     f,
-                    "{}class {}{} {{ {} }}",
+                    "{}class {}{}{} {{ {} }}",
                     attr_prefix,
                     name,
                     tp,
+                    inv,
                     fs.join(", ")
                 )
             }

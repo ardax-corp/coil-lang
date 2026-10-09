@@ -562,6 +562,7 @@ fn walk_self_calls<'a>(ast: &'a Output<'a>, fn_name: &str, out: &mut Vec<&'a [Ou
             }
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,
@@ -1254,6 +1255,7 @@ fn walk_entry_sites(
             }
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

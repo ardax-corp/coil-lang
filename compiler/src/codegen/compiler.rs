@@ -2245,6 +2245,7 @@ impl Compiler {
                     || Self::walk_expr_calls(body, pred)
             }
             Expression::Loop {
+                contracts: _,
                 iterable,
                 body,
                 identifier,
@@ -2447,6 +2448,7 @@ impl Compiler {
                         || body_calls_later_fn(body, impl_idx, free_fn_pos)
                 }
                 Expression::Loop {
+                    contracts: _,
                     iterable,
                     body,
                     identifier,
@@ -6133,6 +6135,7 @@ impl Compiler {
                 }
             }
             Loop {
+                contracts: _,
                 identifier,
                 pattern: _,
                 iterable,
@@ -7425,6 +7428,7 @@ impl Compiler {
                 returns: _returns,
                 where_constraints: _,
                 effects: _,
+                contracts: _,
                 body,
             } = ast.1.borrow() else {
             unreachable!("compile_function_decl_into on another expression");

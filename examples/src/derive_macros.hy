@@ -159,3 +159,17 @@ attr declared(FnDecl f) -> Code {
         }
     };
 }
+
+/// Keep `f` under `<name>_kept` (its contracts too) and add
+/// `<name>_contracts()`: its `requires` / `ensures` clauses as written.
+attr contracted(FnDecl f) -> Code {
+    let text = f.contract_clauses();
+    let kept = f.name.str() + "_kept";
+    let contracts = ident(f.name.str() + "_contracts");
+    return quote items {
+        ${raw(f.with_name(kept))}
+        fn ${contracts}() -> string {
+            return ${lit(text)};
+        }
+    };
+}

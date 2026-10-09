@@ -521,6 +521,9 @@ pub struct Machine<const S: usize> {
     pending_io: Option<PendingIoWait>,
     /// Set when a language-level `panic` aborts the VM.
     panicked: bool,
+    /// The next runtime panic's message already names its location
+    /// (`contract_fail`): print no ` at …` suffix.
+    panic_without_location: bool,
     /// Task scheduler, created by the first `task::scope` (see `task.rs`).
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
@@ -645,6 +648,7 @@ impl<const S: usize> Machine<S> {
             pending_ffi: None,
             pending_io: None,
             panicked: false,
+            panic_without_location: false,
             sched: None,
             task_panic_message: None,
             unwind: Unwind::default(),
@@ -1202,14 +1206,18 @@ impl<const S: usize> Machine<S> {
         self.arm_unwind(message);
         // A child task's panic fails its scope; the scope reports it.
         if self.task_panic_is_caught() {
+            self.panic_without_location = false;
             self.task_panic_message = Some(message.to_string());
             self.panicked = true;
             return false;
         }
-        let loc_suffix = self
-            .format_panic_location(panic_insn_ip)
-            .map(|loc| format!(" at {loc}"))
-            .unwrap_or_default();
+        let loc_suffix = if std::mem::take(&mut self.panic_without_location) {
+            String::new()
+        } else {
+            self.format_panic_location(panic_insn_ip)
+                .map(|loc| format!(" at {loc}"))
+                .unwrap_or_default()
+        };
         let backtrace = self.format_panic_backtrace(panic_insn_ip);
         if let Some(out) = self.output.as_mut() {
             let _ = write!(out, "panic: {message}{loc_suffix}");

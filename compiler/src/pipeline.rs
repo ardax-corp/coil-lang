@@ -25,6 +25,9 @@ use crate::Compiler;
 #[path = "pipeline_macros.rs"]
 mod macros;
 
+#[path = "pipeline_contracts.rs"]
+mod contracts;
+
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
@@ -110,6 +113,8 @@ pub struct Pipeline {
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
+    /// `--contracts`; `None` derives it from the opt level.
+    contracts: Option<crate::ContractLevel>,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -715,6 +720,7 @@ impl Pipeline {
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
             opt_level: crate::OptLevel::Standard,
+            contracts: None,
             debugger_attached: false,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
@@ -1468,6 +1474,7 @@ impl Pipeline {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
     ) -> (Vec<Byte>, Vec<u64>) {
+        crate::hir::set_contract_level(self.contracts());
         let mut bytecode = self.compiler_lazy_mut().compile(module, ast);
         let rejected = self
             .compiler_lazy()
@@ -1489,9 +1496,11 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
-        // Derives and attribute macros run in the discovery stage, which works
-        // on cached files: compile attribute-bearing input as an in-memory file.
-        if src.contains("#[") {
+        // Derives, attribute macros and trait contract copies run in the
+        // discovery stage, which works on cached files: compile such input
+        // as an in-memory file.
+        let trait_contracts = src.contains("trait ") && (src.contains("requires") || src.contains("ensures"));
+        if src.contains("#[") || trait_contracts {
             let path = PathBuf::from("<input>.hy");
             self.overlays.insert(path.clone(), src.to_string());
             let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
@@ -1810,7 +1819,21 @@ impl Pipeline {
         }
     }
 
+    /// Which contract clauses become runtime checks. Unset, `-O0` / `-O1` /
+    /// `-Og` check everything and `-O2` and above only `requires`.
+    pub fn set_contracts(&mut self, level: crate::ContractLevel) {
+        self.contracts = Some(level);
+    }
+
+    pub fn contracts(&self) -> crate::ContractLevel {
+        self.contracts.unwrap_or(match self.opt_level {
+            crate::OptLevel::None | crate::OptLevel::Basic | crate::OptLevel::Debug => crate::ContractLevel::All,
+            _ => crate::ContractLevel::Requires,
+        })
+    }
+
     fn begin_compile_opt_stats(&mut self) {
+        crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
             crate::il::opt::begin_opt_stats();
             self.compiler_lazy_mut().set_collect_opt_stats(true);

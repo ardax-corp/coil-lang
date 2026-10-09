@@ -27,6 +27,8 @@ pub struct CachedAst {
     parse_error: Option<Message>,
     expanded: bool,
     checked: bool,
+    /// Trait method clauses were copied into this file's impls.
+    contracts_inherited: bool,
     source: Pin<Box<str>>,
 }
 
@@ -47,6 +49,7 @@ impl CachedAst {
                     parse_error: None,
                     expanded: false,
                     checked: false,
+                    contracts_inherited: false,
                     source,
                 }
             }
@@ -59,6 +62,7 @@ impl CachedAst {
                 parse_error: Some(parse_error),
                 expanded: false,
                 checked: false,
+                contracts_inherited: false,
                 source,
             },
         }
@@ -83,6 +87,14 @@ impl CachedAst {
     pub fn mark_checked(&mut self) {
         self.checked = true;
         self.expanded = true;
+    }
+
+    pub fn contracts_inherited(&self) -> bool {
+        self.contracts_inherited
+    }
+
+    pub fn mark_contracts_inherited(&mut self) {
+        self.contracts_inherited = true;
     }
 
     pub fn ast(&self) -> Option<&Output<'static>> {

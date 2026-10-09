@@ -6,7 +6,7 @@
 //! the compiled expansion program depends only on the providers and no heap
 //! layout is shared between the compiler and the VM.
 
-use parser::ast::{AttrArgs, AttrLit, Attribute, EnumVariantPayload, Expression, Output};
+use parser::ast::{AttrArgs, AttrLit, Attribute, ContractKind, EnumVariantPayload, Expression, Output};
 
 use super::MacroArg;
 
@@ -339,6 +339,7 @@ pub fn type_decl(w: &mut Wire, node: &Output<'_>, source: &str, module: &str, st
             name,
             type_params,
             fields,
+            ..
         } => ("class", name, type_params, attrs, docs, class_fields(fields), None, String::new()),
         Expression::EnumDecl {
             docs,
@@ -401,6 +402,7 @@ pub fn fn_decl(
         args,
         returns,
         effects,
+        contracts,
         body,
         ..
     } = node.1.as_ref()
@@ -445,6 +447,20 @@ pub fn fn_decl(
     w.bool(effects.is_some());
     w.bool(effects.as_ref().is_some_and(|e| e.pure));
     strings(w, effects.as_ref().map_or(&[][..], |e| &e.uses[..]));
+    for kind in [ContractKind::Requires, ContractKind::Ensures] {
+        let clauses: Vec<String> = contracts
+            .iter()
+            .filter(|c| c.kind == kind)
+            .map(|c| match c.message {
+                Some(m) => format!("{}, \"{m}\"", c.text),
+                None => c.text.to_string(),
+            })
+            .collect();
+        w.count(clauses.len());
+        for c in &clauses {
+            w.str(c);
+        }
+    }
     strings(w, docs);
     w.str(&body_text);
     w.str(&source_without_attrs(node, source, attrs, strip));

@@ -225,6 +225,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
             f(body);
         }
         Expression::Loop {
+            contracts: _,
             identifier,
             pattern: _,
             iterable,

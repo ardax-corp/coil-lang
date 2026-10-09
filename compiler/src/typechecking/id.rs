@@ -331,16 +331,24 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
                 visit(m);
             }
         }
-        Expression::Class { fields, .. } => {
+        Expression::Class { fields, invariants, .. } => {
             for f in fields {
                 visit(f);
             }
+            // Typed after the fields (`infer_class_invariants`).
+            for c in invariants {
+                visit(&c.expr);
+            }
         }
 
-        Expression::Function { args, body, .. } => {
+        Expression::Function { args, body, contracts, .. } => {
             visit(args);
             if let Some(body) = body {
                 visit(body);
+            }
+            // Typed after the body (`infer_contracts`).
+            for c in contracts {
+                visit(&c.expr);
             }
         }
         Expression::Lambda { args, body, .. } => {
@@ -373,15 +381,19 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             body,
             identifier,
             pattern: _,
+            contracts,
         } => {
             // For-in binds `identifier` before the body; visit order must
-            // match infer (iterable → binding → body). Pattern for-in has
-            // no Identifier node.
+            // match infer (iterable → binding → body → clauses). Pattern
+            // for-in has no Identifier node.
             visit(iterable);
             if let Some(i) = identifier {
                 visit(i);
             }
             visit(body);
+            for c in contracts {
+                visit(&c.expr);
+            }
         }
 
         // Patterns have no NodeId; walk bodies only (lockstep with infer).
