@@ -4793,6 +4793,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The checks read the callee's own body.
+    pipeline.set_hir_inline(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pick_off = pipeline.compiler_mut().get_function("pick").expect("pick");
     let pick_bc = &bc[pick_off..];
@@ -4832,6 +4834,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // The checks read the callee's own body.
+    pipeline.set_hir_inline(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let fill_off = pipeline.compiler_mut().get_function("fill").expect("fill");
     let fill_bc = &bc[fill_off..];

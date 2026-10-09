@@ -10,10 +10,12 @@
 //! with locals inlines at any depth.
 //!
 //! The callee must be straight-line code plus `if` values with at most a
-//! trailing `return`; see [`inlinable`]. Only call sites whose operands
-//! evaluated before the call are pure locals and literals are rewritten, so
-//! hoisting the callee's statements ahead of the enclosing statement keeps
-//! the evaluation order. One round: calls inside inlined code stay calls.
+//! trailing `return`; see [`inlinable`]. A call site whose operands
+//! evaluated before the call are pure locals and literals hoists the
+//! callee's statements ahead of the enclosing statement, which keeps the
+//! evaluation order; a call evaluated with no operand below it otherwise
+//! runs in place as a block value. Calls inside inlined code inline in the
+//! next round (`Compiler::hir_inline_replan`).
 
 use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
 use super::{BinOp, BodyKind, Lit};
@@ -308,6 +310,8 @@ pub fn inline_calls<'a>(
     caller: &HirBody,
     callee_of: impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     growth: usize,
+    in_place: bool,
+    opaque: impl Fn(HirId) -> bool,
 ) -> Option<(HirBody, Vec<(String, super::Span)>)> {
     // Defer thunks are planned against the caller's own statements.
     if caller.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })) {
@@ -319,6 +323,8 @@ pub fn inline_calls<'a>(
         sites: 0,
         spliced: Vec::new(),
         clear: Vec::new(),
+        in_place,
+        opaque: &opaque,
     };
     for i in 0..b.original {
         if b.body.exprs.len() - b.original > growth {
@@ -351,7 +357,7 @@ pub fn inline_calls<'a>(
     (!b.spliced.is_empty()).then_some((b.body, b.spliced))
 }
 
-struct Inliner {
+struct Inliner<'o> {
     body: HirBody,
     /// Nodes before the rewrite; only these call sites are inlined.
     original: usize,
@@ -360,6 +366,12 @@ struct Inliner {
     spliced: Vec<(String, super::Span)>,
     /// Heap locals spliced into the current statement.
     clear: Vec<LocalId>,
+    /// Splice calls that cannot hoist where they stand, as a block value
+    /// (see [`Inliner::in_place_site`]).
+    in_place: bool,
+    /// A call whose arguments do not run as written (a literal's `len`):
+    /// nothing in them moves.
+    opaque: &'o dyn Fn(HirId) -> bool,
 }
 
 /// Where the inlined call sits in its statement.
@@ -373,7 +385,7 @@ enum Site {
     Nested,
 }
 
-impl Inliner {
+impl Inliner<'_> {
     /// Inline the sites of statement `s`, pushing hoisted statements to
     /// `out`. Returns the statement to keep (`None` when it was the call
     /// and the callee has no result).
@@ -386,7 +398,13 @@ impl Inliner {
     ) -> Option<HirId> {
         while self.body.exprs.len() - self.original <= growth {
             let Some((call, callee, shape)) = self.site_in(s, callee_of) else {
-                break;
+                match self.in_place.then(|| self.in_place_site(s, callee_of)).flatten() {
+                    Some((call, callee, shape)) => {
+                        self.splice_in_place(call, callee, &shape);
+                        continue;
+                    }
+                    None => break,
+                }
             };
             let site = if call == s {
                 Site::Stmt
@@ -397,7 +415,15 @@ impl Inliner {
                     _ => Site::Nested,
                 }
             };
-            let result = self.splice(call, callee, &shape, site, out);
+            let mut hoisted = Vec::new();
+            let result = self.splice(call, callee, &shape, site, &mut hoisted);
+            // A parameter's `let` holds the call's argument, whose own calls
+            // inline like any statement's.
+            for h in hoisted {
+                if let Some(h) = self.statement(h, callee_of, growth, out) {
+                    out.push(h);
+                }
+            }
             match site {
                 // The statement is gone; its result (if any) is the new one.
                 Site::Stmt => s = result?,
@@ -472,6 +498,7 @@ impl Inliner {
         };
         match &b.expr(e).kind {
             HirKind::Lit(_) | HirKind::Local(_) => Ok(()),
+            HirKind::Call { .. } if (self.opaque)(e) => Err(()),
             HirKind::Call {
                 callee: Callee::Named { .. } | Callee::Method { .. },
                 args,
@@ -511,6 +538,64 @@ impl Inliner {
         }
     }
 
+    /// The first call evaluated with no operand below it in statement `s`
+    /// (an operand the hoisting in [`Inliner::site_in`] cannot move ahead
+    /// of: past an effect, under `&&` / `||`, ...), whose callee then runs
+    /// in place as a block value: its parameters' `let`s and statements,
+    /// then its result. Those `let`s need the empty operand stack.
+    fn in_place_site<'a>(
+        &self,
+        s: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+    ) -> Option<(HirId, &'a HirBody, Shape)> {
+        let b = &self.body;
+        let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::lower::primitive).is_some();
+        match &b.expr(s).kind {
+            HirKind::Call {
+                callee: Callee::Named { .. } | Callee::Method { .. },
+                args,
+            } if (s.0 as usize) < self.original => {
+                let (callee, shape) = callee_of(s)?;
+                (callee.params.len() == args.len()).then_some((s, callee, shape))
+            }
+            HirKind::Let { init: Some(x), .. } | HirKind::Return(Some(x)) => self.in_place_site(*x, callee_of),
+            HirKind::Assign { place, value } if matches!(b.expr(*place).kind, HirKind::Local(_)) => {
+                self.in_place_site(*value, callee_of)
+            }
+            HirKind::Logic { lhs, rhs, .. } => self
+                .in_place_site(*lhs, callee_of)
+                .or_else(|| self.in_place_site(*rhs, callee_of)),
+            HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } if scalar(s) && scalar(*x) => {
+                self.in_place_site(*x, callee_of)
+            }
+            HirKind::Bin { op, lhs, rhs }
+                if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) && scalar(*lhs) && scalar(*rhs) =>
+            {
+                self.in_place_site(*lhs, callee_of)
+            }
+            HirKind::If { cond: x, .. } | HirKind::Match { scrutinee: x, .. } => self.in_place_site(*x, callee_of),
+            // A block spliced in place: its statements run in turn.
+            HirKind::Block { stmts, tail } if (s.0 as usize) >= self.original => stmts
+                .iter()
+                .chain(tail)
+                .find_map(|&x| self.in_place_site(x, callee_of)),
+            _ => None,
+        }
+    }
+
+    /// Splice `callee` in for `call` as a block value in the call's place:
+    /// see [`Inliner::in_place_site`].
+    fn splice_in_place(&mut self, call: HirId, callee: &HirBody, shape: &Shape) {
+        let span = self.body.expr(call).span;
+        let mut stmts = Vec::new();
+        let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
+        let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+        // The call's node becomes the block, so its parent still reads it.
+        let e = &mut self.body.exprs[call.0 as usize];
+        e.kind = HirKind::Block { stmts, tail: Some(tail) };
+        e.node = None;
+    }
+
     /// Reads only locals and literals, with no trap and no effect.
     fn pure(&self, e: HirId) -> bool {
         match &self.body.expr(e).kind {
@@ -533,7 +618,8 @@ impl Inliner {
     fn splice(&mut self, call: HirId, callee: &HirBody, shape: &Shape, site: Site, out: &mut Vec<HirId>) -> Option<HirId> {
         self.sites += 1;
         self.spliced.push((callee.name.clone(), callee.span));
-        let tag = self.sites;
+        // Unique across rounds: the caller's locals so far.
+        let tag = self.body.locals.len();
         let off = self.body.exprs.len() as u32;
         let loff = self.body.locals.len() as u32;
         let span = self.body.expr(call).span;

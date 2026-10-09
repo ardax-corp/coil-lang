@@ -33,6 +33,8 @@ enum Rep {
 }
 
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
+/// Typed inlining rounds: the calls a round splices in inline in the next.
+const HIR_INLINE_ROUNDS: usize = 3;
 
 /// Where a field lives: a class slot (`LoadField` / `SetField` slot form)
 /// or a record key (`GetField` / `SetField` by name).
@@ -419,13 +421,21 @@ impl Compiler {
         // inlined form does not plan keeps its calls.
         let mut inlined = None;
         let plan = match plan {
-            Ok(emit) if self.hir_inline_on(hir) => match self.hir_inline_replan(&module, hir, &emit) {
-                Some((body, replanned)) => {
-                    inlined = Some(body);
-                    Ok(replanned)
+            Ok(mut emit) if self.hir_inline_on(hir) => {
+                // Calls inside spliced code inline in the next round, all
+                // rounds together adding at most `growth` nodes.
+                let growth = hir.exprs.len().max(64) * 4;
+                for _ in 0..HIR_INLINE_ROUNDS {
+                    let body = inlined.as_ref().unwrap_or(hir);
+                    let left = growth.saturating_sub(body.exprs.len() - hir.exprs.len());
+                    let Some((next, replanned)) = self.hir_inline_replan(&module, body, &emit, left) else {
+                        break;
+                    };
+                    inlined = Some(next);
+                    emit = replanned;
                 }
-                None => Ok(emit),
-            },
+                Ok(emit)
+            }
             plan => plan,
         };
         let hir = inlined.as_ref().unwrap_or(hir);
@@ -494,12 +504,18 @@ impl Compiler {
             && self.inline_cost.max_inline_cost > 0
             && self.keep_fns_in.is_none()
             && !hir.is_coro
-            && matches!(hir.kind, BodyKind::Function | BodyKind::Method)
+            && matches!(hir.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test)
     }
 
     /// Inline the eligible direct calls `emit` planned in `hir`, then plan
     /// the result. `None` when nothing inlined or the result did not plan.
-    fn hir_inline_replan(&mut self, module: &crate::hir::HirModule, hir: &HirBody, emit: &HirEmit) -> Option<(HirBody, HirEmit)> {
+    fn hir_inline_replan(
+        &mut self,
+        module: &crate::hir::HirModule,
+        hir: &HirBody,
+        emit: &HirEmit,
+        growth: usize,
+    ) -> Option<(HirBody, HirEmit)> {
         use crate::hir::{BodyKind, inline};
         // The module path a body's names resolve in.
         let home = |b: &HirBody| {
@@ -701,11 +717,32 @@ impl Compiler {
             }
             found.ok()
         };
-        let (body, spliced) = inline::inline_calls(hir, callee_of, hir.exprs.len().max(32) * 2)?;
+        let plan = |this: &mut Self, body: &HirBody| {
+            lower::refusal(body, &this.checker)
+                .map_or_else(|| this.plan_hir_body(body), Err)
+                .and_then(|mut emit| this.plan_hir_lambdas(module, body, &mut emit).map(|()| emit))
+                .and_then(|emit| {
+                    // A mono clone's instance call whose context came from
+                    // the generic body's bounds has no dictionary here.
+                    let open = emit.calls.iter().any(|(&id, call)| {
+                        id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var))
+                    });
+                    if open { Err("inline-open-instance") } else { Ok(emit) }
+                })
+        };
+        let opaque = |id: HirId| emit.lens.contains_key(&id.0);
+        let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque)?;
+        // A call spliced in place may sit where its `let`s cannot lower:
+        // then only the hoisted sites.
+        let hoisted = inline::inline_calls(hir, callee_of, growth, false, opaque);
+        let mut replanned = plan(self, &body);
+        if replanned.is_err()
+            && let Some((b, s)) = hoisted
+        {
+            (body, spliced) = (b, s);
+            replanned = plan(self, &body);
+        }
         let sites = spliced.len();
-        let replanned = lower::refusal(&body, &self.checker)
-            .map_or_else(|| self.plan_hir_body(&body), Err)
-            .and_then(|mut emit| self.plan_hir_lambdas(module, &body, &mut emit).map(|()| emit));
         match replanned {
             Ok(emit) => {
                 crate::il::opt::note_hir_inlined(sites);
