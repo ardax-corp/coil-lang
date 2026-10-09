@@ -31,6 +31,7 @@ mod project_index;
 mod strip_tests;
 pub mod symbols;
 mod typechecking;
+pub mod verify;
 #[macro_use]
 mod codegen;
 

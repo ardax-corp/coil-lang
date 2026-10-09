@@ -8344,6 +8344,7 @@ impl Compiler {
             }
         }
         crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
+        crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
