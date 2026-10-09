@@ -466,3 +466,36 @@ test("hand-written") {
     assert_eq!((result.passed, result.failed), (1, 0));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_source_outside_the_test_root_runs_only_its_contract_tests() {
+    let root = unique_tmp("contract_source");
+    let tests = root.join("tests");
+    let src = root.join("src");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("lib.hy");
+    std::fs::write(
+        &file,
+        "fn twice(int x) -> int\n    ensures result == x + x\n{\n    return x * 2;\n}\n\n\
+         fn plain(int x) -> int {\n    return x;\n}\n\n\
+         test(\"own case\") {\n    assert(false)?;\n}\n",
+    )
+    .unwrap();
+    let mut opts = options(&tests, false);
+    opts.contract_runs = 10;
+    let reactor = Reactor::new(1);
+    let names = |compiled: Compiled| match compiled {
+        Compiled::Ready(p) => p.cases.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+        Compiled::Nothing => Vec::new(),
+        Compiled::Decided(ok, m) => panic!("decided {ok} {m:?}"),
+    };
+    let compiled = compile_test_file(&ReportConfig::default(), &opts, &reactor, &file, None, &[], None);
+    assert_eq!(names(compiled), ["contract: twice"]);
+    // Without contract tests there is nothing to run there.
+    opts.contract_runs = 0;
+    let compiled = compile_test_file(&ReportConfig::default(), &opts, &reactor, &file, None, &[], None);
+    assert!(names(compiled).is_empty());
+    reactor.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -307,7 +307,7 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
             .map(|s| (s.clone(), broken.clone()))
             .collect();
         if let Compiled::Ready(_) =
-            compile_test_file(&config, &run_options, &reactor, file, None, &overlays)
+            compile_test_file(&config, &run_options, &reactor, file, None, &overlays, None)
         {
             reactor.shutdown();
             return Err(format!(

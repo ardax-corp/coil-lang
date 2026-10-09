@@ -30,6 +30,7 @@ mod contracts;
 
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
+pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
 
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
@@ -104,6 +105,8 @@ pub struct Pipeline {
     include_tests: bool,
     /// Calls per generated contract test case; 0 generates none.
     contract_runs: u32,
+    /// Files other than the entry whose functions would get contract tests.
+    contract_sources: Vec<PathBuf>,
     /// Coverage: keep every function defined in files this accepts.
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
@@ -719,6 +722,7 @@ impl Pipeline {
             ast_cache: crate::ast_cache::AstCache::default(),
             include_tests: false,
             contract_runs: 0,
+            contract_sources: Vec::new(),
             keep_fns_in: None,
             auto_par: true,
             hir_inline: crate::hir::inline::inline_from_env(),
@@ -1137,6 +1141,7 @@ impl Pipeline {
         self.ast_cache.clear();
         self.generated_ranges.clear();
         self.derived_items.clear();
+        self.contract_sources.clear();
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
@@ -1755,6 +1760,12 @@ impl Pipeline {
     /// Only with [`Self::set_include_tests`].
     pub fn set_contract_runs(&mut self, runs: u32) {
         self.contract_runs = runs;
+    }
+
+    /// Modules of the last compile, besides the entry, with functions that
+    /// would get contract tests (`set_contract_runs`) if compiled as the entry.
+    pub fn contract_sources(&self) -> &[PathBuf] {
+        &self.contract_sources
     }
 
     pub fn include_tests(&self) -> bool {

@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use coil_host::{
@@ -200,6 +201,8 @@ struct Run<'a> {
     options: &'a TestOptions,
     reactor: &'a Arc<Reactor>,
     coverage: Option<&'a Mutex<Coverage>>,
+    /// Project sources with contract tests, found while compiling tests.
+    sources: Mutex<BTreeSet<PathBuf>>,
 }
 
 /// A case's verdict, or the handle to wait on for it.
@@ -445,6 +448,8 @@ pub(crate) enum Compiled {
     /// without cases or `main` run from the top): `(ok, message)`.
     Decided(bool, Option<String>),
     Ready(Box<Prepared>),
+    /// A project source compiled for its contract tests has none to run.
+    Nothing,
 }
 
 /// Compile one test file with `overlays` (path spelling → text) standing in
@@ -456,7 +461,11 @@ pub(crate) fn compile_test_file(
     path: &Path,
     diagnostics: Option<&Captured>,
     overlays: &[(PathBuf, String)],
+    sources: Option<&Mutex<BTreeSet<PathBuf>>>,
 ) -> Compiled {
+    // A project source outside the test root runs only its generated
+    // contract tests: not its `main`, not its own `test` blocks.
+    let contract_source = is_contract_source(options, path);
     let display = path.display().to_string();
     let expect_compile_fail = is_compile_fail(path);
     // Expected compile rejection: suppress ariadne noise so the harness
@@ -502,6 +511,12 @@ pub(crate) fn compile_test_file(
         pipeline.compile_src_from_file(&display)
     }));
     let mut cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
+    if contract_source {
+        cases.retain(|(name, _)| name.starts_with(compiler::CONTRACT_CASE_PREFIX));
+    } else if let Some(sources) = sources {
+        let found = project_sources(options, pipeline.contract_sources());
+        sources.lock().unwrap_or_else(|e| e.into_inner()).extend(found);
+    }
     options.order.order_cases(&options.root, path, &mut cases);
     let _ = pipeline.finish_reporting();
 
@@ -530,6 +545,9 @@ pub(crate) fn compile_test_file(
         }
         Ok(Ok(ok)) => ok,
     };
+    if contract_source && cases.is_empty() {
+        return Compiled::Nothing;
+    }
     let strings = pipeline.strings().to_vec();
     let main = pipeline.main_offset();
 
@@ -592,6 +610,26 @@ pub(crate) fn compile_test_file(
     }))
 }
 
+/// True when `path` is not under the test root: a project source compiled
+/// for its contract tests.
+fn is_contract_source(options: &TestOptions, path: &Path) -> bool {
+    !canonical(path).starts_with(canonical(&options.root))
+}
+
+/// The files of `found` that are project sources: under the current
+/// directory, outside the test root and `.deps/`.
+fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(cwd) = std::env::current_dir().map(|d| canonical(&d)) else { return Vec::new() };
+    let root = canonical(&options.root);
+    found
+        .iter()
+        .map(|f| canonical(f))
+        .filter(|f| f.is_file() && f.starts_with(&cwd) && !f.starts_with(&root))
+        .filter(|f| !f.strip_prefix(&cwd).is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".deps")))
+        .map(|f| f.strip_prefix(&cwd).map(Path::to_path_buf).unwrap_or(f))
+        .collect()
+}
+
 /// Compile one file, then decide it or start its cases.
 fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
     let diagnostics = Captured::default();
@@ -602,10 +640,21 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
         path,
         Some(&diagnostics),
         &[],
+        Some(&run.sources),
     );
     let prepared = match compiled {
         Compiled::Decided(ok, message) => {
             return PendingFile::decided(path, diagnostics, (ok, message));
+        }
+        Compiled::Nothing => {
+            return PendingFile {
+                path: path.to_path_buf(),
+                display: path.display().to_string(),
+                diagnostics,
+                verdict: None,
+                cases: Vec::new(),
+                lines: None,
+            };
         }
         Compiled::Ready(prepared) => prepared,
     };
@@ -681,12 +730,36 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         options,
         reactor: &reactor,
         coverage: coverage.as_ref(),
+        sources: Mutex::new(BTreeSet::new()),
     };
     let mut result = if jobs == 1 {
         run_serial(&run, &files)
     } else {
         run_parallel(&run, &files, jobs)
     };
+    // Then the contract tests of the project sources the tests compiled.
+    let mut sources: Vec<PathBuf> =
+        std::mem::take(&mut *run.sources.lock().unwrap_or_else(|e| e.into_inner())).into_iter().collect();
+    let stopped = run.options.fail_fast && result.failed != 0;
+    if !sources.is_empty() && !stopped {
+        options.order.order_files(&mut sources);
+        if options.report == Report::Human {
+            eprintln!(
+                "contracts of {} project file{}",
+                sources.len(),
+                if sources.len() == 1 { "" } else { "s" }
+            );
+        }
+        let more = if jobs == 1 {
+            run_serial(&run, &sources)
+        } else {
+            run_parallel(&run, &sources, jobs)
+        };
+        result.passed += more.passed;
+        result.failed += more.failed;
+        result.files_run.extend(more.files_run);
+        result.cases.extend(more.cases);
+    }
     reactor.shutdown();
     result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
     Ok(result)

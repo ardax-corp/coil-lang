@@ -31,6 +31,9 @@ struct Target {
     site: std::ops::Range<usize>,
 }
 
+/// Name prefix of every generated case.
+pub const CASE_PREFIX: &str = "contract: ";
+
 impl Pipeline {
     /// Add contract test cases to the entry file (when `coil test` asked for
     /// them with `set_contract_runs`).
@@ -47,6 +50,19 @@ impl Pipeline {
                 collect_instances(ast, &mut arbitrary, &mut shown);
             }
         }
+        // Other files with contracts get their cases when compiled as the
+        // entry (`coil test` runs them after the suite).
+        self.contract_sources = files
+            .iter()
+            .filter(|f| **f != entry && crate::macros::embedded_module(f).is_none())
+            .filter(|f| {
+                self.ast_cache
+                    .get(f)
+                    .and_then(|c| c.ast())
+                    .is_some_and(|ast| !targets(ast, &arbitrary, &shown).is_empty())
+            })
+            .cloned()
+            .collect();
         let Some(cached) = self.ast_cache.get_mut(&entry) else { return };
         let Some(ast) = cached.ast() else { return };
         let targets = targets(ast, &arbitrary, &shown);
@@ -111,7 +127,7 @@ impl Pipeline {
 }
 
 fn case_name(t: &Target) -> String {
-    format!("contract: {}", t.path)
+    format!("{CASE_PREFIX}{}", t.path)
 }
 
 /// Types with an `Arbitrary` instance and types with a `Show` instance, by
@@ -175,8 +191,13 @@ fn show_expr(ty: &Output<'_>, name: &str, shown: &HashSet<String>) -> Option<Str
 
 /// Functions and static methods of the entry file with contracts and
 /// generatable parameters.
+/// None in a file with a `main`: test cases cannot share a file with it.
 fn targets(ast: &Output<'_>, arbitrary: &HashSet<String>, shown: &HashSet<String>) -> Vec<Target> {
     let Expression::Program(items) = ast.1.as_ref() else { return Vec::new() };
+    let is_main = |i: &Output<'_>| matches!(i.1.as_ref(), Expression::Function { name: "main", .. });
+    if items.iter().any(is_main) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for item in items {
         match item.1.as_ref() {
