@@ -3631,8 +3631,29 @@ struct EmitConstParChunksArgs<'args> {
     done: crate::il::Label,
 }
 
+/// Frame slots of a parallel loop site in the enclosing body.
+pub(super) struct ParLoopSlots {
+    pub index: u32,
+    pub acc: u32,
+    pub live: Vec<u32>,
+    pub begin: Option<u32>,
+    pub end: Option<u32>,
+}
+
+/// A chunk worker being emitted, with the enclosing frame it set aside.
+pub(super) struct ParWorker {
+    entry: u32,
+    prev_ctx: Context,
+    prev_depth: u32,
+    bb: BlockBuilder,
+    top: crate::il::Label,
+    exit: crate::il::Label,
+}
+
 struct EmitDynamicParChunksArgs<'args> {
     site: &'args crate::typechecking::LoopParSite,
+    /// The runtime begin and end locals' slots.
+    bounds: (Option<u32>, Option<u32>),
     bb: &'args mut BlockBuilder,
     worker: u32,
     arity: u32,
@@ -10100,63 +10121,29 @@ impl Compiler {
         binding: Option<&Output<'_>>,
         loop_id: Option<crate::typechecking::id::NodeId>,
     ) -> bool {
-        use crate::typechecking::LoopReduceOp;
-
-        let Some(site) = self.loop_par_sites.get(&(span.start, span.end)).cloned() else {
+        let Some(site) = self.par_loop_site(span, loop_id) else {
             return false;
         };
-        // Reassociating a float reduction changes results. Counted `for` uses
-        // Q6 int Range kind. `while` IVs are const ints from analysis; the
-        // per-iteration value is sidecar-`int`.
-        if site.implicit_step {
-            match self
-                .sidecar_for_in(loop_id, span.start, span.end)
-                .as_ref()
-                .map(|i| &i.kind)
-            {
-                Some(ForInKind::Range { float: false, .. }) => {}
-                _ => return false,
-            }
-        }
         if site.implicit_step {
             // Match sequential for-in: allocate the binding before looking it up
             // so a shadowing `for x in` does not store into an outer `x`.
             self.alloc_binding_slot(&site.index);
         }
-        let (Some(index_slot), Some(acc_slot)) =
-            (self.lookup_slot(&site.index), self.lookup_slot(&site.acc))
-        else {
+        let (Some(index), Some(acc)) = (self.lookup_slot(&site.index), self.lookup_slot(&site.acc)) else {
             return false;
         };
-        let mut live_slots = Vec::with_capacity(site.live_captures.len());
-        for name in &site.live_captures {
-            let Some(slot) = self.lookup_slot(name) else {
-                return false;
-            };
-            live_slots.push(slot);
-        }
-        let arity = 3 + live_slots.len() as u32;
-        if arity as usize > common::MAX_THREAD_SPAWN_ARGS {
-            return false;
-        }
-        for name in site.begin_local.iter().chain(&site.end_local) {
-            if self.lookup_slot(name).is_none() {
-                return false;
-            }
-        }
-        let (Some(spawn_id), Some(join_id)) = (
-            self.native_id("thread_spawn_shared")
-                .or_else(|| self.native_id("thread_spawn")),
-            self.native_id("thread_join"),
-        ) else {
+        let Some(live) = site.live_captures.iter().map(|name| self.lookup_slot(name)).collect::<Option<Vec<_>>>() else {
             return false;
         };
-        let fold = match site.op {
-            LoopReduceOp::Add => Instruction::ADD,
-            LoopReduceOp::Mul => Instruction::MUL,
-            LoopReduceOp::Xor => Instruction::XOR,
+        let bound = |this: &Self, name: &Option<String>| name.as_ref().map(|n| this.lookup_slot(n));
+        let (begin, end) = (bound(self, &site.begin_local), bound(self, &site.end_local));
+        if matches!(begin, Some(None)) || matches!(end, Some(None)) {
+            return false;
+        }
+        let slots = ParLoopSlots { index, acc, live, begin: begin.flatten(), end: end.flatten() };
+        let Some(natives) = self.par_loop_natives(&slots) else {
+            return false;
         };
-        let identity = site.op.identity() as i32;
 
         // The chunk worker tests `i < hi` against its own bound, but the
         // iterable (and for-in binding) NodeIds still have to be consumed in
@@ -10168,13 +10155,66 @@ impl Compiler {
 
         let mut bb = BlockBuilder::new();
         let after_worker = bb.fresh_label(self.bytecode.il_mut());
-        bb.emit_jump_to(
-            after_worker,
-            BbJumpKind::Unconditional,
-            self.bytecode.il_mut(),
-        );
-        let worker = self.emit_par_loop_worker(&site, body);
+        bb.emit_jump_to(after_worker, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        let worker = self.par_worker_begin(&site);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
+        let worker = self.par_worker_end(&site, worker);
         bb.bind_label(after_worker, self.bytecode.il_mut());
+        self.emit_par_loop_chunks(&site, &slots, natives, worker, bb);
+        true
+    }
+
+    /// The parallel-loop site at `span`, when its induction is one this
+    /// codegen chunks: counted `for` needs Q6's int `Range` kind (`while`
+    /// IVs are const ints from analysis; the per-iteration value is
+    /// sidecar-`int`).
+    pub(super) fn par_loop_site(
+        &self,
+        span: SimpleSpan,
+        loop_id: Option<crate::typechecking::id::NodeId>,
+    ) -> Option<crate::typechecking::LoopParSite> {
+        let site = self.loop_par_sites.get(&(span.start, span.end)).cloned()?;
+        // Reassociating a float reduction changes results.
+        if site.implicit_step
+            && !matches!(
+                self.sidecar_for_in(loop_id, span.start, span.end).as_ref().map(|i| &i.kind),
+                Some(ForInKind::Range { float: false, .. })
+            )
+        {
+            return None;
+        }
+        Some(site)
+    }
+
+    /// The spawn and join natives for a site with these slots, when its
+    /// worker's arguments fit a thread spawn.
+    pub(super) fn par_loop_natives(&self, slots: &ParLoopSlots) -> Option<(usize, usize)> {
+        if 3 + slots.live.len() > common::MAX_THREAD_SPAWN_ARGS {
+            return None;
+        }
+        let spawn = self.native_id("thread_spawn_shared").or_else(|| self.native_id("thread_spawn"))?;
+        Some((spawn, self.native_id("thread_join")?))
+    }
+
+    /// The fork-join around chunk worker `worker`: `MakeFn` of it, then the
+    /// const or dynamic chunk split, folding into the accumulator.
+    pub(super) fn emit_par_loop_chunks(
+        &mut self,
+        site: &crate::typechecking::LoopParSite,
+        slots: &ParLoopSlots,
+        (spawn_id, join_id): (usize, usize),
+        worker: u32,
+        mut bb: BlockBuilder,
+    ) {
+        use crate::typechecking::LoopReduceOp;
+        let arity = 3 + slots.live.len() as u32;
+        let fold = match site.op {
+            LoopReduceOp::Add => Instruction::ADD,
+            LoopReduceOp::Mul => Instruction::MUL,
+            LoopReduceOp::Xor => Instruction::XOR,
+        };
+        let identity = site.op.identity() as i32;
 
         // MakeFn of the worker, then spawn every chunk but the first.
         self.bytecode.push_const(0);
@@ -10191,14 +10231,15 @@ impl Compiler {
 
         if site.is_dynamic() {
             self.emit_dynamic_par_chunks(EmitDynamicParChunksArgs {
-                site: &site,
+                site,
+                bounds: (slots.begin, slots.end),
                 bb: &mut bb,
                 worker,
                 arity,
                 fn_tmp,
-                acc_slot,
-                index_slot,
-                live_slots: &live_slots,
+                acc_slot: slots.acc,
+                index_slot: slots.index,
+                live_slots: &slots.live,
                 spawn_id,
                 join_id,
                 identity,
@@ -10216,8 +10257,8 @@ impl Compiler {
                 worker,
                 arity,
                 fn_tmp,
-                acc_slot,
-                live_slots: &live_slots,
+                acc_slot: slots.acc,
+                live_slots: &slots.live,
                 spawn_id,
                 join_id,
                 identity,
@@ -10226,10 +10267,8 @@ impl Compiler {
                 done,
             });
             self.push_int_const(site.final_index());
-            self.bytecode.push_store_pop(index_slot);
+            self.bytecode.push_store_pop(slots.index);
         }
-
-        true
     }
 
     /// Const range: spawn chunks 1..n, run chunk 0 inline, fold in order.
@@ -10337,6 +10376,7 @@ impl Compiler {
     fn emit_dynamic_par_chunks(&mut self, args: EmitDynamicParChunksArgs<'_>) {
         let EmitDynamicParChunksArgs {
             site,
+            bounds,
             bb,
             worker,
             arity,
@@ -10354,9 +10394,9 @@ impl Compiler {
 
         let begin_tmp = self.alloc_temp_slot();
         let end_tmp = self.alloc_temp_slot();
-        self.emit_runtime_bound(&site.begin_local, site.begin, 0);
+        self.emit_runtime_bound(bounds.0, site.begin, 0);
         self.bytecode.push_store_pop(begin_tmp);
-        self.emit_runtime_bound(&site.end_local, site.end, site.end_bias);
+        self.emit_runtime_bound(bounds.1, site.end, site.end_bias);
         self.bytecode.push_store_pop(end_tmp);
 
         let trip_pos = bb.fresh_label(self.bytecode.il_mut());
@@ -10474,10 +10514,8 @@ impl Compiler {
         self.bytecode.push_store_pop(index_slot);
     }
 
-    fn emit_runtime_bound(&mut self, local: &Option<String>, konst: i64, bias: i64) {
-        if let Some(name) = local
-            && let Some(slot) = self.lookup_slot(name)
-        {
+    fn emit_runtime_bound(&mut self, slot: Option<u32>, konst: i64, bias: i64) {
+        if let Some(slot) = slot {
             self.bytecode.push_load(slot);
         } else {
             self.push_int_const(konst);
@@ -10556,19 +10594,16 @@ impl Compiler {
         bb.bind_label(next, self.bytecode.il_mut());
     }
 
-    /// Emit the chunk worker `(lo, hi, acc, …captures) -> acc'` and return its entry.
+    /// Open the chunk worker `(lo, hi, acc, …captures) -> acc'` for `site`:
+    /// a private function in a fresh frame, at the head of its `lo <= hi`
+    /// loop. The caller emits the original body, then [`Self::par_worker_end`].
     ///
     /// Slots 0..2 are the induction variable, the chunk bound, and the accumulator.
     /// Later slots are int captures the body reads. Const ints are stored once
     /// on entry; live ints arrive as arguments.
-    fn emit_par_loop_worker(
-        &mut self,
-        site: &crate::typechecking::LoopParSite,
-        body: &Output<'_>,
-    ) -> u32 {
+    pub(super) fn par_worker_begin(&mut self, site: &crate::typechecking::LoopParSite) -> ParWorker {
         const INDEX_SLOT: u32 = 0;
         const BOUND_SLOT: u32 = 1;
-        const ACC_SLOT: u32 = 2;
 
         self.loop_par_helpers += 1;
         let name = format!("__coil_par_loop_{}", self.loop_par_helpers);
@@ -10603,8 +10638,15 @@ impl Compiler {
         self.bytecode.push_load(BOUND_SLOT);
         self.bytecode.push(Byte::new(Instruction::LE));
         bb.emit_jump_to(exit, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-        let mut body_bc = self.do_compile(body);
-        self.bytecode.append(&mut body_bc);
+        ParWorker { entry, prev_ctx, prev_depth, bb, top, exit }
+    }
+
+    /// Close the worker [`Self::par_worker_begin`] opened: the step, the back
+    /// edge and `return acc`; restores the enclosing frame. Its entry.
+    pub(super) fn par_worker_end(&mut self, site: &crate::typechecking::LoopParSite, worker: ParWorker) -> u32 {
+        const INDEX_SLOT: u32 = 0;
+        const ACC_SLOT: u32 = 2;
+        let ParWorker { entry, prev_ctx, prev_depth, mut bb, top, exit } = worker;
         if site.implicit_step {
             self.bytecode.push_load(INDEX_SLOT);
             self.push_int_const(site.stride);
