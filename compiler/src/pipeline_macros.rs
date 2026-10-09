@@ -241,14 +241,20 @@ impl Pipeline {
             return Ok((file.to_path_buf(), decl, module));
         }
         let mut found: Vec<(PathBuf, MacroDecl)> = Vec::new();
+        // An embedded module (`arbitrary`) or a file under the roots.
+        let resolve = |path: &[String], name: &str| {
+            crate::macros::embedded_use(path, name)
+                .map(|(file, _)| file)
+                .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, name))
+        };
         for (path, name, alias) in top_level_uses(ast) {
             let visible = alias.as_deref().unwrap_or(&name);
             let (candidate, item) = if name == "*" {
                 let mut segs = path.clone();
                 let Some(last) = segs.pop() else { continue };
-                (resolve_use_in_roots(&self.roots, &self.project_root, &segs, &last), p.name.clone())
+                (resolve(&segs, &last), p.name.clone())
             } else if visible == p.name {
-                (resolve_use_in_roots(&self.roots, &self.project_root, &path, &name), name.clone())
+                (resolve(&path, &name), name.clone())
             } else {
                 continue;
             };
