@@ -319,13 +319,7 @@ impl Compiler {
                 }
             }
         }
-        if !module.is_empty() {
-            for body in &hir.bodies {
-                if let Some((key, portable)) = self.hir_portable_body(body) {
-                    self.hir_portable.insert(key, portable);
-                }
-            }
-        }
+
         self.hir_module = Some(hir);
     }
 
@@ -552,6 +546,13 @@ impl Compiler {
             plan => plan,
         };
         let hir = inlined.as_ref().unwrap_or(hir);
+        // Another module may splice this body, as inlined here.
+        if !self.namespace.is_empty()
+            && plan.is_ok()
+            && let Some((key, portable)) = self.hir_portable_body(hir)
+        {
+            self.hir_portable.insert(key, portable);
+        }
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
@@ -699,9 +700,12 @@ impl Compiler {
                             !call.key.contains('#')
                                 || !b.exprs.iter().any(|e| matches!(e.kind, HirKind::Call { .. }))
                         });
-                        let Some(callee) = portable else {
+                        let Some(callee) = portable.filter(|_| self.inline_cost.inline_across_modules) else {
                             return Err(format!("no body `{name}`"));
                         };
+                        if !self.callee_is_visible_for_inline(name) {
+                            return Err(format!("hidden `{name}`"));
+                        }
                         let HirKind::Call { args, .. } = &hir.expr(id).kind else {
                             return Err("not-call".to_string());
                         };
@@ -710,6 +714,12 @@ impl Compiler {
                         });
                         if callee.params.len() != args.len() || callee.name == hir.name || recursive {
                             return Err(format!("callee `{}`", callee.name));
+                        }
+                        // The stricter cross-module budget weighs every node
+                        // (a read too) and a call as 25, as the IL's op count.
+                        let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
+                        if size > self.inline_cost.max_cross_module_inline_cost {
+                            return Err("cost".to_string());
                         }
                         let shape = inline::inlinable(callee, budget)?.with_foreign(true);
                         return Ok((callee, shape));
