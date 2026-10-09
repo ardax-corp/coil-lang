@@ -2170,7 +2170,15 @@ fn emit_args_on_stack(args: EmitArgsOnStackArgs<'_>) -> Result<(), LowerError> {
     if !args.is_empty() && stacked.ends_with(args) {
         return Ok(());
     }
-    for &a in args {
+    // A pushed argument is spoken for: a later argument must not consume it
+    // as an operand (`g(c, 1, c - 1)` would fold `c, 1` into the `SUB`), nor
+    // reuse it as its own value (`f(x, x)`), so each one after the first
+    // sees only what it pushes itself.
+    let mut below = Vec::new();
+    for (i, &a) in args.iter().enumerate() {
+        if i > 0 {
+            below.append(stacked);
+        }
         emit_stack_value(EmitStackValueArgs {
             out,
             stacked,
@@ -2182,6 +2190,8 @@ fn emit_args_on_stack(args: EmitArgsOnStackArgs<'_>) -> Result<(), LowerError> {
             loc,
         })?;
     }
+    below.append(stacked);
+    *stacked = below;
     Ok(())
 }
 
