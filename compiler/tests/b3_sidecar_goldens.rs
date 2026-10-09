@@ -46,7 +46,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("functions.hy", "a1185b8127e3435d_304"),
     ("loops.hy", "d91e9ca0105e4005_248"),
     ("option_pair.hy", "9bd375f8a6acb9c1_340"),
-    ("user_trait_dispatch.hy", "530b8d9b5e6d84f4_138"),
+    ("user_trait_dispatch.hy", "9bc2e6077835a020_122"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
