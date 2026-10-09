@@ -891,8 +891,10 @@ mod tests {
         };
         let waker = Arc::new(TaskWaker::default());
         set_task_waiter(Some((Arc::clone(&waker), 5, 8)));
+        // Windows retries a refused SYN for about two seconds before it
+        // reports the refusal, so the deadline leaves room for that.
         let r = loop {
-            match connect_in_task("127.0.0.1", port, 2000) {
+            match connect_in_task("127.0.0.1", port, 10_000) {
                 Some(Some(r)) => break r,
                 Some(None) => {
                     let req = take_io_retry_park().expect("parked on the socket");
