@@ -106,7 +106,7 @@ test("every variant shows up") {
     while i < 100 {
         let s: Shape = any(g);
         match s {
-            Shape::Circle { r: _ } => circles += 1,
+            Shape::Circle{ r: _ } => circles += 1,
             Shape::Square(_) => squares += 1,
             Shape::Dot => dots += 1,
         }
