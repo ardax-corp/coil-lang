@@ -5,8 +5,7 @@
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
 //! [`super::IlModule::optimize_and_flatten`] still defers
-//! `invert_guard_branch`,
-//! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
+//! `slot_promote_tell` and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
 //!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
@@ -36,8 +35,6 @@ pub struct OptimizeOptions {
     pub loop_bounds: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
     pub clone_shared_return: bool,
-    /// `JMPF A; JMP B; A:` → `JMPT B` for non-fusable guard conditions.
-    pub invert_guard_branch: bool,
     /// Drop `LOAD`/`STORE` the shared cursor proves redundant, promoting the
     /// slot out of the frame. Runs last, after every slot-tracking pass.
     pub slot_promote_tell: bool,
@@ -209,7 +206,6 @@ pub(crate) mod escape_analysis;
 mod loop_unroll;
 mod slot_promote;
 
-pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
 pub(crate) use slot_promote::slot_promote_at;
 
 #[cfg(test)]

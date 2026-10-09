@@ -3,8 +3,8 @@
 //! Cheap split of one [`super::CodeBuf`] — not a second IL language.
 //! Codegen keeps a flat [`super::CodeBuf`] stream. At lower time the buffer is
 //! split into owned function bodies (plus prologue / glue / epilogue), opts and
-//! CFG GVN run per body, then the stream is concatenated for whole-buffer
-//! guard inversion and a single fuse/PC lower.
+//! CFG GVN run per body, then the stream is concatenated for a single
+//! fuse/PC lower.
 
 use std::collections::{HashMap, HashSet};
 
@@ -318,8 +318,7 @@ impl IlModule {
         }
     }
 
-    /// Per-func opts + CFG GVN on each body, then whole-buffer
-    /// [`opt::invert_guard_branch`] on the concatenated stream.
+    /// Per-func opts + CFG GVN on each body, then concatenate the bodies.
     ///
     /// `pool` is the module const pool (`f64` / boxed int bits) for algebraic
     /// float identity / const-fold peeps (may push folded float results).
@@ -329,8 +328,6 @@ impl IlModule {
         pool: &mut Vec<u64>,
     ) -> FlatIl {
         let mut per = opts.clone();
-        let run_invert = per.invert_guard_branch;
-        per.invert_guard_branch = false;
         // GVN reasons about slot defs; promotion removes the store that makes one
         // visible, so it runs after GVN has seen the body.
         let run_slot_promote_tell = per.slot_promote_tell;
@@ -543,11 +540,7 @@ impl IlModule {
         } else {
             self.apply_loop_cursor_raises(&vec!["fuse"; self.funcs.len()]);
         }
-        let (mut flat, remap, func_maps) = self.to_flat();
-        if run_invert {
-            opt::invert_guard_branch(&mut flat);
-        }
-        (flat, remap, func_maps)
+        self.to_flat()
     }
 }
 
@@ -1598,7 +1591,6 @@ mod tests {
             licm: false,
             loop_bounds: false,
             clone_shared_return: false,
-            invert_guard_branch: false,
             slot_promote_tell: true,
             loop_unroll: false,
             loop_unroll_factor: 8,

@@ -600,7 +600,6 @@ mod tests {
             licm: false,
             loop_bounds: false,
             clone_shared_return: false,
-            invert_guard_branch: false,
             slot_promote_tell: false,
             loop_unroll: false,
             ssa_gvn: false,

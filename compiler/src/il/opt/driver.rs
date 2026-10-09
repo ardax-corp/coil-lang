@@ -6,7 +6,7 @@
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
 //! `IlModule::optimize_and_flatten` still defers
-//! `invert_guard_branch`, `slot_promote_tell`, and `ssa_gvn`
+//! `slot_promote_tell` and `ssa_gvn`
 //! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
 //! in `lower_optimized`.
 
@@ -206,15 +206,6 @@ fn apply_clone_shared_return(
     0
 }
 
-fn apply_invert_guard_branch(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
-) -> usize {
-    super::cfg::invert_branch_over_jump(ops);
-    0
-}
-
 fn apply_branch_optimization(
     ops: &mut Vec<IlOp>,
     _: &OptimizeOptions,
@@ -359,16 +350,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_clone_shared_return),
     },
     PassSpec {
-        name: "invert_guard_branch",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.invert_guard_branch,
-        set_flag: |o| o.invert_guard_branch = true,
-        apply: ApplyFn::Grow(apply_invert_guard_branch),
-    },
-    PassSpec {
         name: "branch_optimization",
         phase: Phase::Decision,
         kind: PassKind::Branch,
@@ -425,7 +406,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "escape_analysis",
     "slot_promote",
     "clone_shared_return",
-    "invert_guard_branch",
     "branch_optimization",
     "block_reordering",
     "slot_promote_tell",
@@ -464,7 +444,6 @@ mod tests {
                 "escape_analysis",
                 "slot_promote",
                 "clone_shared_return",
-                "invert_guard_branch",
                 "branch_optimization",
                 "block_reordering",
                 "slot_promote_tell",

@@ -148,7 +148,7 @@ fn try_lower_with_funcs(
 
 /// Optimize an owning [`super::IlModule`] and lower once (fuse-select + PC assign).
 ///
-/// Pipeline: per-body opts/GVN → concat → whole-buffer guard inversion → single lower.
+/// Pipeline: per-body opts/GVN → concat → single lower.
 #[cfg(test)]
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
     try_lower_module(module, pool).unwrap_or_else(|e| panic!("{e}"))
