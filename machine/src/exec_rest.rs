@@ -581,22 +581,31 @@ impl<const S: usize> Machine<S> {
                             let layout = crate::host_enum::HostEnumLayout::from_operand(
                                 opcode.operand_u32(),
                             );
-                            // `stream_park` parks the task (not the thread) under a scheduler.
-                            let park_tasks = fn_id == common::STREAM_PARK_ID as usize
-                                && self.tasks_can_switch();
+                            // Under a scheduler, natives that would block the thread
+                            // (`stream_park`, `thread` recv / join / locks) suspend
+                            // the task instead.
+                            let park_tasks = self.tasks_can_switch();
                             if unlikely(park_tasks) {
-                                crate::task::set_tasks_active(true);
+                                crate::task::set_task_waiter(self.task_waiter());
                             }
                             let invoked = crate::host_enum::with_host_enum_layout(layout, || {
                                 native.invoke(&mut self.heap, args)
                             });
                             if unlikely(park_tasks) {
-                                crate::task::set_tasks_active(false);
+                                crate::task::set_task_waiter(None);
                             }
                             match invoked {
                                 Ok(Some(v)) => {
                                     self.stack.seek(tell - consume);
                                     self.stack.push(v);
+                                }
+                                Ok(None) if park_tasks && crate::task::take_thread_parked() => {
+                                    // The arguments stay: the HostInvoke runs again
+                                    // when another thread posts the wake.
+                                    self.task_suspend_thread(&mut ip, &mut sp);
+                                    *ip_out = ip;
+                                    *sp_out = sp;
+                                    return dispatch::RestFlow::Continue;
                                 }
                                 Ok(None) => {
                                     self.stack.seek(tell - consume);

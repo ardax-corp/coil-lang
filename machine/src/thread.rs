@@ -13,6 +13,7 @@ use parking_lot::RawMutex;
 use parking_lot::lock_api::RawMutex as RawMutexOps;
 
 use crate::AddrHashBuilder;
+use crate::task::ThreadWaiters;
 
 /// Per-root-VM registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
@@ -288,6 +289,8 @@ pub struct JoinState {
     detached: AtomicBool,
     joined: AtomicBool,
     shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// Tasks waiting in `join` (woken when the result is stored).
+    waiters: ThreadWaiters,
 }
 
 /// Join-state payload (result slot).
@@ -304,6 +307,7 @@ impl JoinState {
             detached: AtomicBool::new(false),
             joined: AtomicBool::new(false),
             shared_epoch: None,
+            waiters: ThreadWaiters::default(),
         }
     }
 
@@ -321,6 +325,15 @@ impl JoinState {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.result = Some(result);
         self.finished.notify_all();
+        drop(g);
+        self.waiters.wake_all();
+    }
+
+    /// Under a task scheduler, park the running task until the result is
+    /// stored. True when it parked.
+    fn park_task_until_done(&self) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.result.is_none() && self.waiters.park_current()
     }
 
     fn wait_result(&self) -> Result<PortableValue, ThreadErrorTag> {
@@ -343,6 +356,8 @@ pub struct ChannelInner {
     queue: Mutex<VecDeque<PortableValue>>,
     closed: AtomicBool,
     not_empty: Condvar,
+    /// Tasks waiting in `recv` (woken by a send or the close).
+    waiters: ThreadWaiters,
 }
 
 impl ChannelInner {
@@ -351,12 +366,17 @@ impl ChannelInner {
             queue: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
             not_empty: Condvar::new(),
+            waiters: ThreadWaiters::default(),
         }
     }
 
     fn close(&self) {
+        // Under the queue lock: a task registering in `recv` sees it or is woken.
+        let q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         self.closed.store(true, Ordering::SeqCst);
         self.not_empty.notify_all();
+        drop(q);
+        self.waiters.wake_all();
     }
 
     fn is_closed(&self) -> bool {
@@ -369,6 +389,8 @@ impl ChannelInner {
 pub struct MutexInner {
     lock: RawMutex,
     value: UnsafeCell<PortableValue>,
+    /// Tasks waiting to lock it (woken by every unlock).
+    waiters: ThreadWaiters,
 }
 
 unsafe impl Send for MutexInner {}
@@ -379,11 +401,23 @@ impl MutexInner {
         Self {
             lock: RawMutex::INIT,
             value: UnsafeCell::new(initial),
+            waiters: ThreadWaiters::default(),
         }
     }
 
-    fn lock(&self) {
-        self.lock.lock();
+    /// Lock it, or (under a task scheduler, when it is held) park the
+    /// running task until an unlock. False when it parked.
+    fn lock_or_park_task(&self) -> bool {
+        if self.lock.try_lock() {
+            return true;
+        }
+        match self.waiters.park_unless(|| self.lock.try_lock()) {
+            Some(locked) => locked,
+            None => {
+                self.lock.lock();
+                true
+            }
+        }
     }
 
     fn try_lock(&self) -> bool {
@@ -392,6 +426,7 @@ impl MutexInner {
 
     pub(crate) unsafe fn unlock(&self) {
         unsafe { self.lock.unlock() }
+        self.waiters.wake_all();
     }
 
     /// Payload pointer while `lock` is held. Callers only have `&MutexInner`.
@@ -1183,6 +1218,9 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
 
 pub fn host_join(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_join(heap, args[0]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, r)
 }
 
@@ -1191,10 +1229,14 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
         return Err(ThreadErrorTag::JoinFailed);
     };
     let state = Arc::clone(&gc.as_ref().state);
-    if state.joined.swap(true, Ordering::SeqCst) {
+    if state.joined.load(Ordering::SeqCst) || state.detached.load(Ordering::SeqCst) {
         return Err(ThreadErrorTag::JoinFailed);
     }
-    if state.detached.load(Ordering::SeqCst) {
+    if state.park_task_until_done() {
+        // The task runs `join` again once the thread finished.
+        return Err(ThreadErrorTag::WouldBlock);
+    }
+    if state.joined.swap(true, Ordering::SeqCst) {
         return Err(ThreadErrorTag::JoinFailed);
     }
     let shared = state.shared_epoch();
@@ -1281,11 +1323,16 @@ fn try_host_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), ThreadE
     }
     q.push_back(pv);
     inner.not_empty.notify_one();
+    drop(q);
+    inner.waiters.wake_all();
     Ok(())
 }
 
 pub fn host_recv(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_recv(heap, args[0]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, r)
 }
 
@@ -1301,6 +1348,10 @@ fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
         }
         if inner.is_closed() {
             return Err(ThreadErrorTag::Disconnected);
+        }
+        if inner.waiters.park_current() {
+            // The task runs `recv` again after the next send or the close.
+            return Err(ThreadErrorTag::WouldBlock);
         }
         q = inner.not_empty.wait(q).unwrap();
     }
@@ -1364,6 +1415,9 @@ fn try_host_mutex(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorT
 
 pub fn host_with_lock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_lock(heap, args[0], args[1]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, r)
 }
 
@@ -1377,7 +1431,10 @@ fn try_host_with_lock(
         return Err(ThreadErrorTag::Other);
     };
     let inner = Arc::clone(&gc.as_ref().inner);
-    inner.lock();
+    if !inner.lock_or_park_task() {
+        // The task runs `with_lock` again after an unlock.
+        return Err(ThreadErrorTag::WouldBlock);
+    }
     let _unlock = RawUnlock(&inner);
     let t_val = portable_to_value(heap, unsafe { (*inner.value()).clone() })?;
     let ret = host_call_function(entry, &[t_val])?;
@@ -1399,6 +1456,9 @@ fn parse_lock_callback_result(heap: &Heap, ret: Value) -> Result<(Value, Value),
 
 pub fn host_lock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_lock(heap, args[0]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_unit(heap, r)
 }
 
@@ -1412,7 +1472,10 @@ fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
         if h.borrow().is_some() {
             return Err(ThreadErrorTag::Other);
         }
-        inner.lock();
+        if !inner.lock_or_park_task() {
+            // The task runs `lock` again after an unlock.
+            return Err(ThreadErrorTag::WouldBlock);
+        }
         *h.borrow_mut() = Some((addr, Arc::clone(&inner)));
         Ok(())
     })
@@ -1999,7 +2062,7 @@ mod tests {
         let inner = Arc::new(MutexInner::new(PortableValue::Immediate(1)));
         let held = Arc::clone(&inner);
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            held.lock();
+            assert!(held.lock_or_park_task());
             panic!("between lock and unlock");
         }));
         assert!(panicked.is_err());

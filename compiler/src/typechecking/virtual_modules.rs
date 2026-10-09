@@ -1041,6 +1041,9 @@ impl VirtualModules {
                 ("task_cancel", "task_cancel"),
                 ("task_shield_enter", "task_shield_enter"),
                 ("task_shield_exit", "task_shield_exit"),
+                ("task_cond_new", "task_cond_new"),
+                ("task_cond_wait", "task_cond_wait"),
+                ("task_cond_notify", "task_cond_notify"),
             ]),
         );
 

@@ -120,10 +120,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      leaves. Older archives load with none (panics run no `defer`, as
 ///      before). HostInvoke 153–155 (`task_cancel`, `task_shield_enter`,
 ///      `task_shield_exit`): cancelling a task unwinds it.
+/// 34 — HostInvoke 156–158 (`task_cond_new`, `task_cond_wait`,
+///      `task_cond_notify`): wait conditions behind `task::channel`. Older
+///      archives never reference them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 33;
+pub const ARCHIVE_MINOR: u16 = 34;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);

@@ -53,6 +53,14 @@ impl<const S: usize> Machine<S> {
             }
             10 => self.task_shield_enter(),
             11 => self.task_shield_exit(ip, sp),
+            12 => TaskFlow::Value(Value::from(crate::task::new_cond())),
+            13 => self.task_cond_wait(arg(0), ip, sp),
+            14 => {
+                if let Some(s) = self.sched.as_mut() {
+                    s.notify_cond(arg(0));
+                }
+                TaskFlow::Value(Value::default())
+            }
             _ => TaskFlow::Panic(format!("HostInvoke: unknown task native id {fn_id}")),
         }
     }
@@ -194,6 +202,37 @@ impl<const S: usize> Machine<S> {
         TaskFlow::Switched
     }
 
+    /// Wait for a `task_cond_notify` of `cond` (suspension point). With no
+    /// other task to notify it, returns the deadlock status at once.
+    fn task_cond_wait(&mut self, cond: i64, ip: &mut usize, sp: &mut usize) -> TaskFlow {
+        if !self.tasks_can_switch() {
+            return TaskFlow::Value(Value::from(crate::task::STATUS_DEADLOCK));
+        }
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let current = s.current;
+        s.cond_waits.entry(cond).or_default().push(current);
+        self.task_suspend(Some(crate::task::Block::Cond(cond)), ip, sp);
+        TaskFlow::Switched
+    }
+
+    /// The running task's waker and the key its next thread wait gets.
+    fn task_waiter(&self) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64)> {
+        let s = self.sched.as_ref()?;
+        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key()))
+    }
+
+    /// A native parked the task on a `thread` object (its arguments are
+    /// still on the stack): suspend at the HostInvoke itself, so it runs
+    /// again once the other thread posts the wake.
+    fn task_suspend_thread(&mut self, ip: &mut usize, sp: &mut usize) {
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let key = s.peek_thread_key();
+        let current = s.current;
+        s.add_thread_wait(current, key);
+        *ip -= 1;
+        self.task_suspend_at(Some(crate::task::Block::Thread(key)), false, ip, sp);
+    }
+
     /// IO park inside a scope: wait on the reactor, run other tasks meanwhile.
     fn task_suspend_io(
         &mut self,
@@ -218,8 +257,22 @@ impl<const S: usize> Machine<S> {
     /// Pushes the call's result slot; the wake value replaces it when the
     /// task runs again.
     fn task_suspend(&mut self, block: Option<crate::task::Block>, ip: &mut usize, sp: &mut usize) {
+        self.task_suspend_at(block, true, ip, sp);
+    }
+
+    /// [`Self::task_suspend`]; `result_slot: false` when the task continues
+    /// by running the suspended instruction again.
+    fn task_suspend_at(
+        &mut self,
+        block: Option<crate::task::Block>,
+        result_slot: bool,
+        ip: &mut usize,
+        sp: &mut usize,
+    ) {
         use crate::task::{ROOT, TaskState, Wake};
-        self.stack.push(Value::default());
+        if result_slot {
+            self.stack.push(Value::default());
+        }
         self.frames.get_mut().set(*sp);
         let s = self.sched.as_mut().expect("scheduler");
         let current = s.current;
@@ -228,11 +281,8 @@ impl<const S: usize> Machine<S> {
         if rec.cancel == crate::task::Cancel::Requested && rec.shield == 0 {
             // A cancel waits here: switch out and straight back in, which
             // delivers it (`task_run_next`).
-            if let Some(crate::task::Block::Io(token, _)) = block {
-                s.io_waits.remove(&token);
-                s.reactor.cancel_wait(token);
-            }
             rec.timer_seq = None;
+            s.drop_wait(current, block);
             block = None;
             s.run_queue.push_front(current);
         }
@@ -242,7 +292,7 @@ impl<const S: usize> Machine<S> {
             rec.state = TaskState::Blocked;
         } else {
             rec.state = TaskState::Ready;
-            rec.wake = Some(Wake::Unit);
+            rec.wake = Some(if result_slot { Wake::Unit } else { Wake::Retry });
             if s.run_queue.front() != Some(&current) {
                 s.run_queue.push_back(current);
             }
@@ -419,24 +469,36 @@ impl<const S: usize> Machine<S> {
             Wake::Io(r, layout) => crate::host_enum::with_host_enum_layout(layout, || {
                 crate::io::as_result_unit(&mut self.heap, r)
             }),
+            // The instruction runs again; there is no result slot.
+            Wake::Retry => return,
         };
         let top = self.stack.tell();
         self.stack.seek(top - 1);
         self.stack.push(v);
     }
 
-    /// No task is ready: block until IO readiness or a timer wakes one.
-    /// `false` when nothing could ever wake a task.
+    /// No task is ready: block until IO readiness, a timer or another OS
+    /// thread wakes one. `false` when nothing could ever wake a task.
     fn task_wait_events(&mut self) -> bool {
         use crate::task::{Block, Wake};
+        // How often IO polling looks for wakes from other threads.
+        const THREAD_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
         let s = self.sched.as_mut().expect("scheduler");
+        if s.take_posted() {
+            return true;
+        }
         let deadline = s.next_deadline();
         let has_io = !s.io_waits.is_empty();
-        if !has_io && deadline.is_none() {
+        let has_thread = !s.thread_waits.is_empty();
+        if !has_io && !has_thread && deadline.is_none() {
             return false;
         }
-        let timeout = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        let mut timeout = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
         let reactor = std::sync::Arc::clone(&s.reactor);
+        let waker = std::sync::Arc::clone(&s.waker);
+        if has_io && has_thread {
+            timeout = Some(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)));
+        }
         if has_io {
             reactor.wait_any(timeout);
             let s = self.sched.as_mut().expect("scheduler");
@@ -449,15 +511,17 @@ impl<const S: usize> Machine<S> {
                     s.make_ready(id, Wake::Io(Ok(()), layout));
                 }
             }
+        } else if has_thread {
+            waker.wait(timeout);
         } else if let Some(t) = timeout {
             std::thread::sleep(t);
         }
         let s = self.sched.as_mut().expect("scheduler");
+        s.take_posted();
         for (id, block) in s.expired_timers(std::time::Instant::now()) {
             match block {
-                Some(Block::Io(token, layout)) => {
-                    reactor.cancel_wait(token);
-                    s.io_waits.remove(&token);
+                Some(Block::Io(_, layout)) => {
+                    s.drop_wait(id, block);
                     let err = Err(crate::io::IoErrorTag::TimedOut);
                     s.make_ready(id, Wake::Io(err, layout));
                 }
@@ -621,12 +685,13 @@ impl<const S: usize> Machine<S> {
         let block = rec.block.take();
         rec.timer_seq = None;
         rec.state = TaskState::Ready;
-        rec.wake = Some(Wake::Unit);
+        // A thread wait left no result slot to write.
+        rec.wake = Some(match block {
+            Some(Block::Thread(_)) => Wake::Retry,
+            _ => Wake::Unit,
+        });
         s.run_queue.push_back(id);
-        if let Some(Block::Io(token, _)) = block {
-            s.io_waits.remove(&token);
-            s.reactor.cancel_wait(token);
-        }
+        s.drop_wait(id, block);
     }
 
     /// Task `id` has a cancel to deliver but its scopes still have running

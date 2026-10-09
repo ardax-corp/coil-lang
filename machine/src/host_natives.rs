@@ -103,6 +103,11 @@ pub fn build_standard_host_natives(
         &mut register_id,
         common::TASK_CANCEL_ID..=common::TASK_SHIELD_EXIT_ID,
     );
+    push_task_natives(
+        &mut out,
+        &mut register_id,
+        common::TASK_COND_NEW_ID..=common::TASK_COND_NOTIFY_ID,
+    );
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -948,6 +953,10 @@ fn push_thread_natives(
                 ThreadKind::TryRead => thread::thread_try_read(heap, args),
                 ThreadKind::TryWrite => thread::thread_try_write(heap, args),
             };
+            if crate::task::thread_parked() {
+                // Parked the task (`recv`, `join`, a lock): no result yet.
+                return Ok(None);
+            }
             Ok(Some(v))
         };
         let native: Arc<dyn NativeFn> = if kind == ThreadKind::Spawn {
@@ -1137,7 +1146,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some("task_shield_exit")
+            Some("task_cond_notify")
         );
         assert_eq!(attach, 119);
     }
@@ -1433,6 +1442,10 @@ mod tests {
             registrations.get(end + 19).map(|(n, _)| n.as_str()),
             Some("task_shield_exit")
         );
-        assert_eq!(registrations.len(), end + 20);
+        assert_eq!(
+            registrations.get(end + 22).map(|(n, _)| n.as_str()),
+            Some("task_cond_notify")
+        );
+        assert_eq!(registrations.len(), end + 23);
     }
 }
