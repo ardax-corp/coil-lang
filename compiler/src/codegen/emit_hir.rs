@@ -206,26 +206,20 @@ struct SeqTest {
     misses: Vec<(IlLabel, u32)>,
 }
 
-struct HirEmit {
-    /// Frame slot of each [`LocalId`], once bound.
-    slots: Vec<Option<u32>>,
+/// What planning decided for one body: the representation of each value,
+/// how each call and operator lowers, and which locals live in frame slots.
+/// Lowering reads it; it does not change while the body is emitted.
+struct HirPlan {
     /// Each direct call, by call node.
     calls: HashMap<u32, HirCall>,
     /// Calls in return position that lower to `TailCall`.
     tail_calls: HashSet<u32>,
-    loops: Vec<HirLoop>,
     /// How this function returns its value.
     ret: Rep,
-    /// First frame slot of the boxed `match` payload being bound: the
-    /// payload words stay where `JumpIfMatch` / `Unpack` pushed them and
-    /// become the bindings' slots.
-    payload_base: Option<u32>,
     /// `let x = f(..)` of a two-word call that is never reassigned keeps
     /// `[payload, tag]` in two frame slots (the AST's unboxed enum local):
     /// local to its pair kind.
     pair_locals: HashMap<u32, String>,
-    /// Tag slot of each bound pair local (its payload slot is in `slots`).
-    tag_slots: HashMap<u32, u32>,
     /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
     /// local): local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
@@ -254,11 +248,25 @@ struct HirEmit {
     stacks: HashMap<u32, usize>,
     /// Block statements that box escaping stack arrays before they run.
     box_at: HashMap<u32, Vec<u32>>,
+    /// Whether early exits move out of line ([`Compiler::hir_mark_cold`]).
+    cold_ok: bool,
+}
+
+/// Per-body emission state, around the body's [`HirPlan`].
+struct HirEmit {
+    plan: HirPlan,
+    /// Frame slot of each [`LocalId`], once bound.
+    slots: Vec<Option<u32>>,
+    loops: Vec<HirLoop>,
+    /// First frame slot of the boxed `match` payload being bound: the
+    /// payload words stay where `JumpIfMatch` / `Unpack` pushed them and
+    /// become the bindings' slots.
+    payload_base: Option<u32>,
+    /// Tag slot of each bound pair local (its payload slot is in `slots`).
+    tag_slots: HashMap<u32, u32>,
     /// The array object of each boxed stack array, once boxed: from its
     /// escape on, the local is that object.
     boxes: HashMap<u32, u32>,
-    /// Whether early exits move out of line ([`Compiler::hir_mark_cold`]).
-    cold_ok: bool,
     /// Raw op ranges of the early exits to lay out after the body.
     cold: Vec<(usize, usize)>,
     /// Where the unconditional jump right after the statement being lowered
@@ -655,7 +663,7 @@ impl Compiler {
                     }
                 }
                 if let Some(root) = hir.root {
-                    emit.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
+                    emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
@@ -723,6 +731,7 @@ impl Compiler {
         let budget = self.inline_cost.max_inline_cost;
         // Callees with guard returns, folded to a single exit.
         let folded: HashMap<usize, crate::hir::HirBody> = emit
+            .plan
             .calls
             .values()
             .filter_map(|call| match call.instance {
@@ -734,6 +743,7 @@ impl Compiler {
             .collect();
         // Mono clone callees, as their generic body at the call's types.
         let instances: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
             .calls
             .iter()
             .filter(|_| self.hir_inline_mono)
@@ -748,7 +758,7 @@ impl Compiler {
             })
             .collect();
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
-            let Some(call) = emit.calls.get(&id.0) else {
+            let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
             let kind = [
@@ -946,13 +956,13 @@ impl Compiler {
                 .and_then(|emit| {
                     // A mono clone's instance call whose context came from
                     // the generic body's bounds has no dictionary here.
-                    let open = emit.calls.iter().any(|(&id, call)| {
+                    let open = emit.plan.calls.iter().any(|(&id, call)| {
                         id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var))
                     });
                     if open { Err("inline-open-instance") } else { Ok(emit) }
                 })
         };
-        let opaque = |id: HirId| emit.lens.contains_key(&id.0);
+        let opaque = |id: HirId| emit.plan.lens.contains_key(&id.0);
         let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque)?;
         // A call spliced in place may sit where its `let`s cannot lower:
         // then only the hoisted sites.
@@ -1351,9 +1361,9 @@ impl Compiler {
             // Captures are plain one-word locals of this body.
             for &(outer, _) in &lam.captures {
                 let plain = (outer.0 as usize) < hir.locals.len()
-                    && !emit.sroa.contains_key(&outer.0)
-                    && !emit.pair_locals.contains_key(&outer.0)
-                    && !emit.stacks.contains_key(&outer.0)
+                    && !emit.plan.sroa.contains_key(&outer.0)
+                    && !emit.plan.pair_locals.contains_key(&outer.0)
+                    && !emit.plan.stacks.contains_key(&outer.0)
                     && hir
                         .local(outer)
                         .ty
@@ -1393,7 +1403,7 @@ impl Compiler {
             for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
                 plan.slots[inner.0 as usize] = Some(slot as u32);
             }
-            emit.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan }));
         }
         Ok(())
     }
@@ -1448,27 +1458,29 @@ impl Compiler {
 
     fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
         let mut emit = HirEmit {
+            plan: HirPlan {
+                calls: HashMap::new(),
+                tail_calls: HashSet::new(),
+                ret,
+                pair_locals: HashMap::new(),
+                sroa: HashMap::new(),
+                consts: HashMap::new(),
+                fn_refs: HashMap::new(),
+                polyfns: HashMap::new(),
+                lambdas: HashMap::new(),
+                lambda_unbox: HashMap::new(),
+                statics: HashMap::new(),
+                lens: HashMap::new(),
+                ops: HashMap::new(),
+                stacks: HashMap::new(),
+                box_at: HashMap::new(),
+                cold_ok: false,
+            },
             slots: vec![None; hir.locals.len()],
-            calls: HashMap::new(),
-            tail_calls: HashSet::new(),
             loops: Vec::new(),
-            ret,
             payload_base: None,
-            pair_locals: HashMap::new(),
             tag_slots: HashMap::new(),
-            sroa: HashMap::new(),
-            lens: HashMap::new(),
-            consts: HashMap::new(),
-            fn_refs: HashMap::new(),
-            polyfns: HashMap::new(),
-            lambdas: HashMap::new(),
-            lambda_unbox: HashMap::new(),
-            statics: HashMap::new(),
-            ops: HashMap::new(),
-            stacks: HashMap::new(),
-            box_at: HashMap::new(),
             boxes: HashMap::new(),
-            cold_ok: false,
             cold: Vec::new(),
             next_jump: None,
         };
@@ -1502,19 +1514,19 @@ impl Compiler {
                     continue;
                 }
                 if let Some(slot) = self.hir_global_static(hir, HirId(i as u32), name) {
-                    emit.statics.insert(i as u32, slot);
+                    emit.plan.statics.insert(i as u32, slot);
                     continue;
                 }
                 if let Some(value) = self.hir_global_const(hir, HirId(i as u32), name) {
-                    emit.consts.insert(i as u32, value);
+                    emit.plan.consts.insert(i as u32, value);
                     continue;
                 }
                 if let Some(fn_ref) = self.hir_global_fn(hir, HirId(i as u32), name) {
-                    emit.fn_refs.insert(i as u32, fn_ref);
+                    emit.plan.fn_refs.insert(i as u32, fn_ref);
                     continue;
                 }
                 let poly = self.hir_global_polyfn(hir, HirId(i as u32), name).ok_or("global")?;
-                emit.polyfns.insert(i as u32, poly);
+                emit.plan.polyfns.insert(i as u32, poly);
                 continue;
             }
             // A matrix operator (`a * b`, `a == b`, `~m`): the packed
@@ -1526,7 +1538,7 @@ impl Compiler {
                 if unary != matches!(expr.kind, HirKind::Un { .. }) {
                     return Err("operator-linear-algebra");
                 }
-                emit.ops.insert(i as u32, HirOp::LinAlg(info));
+                emit.plan.ops.insert(i as u32, HirOp::LinAlg(info));
                 continue;
             }
             if let HirKind::Bin {
@@ -1536,14 +1548,14 @@ impl Compiler {
             } = expr.kind
             {
                 let op = self.hir_operator_at(hir, HirId(i as u32), sym, lhs, rhs)?;
-                emit.ops.insert(i as u32, op);
+                emit.plan.ops.insert(i as u32, op);
                 continue;
             }
             if let HirKind::Un { op: UnOp::Neg, .. } = expr.kind
                 && let Some(info) = lower::aggregate_info(&self.checker, hir, HirId(i as u32))
             {
                 self.hir_check_aggregate(&info)?;
-                emit.ops.insert(i as u32, HirOp::Aggregate(info));
+                emit.plan.ops.insert(i as u32, HirOp::Aggregate(info));
                 continue;
             }
             if let HirKind::Un { op: UnOp::Neg, operand } = expr.kind
@@ -1556,7 +1568,7 @@ impl Compiler {
                 if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
                     return Err("operator-bound");
                 }
-                emit.ops.insert(
+                emit.plan.ops.insert(
                     i as u32,
                     HirOp::Bound {
                         dict,
@@ -1566,7 +1578,7 @@ impl Compiler {
                 continue;
             }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
-                emit.lens.insert(i as u32, len);
+                emit.plan.lens.insert(i as u32, len);
                 continue;
             }
             if let HirKind::Call {
@@ -1575,7 +1587,7 @@ impl Compiler {
             } = &expr.kind
             {
                 let call = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
-                emit.calls.insert(i as u32, call);
+                emit.plan.calls.insert(i as u32, call);
             }
             if let HirKind::Call {
                 callee: Callee::Method { name },
@@ -1583,22 +1595,22 @@ impl Compiler {
             } = &expr.kind
             {
                 let call = self.resolve_hir_method(hir, HirId(i as u32), name, args)?;
-                emit.calls.insert(i as u32, call);
+                emit.plan.calls.insert(i as u32, call);
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
         // Calls above stack-array boxes do not stage, so a `format` that
         // shows through temps could run above live operands.
-        if !emit.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
+        if !emit.plan.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
             return Err("format-show");
         }
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
-            emit.calls.get(&value.0).is_some_and(|call| {
+            emit.plan.calls.get(&value.0).is_some_and(|call| {
                 !call.method
                     && call.builtin.is_none()
                     && call.generic.is_none()
-                    && Self::hir_call_rep(call) == emit.ret
+                    && Self::hir_call_rep(call) == emit.plan.ret
                     && !self.coroutine_fns.contains(&call.key)
                     && self.hir_tail_call_ok(&call.key)
             })
@@ -1617,7 +1629,7 @@ impl Compiler {
                 _ => {}
             }
         }
-        emit.tail_calls.extend(tails.into_iter().map(|v| v.0));
+        emit.plan.tail_calls.extend(tails.into_iter().map(|v| v.0));
         if let Some(root) = hir.root {
             self.hir_check_effect(hir, &emit, root)?;
         }
@@ -1631,13 +1643,13 @@ impl Compiler {
     /// planned calls, whose results decide pair locals.
     fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
         let stacks = lower::stack_arrays(hir, &self.checker);
-        emit.stacks = stacks.len;
-        emit.box_at = stacks.box_at;
+        emit.plan.stacks = stacks.len;
+        emit.plan.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
         let class_boxes = lower::class_boxes(hir, &self.checker);
         let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
         for (stmt, locals) in class_boxes {
-            emit.box_at.entry(stmt).or_default().extend(locals);
+            emit.plan.box_at.entry(stmt).or_default().extend(locals);
         }
         for &param in &hir.params {
             let local = hir.local(param);
@@ -1647,7 +1659,7 @@ impl Compiler {
                 let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
                 emit.slots[param.0 as usize] = Some(start);
                 emit.tag_slots.insert(param.0, end);
-                emit.pair_locals.insert(param.0, kind);
+                emit.plan.pair_locals.insert(param.0, kind);
                 continue;
             }
             let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
@@ -1661,7 +1673,7 @@ impl Compiler {
             && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
             && let Some(class) = lower::sroa_class(hir, &self.checker, init)
         {
-            emit.sroa.insert(local.0, class);
+            emit.plan.sroa.insert(local.0, class);
         }
         }
         let assigned: HashSet<u32> = hir
@@ -1686,12 +1698,12 @@ impl Compiler {
             if assigned.contains(&local.0) || hir.local(local).captured {
                 continue;
             }
-            if let Some(Rep::Pair(kind)) = emit.calls.get(&init.0).map(Self::hir_call_rep) {
-                emit.pair_locals.insert(local.0, kind);
+            if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
+                emit.plan.pair_locals.insert(local.0, kind);
                 continue;
             }
             if let Some(kind) = self.hir_pair_init(hir, emit, local, init) {
-                emit.pair_locals.insert(local.0, kind);
+                emit.plan.pair_locals.insert(local.0, kind);
                 continue;
             }
             // `let r = a..b` or a copy of an unboxed range local, as
@@ -1702,6 +1714,7 @@ impl Compiler {
                     ..
                 } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
                 HirKind::Local(from) => emit
+                    .plan
                     .pair_locals
                     .get(&from.0)
                     .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
@@ -1709,7 +1722,7 @@ impl Compiler {
                 _ => None,
             };
             if let Some(kind) = range {
-                emit.pair_locals.insert(local.0, kind);
+                emit.plan.pair_locals.insert(local.0, kind);
             }
         }
         Ok(())
@@ -3461,7 +3474,7 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(base).kind else {
             return None;
         };
-        if !emit.pair_locals.get(&local.0).is_some_and(|k| Self::hir_product(k)) {
+        if !emit.plan.pair_locals.get(&local.0).is_some_and(|k| Self::hir_product(k)) {
             return None;
         }
         match hir.expr(index).kind {
@@ -3522,8 +3535,8 @@ impl Compiler {
                 then, els: Some(els), ..
             } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
             HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
-            HirKind::Call { .. } => emit.calls.get(&e.0).and_then(|c| c.pair.as_deref()) == Some(kind),
-            HirKind::Local(l) => emit.pair_locals.get(&l.0).map(String::as_str) == Some(kind),
+            HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_deref()) == Some(kind),
+            HirKind::Local(l) => emit.plan.pair_locals.get(&l.0).map(String::as_str) == Some(kind),
             _ => false,
         }
     }
@@ -3553,7 +3566,7 @@ impl Compiler {
     }
 
     fn hir_local_rep(&self, hir: &HirBody, emit: &HirEmit, local: LocalId) -> Rep {
-        match emit.pair_locals.get(&local.0) {
+        match emit.plan.pair_locals.get(&local.0) {
             Some(kind) => Rep::Pair(kind.clone()),
             None => Rep::Word(self.hir_local_layout(hir, local)),
         }
@@ -3655,7 +3668,7 @@ impl Compiler {
     /// jumps).
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
-            HirKind::Global { .. } if emit.statics.contains_key(&id.0) => Some(Rep::Word(
+            HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Lit(_)
@@ -3670,7 +3683,7 @@ impl Compiler {
             HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
                 self.hir_natural(hir, emit, *place)
             }
-            HirKind::Call { .. } if emit.lens.contains_key(&id.0) => Some(BOXED),
+            HirKind::Call { .. } if emit.plan.lens.contains_key(&id.0) => Some(BOXED),
             // A function value returns one word: a one-word (niche) enum
             // as that word, as from a direct call; any other boxed.
             HirKind::Call {
@@ -3690,7 +3703,7 @@ impl Compiler {
             | HirKind::Builtin {
                 op: Builtin::Done, ..
             } => Some(BOXED),
-            HirKind::Call { .. } => emit.calls.get(&id.0).map(Self::hir_call_rep),
+            HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
             HirKind::Index { .. }
             | HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array | MakeKind::Record(_),
@@ -3925,7 +3938,7 @@ impl Compiler {
             return None;
         };
         hir.exprs.iter().find_map(|e| match &e.kind {
-            HirKind::Let { local: l, init: Some(init) } if *l == local => emit.polyfns.get(&init.0).cloned(),
+            HirKind::Let { local: l, init: Some(init) } if *l == local => emit.plan.polyfns.get(&init.0).cloned(),
             _ => None,
         })
     }
@@ -4328,7 +4341,7 @@ impl Compiler {
     /// [`lower::index_stages`] for a clobbering index read).
     fn hir_stages_args(&self, hir: &HirBody, emit: &HirEmit, args: &[HirId], depth: u32) -> bool {
         (emit.boxes.is_empty() && lower::stages_args(hir, &self.checker, args, depth))
-            || lower::index_stages(hir, &emit.stacks, args, depth)
+            || lower::index_stages(hir, &emit.plan.stacks, args, depth)
     }
 
     /// Each one-word argument run at depth zero into a fresh temp.
@@ -4362,7 +4375,7 @@ impl Compiler {
     /// How `operand`'s elements are read; a boxed stack array reads its box
     /// (its slots may be stale after an index write).
     fn hir_agg_src(&mut self, hir: &HirBody, emit: &mut HirEmit, operand: HirId) -> AggSrc {
-        match lower::aggregate_src(hir, &emit.stacks, operand) {
+        match lower::aggregate_src(hir, &emit.plan.stacks, operand) {
             Some(lower::AggregateSrc::Items(items)) => AggSrc::Items(items),
             Some(lower::AggregateSrc::Slots(local)) => match emit.boxes.get(&local.0) {
                 Some(&slot) => AggSrc::Heap(slot),
@@ -4568,7 +4581,7 @@ impl Compiler {
 
     /// Whether `base` names a frame-slot stack array.
     fn hir_is_stack(hir: &HirBody, emit: &HirEmit, base: HirId) -> bool {
-        matches!(hir.expr(base).kind, HirKind::Local(local) if emit.stacks.contains_key(&local.0))
+        matches!(hir.expr(base).kind, HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0))
     }
 
     /// `base` as a boxed stack array: the slot of its array object.
@@ -4608,7 +4621,7 @@ impl Compiler {
             }
             HirKind::Local(src) => {
                 let src_base = Self::hir_slot(emit, *src);
-                for i in 0..emit.stacks[&local.0] as u32 {
+                for i in 0..emit.plan.stacks[&local.0] as u32 {
                     self.bytecode.push_load(src_base + i);
                     self.bytecode.push_store_pop(base + i);
                 }
@@ -4619,7 +4632,7 @@ impl Compiler {
 
     fn hir_box_stack_array(&mut self, emit: &mut HirEmit, local: LocalId) {
         let base = Self::hir_slot(emit, local);
-        let n = emit.stacks[&local.0];
+        let n = emit.plan.stacks[&local.0];
         let mut bc = CodeBuf::new();
         self.emit_box_stack_array(&mut bc, base, n);
         self.bytecode.append(&mut bc);
@@ -4636,7 +4649,7 @@ impl Compiler {
     /// writes and whole uses go through the object from there on.
     fn hir_box_sroa_class(&mut self, emit: &mut HirEmit, local: LocalId) {
         let base = Self::hir_slot(emit, local);
-        let class = emit.sroa[&local.0].clone();
+        let class = emit.plan.sroa[&local.0].clone();
         let n = self.checker.class_fields(&class).map_or(0, |f| f.len());
         self.expr_depth = 0;
         let mut bc = CodeBuf::new();
@@ -4655,7 +4668,7 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(base).kind else {
             return None;
         };
-        let &n = emit.stacks.get(&local.0)?;
+        let &n = emit.plan.stacks.get(&local.0)?;
         Some((Self::hir_slot(emit, local), n))
     }
 
@@ -4691,7 +4704,7 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(base).kind else {
             return None;
         };
-        emit.sroa.get(&local.0)?;
+        emit.plan.sroa.get(&local.0)?;
         if emit.boxes.contains_key(&local.0) {
             return None;
         }
@@ -4733,7 +4746,7 @@ impl Compiler {
         match &hir.expr(id).kind {
             HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
             HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => match hir.expr(*place).kind {
-                HirKind::Local(local) if !emit.pair_locals.contains_key(&local.0) => {}
+                HirKind::Local(local) if !emit.plan.pair_locals.contains_key(&local.0) => {}
                 _ => return Err("assign"),
             },
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
@@ -4747,7 +4760,7 @@ impl Compiler {
             HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => {
                 self.hir_check_value(hir, emit, *operand, &BOXED)?
             }
-            HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => {
+            HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => {
                 self.hir_check_value(hir, emit, args[0], &BOXED)?
             }
             HirKind::Call {
@@ -4804,7 +4817,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Call { args, .. } => {
-                let call = emit.calls.get(&id.0).ok_or("callee")?;
+                let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
                     Some(builtin) => Self::hir_ffi_operands(hir, builtin, args),
                     None => args.clone(),
@@ -5176,10 +5189,10 @@ impl Compiler {
                 if lower::is_unit_local(hir, &self.checker, *local) {
                     return self.hir_check_effect(hir, emit, *init);
                 }
-                if emit.sroa.contains_key(&local.0) {
+                if emit.plan.sroa.contains_key(&local.0) {
                     return self.hir_check_new_args(hir, emit, *init);
                 }
-                if emit.stacks.contains_key(&local.0) {
+                if emit.plan.stacks.contains_key(&local.0) {
                     return self.hir_check_stack_array_init(hir, emit, *local, *init);
                 }
                 let want = self.hir_local_rep(hir, emit, *local);
@@ -5194,8 +5207,8 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *init, &BOXED)
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
-                HirKind::Local(local) if emit.pair_locals.contains_key(&local.0) => Err("assign-pair"),
-                HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
+                HirKind::Local(local) if emit.plan.pair_locals.contains_key(&local.0) => Err("assign-pair"),
+                HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) => {
                     self.hir_check_stack_array_init(hir, emit, *local, *value)
                 }
                 HirKind::Local(local) => {
@@ -5203,7 +5216,7 @@ impl Compiler {
                     self.hir_check_value(hir, emit, *value, &want)
                 }
                 HirKind::Global { .. } => {
-                    emit.statics.get(&place.0).ok_or("assign-global")?;
+                    emit.plan.statics.get(&place.0).ok_or("assign-global")?;
                     let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *value, &want)
                 }
@@ -5237,9 +5250,9 @@ impl Compiler {
             // Each capture is one frame word the thunk's frame copies.
             HirKind::Defer { captures, body } => {
                 for local in captures.iter().flatten() {
-                    if emit.sroa.contains_key(&local.0)
-                        || emit.stacks.contains_key(&local.0)
-                        || emit.pair_locals.contains_key(&local.0)
+                    if emit.plan.sroa.contains_key(&local.0)
+                        || emit.plan.stacks.contains_key(&local.0)
+                        || emit.plan.pair_locals.contains_key(&local.0)
                     {
                         return Err("defer-capture");
                     }
@@ -5317,10 +5330,10 @@ impl Compiler {
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
                 Some(v) if lower::is_unit_value(hir, &self.checker, v) => {
                     self.hir_check_effect(hir, emit, v)?;
-                    if emit.ret.words() == 1 { Ok(()) } else { Err("return-unit") }
+                    if emit.plan.ret.words() == 1 { Ok(()) } else { Err("return-unit") }
                 }
-                Some(v) => self.hir_check_value(hir, emit, v, &emit.ret),
-                None if emit.ret.words() == 1 => Ok(()),
+                Some(v) => self.hir_check_value(hir, emit, v, &emit.plan.ret),
+                None if emit.plan.ret.words() == 1 => Ok(()),
                 None => Err("return-unit"),
             },
             HirKind::Match { scrutinee, arms } => {
@@ -5457,7 +5470,7 @@ impl Compiler {
         let expr = hir.expr(id);
         let produced = match expr.kind {
             HirKind::Call { .. } => true,
-            HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.ops.get(&id.0), Some(HirOp::Bound { .. })),
+            HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.plan.ops.get(&id.0), Some(HirOp::Bound { .. })),
             _ => false,
         };
         if produced && self.hir_open_ty(expr.ty.as_ref()) && self.hir_shared_generic() {
@@ -5536,13 +5549,13 @@ impl Compiler {
                 let prefix = hir.expr(id).flags.contains(HirFlags::PREFIX);
                 self.bytecode.push(Byte::new(instr).with_inc_dec(slot, prefix, is_float));
             }
-            HirKind::Global { .. } if let Some(&slot) = emit.statics.get(&id.0) => {
+            HirKind::Global { .. } if let Some(&slot) = emit.plan.statics.get(&id.0) => {
                 self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
             }
             HirKind::Lambda { .. } => {
                 // `JMP after`, the body in its own frame, then the captures,
                 // `CodePtr` and `MakeFn`, as `do_compile`'s `Lambda`.
-                let mut lam = emit.lambdas.remove(&id.0).expect("planned lambda");
+                let mut lam = emit.plan.lambdas.remove(&id.0).expect("planned lambda");
                 let after = self.bytecode.fresh_label();
                 self.hir_jump(IlJumpKind::Unconditional, after);
                 self.bytecode.bind_fresh_entry();
@@ -5554,7 +5567,7 @@ impl Compiler {
                     let name = lam.body.local(param).name.clone();
                     self.record_debug_param(&name, slot);
                 }
-                if let Some(unbox) = emit.lambda_unbox.remove(&id.0) {
+                if let Some(unbox) = emit.plan.lambda_unbox.remove(&id.0) {
                     for (ty, &slot) in unbox.iter().zip(&slots[lam.body.captures.len()..]) {
                         if let Some(ty) = ty {
                             self.bytecode.push_load(slot);
@@ -5565,7 +5578,7 @@ impl Compiler {
                 }
                 self.expr_depth = 0;
                 let root = lam.body.root.expect("planned lambda body");
-                let ret = lam.emit.ret.clone();
+                let ret = lam.emit.plan.ret.clone();
                 self.hir_value(&lam.body, &mut lam.emit, root, &ret, 0);
                 // A body that returned on every path needs no closing return.
                 if !self.bytecode.ends_in_exit() {
@@ -5585,9 +5598,9 @@ impl Compiler {
                 let captures = lam.body.captures.len() as u32;
                 self.bytecode
                     .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(captures, 0, arity, false)));
-                emit.lambdas.insert(id.0, lam);
+                emit.plan.lambdas.insert(id.0, lam);
             }
-            HirKind::Global { .. } if let Some(name) = emit.polyfns.get(&id.0).cloned() => {
+            HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
                 let entry = self.functions[&name] as u32;
                 let mut bc = std::mem::take(&mut self.bytecode);
@@ -5600,7 +5613,7 @@ impl Compiler {
                 }
                 self.bytecode = bc;
             }
-            HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.fn_refs.get(&id.0) => {
+            HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry as u32));
@@ -5608,12 +5621,12 @@ impl Compiler {
                     .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, rest)));
             }
             HirKind::Global { .. } => {
-                let value = emit.consts[&id.0].clone();
+                let value = emit.plan.consts[&id.0].clone();
                 let mut bc = CodeBuf::new();
                 self.emit_const_value(&value, &mut bc);
                 self.bytecode.append(&mut bc);
             }
-            HirKind::Local(local) if emit.stacks.contains_key(&local.0) || emit.sroa.contains_key(&local.0) => {
+            HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) || emit.plan.sroa.contains_key(&local.0) => {
                 let slot = *emit.boxes.get(&local.0).expect("frame-slot local boxed before its escape");
                 self.bytecode.push_load(slot);
             }
@@ -5632,7 +5645,7 @@ impl Compiler {
                 // Either side holds a `match` or a clobbering index read:
                 // both run at depth zero into temps, then the format string
                 // goes under them.
-                let staged = depth == 0 && lower::concat_stages(hir, &emit.stacks, *lhs, *rhs);
+                let staged = depth == 0 && lower::concat_stages(hir, &emit.plan.stacks, *lhs, *rhs);
                 let mut temps = [0u32; 2];
                 if staged {
                     for (temp, operand) in temps.iter_mut().zip([*lhs, *rhs]) {
@@ -5653,12 +5666,12 @@ impl Compiler {
                 }
                 self.bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
             }
-            HirKind::Bin { lhs, rhs, .. } if let Some(HirOp::LinAlg(info)) = emit.ops.get(&id.0) => {
+            HirKind::Bin { lhs, rhs, .. } if let Some(HirOp::LinAlg(info)) = emit.plan.ops.get(&id.0) => {
                 let info = info.clone();
                 let params = [*lhs, *rhs].map(|x| Self::hir_ty(hir, x).map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
                 self.hir_linear_algebra_op(hir, emit, &info, &[*lhs, *rhs], &params, depth);
             }
-            HirKind::Un { operand, .. } if let Some(HirOp::LinAlg(info)) = emit.ops.get(&id.0) => {
+            HirKind::Un { operand, .. } if let Some(HirOp::LinAlg(info)) = emit.plan.ops.get(&id.0) => {
                 let info = info.clone();
                 let params = [Self::hir_ty(hir, *operand).map_or(ValueLayout::Boxed, |t| self.value_layout(t))];
                 self.hir_linear_algebra_op(hir, emit, &info, &[*operand], &params, depth);
@@ -5667,7 +5680,7 @@ impl Compiler {
                 op: BinOp::Overloaded(_),
                 lhs,
                 rhs,
-            } => match &emit.ops[&id.0] {
+            } => match &emit.plan.ops[&id.0] {
                 HirOp::LinAlg(_) => unreachable!("linear algebra emitted above"),
                 HirOp::Aggregate(info) => {
                     let info = info.clone();
@@ -5797,11 +5810,11 @@ impl Compiler {
                     self.bytecode.push(Byte::new(op));
                 }
             }
-            HirKind::Un { operand, .. } if let Some(HirOp::Aggregate(info)) = emit.ops.get(&id.0) => {
+            HirKind::Un { operand, .. } if let Some(HirOp::Aggregate(info)) = emit.plan.ops.get(&id.0) => {
                 let info = info.clone();
                 self.hir_aggregate(hir, emit, &info, *operand, None);
             }
-            HirKind::Un { operand, .. } if let Some(&HirOp::Bound { dict, method }) = emit.ops.get(&id.0) => {
+            HirKind::Un { operand, .. } if let Some(&HirOp::Bound { dict, method }) = emit.plan.ops.get(&id.0) => {
                 let ty = Self::hir_ty(hir, *operand).expect("planned bound operand");
                 let want = Rep::Word(self.value_layout(ty));
                 self.hir_value(hir, emit, *operand, &want, depth);
@@ -5875,7 +5888,7 @@ impl Compiler {
                 self.emit_raw_string_literal(&mut bc, &name);
                 self.bytecode.append(&mut bc);
             }
-            HirKind::Call { args, .. } if emit.lens.contains_key(&id.0) => match emit.lens[&id.0] {
+            HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
                 // evaluated and dropped (as in the AST).
                 Some(n) => {
@@ -5951,7 +5964,7 @@ impl Compiler {
             }
             HirKind::Index { base, index, .. } => {
                 let proven = hir.expr(id).flags.contains(HirFlags::IN_BOUNDS);
-                let staged = lower::clobbers(hir, &emit.stacks, *index);
+                let staged = lower::clobbers(hir, &emit.plan.stacks, *index);
                 let pin = match hir.expr(*base).kind {
                     HirKind::Local(local) if proven => {
                         Some(Self::hir_slot(emit, local)).filter(|s| self.pinned_array_slots.contains(s))
@@ -5995,7 +6008,7 @@ impl Compiler {
                 kind: kind @ (MakeKind::Tuple | MakeKind::Array),
                 args,
             } => {
-                let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
+                let staged = args.len() >= 2 && args[1..].iter().any(|&a| lower::clobbers(hir, &emit.plan.stacks, a));
                 if let Rep::Pair(kind) = want
                     && Self::hir_product(kind)
                     && args.len() == 2
@@ -6128,8 +6141,8 @@ impl Compiler {
                 }
                 self.bytecode.push_seek(tmp + 1);
             }
-            HirKind::Call { args, .. } if emit.calls[&id.0].builtin.is_some() => {
-                let call = &emit.calls[&id.0];
+            HirKind::Call { args, .. } if emit.plan.calls[&id.0].builtin.is_some() => {
+                let call = &emit.plan.calls[&id.0];
                 let params = call.params.clone();
                 let natural = Self::hir_call_rep(call);
                 match call.builtin.expect("builtin call") {
@@ -6332,7 +6345,7 @@ impl Compiler {
                         }
                         // The VM pushes a boxed `Result`; a niche-shaped one
                         // converts, as `emit_ffi_invoke`.
-                        match Self::hir_call_rep(&emit.calls[&id.0]) {
+                        match Self::hir_call_rep(&emit.plan.calls[&id.0]) {
                             Rep::Word(ValueLayout::NicheUnitResult) => Self::emit_boxed_result_to_niche(&mut self.bytecode, true),
                             Rep::Word(ValueLayout::NicheResult) => Self::emit_boxed_result_to_niche(&mut self.bytecode, false),
                             _ => {}
@@ -6344,7 +6357,7 @@ impl Compiler {
                         // arguments from `depth`, so at depth zero one that
                         // may clobber (a `match` binding slots, a call that
                         // stages its own) runs before the id as well.
-                        let clobbering = depth == 0 && args.iter().any(|&a| lower::clobbers(hir, &emit.stacks, a));
+                        let clobbering = depth == 0 && args.iter().any(|&a| lower::clobbers(hir, &emit.plan.stacks, a));
                         if clobbering || self.hir_stages_args(hir, emit, args, depth) {
                             let temps = self.hir_stage_words(hir, emit, args, &params);
                             self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
@@ -6357,7 +6370,7 @@ impl Compiler {
                                 self.hir_value(hir, emit, arg, &Rep::Word(param), depth + 1 + i as u32);
                             }
                         }
-                        let layout = Self::hir_call_rep(&emit.calls[&id.0]);
+                        let layout = Self::hir_call_rep(&emit.plan.calls[&id.0]);
                         let Rep::Word(layout) = layout else {
                             unreachable!("builtin calls return one word")
                         };
@@ -6382,12 +6395,12 @@ impl Compiler {
                 self.hir_convert(&natural, want, depth);
                 return;
             }
-            HirKind::Call { args, .. } if emit.calls[&id.0].key == format!("{}::push", common::BUILTIN_VEC_TYPE) => {
+            HirKind::Call { args, .. } if emit.plan.calls[&id.0].key == format!("{}::push", common::BUILTIN_VEC_TYPE) => {
                 // Inlined as the AST does: `ArrayPush; POP; CONST 0`.
-                let params = emit.calls[&id.0].params.clone();
+                let params = emit.plan.calls[&id.0].params.clone();
                 let (recv, value) = (args[0], args[1]);
                 self.hir_value(hir, emit, recv, &Rep::Word(params[0]), depth);
-                if lower::push_stages(hir, &emit.stacks, value) {
+                if lower::push_stages(hir, &emit.plan.stacks, value) {
                     self.expr_depth = 0;
                     let r = self.alloc_temp_slot();
                     self.bytecode.push_store_pop(r);
@@ -6405,9 +6418,9 @@ impl Compiler {
                 self.bytecode.push_const(0);
             }
             HirKind::Call { args, .. }
-                if emit.calls[&id.0].instance.as_ref().is_some_and(|i| i.ground.is_some()) =>
+                if emit.plan.calls[&id.0].instance.as_ref().is_some_and(|i| i.ground.is_some()) =>
             {
-                let call = &emit.calls[&id.0];
+                let call = &emit.plan.calls[&id.0];
                 let params = call.params.clone();
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
@@ -6443,8 +6456,8 @@ impl Compiler {
                 self.hir_convert(&natural, want, depth);
                 return;
             }
-            HirKind::Call { args, .. } if emit.calls[&id.0].method => {
-                let call = &emit.calls[&id.0];
+            HirKind::Call { args, .. } if emit.plan.calls[&id.0].method => {
+                let call = &emit.plan.calls[&id.0];
                 let params = call.params.clone();
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
@@ -6502,10 +6515,10 @@ impl Compiler {
                 return;
             }
             HirKind::Call { args, .. } => {
-                let call = &emit.calls[&id.0];
+                let call = &emit.plan.calls[&id.0];
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
-                let tail = emit.tail_calls.contains(&id.0);
+                let tail = emit.plan.tail_calls.contains(&id.0);
                 if self.hir_par_call(hir, emit, &key, args, depth) {
                     if tail {
                         // A tail site's `Return` emits nothing after it.
@@ -6519,7 +6532,7 @@ impl Compiler {
                     self.hir_convert(&natural, want, depth);
                     return;
                 }
-                let call = &emit.calls[&id.0];
+                let call = &emit.plan.calls[&id.0];
                 let generic = call.generic.clone();
                 let words = Self::hir_arg_words(call, args.len());
                 if let Some(g) = &generic {
@@ -6527,7 +6540,7 @@ impl Compiler {
                         if let Some(unbox) = unbox
                             && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
                         {
-                            emit.lambda_unbox.insert(arg.0, unbox.clone());
+                            emit.plan.lambda_unbox.insert(arg.0, unbox.clone());
                         }
                     }
                 }
@@ -6536,7 +6549,7 @@ impl Compiler {
                     // reloaded in order, as the AST's `emit_call_args_stage_all`.
                     let mut temps = Vec::with_capacity(args.len());
                     for (i, &arg) in args.iter().enumerate() {
-                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        let rep = Self::hir_arg_rep(&emit.plan.calls[&id.0], i);
                         self.hir_value(hir, emit, arg, &rep, 0);
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
@@ -6565,7 +6578,7 @@ impl Compiler {
                 } else if emit.boxes.is_empty() {
                     let mut at = depth;
                     for (i, &arg) in args.iter().enumerate() {
-                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        let rep = Self::hir_arg_rep(&emit.plan.calls[&id.0], i);
                         self.hir_value(hir, emit, arg, &rep, at);
                         at += rep.words();
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
@@ -6584,7 +6597,7 @@ impl Compiler {
                     // overwrite one.
                     let mut temps = Vec::with_capacity(words as usize);
                     for (i, &arg) in args.iter().enumerate() {
-                        let rep = Self::hir_arg_rep(&emit.calls[&id.0], i);
+                        let rep = Self::hir_arg_rep(&emit.plan.calls[&id.0], i);
                         self.hir_value(hir, emit, arg, &rep, depth);
                         if let Some(ty) = generic.as_ref().and_then(|g| g.boxed[i].as_ref()) {
                             Self::emit_box_if_needed(&mut self.bytecode, ty);
@@ -7614,7 +7627,7 @@ impl Compiler {
     /// scrutinee's own variant into a function result of the same pair
     /// kind and payload type, so the arm is the identity on the pair.
     fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &str, arm: &HirArm) -> Option<u32> {
-        if emit.ret != Rep::Pair(kind.to_string()) {
+        if emit.plan.ret != Rep::Pair(kind.to_string()) {
             return None;
         }
         self.hir_rewrap_tag(hir, ty, arm)
@@ -7689,7 +7702,7 @@ impl Compiler {
                     this.hir_arm(hir, emit, arm, 0, None, want, depth);
                 }
                 HirPat::Bind(_) => this.hir_arm(hir, emit, arm, 0, None, want, depth),
-                _ if matches!(emit.ret, Rep::Pair(_)) && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                _ if matches!(emit.plan.ret, Rep::Pair(_)) && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
                     // `Err(e) => return Err(e)` from a niche word into a pair
                     // return (`assert(..)?`): the word is the payload.
                     if decode {
@@ -7699,7 +7712,7 @@ impl Compiler {
                     this.bytecode.push_const(tag as i32);
                     this.push_return_two_word();
                 }
-                _ if emit.ret == BOXED && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
+                _ if emit.plan.ret == BOXED && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
                     // Into a boxed return (a test body's `assert(..)?`): make
                     // the variant straight from the payload word.
                     if decode {
@@ -7722,7 +7735,7 @@ impl Compiler {
                     this.emit_run_defers();
                     this.bytecode.push_return();
                 }
-                _ if emit.ret == Rep::Word(layout) && this.hir_rewrap_tag(hir, ty, arm).is_some() => {
+                _ if emit.plan.ret == Rep::Word(layout) && this.hir_rewrap_tag(hir, ty, arm).is_some() => {
                     // Into the same niche layout: the matched word is the
                     // returned value.
                     this.emit_run_defers();
@@ -7796,7 +7809,7 @@ impl Compiler {
     /// before them skips, after the body: an early exit (`if c { return }`)
     /// is cold, and the code after it falls through.
     fn hir_mark_cold(&mut self, emit: &mut HirEmit, start: usize) {
-        if emit.cold_ok {
+        if emit.plan.cold_ok {
             let end = self.bytecode.il_mut().raw_len();
             emit.cold.retain(|&(s, _)| s < start);
             emit.cold.push((start, end));
@@ -7849,9 +7862,9 @@ impl Compiler {
     /// Box the frame-slot locals that escape first in statement (or block
     /// tail) `id`.
     fn hir_box_before(&mut self, emit: &mut HirEmit, id: HirId) {
-        if let Some(locals) = emit.box_at.get(&id.0).cloned() {
+        if let Some(locals) = emit.plan.box_at.get(&id.0).cloned() {
             for local in locals {
-                if emit.stacks.contains_key(&local) {
+                if emit.plan.stacks.contains_key(&local) {
                     self.hir_box_stack_array(emit, LocalId(local));
                 } else {
                     self.hir_box_sroa_class(emit, LocalId(local));
@@ -7907,9 +7920,9 @@ impl Compiler {
                         continue;
                     };
                     let key = self.context.variables.resolve(base as usize).clone();
-                    let words = match (emit.stacks.get(&local.0), self.context.unboxed_class_locals.get(&key)) {
+                    let words = match (emit.plan.stacks.get(&local.0), self.context.unboxed_class_locals.get(&key)) {
                         (Some(&n), _) => n,
-                        (None, Some(&(_, n, _))) if emit.sroa.contains_key(&local.0) => n,
+                        (None, Some(&(_, n, _))) if emit.plan.sroa.contains_key(&local.0) => n,
                         _ => 1,
                     };
                     let boxed = emit.boxes.get(&local.0).copied();
@@ -7942,7 +7955,7 @@ impl Compiler {
                     self.hir_effect(hir, emit, *init);
                     return;
                 }
-                if let Some(class) = emit.sroa.get(&local.0).cloned() {
+                if let Some(class) = emit.plan.sroa.get(&local.0).cloned() {
                     // Slots first, then each field stored into its own, as
                     // the AST's unboxed class local.
                     let (_, tys) = self.hir_new_layout(hir, *init).expect("planned new");
@@ -7969,7 +7982,7 @@ impl Compiler {
                     self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
-                if let Some(&n) = emit.stacks.get(&local.0) {
+                if let Some(&n) = emit.plan.stacks.get(&local.0) {
                     // Slots first, then each element stored into its own, as
                     // the AST's `try_emit_stack_array_init`.
                     let base = self.hir_bind_local(hir, *local);
@@ -8001,7 +8014,7 @@ impl Compiler {
                 self.bytecode.push_store_pop(slot);
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
-                HirKind::Local(local) if emit.stacks.contains_key(&local.0) => {
+                HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) => {
                     self.hir_stack_array_init(hir, emit, *local, *value);
                 }
                 HirKind::Local(local) => {
@@ -8014,7 +8027,7 @@ impl Compiler {
                     // As the AST: the value, then `StoreStatic`.
                     let want = self.hir_natural(hir, emit, *place).expect("planned static");
                     self.hir_value(hir, emit, *value, &want, 0);
-                    let slot = emit.statics[&place.0];
+                    let slot = emit.plan.statics[&place.0];
                     self.bytecode.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
                 }
                 HirKind::Field { base, name } => {
@@ -8250,12 +8263,12 @@ impl Compiler {
                     self.bytecode.push_const(0);
                     self.bytecode.push_return();
                 }
-                Some(v) if emit.tail_calls.contains(&v.0) => {
-                    let ret = emit.ret.clone();
+                Some(v) if emit.plan.tail_calls.contains(&v.0) => {
+                    let ret = emit.plan.ret.clone();
                     self.hir_value(hir, emit, v, &ret, 0);
                 }
                 Some(v) => {
-                    let ret = emit.ret.clone();
+                    let ret = emit.plan.ret.clone();
                     let start = self.bytecode.il_mut().raw_len();
                     self.hir_value(hir, emit, v, &ret, 0);
                     self.emit_run_defers();
@@ -8312,7 +8325,7 @@ impl Compiler {
     fn hir_value_copied(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, want: &Rep) {
         let copied = match hir.expr(value).kind {
             HirKind::Local(src) => {
-                !emit.stacks.contains_key(&src.0)
+                !emit.plan.stacks.contains_key(&src.0)
                     && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
             }
             _ => false,
@@ -8385,9 +8398,9 @@ impl Compiler {
             return false;
         }
         let planned = |l: LocalId| {
-            emit.sroa.contains_key(&l.0)
-                || emit.stacks.contains_key(&l.0)
-                || emit.pair_locals.contains_key(&l.0)
+            emit.plan.sroa.contains_key(&l.0)
+                || emit.plan.stacks.contains_key(&l.0)
+                || emit.plan.pair_locals.contains_key(&l.0)
                 || emit.tag_slots.contains_key(&l.0)
         };
         // The enclosing body's locals the loop reads, by name, as the site
@@ -9084,7 +9097,7 @@ impl Compiler {
         // Two plain calls with leaf arguments stack, as the AST's
         // `expr_is_stackable_direct_call` (`f(a) + g(b)` → `BinReturn`).
         let stackable = |this: &Self| this.hir_stackable_call(hir, emit, lhs) && this.hir_stackable_call(hir, emit, rhs);
-        if depth != 0 || !lower::stages_rhs(hir, &emit.stacks, rhs) || stackable(self) {
+        if depth != 0 || !lower::stages_rhs(hir, &emit.plan.stacks, rhs) || stackable(self) {
             self.hir_value(hir, emit, lhs, &BOXED, depth);
             self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
             return;
@@ -9112,8 +9125,8 @@ impl Compiler {
     fn hir_word_local(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Option<u32> {
         let HirKind::Local(l) = hir.expr(id).kind else { return None };
         (!hir.local(l).captured
-            && !emit.stacks.contains_key(&l.0)
-            && !emit.sroa.contains_key(&l.0)
+            && !emit.plan.stacks.contains_key(&l.0)
+            && !emit.plan.sroa.contains_key(&l.0)
             && self.hir_natural(hir, emit, id).as_ref() == Some(want))
         .then(|| Self::hir_slot(emit, l))
     }
@@ -9131,7 +9144,7 @@ impl Compiler {
         let HirKind::Call { callee: Callee::Named { .. }, args } = &hir.expr(id).kind else {
             return false;
         };
-        let Some(call) = emit.calls.get(&id.0) else { return false };
+        let Some(call) = emit.plan.calls.get(&id.0) else { return false };
         if call.method
             || call.builtin.is_some()
             || call.generic.is_some()
@@ -9144,7 +9157,7 @@ impl Compiler {
             return false;
         }
         fn leaf(hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
-            if emit.ops.contains_key(&id.0) {
+            if emit.plan.ops.contains_key(&id.0) {
                 return false;
             }
             match &hir.expr(id).kind {
@@ -9225,7 +9238,7 @@ impl Compiler {
     fn hir_int_imm(hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<i64> {
         match &hir.expr(id).kind {
             HirKind::Lit(Lit::Int(k)) => Some(*k),
-            HirKind::Global { .. } => match emit.consts.get(&id.0)? {
+            HirKind::Global { .. } => match emit.plan.consts.get(&id.0)? {
                 crate::const_fold::ConstValue::Int(k) => Some(*k),
                 _ => None,
             },
