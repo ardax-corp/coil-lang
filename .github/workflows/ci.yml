@@ -213,6 +213,52 @@ jobs:
         run: |
           ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
+      - name: Showcase project tests
+        run: |
+          BIN=./target/debug/coil ./examples/projects/run-tests.sh
+
+  # The same `.hy` suite under other compiler / VM settings. A job of its own
+  # so it runs beside `test` instead of after it.
+  harness-variants:
+    name: harness variants (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS (aarch64) runs GC stress only: stack scanning and the frame
+        # maps are per target, the compiler settings are not.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+
+      - name: Install system deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev build-essential
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libffi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: harness-variants
+
+      - name: Build coil and coil-test
+        if: runner.os == 'Linux'
+        run: cargo build --bin coil --bin coil-test
+
       - name: Language harness at -O0 (`coil test -O 0`)
         if: runner.os == 'Linux'
         run: |
@@ -227,13 +273,6 @@ jobs:
           # result with it off.
           COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
-      - name: GC stress (`coil test`, collect and evacuate at every allocation)
-        if: runner.os == 'Linux'
-        run: |
-          # `coil test` re-execs `coil-test`; build the harness itself with the feature.
-          cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-          ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
       - name: Leak smoke (`coil test` under ulimit -v)
         if: runner.os == 'Linux'
         run: |
@@ -245,9 +284,11 @@ jobs:
           # of address space), which alone exceeds the room left.
           ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
-      - name: Showcase project tests
+      - name: GC stress (`coil test`, collect and evacuate at every allocation)
         run: |
-          BIN=./target/debug/coil ./examples/projects/run-tests.sh
+          # `coil test` re-execs `coil-test`; build the harness itself with the feature.
+          cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
+          ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
   # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
   # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail
