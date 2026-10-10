@@ -273,6 +273,9 @@ struct HirEmit {
     /// goes (a loop's back edge): a branch that would jump to its own end
     /// jumps there directly.
     next_jump: Option<IlLabel>,
+    /// A loop was emitted as a chunked fork-join (`hir_par_loop`), which the
+    /// direct MIR lowering does not model.
+    par_loop: bool,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -708,17 +711,22 @@ impl Compiler {
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
-    fn hir_lower_mir(&self, hir: &HirBody, emit: &HirEmit) -> Option<crate::mir::MirFunc> {
+    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit) -> Option<crate::mir::MirFunc> {
         if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
             return None;
         }
+        let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
+            .filter(|loc| loc.is_known())
+            .map(|loc| loc.file);
         let plan = &emit.plan;
         let why = if !plan.pair_locals.is_empty() || !plan.sroa.is_empty() || !plan.stacks.is_empty() {
             Err("frame-slot aggregate".to_string())
         } else if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
+        } else if emit.par_loop {
+            Err("parallel loop".to_string())
         } else {
-            crate::mir::lower_from_hir(hir, &emit.slots)
+            crate::mir::lower_from_hir(hir, &emit.slots, file)
         };
         match why {
             Ok(func) => {
@@ -1522,6 +1530,7 @@ impl Compiler {
             boxes: HashMap::new(),
             cold: Vec::new(),
             next_jump: None,
+            par_loop: false,
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -8547,6 +8556,7 @@ impl Compiler {
         emit.slots = saved;
         bb.bind_label(after_worker, self.bytecode.il_mut());
         self.emit_par_loop_chunks(&site, &slots, natives, worker, bb);
+        emit.par_loop = true;
         true
     }
 

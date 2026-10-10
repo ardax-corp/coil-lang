@@ -15,6 +15,8 @@
 //! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
 //! numbers as for a lifted body.
 
+use common::DebugLoc;
+
 use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId as HirLocal, UnOp};
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, Ty};
@@ -60,6 +62,8 @@ struct Lower<'a> {
     /// Blocks in the order lowering started filling them: source order,
     /// which is how they are laid out.
     order: Vec<BlockId>,
+    /// Source file of the body, for statement locations.
+    file: Option<u32>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -82,7 +86,7 @@ fn mir(e: MirError) -> Refusal {
 
 /// Lower `hir` to MIR. `slots` is the frame slot of each local, as HIR
 /// lowering assigned them; parameters must sit in slots `0..n`.
-pub fn lower_body(hir: &HirBody, slots: &[Option<u32>]) -> Result<MirFunc, Refusal> {
+pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Result<MirFunc, Refusal> {
     if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
         return Err("body kind".into());
     }
@@ -109,6 +113,7 @@ pub fn lower_body(hir: &HirBody, slots: &[Option<u32>]) -> Result<MirFunc, Refus
         loops: Vec::new(),
         unit_ret,
         order: vec![cur],
+        file,
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -359,7 +364,7 @@ impl Lower<'_> {
             }
             HirKind::Block { stmts, tail } => {
                 for &stmt in stmts {
-                    if !self.effect(stmt)? {
+                    if !self.stmt(stmt)? {
                         return Ok(Val::Never);
                     }
                 }
@@ -625,6 +630,24 @@ impl Lower<'_> {
         }
         self.switch(join);
         Ok(Val::V(self.b.ins_stack_phi(args).map_err(mir)?))
+    }
+
+    /// `id` as a block statement: what it lowers carries the statement's
+    /// source location, as HIR emission gives its IL ops (line breakpoints,
+    /// source views). Nested statements keep their own.
+    fn stmt(&mut self, id: HirId) -> Result<bool, Refusal> {
+        let outer = self.b.pending_loc;
+        if let Some(file) = self.file {
+            let (start, end) = self.hir.expr(id).span;
+            self.b.pending_loc = DebugLoc {
+                file,
+                start_byte: start as u32,
+                end_byte: end.max(start + 1) as u32,
+            };
+        }
+        let flows = self.effect(id);
+        self.b.pending_loc = outer;
+        flows
     }
 
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
