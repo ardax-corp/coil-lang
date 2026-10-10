@@ -15,12 +15,16 @@
 //! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
 //! numbers as for a lifted body.
 
+use std::collections::HashMap;
+
 use common::DebugLoc;
 
 use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId as HirLocal, UnOp};
+use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, Ty};
 
+use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::{MirBlock, MirFunc};
 use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
@@ -64,6 +68,13 @@ struct Lower<'a> {
     order: Vec<BlockId>,
     /// Source file of the body, for statement locations.
     file: Option<u32>,
+    /// Entry label of each plain call site HIR emission lowered to a `CALL`.
+    calls: &'a HashMap<u32, Label>,
+    /// Whether early exits move out of line, as HIR emission's
+    /// `hir_mark_cold`.
+    cold_ok: bool,
+    /// Ranges of `order` holding an early exit, laid out after the body.
+    cold: Vec<(usize, usize)>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -86,7 +97,13 @@ fn mir(e: MirError) -> Refusal {
 
 /// Lower `hir` to MIR. `slots` is the frame slot of each local, as HIR
 /// lowering assigned them; parameters must sit in slots `0..n`.
-pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Result<MirFunc, Refusal> {
+pub fn lower_body(
+    hir: &HirBody,
+    slots: &[Option<u32>],
+    calls: &HashMap<u32, Label>,
+    cold_ok: bool,
+    file: Option<u32>,
+) -> Result<MirFunc, Refusal> {
     if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
         return Err("body kind".into());
     }
@@ -114,6 +131,9 @@ pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Re
         unit_ret,
         order: vec![cur],
         file,
+        calls,
+        cold_ok,
+        cold: Vec::new(),
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -122,7 +142,7 @@ pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Re
         // A unit body whose tail is a value, or a valued body ending in `()`.
         _ => return Err("fallthrough value".into()),
     }
-    let order = std::mem::take(&mut lower.order);
+    let order = lower.layout();
     let mut func = lower.b.finish().map_err(mir)?;
     tidy(&mut func, &order);
     Ok(func)
@@ -328,6 +348,7 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
+            HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
                 let Some(v) = self.word(*operand)? else {
@@ -658,6 +679,52 @@ impl Lower<'_> {
         out
     }
 
+    /// A plain call of scalar arguments: `CALL` of the entry label HIR
+    /// emission used, with the one-word ABI of the argument and result types.
+    fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let target = *self.calls.get(&id.0).ok_or("call")?;
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if unit { MirTy::I64 } else { scalar(ty).ok_or("call type")? };
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            if self.expr_ty(arg).and_then(scalar).is_none() {
+                return Err("call argument type".into());
+            }
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let abi = DenseAbi {
+            params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
+            ret,
+            ret_hi: None,
+        };
+        let (dest, _) = self.b.ins_call(target, words, &abi).map_err(mir)?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
+    }
+
+    /// Lay out the blocks lowering started since `order[start]` after the
+    /// body; a range nested in one already marked goes with it.
+    fn mark_cold(&mut self, start: usize) {
+        if self.cold_ok {
+            self.cold.retain(|&(s, _)| s < start);
+            self.cold.push((start, self.order.len()));
+        }
+    }
+
+    /// The blocks in layout order: source order with the cold ranges last.
+    fn layout(&mut self) -> Vec<BlockId> {
+        let order = std::mem::take(&mut self.order);
+        let cold = |i: usize| self.cold.iter().any(|&(s, e)| (s..e).contains(&i));
+        let mut out: Vec<BlockId> = (0..order.len()).filter(|&i| !cold(i)).map(|i| order[i]).collect();
+        for &(s, e) in &self.cold {
+            out.extend_from_slice(&order[s..e]);
+        }
+        out
+    }
+
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
         // `if !c` branches on `c` with the edges swapped, as HIR lowering
         // inverts it.
@@ -681,11 +748,18 @@ impl Lower<'_> {
         let mut arms = Vec::new();
         let mut join = None;
         for (block, arm) in [(then_b, Some(then)), (else_b, els)] {
+            let start = self.order.len();
             self.switch(block);
             let val = match arm {
                 Some(arm) => self.value(arm)?,
                 None => Val::Unit,
             };
+            // The arm a statement `if` leaves by (`then` without an `else`,
+            // else the `else`) is cold when it only exits.
+            let exit_arm = if els.is_some() { arm == els } else { arm == Some(then) };
+            if matches!(val, Val::Never) && exit_arm && arm.is_some_and(|a| lower::cold_exit(self.hir, a)) {
+                self.mark_cold(start);
+            }
             if !matches!(val, Val::Never) {
                 arms.push((self.cur, val));
                 let to = *join.get_or_insert_with(|| self.b.create_block());

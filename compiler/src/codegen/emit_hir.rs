@@ -276,6 +276,10 @@ struct HirEmit {
     /// A loop was emitted as a chunked fork-join (`hir_par_loop`), which the
     /// direct MIR lowering does not model.
     par_loop: bool,
+    /// Entry label of each plain one-word `CALL` emitted (no dictionaries,
+    /// not a tail call or a coroutine), by call site: the direct MIR
+    /// lowering's call targets.
+    call_targets: HashMap<u32, IlLabel>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -719,14 +723,18 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.pair_locals.is_empty() || !plan.sroa.is_empty() || !plan.stacks.is_empty() {
-            Err("frame-slot aggregate".to_string())
+        let why = if !plan.pair_locals.is_empty() {
+            Err("pair local".to_string())
+        } else if !plan.sroa.is_empty() {
+            Err("scalar-replaced local".to_string())
+        } else if !plan.stacks.is_empty() {
+            Err("stack array".to_string())
         } else if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
         } else if emit.par_loop {
             Err("parallel loop".to_string())
         } else {
-            crate::mir::lower_from_hir(hir, &emit.slots, file)
+            crate::mir::lower_from_hir(hir, &emit.slots, &emit.call_targets, plan.cold_ok, file)
         };
         match why {
             Ok(func) => {
@@ -1531,6 +1539,7 @@ impl Compiler {
             cold: Vec::new(),
             next_jump: None,
             par_loop: false,
+            call_targets: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6732,6 +6741,19 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(&key, words + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
+                if dicts == 0
+                    && generic.is_none()
+                    && let Some(&IlOp::Entry {
+                        kind: crate::il::EntryKind::Call,
+                        target,
+                        arity,
+                        ret_words: 1,
+                        ..
+                    }) = self.bytecode.il_mut().ops_slice_mut().last()
+                    && arity as usize == args.len()
+                {
+                    emit.call_targets.insert(id.0, target);
+                }
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.
                     return;
