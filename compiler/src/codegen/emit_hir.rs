@@ -1587,7 +1587,7 @@ impl Compiler {
                     _ => ("BitNot", "bitnot"),
                 };
                 let op = self.hir_instance_operator(ty, class, method).ok_or("operator")?;
-                emit.ops.insert(i as u32, op);
+                emit.plan.ops.insert(i as u32, op);
                 continue;
             }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
@@ -5851,7 +5851,7 @@ impl Compiler {
                     fqn,
                     class,
                     method,
-                }) = emit.ops.get(&id.0) =>
+                }) = emit.plan.ops.get(&id.0) =>
             {
                 // As the binary instance call: the operand boxed for the
                 // instance and stashed in a temp, then the call.
