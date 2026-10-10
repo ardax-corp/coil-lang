@@ -14,7 +14,6 @@ thread_local! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
     Generic,
-    Unroll,
     Branch,
     BlockOrder,
 }
@@ -428,7 +427,6 @@ pub(crate) fn collect_delta(delta: &PassDelta) {
         s.stores_eliminated += delta.stores_eliminated;
         match delta.kind {
             PassKind::Generic => {}
-            PassKind::Unroll => s.loops_unrolled += delta.extra.max(1),
             PassKind::Branch => s.branches_optimized += delta.extra.max(1),
             PassKind::BlockOrder => s.blocks_reordered += delta.extra.max(1),
         }

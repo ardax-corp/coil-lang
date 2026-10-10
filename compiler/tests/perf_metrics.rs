@@ -1637,9 +1637,10 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     );
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     println!("[COI-99] vec_scan_pure dispatches={dispatches}");
-    // absorb's 8-iter loop plus CALL; vec_scan itself is ~5.0M.
+    // absorb's 8-trip loop unrolls and folds to one add, so each element is
+    // little more than the CALL (~3.1M); a kept loop would be ~5.3M+.
     assert!(
-        dispatches > 5_300_000 && dispatches < 20_000_000,
+        dispatches > 2_500_000 && dispatches < 4_000_000,
         "vec_scan_pure dispatch count unexpected: {dispatches}"
     );
 }

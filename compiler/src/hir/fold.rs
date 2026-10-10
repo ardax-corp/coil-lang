@@ -3,8 +3,9 @@
 //! Operators on literals become literals (`int` and `float` only, and an
 //! `int` result only when it fits 32 bits, as the stack IL encodes it),
 //! `x + 0`, `x * 1`, `x | 0` and friends become `x`, `x * 0` becomes `0`
-//! when `x` is a plain read, `x ** 2` becomes `x * x`, `!!b` becomes `b`, and
-//! `if` on a literal keeps only the branch it takes. Folds run bottom-up, so
+//! when `x` is a plain read, `x ** 2` becomes `x * x`, `(x + 1) + 2` becomes
+//! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `!!b` becomes `b`,
+//! and `if` on a literal keeps only the branch it takes. Folds run bottom-up, so
 //! they cascade.
 
 use super::lower::children;
@@ -24,7 +25,8 @@ fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
     for k in children(body, id) {
         post(body, k, hits);
     }
-    if let Some(kind) = rewrite(body, id).or_else(|| square(body, id)) {
+    merge_steps(body, id, hits);
+    if let Some(kind) = rewrite(body, id).or_else(|| square(body, id)).or_else(|| regroup(body, id)) {
         let e = &mut body.exprs[id.0 as usize];
         e.kind = kind;
         e.node = None;
@@ -87,6 +89,70 @@ fn square(body: &mut HirBody, id: HirId) -> Option<HirKind> {
     let again = HirId(body.exprs.len() as u32);
     body.exprs.push(copy);
     Some(HirKind::Bin { op: BinOp::IntMul, lhs, rhs: again })
+}
+
+/// `(x + a) + b` is `x + (a + b)` for `int` literals of one sign, so a
+/// chain of constant steps (an unrolled counter, say) adds once. Same sign
+/// keeps every overflow the chain had: the sum overflows exactly when some
+/// step did.
+fn regroup(body: &mut HirBody, id: HirId) -> Option<HirKind> {
+    let HirKind::Bin { op: BinOp::IntAdd, lhs, rhs } = body.expr(id).kind else { return None };
+    let HirKind::Lit(Lit::Int(b)) = body.expr(rhs).kind else { return None };
+    let HirKind::Bin { op: BinOp::IntAdd, lhs: x, rhs: inner } = body.expr(lhs).kind else { return None };
+    let HirKind::Lit(Lit::Int(a)) = body.expr(inner).kind else { return None };
+    if (a < 0) != (b < 0) || body.expr(x).ty != body.expr(id).ty {
+        return None;
+    }
+    let sum = fits(a.checked_add(b)?)?;
+    // `inner` belongs to the `x + a` this replaces, so it can take the sum.
+    let e = &mut body.exprs[inner.0 as usize];
+    e.kind = HirKind::Lit(Lit::Int(sum));
+    e.node = None;
+    Some(HirKind::Bin { op: BinOp::IntAdd, lhs: x, rhs: inner })
+}
+
+/// In a block, `x = x + a; x = x + b;` is `x = x + (a + b);` for `int`
+/// literals of one sign, as [`regroup`] does inside one expression.
+fn merge_steps(body: &mut HirBody, id: HirId, hits: &mut usize) {
+    let HirKind::Block { stmts, tail } = &body.expr(id).kind else { return };
+    let (mut stmts, tail) = (stmts.clone(), *tail);
+    let mut k = 0;
+    let mut merged = false;
+    while k + 1 < stmts.len() {
+        if let (Some((x, a, lit_a)), Some((y, b, _))) = (step(body, stmts[k]), step(body, stmts[k + 1]))
+            && x == y
+            && (a < 0) == (b < 0)
+            && let Some(sum) = a.checked_add(b).and_then(fits)
+        {
+            let e = &mut body.exprs[lit_a.0 as usize];
+            e.kind = HirKind::Lit(Lit::Int(sum));
+            e.node = None;
+            stmts.remove(k + 1);
+            merged = true;
+            *hits += 1;
+            continue;
+        }
+        k += 1;
+    }
+    if merged {
+        let e = &mut body.exprs[id.0 as usize];
+        e.kind = HirKind::Block { stmts, tail };
+        e.node = None;
+    }
+}
+
+/// `x = x + c` on an `int` local: `x`, `c` and the literal's node.
+fn step(body: &HirBody, s: HirId) -> Option<(super::LocalId, i64, HirId)> {
+    let HirKind::Assign { place, value } = body.expr(s).kind else { return None };
+    let HirKind::Local(x) = body.expr(place).kind else { return None };
+    let HirKind::Bin { op: BinOp::IntAdd, lhs, rhs } = body.expr(value).kind else { return None };
+    if !matches!(body.expr(lhs).kind, HirKind::Local(y) if y == x) || body.local(x).captured {
+        return None;
+    }
+    match body.expr(rhs).kind {
+        HirKind::Lit(Lit::Int(c)) => Some((x, c, rhs)),
+        _ => None,
+    }
 }
 
 /// `x op c` / `c op x` that is just `x` (or just `0`).

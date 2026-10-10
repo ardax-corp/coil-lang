@@ -63,7 +63,7 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 | Cursor split (`sp` vs `tell`) — **decided: keep** (operand height ≠ STORE floor) | [COI-81](https://linear.app/ardax/issue/COI-81) |
 | Copy-prop / GVN beyond straight-line — **removed 2026-10** (`copy_prop`, `cfg_gvn`, `ssa_gvn` deleted: measurement showed no bench effect; HIR keeps intra-block CSE (`hir::cse`), MIR keeps its own GVN) | [COI-82](https://linear.app/ardax/issue/COI-82) |
 | IL `MakeArray` frame scalarization (`escape_analysis` pass) — **removed 2026-10** (no bench effect); codegen `[T; N]` locals still scalarize, and the `escape_analysis` option now only gates HIR enum / tuple scalar replacement | [COI-84](https://linear.app/ardax/issue/COI-84) |
-| Loop full unroll — **decided: counted trip ≤ 8** (nested/break/call refuse; `LEQ` for **trip count** only — not an Index in-bounds proof; see bounds `LEQ` refusal, COI-85 / COI-98) | [COI-98](https://linear.app/ardax/issue/COI-98) |
+| Loop full unroll — **decided: counted trip ≤ 8**, on the HIR since 2026-10 (`hir::unroll`; break/call/closure refuse, inner loops that unroll first let the outer one follow; `LEQ` for **trip count** only — not an Index in-bounds proof; see bounds `LEQ` refusal, COI-85 / COI-98) | [COI-98](https://linear.app/ardax/issue/COI-98) |
 | Optimization levels (`OptLevel`) — **implemented** (`-O0`…`-O3`, `-Os`, `-Og`; `Standard` default) | — |
 | Iterative optimization — **removed** (re-running the pipeline is unsound: LICM is not idempotent) | [COI-130](https://linear.app/ardax/issue/COI-130) |
 | Optimization statistics — **default off** (`collect_stats` / `--opt-stats`) | [COI-131](https://linear.app/ardax/issue/COI-131) |

@@ -1416,7 +1416,8 @@ fn rec(int n) -> int {
     }
     let i = 0;
     let s = 0;
-    while i < 8 {
+    // Past the full-unroll trip cap, so the loop stays.
+    while i < 12 {
         s = s + n * i;
         i = i + 1;
     }
@@ -3370,14 +3371,15 @@ fn s2d_mapped_preheader_array_mut_takes_dense() {
 fn bump() -> int {
     let arr = [0, 0, 0, 0];
     let i = 0;
-    while i < 8 {
+    // Past the full-unroll trip cap, so the loop stays.
+    while i < 12 {
         arr[i % 4] = arr[i % 4] + 1;
         i = i + 1;
     }
     return arr[0] + arr[1] + arr[2] + arr[3];
 }
 fn main() {
-    if bump() != 8 {
+    if bump() != 12 {
         panic "bump checksum";
     }
 }
