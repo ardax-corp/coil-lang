@@ -1069,8 +1069,10 @@ impl<const S: usize> Machine<S> {
                         promise!(b < common::simd::NREGS);
                         &self.vregs[b]
                     };
-                    let out = crate::simd::eval_vbin(kind, lhs, rhs, scalar);
-                    self.vregs[dest] = out;
+                    match crate::simd::eval_vbin(kind, lhs, rhs, scalar) {
+                        Ok(out) => self.vregs[dest] = out,
+                        Err(t) => int_trap!(t),
+                    }
                 }
                 Instruction::VMove => {
                     let (dest, src) = opcode.dense_move_parts();
@@ -1083,21 +1085,20 @@ impl<const S: usize> Machine<S> {
                     promise!(vsrc < common::simd::NREGS);
                     promise!(sp + dest < stack_cap);
                     let acc = self.stack[sp + dest];
-                    self.stack[sp + dest] =
-                        crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc], fold as u8);
+                    match crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc], fold as u8) {
+                        Ok(v) => self.stack[sp + dest] = v,
+                        Err(t) => int_trap!(t),
+                    }
                 }
                 Instruction::VFma => {
                     let (ty, dest, a, b) = opcode.dense_abc_parts();
                     promise!(dest < common::simd::NREGS);
                     promise!(a < common::simd::NREGS);
                     promise!(b < common::simd::NREGS);
-                    let out = crate::simd::eval_vfma(
-                        ty,
-                        &self.vregs[a],
-                        &self.vregs[b],
-                        &self.vregs[dest],
-                    );
-                    self.vregs[dest] = out;
+                    match crate::simd::eval_vfma(ty, &self.vregs[a], &self.vregs[b], &self.vregs[dest]) {
+                        Ok(out) => self.vregs[dest] = out,
+                        Err(t) => int_trap!(t),
+                    }
                 }
                 Instruction::DenseMake => {
                     let (kind, dest, arity, base) = opcode.dense_abc_parts();

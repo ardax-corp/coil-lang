@@ -11887,3 +11887,48 @@ fn int_ops_at_the_edges_do_not_trap() {
     ));
     assert_eq!(out, "9223372036854775807 0 true");
 }
+
+/// Vectorized int loops (`V*` lanes) trap like scalar ones; a sum reduce
+/// folds in element order.
+#[test]
+fn vectorized_int_overflow_traps() {
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn scan(Vec<int> v) -> int {{
+             let acc = 0;
+             let i = 0;
+             while i < len(v) {{ acc = acc + v[i]; i = i + 1; }}
+             return acc;
+         }}
+         fn scale(int k, Vec<int> x, Vec<int> y) -> int {{
+             let i = 0;
+             while i < len(x) {{ y[i] = k * x[i]; i = i + 1; }}
+             return y[0];
+         }}
+         fn main() {{
+             let big = 4611686018427387904;
+             let v: Vec<int> = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+             let w: Vec<int> = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, big]);
+             let y: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+             say(num(scan(v)));
+             say(\" \");
+             say(num(scale(2, v, y)));
+             say(\" \");
+             say(num(scale(2, w, y)));
+         }}"
+    ));
+    assert!(out.starts_with("136 2 panic: integer overflow"), "got {out:?}");
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn scan(Vec<int> v) -> int {{
+             let acc = 0;
+             let i = 0;
+             while i < len(v) {{ acc = acc + v[i]; i = i + 1; }}
+             return acc;
+         }}
+         fn main() {{
+             let big = 4611686018427387904;
+             let v: Vec<int> = Vec::from([big, big, 0 - big, 0 - big, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+             say(num(scan(v)));
+         }}"
+    ));
+    assert!(out.starts_with("panic: integer overflow"), "big + big overflows first: got {out:?}");
+}
