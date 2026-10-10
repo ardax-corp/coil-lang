@@ -106,7 +106,10 @@ impl IoErrorTag {
             ErrorKind::NotADirectory => Self::NotADirectory,
             ErrorKind::AlreadyExists => Self::AlreadyExists,
             ErrorKind::UnexpectedEof => Self::Truncated,
-            _ => Self::Other,
+            k => {
+                eprintln!("DEBUG from_kind -> Other: {k:?}\n{}", std::backtrace::Backtrace::force_capture());
+                Self::Other
+            }
         }
     }
 
