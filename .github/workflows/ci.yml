@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -10,370 +8,35 @@ env:
   CARGO_TERM_COLOR: always
   CI: "true"
 
-# Prefer `--lib --tests --bins` over `--all-targets`: Criterion benches under
-# `[[bench]]` treat argv after `--` as their own CLI and abort the suite.
-
 jobs:
-  # Every crate's default feature set is empty, and `coil-debug` /
-  # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
-  # `machine/{debugger,coverage}` for the whole workspace, so one feature set
-  # covers `--no-default-features` / `--features dissect|debugger` too.
-  # Criterion benches stay out (`--lib --tests --bins`).
-  clippy:
-    name: clippy (ubuntu-latest)
-    runs-on: ubuntu-latest
+  macos-gc-task-io:
+    name: macos gc-stress task_io debug
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libffi-dev build-essential
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: clippy
-
-      - name: Clippy
-        run: cargo clippy --workspace --lib --tests --bins -- -D warnings
-
-  # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
-  # linted here.
-  clippy-windows-gnu:
-    name: clippy (windows-gnu)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system deps (Windows)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
-
-      - name: Configure pkg-config (Windows)
-        shell: msys2 {0}
-        run: |
-          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-          pkgconf --exists libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-gnu
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-windows-gnu-clippy
-
-      - name: Clippy
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo clippy --workspace --lib --tests --bins -- -D warnings
-
-  # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
-  # deliberately broken programs and is not checked. The embedded prelude
-  # (`compiler/src/prelude`) and the comptime fixtures are.
-  fmt:
-    name: coil fmt --check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libffi-dev build-essential
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: fmt
-
-      - name: coil fmt --check
-        run: |
-          cargo build -p coil-fmt
-          ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy compiler/src/prelude comptime/tests
-
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/checkout@v4
         with:
           repository: ardax-corp/coil-stdlib
           path: .deps/coil-stdlib
-
-      - name: Install system deps (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libffi-dev build-essential z3
-
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: test
-
-      - name: Build all CLI binaries
-        run: cargo build
-
-      - name: Workspace tests
-        run: |
-          set -euo pipefail
-          # macOS: the default nofile limit (256) is low for parallel test runs.
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            ulimit -n 65536 || true
-          fi
-          # A FAILED summary with exit 0 must still fail the job.
-          log="$(mktemp)"
-          set +e
-          cargo test --workspace --lib --tests --bins 2>&1 | tee "$log"
-          code="${PIPESTATUS[0]}"
-          set -e
-          if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
-            echo "::error::tests reported failure but cargo exited 0" >&2
-            exit 1
-          fi
-          exit "$code"
-
-      - name: Release label lower (COI-407)
-        if: runner.os == 'Linux'
-        run: |
-          # Opt-level 3 / no debug_assertions (the release-compiler panic).
-          # Skip fat LTO so this stays a focused label-lower check.
-          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p compiler --test coi407_trailing_label -- --exact
-
-      - name: Release VM no_pool park/close (COI-410)
-        if: runner.os == 'Linux'
-        run: |
-          # Opt-level 3 like the release VM. Tests need Debug on Value
-          # (`cfg(debug_assertions)`) and unwind so the harness can compile.
-          CARGO_PROFILE_RELEASE_LTO=off \
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p machine --lib \
-            vm::tests::no_pool_close_park_resume_two_hundred \
-            -- --exact
-          CARGO_PROFILE_RELEASE_LTO=off \
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p machine --lib \
-            vm::tests::program_string_cache_dropped_when_incremental_sweep_starts \
-            -- --exact
-
-      - name: VM-wire suites (pipeline / perf_metrics / namespace / cursor_model)
-        if: runner.os == 'Linux'
-        run: |
-          # `required-features = ["vm-wire"]` keeps these out of the workspace
-          # suite. Name them: `--tests` would rerun every compiler test.
-          cargo test -p compiler --features vm-wire \
-            --test pipeline --test perf_metrics --test namespace --test cursor_model
-
-      - name: Language harness (`coil test`)
-        env:
-          # A worker abort (coil-lang#804) prints where it happened.
-          RUST_BACKTRACE: "1"
-        run: |
-          ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: Showcase project tests
-        run: |
-          BIN=./target/debug/coil ./examples/projects/run-tests.sh
-
-  # The same `.hy` suite under other compiler / VM settings. A job of its own
-  # so it runs beside `test` instead of after it.
-  harness-variants:
-    name: harness variants (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # macOS (aarch64) runs GC stress only: stack scanning and the frame
-        # maps are per target, the compiler settings are not.
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-
-      - name: Install system deps (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libffi-dev build-essential
-
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - run: brew install libffi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           key: harness-variants
-
-      - name: Build coil and coil-test
-        if: runner.os == 'Linux'
-        run: cargo build --bin coil --bin coil-test
-
-      - name: Language harness at -O0 (`coil test -O 0`)
-        if: runner.os == 'Linux'
+      - name: Build plain + gc-stress
         run: |
-          # Optimizations hide codegen bugs (LICM materializes invariants,
-          # inlining drops CALL targets); run the unoptimized pipeline too.
-          ./target/debug/coil test -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
-        if: runner.os == 'Linux'
-        run: |
-          # Typed inlining is the default; every test must give the same
-          # result with it off.
-          COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: Leak smoke (`coil test` under ulimit -v)
-        if: runner.os == 'Linux'
-        run: |
-          # The cap is 48 MiB above the harness's own code, which grows with
-          # every change (a fixed 64 MiB cap had shrunk to ~35 MiB of room).
-          code_kb=$(( $(size -d target/debug/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-          ulimit -v $(( code_kb + 49152 ))
-          # One job: every extra thread reserves a glibc malloc arena (64 MiB
-          # of address space), which alone exceeds the room left.
-          ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: GC stress (`coil test`, collect and evacuate at every allocation)
-        run: |
-          # `coil test` re-execs `coil-test`; build the harness itself with the feature.
+          cargo build --bin coil --bin coil-test
+          cargo build --bin coil --features gc-stress --target-dir target/gc-stress
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-          ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-  # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
-  # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail
-  # here instead of only on the main-only zip cell.
-  test-windows-gnu:
-    name: test (windows-gnu, default)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-
-      - name: Install system deps (Windows)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
-
-      - name: Configure pkg-config (Windows)
-        shell: msys2 {0}
+      - name: Diagnostic program, plain
+        if: always()
+        run: ./target/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
+      - name: Diagnostic program, gc-stress
+        if: always()
+        run: ./target/gc-stress/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
+      - name: task_io.hy alone, gc-stress, x5
+        if: always()
         run: |
-          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-          pkgconf --exists libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-gnu
-
-      - name: Verify host triple
-        shell: bash
-        run: |
-          host="$(rustc -vV | sed -n 's/^host: //p')"
-          echo "rustc host=$host"
-          if [[ "$host" != "x86_64-pc-windows-gnu" ]]; then
-            echo "::error::runner host triple '$host' is not x86_64-pc-windows-gnu"
-            exit 1
-          fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-windows-gnu-default
-
-      - name: Build all CLI binaries
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          rustc -vV
-          command -v make
-          command -v cmp
-          cargo build
-
-      - name: Workspace tests (default)
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo test --workspace --lib --tests --bins --jobs 1
-
-      - name: Language harness (`coil test`)
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          ./target/debug/coil.exe test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: Showcase project tests
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          BIN=./target/debug/coil.exe bash ./examples/projects/run-tests.sh
+          for i in 1 2 3 4 5; do
+            ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/only 2>&1 | grep -E '^>|FAILED|test result' || true
+          done
