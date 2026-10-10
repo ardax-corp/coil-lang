@@ -2171,7 +2171,9 @@ impl Walk<'_> {
                     if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
                         return self.aggregate_arith(id, *lhs, Some(*rhs), depth);
                     }
-                    if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
+                    if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")
+                        && crate::typechecking::generics::Generics::operator_trait(sym).is_none()
+                    {
                         return Err("operator");
                     }
                     if depth != 0 {
@@ -2221,11 +2223,22 @@ impl Walk<'_> {
             HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
                 self.aggregate_arith(id, *operand, None, depth)
             }
-            // A type parameter's word in a shared body: the AST's plain
-            // `NEG` (coil-lang#803: negation has no dictionary entry).
-            HirKind::Un { op: UnOp::Neg, operand } if matches!(self.ty(*operand).map(strip_readonly), Some(Ty::Var(_))) => {
+            // A type parameter's word in a shared body: its `Neg` / `BitNot`
+            // dictionary call (`Compiler::hir_operator_at`).
+            HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand } if matches!(self.ty(*operand).map(strip_readonly), Some(Ty::Var(_))) => {
                 self.word(*operand)?;
                 self.value(*operand, depth)
+            }
+            // A user type's `-v` / `~v`: a call of its `Neg` / `BitNot`
+            // instance, staged through a temp as the binary operators are.
+            HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand }
+                if self.ty(*operand).is_some_and(|t| user_operand(self.checker, t)) =>
+            {
+                if depth != 0 {
+                    return Err("operator-depth");
+                }
+                self.word(*operand)?;
+                self.value(*operand, 0)
             }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
@@ -3067,3 +3080,13 @@ fn kind_name(kind: &HirKind) -> &'static str {
 #[cfg(test)]
 #[path = "lower.tests.rs"]
 mod tests;
+
+/// A class or enum operand of a unary operator, which dispatches to the
+/// type's trait instance (`impl Neg for V`).
+pub(crate) fn user_operand(checker: &Checker, ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Con(name) | Ty::Sum { name, .. } => checker.is_class(name) || checker.enum_variants(name).is_some(),
+        Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(name) if checker.is_class(name)),
+        _ => false,
+    }
+}

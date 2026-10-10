@@ -81,6 +81,28 @@ fn compile_src_pipeline(src: &str, inline: bool) -> (Vec<Byte>, Vec<u64>) {
 }
 
 fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Vec<u64>) {
+    let (bc, compiler) = compile_src_compiler(src, tune);
+    (bc, compiler.constants)
+}
+
+/// The bytecode of function `name` alone: the program also carries the
+/// builtin operator thunks (`Pow`, `SHL`, `XOR`, …), which a test of how
+/// one body lowers must not see.
+fn compile_fn_body(src: &str, name: &str) -> Vec<Byte> {
+    let (bc, compiler) = compile_src_compiler(src, |_| {});
+    let start = *compiler.functions.get(name).unwrap_or_else(|| panic!("no fn `{name}`"));
+    let end = compiler
+        .functions
+        .values()
+        .copied()
+        .filter(|&pc| pc > start)
+        .min()
+        .unwrap_or(bc.len())
+        .min(bc.len());
+    bc[start..end].to_vec()
+}
+
+fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Compiler) {
     let mut owned = String::new();
     let needs_io = src.contains("write(")
         || src.contains("stdout()")
@@ -118,7 +140,7 @@ fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>,
     compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
     tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
-    (bc, compiler.constants)
+    (bc, compiler)
 }
 
 #[test]
@@ -697,7 +719,7 @@ fn integer_arithmetic_emits_int_opcode() {
 /// An int `x * 8` stays a multiply: `x << 3` would not trap on overflow.
 #[test]
 fn int_mul_by_power_of_two_stays_mul() {
-    let (bc, _pool) = compile_src("fn scale(int x) -> int { return x * 8; }");
+    let bc = compile_fn_body("fn scale(int x) -> int { return x * 8; }", "scale");
     assert!(
         !bytecode_has_any_shl(&bc),
         "x*8 must not become a shift; opcodes: {:?}",
@@ -710,7 +732,7 @@ fn int_mul_by_power_of_two_stays_mul() {
 #[test]
 fn pow_two_emits_self_mul_not_pow() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn sq(int x) -> int { return x ** 2; }");
+    let bc = compile_fn_body("fn sq(int x) -> int { return x ** 2; }", "sq");
     assert!(
         !bc.iter().any(|b| matches!(b.bytecode(), Instruction::Pow)),
         "x**2 must not emit Pow; opcodes: {:?}",
@@ -884,7 +906,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
 #[test]
 fn pow_zero_emits_const_one() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn one(int x) -> int { return x ** 0; }");
+    let bc = compile_fn_body("fn one(int x) -> int { return x ** 0; }", "one");
     let has_pow = bc.iter().any(|b| matches!(b.bytecode(), Instruction::Pow));
     let has_one = bc.iter().any(|b| {
         matches!(b.bytecode(), Instruction::CONST) && b.operand_u32() == 1
@@ -942,7 +964,7 @@ fn mul_by_lhs_power_of_two_emits_shl() {
 /// `const K = 16; x * K` on an int stays a multiply, like a literal factor.
 #[test]
 fn int_mul_by_const_power_of_two_stays_mul() {
-    let (bc, _pool) = compile_src("fn scale(int x) -> int { const K = 16; return x * K; }");
+    let bc = compile_fn_body("fn scale(int x) -> int { const K = 16; return x * K; }", "scale");
     assert!(
         !bytecode_has_any_shl(&bc),
         "x*const(16) must not become a shift; opcodes: {:?}",
@@ -954,7 +976,7 @@ fn int_mul_by_const_power_of_two_stays_mul() {
 /// [`const_fold::strength_reduced_inner`], not SHL lowering).
 #[test]
 fn mul_by_one_does_not_emit_shl() {
-    let (bc, _pool) = compile_src("fn id(int x) -> int { return x * 1; }");
+    let bc = compile_fn_body("fn id(int x) -> int { return x * 1; }", "id");
     assert!(
         !bytecode_has_any_shl(&bc),
         "x*1 should identity-reduce, not emit SHL; opcodes: {:?}",
@@ -969,7 +991,7 @@ fn mul_by_one_does_not_emit_shl() {
 #[test]
 fn float_mul_does_not_emit_shl() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn scale(float x) -> float { return x * 8.0; }");
+    let bc = compile_fn_body("fn scale(float x) -> float { return x * 8.0; }", "scale");
     assert!(
         !bytecode_has_any_shl(&bc),
         "float mul must not emit SHL; opcodes: {:?}",
@@ -1017,7 +1039,7 @@ fn byte_div_by_power_of_two_emits_shr() {
 #[test]
 fn int_div_by_power_of_two_keeps_div() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn scale(int x) -> int { return x / 8; }");
+    let bc = compile_fn_body("fn scale(int x) -> int { return x / 8; }", "scale");
     assert!(
         !bytecode_has_any_shr(&bc),
         "signed int / 8 must not become SHR; opcodes: {:?}",
@@ -1062,7 +1084,7 @@ fn bytecode_has_bitor(bc: &[Byte]) -> bool {
 #[test]
 fn bitand_zero_emits_const_not_bitand() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn z(int x) -> int { return x & 0; }");
+    let bc = compile_fn_body("fn z(int x) -> int { return x & 0; }", "z");
     assert!(
         !bytecode_has_bitand(&bc),
         "x & 0 should not emit BITAND; opcodes: {:?}",
@@ -1078,7 +1100,7 @@ fn bitand_zero_emits_const_not_bitand() {
 
 #[test]
 fn bitor_zero_skips_bitor() {
-    let (bc, _pool) = compile_src("fn id(int x) -> int { return x | 0; }");
+    let bc = compile_fn_body("fn id(int x) -> int { return x | 0; }", "id");
     assert!(
         !bytecode_has_bitor(&bc),
         "x | 0 should skip BITOR; opcodes: {:?}",
@@ -1089,7 +1111,7 @@ fn bitor_zero_skips_bitor() {
 #[test]
 fn xor_same_ident_emits_zero() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn z(int x) -> int { return x ^ x; }");
+    let bc = compile_fn_body("fn z(int x) -> int { return x ^ x; }", "z");
     assert!(
         !bc.iter().any(|b| matches!(b.bytecode(), Instruction::XOR)
             || (*b.bytecode() == Instruction::BinSlotSlot
@@ -1101,7 +1123,7 @@ fn xor_same_ident_emits_zero() {
 
 #[test]
 fn shl_zero_skips_shl() {
-    let (bc, _pool) = compile_src("fn id(int x) -> int { return x << 0; }");
+    let bc = compile_fn_body("fn id(int x) -> int { return x << 0; }", "id");
     assert!(
         !bytecode_has_any_shl(&bc),
         "x << 0 should skip SHL; opcodes: {:?}",

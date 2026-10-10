@@ -411,13 +411,14 @@ fn infer_walk(
                         imm: None,
                     });
                 }
+                // Bitwise `~`: an int, not the `bool` of `LogNot`.
                 Instruction::NOT => {
                     stack
                         .pop()
                         .ok_or_else(|| LowerError::Refused("not stack".into()))?;
                     stack.push(Cell {
                         origin: Origin::Tmp,
-                        ty: Some(MirTy::Bool),
+                        ty: Some(MirTy::I64),
                         imm: None,
                     });
                 }

@@ -1121,13 +1121,8 @@ fn lower_byte(
             tos.push(b.ins_neg(v)?);
             Ok(())
         }
-        Instruction::NOT => {
-            let v = tos
-                .pop()
-                .ok_or_else(|| LowerError::Refused("not stack".into()))?;
-            tos.push(b.ins_not(v)?);
-            Ok(())
-        }
+        // Bitwise `~` (`NOT`); MIR's `Not` is the logical `LogNot`.
+        Instruction::NOT => Err(LowerError::Refused("bitwise not".into())),
         Instruction::ArrayLen if hints.allow_index => {
             let arr = tos
                 .pop()

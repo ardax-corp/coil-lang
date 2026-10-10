@@ -436,21 +436,57 @@ impl Generics {
         format!("{}__{}__{}", class, ty_str, method)
     }
 
+    /// The operator trait and method a binary arithmetic or bitwise operator
+    /// dispatches through on a bound type parameter or a user type (`%` is
+    /// `Rem::rem`, `<<` is `Shl::shl`).
+    pub fn operator_trait(op: &str) -> Option<(&'static str, &'static str)> {
+        Some(match op {
+            "+" => ("Add", "add"),
+            "-" => ("Sub", "sub"),
+            "*" => ("Mul", "mul"),
+            "/" => ("Div", "div"),
+            "%" => ("Rem", "rem"),
+            "**" => ("Pow", "pow"),
+            "<<" => ("Shl", "shl"),
+            ">>" => ("Shr", "shr"),
+            "&" => ("BitAnd", "bitand"),
+            "|" => ("BitOr", "bitor"),
+            "^" => ("BitXor", "bitxor"),
+            _ => return None,
+        })
+    }
+
+    /// True for the integer-only operator traits (`<<`, `>>`, `&`, `|`,
+    /// `^`, `~`): `float` has no instance.
+    pub fn is_bitwise_trait(class: &str) -> bool {
+        matches!(class, "Shl" | "Shr" | "BitAnd" | "BitOr" | "BitXor" | "BitNot")
+    }
+
     /// Register the built-in typeclasses and their builtin instances.
     fn register_builtins(&mut self) {
-        use super::ty::{INT, Ty, boolean, float, int, string, unit};
+        use super::ty::{INT, Ty, boolean, byte, float, int, string, unit};
 
         self.register_builtin_type_ctors();
 
         // Individual arithmetic traits so a type can implement only the
         // operations it supports. `Num` is a convenience supertrait that
-        // implies all of them (see below); `Neg` is unary `-`.
+        // implies all of them (see below); `Neg` is unary `-`, `Rem` is `%`
+        // and `Pow` is `**`.
         for (name, method) in [
             ("Add", "add"),
             ("Sub", "sub"),
             ("Mul", "mul"),
             ("Div", "div"),
             ("Neg", "neg"),
+            ("Rem", "rem"),
+            ("Pow", "pow"),
+            // Integer-only: shifts, bitwise and / or / xor, unary `~`.
+            ("Shl", "shl"),
+            ("Shr", "shr"),
+            ("BitAnd", "bitand"),
+            ("BitOr", "bitor"),
+            ("BitXor", "bitxor"),
+            ("BitNot", "bitnot"),
         ] {
             self.typeclasses.insert(
                 name.into(),
@@ -470,8 +506,8 @@ impl Generics {
             );
         }
 
-        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg
-        // via the flattened superclass dictionary layout. Num itself has no
+        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg +
+        // Rem + Pow via the flattened superclass dictionary layout. Num itself has no
         // methods; call sites resolve operators through the op traits.
         self.typeclasses.insert(
             "Num".into(),
@@ -480,7 +516,22 @@ impl Generics {
                 defined_module: PRELUDE_OPS_MODULE.into(),
                 type_params: vec!["T".into()],
                 param_kinds: vec![Kind::Type],
-                superclasses: vec!["Add".into(), "Sub".into(), "Mul".into(), "Div".into(), "Neg".into()],
+                superclasses: ["Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow"].map(Into::into).to_vec(),
+                assoc_types: vec![],
+                methods: vec![],
+            },
+        );
+
+        // Convenience bundle for integers: `T: Integral` implies Num and the
+        // bitwise traits (`float` is Num but not Integral).
+        self.typeclasses.insert(
+            "Integral".into(),
+            TypeClassDef {
+                name: "Integral".into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                type_params: vec!["T".into()],
+                param_kinds: vec![Kind::Type],
+                superclasses: ["Num", "Shl", "Shr", "BitAnd", "BitOr", "BitXor", "BitNot"].map(Into::into).to_vec(),
                 assoc_types: vec![],
                 methods: vec![],
             },
@@ -734,6 +785,8 @@ impl Generics {
                 ("Mul", "mul"),
                 ("Div", "div"),
                 ("Neg", "neg"),
+                ("Rem", "rem"),
+                ("Pow", "pow"),
                 ("Lt", "lt"),
                 ("Le", "le"),
                 ("Gt", "gt"),
@@ -763,6 +816,41 @@ impl Generics {
                 });
             }
         }
+
+        // Bitwise traits: `int` has all of them (and so `Integral`); `byte`
+        // has the binary ones (`~` on a byte is not defined).
+        for (ty, ty_str, unary) in [(int(), "int", true), (byte(), "byte", false)] {
+            for (class, method) in [
+                ("Shl", "shl"),
+                ("Shr", "shr"),
+                ("BitAnd", "bitand"),
+                ("BitOr", "bitor"),
+                ("BitXor", "bitxor"),
+                ("BitNot", "bitnot"),
+            ] {
+                if class == "BitNot" && !unary {
+                    continue;
+                }
+                self.instances.push(InstanceDef {
+                    class: class.into(),
+                    defined_module: PRELUDE_OPS_MODULE.into(),
+                    range: 0..0,
+                    args: vec![ty.clone()],
+                    method_fqns: make_fqns(class, ty_str, &[method]),
+                    assoc_tys: HashMap::new(),
+                    context: Vec::new(),
+                });
+            }
+        }
+        self.instances.push(InstanceDef {
+            class: "Integral".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![int()],
+            method_fqns: HashMap::new(),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
 
         self.instances.push(InstanceDef {
             class: "Eq".into(),

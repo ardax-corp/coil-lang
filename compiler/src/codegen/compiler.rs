@@ -4448,6 +4448,8 @@ impl Compiler {
                     ("Sub", "sub", Instruction::SUB),
                     ("Mul", "mul", Instruction::MUL),
                     ("Div", "div", Instruction::DIV),
+                    ("Rem", "rem", Instruction::MOD),
+                    ("Pow", "pow", Instruction::Pow),
                 ],
                 [
                     ("Lt", "lt", Instruction::LE),
@@ -4466,6 +4468,8 @@ impl Compiler {
                     ("Sub", "sub", Instruction::SUBF),
                     ("Mul", "mul", Instruction::MULF),
                     ("Div", "div", Instruction::DIVF),
+                    ("Rem", "rem", Instruction::MODF),
+                    ("Pow", "pow", Instruction::PowF),
                 ],
                 [
                     ("Lt", "lt", Instruction::LEF),
@@ -4484,9 +4488,25 @@ impl Compiler {
                 emit(self, class, ty, method, tag, op, false);
             }
         }
-        // `Neg` takes one operand (plus the ignored trailing dictionary).
-        for (ty, tag, op) in [("int", ValueTag::Int, Instruction::NEG), ("float", ValueTag::Float, Instruction::NEGF)] {
-            let fqn = Generics::builtin_instance_fqn("Neg", ty, "neg");
+        // Bitwise traits over the int lane (`byte` shares its tag).
+        for ty in ["int", "byte"] {
+            for (class, method, op) in [
+                ("Shl", "shl", Instruction::SHL),
+                ("Shr", "shr", Instruction::SHR),
+                ("BitAnd", "bitand", Instruction::BITAND),
+                ("BitOr", "bitor", Instruction::BITOR),
+                ("BitXor", "bitxor", Instruction::XOR),
+            ] {
+                emit(self, class, ty, method, ValueTag::Int, op, true);
+            }
+        }
+        // `Neg` / `BitNot` take one operand (plus the ignored trailing dictionary).
+        for (class, method, ty, tag, op) in [
+            ("Neg", "neg", "int", ValueTag::Int, Instruction::NEG),
+            ("Neg", "neg", "float", ValueTag::Float, Instruction::NEGF),
+            ("BitNot", "bitnot", "int", ValueTag::Int, Instruction::NOT),
+        ] {
+            let fqn = Generics::builtin_instance_fqn(class, ty, method);
             if self.functions.contains_key(&fqn) {
                 continue;
             }

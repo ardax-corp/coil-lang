@@ -1558,12 +1558,12 @@ impl Compiler {
                 emit.plan.ops.insert(i as u32, HirOp::Aggregate(info));
                 continue;
             }
-            if let HirKind::Un { op: UnOp::Neg, operand } = expr.kind
+            if let HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand } = expr.kind
                 && let Some(hint) = self.bound_operator_hint(expr.node, expr.span.0, expr.span.1)
                 && let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index))
             {
-                // `-a` on a bound type parameter: its `Neg` dictionary
-                // method on the operand's one word.
+                // `-a` / `~a` on a bound type parameter: its `Neg` / `BitNot`
+                // dictionary method on the operand's one word.
                 let ty = Self::hir_ty(hir, operand).ok_or("operator-bound")?;
                 if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
                     return Err("operator-bound");
@@ -1575,6 +1575,19 @@ impl Compiler {
                         method: hint.method_slot as u32,
                     },
                 );
+                continue;
+            }
+            if let HirKind::Un { op: op @ (UnOp::Neg | UnOp::BitNot), operand } = expr.kind
+                && let Some(ty) = Self::hir_ty(hir, operand)
+                && lower::user_operand(&self.checker, ty)
+            {
+                // `-v` / `~v` on a user type: its `Neg` / `BitNot` instance.
+                let (class, method) = match op {
+                    UnOp::Neg => ("Neg", "neg"),
+                    _ => ("BitNot", "bitnot"),
+                };
+                let op = self.hir_instance_operator(ty, class, method).ok_or("operator")?;
+                emit.plan.ops.insert(i as u32, op);
                 continue;
             }
             if let Some(len) = self.hir_len_call(hir, HirId(i as u32)) {
@@ -4410,29 +4423,14 @@ impl Compiler {
             ">" => ("Gt", "gt"),
             "<=" => ("Le", "le"),
             ">=" => ("Ge", "ge"),
-            "+" => ("Add", "add"),
-            "-" => ("Sub", "sub"),
-            "*" => ("Mul", "mul"),
-            "/" => ("Div", "div"),
-            _ => return None,
+            _ => crate::typechecking::generics::Generics::operator_trait(sym)?,
         };
         let ty = Self::hir_ty(hir, lhs).or_else(|| Self::hir_ty(hir, rhs))?;
+        if let Some(op) = self.hir_instance_operator(ty, class, method) {
+            return Some(op);
+        }
         match self.concrete_operator_target_ty(ty, class, method) {
-            Some((lookup, fqn)) => {
-                let ret = self.checker.fn_return_ty(&fqn)?;
-                if !matches!(
-                    lower::classify(&self.checker, &ret),
-                    Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
-                ) {
-                    return None;
-                }
-                Some(HirOp::Call {
-                    lookup,
-                    fqn,
-                    class,
-                    method,
-                })
-            }
+            Some(_) => None,
             None => match sym {
                 "==" => Some(HirOp::Prim(Instruction::EQ)),
                 "!=" => Some(HirOp::Prim(Instruction::NEQ)),
@@ -4445,6 +4443,8 @@ impl Compiler {
                         "-" => Instruction::SUB,
                         "*" => Instruction::MUL,
                         "/" => Instruction::DIV,
+                        "%" => Instruction::MOD,
+                        "**" => Instruction::Pow,
                         "<" => Instruction::LE,
                         ">" => Instruction::GT,
                         "<=" => Instruction::LEQ,
@@ -4456,6 +4456,8 @@ impl Compiler {
                         "-" => Instruction::SUBF,
                         "*" => Instruction::MULF,
                         "/" => Instruction::DIVF,
+                        "%" => Instruction::MODF,
+                        "**" => Instruction::PowF,
                         "<" => Instruction::LEF,
                         ">" => Instruction::GTF,
                         "<=" => Instruction::LEQF,
@@ -4466,6 +4468,25 @@ impl Compiler {
                 },
             },
         }
+    }
+
+    /// A call of the operand type's `class` instance for an operator, when
+    /// it has one with a one-word result.
+    fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
+        let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
+        let ret = self.checker.fn_return_ty(&fqn)?;
+        if !matches!(
+            lower::classify(&self.checker, &ret),
+            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
+        ) {
+            return None;
+        }
+        Some(HirOp::Call {
+            lookup,
+            fqn,
+            class,
+            method,
+        })
     }
 
     /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,
@@ -5823,6 +5844,33 @@ impl Compiler {
                 self.bytecode.push_const(method as i32);
                 self.bytecode.push_index();
                 self.bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(2));
+            }
+            HirKind::Un { operand, .. }
+                if let Some(HirOp::Call {
+                    lookup,
+                    fqn,
+                    class,
+                    method,
+                }) = emit.plan.ops.get(&id.0) =>
+            {
+                // As the binary instance call: the operand boxed for the
+                // instance and stashed in a temp, then the call.
+                debug_assert_eq!(depth, 0);
+                let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                self.hir_value(hir, emit, *operand, &BOXED, 0);
+                Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                self.expr_depth = 0;
+                let temp = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(temp);
+                self.bytecode.push_load(temp);
+                let mut call = CodeBuf::new();
+                let span = hir.expr(id).span;
+                let mut arity = 1;
+                if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
+                    arity += 1;
+                }
+                self.emit_direct_fn_call(&mut call, &fqn, arity);
+                self.bytecode.append(&mut call);
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
