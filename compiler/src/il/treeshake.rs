@@ -522,7 +522,7 @@ mod tests {
 
         let preserve = buf.len();
         buf.push_const(11); // static-init / setup payload that must survive
-        buf.push_pop();
+        buf.push_store_pop(0);
 
         let main_pc = buf.len();
         let main_l = buf.bind_fresh_entry();
@@ -555,7 +555,7 @@ mod tests {
                 .any(|op| matches!(op, IlOp::Const { imm: 11, .. })),
             "static-init CONST must survive thunk shake"
         );
-        assert_eq!(functions["main"], 2); // setup CONST;POP then main
+        assert_eq!(functions["main"], 2); // setup CONST;StorePop then main
     }
 
     #[test]
