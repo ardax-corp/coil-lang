@@ -5567,7 +5567,10 @@ impl Compiler {
                 let root = lam.body.root.expect("planned lambda body");
                 let ret = lam.emit.ret.clone();
                 self.hir_value(&lam.body, &mut lam.emit, root, &ret, 0);
-                self.bytecode.push_return();
+                // A body that returned on every path needs no closing return.
+                if !self.bytecode.ends_in_exit() {
+                    self.bytecode.push_return();
+                }
                 self.field_key_slots = prev_keys;
                 self.context.variables = prev_vars;
                 self.expr_depth = depth;

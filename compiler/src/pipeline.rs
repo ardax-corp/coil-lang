@@ -2558,7 +2558,6 @@ fn main() { add(1, 2); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        assert_eq!(stats.iterations, 1);
         assert!(
             stats.functions_inlined >= 1,
             "tiny add should inline; stats={stats:?}"

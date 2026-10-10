@@ -69,9 +69,9 @@ mod tests {
         let mut pool = Vec::new();
         let lowered = lower(il.ops(), &mut pool);
         assert!(matches!(*lowered.bytecode[1].bytecode(), Instruction::JMP));
-        // `dead_block` drops the fall-through CONST 2 after JMP.
-        assert_eq!(lowered.bytecode[1].operand_u32(), 2);
-        assert_eq!(lowered.bytecode.len(), 3);
+        // The unreached `CONST 2` stays: lower only assigns PCs.
+        assert_eq!(lowered.bytecode[1].operand_u32(), 3);
+        assert_eq!(lowered.bytecode.len(), 4);
     }
 
 

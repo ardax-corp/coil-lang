@@ -17,16 +17,16 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// Dead-code elimination. Inlining stays modest.
+    /// Constant folding only, with modest inlining.
     Basic,
-    /// All currently-on production passes. Backward-compatible default.
+    /// Every production pass. The default.
     #[default]
     Standard,
     /// Standard plus a larger inline budget.
     Aggressive,
     /// Standard with unrolling and return sinking off (less code growth).
     Size,
-    /// Basic cleanup only; no scalar replacement or unroll.
+    /// Constant folding only; no scalar replacement, unroll or inlining.
     Debug,
 }
 
@@ -36,29 +36,9 @@ impl OptLevel {
         name.parse()
     }
 
-    /// Production pass names this level enables, in driver / D1 table order.
-    pub fn pass_names(self) -> Vec<&'static str> {
-        use super::driver::PRODUCTION_PASSES;
-        PRODUCTION_PASSES
-            .iter()
-            .filter(|spec| pass_included(self, spec))
-            .map(|spec| spec.name)
-            .collect()
-    }
-
     /// `OptimizeOptions` for this level.
-    ///
-    /// Pass flags are derived from [`Self::pass_names`] via the driver table.
-    /// Driver knobs (iteration cap, …) are not pass names.
     pub fn options(self) -> OptimizeOptions {
-        use super::driver::PRODUCTION_PASSES;
-        let mut o = base_knobs(self);
-        for spec in PRODUCTION_PASSES {
-            if pass_included(self, spec) {
-                spec.enable(&mut o);
-            }
-        }
-        o
+        base_knobs(self)
     }
 
     /// Typed-inlining budgets. Lives here so CLI tests can check mapping without
@@ -120,7 +100,6 @@ impl fmt::Display for OptLevel {
 
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
-        dead_block: false,
         algebraic: false,
         local_cse: false,
         licm: false,
@@ -135,18 +114,7 @@ fn all_off() -> OptimizeOptions {
     }
 }
 
-fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
-    use super::driver::OptFloor;
-    let ceiling = match level {
-        OptLevel::None => OptFloor::None,
-        OptLevel::Basic | OptLevel::Debug => OptFloor::Basic,
-        OptLevel::Standard | OptLevel::Size => OptFloor::Standard,
-        OptLevel::Aggressive => OptFloor::Aggressive,
-    };
-    spec.floor <= ceiling && !(level == OptLevel::Size && spec.omit_from_size)
-}
-
-/// Knobs that are not pass names.
+/// The switches `level` turns on.
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
@@ -181,7 +149,6 @@ impl Default for OptimizeOptions {
 #[cfg(test)]
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
-        o.dead_block,
         o.algebraic,
         o.local_cse,
         o.licm,
@@ -242,16 +209,15 @@ mod tests {
     fn none_is_algebraic_only() {
         let o = OptLevel::None.options();
         assert!(o.algebraic);
-        assert!(!o.dead_block);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
         assert!(!o.local_cse);
     }
 
     #[test]
-    fn basic_enables_dce() {
+    fn basic_folds_only() {
         let o = OptLevel::Basic.options();
-        assert!(o.algebraic && o.dead_block);
+        assert!(o.algebraic);
         assert!(!o.licm && !o.escape_analysis);
     }
 
@@ -265,13 +231,13 @@ mod tests {
         let o = OptLevel::Size.options();
         assert!(!o.loop_unroll);
         assert!(!o.sink_return);
-        assert!(o.algebraic && o.dead_block && o.escape_analysis);
+        assert!(o.algebraic && o.escape_analysis);
     }
 
     #[test]
     fn debug_preserves_slots() {
         let o = OptLevel::Debug.options();
-        assert!(o.algebraic && o.dead_block);
+        assert!(o.algebraic);
         assert!(!o.escape_analysis && !o.loop_unroll);
         assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);
@@ -295,21 +261,6 @@ mod tests {
                 w[1]
             );
         }
-    }
-
-    #[test]
-    fn none_runs_no_il_passes() {
-        assert!(OptLevel::None.pass_names().is_empty());
-    }
-
-    #[test]
-    fn aggressive_pass_names_match_standard() {
-        assert_eq!(OptLevel::Standard.pass_names(), OptLevel::Aggressive.pass_names());
-    }
-
-    #[test]
-    fn size_runs_the_standard_il_passes() {
-        assert_eq!(OptLevel::Size.pass_names(), OptLevel::Standard.pass_names());
     }
 
     #[test]
