@@ -95,3 +95,11 @@ fn an_int_literal_moves_to_the_right() {
     // Not commutative.
     assert_eq!(folded_return("fn f(int x) -> int { return 3 - x; }"), "lit IntSub x");
 }
+
+#[test]
+fn stores_to_a_local_nothing_reads_go() {
+    // `j` is only ever stored; `y` is read.
+    assert_eq!(assigns_left("fn f(int x) -> int { let j = 0; j = x; j = 3; let y = x; y = 4; return y; }"), 1);
+    // A store of something with an effect stays.
+    assert_eq!(assigns_left("fn g() -> int { return 1; } fn f(int x) -> int { let j = 0; j = g(); return x; }"), 1);
+}
