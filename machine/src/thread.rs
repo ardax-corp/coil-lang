@@ -473,10 +473,13 @@ pub(crate) struct MachineHostState {
     begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
     end_shared_steal: unsafe fn(*mut (), Value),
     debugger_attached: bool,
-    spawn_context: Option<ThreadSpawnContext>,
+    // Built on demand from `raw`: `execute` is re-entered after every FFI
+    // call, so cloning these up front (the natives and the dload gate's
+    // pin tables) cost more than the call itself.
+    spawn_context: unsafe fn(*mut ()) -> Option<ThreadSpawnContext>,
+    dload_gate: unsafe fn(*mut ()) -> *const crate::ffi::DloadGate,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
-    dload_gate: crate::ffi::DloadGate,
 }
 
 thread_local! {
@@ -490,10 +493,8 @@ pub(crate) struct HostStateGuard {
 impl HostStateGuard {
     pub fn enter<const N: usize>(vm: &mut Machine<N>) -> Self {
         let prev = HOST_STATE.with(|c| c.borrow_mut().take());
-        let spawn_context = vm.thread_spawn_context();
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
-        let dload_gate = vm.dload_gate().clone();
         let debugger_attached = {
             #[cfg(any(test, feature = "debugger"))]
             {
@@ -511,10 +512,10 @@ impl HostStateGuard {
                 begin_shared_steal: Self::begin_steal::<N>,
                 end_shared_steal: Self::end_steal::<N>,
                 debugger_attached,
-                spawn_context,
+                spawn_context: Self::spawn_context::<N>,
+                dload_gate: Self::dload_gate::<N>,
                 io_reactor,
                 cpu_reactor,
-                dload_gate,
             });
         });
         Self { prev }
@@ -522,6 +523,14 @@ impl HostStateGuard {
 
     unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
         unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
+    }
+
+    unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
+        unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
+    }
+
+    unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
+        unsafe { (*(raw.cast::<Machine<N>>())).dload_gate() as *const _ }
     }
 
     unsafe fn begin_steal<const N: usize>(
@@ -556,7 +565,7 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
     HOST_STATE.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|s| s.spawn_context.clone())
+            .and_then(|s| unsafe { (s.spawn_context)(s.raw) })
             .ok_or(ThreadErrorTag::Other)
     })
 }
@@ -646,7 +655,9 @@ pub(crate) fn host_code_ptr_from_hashed_dload(
         let Some(state) = state.as_ref() else {
             return Err(IoErrorTag::PermissionDenied);
         };
-        hashed_dload_code_ptr(&state.dload_gate, addr as *const std::ffi::c_void)
+        // SAFETY: `raw` is the Machine bound by the live guard.
+        let gate = unsafe { &*(state.dload_gate)(state.raw) };
+        hashed_dload_code_ptr(gate, addr as *const std::ffi::c_void)
     })
 }
 
