@@ -47,11 +47,13 @@ const CORPUS: &[&str] = &[
 /// prop, instcombine, …) retargets all five.
 /// Laying out early exits in HIR lowering instead of the stack-IL
 /// `branch_optimization` pass retargets all five (same lengths).
+/// Threading jumps in lowering instead of the stack-IL `jump_thread` and
+/// `block_reordering` passes retargets `option_pair.hy` (one jump shorter).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "3186422f0e51b124_1250"),
     ("functions.hy", "cf7d45d5c7dd59f6_274"),
     ("loops.hy", "b5305a69572145f8_227"),
-    ("option_pair.hy", "1a785448532894d7_340"),
+    ("option_pair.hy", "d00716de810c7e19_339"),
     ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
 ];
 

@@ -14,7 +14,6 @@ thread_local! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
     Generic,
-    BlockOrder,
 }
 
 /// Result of one named pass. [`collect_delta`] records this when `collect_stats`.
@@ -431,7 +430,6 @@ pub(crate) fn collect_delta(delta: &PassDelta) {
         s.stores_eliminated += delta.stores_eliminated;
         match delta.kind {
             PassKind::Generic => {}
-            PassKind::BlockOrder => s.blocks_reordered += delta.extra.max(1),
         }
         s.add_pass(delta.name, delta.ops_delta);
     });

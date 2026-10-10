@@ -53,10 +53,8 @@ pub struct PassSpec {
     apply: ApplyFn,
 }
 
-/// Growth passes need `Vec` (splice / push). Pure rewrites only need a slice,
-/// so they are not forced through `&mut Vec`.
+/// A pass body over a function's ops (growth passes splice / push).
 enum ApplyFn {
-    Slice(fn(&mut [IlOp], &OptimizeOptions, &mut PassCtx<'_>) -> usize),
     Grow(fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx<'_>) -> usize),
 }
 
@@ -82,7 +80,6 @@ impl Pass for PassSpec {
             Pass::name(self),
             self.kind,
             |ops| match self.apply {
-                ApplyFn::Slice(apply) => apply(ops.as_mut_slice(), opts, ctx),
                 ApplyFn::Grow(apply) => apply(ops, opts, ctx),
             },
         )
@@ -129,12 +126,7 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
     }
 }
 
-// Apply wrappers. Extra (unroll / branch / block-order counts) is the usize.
-
-fn apply_jump_thread(ops: &mut [IlOp], _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::cfg::jump_thread(ops);
-    0
-}
+// Apply wrappers. The usize is a pass-specific count.
 
 fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::cfg::eliminate_dead_blocks(ops);
@@ -166,22 +158,8 @@ fn apply_clone_shared_return(
     0
 }
 
-fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::block_order::reorder_basic_blocks(ops)
-}
-
 /// Production opt passes. Order matches D1 README.
 pub static PRODUCTION_PASSES: &[PassSpec] = &[
-    PassSpec {
-        name: "jump_thread",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        gate: |o| o.jump_thread,
-        set_flag: |o| o.jump_thread = true,
-        apply: ApplyFn::Slice(apply_jump_thread),
-    },
     PassSpec {
         name: "dead_block",
         phase: Phase::Cleanup,
@@ -232,28 +210,16 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         set_flag: |o| o.clone_shared_return = true,
         apply: ApplyFn::Grow(apply_clone_shared_return),
     },
-    PassSpec {
-        name: "block_reordering",
-        phase: Phase::Decision,
-        kind: PassKind::BlockOrder,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.block_reordering,
-        set_flag: |o| o.block_reordering = true,
-        apply: ApplyFn::Grow(apply_block_reordering),
-    },
 ];
 
 /// D1 README production order (cleanup then decision).
 #[cfg(test)]
 pub const D1_PASS_ORDER: &[&str] = &[
-    "jump_thread",
     "dead_block",
     "stack_dce",
     "canon",
     "slot_promote",
     "clone_shared_return",
-    "block_reordering",
 ];
 
 #[cfg(test)]
@@ -276,13 +242,11 @@ mod tests {
         assert_eq!(
             enabled,
             [
-                "jump_thread",
                 "dead_block",
                 "stack_dce",
                 "canon",
                 "slot_promote",
                 "clone_shared_return",
-                "block_reordering",
             ]
         );
     }

@@ -8,15 +8,6 @@ fn loc() -> DebugLoc {
     DebugLoc::unknown()
 }
 
-fn jmp(id: u32) -> IlOp {
-    IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: Label(id),
-        loc: loc(),
-        hint: Default::default(),
-    }
-}
-
 fn label(id: u32) -> IlOp {
     IlOp::Label(Label(id))
 }
@@ -30,48 +21,6 @@ fn c(n: i32) -> IlOp {
         imm: n,
         loc: loc(),
     }
-}
-
-fn entry_target(ops: &[IlOp]) -> Option<u32> {
-    match ops.first() {
-        Some(IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target: Label(id),
-            ..
-        }) => Some(*id),
-        _ => None,
-    }
-}
-
-/// Jump threading only. One hop per jump per round, so a 3-edge chain
-/// still has work after a single pipeline pass.
-fn jump_thread_opts() -> OptimizeOptions {
-    let mut o = super::OptLevel::None.options();
-    o.algebraic = false;
-    o.jump_thread = true;
-    o
-}
-
-/// JMP L1; L1: JMP L2; L2: JMP L3; L3: RET
-fn jmp_chain() -> Vec<IlOp> {
-    vec![
-        jmp(1),
-        label(1),
-        jmp(2),
-        label(2),
-        jmp(3),
-        label(3),
-        ret(),
-    ]
-}
-
-/// Production runs the pipeline once; re-running it is not a supported mode
-/// (LICM is not idempotent), so a 3-edge chain threads exactly one hop.
-#[test]
-fn one_round_threads_one_hop() {
-    let mut ops = jmp_chain();
-    optimize(&mut ops, &jump_thread_opts(), &mut Vec::new());
-    assert_eq!(entry_target(&ops), Some(2));
 }
 
 #[test]

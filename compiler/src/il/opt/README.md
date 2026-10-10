@@ -75,12 +75,11 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `canon`
+1. `dead_block` → 2. `stack_dce` → 3. `canon`
 
 **Decision** (`decision_once_at`), in order:
 
-5. `slot_promote` (+ `dead_store_at`) → 6. `clone_shared_return` →
-7. `block_reordering`
+4. `slot_promote` (+ `dead_store_at`) → 5. `clone_shared_return`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -97,20 +96,6 @@ Invariants every pass must preserve unless its section says otherwise:
 - Residual abs-jump `Byte` is never introduced.
 
 ---
-
-## `jump_thread`
-
-**Flag:** `jump_thread` (default on). **Fn:** `cfg::jump_thread`.
-
-- **Input:** Symbolic `Jump` / `Label` IL. No cursor analysis.
-- **Output:** Unconditional `JMP L` whose target begins with `JMP L2` (skipping
-  labels) becomes `JMP L2`. One hop per jump per round. Stack height and label
-  ids unchanged.
-- **Refusals:** Conditional jumps, missing label, target that is not an
-  unconditional jump.
-- **Tests:** `opt/convoy.tests.rs` `jump_thread_collapses_goto_goto` (calls the
-  pass directly). Chain convergence: `opt/mod.tests.rs`
-  `jmp_chain_needs_two_rounds_to_thread_to_the_return`.
 
 ## `dead_block`
 
@@ -257,27 +242,26 @@ Uses **`tell`**. Cleanup `dead_store_at` runs immediately after.
 ## `branch_optimization` (moved to HIR lowering)
 
 Early-exit layout happens as `emit_hir` lowers a body, still under the
-`branch_optimization` flag (Standard, Aggressive, Size). An `if` arm or a
-two-arm niche `match` arm that always returns is marked cold; after the
+`branch_optimization` flag (Standard, Aggressive, Size). An `if` arm (then
+or else), a two-arm niche `match` arm, or the last arm of a pair `match`
+(`?`'s `Err(e) => return Err(e)`) that always returns is marked cold; after the
 body's fall-through return, `CodeBuf::move_exits_to_end` moves each marked
 region to the end and inverts the jump that skipped it, so the code after the
 exit falls through. Refused: `ValueUnderJmp` / `nofuse` jumps, a region that
 can fall through, and a body with a closure or thunk entry bound after the
 region (its offset would move). The stack-IL pass was removed 2026-10. Hit
-benches: `examples/perf/fib.hy`, `pair_fib.hy`, `triple_fib.hy`.
+benches: `examples/perf/fib.hy`, `pair_fib.hy`, `triple_fib.hy`,
+`result_try_churn.hy`. This also replaces the stack-IL `block_reordering`
+pass (removed 2026-10), which sank such exits.
 
-## `block_reordering`
+## Jump threading (in HIR lowering)
 
-**Flag:** `block_reordering` (default on). **Fn:**
-`block_order::reorder_basic_blocks`.
-
-- **Input:** Basic blocks split on labels and terminators.
-- **Output:** Detached jump-only terminating blocks sink to the end. Fall-through
-  chains stay adjacent. Label ids and branch polarity **are not rewritten**.
-- **Refusals:** Fall-through successor; block that is not a terminator; back-edge
-  successor; unconditional-jump join target.
-- **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
-  `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
+At every level, an `if` / `else` whose `end` would be followed by an
+unconditional jump (a loop body's back edge) ends its then-arm with a jump
+straight there; nested `if`s and a block's last statement pass the target
+down (`HirEmit::next_jump`). This replaces the stack-IL `jump_thread` pass
+(removed 2026-10). Hit bench: `examples/perf/tak_iter.hy`. Test:
+`codegen/lib.tests.rs` `if_else_ending_a_loop_body_jumps_to_the_back_edge`.
 
 ---
 
@@ -324,7 +308,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 
 | Pass | Solo test already existed | Newly added in D1 |
 |------|---------------------------|-------------------|
-| jump_thread | `convoy.tests.rs` | no |
 | dead_block | `convoy.tests.rs` | no |
 | stack_dce | `convoy.tests.rs` | no |
 | canon | `canon.rs` | no |
@@ -332,7 +315,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | loop_bounds | `bounds.rs` | no |
 | slot_promote | `slot_promote.rs` | no |
 | clone_shared_return | `convoy.tests.rs` | no |
-| block_reordering | `block_order.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |
 
 Run (from repo root):

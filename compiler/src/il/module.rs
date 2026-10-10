@@ -1605,7 +1605,6 @@ mod tests {
 
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
-            jump_thread: false,
             dead_block: false,
             stack_dce: false,
             slot_promote: false,
@@ -1619,7 +1618,6 @@ mod tests {
             loop_unroll_factor: 8,
             escape_analysis: false,
             branch_optimization: false,
-            block_reordering: false,
             collect_stats: false,
             mir_specialize: true,
         }
