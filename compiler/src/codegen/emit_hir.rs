@@ -734,7 +734,7 @@ impl Compiler {
         } else if emit.par_loop {
             Err("parallel loop".to_string())
         } else {
-            crate::mir::lower_from_hir(hir, &emit.slots, &emit.call_targets, file)
+            crate::mir::lower_from_hir(hir, &emit.slots, &emit.call_targets, plan.cold_ok, file)
         };
         match why {
             Ok(func) => {

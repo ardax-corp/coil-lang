@@ -70,6 +70,11 @@ struct Lower<'a> {
     file: Option<u32>,
     /// Entry label of each plain call site HIR emission lowered to a `CALL`.
     calls: &'a HashMap<u32, Label>,
+    /// Whether early exits move out of line, as HIR emission's
+    /// `hir_mark_cold`.
+    cold_ok: bool,
+    /// Ranges of `order` holding an early exit, laid out after the body.
+    cold: Vec<(usize, usize)>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -96,6 +101,7 @@ pub fn lower_body(
     hir: &HirBody,
     slots: &[Option<u32>],
     calls: &HashMap<u32, Label>,
+    cold_ok: bool,
     file: Option<u32>,
 ) -> Result<MirFunc, Refusal> {
     if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
@@ -126,6 +132,8 @@ pub fn lower_body(
         order: vec![cur],
         file,
         calls,
+        cold_ok,
+        cold: Vec::new(),
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -134,7 +142,7 @@ pub fn lower_body(
         // A unit body whose tail is a value, or a valued body ending in `()`.
         _ => return Err("fallthrough value".into()),
     }
-    let order = std::mem::take(&mut lower.order);
+    let order = lower.layout();
     let mut func = lower.b.finish().map_err(mir)?;
     tidy(&mut func, &order);
     Ok(func)
@@ -697,6 +705,26 @@ impl Lower<'_> {
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
+    /// Lay out the blocks lowering started since `order[start]` after the
+    /// body; a range nested in one already marked goes with it.
+    fn mark_cold(&mut self, start: usize) {
+        if self.cold_ok {
+            self.cold.retain(|&(s, _)| s < start);
+            self.cold.push((start, self.order.len()));
+        }
+    }
+
+    /// The blocks in layout order: source order with the cold ranges last.
+    fn layout(&mut self) -> Vec<BlockId> {
+        let order = std::mem::take(&mut self.order);
+        let cold = |i: usize| self.cold.iter().any(|&(s, e)| (s..e).contains(&i));
+        let mut out: Vec<BlockId> = (0..order.len()).filter(|&i| !cold(i)).map(|i| order[i]).collect();
+        for &(s, e) in &self.cold {
+            out.extend_from_slice(&order[s..e]);
+        }
+        out
+    }
+
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
         // `if !c` branches on `c` with the edges swapped, as HIR lowering
         // inverts it.
@@ -720,11 +748,18 @@ impl Lower<'_> {
         let mut arms = Vec::new();
         let mut join = None;
         for (block, arm) in [(then_b, Some(then)), (else_b, els)] {
+            let start = self.order.len();
             self.switch(block);
             let val = match arm {
                 Some(arm) => self.value(arm)?,
                 None => Val::Unit,
             };
+            // The arm a statement `if` leaves by (`then` without an `else`,
+            // else the `else`) is cold when it only exits.
+            let exit_arm = if els.is_some() { arm == els } else { arm == Some(then) };
+            if matches!(val, Val::Never) && exit_arm && arm.is_some_and(|a| lower::cold_exit(self.hir, a)) {
+                self.mark_cold(start);
+            }
             if !matches!(val, Val::Never) {
                 arms.push((self.cur, val));
                 let to = *join.get_or_insert_with(|| self.b.create_block());
