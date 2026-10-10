@@ -15,7 +15,8 @@
 //! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
 //! numbers as for a lifted body.
 
-use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, Lit, LocalId as HirLocal, UnOp};
+use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId as HirLocal, UnOp};
+use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, Ty};
 
 use super::builder::{MirBuilder, MirError};
@@ -39,7 +40,10 @@ enum Val {
 }
 
 struct Loop {
-    head: BlockId,
+    /// Where `continue` goes: the loop head, or a `for` loop's step.
+    cont: BlockId,
+    /// Whether a `continue` jumped to `cont`.
+    cont_used: bool,
     /// Where `break` goes, made at the first one.
     exit: Option<BlockId>,
 }
@@ -395,7 +399,11 @@ impl Lower<'_> {
                 let head = self.b.create_block();
                 self.jump(head)?;
                 self.switch(head);
-                self.loops.push(Loop { head, exit: None });
+                self.loops.push(Loop {
+                    cont: head,
+                    cont_used: false,
+                    exit: None,
+                });
                 let live = self.effect(*body);
                 let done = self.loops.pop().expect("loop pushed above");
                 if live? {
@@ -421,9 +429,22 @@ impl Lower<'_> {
                 Ok(Val::Never)
             }
             HirKind::Continue => {
-                let head = self.loops.last().ok_or("continue outside loop")?.head;
-                self.jump(head)?;
+                let lp = self.loops.last_mut().ok_or("continue outside loop")?;
+                lp.cont_used = true;
+                let cont = lp.cont;
+                self.jump(cont)?;
                 Ok(Val::Never)
+            }
+            HirKind::ForIn {
+                pat,
+                iterable,
+                body,
+                kind: Some(ForInKind::Range { inclusive, float }),
+            } => {
+                let HirPat::Bind(local) = *pat else {
+                    return Err("for in pattern".into());
+                };
+                self.for_range(local, *iterable, *body, *inclusive, *float)
             }
             HirKind::Return(value) => {
                 match value {
@@ -446,6 +467,75 @@ impl Lower<'_> {
             }
             other => Err(kind_name(other).into()),
         }
+    }
+
+    /// `for x in lo..hi`, as HIR lowering emits it: `x` is the counter
+    /// when the body never assigns it, `hi` is read once, and the step
+    /// adds one after the body (or at a `continue`).
+    fn for_range(&mut self, local: HirLocal, iterable: HirId, body: HirId, inclusive: bool, float: bool) -> Result<Val, Refusal> {
+        let [lo, hi] = lower::range_bounds(self.hir, iterable).ok_or("for in range value")?;
+        let ty = self.local_ty(local)?;
+        if ty != if float { MirTy::F64 } else { MirTy::I64 } {
+            return Err("for in range type".into());
+        }
+        let x = self.slot(local)?;
+        if !float && let Some((start, trips)) = lower::unrolled_range(self.hir, iterable, body, inclusive) {
+            // Unrolled: each value into `x`, then the body.
+            for k in 0..trips {
+                let v = self.b.ins_const(MirConst::I64(start + i64::from(k))).map_err(mir)?;
+                self.b.def_local(x, v).map_err(mir)?;
+                if !self.effect(body)? {
+                    return Ok(Val::Never);
+                }
+            }
+            return Ok(Val::Unit);
+        }
+        if lower::assigns_local(self.hir, body, local) {
+            return Err("for in counter assigned".into());
+        }
+        let Some(start) = self.word(lo)? else {
+            return Ok(Val::Never);
+        };
+        let Some(end) = self.word(hi)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(start) != ty || self.b.value_ty(end) != ty {
+            return Err("for in bound type".into());
+        }
+        self.b.def_local(x, start).map_err(mir)?;
+        let head = self.b.create_block();
+        let step = self.b.create_block();
+        let exit = self.b.create_block();
+        let body_b = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let cur = self.b.use_local(x, ty).map_err(mir)?;
+        let op = if inclusive { MirCmpOp::Le } else { MirCmpOp::Lt };
+        let more = self.b.ins_cmp(op, cur, end).map_err(mir)?;
+        self.b.branch(more, body_b, exit).map_err(mir)?;
+        self.switch(body_b);
+        self.loops.push(Loop {
+            cont: step,
+            cont_used: false,
+            exit: Some(exit),
+        });
+        let live = self.effect(body);
+        let done = self.loops.pop().expect("loop pushed above");
+        if live? {
+            self.jump(step)?;
+        } else if !done.cont_used {
+            // Nothing reaches the step.
+            self.switch(exit);
+            return Ok(Val::Unit);
+        }
+        self.switch(step);
+        let cur = self.b.use_local(x, ty).map_err(mir)?;
+        let one = self.b.ins_const(if float { MirConst::F64(1.0_f64.to_bits()) } else { MirConst::I64(1) }).map_err(mir)?;
+        let next = self.b.ins_binop(MirBinOp::Add, cur, one).map_err(mir)?;
+        self.b.def_local(x, next).map_err(mir)?;
+        self.jump(head)?;
+        self.switch(exit);
+        Ok(Val::Unit)
     }
 
     fn bin(&mut self, id: HirId, op: BinOp, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
