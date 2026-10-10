@@ -169,7 +169,6 @@ pub(crate) fn lower_module_inner(
     capture_ops: bool,
     opts: &opt::OptimizeOptions,
 ) -> Result<Lowered, IlError> {
-    super::canon::reset_canon_stats();
     let (flat, label_remap, func_label_maps) = module.optimize_and_flatten(opts, pool);
     let mut lowered = try_lower_optimized(&flat, pool)?;
     lowered.label_remap = label_remap;
@@ -1034,15 +1033,35 @@ fn try_fuse_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
     Some(Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(op as u8, slot, imm))
 }
 
+/// Opcode after swapping the two stack operands (`None` if not a safe swap).
+fn swap_binop(op: Instruction) -> Option<Instruction> {
+    Some(match op {
+        Instruction::ADD
+        | Instruction::MUL
+        | Instruction::EQ
+        | Instruction::NEQ
+        | Instruction::AND
+        | Instruction::OR
+        | Instruction::BITAND
+        | Instruction::BITOR
+        | Instruction::XOR => op,
+        Instruction::LE => Instruction::GT,
+        Instruction::GT => Instruction::LE,
+        Instruction::LEQ => Instruction::GEQ,
+        Instruction::GEQ => Instruction::LEQ,
+        _ => return None,
+    })
+}
+
 /// `CONST imm; LOAD slot; commute-bin` → `BinSlotImm` (COI-384 S7).
 ///
-/// Same encoding as `LOAD; CONST; op` after operand-order canon. Needed because
-/// `item_check` materializes `1 + call` as `CONST; LOAD; ADD` after slot
-/// promotion, past the canon pass. Non-commutative ops stay unfused.
+/// Same encoding as `LOAD; CONST; op`. Needed because `item_check`
+/// materializes `1 + call` as `CONST; LOAD; ADD` after slot promotion.
+/// Non-commutative ops stay unfused.
 fn try_fuse_const_load_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
     let imm = i16::try_from(const_inline_value(&window[0])?).ok()?;
     let slot = load_slot(&window[1])?;
-    let op2 = super::canon::swap_binop(*window[2].bytecode())?;
+    let op2 = swap_binop(*window[2].bytecode())?;
     if !is_int_bin_op(op2) {
         return None;
     }
@@ -2351,8 +2370,8 @@ mod tests {
         );
     }
 
-    /// Fuse-select encodes `CONST; LOAD; ADD` as `BinSlotImm` without canon
-    /// (COI-384: post-slot-promote `item_check` shape).
+    /// Fuse-select encodes `CONST; LOAD; ADD` as `BinSlotImm` (COI-384:
+    /// post-slot-promote `item_check` shape).
     #[test]
     fn fuse_select_const_load_add_to_bin_slot_imm() {
         let loc = DebugLoc::unknown();
@@ -2398,65 +2417,6 @@ mod tests {
                 .iter()
                 .all(|b| !matches!(*b.bytecode(), Instruction::BinSlotImm)),
             "non-commutative CONST;LOAD;SUB must not become BinSlotImm; got {:?}",
-            lowered
-                .bytecode
-                .iter()
-                .map(|b| *b.bytecode())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    /// Operand-order canon turns `Const; Load; ADD` into `Load; Const; ADD`,
-    /// which fuse-select encodes as `BinSlotImm`.
-    #[test]
-    fn canon_feeds_bin_slot_imm_fuse_shape() {
-        let loc = DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 1, loc },
-            IlOp::Load { slot: 0, loc },
-            IlOp::Bin {
-                op: Instruction::ADD,
-                loc,
-            },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        let mut pool = Vec::new();
-        let lowered = lower(&ops, &mut pool);
-        assert!(
-            lowered
-                .bytecode
-                .iter()
-                .any(|b| matches!(*b.bytecode(), Instruction::BinSlotImm)),
-            "expected BinSlotImm after canon+fuse; got {:?}",
-            lowered
-                .bytecode
-                .iter()
-                .map(|b| *b.bytecode())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    /// Int `ConstPool; Load; ADD` demotes then fuses to `BinSlotImm`.
-    #[test]
-    fn canon_demotes_const_pool_then_fuses_bin_slot_imm() {
-        let loc = DebugLoc::unknown();
-        let ops = vec![
-            IlOp::ConstPool { idx: 0, loc },
-            IlOp::Load { slot: 0, loc },
-            IlOp::Bin {
-                op: Instruction::ADD,
-                loc,
-            },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-        let mut pool = vec![common::Value::from(3_i64).raw() as u64];
-        let lowered = lower(&ops, &mut pool);
-        assert!(
-            lowered
-                .bytecode
-                .iter()
-                .any(|b| matches!(*b.bytecode(), Instruction::BinSlotImm)),
-            "expected BinSlotImm after ConstPool demote+canon+fuse; got {:?}",
             lowered
                 .bytecode
                 .iter()

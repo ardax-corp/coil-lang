@@ -13,15 +13,14 @@ use super::OptimizeOptions;
 use super::stats::{self, PassDelta, PassKind};
 
 /// Context threaded through one pipeline round. Keep this small.
-pub struct PassCtx<'a> {
+pub struct PassCtx {
     pub entry_tell: u32,
-    pub pool: &'a mut Vec<u64>,
 }
 
 /// One named rewrite over a function body (or bare `Vec<IlOp>`).
 pub trait Pass {
     fn name(&self) -> &'static str;
-    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> PassDelta;
+    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) -> PassDelta;
 }
 
 /// Cleanup (profile-agnostic) vs decision (layout / heat).
@@ -55,7 +54,7 @@ pub struct PassSpec {
 
 /// A pass body over a function's ops (growth passes splice / push).
 enum ApplyFn {
-    Grow(fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx<'_>) -> usize),
+    Grow(fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx) -> usize),
 }
 
 impl PassSpec {
@@ -73,7 +72,7 @@ impl Pass for PassSpec {
         self.name
     }
 
-    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> PassDelta {
+    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) -> PassDelta {
         stats::measure_pass(
             ops,
             opts.collect_stats,
@@ -97,22 +96,16 @@ pub fn enabled_pass_names(opts: &OptimizeOptions) -> Vec<&'static str> {
 }
 
 /// One pipeline round: cleanup, then decision.
-pub fn run_once(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-) {
+pub fn run_once(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32) {
     let mut ctx = PassCtx {
         // Cursor seed for the slot-tracking passes (`slot_promote`).
         entry_tell: entry_sp.max(0) as u32,
-        pool,
     };
     run_phase(Phase::Cleanup, ops, opts, &mut ctx);
     run_phase(Phase::Decision, ops, opts, &mut ctx);
 }
 
-fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx<'_>) {
+fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) {
     for spec in PRODUCTION_PASSES {
         if spec.phase != phase {
             continue;
@@ -128,17 +121,12 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
 
 // Apply wrappers. The usize is a pass-specific count.
 
-fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx) -> usize {
     super::cfg::eliminate_dead_blocks(ops);
     0
 }
 
-fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    crate::il::canon::canonicalize_operand_order(ops, ctx.pool);
-    0
-}
-
-fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx) -> usize {
     super::slot_promote::slot_promote(ops, ctx.entry_tell);
     super::dce::dead_store_at(ops, ctx.entry_tell);
     0
@@ -147,7 +135,7 @@ fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCt
 fn apply_clone_shared_return(
     ops: &mut Vec<IlOp>,
     _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
+    _: &mut PassCtx,
 ) -> usize {
     super::convoy::clone_shared_return(ops);
     0
@@ -164,16 +152,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.dead_block,
         set_flag: |o| o.dead_block = true,
         apply: ApplyFn::Grow(apply_dead_block),
-    },
-    PassSpec {
-        name: "canon",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.canon,
-        set_flag: |o| o.canon = true,
-        apply: ApplyFn::Grow(apply_canon),
     },
     PassSpec {
         name: "slot_promote",
@@ -201,7 +179,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
 #[cfg(test)]
 pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
-    "canon",
     "slot_promote",
     "clone_shared_return",
 ];
@@ -227,8 +204,7 @@ mod tests {
             enabled,
             [
                 "dead_block",
-                "canon",
-                "slot_promote",
+                            "slot_promote",
                 "clone_shared_return",
             ]
         );

@@ -30,7 +30,7 @@ fn stats_collect_dead_block_and_format() {
     let mut opts = OptLevel::None.options();
     opts.dead_block = true;
     opts.collect_stats = true;
-    optimize(&mut ops, &opts, &mut Vec::new());
+    optimize(&mut ops, &opts);
     let stats = last_opt_stats();
     assert_eq!(stats.iterations, 1);
     assert!(stats.ops_eliminated >= 2);
@@ -140,7 +140,7 @@ fn stats_off_does_not_record() {
     let mut opts = OptLevel::None.options();
     opts.dead_block = true;
     opts.collect_stats = false;
-    optimize(&mut ops, &opts, &mut Vec::new());
+    optimize(&mut ops, &opts);
     let stats = last_opt_stats();
     assert_eq!(stats, OptStats::default());
 }

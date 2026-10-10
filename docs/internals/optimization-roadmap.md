@@ -73,7 +73,7 @@ known-finite only — see [mir.md](mir.md#p11--mir-float-pipeline-coi-285)):
 - `NEGF` unary float negate.
 - Algebraic: exact `+0.0` / `+1.0` float identities; const-pool float binop fold.
 - Codegen: `new Class(args).field` scalar replacement (no temp instance).
-- Operand-order canon (`il::canon` + `CanonStats`): const-to-RHS / load-load slot order; int `ConstPool` demote into inline `CONST` when safe; bounds accepts post-canon `GT` headers.
+- Operand order: `hir::fold` puts an `int` literal on the right (the stack-IL `canon` pass was removed 2026-10).
 
 LICM now iterates invariant float/int expression chains (nested loops can hoist
 more than one chain per call). Integer `i * c` strength reduction is on after
@@ -217,7 +217,7 @@ Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
 `IndexPinUnchecked` / `StoreIndexPinUnchecked` (archive minor 13) so the VM
 skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < len(a)`) and
 invariant stride loops (`k = k + p` with positive invariant `p`) share the
-same length-invariance proof (`LE` / post-canon `GT` headers only).
+same length-invariance proof (strict `<` / `>` headers only).
 `LEQ` / `GEQ` are **not** length / in-bounds proofs (COI-85 / COI-98). Dynamic
 indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 
