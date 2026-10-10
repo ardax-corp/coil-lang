@@ -201,8 +201,10 @@ jobs:
       - name: VM-wire suites (pipeline / perf_metrics / namespace / cursor_model)
         if: runner.os == 'Linux'
         run: |
-          # `required-features = ["vm-wire"]` keeps these out of the workspace suite.
-          cargo test -p compiler --features vm-wire --tests
+          # `required-features = ["vm-wire"]` keeps these out of the workspace
+          # suite. Name them: `--tests` would rerun every compiler test.
+          cargo test -p compiler --features vm-wire \
+            --test pipeline --test perf_metrics --test namespace --test cursor_model
 
       - name: Language harness (`coil test`)
         env:
