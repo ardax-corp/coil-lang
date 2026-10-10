@@ -538,7 +538,7 @@ fn main() {
 }
 "#,
     );
-    // clone_shared_return may fuse the const arm to ConstReturnImm, but the
+    // The const arm may fuse to ConstReturnImm, but the
     // payload arm must RETURN locally ,  never JMP into ConstReturnImm (that
     // would ignore the stacked Unpack value). Scope to the match region so
     // prologue / other fn JMPs do not trip the guard.

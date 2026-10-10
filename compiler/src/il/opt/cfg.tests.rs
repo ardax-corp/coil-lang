@@ -1,4 +1,5 @@
     use super::*;
+    use crate::il::Label;
     use crate::il::opt::{OptimizeOptions, optimize_per_func};
     use crate::il::opt::cfg::eliminate_dead_blocks;
     use common::{Byte, Instruction};
@@ -51,62 +52,6 @@
         assert_eq!(ops.len(), 3);
         assert!(is_insn(&ops[0], Instruction::ConstReturnImm));
         assert!(matches!(ops[1], IlOp::Label(Label(0))));
-    }
-
-    #[test]
-    fn clone_shared_return_fuses_const_arm_after_jump_only_clone() {
-        // Unwrap-shaped: jump-only Some arm + CONST None arm into shared RETURN.
-        let mut ops = vec![
-            IlOp::Load {
-                slot: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
-                target: Label(1),
-                loc: common::DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-            IlOp::byte(Byte::new(Instruction::Unpack).with_operand_u32(1)),
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(0),
-                loc: common::DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-            IlOp::Label(Label(1)),
-            IlOp::Const {
-                imm: 0,
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Label(Label(0)),
-            IlOp::Return {
-                loc: common::DebugLoc::unknown(), ret_words: 1,},
-        ];
-        clone_shared_return(&mut ops);
-        assert!(
-            ops.iter().any(|op| matches!(op, IlOp::Return { .. })),
-            "Some arm should RETURN locally"
-        );
-        assert!(
-            ops.iter().any(|op| {
-                matches!(op, IlOp::ConstReturnImm { imm: 0, .. })
-                    || op
-                        .as_encode_byte()
-                        .is_some_and(|b| *b.bytecode() == Instruction::ConstReturnImm)
-            }),
-            "None arm should fuse ConstReturnImm"
-        );
-        assert!(
-            !ops.iter().any(|op| matches!(
-                op,
-                IlOp::Jump {
-                    kind: IlJumpKind::Unconditional,
-                    ..
-                }
-            )),
-            "jump-only JMP to shared return should be gone"
-        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ listed once below and are **not** passes.
 `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`,
 `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`,
 `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `slot_promote` + `dead_store_at`,
-`ssa_gvn`, `cfg_gvn`, and the IL `escape_analysis` pass. MIR instcombine /
+`ssa_gvn`, `cfg_gvn`, `clone_shared_return`, and the IL `escape_analysis` pass. MIR instcombine /
 strength reduction / GVN are separate and unaffected. The `escape_analysis`
 option survives: it now only gates HIR enum / tuple scalar replacement
 (`hir::enum_sroa`, `hir::tuple_sroa`) in `emit_hir`.
@@ -76,9 +76,7 @@ pipeline. No solo “pass” tests.
 
 1. `dead_block`
 
-**Decision** (`decision_once_at`), in order:
-
-2. `clone_shared_return`
+**Decision** (`decision_once_at`): no passes left.
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -190,20 +188,19 @@ arm's read-only names to the field locals, and `hir::fold` drops stores to a
 local nothing reads. Code size and time were unchanged on `examples/perf`,
 and no body changed tier.
 
-## `clone_shared_return`
+## `clone_shared_return` (moved to the HIR and lowering)
 
-**Flag:** `clone_shared_return` (default on; off at `-Os`). **Fn:**
-`convoy::clone_shared_return`.
-
-- **Input:** Return-label cluster targeted by jump-only unconditional preds
-  *and* a fall-through (or other) producer arm.
-- **Output:** Replaces those `JMP`s with a cloned `RETURN`. If the cluster then
-  has no jump preds, fuses a lone fall-through `CONST`/`LOAD` into `*Return`.
-  Each arm’s height at return is unchanged (the jump-only arm already had the
-  value on stack).
-- **Refusals:** No jump-only preds; not a mixed join (jump-only only).
-- **Tests:** `opt/convoy.tests.rs`
-  `clone_shared_return_fuses_const_arm_after_jump_only_clone`.
+There is no IL `clone_shared_return` pass (removed 2026-10). Under the
+`sink_return` flag (Standard and Aggressive, not Size), `hir::sink_return`
+turns `return match s { p => a, q => b }` into `match s { p => return a,
+q => return b }` (and the same for an `if` with an `else` and a block's
+tail), so each arm returns where it ends and a call in any arm becomes a tail
+call. A `match` with an arm that returns its payload as is (`Some(x) => x`)
+stays a value: lowering then turns each jump to the join right before its
+`RETURN` into a `RETURN` (`hir_return_at_joins`). A jump after an arm that
+returned is not emitted, and the MIR lift skips blocks nothing reaches.
+On `examples/perf` and `tests/positive`, 34 files gain a body tier and none
+lose one; `int_match` runs about 12% faster.
 
 ## `branch_optimization` (moved to HIR lowering)
 
@@ -274,10 +271,9 @@ calls the pass function directly or runs `optimize` with only that flag true.
 
 | Pass | Solo test already existed | Newly added in D1 |
 |------|---------------------------|-------------------|
-| dead_block | `convoy.tests.rs` | no |
+| dead_block | `cfg.tests.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | loop_bounds | `bounds.rs` | no |
-| clone_shared_return | `convoy.tests.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |
 
 Run (from repo root):

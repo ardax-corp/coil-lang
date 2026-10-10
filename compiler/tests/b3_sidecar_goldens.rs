@@ -51,11 +51,14 @@ const CORPUS: &[&str] = &[
 /// `block_reordering` passes retargets `option_pair.hy` (one jump shorter).
 /// Dropping the stack-IL `slot_promote` pass for the HIR fold's dead-store
 /// cut shortens `loops.hy` (an unrolled inner counter is never stored).
+/// Returning at a returned `match`'s join in lowering instead of the
+/// stack-IL `clone_shared_return` pass grows `option_pair.hy` by one op
+/// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "3186422f0e51b124_1250"),
     ("functions.hy", "cf7d45d5c7dd59f6_274"),
     ("loops.hy", "fccb38b755e5d4eb_217"),
-    ("option_pair.hy", "d00716de810c7e19_339"),
+    ("option_pair.hy", "41bf3fac648c10c5_340"),
     ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
 ];
 

@@ -585,7 +585,8 @@ impl Compiler {
             Ok(emit)
                 if (self.opt_options.loop_unroll
                     || self.opt_options.algebraic
-                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds)
+                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds
+                    || self.opt_options.sink_return)
                     && !self.debugger_attached
                     && !hir.is_coro =>
             {
@@ -604,7 +605,9 @@ impl Compiler {
                 let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
                 let body_l = licm.as_ref().unwrap_or(body_c);
                 let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
-                match bounds.or(licm).or(cse).or(folded).or(unrolled) {
+                let body_b = bounds.as_ref().unwrap_or(body_l);
+                let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
+                match sunk.or(bounds).or(licm).or(cse).or(folded).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -8250,12 +8253,16 @@ impl Compiler {
                 }
                 Some(v) => {
                     let ret = emit.ret.clone();
+                    let start = self.bytecode.il_mut().raw_len();
                     self.hir_value(hir, emit, v, &ret, 0);
                     self.emit_run_defers();
                     if ret.words() == 2 {
                         self.push_return_two_word();
                     } else {
                         self.bytecode.push_return();
+                        if self.opt_options.sink_return {
+                            self.hir_return_at_joins(start);
+                        }
                     }
                 }
                 None => {
@@ -8883,7 +8890,29 @@ impl Compiler {
         }
     }
 
+    /// The value of the `RETURN` just pushed was emitted from op `start`:
+    /// each jump in it to the join right before the `RETURN` returns
+    /// instead (a `match` arm's `Unpack; JMP end` becomes `Unpack; RETURN`).
+    fn hir_return_at_joins(&mut self, start: usize) {
+        let ops = self.bytecode.il_mut().ops_slice_mut();
+        let Some((ret, rest)) = ops.split_last_mut() else { return };
+        let joins: Vec<IlLabel> = rest.iter().rev().map_while(IlOp::bind_label).collect();
+        if joins.is_empty() {
+            return;
+        }
+        let loc = ret.loc();
+        for op in &mut rest[start..] {
+            if matches!(op, IlOp::Jump { kind: IlJumpKind::Unconditional, target, .. } if joins.contains(target)) {
+                *op = IlOp::Return { loc, ret_words: 1 };
+            }
+        }
+    }
+
     fn hir_jump(&mut self, kind: IlJumpKind, target: IlLabel) {
+        // An arm that returned has nothing to jump past.
+        if kind == IlJumpKind::Unconditional && self.bytecode.ends_in_exit() {
+            return;
+        }
         self.bytecode.push_op(IlOp::Jump {
             kind,
             target,

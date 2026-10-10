@@ -24,7 +24,7 @@ pub enum OptLevel {
     Standard,
     /// Standard plus a larger inline budget.
     Aggressive,
-    /// Standard with unrolling and return cloning off (less code growth).
+    /// Standard with unrolling and return sinking off (less code growth).
     Size,
     /// Basic cleanup only; no scalar replacement or unroll.
     Debug,
@@ -125,7 +125,7 @@ fn all_off() -> OptimizeOptions {
         local_cse: false,
         licm: false,
         loop_bounds: false,
-        clone_shared_return: false,
+        sink_return: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
         escape_analysis: false,
@@ -164,6 +164,9 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.licm = standard;
     o.loop_bounds = standard;
     o.loop_unroll = matches!(level, OptLevel::Standard | OptLevel::Aggressive);
+    // Return in each branch of a returned `match` (not at Size: a two-word
+    // return repeats per branch).
+    o.sink_return = o.loop_unroll;
     // Lay out early exits after the body (`emit_hir`).
     o.branch_optimization = standard;
     o
@@ -183,7 +186,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.local_cse,
         o.licm,
         o.loop_bounds,
-        o.clone_shared_return,
+        o.sink_return,
         o.loop_unroll,
         o.escape_analysis,
         o.branch_optimization,
@@ -261,7 +264,7 @@ mod tests {
     fn size_disables_growth_passes() {
         let o = OptLevel::Size.options();
         assert!(!o.loop_unroll);
-        assert!(!o.clone_shared_return);
+        assert!(!o.sink_return);
         assert!(o.algebraic && o.dead_block && o.escape_analysis);
     }
 
@@ -305,12 +308,8 @@ mod tests {
     }
 
     #[test]
-    fn size_omits_clone_shared_return() {
-        let names = OptLevel::Size.pass_names();
-        assert!(!names.contains(&"clone_shared_return"));
-        for n in OptLevel::Standard.pass_names() {
-            assert!(n == "clone_shared_return" || names.contains(&n), "Size missing {n}");
-        }
+    fn size_runs_the_standard_il_passes() {
+        assert_eq!(OptLevel::Size.pass_names(), OptLevel::Standard.pass_names());
     }
 
     #[test]
