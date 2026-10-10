@@ -279,7 +279,7 @@ struct HirEmit {
     /// Entry label of each plain one-word `CALL` emitted (no dictionaries,
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
-    call_targets: HashMap<u32, IlLabel>,
+    call_targets: HashMap<u32, crate::mir::HirCallSite>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -723,9 +723,7 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.pair_locals.is_empty() {
-            Err("pair local".to_string())
-        } else if !plan.sroa.is_empty() {
+        let why = if !plan.sroa.is_empty() {
             Err("scalar-replaced local".to_string())
         } else if !plan.stacks.is_empty() {
             Err("stack array".to_string())
@@ -734,7 +732,8 @@ impl Compiler {
         } else if emit.par_loop {
             Err("parallel loop".to_string())
         } else {
-            crate::mir::lower_from_hir(hir, &emit.slots, &emit.call_targets, plan.cold_ok, file)
+            self.hir_mir_input(hir, emit, file)
+                .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
         };
         match why {
             Ok(func) => {
@@ -749,6 +748,85 @@ impl Compiler {
                 None
             }
         }
+    }
+
+    /// What direct MIR lowering needs from emission: slots, call sites, and
+    /// the word types of each two-word pair.
+    fn hir_mir_input<'a>(
+        &self,
+        hir: &HirBody,
+        emit: &'a HirEmit,
+        file: Option<u32>,
+    ) -> Result<crate::mir::HirMirInput<'a>, String> {
+        let mut pair_locals = HashMap::new();
+        for &local in emit.plan.pair_locals.keys() {
+            let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
+            let (lo, hi) = self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
+            let tag = *emit.tag_slots.get(&local).ok_or("pair local slot")?;
+            pair_locals.insert(local, (tag, lo, hi));
+        }
+        let pair_tys = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
+            .collect();
+        let ret_pair = match &emit.plan.ret {
+            Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
+            Rep::Word(_) => None,
+        };
+        Ok(crate::mir::HirMirInput {
+            slots: &emit.slots,
+            pair_locals,
+            pair_tys,
+            ret_pair,
+            calls: &emit.call_targets,
+            cold_ok: emit.plan.cold_ok,
+            file,
+        })
+    }
+
+    /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`
+    /// with one payload type across the variants, `[start, end]`, or
+    /// `[a, b]`.
+    fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
+        use crate::hir::layout::{self, Layout, PairKind};
+        use crate::mir::{scalar_mir_ty as word, MirTy};
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
+            return None;
+        };
+        let variants: Vec<String> = match kind {
+            PairKind::Range { .. } => {
+                let w = word(crate::typechecking::ty::range_app(&ty)?.0)?;
+                return Some((w, w));
+            }
+            PairKind::Product => {
+                let Ty::Tuple(items) = crate::typechecking::ty::strip_readonly(&ty) else {
+                    return None;
+                };
+                return Some((word(&items[0])?, word(&items[1])?));
+            }
+            PairKind::Option => vec!["Some".into(), "None".into()],
+            PairKind::Result => vec!["Ok".into(), "Err".into()],
+            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+        };
+        let mut lo = None;
+        for variant in &variants {
+            match self.hir_payload_tys(&ty, variant)?.as_slice() {
+                [] => {}
+                [p] if layout::is_unit(p) => {}
+                [p] => {
+                    let w = word(p)?;
+                    if lo.is_some_and(|l| l != w) {
+                        return None;
+                    }
+                    lo = Some(w);
+                }
+                _ => return None,
+            }
+        }
+        Some((lo.unwrap_or(MirTy::I64), MirTy::I64))
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that
@@ -6747,12 +6825,21 @@ impl Compiler {
                         kind: crate::il::EntryKind::Call,
                         target,
                         arity,
-                        ret_words: 1,
+                        ret_words: ret_words @ (1 | 2),
                         ..
                     }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    && arity as usize == args.len()
+                    && arity == words
                 {
-                    emit.call_targets.insert(id.0, target);
+                    let call = &emit.plan.calls[&id.0];
+                    let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
+                    emit.call_targets.insert(
+                        id.0,
+                        crate::mir::HirCallSite {
+                            target,
+                            pair_args,
+                            pair_ret: ret_words == 2,
+                        },
+                    );
                 }
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.

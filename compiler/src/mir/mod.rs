@@ -73,7 +73,7 @@ pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
-pub use from_hir::lower_body as lower_from_hir;
+pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, HirCallSite, HirMirInput};
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
