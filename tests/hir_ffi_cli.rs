@@ -1,5 +1,6 @@
 //! `extern` calls and `dload` / `declare` / `invoke`: the HIR lowering
 //! emits them and they run at every opt level.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,7 +44,6 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn hir_lowers_and_runs_ffi_calls() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
