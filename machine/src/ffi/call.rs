@@ -672,7 +672,7 @@ pub fn invoke_via_libffi(
 mod tests {
     use super::*;
     use crate::ffi::FfiSignatureBuilder;
-    use crate::ffi::{library_candidates, DloadGate};
+    use crate::ffi::library_candidates;
 
     fn open_libc_ungated() -> Option<std::sync::Arc<libloading::Library>> {
         for c in library_candidates("c", None, &[]) {
@@ -683,11 +683,12 @@ mod tests {
         None
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn resolve_granted(
         stem: &str,
         path: &std::path::Path,
     ) -> Result<std::sync::Arc<libloading::Library>, crate::ffi::FfiError> {
-        let mut gate = DloadGate::deny_all();
+        let mut gate = crate::ffi::DloadGate::deny_all();
         gate.grant_file(stem, path)?;
         crate::ffi::resolve_library(path.to_str().unwrap(), None, &[], &gate)
     }

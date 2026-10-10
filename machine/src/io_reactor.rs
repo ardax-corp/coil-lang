@@ -411,6 +411,7 @@ mod win {
     pub const WAIT_TIMEOUT: u32 = 258;
 
     #[repr(C)]
+    #[allow(clippy::upper_case_acronyms)] // the Win32 name
     pub struct WSAPOLLFD {
         pub fd: usize,
         pub events: i16,

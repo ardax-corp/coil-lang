@@ -62,7 +62,7 @@ pub fn load_library_resolved(
 /// Build `examples/sum.c` into the platform `libsum` filename if missing or stale.
 /// Used by machine FFI tests so they do not depend on compiler integration tests
 /// compiling the fixture as a side effect.
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub(crate) fn ensure_examples_libsum() -> PathBuf {
     let lib_name = platform_shared_lib_filename("sum");
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -139,7 +139,7 @@ pub(crate) fn ensure_examples_libsum() -> PathBuf {
 }
 
 /// Compile `examples/libsum` if needed; `None` means skip (never in CI).
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub(crate) fn require_examples_libsum() -> Option<(String, PathBuf)> {
     let lib_name = platform_shared_lib_filename("sum");
     let lib_path = ensure_examples_libsum();

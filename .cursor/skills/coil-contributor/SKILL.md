@@ -64,10 +64,8 @@ Stack IL: symbolic labels until `finalize_bytecode` → single `il::lower` after
 ```bash
 cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate; Gc::payload_mut allows mut_from_ref
 cargo test --workspace --lib --tests --bins   # required; includes */tests/* (skip Criterion benches)
-# Bare optional stack:
-#   cargo test --workspace --lib --tests --bins --no-default-features
-# Feature compile-gates / tooling (match CI matrix job titles):
-#   cargo test --workspace --lib --tests --bins --features dissect
+# --no-default-features / --features dissect|debugger build the same code:
+# default features are empty and the tooling crates unify dissect/debugger/coverage.
 cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # leak smoke (64MB)
 cargo build --release --workspace
 ./scripts/poop_baseline.sh       # soft CPU check before/after perf work
