@@ -332,9 +332,23 @@ pub fn inline_calls<'a>(
         in_place,
         opaque: &opaque,
     };
+    // Only the blocks the body still reaches: a block an earlier round left
+    // behind (`single_exit` rebuilds the blocks it folds) can share a
+    // statement with a live one, and a temp's `let` hoisted into it would
+    // never run.
+    let mut live = vec![false; b.original];
+    let mut todo: Vec<HirId> = caller.root.into_iter().collect();
+    while let Some(id) = todo.pop() {
+        if !std::mem::replace(&mut live[id.0 as usize], true) {
+            todo.extend(super::lower::children(caller, id));
+        }
+    }
     for i in 0..b.original {
         if b.body.exprs.len() - b.original > growth {
             break;
+        }
+        if !live[i] {
+            continue;
         }
         let HirKind::Block { stmts, tail } = b.body.exprs[i].kind.clone() else {
             continue;
