@@ -1,46 +1,11 @@
     use super::*;
     use crate::il::opt::{OptimizeOptions, optimize_per_func};
-    use crate::il::opt::cfg::{eliminate_dead_blocks, jump_thread};
+    use crate::il::opt::cfg::eliminate_dead_blocks;
     use crate::il::opt::dce::{dead_store_at, stack_dce};
     use common::{Byte, Instruction};
 
     fn is_insn(op: &IlOp, i: Instruction) -> bool {
         op.as_encode_byte().is_some_and(|b| *b.bytecode() == i)
-    }
-
-    #[test]
-    fn jump_thread_collapses_goto_goto() {
-        let mut ops = vec![
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(0),
-                loc: common::DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-            IlOp::Byte {
-                byte: Byte::new(Instruction::CONST).with_const_inline(1),
-                loc: common::DebugLoc::unknown(),
-            },
-            IlOp::Label(Label(0)),
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(1),
-                loc: common::DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-            IlOp::Label(Label(1)),
-            IlOp::Byte {
-                byte: Byte::new(Instruction::HALT),
-                loc: common::DebugLoc::unknown(),
-            },
-        ];
-        jump_thread(&mut ops);
-        match &ops[0] {
-            IlOp::Jump {
-                target: Label(1), ..
-            } => {}
-            _ => panic!("expected JMP L1 after jump threading"),
-        }
     }
 
     #[test]

@@ -3,54 +3,6 @@
 use crate::il::op::{IlJumpKind, IlOp};
 use common::Instruction;
 
-pub(super) fn label_targets(ops: &[IlOp]) -> std::collections::HashMap<u32, usize> {
-    let mut map = std::collections::HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let Some(id) = op.bind_label() {
-            map.insert(id.0, i);
-        }
-    }
-    map
-}
-
-pub(super) fn jump_thread(ops: &mut [IlOp]) {
-    let targets = label_targets(ops);
-    for i in 0..ops.len() {
-        let IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target,
-            loc,
-            hint,
-        } = ops[i]
-        else {
-            continue;
-        };
-        let Some(&idx) = targets.get(&target.0) else {
-            continue;
-        };
-        let mut j = idx;
-        while j < ops.len() {
-            match &ops[j] {
-                IlOp::Label(_) | IlOp::JoinLabel(_) => j += 1,
-                IlOp::Jump {
-                    kind: IlJumpKind::Unconditional,
-                    target: t2,
-                    ..
-                } => {
-                    ops[i] = IlOp::Jump {
-                        kind: IlJumpKind::Unconditional,
-                        target: *t2,
-                        loc,
-                        hint,
-                    };
-                    break;
-                }
-                _ => break,
-            }
-        }
-    }
-}
-
 pub(super) fn is_unconditional_jmp(op: &IlOp) -> bool {
     matches!(
         op,

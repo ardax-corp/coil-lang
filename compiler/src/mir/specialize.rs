@@ -664,9 +664,12 @@ fn select_reconstruct_ok(src: &[IlOp], out: &[IlOp]) -> bool {
     last_arm_writes(out) >= last_arm_writes(src)
 }
 
+/// Writes before the first branch are not arm writes: a prologue store that
+/// falls into the loop head is not one, however the head is laid out.
 fn last_arm_writes(ops: &[IlOp]) -> usize {
+    let first = ops.iter().position(is_cond_branch).unwrap_or(ops.len());
     let mut n = 0usize;
-    for (i, op) in ops.iter().enumerate() {
+    for (i, op) in ops.iter().enumerate().skip(first) {
         if !is_select_write(op) {
             continue;
         }
@@ -719,6 +722,29 @@ fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
         }
     }
     n >= 2
+}
+
+fn is_cond_branch(op: &IlOp) -> bool {
+    use crate::il::IlJumpKind;
+    match op {
+        IlOp::Jump { kind, .. } => *kind != IlJumpKind::Unconditional,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::BinSlotImmJmpf
+                | Instruction::BinSlotImmJmpt
+                | Instruction::BinSlotSlotConstJmpf
+                | Instruction::BinSlotSlotConstJmpt
+                | Instruction::BinSlotSlotJmpf
+                | Instruction::BinSlotSlotJmpt
+                | Instruction::CmpJmpf
+                | Instruction::CmpJmpt
+                | Instruction::DenseBinJmpf
+                | Instruction::DenseIndexJmpf
+                | Instruction::LogNotJmpf
+                | Instruction::LogNotJmpt
+        ),
+        _ => false,
+    }
 }
 
 fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {

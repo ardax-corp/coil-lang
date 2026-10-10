@@ -17,7 +17,7 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// DCE and jump threading. Inlining stays modest.
+    /// Dead-code elimination. Inlining stays modest.
     Basic,
     /// All currently-on production passes. Backward-compatible default.
     #[default]
@@ -120,7 +120,6 @@ impl fmt::Display for OptLevel {
 
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
-        jump_thread: false,
         dead_block: false,
         stack_dce: false,
         slot_promote: false,
@@ -134,7 +133,6 @@ fn all_off() -> OptimizeOptions {
         loop_unroll_factor: 8,
         escape_analysis: false,
         branch_optimization: false,
-        block_reordering: false,
         collect_stats: false,
         mir_specialize: false,
     }
@@ -183,7 +181,6 @@ impl Default for OptimizeOptions {
 #[cfg(test)]
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
-        o.jump_thread,
         o.dead_block,
         o.stack_dce,
         o.slot_promote,
@@ -196,7 +193,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.loop_unroll,
         o.escape_analysis,
         o.branch_optimization,
-        o.block_reordering,
     ]
 }
 
@@ -249,7 +245,6 @@ mod tests {
     fn none_is_algebraic_only() {
         let o = OptLevel::None.options();
         assert!(o.algebraic);
-        assert!(!o.jump_thread);
         assert!(!o.dead_block);
         assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
@@ -258,9 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn basic_enables_dce_and_jump_threading() {
+    fn basic_enables_dce() {
         let o = OptLevel::Basic.options();
-        assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
+        assert!(o.algebraic && o.dead_block && o.stack_dce);
         assert!(!o.licm && !o.slot_promote && !o.escape_analysis);
     }
 

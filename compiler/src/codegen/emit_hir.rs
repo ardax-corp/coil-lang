@@ -261,6 +261,10 @@ struct HirEmit {
     cold_ok: bool,
     /// Raw op ranges of the early exits to lay out after the body.
     cold: Vec<(usize, usize)>,
+    /// Where the unconditional jump right after the statement being lowered
+    /// goes (a loop's back edge): a branch that would jump to its own end
+    /// jumps there directly.
+    next_jump: Option<IlLabel>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1463,6 +1467,7 @@ impl Compiler {
             boxes: HashMap::new(),
             cold_ok: false,
             cold: Vec::new(),
+            next_jump: None,
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -5425,7 +5430,9 @@ impl Compiler {
 
     /// Push `id` as `want`, on top of `depth` live operands.
     fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
+        let next_jump = emit.next_jump.take();
         self.hir_value_unpacked(hir, emit, id, want, depth);
+        emit.next_jump = next_jump;
         // A call or dictionary operator typed a bare type parameter can
         // return its value boxed (an instance thunk, a closure adapter);
         // a shared generic body keeps such values raw (#802).
@@ -7508,6 +7515,9 @@ impl Compiler {
         let builtin = consume_tag && common::is_poly_builtin_enum(kind);
         let last = arms.len() - 1;
         let mut tag_consumed = false;
+        // Where the last arm's code starts: its miss label, after the jump
+        // that ends the arm before it.
+        let mut last_start = None;
         for (i, arm) in arms.iter().enumerate() {
             let miss = (i < last).then(|| self.bytecode.fresh_label());
             if let Some(miss) = miss {
@@ -7548,12 +7558,19 @@ impl Compiler {
             }
             if let Some(miss) = miss {
                 self.hir_jump(IlJumpKind::Unconditional, end);
+                last_start = Some(self.bytecode.il_mut().raw_len());
                 self.bytecode.bind_label(miss);
                 if builtin {
                     // The other builtin tag: every later arm sees only the payload.
                     tag_consumed = true;
                 }
             }
+        }
+        // A last arm that returns (`?`'s `Err(e) => return Err(e)`) is cold.
+        if let Some(start) = last_start
+            && lower::cold_exit(hir, arms[last].body)
+        {
+            self.hir_mark_cold(emit, start);
         }
     }
 
@@ -7809,13 +7826,24 @@ impl Compiler {
 
     /// Run `id` for its effect; the operand stack is left as found.
     fn hir_effect(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId) {
+        // Only a block's last statement and an `if`'s arms run right before
+        // the jump [`HirEmit::next_jump`] names.
+        let next_jump = emit.next_jump;
+        if !matches!(hir.expr(id).kind, HirKind::Block { .. } | HirKind::If { .. }) {
+            emit.next_jump = None;
+        }
+        self.hir_effect_kind(hir, emit, id);
+        emit.next_jump = next_jump;
+    }
+
+    fn hir_effect_kind(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId) {
         match &hir.expr(id).kind {
             HirKind::Block { stmts, tail } => {
-                for &s in stmts {
+                let next_jump = emit.next_jump;
+                let all: Vec<HirId> = stmts.iter().chain(tail).copied().collect();
+                for (k, &s) in all.iter().enumerate() {
+                    emit.next_jump = next_jump.filter(|_| k + 1 == all.len());
                     self.hir_stmt(hir, emit, s);
-                }
-                if let Some(t) = tail {
-                    self.hir_stmt(hir, emit, *t);
                 }
             }
             HirKind::LetPat { pat, init } if let Some(names) = self.hir_product_let(hir, emit, pat, *init) => {
@@ -8062,10 +8090,19 @@ impl Compiler {
                         let (cond, then, els) = Self::hir_invert_not_if(hir, *cond, *then, *els);
                         self.hir_value(hir, emit, cond, &BOXED, 0);
                         self.hir_jump(IlJumpKind::JumpIfFalse, else_l);
+                        // The arm jumps straight to where `end` would go next.
+                        let next_jump = emit.next_jump;
+                        let to = next_jump.unwrap_or(end);
+                        emit.next_jump = Some(to);
                         self.hir_effect(hir, emit, then);
-                        self.hir_jump(IlJumpKind::Unconditional, end);
+                        emit.next_jump = next_jump;
+                        self.hir_jump(IlJumpKind::Unconditional, to);
+                        let start = self.bytecode.il_mut().raw_len();
                         self.bytecode.bind_label(else_l);
                         self.hir_effect(hir, emit, els);
+                        if lower::cold_exit(hir, els) {
+                            self.hir_mark_cold(emit, start);
+                        }
                     }
                     None => {
                         self.hir_value(hir, emit, *cond, &BOXED, 0);
@@ -8091,14 +8128,19 @@ impl Compiler {
                 let exit = self.bytecode.fresh_label();
                 self.bytecode.bind_label(top);
                 emit.loops.push(HirLoop { cont: top, exit });
+                // The body runs right before the back edge.
+                let next_jump = emit.next_jump;
                 // `while c { b }` keeps the AST loop shape: test, body, back edge.
                 if let Some((cond, then)) = lower::while_shape(hir, *body) {
                     self.hir_value(hir, emit, cond, &BOXED, 0);
                     self.hir_jump(IlJumpKind::JumpIfFalse, exit);
+                    emit.next_jump = Some(top);
                     self.hir_effect(hir, emit, then);
                 } else {
+                    emit.next_jump = Some(top);
                     self.hir_effect(hir, emit, *body);
                 }
+                emit.next_jump = next_jump;
                 emit.loops.pop();
                 self.hir_jump(IlJumpKind::Unconditional, top);
                 self.bytecode.bind_label(exit);

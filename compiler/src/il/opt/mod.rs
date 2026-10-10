@@ -14,8 +14,6 @@ use super::op::IlOp;
 /// Options for [`optimize`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
-    /// Collapse `JMP L` where `L` begins with `JMP L2` into `JMP L2`.
-    pub jump_thread: bool,
     /// Remove unreachable ops after unconditional JMP / RETURN until a label.
     pub dead_block: bool,
     /// Drop redundant `DUPLICATE; POP` and `LOAD s; StorePop s`.
@@ -42,13 +40,9 @@ pub struct OptimizeOptions {
     /// before emit (`hir::enum_sroa`, `hir::tuple_sroa`). Not an IL pass; on
     /// at Standard and above (and Size), off at None / Basic / Debug.
     pub escape_analysis: bool,
-    /// Heuristic branch layout (COI-128).
-    /// Default **on**: invert only Known-SP terminating then-arms, and mint
-    /// labels from a module-wide watermark so ids cannot collide across funcs.
+    /// Lay out early exits after the function body in HIR lowering
+    /// (`emit_hir`, COI-128). Not an IL pass.
     pub branch_optimization: bool,
-    /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
-    /// chains stay adjacent; branch labels are not rewritten.
-    pub block_reordering: bool,
     /// Record per-pass counters into [`stats::OptStats`] (COI-131). Default **off**.
     pub collect_stats: bool,
     /// Dense specialize + MIR→LIR body replace. On for every named
@@ -158,7 +152,6 @@ pub(crate) fn emitting_range_to_raw(
     )
 }
 
-mod block_order;
 mod driver;
 mod labels;
 mod opt_level;
