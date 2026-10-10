@@ -1852,7 +1852,7 @@ fn match_plus_pure_call_binop_stages() {
                return n + leaf(n - 1); \
              } \
              fn main() { \
-               return match Option::Some(3) { \
+               return match Option::Some(leaf(3)) { \
                  Option::Some(x) => leaf(x), \
                  Option::None => 0, \
                } + leaf(2); \
