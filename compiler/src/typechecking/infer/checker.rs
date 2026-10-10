@@ -2260,6 +2260,11 @@ impl Checker {
             ("Div", &["div"][..], false),
             ("Rem", &["rem"][..], false),
             ("Pow", &["pow"][..], false),
+            ("Shl", &["shl"][..], false),
+            ("Shr", &["shr"][..], false),
+            ("BitAnd", &["bitand"][..], false),
+            ("BitOr", &["bitor"][..], false),
+            ("BitXor", &["bitxor"][..], false),
             ("Lt", &["lt"][..], true),
             ("Le", &["le"][..], true),
             ("Gt", &["gt"][..], true),
@@ -2286,16 +2291,18 @@ impl Checker {
             }
         }
 
-        // Neg::neg : ∀T. Neg T => T → T (unary `-`)
-        let var = self.counter.fresh();
-        self.typeclass_method_schemes.insert(
-            ("Neg".to_string(), "neg".to_string()),
-            Scheme::poly(
-                vec![var],
-                vec![Constraint::unary("Neg", var)],
-                Ty::Fun(Box::new(Ty::Var(var)), Box::new(Ty::Var(var))),
-            ),
-        );
+        // Neg::neg : ∀T. Neg T => T → T (unary `-`), BitNot::bitnot (`~`).
+        for (class, method) in [("Neg", "neg"), ("BitNot", "bitnot")] {
+            let var = self.counter.fresh();
+            self.typeclass_method_schemes.insert(
+                (class.to_string(), method.to_string()),
+                Scheme::poly(
+                    vec![var],
+                    vec![Constraint::unary(class, var)],
+                    Ty::Fun(Box::new(Ty::Var(var)), Box::new(Ty::Var(var))),
+                ),
+            );
+        }
 
         let var = self.counter.fresh();
         self.typeclass_method_schemes.insert(
@@ -2660,7 +2667,9 @@ impl Checker {
                     self.infer_aggregate_neg(pruned, id, range)
                 } else {
                     if let Ty::Var(v) = pruned {
-                        self.record_bound_negate(id, &range, v);
+                        self.record_bound_unary(id, &range, v, ("Neg", "neg", "-"));
+                    } else {
+                        self.check_ground_unary_operand(&pruned, ("Neg", "-"), &range);
                     }
                     pruned
                 }
@@ -2671,6 +2680,15 @@ impl Checker {
                 let pruned = apply_ty_prune(&self.subst, &t);
                 if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
                     return self.infer_matrix_bitnot(pruned, id, range);
+                }
+                // A type parameter through its `BitNot` dictionary, a user
+                // type through its instance; anything else is an int.
+                let overloaded = match pruned {
+                    Ty::Var(v) => self.record_bound_unary(id, &range, v, ("BitNot", "bitnot", "~")),
+                    ref ground => self.check_ground_unary_operand(ground, ("BitNot", "~"), &range),
+                };
+                if overloaded {
+                    return apply_ty_prune(&self.subst, &t);
                 }
                 self.unify(&t, &int(), &e.0.into_range(), "operand of `~`");
                 int()
@@ -3479,14 +3497,24 @@ impl Checker {
             );
             return apply_ty_prune(&self.subst, &target_ty);
         }
-        if matches!(
-            op,
-            parser::ast::AssignOp::Shl
-                | parser::ast::AssignOp::Shr
-                | parser::ast::AssignOp::BitAnd
-                | parser::ast::AssignOp::BitOr
-                | parser::ast::AssignOp::BitXor
-        ) {
+        // A bitwise `op=` is on ints, unless the target is a type parameter
+        // or a user type (its `Shl` / `BitAnd` / … dictionary or instance).
+        let overloadable = match &tp {
+            Ty::Var(v) => self.is_type_param_var(*v),
+            Ty::Con(n) => !matches!(n.as_str(), "int" | "byte" | "float" | "bool" | "string" | "unit"),
+            Ty::App(..) | Ty::Sum { .. } => true,
+            _ => false,
+        };
+        if !overloadable
+            && matches!(
+                op,
+                parser::ast::AssignOp::Shl
+                    | parser::ast::AssignOp::Shr
+                    | parser::ast::AssignOp::BitAnd
+                    | parser::ast::AssignOp::BitOr
+                    | parser::ast::AssignOp::BitXor
+            )
+        {
             let _ = unify_with(&self.subst, &target_ty, &int());
             let _ = unify_with(&self.subst, &val_ty, &int());
         } else {
@@ -3512,8 +3540,10 @@ impl Checker {
                 );
                 // `x op= y` on a bound type parameter: the operator's
                 // dictionary method, as for `x op y`.
-                if let Ty::Var(v) = apply_ty_prune(&self.subst, &result) {
-                    self.bind_arith_operator(v, op_name, id, &range);
+                match apply_ty_prune(&self.subst, &result) {
+                    Ty::Var(v) => self.bind_arith_operator(v, op_name, id, &range),
+                    ground if overloadable => self.check_ground_arith_operands(&ground, op_name, &range),
+                    _ => {}
                 }
             }
         }
@@ -5939,26 +5969,60 @@ impl Checker {
             .insert((range.start, range.end), hint);
     }
 
-    /// `-a` on a type variable goes through its `Neg` dictionary in a shared
-    /// generic body (`T: Num` implies `Neg`); a type parameter without the
-    /// bound is an error, as for the binary operators.
-    fn record_bound_negate(&mut self, id: Option<NodeId>, range: &Range<usize>, var: TyVarId) {
-        if self.user_dict_index(var, "Neg").is_none() {
-            self.bind_matching_abstract_constraints(Some(var), "Neg");
+    /// `-a` / `~a` on a type variable goes through its `Neg` / `BitNot`
+    /// dictionary in a shared generic body (`T: Num` implies `Neg`); a type
+    /// parameter without the bound is an error, as for the binary operators.
+    /// False when `var` is neither bound nor a type parameter (an open
+    /// inference variable).
+    fn record_bound_unary(
+        &mut self,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+        var: TyVarId,
+        (class, method, sym): (&str, &str, &str),
+    ) -> bool {
+        if self.user_dict_index(var, class).is_none() {
+            self.bind_matching_abstract_constraints(Some(var), class);
         }
-        if self.user_dict_index(var, "Neg").is_some() {
-            self.record_bound_operator(id, range, var, "Neg", "neg");
-        } else if self
-            .type_params_in_scope
-            .iter()
-            .any(|frame| frame.values().any(|&candidate| candidate == var))
-        {
+        if self.user_dict_index(var, class).is_some() {
+            self.record_bound_operator(id, range, var, class, method);
+        } else if self.is_type_param_var(var) {
             self.messages.push(Message::error(
                 ErrorCode::GenericTypeError,
-                "Cannot apply unary `-` to value of generic type without bound `Neg`".to_string(),
+                format!("Cannot apply unary `{sym}` to value of generic type without bound `{class}`"),
                 range.clone(),
             ));
+        } else {
+            return false;
         }
+        true
+    }
+
+    /// A ground user-type operand of unary `-` / `~` needs the operator's
+    /// trait instance (`impl Neg for V`), as `check_ground_arith_operands`
+    /// for the binary operators. True when the operand is such a type.
+    fn check_ground_unary_operand(&mut self, ty: &Ty, (class, sym): (&str, &str), range: &Range<usize>) -> bool {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        let user = match &lookup {
+            Ty::Con(n) => !matches!(n.as_str(), "int" | "byte" | "float" | "bool" | "string" | "unit"),
+            Ty::App(..) => true,
+            _ => false,
+        };
+        if !user {
+            return false;
+        }
+        let slice = std::slice::from_ref(&lookup);
+        if self.generics.find_instance(class, slice).is_none() && self.generics.find_generic_instance(class, slice).is_none() {
+            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+            let mut m = Message::error(
+                ErrorCode::TypeMismatch,
+                format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
+                range.clone(),
+            );
+            m.with_help(format!("implement `{class}` for `{pretty}` to use unary `{sym}`"));
+            self.messages.push(m);
+        }
+        true
     }
 
     fn record_bound_display(&mut self, range: &Range<usize>, var: TyVarId) {
@@ -6210,17 +6274,19 @@ impl Checker {
         result
     }
 
+    /// `v` is a type parameter of an enclosing generic item.
+    fn is_type_param_var(&self, v: TyVarId) -> bool {
+        self.type_params_in_scope
+            .iter()
+            .any(|frame| frame.values().any(|&candidate| candidate == v))
+    }
+
     /// An arithmetic operator on an open type variable goes through the
     /// operator's trait (`Add` for `+`, …; `T: Num` covers them through its
     /// superclasses). A type parameter without the bound is an error.
     fn bind_arith_operator(&mut self, v: TyVarId, op: &str, id: Option<NodeId>, range: &Range<usize>) {
-        let in_scope = |this: &Self| {
-            this.type_params_in_scope
-                .iter()
-                .any(|frame| frame.values().any(|&id| id == v))
-        };
-        let Some((class, method)) = Generics::arith_operator_trait(op) else {
-            if in_scope(self) {
+        let Some((class, method)) = Generics::operator_trait(op) else {
+            if self.is_type_param_var(v) {
                 self.messages.push(Message::error(
                     ErrorCode::GenericTypeError,
                     format!("Operator `{}` is not available through an arithmetic trait", op),
@@ -6234,7 +6300,7 @@ impl Checker {
         }
         if self.user_dict_index(v, class).is_some() {
             self.record_bound_operator(id, range, v, class, method);
-        } else if in_scope(self) {
+        } else if self.is_type_param_var(v) {
             self.messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!(
@@ -6269,10 +6335,12 @@ impl Checker {
     /// which is a bogus value that can crash later (#554).
     fn check_ground_arith_operands(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
         let lookup = Self::operand_instance_lookup_ty(ty);
-        if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
+        let trait_name = Generics::operator_trait(op).map(|(class, _)| class);
+        let bitwise = trait_name.is_some_and(Generics::is_bitwise_trait);
+        let float = matches!(&lookup, Ty::Con(n) if n == crate::typechecking::ty::FLOAT);
+        if matches!(lookup, Ty::Var(_) | Ty::Never) || (Self::is_numeric_operand_ty(&lookup) && !(bitwise && float)) {
             return;
         }
-        let trait_name = Generics::arith_operator_trait(op).map(|(class, _)| class);
         if let Some(class) = trait_name
             && (self
                 .generics
@@ -6288,6 +6356,7 @@ impl Checker {
         let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
         let help = match (op, trait_name) {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
+            (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
             (_, Some(class)) => format!(
                 "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
             ),
@@ -17865,6 +17934,13 @@ impl Checker {
                 | "Rem"
                 | "Pow"
                 | "Num"
+                | "Shl"
+                | "Shr"
+                | "BitAnd"
+                | "BitOr"
+                | "BitXor"
+                | "BitNot"
+                | "Integral"
                 | "Lt"
                 | "Le"
                 | "Gt"
