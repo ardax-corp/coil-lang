@@ -985,6 +985,38 @@ pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExp
     }
 }
 
+/// Whether `id` always leaves the function by `return`.
+pub(crate) fn exits(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Return(_) => true,
+        HirKind::Block { stmts, tail } => stmts.iter().chain(tail).any(|&s| exits(body, s)),
+        HirKind::If { then, els: Some(els), .. } => exits(body, *then) && exits(body, *els),
+        _ => false,
+    }
+}
+
+/// An `if` arm that always returns, with no loop, closure, `defer`,
+/// coroutine step or `break` / `continue` in it: lowering may lay it out
+/// after the body as a cold early exit.
+pub(crate) fn cold_exit(body: &HirBody, id: HirId) -> bool {
+    let mut plain = true;
+    visit(body, id, &mut |e| {
+        plain &= !matches!(
+            e.kind,
+            HirKind::Loop { .. }
+                | HirKind::ForIn { .. }
+                | HirKind::Break
+                | HirKind::Continue
+                | HirKind::Lambda { .. }
+                | HirKind::Yield { .. }
+                | HirKind::Resume { .. }
+                | HirKind::Defer { .. }
+                | HirKind::Unsupported(_)
+        );
+    });
+    plain && exits(body, id)
+}
+
 /// The direct subexpressions of `id`.
 pub(crate) fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
     let e = body.expr(id);

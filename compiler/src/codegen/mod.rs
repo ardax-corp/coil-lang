@@ -606,6 +606,9 @@ pub struct Compiler {
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
     hir_refusal: Option<&'static str>,
+    /// Raw op ranges of the early exits the last HIR body marked cold, laid
+    /// out after its epilogue ([`Compiler::flush_hir_cold`]).
+    hir_cold: Vec<(usize, usize)>,
     /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
@@ -757,6 +760,7 @@ impl Default for Compiler {
             stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
             hir_refusal: None,
+            hir_cold: Vec::new(),
             hir_module: None,
             hir_fns: HashMap::new(),
             hir_inline: crate::hir::inline::inline_from_env(),

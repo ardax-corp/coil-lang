@@ -169,6 +169,8 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.licm = standard;
     o.loop_bounds = standard;
     o.loop_unroll = matches!(level, OptLevel::Standard | OptLevel::Aggressive);
+    // Lay out early exits after the body (`emit_hir`).
+    o.branch_optimization = standard;
     o
 }
 

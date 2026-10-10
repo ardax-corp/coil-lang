@@ -5560,6 +5560,7 @@ impl Compiler {
         if ends_on_label || !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
+        self.flush_hir_cold();
         let pinned = self.finish_fn_defers(&qualified);
 
         let body_end = self.bytecode.len();
@@ -5886,6 +5887,7 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
+            self.flush_hir_cold();
             let pinned = self.finish_fn_defers(&mono_name);
             // Its own IL function: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
@@ -6455,6 +6457,7 @@ impl Compiler {
         if !self.try_lower_hir_function(&init.0, init) {
             self.report_unlowered(&init.0, fqn);
         }
+        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span(name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&name).copied();
@@ -7590,6 +7593,7 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
             }
+            self.flush_hir_cold();
             let pinned = self.finish_fn_defers(&table_key);
             self.debug_scope_exit(saved_debug_scope);
 
@@ -8196,6 +8200,7 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
+                self.flush_hir_cold();
                 let pinned = self.finish_fn_defers(&fn_name);
                 self.fn_defers = prev_fn_defers;
 

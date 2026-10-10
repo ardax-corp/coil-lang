@@ -3400,14 +3400,18 @@ fn early_return_callee_is_tiny_inlined() {
         "early-return diamond must be tiny-inlined (only prologue CALL); call_count={calls}; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
-    // Inlined body still has a conditional branch.
+    // Inlined body still has a conditional branch (inverted when the early
+    // return is laid out after the body).
     assert!(
         bc.iter().any(|b| matches!(
             b.bytecode(),
             Instruction::JMPF
+                | Instruction::JMPT
                 | Instruction::CmpJmpf
                 | Instruction::BinSlotImmJmpf
+                | Instruction::BinSlotImmJmpt
                 | Instruction::BinSlotSlotJmpf
+                | Instruction::BinSlotSlotJmpt
         )),
         "inlined diamond must keep a compare+branch; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()

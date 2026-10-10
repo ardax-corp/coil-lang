@@ -74,31 +74,10 @@ pub fn optimize_at(
     entry_sp: i32,
     pool: &mut Vec<u64>,
 ) {
-    let mut next = branch_opt::next_fresh_label(ops);
-    optimize_at_with_labels(ops, opts, entry_sp, pool, &mut next);
-}
-
-pub(crate) fn optimize_at_with_labels(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-    next_label: &mut u32,
-) {
     if opts.collect_stats {
         stats::set_iterations(1);
     }
-    optimize_once_at(ops, opts, entry_sp, pool, next_label);
-}
-
-fn optimize_once_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-    next_label: &mut u32,
-) {
-    driver::run_once(ops, opts, entry_sp, pool, next_label);
+    driver::run_once(ops, opts, entry_sp, pool);
 }
 
 /// Run [`optimize`] on each [`super::IlFunc`] emitting span; leave prologue and
@@ -180,14 +159,14 @@ pub(crate) fn emitting_range_to_raw(
 }
 
 mod block_order;
-mod branch_opt;
 mod driver;
+mod labels;
 mod opt_level;
 mod stats;
-pub(crate) use branch_opt::{max_code_label, remap_label_space};
+pub(crate) use labels::{max_code_label, remap_label_space};
 pub use opt_level::OptLevel;
 pub(crate) use stats::{
-    note_body_tier, note_body_tiers, note_fuse_reason, note_hir_fallback,
+    note_body_tier, note_body_tiers, note_branches_optimized, note_fuse_reason, note_hir_fallback,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
 pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
