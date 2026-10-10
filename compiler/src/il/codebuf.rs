@@ -95,9 +95,35 @@ impl CodeBuf {
         self.il.push_store_pop(slot);
     }
 
+    /// Pop the top value. A pure value pushed just before (a unit `CONST 0`
+    /// after `Vec::push`, a statement `x;`) is dropped instead.
     pub fn push_pop(&mut self) {
         self.invalidate_lowered();
-        self.il.push_pop();
+        if !self.drop_last_value() {
+            self.il.push_pop();
+        }
+    }
+
+    /// Remove a side-effect-free single-value op just pushed, when no label,
+    /// entry or function span marks the code after it.
+    fn drop_last_value(&mut self) -> bool {
+        let pure = matches!(
+            self.il.ops().last(),
+            Some(IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } | IlOp::Load { .. })
+        );
+        if !pure {
+            return false;
+        }
+        let raw = self.il.raw_len() - 1;
+        let pc = self.il.code_len() - 1;
+        if self.root_entries.iter().any(|&i| i >= raw)
+            || self.entry_at_offset.keys().any(|&p| p >= pc)
+            || self.funcs.iter().any(|f| f.code_end > pc)
+        {
+            return false;
+        }
+        self.il.pop_last();
+        true
     }
 
     pub fn push_index(&mut self) {
@@ -819,6 +845,22 @@ mod tests {
             }
         ));
         assert!(matches!(ops[3], IlOp::Return { .. }));
+    }
+
+    #[test]
+    fn push_pop_drops_a_pure_value_pushed_just_before() {
+        let mut buf = CodeBuf::new();
+        buf.push_const(0);
+        buf.push_pop();
+        buf.push_load(2);
+        buf.push_pop();
+        assert!(buf.ops().is_empty());
+        // A label in between is a join: the pop stays.
+        let l = buf.fresh_label();
+        buf.push_const(1);
+        buf.bind_label(l);
+        buf.push_pop();
+        assert!(matches!(buf.ops().last(), Some(IlOp::Pop { .. })));
     }
 
     #[test]

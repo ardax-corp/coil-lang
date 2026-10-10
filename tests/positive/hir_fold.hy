@@ -99,3 +99,45 @@ test("an if on a literal keeps the branch it takes") {
     assert(picks(true) == 36)?;
     assert(picks(false) == 26)?;
 }
+
+fn self_assign(int x) -> int {
+    let y = x;
+    y = y;
+    y = y + 0;
+    return y;
+}
+
+test("x = x does nothing") {
+    assert(self_assign(4) == 4)?;
+}
+
+fn known_some(int i) -> int {
+    return match Option::Some(i) {
+        Option::None => -1,
+        Option::Some(x) => x * 2,
+    };
+}
+
+fn known_default(int i) -> int {
+    return match Option::Some(i) {
+        Option::None => 0,
+        default => i + 1,
+    };
+}
+
+// The arm writes the field's local: the payload keeps the value it was built with.
+fn known_then_write(int i) -> int {
+    return match Option::Some(i) {
+        Option::Some(x) => {
+            i = i + 10;
+            x + i
+        },
+        Option::None => 0,
+    };
+}
+
+test("a match on a constructor takes its arm") {
+    assert(known_some(5) == 10)?;
+    assert(known_default(3) == 4)?;
+    assert(known_then_write(1) == 12)?;
+}

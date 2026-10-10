@@ -4,12 +4,13 @@
 //! `int` result only when it fits 32 bits, as the stack IL encodes it),
 //! `x + 0`, `x * 1`, `x | 0` and friends become `x`, `x * 0` becomes `0`
 //! when `x` is a plain read, `x ** 2` becomes `x * x`, `(x + 1) + 2` becomes
-//! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `!!b` becomes `b`,
-//! and `if` on a literal keeps only the branch it takes. Folds run bottom-up, so
-//! they cascade.
+//! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `x = x` goes, a
+//! `match` on a constructor takes its arm, `!!b` becomes `b`, and `if` on a
+//! literal keeps only the branch it takes. Folds run bottom-up, so they
+//! cascade.
 
 use super::lower::children;
-use super::{BinOp, HirBody, HirExpr, HirId, HirKind, Lit, UnOp};
+use super::{BinOp, HirBody, HirExpr, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind, UnOp};
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with every fold applied, or `None` when nothing folds.
@@ -26,7 +27,11 @@ fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
         post(body, k, hits);
     }
     merge_steps(body, id, hits);
-    if let Some(kind) = rewrite(body, id).or_else(|| square(body, id)).or_else(|| regroup(body, id)) {
+    if let Some(kind) = rewrite(body, id)
+        .or_else(|| square(body, id))
+        .or_else(|| regroup(body, id))
+        .or_else(|| known_variant(body, id))
+    {
         let e = &mut body.exprs[id.0 as usize];
         e.kind = kind;
         e.node = None;
@@ -60,6 +65,12 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             HirKind::Lit(Lit::Bool(a)) => Some(HirKind::Lit(Lit::Bool(a))),
             _ => None,
         },
+        // `x = x` (an identity folded away, `t = t + 0`) does nothing.
+        HirKind::Assign { place, value }
+            if matches!((&body.expr(*place).kind, &body.expr(*value).kind), (HirKind::Local(x), HirKind::Local(y)) if x == y) =>
+        {
+            Some(HirKind::Block { stmts: Vec::new(), tail: None })
+        }
         // The branch taken stands in for the `if` when it has the same type.
         HirKind::If { cond, then, els } => {
             let taken = match body.expr(*cond).kind {
@@ -89,6 +100,74 @@ fn square(body: &mut HirBody, id: HirId) -> Option<HirKind> {
     let again = HirId(body.exprs.len() as u32);
     body.exprs.push(copy);
     Some(HirKind::Bin { op: BinOp::IntMul, lhs, rhs: again })
+}
+
+/// `match V(a, b) { V(x, _) => e, … }` is `e` with `x` read as `a`: the
+/// arm the constructor takes, with no enum built. Arms of other variants
+/// are skipped. Every field must be a literal or a local read, and the arm
+/// must not assign a binding or a field's local (so each read of `x` still
+/// sees `a`).
+fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
+    let HirKind::Match { scrutinee, arms } = &body.expr(id).kind else { return None };
+    let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, args } = &body.expr(*scrutinee).kind else {
+        return None;
+    };
+    if !args.iter().all(|a| matches!(body.expr(*a).kind, HirKind::Lit(_) | HirKind::Local(_))) {
+        return None;
+    }
+    let (pats, arm) = arms.iter().find_map(|arm| match &arm.pat {
+        HirPat::Wild => Some(Some((Vec::new(), arm.body))),
+        HirPat::Variant { enum_name: e, variant: v, fields, .. } if e == enum_name && v == variant => {
+            Some(match fields {
+                HirPatFields::Unit if args.is_empty() => Some((Vec::new(), arm.body)),
+                HirPatFields::Tuple(ps) if ps.len() == args.len() && ps.iter().all(|p| matches!(p, HirPat::Bind(_) | HirPat::Wild)) => {
+                    Some((ps.clone(), arm.body))
+                }
+                _ => None,
+            })
+        }
+        HirPat::Variant { enum_name: e, .. } if e == enum_name => None,
+        _ => Some(None),
+    })??;
+    if body.expr(arm).ty != body.expr(id).ty || body.expr(arm).layout != body.expr(id).layout {
+        return None;
+    }
+    let mut subst = Vec::new();
+    let mut fixed = Vec::new();
+    for (p, &a) in pats.iter().zip(args) {
+        if let HirPat::Bind(x) = p {
+            if body.local(*x).captured {
+                return None;
+            }
+            subst.push((*x, body.expr(a).kind.clone()));
+            fixed.push(*x);
+            if let HirKind::Local(l) = body.expr(a).kind {
+                fixed.push(l);
+            }
+        }
+    }
+    let mut reads = Vec::new();
+    let mut stack = vec![arm];
+    while let Some(k) = stack.pop() {
+        match &body.expr(k).kind {
+            HirKind::Assign { place, .. }
+                if matches!(body.expr(*place).kind, HirKind::Local(l) if fixed.contains(&l)) =>
+            {
+                return None;
+            }
+            HirKind::Lambda { .. } | HirKind::Defer { .. } => return None,
+            HirKind::Local(l) if subst.iter().any(|(x, _)| x == l) => reads.push(k),
+            _ => {}
+        }
+        stack.extend(children(body, k));
+    }
+    for k in reads {
+        let HirKind::Local(l) = body.expr(k).kind else { unreachable!() };
+        let e = &mut body.exprs[k.0 as usize];
+        e.kind = subst.iter().find(|(x, _)| *x == l).map(|(_, v)| v.clone()).expect("a bound read");
+        e.node = None;
+    }
+    Some(body.expr(arm).kind.clone())
 }
 
 /// `(x + a) + b` is `x + (a + b)` for `int` literals of one sign, so a
@@ -280,3 +359,7 @@ fn fits(v: i64) -> Option<i64> {
 fn named(t: &Ty, name: &str) -> bool {
     matches!(ty::strip_readonly(t), Ty::Con(n) if n == name)
 }
+
+#[cfg(test)]
+#[path = "fold.tests.rs"]
+mod tests;

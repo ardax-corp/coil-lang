@@ -1539,15 +1539,15 @@ mod tests {
     fn empty_funcs_optimizes_whole_buffer() {
         let mut m = IlModule {
             prologue: vec![
-                IlOp::Dup { loc: loc() },
-                IlOp::Pop { loc: loc() },
                 IlOp::Const { imm: 1, loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
+                IlOp::Const { imm: 9, loc: loc() },
                 IlOp::Return { loc: loc(), ret_words: 1},
             ],
             ..IlModule::default()
         };
         let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
-        assert!(!flat.iter().any(|op| matches!(op, IlOp::Dup { .. })));
+        assert!(!flat.iter().any(|op| matches!(op, IlOp::Const { imm: 9, .. })));
         assert!(flat.iter().any(
             |op| matches!(op, IlOp::ConstReturnImm { .. }) || matches!(op, IlOp::Return { .. })
         ));
@@ -1555,20 +1555,20 @@ mod tests {
 
     #[test]
     fn optimize_and_flatten_dces_body_only() {
+        // The prologue's dead `CONST 7` stays; the body's dead `CONST 9` goes.
         let ops = vec![
-            IlOp::Dup { loc: loc() },
-            IlOp::Pop { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
+            IlOp::Const { imm: 7, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Dup { loc: loc() },
-            IlOp::Pop { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
+            IlOp::Const { imm: 9, loc: loc() },
             IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let funcs = vec![IlFunc::new("f", None, 2, 6)];
         let mut m = IlModule::from_flat(&ops, &funcs);
         let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
-        assert!(matches!(flat[0], IlOp::Dup { .. }));
-        assert!(matches!(flat[1], IlOp::Pop { .. }));
-        assert!(!flat[2..].iter().any(|op| matches!(op, IlOp::Dup { .. })));
+        assert!(flat.iter().any(|op| matches!(op, IlOp::Const { imm: 7, .. })));
+        assert!(!flat.iter().any(|op| matches!(op, IlOp::Const { imm: 9, .. })));
         let _ = IlJumpKind::Unconditional;
         let _ = Label(0);
     }
@@ -1606,7 +1606,6 @@ mod tests {
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
             dead_block: false,
-            stack_dce: false,
             slot_promote: false,
             canon: false,
             algebraic: false,

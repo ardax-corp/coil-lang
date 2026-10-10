@@ -488,7 +488,7 @@ mod tests {
     fn collect_delta_records_named_pass_from_pass_delta() {
         begin_opt_stats();
         collect_delta(&PassDelta {
-            name: "stack_dce",
+            name: "dead_block",
             kind: PassKind::Generic,
             changed: true,
             ops_delta: -2,
@@ -502,7 +502,7 @@ mod tests {
             stats
                 .passes
                 .iter()
-                .any(|p| p.name == "stack_dce" && p.applied == 1 && p.ops_delta == -2),
+                .any(|p| p.name == "dead_block" && p.applied == 1 && p.ops_delta == -2),
             "{:?}",
             stats.passes
         );

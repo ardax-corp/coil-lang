@@ -170,6 +170,17 @@ impl IlBuilder {
         self.indexed().positions.len()
     }
 
+    /// Remove the last op, which must emit code.
+    pub fn pop_last(&mut self) {
+        debug_assert!(self.ops.last().is_some_and(IlOp::emits_code));
+        self.ops.pop();
+        let index = self.code_index.get_mut();
+        if index.scanned > self.ops.len() {
+            index.positions.retain(|&p| p < self.ops.len());
+            index.scanned = self.ops.len();
+        }
+    }
+
     /// Total IL items including label markers.
     pub fn raw_len(&self) -> usize {
         self.ops.len()

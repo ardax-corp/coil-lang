@@ -133,11 +133,6 @@ fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_
     0
 }
 
-fn apply_stack_dce(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::dce::stack_dce(ops);
-    0
-}
-
 fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     crate::il::canon::canonicalize_operand_order(ops, ctx.pool);
     0
@@ -169,16 +164,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.dead_block,
         set_flag: |o| o.dead_block = true,
         apply: ApplyFn::Grow(apply_dead_block),
-    },
-    PassSpec {
-        name: "stack_dce",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Basic,
-        omit_from_size: false,
-        gate: |o| o.stack_dce,
-        set_flag: |o| o.stack_dce = true,
-        apply: ApplyFn::Grow(apply_stack_dce),
     },
     PassSpec {
         name: "canon",
@@ -216,7 +201,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
 #[cfg(test)]
 pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
-    "stack_dce",
     "canon",
     "slot_promote",
     "clone_shared_return",
@@ -243,7 +227,6 @@ mod tests {
             enabled,
             [
                 "dead_block",
-                "stack_dce",
                 "canon",
                 "slot_promote",
                 "clone_shared_return",
