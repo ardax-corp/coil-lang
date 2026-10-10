@@ -3378,6 +3378,38 @@ fn cross_module_does_not_inline_private_method() {
     assert_eq!(shown, Some(parser::ast::Visibility::Public));
 }
 
+/// An `if` / `else` that ends a loop body jumps straight to the back edge,
+/// not to a `JMP` that does (lowering threads the jump; no IL pass does).
+#[test]
+fn if_else_ending_a_loop_body_jumps_to_the_back_edge() {
+    use common::Instruction;
+    // Off the dense backend, which rebuilds the CFG and hides the chain.
+    let (bc, _pool) = compile_src_tuned(
+        "fn show(int x) -> int { if x <= 0 { return 0; } return show(x - 1) + 1; } \
+         fn walk(int n) -> int { \
+               let i = 0; let s = 0; \
+               while i < n { \
+                   i = i + 1; \
+                   if i % 2 == 0 { s = s + show(i); } else { s = s - show(i); } \
+               } \
+               return s; \
+             } \
+             fn main() { return walk(5); }",
+        |c| c.opt_options.mir_specialize = false,
+    );
+    let jmp = |pc: usize| *bc[pc].bytecode() == Instruction::JMP;
+    for (pc, b) in bc.iter().enumerate() {
+        if jmp(pc) {
+            let t = b.operand_u32() as usize;
+            assert!(
+                !(t < bc.len() && jmp(t)),
+                "JMP at {pc} lands on a JMP; opcodes: {:?}",
+                bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 /// Early-return diamond bodies ARE tiny-inlined (Phase 4a): one compare+branch
 /// + base return + fall-through return, with no CALL left at the call site.
 #[test]
