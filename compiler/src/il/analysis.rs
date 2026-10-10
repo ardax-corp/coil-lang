@@ -19,12 +19,6 @@ pub(crate) struct NaturalLoop {
     pub(crate) header_label: Label,
 }
 
-impl NaturalLoop {
-    pub(crate) fn body_start(&self) -> usize {
-        self.header + 1
-    }
-}
-
 /// IL is module-flat; labels reuse per function. Scope lookups to the function
 /// containing `idx` (ops since the previous `Return`).
 pub(crate) fn il_function_start(ops: &[IlOp], idx: usize) -> usize {

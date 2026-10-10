@@ -156,19 +156,6 @@ fn apply_canon(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) 
     0
 }
 
-fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
-    crate::il::algebraic::algebraic_simplify(ops, ctx.pool);
-    0
-}
-
-fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    // Invariant `len(a)` moves out of its loop first, which is what lets
-    // the bounds proofs below see a fixed length.
-    crate::il::bounds::hoist_loop_invariants_with(ops, opts.pure_call_ctx.as_ref());
-    crate::il::bounds::loop_bounds_with(ops, opts.pure_call_ctx.as_ref());
-    0
-}
-
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
@@ -243,26 +230,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_canon),
     },
     PassSpec {
-        name: "algebraic",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::None,
-        omit_from_size: false,
-        gate: |o| o.algebraic,
-        set_flag: |o| o.algebraic = true,
-        apply: ApplyFn::Grow(apply_algebraic),
-    },
-    PassSpec {
-        name: "loop_bounds",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.loop_bounds,
-        set_flag: |o| o.loop_bounds = true,
-        apply: ApplyFn::Grow(apply_loop_bounds),
-    },
-    PassSpec {
         name: "loop_unroll",
         phase: Phase::Decision,
         kind: PassKind::Unroll,
@@ -321,8 +288,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "dead_block",
     "stack_dce",
     "canon",
-    "algebraic",
-    "loop_bounds",
     "loop_unroll",
     "slot_promote",
     "clone_shared_return",
@@ -354,8 +319,6 @@ mod tests {
                 "dead_block",
                 "stack_dce",
                 "canon",
-                "algebraic",
-                                        "loop_bounds",
                 "loop_unroll",
                 "slot_promote",
                 "clone_shared_return",

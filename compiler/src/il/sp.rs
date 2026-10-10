@@ -24,6 +24,7 @@ impl Sp {
         matches!(self, Sp::Known(_))
     }
 
+    #[cfg(test)]
     pub fn known(self) -> Option<i32> {
         match self {
             Sp::Known(v) => Some(v),

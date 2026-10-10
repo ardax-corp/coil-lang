@@ -569,16 +569,30 @@ impl Compiler {
             }
             plan => plan,
         };
-        // A repeated pure expression reads the local that holds its first
-        // value, and loop-invariant expressions move in front of their
-        // loops, when the rewritten body plans.
+        // Constants fold, a repeated pure expression reads the local that
+        // holds its first value, loop-invariant expressions move in front of
+        // their loops, and counted-loop index sites are proven in bounds,
+        // when the rewritten body plans.
         let plan = match plan {
-            Ok(emit) if (self.opt_options.local_cse || self.opt_options.licm) && !self.debugger_attached && !hir.is_coro => {
+            Ok(emit)
+                if (self.opt_options.algebraic || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds)
+                    && !self.debugger_attached
+                    && !hir.is_coro =>
+            {
                 let body = inlined.as_ref().unwrap_or(hir);
                 let pure = |n: &str| crate::il::pure_call::name_in(&self.pure_fns, n);
-                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body, pure)).flatten();
-                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(cse.as_ref().unwrap_or(body), pure)).flatten();
-                match licm.or(cse) {
+                let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
+                // A finalizer that can resize runs at any allocation: no
+                // length is steady then.
+                let lengths = self.alloc_steady.then_some(&steady as &dyn Fn(&str) -> bool);
+                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body)).flatten();
+                let body_f = folded.as_ref().unwrap_or(body);
+                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
+                let body_c = cse.as_ref().unwrap_or(body_f);
+                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
+                let body_l = licm.as_ref().unwrap_or(body_c);
+                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
+                match bounds.or(licm).or(cse).or(folded) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -7986,7 +8000,21 @@ impl Compiler {
                         self.bytecode.push_load(tmp_idx);
                         self.bytecode.push_load(tmp_val);
                     }
-                    self.bytecode.push(Byte::new(Instruction::StoreIndex));
+                    // The value runs first: one that calls or writes could
+                    // change the length or index the proof was about.
+                    let mut quiet = true;
+                    lower::visit(hir, *value, &mut |e| {
+                        quiet &= !matches!(
+                            e.kind,
+                            HirKind::Call { .. } | HirKind::Assign { .. } | HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. }
+                        );
+                    });
+                    let store = if quiet && hir.expr(*place).flags.contains(HirFlags::IN_BOUNDS) {
+                        Instruction::StoreIndexUnchecked
+                    } else {
+                        Instruction::StoreIndex
+                    };
+                    self.bytecode.push(Byte::new(store));
                     self.bytecode.push_pop();
                 }
                 _ => unreachable!("HIR lowering admitted a non-local assignment place"),

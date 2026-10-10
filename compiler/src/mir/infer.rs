@@ -1052,7 +1052,7 @@ pub(crate) fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
     }
     let tail_works = ops[last_back..]
         .iter()
-        .any(|op| effects(op, None).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
+        .any(|op| effects(op).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
     any && !tail_works
 }
 
