@@ -40,7 +40,7 @@ pub struct PassSpec {
     pub phase: Phase,
     pub kind: PassKind,
     pub floor: OptFloor,
-    /// Size omits growth passes (`clone_shared_return`).
+    /// Size omits growth passes.
     pub omit_from_size: bool,
     gate: fn(&OptimizeOptions) -> bool,
     set_flag: fn(&mut OptimizeOptions),
@@ -114,11 +114,6 @@ fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions) -> usize {
     0
 }
 
-fn apply_clone_shared_return(ops: &mut Vec<IlOp>, _: &OptimizeOptions) -> usize {
-    super::convoy::clone_shared_return(ops);
-    0
-}
-
 /// Production opt passes. Order matches D1 README.
 pub static PRODUCTION_PASSES: &[PassSpec] = &[
     PassSpec {
@@ -131,21 +126,11 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         set_flag: |o| o.dead_block = true,
         apply: ApplyFn::Grow(apply_dead_block),
     },
-    PassSpec {
-        name: "clone_shared_return",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: true,
-        gate: |o| o.clone_shared_return,
-        set_flag: |o| o.clone_shared_return = true,
-        apply: ApplyFn::Grow(apply_clone_shared_return),
-    },
 ];
 
 /// D1 README production order (cleanup then decision).
 #[cfg(test)]
-pub const D1_PASS_ORDER: &[&str] = &["dead_block", "clone_shared_return"];
+pub const D1_PASS_ORDER: &[&str] = &["dead_block"];
 
 #[cfg(test)]
 mod tests {
@@ -166,7 +151,7 @@ mod tests {
         assert_eq!(enabled, subsequence(D1_PASS_ORDER, &enabled));
         assert_eq!(
             enabled,
-            ["dead_block", "clone_shared_return"]
+            ["dead_block"]
         );
     }
 

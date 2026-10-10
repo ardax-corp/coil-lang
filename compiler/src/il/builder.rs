@@ -199,6 +199,14 @@ impl IlBuilder {
         self.ops.push(IlOp::Label(label));
     }
 
+    /// Drop the label marker last pushed.
+    pub fn pop_label(&mut self) {
+        let Some(IlOp::Label(label) | IlOp::JoinLabel(label)) = self.ops.pop() else {
+            panic!("pop_label: last op is not a label");
+        };
+        self.bound.remove(&label.0);
+    }
+
     /// Insert a bound label marker at raw op index `raw_idx` (does not append).
     pub fn insert_bound_label_at(&mut self, raw_idx: usize, label: Label) {
         *self.code_index.get_mut() = CodeIndex::default();

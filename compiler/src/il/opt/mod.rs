@@ -24,8 +24,9 @@ pub struct OptimizeOptions {
     pub licm: bool,
     /// HIR counted-loop in-bounds proofs (`hir::bounds`).
     pub loop_bounds: bool,
-    /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
-    pub clone_shared_return: bool,
+    /// Return in each branch of a returned `match` / `if` in the HIR
+    /// (`hir::sink_return`), not an IL pass.
+    pub sink_return: bool,
     /// Full-unroll counted natural loops with a known trip count ≤ 8.
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
@@ -146,7 +147,6 @@ pub(crate) use stats::{
 pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 
 mod cfg;
-mod convoy;
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]

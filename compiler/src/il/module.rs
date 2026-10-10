@@ -1610,7 +1610,7 @@ mod tests {
             local_cse: false,
             licm: false,
             loop_bounds: false,
-            clone_shared_return: false,
+            sink_return: false,
             loop_unroll: false,
             loop_unroll_factor: 8,
             escape_analysis: false,

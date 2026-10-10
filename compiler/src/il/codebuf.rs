@@ -111,19 +111,40 @@ impl CodeBuf {
             self.il.ops().last(),
             Some(IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } | IlOp::Load { .. })
         );
-        if !pure {
-            return false;
-        }
-        let raw = self.il.raw_len() - 1;
-        let pc = self.il.code_len() - 1;
-        if self.root_entries.iter().any(|&i| i >= raw)
-            || self.entry_at_offset.keys().any(|&p| p >= pc)
-            || self.funcs.iter().any(|f| f.code_end > pc)
-        {
+        if !pure || self.marked_after(self.il.raw_len() - 1) {
             return false;
         }
         self.il.pop_last();
         true
+    }
+
+    /// Whether a root entry, function entry or function span starts at or
+    /// after op `raw`, the last code op pushed: code after it is not the
+    /// same straight line.
+    fn marked_after(&self, raw: usize) -> bool {
+        let pc = self.il.code_len() - 1;
+        self.root_entries.iter().any(|&i| i >= raw)
+            || self.entry_at_offset.keys().any(|&p| p >= pc)
+            || self.funcs.iter().any(|f| f.code_end > pc)
+    }
+
+    /// Whether the last code op pushed leaves (a return, a tail call, a
+    /// jump), so code pushed now cannot run: no label since it is bound, or
+    /// none that anything jumps to yet. Structured lowering only jumps back
+    /// to a loop head, which is unreachable too when it is bound after an
+    /// exit with nothing jumping to it.
+    pub fn ends_in_exit(&self) -> bool {
+        let ops = self.il.ops();
+        let Some(last) = ops.iter().rposition(IlOp::emits_code) else { return false };
+        if ops[last].can_fall_through() || self.marked_after(last) {
+            return false;
+        }
+        let labels: Vec<_> = ops[last + 1..].iter().filter_map(IlOp::bind_label).collect();
+        labels.is_empty()
+            || !ops.iter().any(|op| match op {
+                IlOp::Jump { target, .. } | IlOp::Entry { target, .. } => labels.contains(target),
+                _ => false,
+            })
     }
 
     pub fn push_index(&mut self) {
@@ -526,6 +547,14 @@ impl CodeBuf {
             return 0;
         }
         self.invalidate_lowered();
+        // Labels after a last exit that nothing jumps to (after arms that
+        // all returned) go: the moved exits would follow them, as a
+        // fallthrough from nowhere.
+        if self.ends_in_exit() {
+            while self.il.ops().last().is_some_and(|op| op.bind_label().is_some()) {
+                self.il.pop_label();
+            }
+        }
         // A label after the last op (a loop exit) is reached from elsewhere
         // and falls through into what follows.
         let done = (!self.il.ops().last().is_some_and(Self::ends_flow)).then(|| self.il.fresh_label());

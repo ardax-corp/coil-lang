@@ -60,3 +60,7 @@ pub(super) fn eliminate_dead_blocks(ops: &mut Vec<IlOp>) {
     }
     *ops = out;
 }
+
+#[cfg(test)]
+#[path = "cfg.tests.rs"]
+mod tests;
