@@ -694,13 +694,13 @@ fn integer_arithmetic_emits_int_opcode() {
     );
 }
 
-/// `x * 8` strength-reduces to `x << 3` (via [`const_fold::strength_mul_int`]).
+/// An int `x * 8` stays a multiply: `x << 3` would not trap on overflow.
 #[test]
-fn mul_by_power_of_two_emits_shl_not_mul() {
+fn int_mul_by_power_of_two_stays_mul() {
     let (bc, _pool) = compile_src("fn scale(int x) -> int { return x * 8; }");
     assert!(
-        bytecode_has_shl_by(&bc, 3),
-        "expected LOAD/CONST/SHL (shift 3) or fused BinSlotImm(SHL, 3) for x*8; opcodes: {:?}",
+        !bytecode_has_any_shl(&bc),
+        "x*8 must not become a shift; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -928,10 +928,10 @@ fn not_if_else_inverts_away_log_not_jmpf() {
     );
 }
 
-/// Commuted form `8 * x` must use the same SHL lowering (LHS factor).
+/// Commuted form `8 * x` on a byte uses the same SHL lowering (LHS factor).
 #[test]
 fn mul_by_lhs_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("fn scale(int x) -> int { return 8 * x; }");
+    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return 8 * x; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL (shift 3) for 8*x; opcodes: {:?}",
@@ -939,13 +939,13 @@ fn mul_by_lhs_power_of_two_emits_shl() {
     );
 }
 
-/// `const K = 16; x * K` must consult `const_env` and emit `<< 4`.
+/// `const K = 16; x * K` on an int stays a multiply, like a literal factor.
 #[test]
-fn mul_by_const_power_of_two_emits_shl() {
+fn int_mul_by_const_power_of_two_stays_mul() {
     let (bc, _pool) = compile_src("fn scale(int x) -> int { const K = 16; return x * K; }");
     assert!(
-        bytecode_has_shl_by(&bc, 4),
-        "expected SHL (shift 4) for x*const(16); opcodes: {:?}",
+        !bytecode_has_any_shl(&bc),
+        "x*const(16) must not become a shift; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -1109,10 +1109,10 @@ fn shl_zero_skips_shl() {
     );
 }
 
-/// Type aliases to `int` expand at check time, so `I * 8` still SHLs.
+/// Type aliases to `byte` expand at check time, so `B * 8` still SHLs.
 #[test]
-fn aliased_int_mul_by_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("type I = int; fn scale(I x) -> I { return x * 8; }");
+fn aliased_byte_mul_by_power_of_two_emits_shl() {
+    let (bc, _pool) = compile_src("type B = byte; fn scale(B x) -> B { return x * 8; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL for aliased int*8; opcodes: {:?}",

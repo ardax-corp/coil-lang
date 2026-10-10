@@ -8980,12 +8980,17 @@ impl Compiler {
     }
 
     /// `x / 2^n` as `x >> n` when `x` is a `byte` or the checker proved it
-    /// non-negative. (`x * 2^n` stays a `MUL`: a shift would not trap on
-    /// overflow.)
+    /// non-negative, and `x * 2^n` as `x << n` when `x` is a `byte`. An int
+    /// `x * 2^n` stays a `MUL`: a shift would not trap on overflow.
     fn hir_strength_reduce(hir: &HirBody, emit: &HirEmit, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, Instruction)> {
         let pow2 = |id: HirId| Self::hir_int_imm(hir, emit, id).and_then(crate::const_fold::strength_div_int);
         let nonneg = hir.expr(lhs).flags.contains(HirFlags::NONNEG) || Self::hir_ty(hir, lhs).is_some_and(lower::is_byte);
+        let byte = |id: HirId| Self::hir_ty(hir, id).is_some_and(lower::is_byte);
         match op {
+            BinOp::IntMul => pow2(rhs)
+                .filter(|_| byte(lhs))
+                .map(|n| (lhs, n, Instruction::SHL))
+                .or_else(|| pow2(lhs).filter(|_| byte(rhs)).map(|n| (rhs, n, Instruction::SHL))),
             BinOp::IntDiv if nonneg => pow2(rhs).map(|n| (lhs, n, Instruction::SHR)),
             _ => None,
         }

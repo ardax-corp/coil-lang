@@ -638,14 +638,21 @@ impl Inliner<'_> {
         e.node = None;
     }
 
-    /// Reads only locals and literals, with no trap and no effect.
+    /// Reads only locals and literals, with no effect and no trap but int
+    /// overflow. A call hoisted ahead of an int `+ - *` that overflows runs
+    /// before the panic instead of not at all; spilling such an operand
+    /// into a temp first would keep the order (coil-lang#856).
     fn pure(&self, e: HirId) -> bool {
         match &self.body.expr(e).kind {
             HirKind::Lit(_) | HirKind::Local(_) => true,
             HirKind::Bin { op, lhs, rhs } => {
-                !op.int_may_trap() && !matches!(op, BinOp::Overloaded(_)) && self.pure(*lhs) && self.pure(*rhs)
+                !matches!(
+                    op,
+                    BinOp::IntDiv | BinOp::IntRem | BinOp::IntPow | BinOp::Overloaded(_)
+                ) && self.pure(*lhs)
+                    && self.pure(*rhs)
             }
-            HirKind::Un { operand, .. } => !super::op_may_trap(&self.body, e) && self.pure(*operand),
+            HirKind::Un { operand, .. } => self.pure(*operand),
             _ => false,
         }
     }
