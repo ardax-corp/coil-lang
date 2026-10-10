@@ -8,6 +8,7 @@ use io::Stream;
 use io::net::tcp::connect;
 use io::net::tcp::listen;
 use io::net::tcp::local_addr;
+use io::net::tcp::shutdown;
 use io::sync::accept_wait;
 use io::sync::read_to_end;
 use io::sync::write_all;
@@ -30,6 +31,10 @@ fn send_later(int port, int ms, string text) -> int {
         Result::Ok(_) => {},
         Result::Err(_) => panic "write",
     }
+    // Half-close, then wait for the server's close: a closed client socket
+    // sits orphaned in FIN_WAIT_2 and macOS resets it after a timeout.
+    let _ = shutdown(c, 1);
+    let _ = read_to_end(c);
     let _ = close(c);
     return 0;
 }

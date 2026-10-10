@@ -31,3 +31,9 @@ jobs:
       - name: Diagnostic program, gc-stress
         if: always()
         run: ./target/gc-stress/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
+      - name: task_io.hy alone (half-close fix), gc-stress, x3
+        if: always()
+        run: |
+          for i in 1 2 3; do
+            ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/only 2>&1 | grep -E '^>|FAILED|test result' || true
+          done
