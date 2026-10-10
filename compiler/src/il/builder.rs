@@ -98,12 +98,16 @@ impl IlBuilder {
         self.indexed().positions.partition_point(|&p| p < raw)
     }
 
-    /// Move `ops[start..end]` to the end of the stream behind a fresh bound
-    /// `label`; the code index before `start` stays valid.
-    pub fn move_to_end(&mut self, start: usize, end: usize, label: Label) {
-        self.bound.insert(label.0);
-        self.ops.insert(start, IlOp::Label(label));
-        self.ops[start..].rotate_left(end + 1 - start);
+    /// Move `ops[start..end]` to the end of the stream, behind a fresh bound
+    /// `label` when there is one; the code index before `start` stays valid.
+    pub fn move_to_end(&mut self, start: usize, end: usize, label: Option<Label>) {
+        let mut end = end;
+        if let Some(label) = label {
+            self.bound.insert(label.0);
+            self.ops.insert(start, IlOp::Label(label));
+            end += 1;
+        }
+        self.ops[start..].rotate_left(end - start);
         let index = self.code_index.get_mut();
         if index.scanned > start {
             let keep = index.positions.partition_point(|&p| p < start);

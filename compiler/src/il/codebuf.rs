@@ -482,11 +482,14 @@ impl CodeBuf {
     }
 
     /// Lay out each region `start..end` after the rest of the buffer: a
-    /// conditional jump just before it skips it to the label bound at
-    /// `end`, and it ends in a return (or a jump). The jump inverts to reach
-    /// it there, so the code it skipped to falls through; a buffer that
-    /// falls off its end jumps over the moved regions. Regions of any other
-    /// shape, or with an entry bound past them (its offset would move), stay.
+    /// jump just before it skips it to the label bound at `end`, and it ends
+    /// in a return (or a jump). A conditional jump inverts to reach it
+    /// there, so the code it skipped to falls through; after an
+    /// unconditional one the region is reached only through its own leading
+    /// label (a `match` arm's), and the jump is left to the next label. A
+    /// buffer that falls off its end jumps over the moved regions. Regions of
+    /// any other shape, or with an entry bound past them (its offset would
+    /// move), stay.
     /// Returns how many moved.
     pub fn move_exits_to_end(&mut self, regions: &[(usize, usize)]) -> usize {
         let movable: Vec<_> = regions
@@ -505,19 +508,24 @@ impl CodeBuf {
         }
         // Back to front, so each earlier region's indices still hold.
         for &(start, end, inverted) in movable.iter().rev() {
-            let label = self.il.fresh_label();
-            if let IlOp::Jump { kind, target, .. } = &mut self.il.ops_slice_mut()[start - 1] {
+            // A region after an unconditional jump keeps its own leading
+            // label; a fresh one there would be an unreached block.
+            let label = inverted.map(|_| self.il.fresh_label());
+            if let (Some(inverted), Some(label)) = (inverted, label)
+                && let IlOp::Jump { kind, target, .. } = &mut self.il.ops_slice_mut()[start - 1]
+            {
                 *kind = inverted;
                 *target = label;
+                self.il.note_targeted(label);
             }
-            self.il.note_targeted(label);
             let len = self.il.raw_len();
             self.il.move_to_end(start, end, label);
             // Raw indices past `start` rotate with their ops.
             let (moved, rest) = (end - start, len - end);
+            let inserted = usize::from(label.is_some());
             for i in &mut self.root_entries {
                 if (start..end).contains(i) {
-                    *i += rest + 1;
+                    *i += rest + inserted;
                 } else if *i >= end {
                     *i -= moved;
                 }
@@ -536,17 +544,17 @@ impl CodeBuf {
 
     /// The inverted jump kind for [`Self::move_exits_to_end`] of
     /// `start..end`, when the region has that shape.
-    fn exit_jump(&self, start: usize, end: usize) -> Option<IlJumpKind> {
+    fn exit_jump(&self, start: usize, end: usize) -> Option<Option<IlJumpKind>> {
         let ops = self.il.ops();
         let (IlOp::Jump { kind, target, hint, .. }, IlOp::Label(bound)) = (ops.get(start.checked_sub(1)?)?, ops.get(end)?) else {
             return None;
         };
-        if hint.blocks_cold_fallthrough_invert() {
-            return None;
-        }
         let inverted = match kind {
-            IlJumpKind::JumpIfFalse => IlJumpKind::JumpIfTrue,
-            IlJumpKind::JumpIfTrue => IlJumpKind::JumpIfFalse,
+            // Reached only through its own leading label: it moves as is.
+            IlJumpKind::Unconditional => None,
+            _ if hint.blocks_cold_fallthrough_invert() => return None,
+            IlJumpKind::JumpIfFalse => Some(IlJumpKind::JumpIfTrue),
+            IlJumpKind::JumpIfTrue => Some(IlJumpKind::JumpIfFalse),
             _ => return None,
         };
         if target != bound || !ops[start..end].last().is_some_and(Self::ends_flow) {
@@ -749,6 +757,33 @@ mod tests {
             _ => None,
         });
         assert!(matches!((done, ops.last()), (Some(d), Some(IlOp::Label(l))) if d == *l));
+    }
+
+    #[test]
+    fn move_exits_to_end_moves_a_match_arm_with_its_own_label() {
+        // `JMP end; miss: return 3; end: return 4`: the arm keeps its label
+        // and gets no fresh one (an unreached block that falls into it).
+        let mut buf = CodeBuf::new();
+        let (miss, end_l) = (buf.fresh_label(), buf.fresh_label());
+        buf.push_const(1);
+        buf.il_mut().emit_jump(IlJumpKind::JumpIfFalse, miss);
+        buf.il_mut().emit_jump(IlJumpKind::Unconditional, end_l);
+        let start = buf.il().raw_len();
+        buf.bind_label(miss);
+        buf.push_const(3);
+        buf.push_return();
+        let end = buf.il().raw_len();
+        buf.bind_label(end_l);
+        buf.push_const(4);
+        buf.push_return();
+        let labels = |buf: &CodeBuf| buf.ops().iter().filter(|op| matches!(op, IlOp::Label(_))).count();
+        let before = labels(&buf);
+        assert_eq!(buf.move_exits_to_end(&[(start, end)]), 1);
+        assert_eq!(labels(&buf), before);
+        assert_eq!(consts(&buf), [1, 4, 3]);
+        let ops = buf.ops();
+        assert!(matches!(ops[ops.len() - 3], IlOp::Label(l) if l == miss));
+        assert!(matches!(ops[1], IlOp::Jump { kind: IlJumpKind::JumpIfFalse, target, .. } if target == miss));
     }
 
     #[test]
