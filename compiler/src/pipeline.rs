@@ -2030,6 +2030,7 @@ fn ffi_type_to_ty(ty: FfiType) -> crate::typechecking::ty::Ty {
         FfiType::Void => unit(),
         FfiType::Bool => boolean(),
         FfiType::Ptr => array(int()),
+        FfiType::Bytes => array(crate::typechecking::ty::Ty::Con("byte".into())),
         FfiType::Callback(_) | FfiType::Struct(_) => int(),
     }
 }

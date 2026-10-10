@@ -812,6 +812,10 @@ impl VirtualModules {
                 BuiltinExport::FfiFn {
                     kind: FfiBuiltin::Invoke,
                 },
+                BuiltinExport::HostFn {
+                    surface: "read_ints",
+                    registry: common::FFI_READ_INTS_NATIVE,
+                },
             ],
         );
 

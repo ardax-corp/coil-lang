@@ -49,6 +49,7 @@ const PARK_R: EffectFlags = fx(EffectFlags::ATTACH_PARK | R);
 /// loop (every iteration would then share one array).
 const TEXT: EffectFlags = fx(EffectFlags::ALLOC);
 const TEXT_R: EffectFlags = fx(EffectFlags::ALLOC | R);
+const FFI_R: EffectFlags = fx(EffectFlags::FFI | R);
 
 const NO_CAP: Caps = Caps::NONE;
 const OPEN: Caps = Caps::READ.union(Caps::WRITE);
@@ -1183,6 +1184,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: PURE,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "ffi_read_ints",
+        arity: 3,
+        id: 160,
+        effects: FFI_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1250,6 +1258,10 @@ pub const TASK_COND_NOTIFY_ID: u16 = 158;
 /// message plus the caller's location (the frame below), never returns.
 pub const CONTRACT_FAIL_ID: u16 = 159;
 pub const CONTRACT_FAIL_NATIVE: &str = "contract_fail";
+/// `ffi::read_ints(lib, ptr, count)` (archive minor 36): copy `count` C
+/// `int64_t`s from a pointer a native returned (an ovector, an out array).
+pub const FFI_READ_INTS_ID: u16 = 160;
+pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1297,7 +1309,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 160);
+    assert!(HOST_NATIVES.len() == 161);
+    assert!(HOST_NATIVES[FFI_READ_INTS_ID as usize].id == FFI_READ_INTS_ID);
     assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);
     assert!(HOST_NATIVES[TASK_COND_NOTIFY_ID as usize].id == TASK_COND_NOTIFY_ID);
     assert!(HOST_NATIVES[CONTRACT_FAIL_ID as usize].id == CONTRACT_FAIL_ID);

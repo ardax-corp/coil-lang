@@ -4,6 +4,7 @@ mod call;
 mod closure;
 mod error;
 mod gate;
+mod read;
 mod registry;
 mod resolve;
 mod runtime;
@@ -16,6 +17,7 @@ pub use call::{
 pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use gate::DloadGate;
+pub use read::read_ints;
 pub use libloading::Library;
 pub use registry::{HostClosureFn, HostOp, NativeFn, Natives};
 pub use resolve::{
@@ -38,6 +40,7 @@ pub fn register_on_library(
     let name = sig.name.clone();
     obj_lib.signatures.push(crate::memory::RegisteredFunction {
         sig: crate::memory::FunctionSig::from_ffi_signature(&sig),
+        ffi_sig: sig,
         prepared,
     });
     obj_lib.by_name.insert(name, id);

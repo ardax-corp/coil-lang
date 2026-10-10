@@ -114,6 +114,8 @@ pub fn build_standard_host_natives(
         &mut register_id,
         common::CONTRACT_FAIL_ID..=common::CONTRACT_FAIL_ID,
     );
+    // Append-only after contract_fail: `ffi::read_ints` (minor 36).
+    push_ffi_read_ints(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -304,6 +306,18 @@ fn push_string_bytes(
             Ok(Some(host(heap, args)))
         })));
     }
+}
+
+/// `ffi::read_ints(lib, ptr, count) -> Result<Vec<int>, ffi::Error>`.
+fn push_ffi_read_ints(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::FFI_READ_INTS_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
+        .expect("ffi_read_ints signature");
+    let id = out.len();
+    register_id(name, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        Ok(Some(crate::ffi::read_ints(heap, args)))
+    })));
 }
 
 /// `task_*` natives and `contract_fail`: VM hooks ([`HostOp::Task`]), like `gc_collect`.
@@ -1163,7 +1177,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some(common::CONTRACT_FAIL_NATIVE)
+            Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1467,6 +1481,10 @@ mod tests {
             registrations.get(end + 23).map(|(n, _)| n.as_str()),
             Some(common::CONTRACT_FAIL_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 24);
+        assert_eq!(
+            registrations.get(end + 24).map(|(n, _)| n.as_str()),
+            Some(common::FFI_READ_INTS_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 25);
     }
 }

@@ -125,10 +125,14 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      archives never reference them.
 /// 35 — HostInvoke 159 (`contract_fail`): a failed `requires` panics with
 ///      the caller's location. Older archives never reference it.
+/// 36 — FFI type tag 15 (`ffi::types::Bytes`): a `Vec<byte>` passed as a
+///      `uint8_t *`. HostInvoke 160 (`ffi_read_ints`): `ffi::read_ints`
+///      copies `int64_t`s from a native pointer. Older archives never
+///      reference either.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 35;
+pub const ARCHIVE_MINOR: u16 = 36;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1069,9 +1073,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 35);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 35));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.35");
+        assert_eq!(ARCHIVE_MINOR, 36);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 36));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.36");
     }
 
     #[test]
