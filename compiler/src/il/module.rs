@@ -393,6 +393,7 @@ impl IlModule {
                     pool,
                     &dense_calls,
                     body.meta.entry,
+                    body.meta.hir_mir.as_deref(),
                     &mut side,
                 ) {
                     if drops_bound_label(&body.ops, &dense) {

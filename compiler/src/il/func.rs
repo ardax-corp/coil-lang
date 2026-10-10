@@ -26,6 +26,9 @@ pub struct IlFunc {
     /// `defer` cleanup pad reads frame slots by number and is reached only
     /// by the VM unwinder, so no pass may renumber slots or relabel it.
     pub pinned: bool,
+    /// The body lowered straight from HIR to MIR, when it could be: the
+    /// register tiers start from it instead of lifting the IL.
+    pub hir_mir: Option<Box<crate::mir::MirFunc>>,
 }
 
 impl IlFunc {
@@ -54,6 +57,7 @@ impl IlFunc {
             entry_sp,
             unboxed_fields: Vec::new(),
             pinned: false,
+            hir_mir: None,
         }
     }
 }
