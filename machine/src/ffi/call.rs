@@ -361,10 +361,10 @@ fn array_buffer_from_value(
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
     let addr = value.raw() as u64;
     if let Some(obj) = heap.find_object_by_addr(addr) {
-        let elements = match obj {
-            Object::Array(gc) => gc.as_ref().elements().clone(),
-            Object::Tuple(gc) => gc.as_ref().elements().to_vec(),
-            _ => Vec::new(),
+        let elements: &[Value] = match &obj {
+            Object::Array(gc) => gc.as_ref().elements(),
+            Object::Tuple(gc) => gc.as_ref().elements(),
+            _ => &[],
         };
         if !elements.is_empty() {
             let mut buf: Vec<i64> = elements.iter().map(|v| v.as_int()).collect();
@@ -398,7 +398,7 @@ pub fn invoke_via_libffi(
     ctx.heap().reset_ffi_strings();
     let _reset = FfiStringReset { heap: ctx.heap };
     let nfixed = sig.arity();
-    let effective_types: Vec<FfiType> = if sig.variadic {
+    let effective_types: std::borrow::Cow<'_, [FfiType]> = if sig.variadic {
         if args.len() < nfixed {
             return Err(FfiError::ArityMismatch {
                 expected: nfixed,
@@ -424,7 +424,8 @@ pub fn invoke_via_libffi(
                     promote_variadic_arg_type(*ty)
                 }
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     } else {
         if args.len() != nfixed {
             return Err(FfiError::ArityMismatch {
@@ -432,7 +433,7 @@ pub fn invoke_via_libffi(
                 got: args.len(),
             });
         }
-        sig.args.clone()
+        std::borrow::Cow::Borrowed(sig.args.as_slice())
     };
 
     // For variadic calls, build a fresh CIF; fixed-arity uses the declare-time CIF.

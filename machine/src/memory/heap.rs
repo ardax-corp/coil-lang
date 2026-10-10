@@ -2807,17 +2807,15 @@ impl FunctionSig {
 /// A declared FFI function with a prepared libffi call interface.
 pub struct RegisteredFunction {
     pub sig: FunctionSig,
+    /// The signature the call path marshals against, kept so an invoke
+    /// does not rebuild (and allocate) it.
+    pub ffi_sig: crate::ffi::FfiSignature,
     pub prepared: crate::ffi::PreparedCall,
 }
 
 impl RegisteredFunction {
-    pub fn ffi_signature(&self) -> crate::ffi::FfiSignature {
-        crate::ffi::FfiSignature {
-            name: self.sig.name.clone(),
-            args: self.sig.arg_types.clone(),
-            ret: self.sig.ret_type,
-            variadic: self.sig.variadic,
-        }
+    pub fn ffi_signature(&self) -> &crate::ffi::FfiSignature {
+        &self.ffi_sig
     }
 }
 

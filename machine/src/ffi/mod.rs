@@ -38,6 +38,7 @@ pub fn register_on_library(
     let name = sig.name.clone();
     obj_lib.signatures.push(crate::memory::RegisteredFunction {
         sig: crate::memory::FunctionSig::from_ffi_signature(&sig),
+        ffi_sig: sig,
         prepared,
     });
     obj_lib.by_name.insert(name, id);

@@ -1439,13 +1439,16 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn materialize_callback_args(
+    fn materialize_callback_args<'a>(
         &mut self,
         sig: &crate::ffi::FfiSignature,
-        args: &[Value],
-    ) -> Result<Vec<Value>, crate::ffi::FfiError> {
+        args: &'a [Value],
+    ) -> Result<std::borrow::Cow<'a, [Value]>, crate::ffi::FfiError> {
         use crate::ffi::{callback_cif, make_int_callback, VmCallFn};
         use crate::memory::FfiType;
+        if !sig.args.iter().any(|ty| matches!(ty, FfiType::Callback(_))) {
+            return Ok(std::borrow::Cow::Borrowed(args));
+        }
         let mut out = args.to_vec();
         let vm_ptr = self as *mut Self as *mut c_void;
         let call_fn: VmCallFn = Self::invoke_call;
@@ -1459,7 +1462,7 @@ impl<const S: usize> Machine<S> {
                 out[i] = Value::from(ptr as u64);
             }
         }
-        Ok(out)
+        Ok(std::borrow::Cow::Owned(out))
     }
 
     /// Register a new FFI function on the given library `Object`.
@@ -3219,7 +3222,7 @@ impl<const S: usize> Machine<S> {
                 if pending.function_id < lib_ref.signatures.len() {
                     let registered = &lib_ref.signatures[pending.function_id];
                     let ffi_sig = registered.ffi_signature();
-                    let args = match self.materialize_callback_args(&ffi_sig, &pending.args) {
+                    let args = match self.materialize_callback_args(ffi_sig, &pending.args) {
                         Ok(a) => a,
                         Err(e) => {
                             self.push_ffi_error(e);
@@ -3233,7 +3236,7 @@ impl<const S: usize> Machine<S> {
                     let mut closure_ptrs = Vec::new();
                     crate::ffi::invoke_via_libffi(
                         &registered.prepared,
-                        &ffi_sig,
+                        ffi_sig,
                         &args,
                         pending.arg_types.as_deref(),
                         &mut ctx,
