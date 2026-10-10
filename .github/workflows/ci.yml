@@ -156,64 +156,21 @@ jobs:
       - name: Workspace tests
         run: |
           set -euo pipefail
-          # macOS: cargo lists many test binaries in parallel and hits EAGAIN.
-          # Raise nofile and serialize package test runs so listing is sequential.
-          jobs=""
-          extra=""
+          # macOS: the default nofile limit (256) is low for parallel test runs.
           if [ "${{ runner.os }}" = "macOS" ]; then
             ulimit -n 65536 || true
-            jobs="--jobs 1"
-            # Listing ~1500 compiler unit tests otherwise EAGAIN (EMFILE).
-            extra="-- --test-threads=1"
-            export RUST_TEST_THREADS=1
           fi
-          run_ws_tests() {
-            cargo test --workspace --lib --tests --bins $jobs $extra
-          }
-          # Linux: one shot. A FAILED summary with exit 0 must still fail the job.
-          if [ "${{ runner.os }}" != "macOS" ]; then
-            log="$(mktemp)"
-            set +e
-            run_ws_tests 2>&1 | tee "$log"
-            code="${PIPESTATUS[0]}"
-            set -e
-            if grep -E -q 'test result: FAILED|error: test failed' "$log"; then
-              if [ "$code" -eq 0 ]; then
-                echo "::error::tests reported failure but cargo exited 0" >&2
-                exit 1
-              fi
-              exit "$code"
-            fi
-            exit "$code"
-          fi
-          # macOS: retry listing/resource errors only — never retry a red suite.
+          # A FAILED summary with exit 0 must still fail the job.
           log="$(mktemp)"
-          n=0
-          while true; do
-            set +e
-            run_ws_tests 2>&1 | tee "$log"
-            code="${PIPESTATUS[0]}"
-            set -e
-            if grep -E -q 'test result: FAILED|error: test failed' "$log"; then
-              if [ "$code" -eq 0 ]; then
-                echo "::error::tests reported failure but cargo exited 0" >&2
-                exit 1
-              fi
-              exit "$code"
-            fi
-            if [ "$code" -eq 0 ]; then
-              exit 0
-            fi
-            if grep -E -q 'EAGAIN|EMFILE|os error 24|os error 35' "$log"; then
-              n=$((n + 1))
-              if [ "$n" -ge 5 ]; then
-                exit "$code"
-              fi
-              sleep 5
-              continue
-            fi
-            exit "$code"
-          done
+          set +e
+          cargo test --workspace --lib --tests --bins 2>&1 | tee "$log"
+          code="${PIPESTATUS[0]}"
+          set -e
+          if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
+            echo "::error::tests reported failure but cargo exited 0" >&2
+            exit 1
+          fi
+          exit "$code"
 
       - name: Release label lower (COI-407)
         if: runner.os == 'Linux'
