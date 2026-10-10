@@ -14,23 +14,14 @@ env:
 # `[[bench]]` treat argv after `--` as their own CLI and abort the suite.
 
 jobs:
-  # Default Clippy on the same feature sets and target filters as the test
-  # matrix. Criterion benches stay out (`--lib --tests --bins`).
+  # Every crate's default feature set is empty, and `coil-debug` /
+  # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
+  # `machine/{debugger,coverage}` for the whole workspace, so one feature set
+  # covers `--no-default-features` / `--features dissect|debugger` too.
+  # Criterion benches stay out (`--lib --tests --bins`).
   clippy:
-    name: clippy (${{ matrix.features.id }})
+    name: clippy (ubuntu-latest)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        features:
-          - id: default
-            flags: ""
-          - id: no-default
-            flags: "--no-default-features"
-          - id: dissect
-            flags: "--features dissect"
-          - id: debugger
-            flags: "--features debugger"
     steps:
       - uses: actions/checkout@v4
 
@@ -47,10 +38,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: clippy-${{ matrix.features.id }}
+          key: clippy
 
-      - name: Clippy (${{ matrix.features.id }})
-        run: cargo clippy --workspace --lib --tests --bins ${{ matrix.features.flags }} -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --lib --tests --bins -- -D warnings
 
   # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
   # deliberately broken programs and is not checked. The embedded prelude
@@ -80,32 +71,12 @@ jobs:
           ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy compiler/src/prelude comptime/tests
 
   test:
-    name: test (${{ matrix.os }}, ${{ matrix.features.id }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        features:
-          - id: default
-            flags: ""
-            mode: test
-        include:
-          - os: ubuntu-latest
-            features:
-              id: no-default
-              flags: "--no-default-features"
-              mode: check
-          - os: ubuntu-latest
-            features:
-              id: dissect
-              flags: "--features dissect"
-              mode: test
-          - os: ubuntu-latest
-            features:
-              id: debugger
-              flags: "--features debugger"
-              mode: test
     steps:
       - uses: actions/checkout@v4
 
@@ -131,19 +102,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.features.id }}
+          key: test
 
       - name: Build all CLI binaries
-        if: matrix.features.id == 'default'
         run: cargo build
 
-      - name: Workspace check (${{ matrix.features.id }})
-        if: matrix.features.mode == 'check'
-        run: |
-          cargo check --workspace --lib --tests --bins ${{ matrix.features.flags }}
-
-      - name: Workspace tests (${{ matrix.features.id }})
-        if: matrix.features.mode == 'test'
+      - name: Workspace tests
         run: |
           set -euo pipefail
           # macOS: cargo lists many test binaries in parallel and hits EAGAIN.
@@ -158,7 +122,7 @@ jobs:
             export RUST_TEST_THREADS=1
           fi
           run_ws_tests() {
-            cargo test --workspace --lib --tests --bins $jobs ${{ matrix.features.flags }} $extra
+            cargo test --workspace --lib --tests --bins $jobs $extra
           }
           # Linux: one shot. A FAILED summary with exit 0 must still fail the job.
           if [ "${{ runner.os }}" != "macOS" ]; then
@@ -206,7 +170,7 @@ jobs:
           done
 
       - name: Release label lower (COI-407)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # Opt-level 3 / no debug_assertions (the release-compiler panic).
           # Skip fat LTO so this stays a focused label-lower check.
@@ -215,7 +179,7 @@ jobs:
             cargo test --release -p compiler --test coi407_trailing_label -- --exact
 
       - name: Release VM no_pool park/close (COI-410)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # Opt-level 3 like the release VM. Tests need Debug on Value
           # (`cfg(debug_assertions)`) and unwind so the harness can compile.
@@ -235,13 +199,12 @@ jobs:
             -- --exact
 
       - name: VM-wire suites (pipeline / perf_metrics / namespace / cursor_model)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # `required-features = ["vm-wire"]` keeps these out of the workspace suite.
           cargo test -p compiler --features vm-wire --tests
 
       - name: Language harness (`coil test`)
-        if: matrix.features.id == 'default'
         env:
           # A worker abort (coil-lang#804) prints where it happened.
           RUST_BACKTRACE: "1"
@@ -249,28 +212,28 @@ jobs:
           ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness at -O0 (`coil test -O 0`)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # Optimizations hide codegen bugs (LICM materializes invariants,
           # inlining drops CALL targets); run the unoptimized pipeline too.
           ./target/debug/coil test -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # Typed inlining is the default; every test must give the same
           # result with it off.
           COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: GC stress (`coil test`, collect and evacuate at every allocation)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # `coil test` re-execs `coil-test`; build the harness itself with the feature.
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
           ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Leak smoke (`coil test` under ulimit -v)
-        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           # The cap is 48 MiB above the harness's own code, which grows with
           # every change (a fixed 64 MiB cap had shrunk to ~35 MiB of room).
@@ -281,7 +244,6 @@ jobs:
           ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
-        if: matrix.features.id == 'default'
         run: |
           BIN=./target/debug/coil ./examples/projects/run-tests.sh
 
