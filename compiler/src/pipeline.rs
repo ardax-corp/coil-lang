@@ -1644,6 +1644,10 @@ impl Pipeline {
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
+        // `coil verify`'s proof of this file, while it still matches; never
+        // while verifying, which makes the proof.
+        let proof = (!crate::verify::capture_active()).then(|| crate::verify::proof::Proof::load(&entry)).flatten();
+        let _proof = crate::verify::proof::ProofScope::set(proof);
         self.begin_compile_opt_stats();
         self.enqueue_file(entry);
 
@@ -1697,6 +1701,10 @@ impl Pipeline {
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
+        // `coil verify`'s proof of this file, while it still matches; never
+        // while verifying, which makes the proof.
+        let proof = (!crate::verify::capture_active()).then(|| crate::verify::proof::Proof::load(&entry)).flatten();
+        let _proof = crate::verify::proof::ProofScope::set(proof);
         self.begin_compile_opt_stats();
         self.enqueue_file(entry);
 

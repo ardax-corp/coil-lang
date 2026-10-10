@@ -47,6 +47,7 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
         sidecar,
         module: &mut module,
         invariants,
+        entry: module_path.is_empty(),
     };
     let mut top = BodyBuilder::new(&join(module_path, "<top>"), BodyKind::TopLevel, span_of(ast));
     let mut top_stmts = Vec::new();
@@ -73,7 +74,41 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
             }
         }
     }
+    if module_path.is_empty() {
+        proved_bounds(&mut module);
+    }
     module
+}
+
+/// Mark the `Vec` and array indexes `coil verify` proved in bounds, when it
+/// proved the whole module and `requires` (which those proofs assume) are
+/// still checked.
+fn proved_bounds(module: &mut HirModule) {
+    if !super::contract_level().checks_requires() {
+        return;
+    }
+    crate::verify::proof::with_proof(|proof| {
+        let Some(proof) = proof.filter(|p| p.complete && !p.bounds.is_empty()) else { return };
+        for body in &mut module.bodies {
+            let name = body.name.clone();
+            for i in 0..body.exprs.len() {
+                let HirKind::Index { base, .. } = body.exprs[i].kind else { continue };
+                let (start, end) = body.exprs[i].span;
+                if !proof.bounds.contains(&(name.clone(), start, end, String::new())) {
+                    continue;
+                }
+                let vec = body.exprs[base.0 as usize].ty.as_ref().is_some_and(|t| {
+                    matches!(
+                        crate::typechecking::ty::strip_readonly(t),
+                        Ty::List(_) | Ty::Array { .. }
+                    ) || matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == "Vec" || n.ends_with("::Vec")))
+                });
+                if vec {
+                    body.exprs[i].flags.insert(HirFlags::IN_BOUNDS);
+                }
+            }
+        }
+    });
 }
 
 fn declared_effects(e: &parser::ast::EffectDecl<'_>) -> super::DeclaredEffects {
@@ -94,6 +129,8 @@ struct Cx<'c, 'm, 'ast> {
     module: &'m mut HirModule,
     /// Each class's `invariant` clauses, by class name.
     invariants: HashMap<String, Vec<&'ast Contract<'ast>>>,
+    /// The entry module, which `coil verify`'s proof is about.
+    entry: bool,
 }
 
 /// Collect the `invariant` clauses of every class in `node`.
@@ -672,11 +709,30 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     /// `ensures` panic is reported at its clause.
     fn contract_check(&mut self, b: &mut BodyBuilder, c: &Contract<'_>, fname: &str) -> HirId {
         let span = (c.span.start, c.span.end);
+        if self.proved(b, c, fname) {
+            return self.synth(b, span, HirKind::Block { stmts: Vec::new(), tail: None }, Some(coil_ty::unit()));
+        }
         let cond = self.expr(b, &c.expr);
         let not = self.synth(b, span, HirKind::Un { op: UnOp::Not, operand: cond }, Some(coil_ty::boolean()));
         let text = Self::contract_text(c, fname);
         let then = self.contract_panic(b, span, text, c.kind == ContractKind::Requires);
         self.synth(b, span, HirKind::If { cond: not, then, els: None }, Some(coil_ty::unit()))
+    }
+
+    /// `coil verify` proved this `ensures` / `invariant` check never fails
+    /// here (see [`crate::verify::proof`]).
+    fn proved(&self, b: &BodyBuilder, c: &Contract<'_>, fname: &str) -> bool {
+        if !self.entry || !matches!(c.kind, ContractKind::Ensures | ContractKind::Invariant) {
+            return false;
+        }
+        crate::verify::proof::with_proof(|proof| {
+            let Some(proof) = proof else { return false };
+            let text = Self::contract_text(c, fname);
+            let text = text.strip_prefix("contract violated: ").unwrap_or(&text);
+            let name = &b.body.name;
+            let clause = text.strip_suffix(&format!(" in {name}")).unwrap_or(text);
+            proof.checks.contains(&(name.clone(), c.span.start, c.span.end, clause.to_string()))
+        })
     }
 
     /// `contract violated: <keyword> <clause> ("<message>") in <function>`.

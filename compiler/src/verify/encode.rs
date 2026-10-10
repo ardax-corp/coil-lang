@@ -29,6 +29,9 @@ use crate::typechecking::ty::Ty;
 const BV: &str = "(_ BitVec 64)";
 const ARR: &str = "(Array (_ BitVec 64) (_ BitVec 64))";
 const VIOLATED: &str = "contract violated: ";
+/// The keyword of an index's bounds goal.
+pub const BOUNDS: &str = "bounds";
+const BOUNDS_CLAUSE: &str = "index in bounds";
 /// How deep callee contracts are expanded inside each other.
 const MAX_CALL_DEPTH: u32 = 3;
 
@@ -68,6 +71,10 @@ enum V {
     /// elements. `id` names the object, so a write through one local is seen
     /// through its aliases.
     Seq { len: String, data: Option<String>, id: u32 },
+    /// A record, tuple, class instance or enum value. Its fields live in
+    /// [`St::fields`], so a write through one local is seen through its
+    /// aliases.
+    Obj(u32),
     Unit,
     Opaque,
 }
@@ -76,6 +83,10 @@ enum V {
 struct St {
     env: HashMap<LocalId, V>,
     guard: String,
+    /// What is known of object fields: `(object, field)`. An enum's tag and
+    /// payload are `$`-named and never change; the rest is forgotten
+    /// wherever the heap may change.
+    fields: HashMap<(u32, String), V>,
 }
 
 type Out = Option<(V, St)>;
@@ -121,6 +132,10 @@ struct Enc<'m> {
     quiet: u32,
     depth: u32,
     next_seq: u32,
+    /// Objects a join made from two others: `(new, a, b)`.
+    obj_joins: Vec<(u32, u32, u32)>,
+    /// Enum variant numbers, by `enum::variant`.
+    tags: HashMap<String, u32>,
 }
 
 impl<'m> Enc<'m> {
@@ -136,12 +151,14 @@ impl<'m> Enc<'m> {
             quiet: 0,
             depth: 0,
             next_seq: 0,
+            obj_joins: Vec::new(),
+            tags: HashMap::new(),
         }
     }
 
     fn function(&mut self, body: &'m HirBody) -> Option<FnCheck> {
         let root = body.root?;
-        let mut st = St { env: HashMap::new(), guard: "true".into() };
+        let mut st = St { env: HashMap::new(), guard: "true".into(), fields: HashMap::new() };
         let mut params = Vec::new();
         for &p in &body.params {
             let local = body.local(p);
@@ -287,8 +304,14 @@ impl<'m> Enc<'m> {
                 V::Seq { len, data: Some(data), id: self.next_seq }
             }
             Some(Shape::Unit) => V::Unit,
+            Some(Shape::Obj) => V::Obj(self.new_obj()),
             _ => V::Opaque,
         }
+    }
+
+    fn new_obj(&mut self) -> u32 {
+        self.next_seq += 1;
+        self.next_seq
     }
 
     /// `fresh`, and the path now depends on a value the encoder made up.
@@ -341,7 +364,27 @@ impl<'m> Enc<'m> {
             env.entry(*k).or_insert_with(|| y.clone());
         }
         let v = self.merge(&c, &va, &vb);
-        Some((v, St { env, guard }))
+        let mut fields = HashMap::new();
+        for (k, x) in &sa.fields {
+            if let Some(y) = sb.fields.get(k) {
+                let m = self.merge(&c, x, y);
+                fields.insert(k.clone(), m);
+            }
+        }
+        // An object that is one of two: the fields both sides know.
+        for (n, a, b) in std::mem::take(&mut self.obj_joins) {
+            for ((o, name), x) in &sa.fields {
+                if *o != a {
+                    continue;
+                }
+                if let Some(y) = sb.fields.get(&(b, name.clone())) {
+                    let m = self.merge(&c, x, y);
+                    fields.insert((n, name.clone()), m);
+                }
+            }
+        }
+        self.obj_joins.clear();
+        Some((v, St { env, guard, fields }))
     }
 
     fn merge(&mut self, c: &str, a: &V, b: &V) -> V {
@@ -365,6 +408,11 @@ impl<'m> Enc<'m> {
                     self.next_seq
                 };
                 V::Seq { len, data, id }
+            }
+            (V::Obj(x), V::Obj(y)) => {
+                let n = self.new_obj();
+                self.obj_joins.push((n, *x, *y));
+                V::Obj(n)
             }
             (V::Unit, V::Unit) => V::Unit,
             _ => V::Opaque,
@@ -419,15 +467,19 @@ impl<'m> Enc<'m> {
                 let v = self.invent(ty, &mut st);
                 Some((v, st))
             }
-            HirKind::Field { base, .. } => {
-                let (_, mut st) = self.exec(f, *base, st)?;
-                let v = self.invent(ty, &mut st);
+            HirKind::Field { base, name } => {
+                let (bv, mut st) = self.exec(f, *base, st)?;
+                let v = match bv {
+                    V::Obj(o) => self.field(o, name, ty, &mut st),
+                    _ => self.invent(ty, &mut st),
+                };
                 Some((v, st))
             }
             HirKind::Index { base, index, .. } => {
                 let (bv, st) = self.exec(f, *base, st)?;
                 let (iv, mut st) = self.exec(f, *index, st)?;
-                self.index(&bv, &iv, ty, &mut st).map(|v| (v, st))
+                let at = f.own.then_some(e.span);
+                self.index(&bv, &iv, ty, at, &mut st).map(|v| (v, st))
             }
             HirKind::Bin { op, lhs, rhs } => {
                 let (a, st) = self.exec(f, *lhs, st)?;
@@ -497,6 +549,35 @@ impl<'m> Enc<'m> {
                     vals.push(v);
                 }
                 let v = match kind {
+                    MakeKind::Record(names) => {
+                        let o = self.new_obj();
+                        for (n, v) in names.iter().zip(vals) {
+                            st.fields.insert((o, n.clone()), v);
+                        }
+                        V::Obj(o)
+                    }
+                    MakeKind::Tuple => {
+                        let o = self.new_obj();
+                        for (i, v) in vals.into_iter().enumerate() {
+                            st.fields.insert((o, i.to_string()), v);
+                        }
+                        V::Obj(o)
+                    }
+                    MakeKind::Variant { enum_name, variant, fields, .. } => {
+                        let o = self.new_obj();
+                        let tag = self.tag(enum_name, variant);
+                        st.fields.insert((o, "$tag".into()), V::Bv(bv_lit(tag)));
+                        for (i, v) in vals.into_iter().enumerate() {
+                            let key = match fields.as_ref().and_then(|f| f.get(i)) {
+                                Some(n) => payload(variant, n),
+                                None => payload(variant, &i.to_string()),
+                            };
+                            st.fields.insert((o, key), v);
+                        }
+                        V::Obj(o)
+                    }
+                    // A new instance: its fields are what the constructor set.
+                    MakeKind::Class(_) => V::Obj(self.new_obj()),
                     MakeKind::Array | MakeKind::List if matches!(ty.map(shape), Some(Shape::Seq)) => {
                         let mut data = self.declare(ARR, "a");
                         for (i, v) in vals.iter().enumerate() {
@@ -535,8 +616,10 @@ impl<'m> Enc<'m> {
                 Some((V::Unit, st))
             }
             HirKind::LetPat { pat, init } => {
-                let (_, mut st) = self.exec(f, *init, st)?;
-                self.bind_fresh(b, pat, &mut st);
+                let (v, mut st) = self.exec(f, *init, st)?;
+                // An irrefutable pattern: what it takes apart is what it binds.
+                let c = self.pattern(b, pat, &v, &mut st);
+                self.assume(&mut st, &c);
                 Some((V::Unit, st))
             }
             HirKind::Assign { place, value } => self.assign(f, id, *place, *value, st),
@@ -583,7 +666,14 @@ impl<'m> Enc<'m> {
                 None
             }
             HirKind::Match { scrutinee, arms } => {
-                let (sv, st) = self.exec(f, *scrutinee, st)?;
+                let (sv, mut st) = self.exec(f, *scrutinee, st)?;
+                // What the arms take apart, read once: every arm (and what
+                // runs after the match) sees the same tag and payload.
+                if let V::Obj(o) = sv {
+                    for arm in arms {
+                        self.prefetch(b, o, &arm.pat, &mut st);
+                    }
+                }
                 let mut rest = st;
                 let mut out: Out = None;
                 for arm in arms {
@@ -642,12 +732,19 @@ impl<'m> Enc<'m> {
         self.goal(&keyword, clause, None, span, &st.guard);
     }
 
-    fn index(&mut self, base: &V, index: &V, ty: Option<&Ty>, st: &mut St) -> Option<V> {
+    /// `base[index]`. `at`: the site of an index in the function's own body,
+    /// whose bounds check is a goal.
+    fn index(&mut self, base: &V, index: &V, ty: Option<&Ty>, at: Option<Span>, st: &mut St) -> Option<V> {
         match (base, index) {
             (V::Seq { len, data, .. }, V::Bv(i)) => {
+                let ok = self.def("Bool", format!("(and (bvsge {i} #x0000000000000000) (bvslt {i} {len}))"));
+                if let Some(span) = at {
+                    let out = self.not(&ok);
+                    let g = self.and(&st.guard, &out);
+                    self.goal(BOUNDS, BOUNDS_CLAUSE.into(), None, span, &g);
+                }
                 // An index outside `0..len` panics, so a path that goes on
                 // has it inside.
-                let ok = self.def("Bool", format!("(and (bvsge {i} #x0000000000000000) (bvslt {i} {len}))"));
                 self.assume(st, &ok);
                 if st.guard == "false" {
                     return None;
@@ -751,12 +848,115 @@ impl<'m> Enc<'m> {
                 "true".into()
             }
             (HirPat::Int(k), V::Bv(t)) => self.def("Bool", format!("(= {t} {})", bv_lit(*k))),
+            (HirPat::Variant { enum_name, variant, fields, .. }, V::Obj(o)) => {
+                let o = *o;
+                let tag = match st.fields.get(&(o, "$tag".to_string())) {
+                    Some(V::Bv(t)) => t.clone(),
+                    _ => {
+                        let t = self.declare(BV, "tag");
+                        st.fields.insert((o, "$tag".into()), V::Bv(t.clone()));
+                        t
+                    }
+                };
+                let k = self.tag(enum_name, variant);
+                let mut c = self.def("Bool", format!("(= {tag} {})", bv_lit(k)));
+                let subs: Vec<(String, &HirPat)> = match fields {
+                    HirPatFields::Unit => Vec::new(),
+                    HirPatFields::Tuple(ps) => ps.iter().enumerate().map(|(i, p)| (payload(variant, &i.to_string()), p)).collect(),
+                    HirPatFields::Record(ps) => ps.iter().map(|(n, p)| (payload(variant, n), p)).collect(),
+                };
+                for (key, p) in subs {
+                    let sub = self.part(b, o, &key, p, st);
+                    let m = self.pattern(b, p, &sub, st);
+                    c = self.and(&c, &m);
+                }
+                c
+            }
+            (HirPat::Tuple(ps), V::Obj(o)) => {
+                let o = *o;
+                let mut c = "true".to_string();
+                for (i, p) in ps.iter().enumerate() {
+                    let sub = self.part(b, o, &i.to_string(), p, st);
+                    let m = self.pattern(b, p, &sub, st);
+                    c = self.and(&c, &m);
+                }
+                c
+            }
+            (HirPat::Record(ps), V::Obj(o)) => {
+                let o = *o;
+                let mut c = "true".to_string();
+                for (n, p) in ps {
+                    let sub = self.part(b, o, n, p, st);
+                    let m = self.pattern(b, p, &sub, st);
+                    c = self.and(&c, &m);
+                }
+                c
+            }
             _ => {
                 self.bind_fresh(b, pat, st);
                 self.exact = false;
                 self.declare("Bool", "m")
             }
         }
+    }
+
+    /// Read the parts of object `o` that `pat` looks at.
+    fn prefetch(&mut self, b: &HirBody, o: u32, pat: &HirPat, st: &mut St) {
+        let subs: Vec<(String, &HirPat)> = match pat {
+            HirPat::Variant { fields, variant, .. } => {
+                if !st.fields.contains_key(&(o, "$tag".to_string())) {
+                    let t = self.declare(BV, "tag");
+                    st.fields.insert((o, "$tag".into()), V::Bv(t));
+                }
+                match fields {
+                    HirPatFields::Unit => Vec::new(),
+                    HirPatFields::Tuple(ps) => ps.iter().enumerate().map(|(i, p)| (payload(variant, &i.to_string()), p)).collect(),
+                    HirPatFields::Record(ps) => ps.iter().map(|(n, p)| (payload(variant, n), p)).collect(),
+                }
+            }
+            HirPat::Tuple(ps) => ps.iter().enumerate().map(|(i, p)| (i.to_string(), p)).collect(),
+            HirPat::Record(ps) => ps.iter().map(|(n, p)| (n.clone(), p)).collect(),
+            _ => Vec::new(),
+        };
+        for (key, p) in subs {
+            if let V::Obj(inner) = self.part(b, o, &key, p, st) {
+                self.prefetch(b, inner, p, st);
+            }
+        }
+    }
+
+    /// Field `key` of object `o`, which sub-pattern `p` matches; a binding
+    /// takes its local's type.
+    fn part(&mut self, b: &HirBody, o: u32, key: &str, p: &HirPat, st: &mut St) -> V {
+        let ty = match p {
+            HirPat::Bind(l) => b.local(*l).ty.clone(),
+            HirPat::Int(_) => Some(Ty::Con(crate::typechecking::ty::INT.into())),
+            HirPat::Tuple(_) | HirPat::Record(_) | HirPat::Variant { .. } => {
+                return self.field(o, key, Some(&Ty::Con("$object".into())), st);
+            }
+            HirPat::Wild => None,
+        };
+        self.field(o, key, ty.as_ref(), st)
+    }
+
+    /// Field `name` of object `o`: what is known of it, or a fresh value
+    /// that later reads see too.
+    fn field(&mut self, o: u32, name: &str, ty: Option<&Ty>, st: &mut St) -> V {
+        let key = (o, name.to_string());
+        if let Some(v) = st.fields.get(&key) {
+            return v.clone();
+        }
+        let v = self.invent(ty, st);
+        if !matches!(v, V::Opaque) {
+            st.fields.insert(key, v.clone());
+        }
+        v
+    }
+
+    fn tag(&mut self, enum_name: &str, variant: &str) -> i64 {
+        let short = enum_name.rsplit("::").next().unwrap_or(enum_name);
+        let next = self.tags.len() as u32;
+        i64::from(*self.tags.entry(format!("{short}::{variant}")).or_insert(next))
     }
 
     fn bind_fresh(&mut self, b: &HirBody, pat: &HirPat, st: &mut St) {
@@ -787,7 +987,8 @@ impl<'m> Enc<'m> {
                 let (bv, st) = self.exec(f, *base, st)?;
                 let (iv, st) = self.exec(f, *index, st)?;
                 let (v, mut st) = self.exec(f, value, st)?;
-                self.index(&bv, &iv, None, &mut st)?;
+                let at = f.own.then_some(b.expr(place).span);
+                self.index(&bv, &iv, None, at, &mut st)?;
                 match (&bv, &iv, &v) {
                     (V::Seq { len, data: Some(d), id }, V::Bv(i), V::Bv(x)) => {
                         let data = self.def(ARR, format!("(store {d} {i} {x})"));
@@ -798,10 +999,36 @@ impl<'m> Enc<'m> {
                 }
                 Some((v, st))
             }
+            HirKind::Field { base, name } => {
+                let (bv, st) = self.exec(f, *base, st)?;
+                let old = match &bv {
+                    V::Obj(o) => st.fields.get(&(*o, name.clone())).cloned(),
+                    _ => None,
+                };
+                let (v, mut st) = self.exec(f, value, st)?;
+                match bv {
+                    V::Obj(o) => {
+                        // Another object may be this one under another name.
+                        st.fields.retain(|(_, n), _| n != name);
+                        st.fields.insert((o, name.clone()), v.clone());
+                    }
+                    _ => {
+                        self.exact = false;
+                        st.fields.retain(|(_, n), _| n != name);
+                    }
+                }
+                let shown = if flags.contains(crate::hir::HirFlags::ADJUST) && !flags.contains(crate::hir::HirFlags::PREFIX) {
+                    old.unwrap_or(V::Opaque)
+                } else {
+                    v
+                };
+                Some((shown, st))
+            }
             _ => {
                 let (_, st) = self.exec(f, place, st)?;
-                let (v, st) = self.exec(f, value, st)?;
+                let (v, mut st) = self.exec(f, value, st)?;
                 self.exact = false;
+                self.havoc_heap(&mut st);
                 Some((v, st))
             }
         }
@@ -847,6 +1074,12 @@ impl<'m> Enc<'m> {
             };
             st.env.insert(k, v);
         }
+        st.fields.retain(|_, v| !matches!(v, V::Seq { id: other, .. } if *other != id));
+        for v in st.fields.values_mut() {
+            if matches!(v, V::Seq { id: other, .. } if *other == id) {
+                *v = new.clone();
+            }
+        }
     }
 
     /// A sequence `id` that may now hold anything.
@@ -858,8 +1091,16 @@ impl<'m> Enc<'m> {
         }
     }
 
+    /// Every sequence and every object field may have changed (an enum's
+    /// tag and payload cannot).
+    fn havoc_heap(&mut self, st: &mut St) {
+        self.havoc_seqs(st);
+        st.fields.retain(|(_, n), _| n.starts_with('$'));
+    }
+
     /// Every sequence may have changed.
     fn havoc_seqs(&mut self, st: &mut St) {
+        st.fields.retain(|_, v| !matches!(v, V::Seq { .. }));
         let seqs: Vec<(LocalId, u32)> = st
             .env
             .iter()
@@ -915,11 +1156,25 @@ impl<'m> Enc<'m> {
                     return self.modular_call(callee, &vals, b.expr(id).span, st);
                 }
             }
+            // `x.m(…)` on a class of this file: its `C::m`, `self` first.
+            Callee::Method { name } if !args.is_empty() && self.depth < MAX_CALL_DEPTH => {
+                let class = match b.expr(args[0]).ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    Some(Ty::Con(c)) => Some(c.clone()),
+                    _ => None,
+                };
+                if let Some(&i) = class.and_then(|c| self.by_name.get(format!("{c}::{name}").as_str()))
+                    && self.module.bodies[i].params.len() == vals.len()
+                    && self.module.bodies[i].params.first().is_some_and(|&p| self.module.bodies[i].local(p).name == "self")
+                {
+                    let callee = &self.module.bodies[i];
+                    return self.modular_call(callee, &vals, b.expr(id).span, st);
+                }
+            }
             _ => {}
         }
         // Unknown: any sequence it was handed, or any receiver, may change.
-        if matches!(callee, Callee::Method { .. } | Callee::Value(_)) || vals.iter().any(|v| matches!(v, V::Seq { .. })) {
-            self.havoc_seqs(&mut st);
+        if matches!(callee, Callee::Method { .. } | Callee::Value(_)) || vals.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
+            self.havoc_heap(&mut st);
         }
         let v = self.invent(ty, &mut st);
         Some((v, st))
@@ -996,9 +1251,10 @@ impl<'m> Enc<'m> {
         };
         // What the callee may write: the sequences it was handed.
         let pure = callee.declared.as_ref().is_some_and(|d| d.names.is_empty());
-        if !pure && args.iter().any(|v| matches!(v, V::Seq { .. })) {
-            let mut caller = St { env: caller_env, guard: st.guard.clone() };
-            self.havoc_seqs(&mut caller);
+        if !pure && args.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
+            let mut caller = St { env: caller_env, guard: st.guard.clone(), fields: std::mem::take(&mut st.fields) };
+            self.havoc_heap(&mut caller);
+            st.fields = std::mem::take(&mut caller.fields);
             // The parameters name the objects as they are after the call.
             for (&p, v) in callee.params.iter().zip(args) {
                 if let V::Seq { id, .. } = v
@@ -1085,7 +1341,7 @@ impl<'m> Enc<'m> {
             }
         }
         if heap {
-            self.havoc_seqs(&mut out);
+            self.havoc_heap(&mut out);
         }
         self.exact = false;
         out
@@ -1208,6 +1464,8 @@ enum Shape {
     Bool,
     Seq,
     Unit,
+    /// A record, tuple, class or enum: an [`V::Obj`].
+    Obj,
     Other,
 }
 
@@ -1231,8 +1489,16 @@ fn shape(ty: &Ty) -> Shape {
             _ => Shape::Other,
         },
         Ty::Readonly(t) => shape(t),
+        Ty::Con(n) if n == "float" || n == "char" || n == "never" => Shape::Other,
+        Ty::Con(_) | Ty::Tuple(_) | Ty::Record { .. } | Ty::Sum { .. } => Shape::Obj,
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(_)) => Shape::Obj,
         _ => Shape::Other,
     }
+}
+
+/// The field holding an enum payload: `$Some.0`, `$Point.x`.
+fn payload(variant: &str, field: &str) -> String {
+    format!("${variant}.{field}")
 }
 
 fn bv_lit(i: i64) -> String {

@@ -255,7 +255,29 @@ unknown  sum_to: invariant s >= 0  [a.hy:9:17] (possible counterexample n = 1)
 ```
 
 Exit status 1 when a clause has a counterexample, or with `--strict` when
-one is not proved.
+one is not proved. Each index into a `Vec` or string is also a goal; the
+summary counts them (`3 of 4 index bounds checks proved`) and `--bounds`
+lists them.
+
+### Proof file
+
+`coil verify FILE` writes `FILE.proof` (`--no-proof` skips it; a `--fn`
+run never writes one). It records the compiler version, a hash of the
+source and every proved clause and index (`compiler/src/verify/proof.rs`).
+A build of `FILE` (`Pipeline::compile_src_from_file`) loads it while the
+hash still matches, and HIR building:
+
+- drops each proved `ensures` and `invariant` check (function, loop and
+  class), keeping every `requires`. The proof assumed the function's own
+  `requires` and its callees' `ensures`, which are themselves checked or
+  proved;
+- marks each proved `Vec` / array index `IN_BOUNDS`, so it lowers
+  unchecked. Only when every contract goal of the file was proved
+  (`complete true`) and `requires` are checked: at `--contracts=requires`
+  the callee `ensures` an index proof assumed are not checked at run time.
+
+An edited file, a new compiler (`FORMAT` in `proof.rs` is bumped when what
+a proof means changes) or a damaged proof is ignored, never trusted.
 
 ### Encoding
 
@@ -271,16 +293,23 @@ share their operands and do not copy them.
   - `bool` is `Bool`. A `byte` is a bit-vector below 256.
   - `Vec<int>`, `Vec<byte>` and `string` are a length plus an array of
     items. A length is below 2^48.
-  - Anything else (records, enums, floats, fields) is a fresh constant.
+  - Records, tuples, class instances and enum values are objects. A
+    field read is remembered per object until something may write it; a
+    field write forgets that field of every other object (it may be the
+    same one under another name). An enum's tag and payload are `$tag` and
+    `$Variant.field` fields, which never change. A `match` reads what its
+    arms take apart once, so every arm and the code after the match agree.
+  - Floats and anything else are fresh constants.
 - Own `requires`: the function's own checks end their failing path without
   a goal, so they are assumptions.
 - Calls:
-  - A call to a function of the same file is modular. Its `requires` is a
-    goal at the call (`call to f: requires …`), and its `ensures` hold of a
-    fresh result.
+  - A call to a function of the same file, or to a method `x.m(…)` of a
+    class declared in it (`C::m`), is modular. Its `requires` is a goal at
+    the call (`call to f: requires …`), and its `ensures` hold of a fresh
+    result. A callee that may write forgets every field and sequence.
   - `len` and `Vec::push` are modelled.
-  - Any other call gets a fresh result and forgets every sequence it could
-    reach.
+  - Any other call gets a fresh result and forgets every sequence and
+    object field it could reach.
 - Panics: indexing outside `0..len`, division by zero and `MIN / -1` panic,
   so a path that goes on excludes them.
 - Writes and aliasing: a write through one sequence is seen through its
@@ -298,8 +327,7 @@ share their operands and do not copy them.
   counterexample. Any other model is a "possible counterexample" of a
   clause that is not proved: the invariant may just be too weak.
 
-Not yet: dropping proved checks from compiled code, bounds-check facts, and
-records, enums and instance methods.
+Not yet: floats, termination (`decreases`), and proofs across files.
 
 ## Elsewhere
 

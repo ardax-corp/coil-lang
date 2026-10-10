@@ -4,13 +4,15 @@
 //!
 //! Ints are 64-bit bit-vectors. Int `+ - *` and negation trap on overflow,
 //! so a path that goes on past one did not overflow.
-//! A call to a function of the same module assumes the callee's `ensures`
-//! and must establish its `requires`; any other call, a loop and a value
-//! the encoder does not model (records, enums, floats) is abstracted by a
+//! A call to a function (or class method) of the same module assumes the
+//! callee's `ensures` and must establish its `requires`; any other call, a
+//! loop and a value the encoder does not model (floats) is abstracted by a
 //! fresh value, which keeps a proof sound but can make a counterexample
-//! spurious ([`Query::exact`]).
+//! spurious ([`Query::exact`]). What it proves goes to `FILE.proof`
+//! ([`proof`]) for builds to drop.
 
 pub mod encode;
+pub mod proof;
 
 pub use crate::hir::Span;
 
@@ -85,6 +87,10 @@ thread_local! {
 /// Start encoding the goals of each module codegen compiles.
 pub fn start_verify_capture() {
     VERIFY_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+pub(crate) fn capture_active() -> bool {
+    VERIFY_CAPTURE.with(|c| c.borrow().is_some())
 }
 
 /// `(module path, goals)` of the entry module compiled since [`start_verify_capture`].
