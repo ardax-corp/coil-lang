@@ -1,4 +1,4 @@
-//! Fail-closed `dload` integrity: lock hash or `trusted`. Not a capability grant.
+//! Fail-closed `dload` integrity: a pinned hash or a trusted stem. Not a capability grant.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -11,17 +11,16 @@ use super::signature::FfiError;
 
 /// Default-deny integrity check for opening shared libraries.
 ///
-/// Bytecode that `dload`s a stem still needs a matching `[[package.native]]
-/// sha256`, unless that stem's `[dependencies]` row is `trusted = true`
-/// (honor-only skip of native sha256). Consumer `[ffi] allow` is compile-time
-/// only. Host [`Self::grant_file`] / [`Self::grant_stem`] remain test-only
+/// Bytecode that `dload`s a stem still needs a matching `--dload-pin` sha256,
+/// unless the stem is `--dload-trusted` (honor-only skip of the hash).
+/// `--allow-dload` is compile-time only. Host [`Self::grant_file`] / [`Self::grant_stem`] remain test-only
 /// and do not restore a first-party exemption. Libc aliases stay denied.
 #[derive(Clone, Debug, Default)]
 pub struct DloadGate {
     hashes_by_stem: HashMap<String, HashSet<[u8; 32]>>,
-    /// Host/test stems that skip lock hashing (`set_dload_allowlist`).
+    /// Host/test stems that skip hashing (`set_dload_allowlist`).
     host_unhashed: HashSet<String>,
-    /// Stems whose dep row is `trusted = true`.
+    /// `--dload-trusted` stems.
     trusted_unhashed: HashSet<String>,
 }
 
@@ -31,15 +30,15 @@ impl DloadGate {
         Self::default()
     }
 
-    /// Lock native `(stem, sha256 hex)` pins.
+    /// `(stem, sha256 hex)` pins (`--dload-pin` or a packaged native lock).
     ///
-    /// Libc aliases in lock pins are ignored. First-party stems are addable
+    /// Libc aliases in pins are ignored. First-party stems are addable
     /// via a pin. A pin is an integrity locator, not a compile-time grant.
     pub fn from_consumer(native_pins: &[(String, String)]) -> Self {
         Self::from_consumer_trusted(native_pins, std::iter::empty::<&str>())
     }
 
-    /// Like [`Self::from_consumer`], plus stems whose dep row is `trusted = true`.
+    /// Like [`Self::from_consumer`], plus `--dload-trusted` stems.
     ///
     /// Trusted skips **native sha256** for that stem. Libc aliases are ignored
     /// (`trusted` is not an allowlist).
@@ -75,9 +74,9 @@ impl DloadGate {
         gate
     }
 
-    /// Host/test stem with no lock hash (libc / fixtures on dyld or DLL search).
+    /// Host/test stem with no pinned hash (libc / fixtures on dyld or DLL search).
     ///
-    /// Manifest `[ffi] allow` cannot do this. Does not restore a first-party exemption.
+    /// `--allow-dload` cannot do this. Does not restore a first-party exemption.
     pub fn grant_stem(&mut self, stem: &str) {
         self.host_unhashed.insert(stem.to_string());
     }
@@ -151,7 +150,7 @@ impl DloadGate {
         FfiError::LibraryDenied {
             name: name.to_string(),
             stem: stem.to_string(),
-            reason: "shared library is not a lock-hashed native for this stem".into(),
+            reason: "shared library does not match a pinned sha256 for this stem".into(),
         }
     }
 }

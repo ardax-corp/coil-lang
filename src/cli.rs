@@ -43,7 +43,7 @@ pub(crate) enum Command {
         check_native: bool,
         strip_debug: bool,
     },
-    /// Dump / list native lock metadata for `spool download`.
+    /// Dump / list native lock metadata.
     Natives {
         /// Packaged executable (omit to use the `--ffi-native` rows).
         exe: Option<String>,
@@ -96,8 +96,8 @@ pub(crate) struct CliArgs {
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
-`--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck; coil reads\n\
-no coil.toml / coil.lock (spool passes the flags). `coil run out.hyc` and coil-embed do\n\
+`--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
+`coil run out.hyc` and coil-embed do\n\
 not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
 lookup only. `--dload-pin STEM=SHA256` / `--dload-trusted STEM` are the dload integrity.\n\
 `dload(\"c\")` stays denied even if flagged."
@@ -213,7 +213,7 @@ enum RawCommand {
         /// Entry `.hy` file
         file: Option<String>,
     },
-    /// Native lock helpers for `spool download`
+    /// Native lock helpers
     Natives {
         #[command(subcommand)]
         action: NativesAction,

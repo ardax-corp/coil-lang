@@ -102,13 +102,12 @@ fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
     ))
 }
 
-/// A native library the packaged app downloads (`--ffi-native`; spool passes
-/// one per `[[ffi.native]]` row).
+/// A native library the packaged app loads (one `--ffi-native` flag).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfiNative {
     /// `dload` stem (e.g. `regex`).
     pub name: String,
-    /// Cache / spool package name (defaults to `name`).
+    /// Natives cache package name (defaults to `name`).
     pub package: String,
     pub version: String,
     /// Directory holding the platform library file (relative to the cwd).
@@ -293,11 +292,12 @@ pub fn cmd_package(
         // FFI opcodes present but only system libs (or dynamic dload) — OK for libc-only.
         eprintln!(
             "note: this program uses FFI; only system libraries were detected. \
-             Userland natives need `[[ffi.native]]` rows and `spool download` on the target."
+             Userland natives need `--ffi-native` and the library on the target."
         );
     } else if !native_lock.entries.is_empty() {
         eprintln!(
-            "note: {} native artifact(s) declared; on the target run: spool download {}",
+            "note: {} native artifact(s) declared; the target needs them in the natives \
+             cache, beside {} or in its lib/",
             native_lock.entries.len(),
             output
         );

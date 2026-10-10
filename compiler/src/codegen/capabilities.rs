@@ -50,10 +50,7 @@ impl CapViolation {
             text.push_str(&format!(": reached from {}", self.chain.join(" → ")));
         }
         let mut message = Message::error(code, text, self.range.clone());
-        let names = self.needed.names().join(", ");
-        message.with_help(format!(
-            "pass `{flags}` (or `-A` for everything); in a spool project add {names} to `[permissions]` in coil.toml"
-        ));
+        message.with_help(format!("pass `{flags}` (or `-A` for everything)"));
         message
     }
 }
