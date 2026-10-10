@@ -3,8 +3,8 @@
 `requires` and `ensures` clauses on functions and methods, `old(e)` in
 `ensures`, `invariant` on classes and loops and `decreases` on `while`
 loops, and clauses on trait methods that every impl inherits, checked at
-run time (plan steps C0 to C2), and tests generated from them (C3). A
-prover is C4.
+run time (plan steps C0 to C2), tests generated from them (C3), and
+`coil verify`, which proves them with an SMT solver (C4).
 
 ```coil
 fn isqrt(int n) -> int
@@ -236,6 +236,71 @@ the test root runs only its `contract: ` cases, never its `main` or its own
 project lines like any test and a mutant that breaks an `ensures` is killed
 by them (`killed … (src/mathx.hy: contract: twice)`). Clauses themselves
 are never mutated: the site walker does not visit them.
+
+## Static verification
+
+`coil verify FILE` (the `coil-verify` helper) proves clauses instead of
+testing them. It compiles the file with every check on, captures the entry
+module's HIR (`compiler::verify::start_verify_capture`), and turns each
+reachable contract panic into an SMT-LIB query (`compiler/src/verify/
+encode.rs`) for an external solver: `z3 -in` on PATH by default,
+`--solver PATH` or `$COIL_SMT_SOLVER` otherwise. `unsat` proves the check
+can never fail.
+
+```text
+proved   clamp: ensures result >= lo && result <= hi  [a.hy:5:5]
+FAILED   calls_half: call to half: requires x >= 0  [a.hy:15:12]
+         counterexample: x = 0
+unknown  sum_to: invariant s >= 0  [a.hy:9:17] (possible counterexample n = 1)
+```
+
+Exit status 1 when a clause has a counterexample, or with `--strict` when
+one is not proved.
+
+### Encoding
+
+Symbolic execution over the HIR body: a state maps locals to terms under a
+guard (the condition for execution to reach that point). `if` and `match`
+run each branch under its condition and join with `ite`. `return`, `break`
+and panics end their path. Every term is bound by a `define-fun`, so joins
+share their operands and do not copy them.
+
+- Values:
+  - `int` is a 64-bit bit-vector, so arithmetic wraps exactly as a release
+    VM does. `--overflow trap` instead assumes that an overflowing path
+    panicked first, which is what a debug VM does.
+  - `bool` is `Bool`. A `byte` is a bit-vector below 256.
+  - `Vec<int>`, `Vec<byte>` and `string` are a length plus an array of
+    items. A length is below 2^48.
+  - Anything else (records, enums, floats, fields) is a fresh constant.
+- Own `requires`: the function's own checks end their failing path without
+  a goal, so they are assumptions.
+- Calls:
+  - A call to a function of the same file is modular. Its `requires` is a
+    goal at the call (`call to f: requires …`), and its `ensures` hold of a
+    fresh result.
+  - `len` and `Vec::push` are modelled.
+  - Any other call gets a fresh result and forgets every sequence it could
+    reach.
+- Panics: indexing outside `0..len`, division by zero and `MIN / -1` panic,
+  so a path that goes on excludes them.
+- Writes and aliasing: a write through one sequence is seen through its
+  aliases, and every other sequence forgets its contents.
+- Loops are cut at their head:
+  - The leading checks (`invariant`, `decreases`) are goals on entry.
+  - Every local the body assigns becomes fresh, the checks are re-run as
+    assumptions, and the body runs once from there.
+  - Each path back to the head must re-establish them.
+  - A `for` loop over `lo..hi` or a sequence binds its variable within
+    range. Its exit is any state where the clauses hold.
+  - `decreases` is reported as skipped: termination is not checked.
+- Exact counterexamples: a query is `exact` when nothing on the way was
+  made up. Only an exact model is reported as `FAILED` with a
+  counterexample. Any other model is a "possible counterexample" of a
+  clause that is not proved: the invariant may just be too weak.
+
+Not yet: dropping proved checks from compiled code, bounds-check facts, and
+records, enums and instance methods.
 
 ## Elsewhere
 

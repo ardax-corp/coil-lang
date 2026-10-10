@@ -874,7 +874,11 @@ mod tests {
             }
         };
         set_task_waiter(None);
-        assert_eq!(lookup_waits, 1, "the lookup ran on a resolver thread");
+        // `localhost` comes from the hosts file, so a resolver thread that is
+        // already running can answer before the task would park on it.
+        assert!(lookup_waits <= 1, "parked {lookup_waits} times on one lookup");
+        let threads = RESOLVER.get().map_or(0, |r| r.queue.lock().unwrap_or_else(|e| e.into_inner()).threads);
+        assert!(threads > 0, "the lookup ran on a resolver thread");
         assert_eq!(
             stream.peer_addr().expect("peer").port(),
             listener.local_addr().expect("addr").port()

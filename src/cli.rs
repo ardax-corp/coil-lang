@@ -13,7 +13,7 @@ use compiler::{HostGrants, OptLevel};
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
 
 const RESERVED: &[&str] = &[
-    "compile", "run", "test", "package", "dissect", "debug", "fmt", "lsp", "natives",
+    "compile", "run", "test", "package", "dissect", "debug", "fmt", "lsp", "natives", "verify",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub(crate) enum Command {
     /// Re-exec `coil-test` (every flag is forwarded and parsed there).
     Test,
     Mutate,
+    /// Re-exec `coil-verify` (every flag is forwarded and parsed there).
+    Verify,
     Package {
         filename: String,
         output: String,
@@ -164,6 +166,13 @@ enum RawCommand {
     #[command(disable_help_flag = true)]
     Mutate {
         /// Forwarded to `coil-test mutate` (`coil mutate --help` lists them)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Prove contracts with an SMT solver (re-execs `coil-verify`)
+    #[command(disable_help_flag = true)]
+    Verify {
+        /// Forwarded to `coil-verify` (`coil verify --help` lists them)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
@@ -455,6 +464,15 @@ impl RawCli {
             ),
             Some(RawCommand::Mutate { args: _ }) => cli_from(
                 Command::Mutate,
+                LogFlags::default(),
+                false,
+                OptLevelFlags::default(),
+                CompileProfileFlags::default(),
+                HostGrantFlags::default(),
+                Vec::new(),
+            ),
+            Some(RawCommand::Verify { args: _ }) => cli_from(
+                Command::Verify,
                 LogFlags::default(),
                 false,
                 OptLevelFlags::default(),
@@ -956,6 +974,14 @@ mod tests {
             let cli = parse_args(&args(argv)).unwrap();
             assert_eq!(cli.command, Command::Mutate, "{argv:?}");
             assert!(!cli.log_json, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn parse_verify_forwards_every_flag_to_the_helper() {
+        for argv in [&["verify", "a.hy"][..], &["verify", "--solver", "z3", "--strict", "a.hy", "--help"]] {
+            let cli = parse_args(&args(argv)).unwrap();
+            assert_eq!(cli.command, Command::Verify, "{argv:?}");
         }
     }
 

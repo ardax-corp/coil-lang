@@ -457,6 +457,7 @@ fn main() {
     match cli.command {
         Command::Test => dispatch_helper("test"),
         Command::Mutate => dispatch_helper_as("mutate", "test", &["mutate"]),
+        Command::Verify => dispatch_helper("verify"),
         Command::Dissect { .. } => dispatch_helper("dissect"),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
@@ -525,6 +526,7 @@ fn main() {
                 }
                 Command::Test
                 | Command::Mutate
+                | Command::Verify
                 | Command::Dissect { .. }
                 | Command::Debug { .. }
                 | Command::Fmt

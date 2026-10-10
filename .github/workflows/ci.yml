@@ -118,7 +118,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libffi-dev build-essential
+          sudo apt-get install -y libffi-dev build-essential z3
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
