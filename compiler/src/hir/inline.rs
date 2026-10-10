@@ -343,11 +343,11 @@ pub fn inline_calls<'a>(
             todo.extend(super::lower::children(caller, id));
         }
     }
-    for i in 0..b.original {
+    for (i, live) in live.into_iter().enumerate() {
         if b.body.exprs.len() - b.original > growth {
             break;
         }
-        if !live[i] {
+        if !live {
             continue;
         }
         let HirKind::Block { stmts, tail } = b.body.exprs[i].kind.clone() else {
