@@ -175,7 +175,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     if ops.is_empty() {
         return Err(LowerError::Refused("empty IL".into()));
     }
-    let ranges = split_blocks(ops);
+    let ranges = reachable_blocks(ops, split_blocks(ops));
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
     b.allow_effects = hints.allow_effects;
@@ -519,6 +519,51 @@ fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
         }
     }
     ranges
+}
+
+/// The blocks of `ranges` control can reach from the first: a block after
+/// an exit that nothing jumps to (the join of arms that all returned) has no
+/// stack height to start from. A fallthrough from a reached block is reached
+/// too, so the next kept range is still the one it falls into.
+fn reachable_blocks(ops: &[IlOp], ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut of_label: HashMap<Label, usize> = HashMap::new();
+    for (i, &(start, end)) in ranges.iter().enumerate() {
+        for l in ops[start..end].iter().filter_map(label_at) {
+            of_label.insert(l, i);
+        }
+    }
+    let mut reached = vec![false; ranges.len()];
+    reached[0] = true;
+    // Anything an entry names stays: only jumps are followed.
+    for op in ops {
+        if let IlOp::Entry { target, .. } = op
+            && let Some(&i) = of_label.get(target)
+        {
+            reached[i] = true;
+        }
+    }
+    let mut work: Vec<usize> = (0..ranges.len()).filter(|&i| reached[i]).collect();
+    while let Some(i) = work.pop() {
+        let (start, end) = ranges[i];
+        let mut next = Vec::new();
+        match ops[start..end].iter().rev().find(|op| label_at(op).is_none()) {
+            Some(IlOp::Jump { kind, target, .. }) => {
+                next.extend(of_label.get(target).copied());
+                if *kind != IlJumpKind::Unconditional {
+                    next.push(i + 1);
+                }
+            }
+            Some(op) if is_term(op) => {}
+            _ => next.push(i + 1),
+        }
+        for n in next {
+            if n < ranges.len() && !reached[n] {
+                reached[n] = true;
+                work.push(n);
+            }
+        }
+    }
+    ranges.into_iter().zip(reached).filter_map(|(r, keep)| keep.then_some(r)).collect()
 }
 
 fn is_term(op: &IlOp) -> bool {
