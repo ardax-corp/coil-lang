@@ -1162,6 +1162,18 @@ impl Heap {
         }
     }
 
+    /// Write `bytes` back into the array at `addr`, one byte per element
+    /// (an FFI `Bytes` buffer after the call). Extra bytes are dropped.
+    pub fn update_array_bytes(&mut self, addr: u64, bytes: &[u8]) {
+        let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
+            return;
+        };
+        let arr = gc.as_mut();
+        for (slot, &b) in arr.elements.iter_mut().zip(bytes) {
+            *slot = Value::from(i64::from(b));
+        }
+    }
+
     /// True if `addr` is a live heap object.
     /// True when `v` could be a heap reference: its address lies in the
     /// slab's mapped range. False proves it is not one.
@@ -2837,6 +2849,8 @@ pub enum FfiType {
     Ptr,
     Callback(u32),
     Struct(u32),
+    /// `Vec<byte>` buffer, passed as `uint8_t *` and copied back.
+    Bytes,
 }
 
 impl FfiType {
@@ -2857,6 +2871,7 @@ impl FfiType {
             x if x == t::PTR => Self::Ptr,
             x if x == t::CALLBACK => Self::Callback(aux),
             x if x == t::STRUCT => Self::Struct(aux),
+            x if x == t::BYTES => Self::Bytes,
             _ => Self::Int,
         }
     }
@@ -2879,6 +2894,7 @@ impl FfiType {
             Self::Ptr => t::PTR,
             Self::Callback(_) => t::CALLBACK,
             Self::Struct(_) => t::STRUCT,
+            Self::Bytes => t::BYTES,
         }
     }
 

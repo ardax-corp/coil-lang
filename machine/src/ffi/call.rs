@@ -45,7 +45,9 @@ fn ffi_type_to_libffi(ty: FfiType, layouts: &[CStructLayout]) -> Result<Type, Ff
     match ty {
         FfiType::Int => Ok(Type::i64()),
         FfiType::Float => Ok(Type::f64()),
-        FfiType::String | FfiType::Ptr | FfiType::Callback(_) => Ok(Type::pointer()),
+        FfiType::String | FfiType::Ptr | FfiType::Bytes | FfiType::Callback(_) => {
+            Ok(Type::pointer())
+        }
         FfiType::Void => Ok(Type::void()),
         FfiType::Bool => Ok(Type::u8()),
         FfiType::Int8 => Ok(Type::i8()),
@@ -376,6 +378,41 @@ fn array_buffer_from_value(
     Ok((value.raw() as *mut c_void, None))
 }
 
+/// A `Vec<byte>` (or byte tuple) as a `uint8_t *` buffer, one byte per
+/// element. `Some(addr)` when the bytes should be copied back after the call.
+fn byte_buffer_from_value(
+    heap: &Heap,
+    value: &Value,
+    bufs: &mut Vec<Vec<u8>>,
+) -> Result<(*mut c_void, Option<u64>), FfiError> {
+    let addr = value.raw() as u64;
+    let obj = heap.find_object_by_addr(addr);
+    let (elements, copy_back): (&[Value], bool) = match &obj {
+        Some(Object::Array(gc)) => (gc.as_ref().elements(), true),
+        Some(Object::Tuple(gc)) => (gc.as_ref().elements(), false),
+        _ => {
+            return Err(FfiError::Unsupported(
+                "Bytes argument must be a Vec<byte>".into(),
+            ));
+        }
+    };
+    let mut buf: Vec<u8> = elements.iter().map(|v| v.as_int() as u8).collect();
+    // Never hand C a dangling pointer for an empty buffer.
+    buf.reserve(1);
+    let ptr = buf.as_mut_ptr() as *mut c_void;
+    bufs.push(buf);
+    Ok((ptr, copy_back.then_some(addr)))
+}
+
+fn copy_byte_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<u8>]) {
+    for &(addr, buf_idx) in targets {
+        let Some(buf) = bufs.get(buf_idx) else {
+            continue;
+        };
+        heap.update_array_bytes(addr, buf);
+    }
+}
+
 fn copy_array_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<i64>]) {
     for &(addr, buf_idx) in targets {
         let Some(buf) = bufs.get(buf_idx) else {
@@ -474,6 +511,8 @@ pub fn invoke_via_libffi(
     let mut ptr_storage: Vec<*mut c_void> = Vec::new();
     let mut array_buffers: Vec<Vec<i64>> = Vec::new();
     let mut array_copy_back: Vec<(u64, usize)> = Vec::new();
+    let mut byte_buffers: Vec<Vec<u8>> = Vec::new();
+    let mut byte_copy_back: Vec<(u64, usize)> = Vec::new();
     let mut struct_bufs: Vec<Vec<u8>> = Vec::new();
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
@@ -550,6 +589,15 @@ pub fn invoke_via_libffi(
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(ptr);
             }
+            FfiType::Bytes => {
+                let (ptr, heap_addr) =
+                    byte_buffer_from_value(ctx.heap(), value, &mut byte_buffers)?;
+                if let Some(addr) = heap_addr {
+                    byte_copy_back.push((addr, byte_buffers.len() - 1));
+                }
+                slots.push(ArgSlot::Ptr(ptr_storage.len()));
+                ptr_storage.push(ptr);
+            }
             FfiType::Callback(_) => {
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(value.raw() as *mut c_void);
@@ -590,36 +638,45 @@ pub fn invoke_via_libffi(
         .collect();
 
     match sig.ret {
+        FfiType::Bytes => Err(FfiError::Unsupported(
+            "Bytes is an argument type; return a Ptr instead".into(),
+        )),
         FfiType::Void => {
             unsafe {
                 cif.call::<()>(prepared.addr, &ffi_args);
             }
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(None)
         }
         FfiType::Int | FfiType::Int32 | FfiType::Int16 | FfiType::Int8 => {
             let ret = unsafe { cif.call::<i64>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret)))
         }
         FfiType::UInt8 | FfiType::UInt16 | FfiType::UInt32 | FfiType::UInt64 => {
             let ret = unsafe { cif.call::<u64>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret as i64)))
         }
         FfiType::Float => {
             let ret = unsafe { cif.call::<f64>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret)))
         }
         FfiType::Bool => {
             let ret = unsafe { cif.call::<u8>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret != 0)))
         }
         FfiType::String => {
             let ret = unsafe { cif.call::<*mut c_char>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             if ret.is_null() {
                 Ok(Some(Value::from(0u64)))
             } else {
@@ -634,6 +691,7 @@ pub fn invoke_via_libffi(
         FfiType::Ptr => {
             let ret = unsafe { cif.call::<*mut c_void>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret as u64)))
         }
         // Opaque function pointer — same representation as Ptr. Re-invoking
@@ -642,6 +700,7 @@ pub fn invoke_via_libffi(
         FfiType::Callback(_) => {
             let ret = unsafe { cif.call::<*mut c_void>(prepared.addr, &ffi_args) };
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             Ok(Some(Value::from(ret as u64)))
         }
         FfiType::Struct(id) => {
@@ -663,6 +722,7 @@ pub fn invoke_via_libffi(
                 );
             }
             copy_array_buffers_back(ctx.heap(), &array_copy_back, &array_buffers);
+            copy_byte_buffers_back(ctx.heap(), &byte_copy_back, &byte_buffers);
             let val = unpack_struct(ctx.heap(), &layout, &layouts, &ret_buf[..nbytes])?;
             Ok(Some(val))
         }
@@ -738,6 +798,54 @@ mod tests {
         let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures).unwrap();
         assert!(ret.is_none());
         assert_eq!(HITS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn invoke_bytes_arg_round_trips_and_copies_back() {
+        // Reads the bytes it is given, then overwrites them.
+        extern "C" fn sum_then_fill(buf: *mut u8, n: i64) -> i64 {
+            let bytes = unsafe { std::slice::from_raw_parts_mut(buf, n as usize) };
+            let sum = bytes.iter().map(|&b| i64::from(b)).sum();
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = 200 + i as u8;
+            }
+            sum
+        }
+        use crate::memory::ObjArray;
+        let sig = FfiSignature::from_parts(
+            "sum_then_fill",
+            vec![FfiType::Bytes, FfiType::Int],
+            FfiType::Int,
+        )
+        .unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(sum_then_fill as *mut c_void);
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64), Value::from(255_i64)]),
+            Object::Array,
+        );
+        let args = [Value::from(obj.addr()), Value::from(3_i64)];
+        let mut ctx = InvokeContext::new(&mut heap, &[]);
+        let mut closures = Vec::new();
+        let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ret.as_int(), 258);
+        let after: Vec<i64> = gc.as_ref().elements().iter().map(|v| v.as_int()).collect();
+        assert_eq!(after, vec![200, 201, 202]);
+    }
+
+    #[test]
+    fn invoke_bytes_return_is_rejected() {
+        let sig = FfiSignature::from_parts("f", vec![], FfiType::Bytes).unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(add_two as *mut c_void);
+        let mut heap = Heap::default();
+        let mut ctx = InvokeContext::new(&mut heap, &[]);
+        let mut closures = Vec::new();
+        let err = invoke_via_libffi(&prepared, &sig, &[], None, &mut ctx, &mut closures);
+        assert!(matches!(err, Err(FfiError::Unsupported(_))));
     }
 
     #[test]

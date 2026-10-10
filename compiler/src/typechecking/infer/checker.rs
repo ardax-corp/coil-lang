@@ -11882,7 +11882,7 @@ impl Checker {
                         .fields
                         .iter()
                         .map(|(name, enc)| {
-                            let tag = if *enc <= tag::STRUCT {
+                            let tag = if *enc <= tag::LAST {
                                 *enc
                             } else {
                                 *enc & 0xFFFF

@@ -18,6 +18,10 @@ pub mod tag {
     pub const CALLBACK: u32 = 13;
     /// Struct-by-value; operand carries struct layout id in upper bits at declare time.
     pub const STRUCT: u32 = 14;
+    /// Byte buffer (`Vec<byte>`): passed as `uint8_t *`, copied back after the call.
+    pub const BYTES: u32 = 15;
+    /// Highest tag; operands above it carry an aux id (see [`super::encode_tag_operand`]).
+    pub const LAST: u32 = BYTES;
 }
 
 pub const BUILTIN_FFI_TYPE_ENUM: &str = "FFIType";
@@ -25,7 +29,7 @@ pub const BUILTIN_FFI_TYPE_ENUM: &str = "FFIType";
 /// Built-in `FFIType` variant names in tag order (must match VM decoder).
 pub const BUILTIN_FFI_TYPE_VARIANTS: &[&str] = &[
     "Int", "Float", "String", "Void", "Bool", "Int8", "Int16", "Int32", "UInt8", "UInt16",
-    "UInt32", "UInt64", "Ptr", "Callback", "Struct",
+    "UInt32", "UInt64", "Ptr", "Callback", "Struct", "Bytes",
 ];
 
 /// Map a bare type name (extern blocks, aliases) to a tag.
@@ -45,6 +49,7 @@ pub fn tag_from_type_name(name: &str) -> Option<u32> {
         "uint64" | "u64" => Some(tag::UINT64),
         "ptr" | "pointer" => Some(tag::PTR),
         "callback" => Some(tag::CALLBACK),
+        "bytes" => Some(tag::BYTES),
         _ => None,
     }
 }
@@ -77,7 +82,7 @@ pub fn encode_tag_operand(tag: u32, aux: u32) -> u32 {
 
 /// Inverse of [`encode_tag_operand`].
 pub fn decode_tag_operand(enc: u32) -> (u32, u32) {
-    if enc <= tag::STRUCT {
+    if enc <= tag::LAST {
         (enc, 0)
     } else {
         (enc & 0xFFFF, enc >> 16)
@@ -101,6 +106,7 @@ mod tests {
         assert_eq!(tag_from_variant_name("Int"), Some(tag::INT));
         assert_eq!(tag_from_variant_name("Void"), Some(tag::VOID));
         assert_eq!(tag_from_variant_name("Ptr"), Some(tag::PTR));
+        assert_eq!(tag_from_variant_name("Bytes"), Some(tag::BYTES));
     }
 
     #[test]
@@ -118,6 +124,10 @@ mod tests {
         assert_eq!(
             decode_tag_operand(encode_tag_operand(tag::STRUCT, 3)),
             (tag::STRUCT, 3)
+        );
+        assert_eq!(
+            decode_tag_operand(encode_tag_operand(tag::BYTES, 0)),
+            (tag::BYTES, 0)
         );
     }
 }

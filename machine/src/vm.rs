@@ -1363,7 +1363,7 @@ impl<const S: usize> Machine<S> {
 
     fn decode_ffi_type_tag(v: &Value, heap: &Heap) -> (u32, u32) {
         let raw = v.raw() as u64;
-        if raw <= common::tag::STRUCT as u64 {
+        if raw <= common::tag::LAST as u64 {
             return (raw as u32, 0);
         }
         if raw > 0xFFFF {
