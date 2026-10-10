@@ -11826,3 +11826,64 @@ fn main() {
     let out = run_contracts_src(&src.replace("OFFSET", "5"), All);
     assert!(out.contains("contract violated: ensures result >= 0 in find"), "got {out:?}");
 }
+
+const INT_PRELUDE: &str = "use io::{stdout, write};
+use string::{format, to_bytes};
+fn say(string s) { write(stdout(), to_bytes(s)); }
+fn num(int n) -> string { return format(\"%i\", n); }
+";
+
+/// `main` runs `body` after `fn big() -> int` (int::MAX, from a call so
+/// nothing folds it) and must panic with `message`.
+fn assert_int_trap(body: &str, message: &str) {
+    let src = format!(
+        "{INT_PRELUDE}fn big() -> int {{ return 9223372036854775807; }}\n\
+         fn small() -> int {{ return 0 - big() - 1; }}\n\
+         fn id(int x) -> int {{ return x; }}\n\
+         fn main() {{\n{body}\n}}\n"
+    );
+    let out = run_example_src(&src);
+    assert!(out.starts_with(&format!("panic: {message}")), "{body}: got {out:?}");
+}
+
+#[test]
+fn int_overflow_traps() {
+    for body in [
+        "say(num(big() + 1));",
+        "say(num(small() - 1));",
+        "say(num(big() * 2));",
+        "say(num(-small()));",
+        "say(num(small() / id(-1)));",
+        "say(num(id(2) ** 63));",
+        "let x = big(); x += 1; say(num(x));",
+        "let x = small(); x -= 1; say(num(x));",
+        "let s = big() - 10; for i in 0..20 { s = s + 1; } say(num(s));",
+        "let s = 1; let i = 0; while i < 100 { s = s * 3; i = i + 1; } say(num(s));",
+    ] {
+        assert_int_trap(body, "integer overflow");
+    }
+}
+
+#[test]
+fn int_division_by_zero_traps() {
+    for body in ["say(num(big() / id(0)));", "say(num(big() % id(0)));"] {
+        assert_int_trap(body, "division by zero");
+    }
+}
+
+#[test]
+fn int_ops_at_the_edges_do_not_trap() {
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn big() -> int {{ return 9223372036854775807; }}
+         fn id(int x) -> int {{ return x; }}
+         fn main() {{
+             let min = 0 - big() - 1;
+             say(num(big() - 1 + 1));
+             say(\" \");
+             say(num(min % id(-1)));
+             say(\" \");
+             if id(-2) ** 63 == min {{ say(\"true\"); }}
+         }}"
+    ));
+    assert_eq!(out, "9223372036854775807 0 true");
+}
