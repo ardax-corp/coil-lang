@@ -369,6 +369,9 @@ impl Lower<'_> {
                     }
                 }
                 match tail {
+                    // The body's own tail is a statement to HIR emission; a
+                    // nested block's tail has its statement's location.
+                    Some(tail) if !self.b.pending_loc.is_known() => self.at_stmt(*tail, |l| l.value(*tail)),
                     Some(tail) => self.value(*tail),
                     None => Ok(Val::Unit),
                 }
@@ -636,6 +639,11 @@ impl Lower<'_> {
     /// source location, as HIR emission gives its IL ops (line breakpoints,
     /// source views). Nested statements keep their own.
     fn stmt(&mut self, id: HirId) -> Result<bool, Refusal> {
+        self.at_stmt(id, |l| l.effect(id))
+    }
+
+    /// `f` with the source location of statement `id`.
+    fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
         if let Some(file) = self.file {
             let (start, end) = self.hir.expr(id).span;
@@ -645,9 +653,9 @@ impl Lower<'_> {
                 end_byte: end.max(start + 1) as u32,
             };
         }
-        let flows = self.effect(id);
+        let out = f(self);
         self.b.pending_loc = outer;
-        flows
+        out
     }
 
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
