@@ -75,11 +75,11 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `dead_block` → 2. `stack_dce` → 3. `canon`
+1. `dead_block` → 2. `canon`
 
 **Decision** (`decision_once_at`), in order:
 
-4. `slot_promote` (+ `dead_store_at`) → 5. `clone_shared_return`
+3. `slot_promote` (+ `dead_store_at`) → 4. `clone_shared_return`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -111,22 +111,10 @@ Invariants every pass must preserve unless its section says otherwise:
 - **Tests:** `opt/convoy.tests.rs` `dead_block_drops_after_unconditional_jmp`,
   `dead_block_drops_after_return_until_label`.
 
-## `stack_dce`
-
-**Flag:** `stack_dce` (default on). **Fn:** `dce::stack_dce` (fixpoint of
-`stack_dce_once`).
-
-- **Input:** Straight-line adjacent pairs. No `sp`/`tell` required.
-- **Output:** Drops `Dup; Pop`, `Load s; StorePop s`, pure producer + `Pop`
-  (`Const`/`ConstPool`/`String`/`Load`), `MakeEnum; Pop` (replaced by `arity`
-  pops), unary-enum `LoadField 0` / `Unpack` unwrap, constructor+`JumpIfMatch`
-  of the same tag → unconditional jump. Residual `Byte` DUP/POP and LOAD/STORE
-  same-slot pairs also drop. Net height of the remaining stream is preserved
-  (pairs are height-neutral).
-- **Refusals:** Different slots, non-droppable producers, intervening ops,
-  typed forms that are not the listed pairs.
-- **Tests:** `opt/convoy.tests.rs` `stack_dce_removes_dup_pop`,
-  `stack_dce_removes_typed_dup_pop`.
+A value pushed and then popped right away (`CONST 0` from an inlined unit
+return, a statement-position literal or local read) is dropped as it is
+emitted (`CodeBuf::push_pop`), and the HIR fold drops `x = x`, so there is no
+IL `stack_dce` pass (removed 2026-10).
 
 ## `canon`
 
@@ -309,7 +297,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | Pass | Solo test already existed | Newly added in D1 |
 |------|---------------------------|-------------------|
 | dead_block | `convoy.tests.rs` | no |
-| stack_dce | `convoy.tests.rs` | no |
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | loop_bounds | `bounds.rs` | no |

@@ -121,7 +121,6 @@ impl fmt::Display for OptLevel {
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
         dead_block: false,
-        stack_dce: false,
         slot_promote: false,
         canon: false,
         algebraic: false,
@@ -182,7 +181,6 @@ impl Default for OptimizeOptions {
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
         o.dead_block,
-        o.stack_dce,
         o.slot_promote,
         o.canon,
         o.algebraic,
@@ -255,7 +253,7 @@ mod tests {
     #[test]
     fn basic_enables_dce() {
         let o = OptLevel::Basic.options();
-        assert!(o.algebraic && o.dead_block && o.stack_dce);
+        assert!(o.algebraic && o.dead_block);
         assert!(!o.licm && !o.slot_promote && !o.escape_analysis);
     }
 

@@ -16,8 +16,6 @@ use super::op::IlOp;
 pub struct OptimizeOptions {
     /// Remove unreachable ops after unconditional JMP / RETURN until a label.
     pub dead_block: bool,
-    /// Drop redundant `DUPLICATE; POP` and `LOAD s; StorePop s`.
-    pub stack_dce: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
