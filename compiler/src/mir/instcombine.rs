@@ -532,7 +532,9 @@ fn neg_sources(func: &MirFunc) -> HashMap<ValueId, ValueId> {
                 src,
                 dest,
             } = *inst
+                && !func.ty(src).is_int()
             {
+                // `-(-x)` is `x` for floats; for an int, `x == MIN` traps.
                 m.insert(dest, src);
             }
         }
@@ -695,13 +697,16 @@ fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirCons
     }
 }
 
+/// An int op that traps at run time (overflow, division by zero) is not
+/// folded, so the trap stays.
 fn eval_i64(op: MirBinOp, a: i64, b: i64) -> Option<i64> {
+    use common::int_arith;
     Some(match op {
-        MirBinOp::Add => a.wrapping_add(b),
-        MirBinOp::Sub => a.wrapping_sub(b),
-        MirBinOp::Mul => a.wrapping_mul(b),
-        MirBinOp::Div if b != 0 && !(a == i64::MIN && b == -1) => a / b,
-        MirBinOp::Rem if b != 0 && !(a == i64::MIN && b == -1) => a % b,
+        MirBinOp::Add => int_arith::add(a, b).ok()?,
+        MirBinOp::Sub => int_arith::sub(a, b).ok()?,
+        MirBinOp::Mul => int_arith::mul(a, b).ok()?,
+        MirBinOp::Div => int_arith::div(a, b).ok()?,
+        MirBinOp::Rem => int_arith::rem(a, b).ok()?,
         MirBinOp::BitAnd => a & b,
         MirBinOp::BitOr => a | b,
         MirBinOp::Xor => a ^ b,
@@ -713,11 +718,11 @@ fn eval_i64(op: MirBinOp, a: i64, b: i64) -> Option<i64> {
 
 fn eval_i32(op: MirBinOp, a: i32, b: i32) -> Option<i32> {
     Some(match op {
-        MirBinOp::Add => a.wrapping_add(b),
-        MirBinOp::Sub => a.wrapping_sub(b),
-        MirBinOp::Mul => a.wrapping_mul(b),
-        MirBinOp::Div if b != 0 && !(a == i32::MIN && b == -1) => a / b,
-        MirBinOp::Rem if b != 0 && !(a == i32::MIN && b == -1) => a % b,
+        MirBinOp::Add => a.checked_add(b)?,
+        MirBinOp::Sub => a.checked_sub(b)?,
+        MirBinOp::Mul => a.checked_mul(b)?,
+        MirBinOp::Div => a.checked_div(b)?,
+        MirBinOp::Rem if b != 0 => a.wrapping_rem(b),
         MirBinOp::BitAnd => a & b,
         MirBinOp::BitOr => a | b,
         MirBinOp::Xor => a ^ b,
@@ -795,8 +800,8 @@ fn cmp_float<T: PartialOrd>(op: MirCmpOp, a: T, b: T) -> Option<bool> {
 
 fn eval_neg(c: MirConst) -> Option<MirConst> {
     Some(match c {
-        MirConst::I64(v) => MirConst::I64(v.wrapping_neg()),
-        MirConst::I32(v) => MirConst::I32(v.wrapping_neg()),
+        MirConst::I64(v) => MirConst::I64(v.checked_neg()?),
+        MirConst::I32(v) => MirConst::I32(v.checked_neg()?),
         MirConst::F64(b) => MirConst::F64((-f64::from_bits(b)).to_bits()),
         MirConst::F32(b) => MirConst::F32((-f32::from_bits(b)).to_bits()),
         MirConst::Bool(_) => return None,

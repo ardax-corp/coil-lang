@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use common::int_arith;
+
 use parser::{
     ast::{Expression, Output},
     SimpleSpan,
@@ -39,7 +41,7 @@ pub fn eval_expr<'a>(
         Expression::Negate(inner) => {
             let v = eval_expr(inner, env)?;
             match v {
-                ConstValue::Int(n) => Some(ConstValue::Int(-n)),
+                ConstValue::Int(n) => int_arith::neg(n).ok().map(ConstValue::Int),
                 ConstValue::Float(n) => Some(ConstValue::Float(-n)),
                 _ => None,
             }
@@ -60,18 +62,18 @@ pub fn eval_expr<'a>(
             let b = eval_expr(rhs, env)?;
             match (a, b) {
                 (ConstValue::Str(x), ConstValue::Str(y)) => Some(ConstValue::Str(format!("{x}{y}"))),
-                (ConstValue::Int(x), ConstValue::Int(y)) => Some(ConstValue::Int(x + y)),
+                (ConstValue::Int(x), ConstValue::Int(y)) => int_arith::add(x, y).ok().map(ConstValue::Int),
                 (ConstValue::Float(x), ConstValue::Float(y)) => Some(ConstValue::Float(x + y)),
                 _ => None,
             }
         }
-        Expression::Sub(lhs, rhs) => eval_binop(lhs, rhs, env, |a, b| a - b, |a, b| a - b),
-        Expression::Mul(lhs, rhs) => eval_binop(lhs, rhs, env, |a, b| a * b, |a, b| a * b),
+        Expression::Sub(lhs, rhs) => eval_binop(lhs, rhs, env, int_arith::sub, |a, b| a - b),
+        Expression::Mul(lhs, rhs) => eval_binop(lhs, rhs, env, int_arith::mul, |a, b| a * b),
         Expression::Div(lhs, rhs) => {
             let a = eval_expr(lhs, env)?;
             let b = eval_expr(rhs, env)?;
             match (a, b) {
-                (ConstValue::Int(x), ConstValue::Int(y)) if y != 0 => Some(ConstValue::Int(x / y)),
+                (ConstValue::Int(x), ConstValue::Int(y)) => int_arith::div(x, y).ok().map(ConstValue::Int),
                 (ConstValue::Float(x), ConstValue::Float(y)) if y != 0.0 && y.is_finite() => {
                     Some(ConstValue::Float(x / y))
                 }
@@ -82,7 +84,7 @@ pub fn eval_expr<'a>(
             let a = eval_expr(lhs, env)?;
             let b = eval_expr(rhs, env)?;
             match (a, b) {
-                (ConstValue::Int(x), ConstValue::Int(y)) if y != 0 => Some(ConstValue::Int(x % y)),
+                (ConstValue::Int(x), ConstValue::Int(y)) => int_arith::rem(x, y).ok().map(ConstValue::Int),
                 _ => None,
             }
         }
@@ -151,13 +153,13 @@ fn eval_binop<'a>(
     lhs: &Output<'a>,
     rhs: &Output<'a>,
     env: &HashMap<String, ConstValue>,
-    int_op: fn(i64, i64) -> i64,
+    int_op: fn(i64, i64) -> int_arith::IntResult,
     float_op: fn(f64, f64) -> f64,
 ) -> Option<ConstValue> {
     let a = eval_expr(lhs, env)?;
     let b = eval_expr(rhs, env)?;
     match (a, b) {
-        (ConstValue::Int(x), ConstValue::Int(y)) => Some(ConstValue::Int(int_op(x, y))),
+        (ConstValue::Int(x), ConstValue::Int(y)) => int_op(x, y).ok().map(ConstValue::Int),
         (ConstValue::Float(x), ConstValue::Float(y)) => Some(ConstValue::Float(float_op(x, y))),
         _ => None,
     }

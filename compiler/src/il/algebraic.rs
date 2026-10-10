@@ -162,27 +162,32 @@ fn eval_cmp(op: Instruction, a: i32, b: i32) -> i32 {
     i32::from(t)
 }
 
-/// Fold `Const a; Const b; Bin` when both immediates are inline ints.
+/// Fold `Const a; Const b; Bin` when both immediates are inline ints. The
+/// VM computes in 64 bits, so the result is the 64-bit one, kept only when
+/// it fits an immediate; an op that traps at run time is not folded.
 fn eval_const_bin(op: Instruction, a: i32, b: i32) -> Option<i32> {
+    use common::int_arith;
     if is_int_cmp(op) {
         return Some(eval_cmp(op, a, b));
     }
-    match op {
-        Instruction::ADD => Some(a.wrapping_add(b)),
-        Instruction::SUB => Some(a.wrapping_sub(b)),
-        Instruction::MUL => Some(a.wrapping_mul(b)),
-        Instruction::DIV if b != 0 => Some(a / b),
-        Instruction::MOD if b != 0 => Some(a % b),
-        Instruction::BITAND => Some(a & b),
-        Instruction::BITOR => Some(a | b),
-        Instruction::XOR => Some(a ^ b),
-        Instruction::SHL if (0..32).contains(&b) => Some(a.wrapping_shl(b as u32)),
-        Instruction::SHR if (0..32).contains(&b) => Some(a.wrapping_shr(b as u32)),
-        Instruction::AND => Some(i32::from(a != 0 && b != 0)),
-        Instruction::OR => Some(i32::from(a != 0 || b != 0)),
-        Instruction::Pow if (0..32).contains(&b) => Some(a.wrapping_pow(b as u32)),
-        _ => None,
-    }
+    let (a, b) = (i64::from(a), i64::from(b));
+    let r = match op {
+        Instruction::ADD => int_arith::add(a, b).ok()?,
+        Instruction::SUB => int_arith::sub(a, b).ok()?,
+        Instruction::MUL => int_arith::mul(a, b).ok()?,
+        Instruction::DIV => int_arith::div(a, b).ok()?,
+        Instruction::MOD => int_arith::rem(a, b).ok()?,
+        Instruction::Pow => int_arith::pow(a, b).ok()?,
+        Instruction::BITAND => a & b,
+        Instruction::BITOR => a | b,
+        Instruction::XOR => a ^ b,
+        Instruction::SHL if (0..32).contains(&b) => a << b,
+        Instruction::SHR if (0..32).contains(&b) => a >> b,
+        Instruction::AND => i64::from(a != 0 && b != 0),
+        Instruction::OR => i64::from(a != 0 || b != 0),
+        _ => return None,
+    };
+    i32::try_from(r).ok()
 }
 
 /// IEEE float binop bits matching VM `as_float` + `to_bits`. Refuse ÷/% by ±0.0.
