@@ -202,7 +202,7 @@ fn specialize_side(
     let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
     let mut edge_stack = false;
     // MIR lowered from HIR needs no lift; the IL is the fallback.
-    let direct = from_hir.filter(|f| !has_alloc && has_numeric_arith(f));
+    let direct = from_hir.filter(|f| !has_alloc && has_numeric_arith(f) && calls_agree(f, calls));
     let mut first = match direct {
         Some(func) => Ok((LowerHints::new(name), func.clone())),
         None => attempt(false, false),
@@ -329,6 +329,20 @@ fn specialize_side(
 
 /// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`, as
 /// [`infer_numeric_with`] asks of a lifted body.
+/// Every `CALL` in `func` uses its callee's dense ABI, when the callee has one.
+fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
+    use crate::mir::MirInst;
+    func.blocks.iter().flat_map(|b| b.insts.iter()).all(|i| match i {
+        MirInst::Call { dest, dest_hi: None, target, args } => calls.get(&target.0).is_none_or(|abi| {
+            abi.ret_hi.is_none()
+                && abi.ret == func.ty(*dest)
+                && abi.params.len() == args.len()
+                && abi.params.iter().zip(args).all(|(&p, &a)| p == func.ty(a))
+        }),
+        _ => true,
+    })
+}
+
 fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
     use crate::mir::{MirBinOp, MirInst};
     func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {

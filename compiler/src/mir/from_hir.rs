@@ -15,12 +15,16 @@
 //! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
 //! numbers as for a lifted body.
 
+use std::collections::HashMap;
+
 use common::DebugLoc;
 
 use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId as HirLocal, UnOp};
+use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, Ty};
 
+use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::{MirBlock, MirFunc};
 use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
@@ -64,6 +68,8 @@ struct Lower<'a> {
     order: Vec<BlockId>,
     /// Source file of the body, for statement locations.
     file: Option<u32>,
+    /// Entry label of each plain call site HIR emission lowered to a `CALL`.
+    calls: &'a HashMap<u32, Label>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -86,7 +92,12 @@ fn mir(e: MirError) -> Refusal {
 
 /// Lower `hir` to MIR. `slots` is the frame slot of each local, as HIR
 /// lowering assigned them; parameters must sit in slots `0..n`.
-pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Result<MirFunc, Refusal> {
+pub fn lower_body(
+    hir: &HirBody,
+    slots: &[Option<u32>],
+    calls: &HashMap<u32, Label>,
+    file: Option<u32>,
+) -> Result<MirFunc, Refusal> {
     if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
         return Err("body kind".into());
     }
@@ -114,6 +125,7 @@ pub fn lower_body(hir: &HirBody, slots: &[Option<u32>], file: Option<u32>) -> Re
         unit_ret,
         order: vec![cur],
         file,
+        calls,
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -328,6 +340,7 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
+            HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
                 let Some(v) = self.word(*operand)? else {
@@ -656,6 +669,32 @@ impl Lower<'_> {
         let out = f(self);
         self.b.pending_loc = outer;
         out
+    }
+
+    /// A plain call of scalar arguments: `CALL` of the entry label HIR
+    /// emission used, with the one-word ABI of the argument and result types.
+    fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let target = *self.calls.get(&id.0).ok_or("call")?;
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if unit { MirTy::I64 } else { scalar(ty).ok_or("call type")? };
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            if self.expr_ty(arg).and_then(scalar).is_none() {
+                return Err("call argument type".into());
+            }
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let abi = DenseAbi {
+            params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
+            ret,
+            ret_hi: None,
+        };
+        let (dest, _) = self.b.ins_call(target, words, &abi).map_err(mir)?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
