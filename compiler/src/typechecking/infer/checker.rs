@@ -139,6 +139,7 @@ impl Checker {
             fn_codegen_baselines: Vec::new(),
             fn_param_names: std::collections::HashMap::new(),
             forward_free_fn_schemes: HashMap::new(),
+            module_frame: 0,
             fn_has_rest: std::collections::HashMap::new(),
             fn_tuple_rest: std::collections::HashMap::new(),
             current_tuple_pack: None,
@@ -1644,6 +1645,7 @@ impl Checker {
 
         // Top frame for natives/globals; left on stack after check_program.
         self.push_scope();
+        self.module_frame = self.env.depth() - 1;
 
         // Forward-declare free fns so earlier `impl` methods can call them.
         self.pre_register_free_functions(ast);
@@ -4251,16 +4253,26 @@ impl Checker {
         }
     }
 
+    /// Whether `name` is bound by the natives or by this module's own
+    /// frames, not only by the frame an earlier `check_program` left behind.
+    fn binds_in_this_module(&self, name: &str) -> bool {
+        self.env
+            .lookup_frame(name)
+            .is_some_and(|f| f == 0 || f >= self.module_frame)
+    }
+
     #[inline(never)]
     fn lookup_fn_scheme(&self, ident: &str) -> Option<Scheme> {
         // Proof path: interned free functions resolve by DefId, not the
         // name string. Env lookup remains a shadowing / forward-stub
         // fallback (locals, natives, not-yet-recorded schemes).
-        let env_scheme = self
-            .env
-            .lookup(ident)
-            .cloned()
-            .or_else(|| self.forward_free_fn_schemes.get(ident).cloned());
+        // A later `fn` of this module wins over the bare name an earlier
+        // module's frame still binds (`text::starts_with` while checking
+        // `bytes`).
+        let env_scheme = match self.forward_free_fn_schemes.get(ident) {
+            Some(fwd) if !self.binds_in_this_module(ident) => Some(fwd.clone()),
+            fwd => self.env.lookup(ident).cloned().or_else(|| fwd.cloned()),
+        };
         if let Some(&id) = self.local_defs.get(ident)
             && let Some(def_scheme) = self.schemes_by_def.get(&id)
         {
@@ -13983,8 +13995,8 @@ impl Checker {
         } else {
             format!("{}::{}", self.current_module, name)
         };
-        if self.env.lookup(&key).is_some()
-            || self.env.lookup(name).is_some()
+        if self.binds_in_this_module(&key)
+            || self.binds_in_this_module(name)
             || self.forward_free_fn_schemes.contains_key(&key)
             || self.forward_free_fn_schemes.contains_key(name)
         {
