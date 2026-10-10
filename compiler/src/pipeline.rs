@@ -16,9 +16,8 @@ use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
 };
 use crate::host_grants::HostGrants;
-use crate::manifest::{
+use crate::module_roots::{
     default_module_roots, namespace_of_in_roots, resolve_mod_in_roots, resolve_use_in_roots,
-    Manifest,
 };
 use crate::Compiler;
 
@@ -62,8 +61,6 @@ pub struct Pipeline {
     project_root: PathBuf,
     /// `use`/`mod` search roots, relative to [`Self::project_root`] or absolute.
     roots: Vec<PathBuf>,
-    /// Spool/package fields only. Never loaded to bind language roots/entry.
-    manifest: Manifest,
     bytecode: Vec<Byte>,
     /// Set of files already visited (used to short-circuit
     /// diamond dependencies in the worklist).
@@ -117,7 +114,7 @@ pub struct Pipeline {
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
     extra_dload_stems: Vec<String>,
-    /// CLI / Pipeline API grants. Never copied from Manifest allow fields.
+    /// CLI / Pipeline API grants and dload pins (coil reads no manifest).
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
@@ -415,11 +412,6 @@ impl Pipeline {
         &self.roots
     }
 
-    /// Spool/package manifest copy (not used for language roots/entry).
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
     /// Files discovered on the last compile/typecheck (use-graph, not a root walk).
     pub fn discovered_files(&self) -> &[PathBuf] {
         &self.processed
@@ -505,7 +497,7 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Consumer `dload` stem (`--allow-dload`). Still needs lock hash or `trusted`.
+    /// Consumer `dload` stem (`--allow-dload`). Still needs a pin or trusted stem.
     ///
     /// Libc aliases stay denied at the gate even if listed here.
     pub fn grant_dload_allow(&mut self, stem: impl Into<String>) {
@@ -552,7 +544,7 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Replace host grants (CLI / embedders). Does not read Manifest.
+    /// Replace host grants (CLI / embedders).
     pub fn set_host_grants(&mut self, grants: HostGrants) {
         self.host_grants = grants;
         self.try_sync_host_caps();
@@ -594,18 +586,14 @@ impl Pipeline {
         &self.extra_dload_grants
     }
 
+    /// `(stem, sha256)` pins from `--dload-pin`.
     pub fn dload_native_pins(&self) -> Vec<(String, String)> {
-        crate::lockfile::Lockfile::load(&self.project_root)
-            .native_pins()
-            .to_vec()
+        self.host_grants.dload_pins.clone()
     }
 
+    /// Stems from `--dload-trusted` (no hash check).
     pub fn dload_trusted_stems(&self) -> Vec<String> {
-        let lock = crate::lockfile::Lockfile::load(&self.project_root);
-        let deps = Manifest::load(&self.project_root)
-            .map(|m| m.dependencies)
-            .unwrap_or_default();
-        lock.trusted_extra_stems(&deps)
+        self.host_grants.dload_trusted.clone()
     }
 
     pub fn c_struct_encodings(&self) -> Vec<(String, Vec<(String, u32)>)> {
@@ -619,12 +607,10 @@ impl Pipeline {
     /// Fail-closed integrity: lock hash, trusted, and host grants.
     #[cfg(any(test, feature = "vm-wire"))]
     pub fn build_dload_gate(&self) -> machine::DloadGate {
-        let lock = crate::lockfile::Lockfile::load(&self.project_root);
-        let deps = Manifest::load(&self.project_root)
-            .map(|m| m.dependencies)
-            .unwrap_or_default();
-        let trusted = lock.trusted_extra_stems(&deps);
-        let mut gate = machine::DloadGate::from_consumer_trusted(lock.native_pins(), &trusted);
+        let mut gate = machine::DloadGate::from_consumer_trusted(
+            &self.host_grants.dload_pins,
+            &self.host_grants.dload_trusted,
+        );
         for stem in &self.extra_dload_stems {
             gate.grant_stem(stem);
         }
@@ -704,7 +690,6 @@ impl Pipeline {
             failed: false,
             project_root: cwd,
             roots: default_module_roots(),
-            manifest: Manifest::default(),
             bytecode,
             processed: Vec::new(),
             worklist: VecDeque::new(),

@@ -121,7 +121,7 @@ impl DloadGate {
         Err(FfiError::LibraryDenied {
             name: name.to_string(),
             stem,
-            reason: "stem lacks lock hash or trusted".into(),
+            reason: "stem has no `--dload-pin` and no `--dload-trusted`".into(),
         })
     }
 

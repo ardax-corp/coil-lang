@@ -1,15 +1,16 @@
-//! Host capability grants for compile/typecheck. Independent of `coil.toml`.
+//! Host capability grants and `dload` integrity inputs, from CLI flags only.
 //!
-//! Spool may still parse Manifest `[env]` / `[ffi] allow` keys. The language
-//! path (Pipeline, CLI) uses this struct and CLI flags at typecheck. The VM
-//! does not re-apply these flags; the compiled artifact is the grant.
+//! coil never reads `coil.toml` or `coil.lock`: spool reads them and passes
+//! the flags. Capabilities are checked at typecheck and the VM does not
+//! re-apply them (the compiled artifact is the grant). Native pins and
+//! trusted stems feed the run-time `dload` gate.
 
 use std::path::PathBuf;
 
 /// Deny-by-default host capabilities (`dload`, attach, env exec/exit, and
 /// read / write / net / env).
 ///
-/// Defaults match a missing `coil.toml` (everything denied). `dload("c")` /
+/// The default denies everything. `dload("c")` /
 /// libc aliases stay denied even when listed in [`Self::allow_dload`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostGrants {
@@ -29,11 +30,15 @@ pub struct HostGrants {
     pub allow_net: bool,
     /// Environment variables and the working directory (`--allow-env`).
     pub allow_env: bool,
-    /// Consumer `dload` stems (`--allow-dload`). Still need lock hash or
-    /// `trusted = true`. Lookup paths are not a grant.
+    /// Consumer `dload` stems (`--allow-dload`). Still need a pin or a
+    /// trusted stem at run time. Lookup paths are not a grant.
     pub allow_dload: Vec<String>,
     /// Extra FFI library search dirs (`--ffi-search-path`). Lookup only.
     pub ffi_search_paths: Vec<PathBuf>,
+    /// `(stem, sha256 hex)` a loaded library must match (`--dload-pin`).
+    pub dload_pins: Vec<(String, String)>,
+    /// Stems loaded without a hash check (`--dload-trusted`).
+    pub dload_trusted: Vec<String>,
 }
 
 impl HostGrants {
@@ -113,6 +118,22 @@ impl HostGrants {
         let path = path.into();
         if !self.ffi_search_paths.iter().any(|p| p == &path) {
             self.ffi_search_paths.push(path);
+        }
+    }
+
+    /// Pin `stem` to a library whose SHA-256 is `sha256` (hex).
+    pub fn add_dload_pin(&mut self, stem: impl Into<String>, sha256: impl Into<String>) {
+        let pin = (stem.into(), sha256.into());
+        if !self.dload_pins.contains(&pin) {
+            self.dload_pins.push(pin);
+        }
+    }
+
+    /// Load `stem` without a hash check (duplicates ignored).
+    pub fn add_dload_trusted(&mut self, stem: impl Into<String>) {
+        let stem = stem.into();
+        if !self.dload_trusted.iter().any(|s| s == &stem) {
+            self.dload_trusted.push(stem);
         }
     }
 }

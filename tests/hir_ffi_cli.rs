@@ -31,7 +31,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
     for mode in [&[][..], &["-O", "0"][..]] {
         let run = Command::new(bin)
             .args(mode)
-            .args(["--allow-dload", "sum", "--ffi-search-path"])
+            .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
             .arg(tmp)
             .arg(src)
             .output()

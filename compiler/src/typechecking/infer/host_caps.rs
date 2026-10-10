@@ -105,7 +105,7 @@ impl Checker {
             ErrorCode::HostDloadDenied,
             format!("`dload` of `{stem}` requires `--allow-dload {stem}`"),
             range,
-            Some("pass `--allow-dload STEM` (still needs a lock hash or `trusted`)".to_string()),
+            Some("pass `--allow-dload STEM` (a run also needs `--dload-pin` or `--dload-trusted`)".to_string()),
         );
     }
 

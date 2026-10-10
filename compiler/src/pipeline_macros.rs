@@ -12,7 +12,7 @@ use crate::macros::encode::{self, Strip};
 use crate::macros::{
     CallPosition, MacroArg, MacroDecl, MacroInput, MacroKind, PendingMacro, lower::is_synthetic,
 };
-use crate::manifest::resolve_use_in_roots;
+use crate::module_roots::resolve_use_in_roots;
 
 /// Where generated code landed in a file's report text, for diagnostics.
 #[derive(Clone, Debug)]

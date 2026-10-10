@@ -2,7 +2,7 @@
 //!
 //! B5: index the use-graph (not every `.hy` under roots). `resolve_definition`
 //! uses checker DefId tables, not "every def with this string". Roots are
-//! bound on [`Pipeline`] — this module does not `Manifest::load`.
+//! bound on [`Pipeline`].
 
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use std::{
 use reporting::Message;
 
 use crate::{
-    default_module_roots, manifest::namespace_of_in_roots, Checker, DefId, Pipeline, SymbolIndex,
+    default_module_roots, module_roots::namespace_of_in_roots, Checker, DefId, Pipeline, SymbolIndex,
     SymbolKind,
 };
 
