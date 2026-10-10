@@ -36,11 +36,10 @@ not change pass behavior.
 
 | Analysis | Module | Quantity |
 |----------|--------|----------|
-| **`sp`** | [`crate::il::sp`] | Eval-stack *height*. Nested `CALL`/`MakeCoro` reset to 1 (return value). `STORE` does **not** floor height. |
+| **`sp`** | [`crate::il::sp`] | Eval-stack *height* (`stack_delta` feeds `tell`; the whole-buffer analysis backs tests only). Nested `CALL`/`MakeCoro` reset to 1 (return value). `STORE` does **not** floor height. |
 | **`tell`** | [`crate::il::tell`] | Shared operand/local *cursor*. `STORE` raises the cursor to `slot + 1` even when height is lower. |
 
-Do not substitute one for the other (COI-81). Fuse/canon/branch layout need
-height; slot promotion / `dead_store_at` need the cursor. `Tell::Unknown`
+Do not substitute one for the other (COI-81). Height is a per-op delta; slot promotion / `dead_store_at` need the cursor. `Tell::Unknown`
 at a join is often the correct answer (a raising loop header), not a gap.
 
 Entry seed: `optimize` / `optimize_at` use `entry_sp` (usually `0` in unit
@@ -75,11 +74,11 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `dead_block` → 2. `canon`
+1. `dead_block`
 
 **Decision** (`decision_once_at`), in order:
 
-3. `slot_promote` (+ `dead_store_at`) → 4. `clone_shared_return`
+2. `slot_promote` (+ `dead_store_at`) → 3. `clone_shared_return`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -116,23 +115,12 @@ return, a statement-position literal or local read) is dropped as it is
 emitted (`CodeBuf::push_pop`), and the HIR fold drops `x = x`, so there is no
 IL `stack_dce` pass (removed 2026-10).
 
-## `canon`
-
-**Flag:** `canon` (default on). **Fn:** `il::canon::canonicalize_operand_order`.
-Uses **`sp`**.
-
-- **Input:** `Const; Load; op` (any SP), demote-able `ConstPool; Load;
-  int-op`, or Known-SP `Load a; Load b; op` with `a > b`.
-- **Output:** Const on RHS; low-then-high load order; ordered-cmp polarity flip
-  (`LE`↔`GT`, `LEQ`↔`GEQ`). Int `ConstPool` may demote to inline `Const`. Stack
-  height and labels unchanged.
-- **Refusals:** Unknown SP on `Load; Load; op` only (counted in
-  `CanonStats::refused_unknown_sp`); float ops; residual `Byte`; non-commutative
-  `SUB`/`DIV`/`MOD`/`SHL`/`SHR`/`Pow`. No float reassoc. `Const; Load; op` is
-  stack-relative and does not consult SP (COI-384).
-- **Tests:** `il/canon.rs` `const_load_add_swaps_to_load_const_add`,
-  `const_load_add_swaps_after_unknown_sp`, `load_load_unknown_sp_still_refused`,
-  `const_load_sub_refused`.
+There is no IL `canon` pass (removed 2026-10). `hir::fold` writes an `int`
+literal on the right of a commutative op or a flipped compare (`2 * x` is
+`x * 2`, `1 < x` is `x > 1`), so lowering emits `Load; Const; op` for
+`BinSlotImm`, and fuse-select still packs a leftover `Const; Load; op`
+(COI-384). The pass's remaining work, ordering `Load a; Load b` by slot, had
+no effect on code size or time.
 
 ## `algebraic`
 
@@ -297,7 +285,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | Pass | Solo test already existed | Newly added in D1 |
 |------|---------------------------|-------------------|
 | dead_block | `convoy.tests.rs` | no |
-| canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | loop_bounds | `bounds.rs` | no |
 | slot_promote | `slot_promote.rs` | no |

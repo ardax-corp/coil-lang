@@ -13,7 +13,7 @@ pub(crate) mod il;
 pub(crate) mod mir;
 pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
-pub use il::{CanonStats, OptLevel, last_canon_stats};
+pub use il::OptLevel;
 pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
 };

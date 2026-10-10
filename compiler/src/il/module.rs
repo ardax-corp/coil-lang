@@ -332,8 +332,8 @@ impl IlModule {
 
     /// Per-func opts on each body, then concatenate the bodies.
     ///
-    /// `pool` is the module const pool (`f64` / boxed int bits) for algebraic
-    /// float identity / const-fold peeps (may push folded float results).
+    /// `pool` is the module const pool, which MIR specialization reads and
+    /// extends.
     pub fn optimize_and_flatten(
         &mut self,
         opts: &OptimizeOptions,
@@ -341,13 +341,13 @@ impl IlModule {
     ) -> FlatIl {
         if self.funcs.is_empty() {
             let (mut ops, remap, func_maps) = self.to_flat();
-            opt::optimize(&mut ops, opts, pool);
+            opt::optimize(&mut ops, opts);
             return (ops, remap, func_maps);
         }
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
-            opt::optimize_at(&mut body.ops, opts, body.meta.entry_sp as i32, pool);
+            opt::optimize_at(&mut body.ops, opts, body.meta.entry_sp as i32);
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
@@ -1607,7 +1607,6 @@ mod tests {
         OptimizeOptions {
             dead_block: false,
             slot_promote: false,
-            canon: false,
             algebraic: false,
             local_cse: false,
             licm: false,

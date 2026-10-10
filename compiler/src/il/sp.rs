@@ -5,26 +5,26 @@
 //! counts eval-stack values. Nested `CALL`/`MakeCoro` reset height to 1
 //! (return value only), not `before + (1 - arity)`.
 //!
-//! Used by fuse/canon and the IL opt passes. Do not substitute
+//! [`stack_delta`] feeds [`super::tell`]; the whole-buffer height analysis
+//! only backs tests now (it checks the split from tell). Do not substitute
 //! tell here — a STORE floor is not height (COI-81).
 
 use common::Instruction;
 
-use super::op::{EntryKind, IlJumpKind, IlOp, Label};
+use super::op::{EntryKind, IlJumpKind, IlOp};
+#[cfg(test)]
+use super::op::Label;
 
 /// Stack height relative to analysis entry (usually 0 at `ops[0]`).
+#[cfg(test)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Sp {
     Known(i32),
     Unknown,
 }
 
+#[cfg(test)]
 impl Sp {
-    pub fn is_known(self) -> bool {
-        matches!(self, Sp::Known(_))
-    }
-
-    #[cfg(test)]
     pub fn known(self) -> Option<i32> {
         match self {
             Sp::Known(v) => Some(v),
@@ -41,11 +41,13 @@ impl Sp {
 }
 
 /// Per-op SP-in (height before the op at that index).
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct SpInfo {
     pub sp_in: Vec<Sp>,
 }
 
+#[cfg(test)]
 impl SpInfo {
     pub fn sp_before(&self, idx: usize) -> Sp {
         self.sp_in.get(idx).copied().unwrap_or(Sp::Unknown)
@@ -293,6 +295,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
 /// When `op` is a nested direct call, the VM return resets tell to
 /// `frame_base + ret_words` (`1` boxed word, or `2` for a known ≤2-word
 /// direct `CALL`; `MakeCoro` is always `1`).
+#[cfg(test)]
 fn nested_call_return_words(op: &IlOp) -> Option<i32> {
     match op {
         IlOp::Entry {
@@ -313,6 +316,7 @@ fn nested_call_return_words(op: &IlOp) -> Option<i32> {
 }
 
 /// Compute SP-in for each op. Entry SP is 0 at index 0; unknown effects poison.
+#[cfg(test)]
 pub fn analyze(ops: &[IlOp]) -> SpInfo {
     analyze_at(ops, 0)
 }
@@ -322,6 +326,7 @@ pub fn analyze(ops: &[IlOp]) -> SpInfo {
 /// Per-function bodies begin with args already on the shared locals/operand
 /// stack; starting at 0 understates height and lets a store-forwarding rewrite emit `Dup;Store`
 /// that aliases a local with TOS.
+#[cfg(test)]
 pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
     let n = ops.len();
     let mut sp_in: Vec<Option<Sp>> = vec![None; n];

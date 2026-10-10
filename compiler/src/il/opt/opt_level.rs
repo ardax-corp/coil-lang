@@ -122,7 +122,6 @@ fn all_off() -> OptimizeOptions {
     OptimizeOptions {
         dead_block: false,
         slot_promote: false,
-        canon: false,
         algebraic: false,
         local_cse: false,
         licm: false,
@@ -182,7 +181,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
         o.dead_block,
         o.slot_promote,
-        o.canon,
         o.algebraic,
         o.local_cse,
         o.licm,

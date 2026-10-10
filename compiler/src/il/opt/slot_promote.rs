@@ -2481,7 +2481,7 @@ mod tests {
     }
 
     /// `fn rsum(Range<int> r) -> int { let s = 0; for x in r { s = s + x; } return s; }`
-    /// after canon: Range param = slots 0/1; `s` = 2; dead start copy 3;
+    /// Range param = slots 0/1; `s` = 2; dead start copy 3;
     /// end copy 4 (aliased to 1 by transfer); `x` = 5.
     #[test]
     fn peel_floor_raise_keeps_loop_carried_slot_whole() {

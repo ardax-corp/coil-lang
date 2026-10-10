@@ -18,8 +18,6 @@ pub struct OptimizeOptions {
     pub dead_block: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
-    /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
-    pub canon: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
     /// Local CSE in the HIR (`hir::cse`), not an IL pass.
@@ -52,24 +50,16 @@ pub struct OptimizeOptions {
 // Default is `OptLevel::Standard.options()` (derived from the driver table).
 
 /// Run IL opts in place. Safe to call before [`super::lower`].
-///
-/// Pass the const pool when available so canon can read `ConstPool` bits;
-/// an empty vec disables the pool-entry demotion.
-pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, pool: &mut Vec<u64>) {
-    optimize_at(ops, opts, 0, pool);
+pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions) {
+    optimize_at(ops, opts, 0);
 }
 
-/// Like [`optimize`], seeding SP analysis at `entry_sp` for the op buffer.
-pub fn optimize_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-) {
+/// Like [`optimize`], seeding the cursor at `entry_sp` for the op buffer.
+pub fn optimize_at(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32) {
     if opts.collect_stats {
         stats::set_iterations(1);
     }
-    driver::run_once(ops, opts, entry_sp, pool);
+    driver::run_once(ops, opts, entry_sp);
 }
 
 /// Run [`optimize`] on each [`super::IlFunc`] emitting span; leave prologue and
@@ -88,7 +78,7 @@ pub fn optimize_per_func(
     pool: &mut Vec<u64>,
 ) {
     if funcs.is_empty() {
-        optimize(ops, opts, pool);
+        optimize(ops, opts);
         return;
     }
 

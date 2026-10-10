@@ -9,7 +9,6 @@
 
 mod analysis;
 mod builder;
-mod canon;
 mod codebuf;
 pub(crate) mod effects;
 mod emit_buf;
@@ -23,7 +22,6 @@ mod sp;
 pub mod tell;
 mod treeshake;
 
-pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
 #[cfg(any(test, feature = "dissect"))]
 pub(crate) use sp::stack_delta;
