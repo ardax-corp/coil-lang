@@ -3811,7 +3811,9 @@ impl<const S: usize> Machine<S> {
                 }
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
                 Instruction::BinSlotImm => {
-                    dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap);
+                    if let Err(t) = dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                 }
                 Instruction::CmpJmpf | Instruction::CmpJmpt => {
                     if let Some(target) = dispatch::cmp_jmp(
@@ -3867,23 +3869,27 @@ impl<const S: usize> Machine<S> {
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest`, pool packs (dest<<32)|imm.
                 Instruction::BinSlotImmStore => {
-                    dispatch::bin_slot_imm_store(
+                    if let Err(t) = dispatch::bin_slot_imm_store(
                         &mut self.stack,
                         sp,
                         opcode,
                         constants,
                         &self.heap,
                         stack_cap,
-                    );
+                    ) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                 }
                 Instruction::BinSlotSlotStore => {
-                    dispatch::bin_slot_slot_store(
+                    if let Err(t) = dispatch::bin_slot_slot_store(
                         &mut self.stack,
                         sp,
                         opcode,
                         &self.heap,
                         stack_cap,
-                    );
+                    ) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                     then_hot_streak!();
                 }
                 Instruction::LoadReturnSlot => {
@@ -3915,8 +3921,10 @@ impl<const S: usize> Machine<S> {
                     promise!(tos >= 2);
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
-                    let ret_val =
-                        crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap);
+                    let ret_val = match crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap) {
+                        Ok(v) => v,
+                        Err(t) => return self.runtime_panic(t.message(), ip.saturating_sub(1)),
+                    };
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
@@ -3937,18 +3945,24 @@ impl<const S: usize> Machine<S> {
                     self.after_return(&mut ip, &mut sp);
                 }
                 Instruction::DenseBin | Instruction::DenseBin2 => {
-                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
+                    if let Err(t) = dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                     if unlikely(*bc as u8 == Instruction::DenseBin2 as u8) {
                         promise!(ip < code_len);
                         let tail = unsafe { code.get_unchecked(ip) };
                         ip += 1;
                         prefetch_code(code, ip);
-                        dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
+                        if let Err(t) = dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap) {
+                            return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                        }
                     }
                     then_hot_streak!();
                 }
                 Instruction::DenseBinJmpf => {
-                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
+                    if let Err(t) = dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                     promise!(ip < code_len);
                     let tail = unsafe { code.get_unchecked(ip) };
                     ip += 1;
@@ -3978,7 +3992,9 @@ impl<const S: usize> Machine<S> {
                     then_hot_streak!();
                 }
                 Instruction::DenseUnary => {
-                    dispatch::dense_unary(&mut self.stack, sp, opcode, stack_cap);
+                    if let Err(t) = dispatch::dense_unary(&mut self.stack, sp, opcode, stack_cap) {
+                        return self.runtime_panic(t.message(), ip.saturating_sub(1));
+                    }
                     then_hot_streak!();
                 }
                 Instruction::DenseCast => {

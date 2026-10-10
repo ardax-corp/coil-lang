@@ -6,6 +6,7 @@
 //! These helpers are `#[inline(always)]` matches so LLVM can emit a jump table
 //! of straight-line arms without a second call.
 
+use common::int_arith::{self, IntTrap};
 use common::{Instruction, Value};
 
 use crate::{Heap, HeapSlot};
@@ -37,18 +38,17 @@ fn eq_values<H: HeapView>(heap: &H, lhs: Value, rhs: Value) -> bool {
     crate::value_eq::values_eq(heap.as_heap(), lhs, rhs)
 }
 
+/// A fused binary op; an int op that overflows or divides by zero traps.
 #[inline(always)]
-pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> Value {
-    match Instruction::from(op) {
-        Instruction::ADD => Value::from(lhs.as_int() + rhs.as_int()),
-        Instruction::SUB => Value::from(lhs.as_int() - rhs.as_int()),
-        Instruction::MUL => Value::from(lhs.as_int() * rhs.as_int()),
-        Instruction::DIV => Value::from(lhs.as_int() / rhs.as_int()),
-        Instruction::MOD => Value::from(lhs.as_int() % rhs.as_int()),
-        Instruction::Pow => {
-            let exp = rhs.as_int().max(0) as u32;
-            Value::from(lhs.as_int().pow(exp))
-        }
+pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> Result<Value, IntTrap> {
+    let int = |r: int_arith::IntResult| r.map(Value::from);
+    Ok(match Instruction::from(op) {
+        Instruction::ADD => return int(int_arith::add(lhs.as_int(), rhs.as_int())),
+        Instruction::SUB => return int(int_arith::sub(lhs.as_int(), rhs.as_int())),
+        Instruction::MUL => return int(int_arith::mul(lhs.as_int(), rhs.as_int())),
+        Instruction::DIV => return int(int_arith::div(lhs.as_int(), rhs.as_int())),
+        Instruction::MOD => return int(int_arith::rem(lhs.as_int(), rhs.as_int())),
+        Instruction::Pow => return int(int_arith::pow(lhs.as_int(), rhs.as_int())),
         Instruction::BITAND => Value::from(lhs.as_int() & rhs.as_int()),
         Instruction::BITOR => Value::from(lhs.as_int() | rhs.as_int()),
         Instruction::SHL => Value::from(lhs.as_int() << rhs.as_int()),
@@ -73,7 +73,7 @@ pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) ->
         Instruction::GEQF => Value::from((lhs.as_float() >= rhs.as_float()) as i64),
         Instruction::PowF => Value::from(lhs.as_float().powf(rhs.as_float())),
         _ => Value::default(),
-    }
+    })
 }
 
 #[inline(always)]
@@ -130,13 +130,25 @@ mod tests {
         let heap = Heap::default();
         let a = Value::from(10i64);
         let b = Value::from(3i64);
-        assert_eq!(eval_bin(Instruction::ADD as u8, a, b, &heap).as_int(), 13);
-        assert_eq!(eval_bin(Instruction::SUB as u8, a, b, &heap).as_int(), 7);
-        assert_eq!(eval_bin(Instruction::MUL as u8, a, b, &heap).as_int(), 30);
-        assert_eq!(eval_bin(Instruction::DIV as u8, a, b, &heap).as_int(), 3);
-        assert_eq!(eval_bin(Instruction::MOD as u8, a, b, &heap).as_int(), 1);
+        assert_eq!(eval_bin(Instruction::ADD as u8, a, b, &heap).unwrap().as_int(), 13);
+        assert_eq!(eval_bin(Instruction::SUB as u8, a, b, &heap).unwrap().as_int(), 7);
+        assert_eq!(eval_bin(Instruction::MUL as u8, a, b, &heap).unwrap().as_int(), 30);
+        assert_eq!(eval_bin(Instruction::DIV as u8, a, b, &heap).unwrap().as_int(), 3);
+        assert_eq!(eval_bin(Instruction::MOD as u8, a, b, &heap).unwrap().as_int(), 1);
         assert!(!eval_cmp(Instruction::LE as u8, a, b, &heap));
         assert!(eval_cmp(Instruction::GT as u8, a, b, &heap));
+    }
+
+    #[test]
+    fn fused_int_ops_trap() {
+        let heap = Heap::default();
+        let max = Value::from(i64::MAX);
+        let one = Value::from(1i64);
+        let zero = Value::from(0i64);
+        assert_eq!(eval_bin(Instruction::ADD as u8, max, one, &heap), Err(IntTrap::Overflow));
+        assert_eq!(eval_bin(Instruction::MUL as u8, max, max, &heap), Err(IntTrap::Overflow));
+        assert_eq!(eval_bin(Instruction::DIV as u8, one, zero, &heap), Err(IntTrap::DivByZero));
+        assert_eq!(eval_bin(Instruction::Pow as u8, one, Value::from(-1i64), &heap), Err(IntTrap::NegativeExponent));
     }
 
     #[test]
@@ -159,7 +171,7 @@ mod tests {
             Value::from(2i64),
             &heap,
         );
-        assert_eq!(z.as_int(), 0);
+        assert_eq!(z.unwrap().as_int(), 0);
         assert!(!eval_cmp(
             Instruction::HALT as u8,
             Value::from(1i64),

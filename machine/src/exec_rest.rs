@@ -370,8 +370,10 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + b < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
-                    let result = crate::fused::eval_bin(op, va, vb, &self.heap);
-                    self.stack.push(result);
+                    match crate::fused::eval_bin(op, va, vb, &self.heap) {
+                        Ok(result) => self.stack.push(result),
+                        Err(t) => int_trap!(t),
+                    }
                 }
                 Instruction::NATIVE => {
                     #[cfg(debug_assertions)]
