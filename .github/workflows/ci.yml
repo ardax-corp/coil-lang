@@ -28,12 +28,13 @@ jobs:
           cargo build --bin coil --bin coil-test
           cargo build --bin coil --features gc-stress --target-dir target/gc-stress
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-      - name: Diagnostic program, gc-stress
+      - name: half-close split tests, gc-stress, 10 min each
         if: always()
-        run: ./target/gc-stress/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
-      - name: task_io.hy alone (half-close fix), gc-stress, x3
-        if: always()
+        timeout-minutes: 50
         run: |
-          for i in 1 2 3; do
-            ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/only 2>&1 | grep -E '^>|FAILED|test result' || true
+          for k in 0 1 2 3; do
+            echo "=== split$k: $(head -n 200 debug-gc/split$k/t.hy | grep -m1 '^test(')"
+            start=$(date +%s)
+            perl -e 'alarm 600; exec @ARGV' ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/split$k 2>&1 | grep -E '^>|FAILED|test result|^ok' || true
+            echo "exit=${PIPESTATUS[0]} secs=$(( $(date +%s) - start ))"
           done
