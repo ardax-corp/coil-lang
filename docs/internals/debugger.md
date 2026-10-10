@@ -29,7 +29,7 @@ coil-debug examples/fib.hy -x cmds.txt --batch
 | `--ffi-search-path DIR` | Extra FFI lookup directory (not a grant) |
 | `--root DIR` | Extra `use`/`mod` search directory |
 
-Host grants are CLI / DAP-launch only — `coil.toml` does not grant them. Ungranted
+Host grants are CLI / DAP-launch only. Ungranted
 gated calls fail typecheck (`E0406`–`E0411`). The compiled in-memory bytecode is
 the grant at run time, same as other compile-and-run paths.
 

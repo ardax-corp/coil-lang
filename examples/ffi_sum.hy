@@ -16,8 +16,7 @@
 //
 // `dload("sum")` resolves to the platform filename via
 // `--ffi-search-path examples`. Every stem needs `--allow-dload STEM` plus
-// `--dload-pin STEM=SHA256` or `--dload-trusted STEM` (spool passes them
-// from coil.toml / coil.lock) — including `time` / `crypto` / `tls` /
+// `--dload-pin STEM=SHA256` or `--dload-trusted STEM` — including `time` / `crypto` / `tls` /
 // `regex`. A stem without allow is `LibraryDenied`. `dload("c")` is
 // always denied; an absolute path is not a bypass.
 //

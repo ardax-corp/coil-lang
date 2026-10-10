@@ -110,7 +110,7 @@ pub struct Pipeline {
     auto_par: bool,
     /// Typed inlining of HIR bodies (the default; `COIL_HIR_INLINE=0` off).
     hir_inline: bool,
-    /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
+    /// Host/test `dload` grants (stem + file to hash). Not set from CLI flags.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
     extra_dload_stems: Vec<String>,
@@ -336,7 +336,7 @@ impl Pipeline {
     /// bytecode. Each result is associated with the source file that was
     /// checked, which makes this suitable for editor diagnostics.
     ///
-    /// Does not load `coil.toml`. Bind roots with [`Self::bind_project_root`].
+    /// Bind roots with [`Self::bind_project_root`].
     pub fn typecheck_project(&mut self, file: &Path) -> Vec<(PathBuf, Vec<Message>)> {
         self.reset_compiler();
         self.reset_session();
@@ -424,8 +424,8 @@ impl Pipeline {
 
     /// Bind the project directory and `use`/`mod` search roots.
     ///
-    /// Empty `roots` means [`default_module_roots`] (`["src"]`). Does not
-    /// read `coil.toml`. CLI and tests pass extra `--root` directories here.
+    /// Empty `roots` means [`default_module_roots`] (`["src"]`).
+    /// CLI and tests pass extra `--root` directories here.
     pub fn bind_project_root(&mut self, project_dir: PathBuf, roots: Vec<PathBuf>) {
         let roots = if roots.is_empty() {
             default_module_roots()
@@ -456,8 +456,7 @@ impl Pipeline {
 
     /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
     ///
-    /// CLI/tests pass these as `--root` (the language path does not read
-    /// `[module].roots` from `coil.toml`).
+    /// CLI/tests pass these as `--root`.
     pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -483,8 +482,8 @@ impl Pipeline {
     /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
     ///
     /// The CLI never calls this. Consumer stems are `--allow-dload` / 
-    /// [`Self::grant_dload_allow`] plus lock hashes, or allow plus
-    /// `trusted = true` on that dep (hash skip only).
+    /// [`Self::grant_dload_allow`] plus `--dload-pin`, or allow plus
+    /// `--dload-trusted` (hash skip only).
     /// Host grants do not restore a first-party exemption.
     pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
         self.extra_dload_grants.push((stem.into(), path));

@@ -485,7 +485,7 @@ pub struct Machine<const S: usize> {
     resume_stack: Vec<ResumeCtx>,
     /// Directory of the entry script (for relative `dload` paths).
     base_dir: Option<PathBuf>,
-    /// Extra search paths from `coil.toml` `[ffi]`.
+    /// Extra search paths (`--ffi-search-path`).
     ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash or trusted).
     dload_gate: crate::ffi::DloadGate,

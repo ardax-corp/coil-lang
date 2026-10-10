@@ -27,7 +27,7 @@ broken, what looked flaky, incomplete implementations, and fixes applied.
 
 Namespace suite (`compiler/tests/namespace.rs`) passed repeatedly under `--test-threads=16`. Residual risks (not failing today):
 
-- Process-wide `CWD_LOCK` + `chdir` for `coil.toml` discovery
+- Process-wide `CWD_LOCK` + `chdir` for project-root discovery
 - Shared `examples/libsum.so` build among FFI tests (must not truncate with `File::create`)
 
 ## Incomplete / false-green patterns

@@ -74,7 +74,6 @@ impl CompileProfileFlags {
 
 /// Host capabilities and `dload` integrity. Default deny.
 ///
-/// coil never reads `coil.toml` / `coil.lock`; spool passes these flags.
 /// Capabilities are checked at **compile** (`E0406`–`E0411`, `E0414`).
 /// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
 /// is the grant. `--ffi-search-path` is lookup, not a dload grant.

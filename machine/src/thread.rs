@@ -1163,7 +1163,7 @@ pub struct ThreadSpawnContext {
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
     /// Entry-script directory for relative `dload` (same as parent `wire_vm_ffi`).
     pub ffi_base_dir: Option<PathBuf>,
-    /// `[ffi] search_paths` from the parent Machine.
+    /// `--ffi-search-path` dirs from the parent Machine.
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,

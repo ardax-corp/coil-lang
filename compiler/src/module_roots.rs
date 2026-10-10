@@ -1,7 +1,6 @@
 //! `use` / `mod` search roots and module namespaces.
 //!
-//! Roots are CLI (`--root`) / [`crate::Pipeline`] state. coil never reads
-//! `coil.toml`; spool turns `[module].roots` into `--root` flags.
+//! Roots are CLI (`--root`) / [`crate::Pipeline`] state.
 
 use std::path::{Path, PathBuf};
 
@@ -162,7 +161,7 @@ mod tests {
         // Build a temporary project layout:
         //   <tmp>/src/foo/sadge.hy
         // `use foo::sadge;` should resolve to that file.
-        let tmp = std::env::temp_dir().join("coil_manifest_test_1");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_1");
         let src = tmp.join("src").join("foo");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("sadge.hy"), "// empty\n").unwrap();
@@ -182,7 +181,7 @@ mod tests {
 
     #[test]
     fn resolve_use_falls_back_to_second_root() {
-        let tmp = std::env::temp_dir().join("coil_manifest_test_2");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_2");
         let vendor = tmp.join("vendor").join("lib_x");
         std::fs::create_dir_all(&vendor).unwrap();
         std::fs::write(vendor.join("foo.hy"), "// empty\n").unwrap();
@@ -203,7 +202,7 @@ mod tests {
     fn resolve_use_falls_back_to_module_file() {
         // Layout: <tmp>/src/foo.hy (no foo/sadge.hy).
         // `use foo::sadge;` should resolve to foo.hy.
-        let tmp = std::env::temp_dir().join("coil_manifest_test_module_file");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_module_file");
         let src = tmp.join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("foo.hy"), "fn sadge() {}\n").unwrap();
@@ -223,7 +222,7 @@ mod tests {
     fn resolve_use_prefers_one_item_file_over_module_file() {
         // Both Convention A (`foo/sadge.hy`) and B (`foo.hy`) exist —
         // A must win so FQN/body resolution stays deterministic.
-        let tmp = std::env::temp_dir().join("coil_manifest_test_prefers_a");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_prefers_a");
         let src = tmp.join("src");
         let sub = src.join("foo");
         std::fs::create_dir_all(&sub).unwrap();
@@ -245,7 +244,7 @@ mod tests {
 
     #[test]
     fn resolve_use_returns_none_when_missing() {
-        let tmp = std::env::temp_dir().join("coil_manifest_test_3");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_3");
         std::fs::create_dir_all(&tmp).unwrap();
 
         let roots = default_module_roots();
@@ -257,7 +256,7 @@ mod tests {
 
     #[test]
     fn resolve_mod_finds_top_level_file() {
-        let tmp = std::env::temp_dir().join("coil_manifest_test_resolve_mod");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_resolve_mod");
         let src = tmp.join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("foo.hy"), "// empty\n").unwrap();
@@ -272,7 +271,7 @@ mod tests {
 
     #[test]
     fn namespace_of_returns_path_relative_to_root() {
-        let tmp = std::env::temp_dir().join("coil_manifest_test_4");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_4");
         let builtins = tmp.join("builtins").join("core").join("ffi");
         std::fs::create_dir_all(&builtins).unwrap();
         let file = builtins.join("dload.hy");
@@ -288,7 +287,7 @@ mod tests {
     #[test]
     fn namespace_of_dot_root_strips_project_dir() {
         let tmp = std::env::temp_dir().join(format!(
-            "coil_manifest_dot_root_{}",
+            "coil_module_roots_dot_root_{}",
             std::process::id()
         ));
         let nested = tmp.join("a");
@@ -306,7 +305,7 @@ mod tests {
     fn namespace_of_prefers_the_innermost_root() {
         // #581: `.` before `.deps/shapes/src`, as the LSP lists them.
         let tmp = std::env::temp_dir().join(format!(
-            "coil_manifest_nested_roots_{}",
+            "coil_module_roots_nested_roots_{}",
             std::process::id()
         ));
         let dep_src = tmp.join(".deps").join("shapes").join("src");
@@ -327,7 +326,7 @@ mod tests {
 
     #[test]
     fn namespace_of_returns_none_for_file_outside_all_roots() {
-        let tmp = std::env::temp_dir().join("coil_manifest_test_5");
+        let tmp = std::env::temp_dir().join("coil_module_roots_test_5");
         let outside = tmp.join("totally").join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         let file = outside.join("x.hy");

@@ -12,7 +12,7 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 
 | Issue | Detail | Linear |
 |-------|--------|--------|
-| `coil.toml` / `coil.lock` | coil reads neither. Spool parses them (old keys like `preludes` / `strict` are spool's errors) and passes `--root`, `--allow-*`, `--dload-pin` / `--dload-trusted` and `--ffi-native`. The virtual prelude is compiler-owned; undefined names already fail typecheck (`E0100`). — [project-config.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) | [COI-72](https://linear.app/ardax/issue/COI-72) |
+| Project files | coil reads no project manifest or lock; everything is a flag (`--root`, `--allow-*`, `--dload-pin` / `--dload-trusted`, `--ffi-native`). The virtual prelude is compiler-owned; undefined names already fail typecheck (`E0100`). — [project-config.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) | [COI-72](https://linear.app/ardax/issue/COI-72) |
 | `import` keyword | **Non-goal:** not a synonym of `use` and not a distinct construct. Module binding is `use` only. | [COI-73](https://linear.app/ardax/issue/COI-73) |
 | `case` as `match` alias | **Non-goal:** not a synonym of `match`. Pattern matching is `match` only. | [COI-74](https://linear.app/ardax/issue/COI-74) |
 | Range `collect` | **Implemented:** numeric `Range` / `RangeInclusive` (`int` / `byte` / `float`) expose inherent `.to_vec() -> Vec<T>`. Decreasing ranges collect empty (same as `for`). Non-numeric `Ord` may construct a range; `for` and `.to_vec()` are type errors (no `succ` protocol). Step syntax still deferred. | [COI-75](https://linear.app/ardax/issue/COI-75) |

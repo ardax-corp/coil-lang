@@ -108,7 +108,7 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 ///
 /// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
 /// here. If the bytecode has the op, it runs. `dload` still uses pin /
-/// trusted integrity when `dload_gate` is supplied. `coil.toml` is not consulted.
+/// trusted integrity when `dload_gate` is supplied.
 /// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;
 /// older archives keep empty maps (conservative stack GC). Seek+CALL
 /// archives still grow to [`machine::MAX_OPERAND_STACK_SLOTS`].

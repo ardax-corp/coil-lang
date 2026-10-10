@@ -1,7 +1,6 @@
 //! Host capability grants and `dload` integrity inputs, from CLI flags only.
 //!
-//! coil never reads `coil.toml` or `coil.lock`: spool reads them and passes
-//! the flags. Capabilities are checked at typecheck and the VM does not
+//! Capabilities are checked at typecheck and the VM does not
 //! re-apply them (the compiled artifact is the grant). Native pins and
 //! trusted stems feed the run-time `dload` gate.
 

@@ -63,8 +63,7 @@ instead (it returns a park request), so a TLS handshake does not stall the
 scheduler.
 
 `Stream.attach` is a compile-time capability (`--allow-attach` / `HostGrants`,
-default deny). It is not a process-wide switch and is not read from
-`coil.toml`. Ungranted source fails the compile (`E0408`): the function form
+default deny). It is not a process-wide switch. Ungranted source fails the compile (`E0408`): the function form
 when `main` or a test reaches it, the method form at the call. Archived bytecode
 with HostInvoke 120 runs attach; there is no VM `allow_attach` re-check.
 `--allow-dload` does not grant attach. Function pointers must be symbols from a hashed (or trusted/host)
