@@ -9,6 +9,7 @@ use coil_args::{
     expand_o_shorts, merge_entry,
 };
 use compiler::{HostGrants, OptLevel};
+use crate::package_app::{FfiNative, parse_ffi_native};
 
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
 
@@ -38,13 +39,15 @@ pub(crate) enum Command {
         filename: String,
         output: String,
         runner: Option<PathBuf>,
+        natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
     },
-    /// Dump / list native lock metadata for `spool download`.
+    /// Dump / list native lock metadata.
     Natives {
-        /// Packaged executable (omit to use project `[[ffi.native]]`).
+        /// Packaged executable (omit to use the `--ffi-native` rows).
         exe: Option<String>,
+        natives: Vec<FfiNative>,
         /// Emit fetch TSV instead of JSON.
         tsv: bool,
     },
@@ -93,9 +96,10 @@ pub(crate) struct CliArgs {
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
-`--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck — coil.toml\n\
-does not grant them. `coil run out.hyc` and coil-embed do not re-apply allow flags;\n\
-if the bytecode has the op, it runs. `--ffi-search-path` is lookup only.\n\
+`--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
+`coil run out.hyc` and coil-embed do\n\
+not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
+lookup only. `--dload-pin STEM=SHA256` / `--dload-trusted STEM` are the dload integrity.\n\
 `dload(\"c\")` stays denied even if flagged."
 )]
 struct RawCli {
@@ -196,6 +200,10 @@ enum RawCommand {
         /// Runner template (default: `coil-embed` beside this binary)
         #[arg(long, value_name = "PATH")]
         runner: Option<PathBuf>,
+        /// Native library to embed in the native lock (repeatable):
+        /// name=STEM,version=V,path=DIR[,package=P][,requires=a;b][,requires-hint=TEXT]
+        #[arg(long = "ffi-native", value_name = "SPEC", value_parser = parse_ffi_native, action = clap::ArgAction::Append)]
+        ffi_native: Vec<FfiNative>,
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
@@ -205,7 +213,7 @@ enum RawCommand {
         /// Entry `.hy` file
         file: Option<String>,
     },
-    /// Native lock helpers for `spool download`
+    /// Native lock helpers
     Natives {
         #[command(subcommand)]
         action: NativesAction,
@@ -299,9 +307,12 @@ enum RawCommand {
 enum NativesAction {
     /// Print the native lock (JSON by default) for a packaged exe or the current project
     Dump {
-        /// Packaged executable; omit to read `[[ffi.native]]` from the project `coil.toml`
+        /// Packaged executable; omit to list the `--ffi-native` rows
         file: Option<String>,
-        /// Emit fetch TSV: package, version, filename, url, sha256, size
+        /// Native library row, as for `coil package` (repeatable)
+        #[arg(long = "ffi-native", value_name = "SPEC", value_parser = parse_ffi_native, action = clap::ArgAction::Append)]
+        ffi_native: Vec<FfiNative>,
+        /// Emit TSV: package, version, filename, sha256, size
         #[arg(long)]
         tsv: bool,
     },
@@ -533,6 +544,7 @@ impl RawCli {
                 entry_flag,
                 output,
                 runner,
+                ffi_native,
                 check_native,
                 strip_debug,
                 file,
@@ -554,6 +566,7 @@ impl RawCli {
                         filename,
                         output: out,
                         runner,
+                        natives: ffi_native,
                         check_native,
                         strip_debug,
                     },
@@ -566,9 +579,17 @@ impl RawCli {
                 )
             }
             Some(RawCommand::Natives {
-                action: NativesAction::Dump { file, tsv },
+                action: NativesAction::Dump {
+                    file,
+                    ffi_native,
+                    tsv,
+                },
             }) => cli_from(
-                Command::Natives { exe: file, tsv },
+                Command::Natives {
+                    exe: file,
+                    natives: ffi_native,
+                    tsv,
+                },
                 LogFlags::default(),
                 false,
                 OptLevelFlags::default(),
@@ -917,6 +938,7 @@ mod tests {
                 filename: "examples/fib.hy".into(),
                 output: "fib".into(),
                 runner: None,
+                natives: Vec::new(),
                 check_native: false,
                 strip_debug: false,
             }
@@ -934,6 +956,8 @@ mod tests {
             "--strip-debug",
             "--runner",
             "/usr/bin/coil",
+            "--ffi-native",
+            "name=sum,version=0.1.0,path=native",
         ]))
         .unwrap();
         assert_eq!(
@@ -942,10 +966,70 @@ mod tests {
                 filename: "app.hy".into(),
                 output: "myapp".into(),
                 runner: Some(PathBuf::from("/usr/bin/coil")),
+                natives: vec![FfiNative {
+                    name: "sum".into(),
+                    package: "sum".into(),
+                    version: "0.1.0".into(),
+                    path: PathBuf::from("native"),
+                    requires: Vec::new(),
+                    requires_hint: String::new(),
+                }],
                 check_native: true,
                 strip_debug: true,
             }
         );
+    }
+
+    #[test]
+    fn parse_ffi_native_optional_keys_and_escaped_comma() {
+        let n = parse_ffi_native(
+            "name=re,package=coil-regex,version=1.2.0,path=lib,\
+             requires=libpcre2.so;libz.so,requires-hint=apt install pcre2\\, zlib",
+        )
+        .unwrap();
+        assert_eq!(n.package, "coil-regex");
+        assert_eq!(n.requires, vec!["libpcre2.so".to_string(), "libz.so".to_string()]);
+        assert_eq!(n.requires_hint, "apt install pcre2, zlib");
+        assert!(parse_ffi_native("name=re,version=1").is_err());
+        assert!(parse_ffi_native("name=re,colour=red").is_err());
+    }
+
+    #[test]
+    fn parse_natives_dump_takes_ffi_native_rows() {
+        let cli = parse_args(&args(&[
+            "natives",
+            "dump",
+            "--ffi-native",
+            "name=sum,version=0.1.0,path=native",
+        ]))
+        .unwrap();
+        let Command::Natives { exe, natives, .. } = cli.command else {
+            panic!("expected natives");
+        };
+        assert_eq!(exe, None);
+        assert_eq!(natives.len(), 1);
+        assert_eq!(natives[0].name, "sum");
+    }
+
+    #[test]
+    fn parse_dload_pin_and_trusted() {
+        let sha = "AB".repeat(32);
+        let cli = parse_args(&args(&[
+            "run",
+            "out.hyc",
+            "--dload-pin",
+            &format!("tls={sha}"),
+            "--dload-trusted",
+            "sum",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.host_grants.dload_pins,
+            vec![("tls".to_string(), "ab".repeat(32))]
+        );
+        assert_eq!(cli.host_grants.dload_trusted, vec!["sum".to_string()]);
+        assert!(parse_args(&args(&["run", "out.hyc", "--dload-pin", "tls=abc"])).is_err());
+        assert!(parse_args(&args(&["run", "out.hyc", "--dload-pin", "tls"])).is_err());
     }
 
     #[test]

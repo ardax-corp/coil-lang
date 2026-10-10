@@ -44,12 +44,11 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 Search roots for an opened workspace are `src`, `.` (sibling files at the
 project root), and each `.deps/*/src` checkout when present, then any
 `--root DIR` given on the command line. A file under nested roots is
-namespaced by the innermost one. Language `use`/`mod` still does **not**
-read `[module].roots` from `coil.toml` (same rule as `coil` without
-`--root`); tools pass them as flags instead.
+namespaced by the innermost one. Other roots come only from `--root`
+flags, as for `coil`.
 
 `coil lsp` takes the same root and host-grant flags as `coil compile`, so a
-project tool (spool) can start it with the flags it uses everywhere else:
+project tool can start it with the flags it uses everywhere else:
 
 ```
 coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exec
@@ -89,8 +88,6 @@ Leave these for a later LSP pass unless they block daily editing:
   (strings, arrays, enums).
 - The default-arm quick fix skips value `match`es (a value arm needs an
   expression the fix cannot choose).
-- `coil.toml` `[module].roots` (compiler language path ignores it; pass
-  `--root` to `coil lsp`).
 - Semantic token modifiers (`declaration`, `readonly`, …).
 
 The reporting crate exposes byte-to-LSP UTF-16 position conversion so other

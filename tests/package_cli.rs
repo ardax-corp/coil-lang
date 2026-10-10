@@ -190,14 +190,14 @@ fn package_ffi_without_native_inventory_fails() {
         .expect("spawn coil package");
     assert!(
         !status.success(),
-        "expected package to fail without [[ffi.native]] for sum"
+        "expected package to fail without --ffi-native for sum"
     );
     let _ = std::fs::remove_file(&out);
 }
 
 #[cfg(unix)]
 #[test]
-fn package_with_native_lock_requires_spool_download_then_runs() {
+fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed();
@@ -256,23 +256,6 @@ fn main() {
 "#,
     )
     .unwrap();
-    std::fs::write(
-        tmp.join("coil.toml"),
-        r#"
-[module]
-roots = ["./src"]
-
-[ffi]
-search_paths = ["./native"]
-
-[[ffi.native]]
-name = "sum"
-version = "0.0.1"
-path = "./native"
-url = "https://example.com/libsum.so"
-"#,
-    )
-    .unwrap();
 
     let out = tmp.join(format!("sum-app{}", std::env::consts::EXE_SUFFIX));
     let packaged = Command::new(&bin)
@@ -287,15 +270,15 @@ url = "https://example.com/libsum.so"
             out.to_str().unwrap(),
             "--runner",
             embed.to_str().unwrap(),
-            "--allow-dload",
-            "sum",
+            "--ffi-native",
+            "name=sum,version=0.0.1,path=./native",
         ])
         .current_dir(&tmp)
         .output()
         .expect("package");
     assert!(
         packaged.status.success(),
-        "package with [[ffi.native]] should succeed: {}",
+        "package with --ffi-native should succeed: {}",
         String::from_utf8_lossy(&packaged.stderr)
     );
 
@@ -322,11 +305,11 @@ url = "https://example.com/libsum.so"
     );
     assert!(
         !run_missing.status.success(),
-        "expected fail without cache"
+        "expected the dload to fail with the library nowhere"
     );
     let err = String::from_utf8_lossy(&run_missing.stderr);
     assert!(
-        err.contains("spool download") || err.contains("native libraries missing"),
+        err.contains("sum"),
         "stderr={err}"
     );
 
@@ -363,6 +346,23 @@ url = "https://example.com/libsum.so"
         run_ok.status.success(),
         "packaged app failed after cache fill: {}",
         String::from_utf8_lossy(&run_ok.stderr)
+    );
+
+    // Beside the executable works too (no cache).
+    std::fs::remove_dir_all(&natives_root).unwrap();
+    std::fs::copy(&so, out.with_file_name(&lib_name)).unwrap();
+    let run_beside = run_command_with_timeout(
+        {
+            let mut c = Command::new(&out);
+            c.env("COIL_NATIVES_DIR", &natives_root);
+            c
+        },
+        15,
+    );
+    assert!(
+        run_beside.status.success(),
+        "packaged app failed with the library beside it: {}",
+        String::from_utf8_lossy(&run_beside.stderr)
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

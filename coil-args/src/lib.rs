@@ -72,9 +72,9 @@ impl CompileProfileFlags {
     }
 }
 
-/// Host capabilities. Default deny (same as a missing coil.toml).
+/// Host capabilities and `dload` integrity. Default deny.
 ///
-/// Not read from Manifest. Used at **compile** (`E0406`–`E0411`, `E0414`).
+/// Capabilities are checked at **compile** (`E0406`–`E0411`, `E0414`).
 /// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
 /// is the grant. `--ffi-search-path` is lookup, not a dload grant.
 /// `dload("c")` stays denied even with `--allow-dload c`.
@@ -107,12 +107,37 @@ pub struct HostGrantFlags {
     /// Allow everything above (not dload)
     #[arg(short = 'A', long)]
     pub allow_all: bool,
-    /// Allow dload of STEM (repeatable). Still needs lock hash or trusted.
+    /// Allow dload of STEM (repeatable). Still needs --dload-pin or --dload-trusted.
     #[arg(long = "allow-dload", value_name = "STEM", action = clap::ArgAction::Append)]
     pub allow_dload: Vec<String>,
     /// Extra FFI library search directory (repeatable; lookup only)
     #[arg(long = "ffi-search-path", value_name = "DIR", action = clap::ArgAction::Append)]
     pub ffi_search_path: Vec<PathBuf>,
+    /// The library dload loads for STEM must have this SHA-256 (repeatable)
+    #[arg(
+        long = "dload-pin",
+        value_name = "STEM=SHA256",
+        value_parser = parse_dload_pin,
+        action = clap::ArgAction::Append
+    )]
+    pub dload_pin: Vec<(String, String)>,
+    /// Load STEM's library without a hash check (repeatable)
+    #[arg(long = "dload-trusted", value_name = "STEM", action = clap::ArgAction::Append)]
+    pub dload_trusted: Vec<String>,
+}
+
+/// `STEM=SHA256` with a 64-digit hex digest.
+pub fn parse_dload_pin(s: &str) -> Result<(String, String), String> {
+    let (stem, hash) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected STEM=SHA256, got `{s}`"))?;
+    if stem.is_empty() {
+        return Err(format!("missing stem in `{s}`"));
+    }
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("`{hash}` is not a 64-digit hex SHA-256"));
+    }
+    Ok((stem.to_string(), hash.to_ascii_lowercase()))
 }
 
 impl HostGrantFlags {
@@ -128,6 +153,8 @@ impl HostGrantFlags {
             || self.allow_all
             || !self.allow_dload.is_empty()
             || !self.ffi_search_path.is_empty()
+            || !self.dload_pin.is_empty()
+            || !self.dload_trusted.is_empty()
     }
 
     pub fn into_grants(self) -> HostGrants {
@@ -142,6 +169,8 @@ impl HostGrantFlags {
             allow_env: self.allow_env,
             allow_dload: self.allow_dload,
             ffi_search_paths: self.ffi_search_path,
+            dload_pins: self.dload_pin,
+            dload_trusted: self.dload_trusted,
         };
         if self.allow_all {
             grants.grant_all();

@@ -17,7 +17,7 @@ mod cli;
 mod package_app;
 
 use cli::{Command, DEFAULT_OUT, parse_args, print_version};
-use package_app::{cmd_package, native_lock_from_project_manifest};
+use package_app::{FfiNative, cmd_package, native_lock_from_ffi_natives};
 
 
 fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
@@ -371,7 +371,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
     }
 }
 
-fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, tsv: bool) {
+fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNative], tsv: bool) {
     use common::{read_embedded_native_lock, read_package_trailer};
 
     let lock = if let Some(path) = exe {
@@ -397,20 +397,20 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, tsv: bool) {
                 pipeline,
                 ErrorCode::IoError,
                 format!(
-                    "`{path}` has no embedded native lock (no `[[ffi.native]]` at package time)"
+                    "`{path}` has no embedded native lock (no `--ffi-native` at package time)"
                 ),
             ),
             Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
         }
     } else {
-        match native_lock_from_project_manifest(pipeline) {
+        match native_lock_from_ffi_natives(natives) {
             Ok(lock) => lock,
             Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
         }
     };
 
     let out = if tsv {
-        lock.to_fetch_tsv()
+        lock.to_tsv()
     } else {
         lock.to_json()
     };
@@ -508,6 +508,7 @@ fn main() {
                     filename,
                     output,
                     runner,
+                    natives,
                     check_native,
                     strip_debug,
                 } => {
@@ -516,13 +517,14 @@ fn main() {
                         &filename,
                         &output,
                         runner.as_deref(),
+                        &natives,
                         check_native,
                         strip_debug,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
                 }
-                Command::Natives { exe, tsv } => {
-                    cmd_natives_dump(&mut pipeline, exe.as_deref(), tsv);
+                Command::Natives { exe, natives, tsv } => {
+                    cmd_natives_dump(&mut pipeline, exe.as_deref(), &natives, tsv);
                 }
                 Command::Test
                 | Command::Mutate

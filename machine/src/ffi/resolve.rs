@@ -223,7 +223,7 @@ pub fn library_candidates(
 /// Resolve and load a shared library, trying each candidate in order.
 ///
 /// The gate runs before `Library::new`. Stems open only when allowed
-/// and either lock-hashed, allow+trusted, or a host unhashed grant.
+/// and either pinned, allow+trusted, or a host unhashed grant.
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
@@ -370,7 +370,7 @@ mod tests {
         })
     }
 
-    /// COI-233: `[ffi] search_paths` must not grow a cwd `./native/libtls.so` fallback.
+    /// COI-233: `--ffi-search-path` dirs must not grow a cwd `./native/libtls.so` fallback.
     #[test]
     fn search_paths_do_not_fallback_to_cwd_native_tls() {
         let search = vec![PathBuf::from("/allowed/ffi")];

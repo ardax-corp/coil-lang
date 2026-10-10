@@ -1,17 +1,14 @@
 // TLS is userland: https://github.com/ardax-corp/coil-tls
 //
-// Add coil-tls to module roots and native search paths:
+// Add coil-tls to the module roots and the native search path:
 //
-//   [module]
-//   roots = ["./src", "../coil-tls/src"]
-//   [ffi]
-//   search_paths = ["../coil-tls/native"]
+//   coil --root src --root ../coil-tls/src --ffi-search-path ../coil-tls/native \
+//     --allow-dload tls --dload-trusted tls app.hy
 //
-// Then `coil run` / in-memory run with `--allow-dload tls`.
-// `tls` needs `--allow-dload tls` plus `trusted = true` on the coil-tls dep
-// (or a matching `[[package.native]] sha256`). search_paths only locates
-// the file. Without allow, `dload` is `LibraryDenied`. A missing libtls
-// that passed the gate is `LibraryNotFound`.
+// `tls` needs `--allow-dload tls` plus `--dload-trusted tls` (or
+// `--dload-pin tls=SHA256`). `--ffi-search-path` only locates the file.
+// Without allow, `dload` is `LibraryDenied`. A missing libtls that passed
+// the gate is `LibraryNotFound`.
 //
 // Then:
 //   use tls::{client, server};

@@ -107,8 +107,8 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
 ///
 /// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
-/// here. If the bytecode has the op, it runs. `dload` still uses lock hash /
-/// trusted integrity when `dload_gate` is supplied. `coil.toml` is not consulted.
+/// here. If the bytecode has the op, it runs. `dload` still uses pin /
+/// trusted integrity when `dload_gate` is supplied.
 /// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;
 /// older archives keep empty maps (conservative stack GC). Seek+CALL
 /// archives still grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
@@ -159,35 +159,22 @@ pub fn execute_archived_program(
     machine.panicked()
 }
 
-/// Verify every direct native lock entry exists in the natives cache with matching size.
-fn ensure_native_cache(lock: &NativeLock, exe: &Path) -> Result<Vec<PathBuf>, String> {
+/// Natives-cache directories that hold a lock entry's library (size checked).
+///
+/// A library may also sit beside the executable or in `lib/` there; one found
+/// nowhere fails at its `dload`. Getting the files in place is up to the user.
+fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
     let root = default_natives_root();
     let mut dirs = Vec::new();
-    let mut missing = Vec::new();
     for entry in &lock.entries {
         let path = NativeLock::entry_cache_path(&root, entry);
         let dir = NativeLock::entry_cache_dir(&root, entry);
-        if path.is_file()
-            && let Ok(meta) = std::fs::metadata(&path)
-                && meta.len() == entry.size {
-                    if !dirs.iter().any(|d: &PathBuf| d == &dir) {
-                        dirs.push(dir);
-                    }
-                    continue;
-                }
-        missing.push(format!(
-            "{} {} ({})",
-            entry.package, entry.version, entry.filename
-        ));
+        let cached = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == entry.size);
+        if cached && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
     }
-    if !missing.is_empty() {
-        return Err(format!(
-            "Unable to continue: native libraries missing:\n  {}\nRun: spool download {}",
-            missing.join("\n  "),
-            exe.display()
-        ));
-    }
-    Ok(dirs)
+    dirs
 }
 
 /// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
@@ -247,21 +234,13 @@ pub fn try_run_embedded() -> Option<bool> {
                 );
                 exit(1);
             }
-            match ensure_native_cache(&lock, &exe) {
-                Ok(dirs) => {
-                    ffi_search_paths = dirs;
-                    let pins: Vec<(String, String)> = lock
-                        .entries
-                        .iter()
-                        .map(|e| (e.stem.clone(), e.sha256.clone()))
-                        .collect();
-                    dload_gate = Some(DloadGate::from_consumer(&pins));
-                }
-                Err(msg) => {
-                    eprintln!("error: {msg}");
-                    exit(1);
-                }
-            }
+            ffi_search_paths = native_cache_dirs(&lock);
+            let pins: Vec<(String, String)> = lock
+                .entries
+                .iter()
+                .map(|e| (e.stem.clone(), e.sha256.clone()))
+                .collect();
+            dload_gate = Some(DloadGate::from_consumer(&pins));
         }
         Ok(_) => {}
         Err(e) => {

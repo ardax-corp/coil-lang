@@ -40,7 +40,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--allow-dload STEM` | Allow `dload` of STEM (repeatable; `dload("c")` still denied) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (repeatable; not a dload grant) |
 
-Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only — `coil.toml` does not grant them. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
+Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
 
 A `.hyc` archive as the entry (`coil dissect out.hyc`) dumps its bytecode
 without compiling; `--il` / `--il-post` / `--hir` / `--effects` / `--mir` / `--ast` need a source.

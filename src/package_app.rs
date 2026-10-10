@@ -11,7 +11,7 @@ use common::{
     is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
-use compiler::{Manifest, Pipeline};
+use compiler::Pipeline;
 use machine::platform_shared_lib_filename;
 use reporting::ErrorCode;
 use rkyv::rancor::Error;
@@ -102,23 +102,81 @@ fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
     ))
 }
 
-fn spool_project() -> (PathBuf, Manifest) {
-    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let dir = Manifest::locate_dir(&start).unwrap_or(start);
-    let manifest = Manifest::load(&dir).unwrap_or_default();
-    (dir, manifest)
+/// A native library the packaged app loads (one `--ffi-native` flag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfiNative {
+    /// `dload` stem (e.g. `regex`).
+    pub name: String,
+    /// Natives cache package name (defaults to `name`).
+    pub package: String,
+    pub version: String,
+    /// Directory holding the platform library file (relative to the cwd).
+    pub path: PathBuf,
+    /// Transitive sonames expected from the OS (diagnostics only).
+    pub requires: Vec<String>,
+    /// Install hint when a `requires` soname is missing.
+    pub requires_hint: String,
 }
 
-/// Build a [`NativeLock`] from bytecode `dload` stems and `[[ffi.native]]` rows.
+/// Parse `name=…,version=…,path=…[,package=…][,requires=a;b][,requires-hint=…]`.
+/// `\,` is a literal comma inside a value.
+pub fn parse_ffi_native(spec: &str) -> Result<FfiNative, String> {
+    let mut fields: Vec<String> = vec![String::new()];
+    let mut chars = spec.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&',') => {
+                chars.next();
+                fields.last_mut().expect("one field").push(',');
+            }
+            ',' => fields.push(String::new()),
+            c => fields.last_mut().expect("one field").push(c),
+        }
+    }
+    let (mut name, mut package, mut version, mut path) = (None, None, None, None);
+    let mut requires = Vec::new();
+    let mut requires_hint = String::new();
+    for field in &fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("`{field}` is not key=value"))?;
+        let value = value.to_string();
+        match key {
+            "name" => name = Some(value),
+            "package" => package = Some(value),
+            "version" => version = Some(value),
+            "path" => path = Some(PathBuf::from(value)),
+            "requires" => {
+                requires = value
+                    .split(';')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
+            "requires-hint" => requires_hint = value,
+            _ => return Err(format!("unknown key `{key}`")),
+        }
+    }
+    let missing = |key: &str| format!("missing `{key}` in `{spec}`");
+    let name = name.ok_or_else(|| missing("name"))?;
+    Ok(FfiNative {
+        package: package.unwrap_or_else(|| name.clone()),
+        version: version.ok_or_else(|| missing("version"))?,
+        path: path.ok_or_else(|| missing("path"))?,
+        name,
+        requires,
+        requires_hint,
+    })
+}
+
+/// Build a [`NativeLock`] from bytecode `dload` stems and `--ffi-native` rows.
 pub fn build_native_lock(
-    _pipeline: &Pipeline,
+    natives: &[FfiNative],
     bytecode: &[Byte],
     strings: &[String],
 ) -> Result<NativeLock, String> {
     let stems = ffi_library_names_from_bytecode(bytecode, strings);
     let mut entries = Vec::new();
-    let (root, manifest) = spool_project();
-    let natives = &manifest.ffi_natives;
 
     for stem in &stems {
         if is_system_ffi_stem(stem) {
@@ -126,31 +184,24 @@ pub fn build_native_lock(
         }
         let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
             format!(
-                "FFI library `{stem}` is loaded but not declared in `[[ffi.native]]`; \
-                     add a row with name/version/path/url (system libs like `c` need no entry)"
+                "FFI library `{stem}` is loaded but has no `--ffi-native name={stem},…`; \
+                     pass one with name/version/path (system libs like `c` need no entry)"
             )
         })?;
         let filename = platform_shared_lib_filename(&decl.name);
-        let lib_path = root.join(&decl.path).join(&filename);
+        let lib_path = decl.path.join(&filename);
         if !lib_path.is_file() {
             return Err(format!(
-                "[[ffi.native]] `{stem}`: expected library at `{}`",
+                "--ffi-native `{stem}`: expected library at `{}`",
                 lib_path.display()
             ));
         }
         let (sha256, size) = sha256_hex_file(&lib_path)?;
-        if !decl.url.starts_with("https://") {
-            return Err(format!(
-                "[[ffi.native]] `{stem}`: url must be https://, got `{}`",
-                decl.url
-            ));
-        }
         entries.push(NativeLockEntry {
             package: decl.package.clone(),
             version: decl.version.clone(),
             stem: decl.name.clone(),
             filename,
-            url: decl.url.clone(),
             sha256,
             size,
             requires: decl.requires.clone(),
@@ -158,8 +209,7 @@ pub fn build_native_lock(
         });
     }
 
-    // Also include declared natives that may be loaded via non-constant paths? Plan says
-    // constant stems only. Extra [[ffi.native]] rows unused by bytecode are ignored.
+    // Constant stems only: `--ffi-native` rows the bytecode never loads are ignored.
 
     Ok(NativeLock {
         os: std::env::consts::OS.to_string(),
@@ -168,34 +218,29 @@ pub fn build_native_lock(
     })
 }
 
-/// Build a native lock from the current project's `[[ffi.native]]` (project-mode download).
-pub fn native_lock_from_project_manifest(_pipeline: &Pipeline) -> Result<NativeLock, String> {
-    let (root, manifest) = spool_project();
+/// Build a native lock from every `--ffi-native` row (`coil natives dump`).
+pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock, String> {
     let mut entries = Vec::new();
-    for decl in &manifest.ffi_natives {
+    for decl in natives {
         if is_system_ffi_stem(&decl.name) {
             continue;
         }
         let filename = platform_shared_lib_filename(&decl.name);
-        let lib_path = root.join(&decl.path).join(&filename);
-        let (sha256, size) = if lib_path.is_file() {
-            sha256_hex_file(&lib_path)?
-        } else {
-            // Allow project download when the local artifact is not built yet; hash
-            // will be verified against the downloaded bytes using the URL payload only
-            // if we had a pinned hash — require local file for a trusted pin.
+        let lib_path = decl.path.join(&filename);
+        // The pin is the local file's hash, so the file must exist.
+        if !lib_path.is_file() {
             return Err(format!(
-                "[[ffi.native]] `{}`: local library missing at `{}` (build it or package with a known file to pin sha256)",
+                "--ffi-native `{}`: expected library at `{}`",
                 decl.name,
                 lib_path.display()
             ));
-        };
+        }
+        let (sha256, size) = sha256_hex_file(&lib_path)?;
         entries.push(NativeLockEntry {
             package: decl.package.clone(),
             version: decl.version.clone(),
             stem: decl.name.clone(),
             filename,
-            url: decl.url.clone(),
             sha256,
             size,
             requires: decl.requires.clone(),
@@ -214,6 +259,7 @@ pub fn cmd_package(
     filename: &str,
     output: &str,
     runner: Option<&Path>,
+    natives: &[FfiNative],
     check_native: bool,
     strip_debug: bool,
 ) {
@@ -237,7 +283,7 @@ pub fn cmd_package(
         flags |= PACKAGE_FLAG_USES_FFI;
     }
 
-    let native_lock = match build_native_lock(pipeline, &bytecode, &strings) {
+    let native_lock = match build_native_lock(natives, &bytecode, &strings) {
         Ok(lock) => lock,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
@@ -246,11 +292,12 @@ pub fn cmd_package(
         // FFI opcodes present but only system libs (or dynamic dload) — OK for libc-only.
         eprintln!(
             "note: this program uses FFI; only system libraries were detected. \
-             Userland natives need `[[ffi.native]]` rows and `spool download` on the target."
+             Userland natives need `--ffi-native` and the library on the target."
         );
     } else if !native_lock.entries.is_empty() {
         eprintln!(
-            "note: {} native artifact(s) declared; on the target run: spool download {}",
+            "note: {} native artifact(s) declared; the target needs them in the natives \
+             cache, beside {} or in its lib/",
             native_lock.entries.len(),
             output
         );

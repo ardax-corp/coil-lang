@@ -55,14 +55,14 @@ impl PackageTrailer {
     }
 }
 
-/// One direct shared-library artifact declared for packaging / `spool download`.
+/// One direct shared-library artifact a packaged app loads. Locating or
+/// shipping the file is up to the user; the runner only searches for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLockEntry {
     pub package: String,
     pub version: String,
     pub stem: String,
     pub filename: String,
-    pub url: String,
     pub sha256: String,
     pub size: u64,
     pub requires: Vec<String>,
@@ -90,7 +90,6 @@ impl NativeLock {
             out.push_str(&format!("      \"version\": {},\n", json_string(&e.version)));
             out.push_str(&format!("      \"stem\": {},\n", json_string(&e.stem)));
             out.push_str(&format!("      \"filename\": {},\n", json_string(&e.filename)));
-            out.push_str(&format!("      \"url\": {},\n", json_string(&e.url)));
             out.push_str(&format!("      \"sha256\": {},\n", json_string(&e.sha256)));
             out.push_str(&format!("      \"size\": {},\n", e.size));
             out.push_str("      \"requires\": [");
@@ -139,7 +138,6 @@ impl NativeLock {
                 version: json_obj_str(e, "version")?,
                 stem: json_obj_str(e, "stem")?,
                 filename: json_obj_str(e, "filename")?,
-                url: json_obj_str(e, "url")?,
                 sha256: json_obj_str(e, "sha256")?,
                 size: json_obj_u64(e, "size")?,
                 requires,
@@ -149,16 +147,16 @@ impl NativeLock {
         Ok(Self { os, arch, entries })
     }
 
-    /// TSV lines for bash `spool download`: package, version, filename, url, sha256, size.
+    /// TSV lines: package, version, filename, sha256, size.
     /// Prefixed with `# os=…` / `# arch=…` comments for host checks.
-    pub fn to_fetch_tsv(&self) -> String {
+    pub fn to_tsv(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# os={}\n", self.os));
         out.push_str(&format!("# arch={}\n", self.arch));
         for e in &self.entries {
             out.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\n",
-                e.package, e.version, e.filename, e.url, e.sha256, e.size
+                "{}\t{}\t{}\t{}\t{}\n",
+                e.package, e.version, e.filename, e.sha256, e.size
             ));
         }
         out
@@ -667,7 +665,6 @@ mod tests {
                 version: "0.3.0".into(),
                 stem: "regex".into(),
                 filename: "libregex.so".into(),
-                url: "https://example.com/libregex.so".into(),
                 sha256: "abcd".into(),
                 size: 12,
                 requires: vec!["libpcre2-8.so.0".into()],
@@ -700,6 +697,16 @@ mod tests {
         };
         let again = NativeLock::from_json(&lock.to_json()).unwrap();
         assert_eq!(again, lock);
+    }
+
+    #[test]
+    fn native_lock_json_ignores_a_legacy_url() {
+        let json = r#"{"os": "linux", "arch": "x86_64", "entries": [{"package": "sum",
+            "version": "0.0.1", "stem": "sum", "filename": "libsum.so",
+            "url": "https://example.com/libsum.so", "sha256": "ab", "size": 3}]}"#;
+        let lock = NativeLock::from_json(json).unwrap();
+        assert_eq!(lock.entries[0].stem, "sum");
+        assert_eq!(lock.entries[0].size, 3);
     }
 
     #[test]

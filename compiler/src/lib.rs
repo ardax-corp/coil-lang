@@ -22,9 +22,8 @@ pub use mir::{start_mir_capture, take_mir_capture};
 pub(crate) mod hir;
 mod host_grants;
 mod local_scopes;
-mod lockfile;
 pub mod macros;
-mod manifest;
+mod module_roots;
 mod monomorphize;
 mod pipeline;
 mod project_index;
@@ -42,10 +41,7 @@ pub use dissect::{
     format_il, format_symbol_index, matches_fn_pat,
 };
 pub use host_grants::HostGrants;
-pub use manifest::{
-    DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo, Scripts,
-    default_module_roots,
-};
+pub use module_roots::default_module_roots;
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
 
