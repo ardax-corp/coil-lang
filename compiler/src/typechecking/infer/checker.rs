@@ -608,7 +608,7 @@ impl Checker {
             } | BuiltinExport::Enum {
                 name: common::BUILTIN_FFI_ERROR_KIND_ENUM
             } | BuiltinExport::FfiFn { .. }
-        );
+        ) || host_registry == Some(common::FFI_READ_INTS_NATIVE);
         if needs_ffi_error {
             if !self.enums.contains_key(common::BUILTIN_FFI_ERROR_KIND_ENUM) {
                 self.register_builtin_ffi_error_kind();
@@ -1225,6 +1225,13 @@ impl Checker {
         let res_int_env = result_app_ty(int(), env_err);
 
         let ty = match registry {
+            common::FFI_READ_INTS_NATIVE => fun(
+                &[int(), int(), int()],
+                result_app_ty(
+                    vec_app_ty(int()),
+                    Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()),
+                ),
+            ),
             "fs_exists" | "fs_is_file" | "fs_is_dir" | "fs_is_symlink" => {
                 fun(&[string()], res_bool_io)
             }

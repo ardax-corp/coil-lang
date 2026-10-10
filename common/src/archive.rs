@@ -126,7 +126,9 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 35 — HostInvoke 159 (`contract_fail`): a failed `requires` panics with
 ///      the caller's location. Older archives never reference it.
 /// 36 — FFI type tag 15 (`ffi::types::Bytes`): a `Vec<byte>` passed as a
-///      `uint8_t *`. Older archives never emit it.
+///      `uint8_t *`. HostInvoke 160 (`ffi_read_ints`): `ffi::read_ints`
+///      copies `int64_t`s from a native pointer. Older archives never
+///      reference either.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
