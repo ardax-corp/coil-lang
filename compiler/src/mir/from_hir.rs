@@ -123,8 +123,9 @@ pub fn lower_body(hir: &HirBody, slots: &[Option<u32>]) -> Result<MirFunc, Refus
     Ok(func)
 }
 
-/// Thread jumps through empty blocks, then lay the blocks out in `order`,
-/// dropping the ones nothing reaches.
+/// Thread jumps through empty blocks (but not into a φ block from a
+/// branch), then lay the blocks out in `order`, dropping the ones nothing
+/// reaches.
 fn tidy(func: &mut MirFunc, order: &[BlockId]) {
     loop {
         let mut changed = false;
@@ -144,8 +145,13 @@ fn tidy(func: &mut MirFunc, order: &[BlockId]) {
                 .collect();
             let mut left = false;
             for p in preds {
-                // Two edges from `p` into `c` would need two φ incomings.
-                if func.block(p).term.as_ref().is_some_and(|t| t.succs().contains(&c)) {
+                // Two edges from `p` into `c` would need two φ incomings,
+                // and a branch straight into a φ block would put the φ
+                // copies on a critical edge, where emit has to jump around
+                // them: keep the split block there.
+                let succs = func.block(p).term.as_ref().map_or(Vec::new(), |t| t.succs());
+                let phis = func.block(c).insts.iter().any(|i| matches!(i, MirInst::Phi { .. }));
+                if succs.contains(&c) || (succs.len() > 1 && phis) {
                     left = true;
                     continue;
                 }
@@ -622,6 +628,12 @@ impl Lower<'_> {
     }
 
     fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
+        // `if !c` branches on `c` with the edges swapped, as HIR lowering
+        // inverts it.
+        let (cond, negated) = match self.hir.expr(cond).kind {
+            HirKind::Un { op: UnOp::Not, operand } => (operand, true),
+            _ => (cond, false),
+        };
         let Some(c) = self.word(cond)? else {
             return Ok(Val::Never);
         };
@@ -630,7 +642,11 @@ impl Lower<'_> {
         }
         let then_b = self.b.create_block();
         let else_b = self.b.create_block();
-        self.b.branch(c, then_b, else_b).map_err(mir)?;
+        if negated {
+            self.b.branch(c, else_b, then_b).map_err(mir)?;
+        } else {
+            self.b.branch(c, then_b, else_b).map_err(mir)?;
+        }
         let mut arms = Vec::new();
         let mut join = None;
         for (block, arm) in [(then_b, Some(then)), (else_b, els)] {
