@@ -4,6 +4,9 @@
 //! checks become SMT-LIB queries (`compiler::verify`), and the solver says
 //! whether a check can fail. A proved check holds for every input; a
 //! counterexample is an input that breaks it.
+//!
+//! What it proves is written to `FILE.proof` (see `compiler::verify::proof`):
+//! later builds of the unchanged file drop the proved checks.
 
 mod solver;
 
@@ -13,6 +16,8 @@ use std::process::exit;
 
 use clap::{Command, CommandFactory, Parser};
 use coil_args::{EntryFlag, HostGrantFlags, LogFlags, RootFlags, merge_entry, parse_with, print_cli_error, print_command_help};
+use compiler::verify::encode::BOUNDS;
+use compiler::verify::proof::{Outcome, Proof, path_for};
 use compiler::verify::{FnCheck, Goal, ParamShape};
 use compiler::{ContractLevel, Pipeline};
 use reporting::{ReportConfig, ReportFormat};
@@ -50,6 +55,12 @@ struct VerifyCli {
     /// Also print each SMT-LIB query
     #[arg(long)]
     smt: bool,
+    /// Also list each index's bounds check
+    #[arg(long)]
+    bounds: bool,
+    /// Do not write FILE.proof
+    #[arg(long)]
+    no_proof: bool,
     /// Entry `.hy` file
     #[arg(value_name = "FILE")]
     file: Option<String>,
@@ -121,23 +132,59 @@ fn main() {
     };
     let source = std::fs::read_to_string(&filename).unwrap_or_default();
     let mut tally = Tally::default();
+    let mut indexes = Tally::default();
+    let mut outcomes: Vec<Vec<Outcome>> = Vec::new();
     let mut out = std::io::stdout().lock();
     for check in &checks {
+        let mut mine = Vec::new();
         if cli.fn_pat.as_deref().is_some_and(|p| !check.name.contains(p)) {
+            outcomes.push(vec![Outcome::Unknown; check.goals.len()]);
             continue;
         }
         for goal in &check.goals {
-            let line = report(&solver, check, goal, &source, &filename, cli.smt, &mut tally);
-            let _ = writeln!(out, "{line}");
+            let bounds = goal.keyword == BOUNDS;
+            let t = if bounds { &mut indexes } else { &mut tally };
+            let (line, outcome) = report(&solver, check, goal, &source, &filename, cli.smt, t);
+            mine.push(outcome);
+            if !bounds || cli.bounds {
+                let _ = writeln!(out, "{line}");
+            }
         }
+        outcomes.push(mine);
     }
     let _ = writeln!(
         out,
         "\n{} proved, {} failed, {} not proved, {} skipped",
         tally.proved, tally.failed, tally.unknown, tally.skipped
     );
+    let total = indexes.proved + indexes.failed + indexes.unknown;
+    if total > 0 {
+        let _ = writeln!(out, "{} of {total} index bounds checks proved", indexes.proved);
+    }
+    if !cli.no_proof && cli.fn_pat.is_none() {
+        let _ = writeln!(out, "{}", write_proof(&checks, &outcomes, &source, Path::new(&filename)));
+    }
     if tally.failed > 0 || (cli.strict && tally.unknown > 0) {
         exit(1);
+    }
+}
+
+/// Write `FILE.proof`, or remove a stale one when nothing was proved.
+fn write_proof(checks: &[FnCheck], outcomes: &[Vec<Outcome>], source: &str, file: &Path) -> String {
+    let proof = Proof::from_outcomes(checks, |i, j| outcomes[i][j]);
+    let path = path_for(file);
+    if proof.checks.is_empty() && (proof.bounds.is_empty() || !proof.complete) {
+        let _ = std::fs::remove_file(&path);
+        return "nothing for builds to drop".into();
+    }
+    let indexes = if proof.complete { proof.bounds.len() } else { 0 };
+    match std::fs::write(&path, proof.render(source)) {
+        Ok(()) => format!(
+            "wrote {}: builds drop {} proved checks and {indexes} index bounds checks",
+            path.display(),
+            proof.checks.len()
+        ),
+        Err(e) => format!("cannot write {}: {e}", path.display()),
     }
 }
 
@@ -166,7 +213,7 @@ fn goals_of(config: ReportConfig, cli: &VerifyCli, filename: &str) -> Option<Vec
     Some(modules.into_iter().filter(|(m, _)| mine(m)).flat_map(|(_, c)| c).collect())
 }
 
-fn report(solver: &Solver, check: &FnCheck, goal: &Goal, source: &str, file: &str, smt: bool, tally: &mut Tally) -> String {
+fn report(solver: &Solver, check: &FnCheck, goal: &Goal, source: &str, file: &str, smt: bool, tally: &mut Tally) -> (String, Outcome) {
     let at = location(source, file, goal.span.0);
     let what = match &goal.callee {
         Some(callee) => format!("{}: call to {callee}: {}", check.name, goal.clause),
@@ -174,7 +221,7 @@ fn report(solver: &Solver, check: &FnCheck, goal: &Goal, source: &str, file: &st
     };
     if goal.keyword == "decreases" {
         tally.skipped += 1;
-        return format!("skipped  {what}  [{at}] (termination is not checked)");
+        return (format!("skipped  {what}  [{at}] (termination is not checked)"), Outcome::Skipped);
     }
     let mut worst: Option<String> = None;
     let mut not_proved: Option<String> = None;
@@ -199,14 +246,14 @@ fn report(solver: &Solver, check: &FnCheck, goal: &Goal, source: &str, file: &st
     }
     if let Some(inputs) = worst {
         tally.failed += 1;
-        return format!("FAILED   {what}  [{at}]\n         counterexample: {inputs}");
+        return (format!("FAILED   {what}  [{at}]\n         counterexample: {inputs}"), Outcome::Failed);
     }
     if let Some(why) = not_proved {
         tally.unknown += 1;
-        return format!("unknown  {what}  [{at}] ({why})");
+        return (format!("unknown  {what}  [{at}] ({why})"), Outcome::Unknown);
     }
     tally.proved += 1;
-    format!("proved   {what}  [{at}]")
+    (format!("proved   {what}  [{at}]"), Outcome::Proved)
 }
 
 /// `x = 3, len(v) = 0` from a model.
