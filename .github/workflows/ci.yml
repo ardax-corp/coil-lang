@@ -28,15 +28,6 @@ jobs:
           cargo build --bin coil --bin coil-test
           cargo build --bin coil --features gc-stress --target-dir target/gc-stress
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-      - name: Diagnostic program, plain
-        if: always()
-        run: ./target/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
       - name: Diagnostic program, gc-stress
         if: always()
         run: ./target/gc-stress/debug/coil --allow-net --root examples/src --root .deps/coil-stdlib/src debug-gc/task_io_dbg.hy
-      - name: task_io.hy alone, gc-stress, x5
-        if: always()
-        run: |
-          for i in 1 2 3 4 5; do
-            ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/only 2>&1 | grep -E '^>|FAILED|test result' || true
-          done
