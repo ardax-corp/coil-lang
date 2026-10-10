@@ -43,6 +43,52 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --lib --tests --bins -- -D warnings
 
+  # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
+  # linted here.
+  clippy-windows-gnu:
+    name: clippy (windows-gnu)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (Windows)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-pkgconf
+
+      - name: Configure pkg-config (Windows)
+        shell: msys2 {0}
+        run: |
+          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
+          pkgconf --exists libffi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-gnu-clippy
+
+      - name: Clippy
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo clippy --workspace --lib --tests --bins -- -D warnings
+
   # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
   # deliberately broken programs and is not checked. The embedded prelude
   # (`compiler/src/prelude`) and the comptime fixtures are.
