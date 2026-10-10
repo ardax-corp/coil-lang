@@ -345,26 +345,9 @@ impl IlModule {
             return (ops, remap, func_maps);
         }
 
-        let mut next_label = self
-            .funcs
-            .iter()
-            .map(|b| opt::max_code_label(&b.ops))
-            .chain(std::iter::once(opt::max_code_label(&self.prologue)))
-            .chain(self.glue.iter().map(|g| opt::max_code_label(g)))
-            .chain(std::iter::once(opt::max_code_label(&self.epilogue)))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
-            opt::optimize_at_with_labels(
-                &mut body.ops,
-                opts,
-                body.meta.entry_sp as i32,
-                pool,
-                &mut next_label,
-            );
+            opt::optimize_at(&mut body.ops, opts, body.meta.entry_sp as i32, pool);
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.

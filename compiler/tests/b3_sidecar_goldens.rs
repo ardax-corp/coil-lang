@@ -27,7 +27,7 @@ const CORPUS: &[&str] = &[
 /// Float scalar `-` now folds / emits `NEGF` (`arithmetic.hy` unary cases;
 /// `option_pair.hy` `-1` folds to a pool const).
 /// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
-/// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
+/// epilogue; cold layout leaves `ValueUnderJmp` tag jumps in place).
 /// I8 leftover LIR (COI-301) retargets `functions.hy` (inferable diamonds).
 /// A3 (COI-336) drops the named-reason checklist; `functions.hy` keeps LIR
 /// when cost ≤ fuse (fingerprint 400). B2 convoys recursive `fib` (same
@@ -45,12 +45,14 @@ const CORPUS: &[&str] = &[
 /// its tests inline `opaque`).
 /// Removing 16 no-effect stack-IL passes (2026-10: convoys, GVN, copy/dest
 /// prop, instcombine, …) retargets all five.
+/// Laying out early exits in HIR lowering instead of the stack-IL
+/// `branch_optimization` pass retargets all five (same lengths).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "95cfeaffe15c3f70_1250"),
-    ("functions.hy", "57f475daee1ae0f2_274"),
-    ("loops.hy", "5ac18420adc669d8_227"),
-    ("option_pair.hy", "7b0f8b444ec118db_340"),
-    ("user_trait_dispatch.hy", "00233c336c0f1c62_123"),
+    ("arithmetic.hy", "3186422f0e51b124_1250"),
+    ("functions.hy", "cf7d45d5c7dd59f6_274"),
+    ("loops.hy", "b5305a69572145f8_227"),
+    ("option_pair.hy", "1a785448532894d7_340"),
+    ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

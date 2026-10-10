@@ -14,10 +14,8 @@ use super::stats::{self, PassDelta, PassKind};
 
 /// Context threaded through one pipeline round. Keep this small.
 pub struct PassCtx<'a> {
-    pub entry_sp: i32,
     pub entry_tell: u32,
     pub pool: &'a mut Vec<u64>,
-    pub next_label: &'a mut u32,
 }
 
 /// One named rewrite over a function body (or bare `Vec<IlOp>`).
@@ -107,14 +105,11 @@ pub fn run_once(
     opts: &OptimizeOptions,
     entry_sp: i32,
     pool: &mut Vec<u64>,
-    next_label: &mut u32,
 ) {
     let mut ctx = PassCtx {
-        entry_sp,
         // Cursor seed for the slot-tracking passes (`slot_promote`).
         entry_tell: entry_sp.max(0) as u32,
         pool,
-        next_label,
     };
     run_phase(Phase::Cleanup, ops, opts, &mut ctx);
     run_phase(Phase::Decision, ops, opts, &mut ctx);
@@ -169,14 +164,6 @@ fn apply_clone_shared_return(
 ) -> usize {
     super::convoy::clone_shared_return(ops);
     0
-}
-
-fn apply_branch_optimization(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    ctx: &mut PassCtx<'_>,
-) -> usize {
-    super::branch_opt::optimize_branches_at(ops, ctx.entry_sp, ctx.next_label)
 }
 
 fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
@@ -246,16 +233,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_clone_shared_return),
     },
     PassSpec {
-        name: "branch_optimization",
-        phase: Phase::Decision,
-        kind: PassKind::Branch,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.branch_optimization,
-        set_flag: |o| o.branch_optimization = true,
-        apply: ApplyFn::Grow(apply_branch_optimization),
-    },
-    PassSpec {
         name: "block_reordering",
         phase: Phase::Decision,
         kind: PassKind::BlockOrder,
@@ -276,7 +253,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "canon",
     "slot_promote",
     "clone_shared_return",
-    "branch_optimization",
     "block_reordering",
 ];
 
@@ -306,7 +282,6 @@ mod tests {
                 "canon",
                 "slot_promote",
                 "clone_shared_return",
-                "branch_optimization",
                 "block_reordering",
             ]
         );
