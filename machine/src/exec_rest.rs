@@ -22,6 +22,29 @@ impl<const S: usize> Machine<S> {
                 }
             };
         }
+        // A Coil int op: the exact result, or a panic.
+        macro_rules! int_trap {
+            ($trap:expr) => {{
+                *ip_out = ip;
+                *sp_out = sp;
+                return dispatch::RestFlow::Done(self.runtime_panic($trap.message(), ip.saturating_sub(1)));
+            }};
+        }
+        macro_rules! int_bin {
+            ($f:path) => {{
+                let top = self.stack.tell();
+                promise!(top >= 2);
+                let rhs = self.stack[top - 1].as_int();
+                let lhs = self.stack[top - 2].as_int();
+                match $f(lhs, rhs) {
+                    Ok(r) => {
+                        self.stack[top - 2].replace(r as _);
+                        self.stack.seek(top - 1);
+                    }
+                    Err(t) => int_trap!(t),
+                }
+            }};
+        }
         match bc {
                 Instruction::POP => {
                     self.stack.pop();
@@ -83,7 +106,10 @@ impl<const S: usize> Machine<S> {
                     let new_val = if is_float {
                         Value::from(old.as_float() + 1.0)
                     } else {
-                        Value::from(old.as_int() + 1)
+                        match int_arith::add(old.as_int(), 1) {
+                            Ok(v) => Value::from(v),
+                            Err(t) => int_trap!(t),
+                        }
                     };
                     self.stack[idx] = new_val;
                     self.stack.push(if prefix { new_val } else { old });
@@ -96,7 +122,10 @@ impl<const S: usize> Machine<S> {
                     let new_val = if is_float {
                         Value::from(old.as_float() - 1.0)
                     } else {
-                        Value::from(old.as_int() - 1)
+                        match int_arith::sub(old.as_int(), 1) {
+                            Ok(v) => Value::from(v),
+                            Err(t) => int_trap!(t),
+                        }
                     };
                     self.stack[idx] = new_val;
                     self.stack.push(if prefix { new_val } else { old });
@@ -106,7 +135,14 @@ impl<const S: usize> Machine<S> {
                     let val = self.stack.pop();
                     self.stack.push(Value::from(!(val.as_int() != 0)));
                 }
-                Instruction::NEG => unary!(self.stack, -, as_int),
+                Instruction::NEG => {
+                    let top = self.stack.tell();
+                    promise!(top >= 1);
+                    match int_arith::neg(self.stack[top - 1].as_int()) {
+                        Ok(r) => self.stack[top - 1].replace(r as _),
+                        Err(t) => int_trap!(t),
+                    }
+                }
                 // IEEE negate: flip sign bit (preserves NaN payload).
                 Instruction::NEGF => {
                     let sp = self.stack.tell();
@@ -117,11 +153,11 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::AND => binary!(self.stack, &&, as_bool),
                 Instruction::OR => binary!(self.stack, ||, as_bool),
-                Instruction::ADD => binary!(self.stack, +, as_int),
-                Instruction::SUB => binary!(self.stack, -, as_int),
-                Instruction::MUL => binary!(self.stack, *, as_int),
-                Instruction::DIV => binary!(self.stack, /, as_int),
-                Instruction::MOD => binary!(self.stack, %, as_int),
+                Instruction::ADD => int_bin!(int_arith::add),
+                Instruction::SUB => int_bin!(int_arith::sub),
+                Instruction::MUL => int_bin!(int_arith::mul),
+                Instruction::DIV => int_bin!(int_arith::div),
+                Instruction::MOD => int_bin!(int_arith::rem),
                 Instruction::LE => binary!(self.stack, <, as_int),
                 Instruction::LEQ => binary!(self.stack, <=, as_int),
                 Instruction::GT => binary!(self.stack, >, as_int),
@@ -154,15 +190,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::XOR => binary!(self.stack, ^, as_int),
                 Instruction::BITAND => binary!(self.stack, &, as_int),
                 Instruction::BITOR => binary!(self.stack, |, as_int),
-                Instruction::Pow => {
-                    let sp = self.stack.tell();
-                    promise!(sp >= 2);
-                    let rhs = self.stack[sp - 1].as_int();
-                    let lhs = self.stack[sp - 2].as_int();
-                    let result = lhs.pow(rhs as u32);
-                    self.stack[sp - 2].replace(result as _);
-                    self.stack.seek(sp - 1);
-                }
+                Instruction::Pow => int_bin!(int_arith::pow),
                 Instruction::PowF => {
                     let sp = self.stack.tell();
                     promise!(sp >= 2);
@@ -1890,36 +1918,17 @@ impl<const S: usize> Machine<S> {
                             let ai = a_inner.as_int();
                             let bi = b_inner.as_int();
                             let r = match bc_instr {
-                                Instruction::DynAdd => ai.wrapping_add(bi),
-                                Instruction::DynSub => ai.wrapping_sub(bi),
-                                Instruction::DynMul => ai.wrapping_mul(bi),
-                                Instruction::DynDiv => {
-                                    if bi == 0 {
-                                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
-                                            "division by zero",
-                                            ip.saturating_sub(1),
-                                        ));
-
-                                    }
-                                    ai / bi
-                                }
-                                Instruction::DynMod => {
-                                    if bi == 0 {
-                                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
-                                            "division by zero",
-                                            ip.saturating_sub(1),
-                                        ));
-
-                                    }
-                                    ai % bi
-                                }
+                                Instruction::DynAdd => int_arith::add(ai, bi),
+                                Instruction::DynSub => int_arith::sub(ai, bi),
+                                Instruction::DynMul => int_arith::mul(ai, bi),
+                                Instruction::DynDiv => int_arith::div(ai, bi),
+                                Instruction::DynMod => int_arith::rem(ai, bi),
                                 _ => unreachable!(),
                             };
-                            Value::from(r)
+                            match r {
+                                Ok(r) => Value::from(r),
+                                Err(t) => int_trap!(t),
+                            }
                         }
                     };
                     self.stack.push(result);

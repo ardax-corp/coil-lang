@@ -25,6 +25,7 @@ use crate::{
 #[cfg(any(test, feature = "debugger"))]
 use crate::{DebugController, StopReason};
 use common::ValueTag;
+use common::int_arith;
 
 // Thread-local dispatch counter (tests / `vm_profile` only).
 #[cfg(any(test, feature = "vm_profile"))]
