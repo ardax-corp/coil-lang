@@ -10,6 +10,7 @@ mod ffi;
 mod frame_bound;
 mod host;
 mod interner;
+pub mod int_arith;
 mod opcode;
 mod package;
 mod seekable_iter;
