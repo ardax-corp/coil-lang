@@ -5404,6 +5404,20 @@ impl Compiler {
         }
     }
 
+    /// Whether the ops since `op_start` end on a label something jumps to: a
+    /// join that falls off the body. A `match` whose arms all return leaves
+    /// an end label nothing reaches. Moving early exits after the body
+    /// jumps back to the label after each one, so any end label counts then.
+    fn ends_on_jumped_label(&self, op_start: usize) -> bool {
+        let ops = &self.bytecode.ops()[op_start..];
+        let trailing: Vec<_> = ops.iter().rev().map_while(|op| match op {
+            IlOp::Label(l) => Some(*l),
+            _ => None,
+        }).collect();
+        !trailing.is_empty()
+            && ops.iter().any(|op| matches!(op, IlOp::Jump { target, .. } if trailing.contains(target)))
+    }
+
     /// True when IL ops in `[op_start, ops.len())` end with a return terminator
     /// (labels skipped). `op_start` must be an index into [`CodeBuf::ops`], not
     /// an emitting-code length from [`CodeBuf::len`].
@@ -5549,7 +5563,7 @@ impl Compiler {
             self.report_unlowered(&method.0, &qualified);
         }
 
-        let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+        let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
         if ends_on_label || !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
@@ -5876,7 +5890,7 @@ impl Compiler {
                 self.report_unlowered(span, &mono_name);
             }
 
-            let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
@@ -7580,9 +7594,10 @@ impl Compiler {
             self.active_fn_name = prev_active;
 
             // A lowered body can end on a join label that only unreachable
-            // jumps target; a label at the very end would bind to the next
-            // function's entry, so it still gets the fallthrough return.
-            let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+            // jumps target; a jumped-to label at the very end would bind to
+            // the next function's entry, so it still gets the fallthrough
+            // return.
+            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
             }
@@ -8188,7 +8203,7 @@ impl Compiler {
                 }
 
                 // A lowered body can end on an unreachable join label.
-                let ends_on_label = lowered && matches!(self.bytecode.ops().last(), Some(IlOp::Label(_)));
+                let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
                 if ends_on_label || !self.region_ends_with_return(body_op_start) {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
