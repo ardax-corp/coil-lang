@@ -15,9 +15,9 @@
 //   Windows: clang -shared -o examples/sum.dll examples/sum.c
 //
 // `dload("sum")` resolves to the platform filename via
-// `[ffi] search_paths` in `coil.toml` (./examples). Every stem needs
-// `--allow-dload STEM` plus a matching `[[package.native]] sha256` or
-// `trusted = true` on that dep — including `time` / `crypto` / `tls` /
+// `--ffi-search-path examples`. Every stem needs `--allow-dload STEM` plus
+// `--dload-pin STEM=SHA256` or `--dload-trusted STEM` (spool passes them
+// from coil.toml / coil.lock) — including `time` / `crypto` / `tls` /
 // `regex`. A stem without allow is `LibraryDenied`. `dload("c")` is
 // always denied; an absolute path is not a bypass.
 //

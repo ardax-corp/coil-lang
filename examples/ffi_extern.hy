@@ -7,11 +7,12 @@
 //   Linux:  cc -shared -fPIC -o examples/libsum.so examples/sum.c
 //   macOS:  cc -dynamiclib -o examples/libsum.dylib examples/sum.c
 //
-//   coil --allow-dload sum examples/ffi_extern.hy
+//   coil --allow-dload sum --dload-trusted sum --ffi-search-path examples \
+//     examples/ffi_extern.hy
 //
-// `coil.toml`'s `[ffi] search_paths` finds `libsum` in ./examples. Every
-// library stem needs `--allow-dload STEM`; the libc aliases (`extern "c"`)
-// are always denied.
+// `--ffi-search-path` finds `libsum` in ./examples. Every library stem
+// needs `--allow-dload STEM` and a `--dload-pin` or `--dload-trusted`; the
+// libc aliases (`extern "c"`) are always denied.
 //
 // Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 

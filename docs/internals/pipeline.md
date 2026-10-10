@@ -91,6 +91,14 @@ Flags: `--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`,
 `-A` / `--allow-all` for all of them (not `dload`). `Pipeline::grant_capability`
 / `grant_all` are the library form; spool reads `[permissions]` in `coil.toml`.
 
+coil reads no `coil.toml` or `coil.lock`. `dload` integrity is flags too:
+`--dload-pin STEM=SHA256` (a `coil.lock` native hash) and `--dload-trusted
+STEM` (no hash check); `coil package` / `coil natives dump` take
+`--ffi-native name=…,version=…,path=…` per native library. Spool reads the
+files and passes the flags. A packaged app looks for each library in the
+natives cache, beside the executable and in `lib/` there; getting it there is
+the user's job.
+
 ## Archives (`out.hyc`)
 
 Default `coil file.hy` compiles and runs in memory. It does **not** read or write `out.hyc` (integration tests assert this). An existing `out.hyc` beside the entry is left untouched; if it looks stale the CLI may warn, but the in-memory compile still runs.
@@ -101,7 +109,7 @@ Incrementality (fingerprint-based reuse of a compile) is a later design, not cur
 
 ## Multi-file programs
 
-With a `coil.toml`, the pipeline discovers dependencies via `use` / `mod`, compiles each file with a namespace prefix into one shared IL buffer, and **lowers once** after linking. The **entry file** uses the empty namespace. See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md).
+The pipeline discovers dependencies via `use` / `mod` under the `--root` search roots, compiles each file with a namespace prefix into one shared IL buffer, and **lowers once** after linking. The **entry file** uses the empty namespace. See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md).
 
 ## Opcode discipline
 

@@ -8,9 +8,8 @@
 //   search_paths = ["../coil-tls/native"]
 //
 // Then `coil run` / in-memory run with `--allow-dload tls`.
-// `tls` needs `--allow-dload tls` plus `trusted = true` on the coil-tls dep
-// (or a matching `[[package.native]] sha256`). search_paths only locates
-// the file. Without allow, `dload` is `LibraryDenied`. A missing libtls
+// `tls` needs `--allow-dload tls` plus `--dload-trusted tls` (or
+// `--dload-pin tls=SHA256`). `--ffi-search-path` only locates the file. Without allow, `dload` is `LibraryDenied`. A missing libtls
 // that passed the gate is `LibraryNotFound`.
 //
 // Then:

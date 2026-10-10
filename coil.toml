@@ -1,7 +1,8 @@
-# Project manifest for the coil workspace / examples.
-# `[module] roots` is read by spool and the docs, not by the `coil` CLI: pass
-# roots explicitly, e.g. `coil --root ../coil-stdlib/src --root examples/src
-# examples/modules.hy`. Userland stdlib is
+# Spool project manifest for the coil workspace / examples. The `coil` CLI
+# never reads it (nor coil.lock): spool turns it into flags. Without spool,
+# pass them yourself, e.g. `coil --root ../coil-stdlib/src --root examples/src
+# examples/modules.hy`, or `--allow-dload sum --dload-trusted sum
+# --ffi-search-path examples` for the FFI examples. Userland stdlib is
 # [coil-stdlib](https://github.com/ardax-corp/coil-stdlib): clone it as a
 # sibling (`../coil-stdlib`) or under `.deps/coil-stdlib`.
 
