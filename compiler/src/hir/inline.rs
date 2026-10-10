@@ -643,13 +643,9 @@ impl Inliner<'_> {
         match &self.body.expr(e).kind {
             HirKind::Lit(_) | HirKind::Local(_) => true,
             HirKind::Bin { op, lhs, rhs } => {
-                !matches!(
-                    op,
-                    BinOp::IntDiv | BinOp::IntRem | BinOp::IntPow | BinOp::Overloaded(_)
-                ) && self.pure(*lhs)
-                    && self.pure(*rhs)
+                !op.int_may_trap() && !matches!(op, BinOp::Overloaded(_)) && self.pure(*lhs) && self.pure(*rhs)
             }
-            HirKind::Un { operand, .. } => self.pure(*operand),
+            HirKind::Un { operand, .. } => !super::op_may_trap(&self.body, e) && self.pure(*operand),
             _ => false,
         }
     }

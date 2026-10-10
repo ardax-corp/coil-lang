@@ -1,6 +1,9 @@
 //! Lite IV strength reduction on numeric MIR (COI-283).
 //!
-//! Replaces `iv * invariant` with an add induction. Integer is wrapping-exact.
+//! Replaces `iv * invariant` with an add induction, for floats only. An
+//! int add recurrence runs one step ahead of the multiply it replaces (the
+//! latch computes the next product before the exit test), so it could trap
+//! on an overflow the program never performs; int multiplies stay.
 //! Float `cast(i) * C` / `xf * C` only when `C` is a finite integer-valued
 //! const (IEEE-exact while `|i*C|` stays in the mantissa). Non-const float
 //! factors stay — flagship `(x as float) * (2/size)` is not rewritten.
@@ -439,10 +442,7 @@ fn is_invariant(func: &MirFunc, defined: &HashSet<ValueId>, v: ValueId) -> bool 
 }
 
 fn factor_ok(func: &MirFunc, mul_ty: MirTy, factor: ValueId) -> bool {
-    if mul_ty.is_int() {
-        return true;
-    }
-    integer_valued_value(func, factor)
+    !mul_ty.is_int() && integer_valued_value(func, factor)
 }
 
 fn integer_valued_value(func: &MirFunc, v: ValueId) -> bool {
@@ -501,8 +501,8 @@ fn zero_const(ty: MirTy) -> MirConst {
 
 fn fold_mul(ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
     match (ty, a, b) {
-        (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(MirConst::I64(x.wrapping_mul(y))),
-        (MirTy::I32, MirConst::I32(x), MirConst::I32(y)) => Some(MirConst::I32(x.wrapping_mul(y))),
+        (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(MirConst::I64(x.checked_mul(y)?)),
+        (MirTy::I32, MirConst::I32(x), MirConst::I32(y)) => Some(MirConst::I32(x.checked_mul(y)?)),
         (MirTy::F64, MirConst::F64(x), MirConst::F64(y)) => {
             Some(MirConst::f64(f64::from_bits(x) * f64::from_bits(y)))
         }
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn reduces_int_iv_times_invariant() {
+    fn keeps_int_iv_times_invariant() {
         let src = r#"
 func @sr(v0: i64, v1: i64) -> i64 {
 bb0:
@@ -563,10 +563,9 @@ bb3:
         let mut f = parse_func(src).expect(src);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Mul, true), 1);
-        assert!(strength_reduce(&mut f) >= 1);
-        f.verify().unwrap();
-        assert_eq!(count_bin(&f, MirBinOp::Mul, true), 0, "i*c must leave the loop");
-        assert!(count_bin(&f, MirBinOp::Add, true) >= 2);
+        // `(i + 1) * c` on the way out could overflow where `i * c` does not.
+        assert_eq!(strength_reduce(&mut f), 0);
+        assert_eq!(count_bin(&f, MirBinOp::Mul, true), 1);
     }
 
     #[test]
