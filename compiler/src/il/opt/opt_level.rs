@@ -26,7 +26,7 @@ pub enum OptLevel {
     Aggressive,
     /// Standard with unrolling and return cloning off (less code growth).
     Size,
-    /// Basic cleanup only; no slot promotion, scalar replacement, or unroll.
+    /// Basic cleanup only; no scalar replacement or unroll.
     Debug,
 }
 
@@ -121,7 +121,6 @@ impl fmt::Display for OptLevel {
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
         dead_block: false,
-        slot_promote: false,
         algebraic: false,
         local_cse: false,
         licm: false,
@@ -180,7 +179,6 @@ impl Default for OptimizeOptions {
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
         o.dead_block,
-        o.slot_promote,
         o.algebraic,
         o.local_cse,
         o.licm,
@@ -242,7 +240,6 @@ mod tests {
         let o = OptLevel::None.options();
         assert!(o.algebraic);
         assert!(!o.dead_block);
-        assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
         assert!(!o.local_cse);
@@ -252,7 +249,7 @@ mod tests {
     fn basic_enables_dce() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic && o.dead_block);
-        assert!(!o.licm && !o.slot_promote && !o.escape_analysis);
+        assert!(!o.licm && !o.escape_analysis);
     }
 
     #[test]
@@ -272,7 +269,6 @@ mod tests {
     fn debug_preserves_slots() {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic && o.dead_block);
-        assert!(!o.slot_promote);
         assert!(!o.escape_analysis && !o.loop_unroll);
         assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);

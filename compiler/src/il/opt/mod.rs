@@ -16,8 +16,6 @@ use super::op::IlOp;
 pub struct OptimizeOptions {
     /// Remove unreachable ops after unconditional JMP / RETURN until a label.
     pub dead_block: bool,
-    /// Promote slots to virtual values (straight-line + same-def joins).
-    pub slot_promote: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
     /// Local CSE in the HIR (`hir::cse`), not an IL pass.
@@ -51,15 +49,10 @@ pub struct OptimizeOptions {
 
 /// Run IL opts in place. Safe to call before [`super::lower`].
 pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions) {
-    optimize_at(ops, opts, 0);
-}
-
-/// Like [`optimize`], seeding the cursor at `entry_sp` for the op buffer.
-pub fn optimize_at(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32) {
     if opts.collect_stats {
         stats::set_iterations(1);
     }
-    driver::run_once(ops, opts, entry_sp);
+    driver::run_once(ops, opts);
 }
 
 /// Run [`optimize`] on each [`super::IlFunc`] emitting span; leave prologue and
@@ -154,9 +147,6 @@ pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 
 mod cfg;
 mod convoy;
-mod dce;
-mod slot_promote;
-
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]

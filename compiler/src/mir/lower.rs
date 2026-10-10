@@ -454,8 +454,8 @@ fn bind_match_payloads(args: BindMatchPayloadsArgs<'_>) -> Result<Vec<ValueId>, 
             slot = Some(base);
         }
     // Known cursor: the VM overwrites the scrutinee slot with payload[0].
-    // The arm's first load need not be payload[0] (slot_promote may drop
-    // the binding copies), so the exact base wins over the guess.
+    // The arm's first load need not be payload[0] (lowering may read the
+    // field slot in place), so the exact base wins over the guess.
     if let Some(base) = b.match_base
         && slot.is_some()
     {

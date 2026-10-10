@@ -12,7 +12,7 @@ listed once below and are **not** passes.
 **Removed 2026-10** (measurement showed no bench effect): `copy_prop`,
 `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`,
 `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`,
-`multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`,
+`multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `slot_promote` + `dead_store_at`,
 `ssa_gvn`, `cfg_gvn`, and the IL `escape_analysis` pass. MIR instcombine /
 strength reduction / GVN are separate and unaffected. The `escape_analysis`
 option survives: it now only gates HIR enum / tuple scalar replacement
@@ -39,7 +39,7 @@ not change pass behavior.
 | **`sp`** | [`crate::il::sp`] | Eval-stack *height* (`stack_delta` feeds `tell`; the whole-buffer analysis backs tests only). Nested `CALL`/`MakeCoro` reset to 1 (return value). `STORE` does **not** floor height. |
 | **`tell`** | [`crate::il::tell`] | Shared operand/local *cursor*. `STORE` raises the cursor to `slot + 1` even when height is lower. |
 
-Do not substitute one for the other (COI-81). Height is a per-op delta; slot promotion / `dead_store_at` need the cursor. `Tell::Unknown`
+Do not substitute one for the other (COI-81). Height is a per-op delta; the tier choice and `Seek` normalization need the cursor. `Tell::Unknown`
 at a join is often the correct answer (a raising loop header), not a gap.
 
 Entry seed: `optimize` / `optimize_at` use `entry_sp` (usually `0` in unit
@@ -78,7 +78,7 @@ pipeline. No solo “pass” tests.
 
 **Decision** (`decision_once_at`), in order:
 
-2. `slot_promote` (+ `dead_store_at`) → 3. `clone_shared_return`
+2. `clone_shared_return`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -182,23 +182,13 @@ inlining, before `hir::fold`), still under the `loop_unroll` flag (off at
 `-Os`). The stack-IL pass was removed 2026-10. Hit benches:
 `examples/perf/vec_scan_pure.hy`, `vec_scan_impure.hy`.
 
-## `slot_promote`
-
-**Flag:** `slot_promote` (default on). **Fn:** `slot_promote::slot_promote`.
-Uses **`tell`**. Cleanup `dead_store_at` runs immediately after.
-
-- **Input:** Straight-line and same-def-join aliases (`LOAD a; STORE b`),
-  tell-safe producer bindings, store-destination coalescing, copy-only latch
-  shuffles.
-- **Output:** Rewrites later `LOAD` / `BinSlot*` uses to the source; elides
-  unused alias stores when tell or a higher store covers the floor. Peel param
-  copies may raise the producer into a dead high slot then elide. Labels
-  unchanged.
-- **Refusals:** Unknown tell; `CALL`/host without a raise proof; residual
-  `Byte` between copy-shuffle ops; overlapping live ranges (mandelbrot
-  `tr`/`zr`); multi-pred φ merges; address-taken / aggregate promotion.
-- **Tests:** `opt/slot_promote.rs` `forwards_alias_load_through_store_load`,
-  `rewrites_bin_slot_through_alias`,   `same_def_join_forwards_alias_across_diamond`.
+There is no IL `slot_promote` pass (removed 2026-10, with its
+`dead_store_at` cleanup). HIR lowering reads a one-word local in place where
+it used to copy it first (a range loop's end, a stack-array store's value, a
+staged operand, a scalar `match` scrutinee), enum scalar replacement binds an
+arm's read-only names to the field locals, and `hir::fold` drops stores to a
+local nothing reads. Code size and time were unchanged on `examples/perf`,
+and no body changed tier.
 
 ## `clone_shared_return`
 
@@ -287,7 +277,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | dead_block | `convoy.tests.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | loop_bounds | `bounds.rs` | no |
-| slot_promote | `slot_promote.rs` | no |
 | clone_shared_return | `convoy.tests.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |
 

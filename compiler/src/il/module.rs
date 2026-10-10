@@ -347,7 +347,7 @@ impl IlModule {
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
-            opt::optimize_at(&mut body.ops, opts, body.meta.entry_sp as i32);
+            opt::optimize(&mut body.ops, opts);
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
@@ -1606,7 +1606,6 @@ mod tests {
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
             dead_block: false,
-            slot_promote: false,
             algebraic: false,
             local_cse: false,
             licm: false,

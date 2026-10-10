@@ -1056,7 +1056,7 @@ fn swap_binop(op: Instruction) -> Option<Instruction> {
 /// `CONST imm; LOAD slot; commute-bin` → `BinSlotImm` (COI-384 S7).
 ///
 /// Same encoding as `LOAD; CONST; op`. Needed because `item_check`
-/// materializes `1 + call` as `CONST; LOAD; ADD` after slot promotion.
+/// materializes `1 + call` as `CONST; LOAD; ADD` when it stages operands.
 /// Non-commutative ops stay unfused.
 fn try_fuse_const_load_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
     let imm = i16::try_from(const_inline_value(&window[0])?).ok()?;

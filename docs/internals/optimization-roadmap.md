@@ -149,6 +149,9 @@ IPA top-site `examples/perf/fib.hy` (`COIL_AUTO_PAR=1`, COI-361 E3),
 
 Priority: highest. **Status: Phases 1–4 of register-win harvest landed**
 (`perf/register-wins-harvest`; docs ledger in § Opcode candidate ledger below).
+**2026-10: the stack-IL `slot_promote` pass and `dead_store_at` were removed**
+(no bench or tier effect once HIR lowering read locals in place and
+`hir::fold` dropped unread stores); the history below describes the pass.
 
 The shared operand/local stack still makes repeated `LOAD` / `STORE` traffic
 expensive. Stack-IL GVN (`cfg_gvn` / `ssa_gvn`) and copy propagation were
@@ -176,8 +179,8 @@ Residual slot copies near a back-edge are:
 - `acc = acc + f(…)` spill before a `CALL` (`LOAD acc; STORE tmp`) in auto-par
   chunk workers (`mandelbrot_ipa`, `for_in_range`, `for_in_dict`, …) — two
   dispatches next to a `CALL` / `RETURN` into a much larger callee;
-- copies into never-read slots (`tail_sibling`, `gc_churn::build_list`) that
-  `dead_store_at` keeps because the loop header cursor is `Unknown`;
+- copies into never-read slots (`tail_sibling`, `gc_churn::build_list`), now
+  dropped by the HIR fold where the value is a literal or local read;
 - genuine branch assignments (`s2g_escape_edges::pack_field`).
 
 None clears the hit-bench bar. Revisit only if a fuse-IL body with a hot
@@ -372,7 +375,7 @@ existing opcode; fits append-only opcode ABI.
 | `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** ([COI-87](https://linear.app/ardax/issue/COI-87)) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
 | Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **removed** | `il::cast_spill` only fed `FloatChainStore`; once that opcode was retired the pass was forced off at every level and has been deleted. |
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
-| Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store_at` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
+| Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `hir::fold` drops stores to locals nothing reads (was `dead_store_at`, removed 2026-10). |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
 | `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle` (was `tr`→`zr` LOAD+STORE latch) | ~2.56M dispatches/run before dense MIR | **closed** (dense MIR registers; the `tos_carry` IL rewrite was removed 2026-10, no bench effect); opcode still unproven | Do **not** append `MoveSlot` until a universal residual remains. |
 | Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | bounds proofs (`il::bounds`, now `hir::bounds`) + `IndexPin*` (minor 13, dropped with the IL pass) on proven loops |
