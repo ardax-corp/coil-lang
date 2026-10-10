@@ -3918,7 +3918,14 @@ impl Compiler {
         }
     }
 
-    /// Const range: spawn chunks 1..n, run chunk 0 inline, fold in order.
+    /// Const range: spawn every chunk, then fold the joins in order onto the
+    /// accumulator. The root runs no chunk itself: a chunk that traps (int
+    /// overflow) must not panic the root while other chunks still run on
+    /// its heap. A failed join reruns the whole range sequentially, which
+    /// traps where the program does, or finishes when only a chunk's own
+    /// partial overflowed. Folding in order makes each fold a prefix of
+    /// the sequential reduction, so a fold that overflows is one the
+    /// sequential loop also performs.
     fn emit_const_par_chunks(&mut self, args: EmitConstParChunksArgs<'_>) {
         let EmitConstParChunksArgs {
             bounds,
@@ -3938,7 +3945,7 @@ impl Compiler {
 
         let n = bounds.len() - 1;
         let mut handles = Vec::new();
-        for c in 1..n {
+        for c in 0..n {
             let have = bb.fresh_label(self.bytecode.il_mut());
             self.emit_chunk_spawn(EmitChunkSpawnArgs {
                 fn_tmp,
@@ -3965,44 +3972,7 @@ impl Compiler {
             handles.push(handle);
         }
 
-        self.emit_chunk_call(EmitChunkCallArgs {
-            worker,
-            lo: bounds[0],
-            hi: bounds[1],
-            acc_slot: Some(acc_slot),
-            identity: None,
-            live_slots,
-            arity,
-        });
-        let mut running = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(running);
-
-        for (i, handle) in handles.iter().enumerate() {
-            let joined = bb.fresh_label(self.bytecode.il_mut());
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
-            self.bytecode.push_load(*handle);
-            self.bytecode.push_host_invoke(1);
-            bb.emit_jump_to(
-                joined,
-                BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-                self.bytecode.il_mut(),
-            );
-            self.bytecode.push_pop();
-            for rest in &handles[i + 1..] {
-                self.emit_join_discard(*rest, join_id, bb);
-            }
-            bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-            bb.bind_label(joined, self.bytecode.il_mut());
-            let partial = self.alloc_temp_slot();
-            self.bytecode.push_store_pop(partial);
-            self.bytecode.push_load(running);
-            self.bytecode.push_load(partial);
-            self.bytecode.push(Byte::new(fold));
-            running = self.alloc_temp_slot();
-            self.bytecode.push_store_pop(running);
-        }
-        self.bytecode.push_load(running);
+        self.emit_join_fold(&handles, acc_slot, join_id, fold, seq, bb);
         bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
         bb.bind_label(seq, self.bytecode.il_mut());
@@ -4088,57 +4058,38 @@ impl Compiler {
         self.bytecode.push(Byte::new(Instruction::ADD));
         self.bytecode.push_store_pop(mid_tmp);
 
-        let have = bb.fresh_label(self.bytecode.il_mut());
-        let joined = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
-        self.bytecode.push_load(fn_tmp);
-        self.bytecode.push_load(mid_tmp);
-        self.bytecode.push_load(end_tmp);
-        self.bytecode.push_const(identity);
-        for slot in live_slots {
-            self.bytecode.push_load(*slot);
+        // Both halves run on workers, as in `emit_const_par_chunks`.
+        let halves = [(begin_tmp, mid_tmp), (mid_tmp, end_tmp)];
+        let mut handles: Vec<u32> = Vec::new();
+        for (lo, hi) in halves {
+            let have = bb.fresh_label(self.bytecode.il_mut());
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
+            self.bytecode.push_load(fn_tmp);
+            self.bytecode.push_load(lo);
+            self.bytecode.push_load(hi);
+            self.bytecode.push_const(identity);
+            for slot in live_slots {
+                self.bytecode.push_load(*slot);
+            }
+            self.bytecode.push_host_invoke(arity + 1);
+            bb.emit_jump_to(
+                have,
+                BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_pop();
+            for h in &handles {
+                self.emit_join_discard(*h, join_id, bb);
+            }
+            bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            bb.bind_label(have, self.bytecode.il_mut());
+            let handle = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(handle);
+            handles.push(handle);
         }
-        self.bytecode.push_host_invoke(arity + 1);
-        bb.emit_jump_to(
-            have,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            self.bytecode.il_mut(),
-        );
-        self.bytecode.push_pop();
-        bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(have, self.bytecode.il_mut());
-        let handle = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(handle);
 
-        self.bytecode.push_load(begin_tmp);
-        self.bytecode.push_load(mid_tmp);
-        self.bytecode.push_load(acc_slot);
-        for slot in live_slots {
-            self.bytecode.push_load(*slot);
-        }
-        self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(arity, worker));
-        let lower = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(lower);
-
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
-        self.bytecode.push_load(handle);
-        self.bytecode.push_host_invoke(1);
-        bb.emit_jump_to(
-            joined,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            self.bytecode.il_mut(),
-        );
-        self.bytecode.push_pop();
-        bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(joined, self.bytecode.il_mut());
-        let upper = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(upper);
-        self.bytecode.push_load(lower);
-        self.bytecode.push_load(upper);
-        self.bytecode.push(Byte::new(fold));
+        self.emit_join_fold(&handles, acc_slot, join_id, fold, seq, bb);
         bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
         bb.bind_label(seq, self.bytecode.il_mut());
@@ -4219,6 +4170,48 @@ impl Compiler {
         }
         self.bytecode
             .push(Byte::new(Instruction::CALL).with_call_packed(arity, worker));
+    }
+
+    /// Join every chunk, then fold the partials in order onto `acc_slot`,
+    /// leaving the result on the stack. Folding waits for the last join: a
+    /// fold that traps must not panic while a chunk still runs. A failed
+    /// join joins the rest and jumps to `seq`.
+    fn emit_join_fold(
+        &mut self,
+        handles: &[u32],
+        acc_slot: u32,
+        join_id: usize,
+        fold: Instruction,
+        seq: crate::il::Label,
+        bb: &mut BlockBuilder,
+    ) {
+        let mut partials = Vec::with_capacity(handles.len());
+        for (i, handle) in handles.iter().enumerate() {
+            let joined = bb.fresh_label(self.bytecode.il_mut());
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
+            self.bytecode.push_load(*handle);
+            self.bytecode.push_host_invoke(1);
+            bb.emit_jump_to(
+                joined,
+                BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_pop();
+            for rest in &handles[i + 1..] {
+                self.emit_join_discard(*rest, join_id, bb);
+            }
+            bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            bb.bind_label(joined, self.bytecode.il_mut());
+            let partial = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(partial);
+            partials.push(partial);
+        }
+        self.bytecode.push_load(acc_slot);
+        for partial in partials {
+            self.bytecode.push_load(partial);
+            self.bytecode.push(Byte::new(fold));
+        }
     }
 
     /// Join `handle` and drop both the Ok payload and the Err, leaving the stack as it was.
