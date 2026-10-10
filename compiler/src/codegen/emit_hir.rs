@@ -9058,7 +9058,7 @@ impl Compiler {
         let trivial = |id: HirId| matches!(hir.expr(id).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_) | Lit::Bool(_)));
         let same = matches!((&hir.expr(lhs).kind, &hir.expr(rhs).kind), (HirKind::Local(a), HirKind::Local(b)) if a == b);
         let imm = |id: HirId| Self::hir_int_imm(hir, emit, id);
-        let all_ones = |k: i64| k == -1 || k == 0xFFFF_FFFF;
+        let all_ones = |k: i64| k == -1;
         let operand = || match (imm(lhs), imm(rhs)) {
             (Some(k), None) if trivial(rhs) => Some((rhs, k)),
             (None, Some(k)) if trivial(lhs) => Some((lhs, k)),
