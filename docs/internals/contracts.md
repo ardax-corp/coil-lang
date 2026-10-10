@@ -171,8 +171,8 @@ caused it.
 | `any(g)` | `T::arbitrary(g)`, `T` chosen by the expected type: `let v: Vec<int> = any(g);` |
 | `#[derive(Arbitrary)]` | after `use arbitrary::Arbitrary`: a class draws each field, an enum picks a variant and draws its payloads |
 
-Ints avoid huge values: an overflow in the code under test aborts the VM
-rather than failing a case. Below `deep()` (depth 4) collections are empty
+Ints avoid huge values, so a case does not end on an int overflow panic
+in the code under test. Below `deep()` (depth 4) collections are empty
 and derived enums take their first variant without payloads, so recursive
 types end. A derived class value may break the class's `invariant`; such a
 class needs a hand-written instance. The derive is a macro of the module
@@ -266,9 +266,8 @@ and panics end their path. Every term is bound by a `define-fun`, so joins
 share their operands and do not copy them.
 
 - Values:
-  - `int` is a 64-bit bit-vector, so arithmetic wraps exactly as a release
-    VM does. `--overflow trap` instead assumes that an overflowing path
-    panicked first, which is what a debug VM does.
+  - `int` is a 64-bit bit-vector. Int `+ - *` and negation trap on
+    overflow, so a path that goes on assumes the exact result fits.
   - `bool` is `Bool`. A `byte` is a bit-vector below 256.
   - `Vec<int>`, `Vec<byte>` and `string` are a length plus an array of
     items. A length is below 2^48.

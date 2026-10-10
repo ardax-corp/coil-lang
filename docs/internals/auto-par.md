@@ -237,25 +237,34 @@ Ranges are normalized half-open (`i <= K` and `..=` become `end = K + 1`), so a
 split is just a partition of `[begin, end)`. A dynamic int bound (`while i < n`,
 `for x in 0..n`) is the same partition with `lo` / `hi` loaded at runtime; the
 grain compare runs once. Const ranges with wide mode on split into up to four
-chunks (`trips / DEFAULT_LOOP_GRAIN`, clamped to 2..=4). The joiner runs the
-first chunk; the others start from the operator identity.
+chunks (`trips / DEFAULT_LOOP_GRAIN`, clamped to 2..=4). Every chunk runs on
+a worker and starts from the operator identity; the joiner folds them onto
+`acc`.
 
 Codegen emits one private **chunk worker** per site,
 `__coil_par_loop_{n}(lo, hi, acc)`, holding the original body over `[lo, hi)` and
 returning the partial. For `for`, the worker emits the unit step after the body.
 At the loop site:
 
-1. `MakeFn` the worker, then `thread_spawn_shared(worker, mid, end, identity)`
-   (HostInvoke **137**; falls back to isolate `thread_spawn` when maps are
-   missing, the debugger is attached, or an arg misses the C1 whitelist) — the
-   upper chunk starts from the operator's identity (`0` for `+`/`^`, `1` for `*`) so
-   the accumulator's initial value is counted exactly once.
-2. Call the worker inline for `[begin, mid)` seeded with the live `acc`.
-3. `thread_join` (help-steals), then fold the two partials with `ADD` / `MUL` / `XOR`.
-4. Store the fold into `acc` and set the IV to `end`, the value the sequential loop
+1. `MakeFn` the worker, then `thread_spawn_shared(worker, lo, hi, identity)` for
+   each chunk (HostInvoke **137**; falls back to isolate `thread_spawn` when maps
+   are missing, the debugger is attached, or an arg misses the C1 whitelist).
+   Each chunk starts from the operator's identity (`0` for `+`/`^`, `1` for `*`).
+2. `thread_join` every chunk (help-steals), then fold `acc` and the partials in
+   order with `ADD` / `MUL` / `XOR`.
+3. Store the fold into `acc` and set the IV to `end`, the value the sequential loop
    would have left behind.
 
 On a failed spawn or join, a single worker call covers `[begin, end)`.
+
+Int overflow traps ([Int overflow](int-overflow.md)), and that shapes the
+order. The joiner runs no chunk itself: a chunk that panics must not unwind
+the joiner while other chunks still use its heap. A chunk that overflows
+fails its join, so the loop reruns sequentially, which panics where the
+program does, or finishes when only that chunk's partial overflowed. The
+fold waits for the last join, and folding in order makes each step a prefix
+of the sequential reduction, so a fold that overflows is one the sequential
+loop performs too.
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, [COI-365](https://linear.app/ardax/issue/COI-365)).

@@ -47,10 +47,6 @@ struct VerifyCli {
     /// Fail when a check is not proved, not only when it has a counterexample
     #[arg(long)]
     strict: bool,
-    /// What int overflow does: `wrap` (a release build) or `trap` (a
-    /// debug build, where an overflowing path panics before any check)
-    #[arg(long, value_name = "MODE", default_value = "wrap", value_parser = ["wrap", "trap"])]
-    overflow: String,
     /// Also print each SMT-LIB query
     #[arg(long)]
     smt: bool,
@@ -153,7 +149,7 @@ fn goals_of(config: ReportConfig, cli: &VerifyCli, filename: &str) -> Option<Vec
     let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     pipeline.bind_project_roots_with_default(dir, cli.roots.root.clone());
     pipeline.set_contracts(ContractLevel::All);
-    compiler::verify::start_verify_capture(compiler::verify::Options { overflow_traps: cli.overflow == "trap" });
+    compiler::verify::start_verify_capture();
     let compiled = pipeline.compile_src_from_file(filename);
     let modules = compiler::verify::take_verify_capture();
     let _ = pipeline.finish_reporting();

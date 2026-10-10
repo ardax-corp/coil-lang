@@ -48,7 +48,14 @@ fn a_broken_clause_fails_with_an_input_that_breaks_it() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.hy:4:5]"), "{out}");
     assert!(out.contains("FAILED   calls_half: call to half: requires x >= 0"), "{out}");
-    assert!(out.contains("counterexample: x = 0"), "{out}");
+    // Any `x < 1` breaks it (`x - 1` traps only at `int::MIN`).
+    let x: i64 = out
+        .split("counterexample: x = ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(x < 1 && x != i64::MIN, "{out}");
 }
 
 #[test]

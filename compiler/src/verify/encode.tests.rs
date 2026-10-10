@@ -4,7 +4,7 @@
 use super::*;
 use crate::typechecking::infer::Checker;
 
-fn checks_with(src: &str, options: Options) -> Vec<FnCheck> {
+fn checks(src: &str) -> Vec<FnCheck> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
     let mut checker = Checker::new();
@@ -17,11 +17,7 @@ fn checks_with(src: &str, options: Options) -> Vec<FnCheck> {
     crate::hir::set_contract_level(crate::hir::ContractLevel::All);
     let sidecar = checker.typed_sidecar();
     let module = crate::hir::build_module(&checker, &sidecar, "", &ast);
-    verify_module(&module, options)
-}
-
-fn checks(src: &str) -> Vec<FnCheck> {
-    checks_with(src, Options::default())
+    verify_module(&module)
 }
 
 fn named<'a>(checks: &'a [FnCheck], name: &str) -> &'a FnCheck {
@@ -108,12 +104,9 @@ fn decreases_is_a_goal_of_its_own_and_generic_functions_are_skipped() {
 
 #[test]
 fn trapping_overflow_assumes_the_result_fits() {
-    let src = "fn inc(int x) -> int ensures result > x { return x + 1; }";
-    let wrap = checks(src);
-    let trap = checks_with(src, Options { overflow_traps: true });
-    let q = |c: &[FnCheck]| named(c, "inc").goals[0].queries[0].smt.clone();
-    assert!(!q(&wrap).contains("sign_extend"));
-    assert!(q(&trap).contains("((_ sign_extend 1) p_x)"), "{}", q(&trap));
+    let all = checks("fn inc(int x) -> int ensures result > x { return x + 1; }");
+    let q = &named(&all, "inc").goals[0].queries[0].smt;
+    assert!(q.contains("((_ sign_extend 1) p_x)"), "{q}");
 }
 
 #[test]

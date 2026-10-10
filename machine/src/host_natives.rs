@@ -487,7 +487,8 @@ fn push_prelude_char_ord(
 }
 
 fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    let specs: &[(&str, usize, crate::HostValueFn)] = &[
+    type Kernel = fn(&mut crate::Heap, &[Value]) -> Result<Value, common::int_arith::IntTrap>;
+    let specs: &[(&str, usize, Kernel)] = &[
         (PACKED_DOT, 3, packed_dot),
         (PACKED_MATMUL, 3, packed_matmul),
         (PACKED_MATRIX_ZIP, 3, packed_matrix_zip),
@@ -500,7 +501,7 @@ fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
         let id = out.len();
         register_id(name, id);
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(kernel(heap, args)))
+            kernel(heap, args).map(Some).map_err(FfiError::IntTrap)
         })));
     }
 
@@ -517,7 +518,7 @@ fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
         vec_sig,
         2,
         3,
-        |heap, args| Ok(Some(packed_vec_arith(heap, args))),
+        |heap, args| packed_vec_arith(heap, args).map(Some).map_err(FfiError::IntTrap),
     )));
 }
 

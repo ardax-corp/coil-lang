@@ -67,7 +67,7 @@ impl Default for Pt {
 
 impl Hash for Pt {
     fn hash(Pt __hash_Pt) -> int {
-        return (__hash_Pt.x.hash() * 31) + __hash_Pt.y.hash();
+        return ((__hash_Pt.x.hash() & 288230376151711743) * 31) ^ __hash_Pt.y.hash();
     }
 }
 
@@ -372,9 +372,11 @@ impl Hash for Sh {
     fn hash(Sh __hash_Sh) -> int {
         return match __hash_Sh {
             Sh::Dot => 0,
-            Sh::Circle(h_p0) => ((1 * 31) + h_p0.hash()),
-            Sh::Pair(h_p0, h_p1) => ((((2 * 31) + h_p0.hash()) * 31) + h_p1.hash()),
-            Sh::Rect { w: _, h: _ } => ((((3 * 31) + __hash_Sh.w.hash()) * 31) + __hash_Sh.h.hash()),
+            Sh::Circle(h_p0) => (((1 & 288230376151711743) * 31) ^ h_p0.hash()),
+            Sh::Pair(h_p0, h_p1) => ((((((2 & 288230376151711743) * 31) ^ h_p0.hash()) &
+                                       288230376151711743) * 31) ^ h_p1.hash()),
+            Sh::Rect { w: _, h: _ } => ((((((3 & 288230376151711743) * 31) ^ __hash_Sh.w.hash()) &
+                                          288230376151711743) * 31) ^ __hash_Sh.h.hash()),
             default => 0,
         };
     }
@@ -644,6 +646,9 @@ test("class Ord / Hash") {
     assert(new Pt(2, 0) >= new Pt(2, 0))?;
     assert(new Pt(1, 2).hash() == new Pt(1, 2).hash())?;
     assert(new Pt(1, 2).hash() != new Pt(2, 1).hash())?;
+    let big = 9223372036854775807;
+    assert(new Pt(big, big).hash() == new Pt(big, big).hash())?;
+    assert(new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash())?;
 }
 
 test("enum Show / String") {

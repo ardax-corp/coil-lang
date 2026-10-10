@@ -7,7 +7,8 @@
 //! visited outermost first, so an expression invariant in every loop of a
 //! nest leaves the whole nest at once.
 //!
-//! An expression that may trap (a pure call, a division by a variable)
+//! An expression that may trap (a pure call, a division by a variable,
+//! int arithmetic that can overflow)
 //! moves only when every iteration runs it, before any exit, and the loop
 //! is sure to run it once: a `loop` with no condition, or a `while` whose
 //! cheap condition is tested again in front of the hoisted code.
@@ -270,6 +271,9 @@ impl<'a, P: Fn(&str) -> bool> Plan<'a, P> {
                     _ => None,
                 }
             }
+            HirKind::Un { op: UnOp::Neg, operand } if e.ty.as_ref().is_some_and(is_int) => {
+                Some(Safety::Traps.max(self.invariant(*operand)?))
+            }
             HirKind::Un { op: UnOp::Neg | UnOp::BitNot | UnOp::Not, operand } => self.invariant(*operand),
             HirKind::Cast { value } => {
                 let from = body.expr(*value).ty.as_ref().map(ty::strip_readonly)?;
@@ -342,7 +346,8 @@ fn op_safety(body: &HirBody, op: BinOp, id: HirId) -> Option<Safety> {
                 _ => Safety::Traps,
             }
         }
-        BinOp::IntPow => Safety::Traps,
+        // Overflow traps.
+        BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul | BinOp::IntPow => Safety::Traps,
         _ => Safety::Free,
     })
 }

@@ -323,15 +323,17 @@ derive Ord(TypeDecl t) -> Code {
     };
 }
 
-// `((a.hash() * 31) + b.hash())`, from `seed` (the variant index).
+// `(((a.hash() & M) * 31) ^ b.hash())`, from `seed` (the variant index).
+// Int overflow traps, so the running hash keeps its low 58 bits before the
+// multiply (`M * 31 < 2^63`) and takes the next field with `^`.
 fn hash_chain(string seed, Vec<string> values) -> string {
     let acc = seed;
     for v in values {
         if acc == "0" {
-            // `0 * 31 + h` is `h`.
+            // `(0 * 31) ^ h` is `h`.
             acc = v + ".hash()";
         } else {
-            acc = "((" + acc + " * 31) + " + v + ".hash())";
+            acc = "(((" + acc + " & 288230376151711743) * 31) ^ " + v + ".hash())";
         }
     }
     return acc;

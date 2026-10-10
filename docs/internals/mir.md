@@ -242,8 +242,10 @@ overwrite can drop the copy. No new opcode; LOAD/STORE cost 2 vs
 ## P9 — MIR IV strength reduction (COI-283)
 
 After DestProp, a **lite LSR** rewrites `iv * invariant` to an add
-induction (new header φ, latch `+ step*factor`). Integer `i32`/`i64` is
-wrapping-exact. Float `cast(i) * C` only when `C` is a finite
+induction (new header φ, latch `+ step*factor`), for floats only: an int
+recurrence computes the next product before the exit test, so it could trap
+on an overflow the loop never performs ([Int overflow](int-overflow.md)).
+Float `cast(i) * C` only when `C` is a finite
 integer-valued const (IEEE-exact while the product stays in the
 mantissa). Non-const float factors stay, so mandelbrot
 `(x as float) * (2/size)` is unchanged. Quadratic `i*i` and IL-style

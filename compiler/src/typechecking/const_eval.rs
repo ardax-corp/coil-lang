@@ -52,7 +52,7 @@ pub fn eval_const(
             Some(ConstVal::Bool(!eval_const(inner, lookup)?.as_bool()?))
         }
         Expression::Negate(inner) => match eval_const(inner, lookup)? {
-            ConstVal::Int(i) => Some(ConstVal::Int(-i)),
+            ConstVal::Int(i) => Some(ConstVal::Int(i.checked_neg()?)),
             ConstVal::Float(f) => Some(ConstVal::Float(-f)),
             ConstVal::Bool(_) => None,
         },
@@ -87,14 +87,14 @@ pub fn eval_const(
             l,
             r,
             lookup,
-            |a, b| (b != 0).then_some(a / b),
+            |a, b| a.checked_div(b),
             |a, b| if b != 0.0 { a / b } else { f64::NAN },
         ),
         Expression::Mod(l, r) => arith(
             l,
             r,
             lookup,
-            |a, b| (b != 0).then_some(a % b),
+            |a, b| (b != 0).then_some(a.wrapping_rem(b)),
             |_, _| f64::NAN,
         ),
 

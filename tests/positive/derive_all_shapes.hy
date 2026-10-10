@@ -56,6 +56,10 @@ test("class Ord / Hash") {
     assert(new Pt(2, 0) >= new Pt(2, 0))?;
     assert(new Pt(1, 2).hash() == new Pt(1, 2).hash())?;
     assert(new Pt(1, 2).hash() != new Pt(2, 1).hash())?;
+    // Combining field hashes never overflows, whatever their size.
+    let big = 9223372036854775807;
+    assert(new Pt(big, big).hash() == new Pt(big, big).hash())?;
+    assert(new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash())?;
 }
 
 test("enum Show / String") {

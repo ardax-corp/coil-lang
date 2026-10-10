@@ -2,7 +2,8 @@
 //! symbolically ([`encode`]) and every contract check it can reach becomes
 //! an SMT-LIB query that is unsatisfiable when the check can never fail.
 //!
-//! Ints are 64-bit bit-vectors, so wrapping arithmetic is modelled exactly.
+//! Ints are 64-bit bit-vectors. Int `+ - *` and negation trap on overflow,
+//! so a path that goes on past one did not overflow.
 //! A call to a function of the same module assumes the callee's `ensures`
 //! and must establish its `requires`; any other call, a loop and a value
 //! the encoder does not model (records, enums, floats) is abstracted by a
@@ -73,17 +74,8 @@ pub struct Query {
     pub exact: bool,
 }
 
-/// How the encoder reads the program.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Options {
-    /// Int arithmetic that overflows panics, so a path that goes on did not
-    /// overflow (a debug build of the VM). Off: it wraps, as a release
-    /// build does.
-    pub overflow_traps: bool,
-}
-
-/// The options and `(module path, goals)` captured so far.
-type Capture = (Options, Vec<(String, Vec<FnCheck>)>);
+/// `(module path, goals)` captured so far.
+type Capture = Vec<(String, Vec<FnCheck>)>;
 
 thread_local! {
     static VERIFY_CAPTURE: std::cell::RefCell<Option<Capture>> =
@@ -91,13 +83,13 @@ thread_local! {
 }
 
 /// Start encoding the goals of each module codegen compiles.
-pub fn start_verify_capture(options: Options) {
-    VERIFY_CAPTURE.with(|c| *c.borrow_mut() = Some((options, Vec::new())));
+pub fn start_verify_capture() {
+    VERIFY_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
 }
 
 /// `(module path, goals)` of the entry module compiled since [`start_verify_capture`].
 pub fn take_verify_capture() -> Vec<(String, Vec<FnCheck>)> {
-    VERIFY_CAPTURE.with(|c| c.borrow_mut().take().map(|(_, m)| m).unwrap_or_default())
+    VERIFY_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
 }
 
 pub(crate) fn capture_module(
@@ -106,17 +98,17 @@ pub(crate) fn capture_module(
     module_path: &str,
     ast: &parser::ast::Output<'_>,
 ) {
-    let Some(options) = VERIFY_CAPTURE.with(|c| c.borrow().as_ref().map(|(o, _)| *o)) else {
+    if VERIFY_CAPTURE.with(|c| c.borrow().is_none()) {
         return;
-    };
+    }
     // Only the entry file, which compiles as the unnamed module.
     if !module_path.is_empty() {
         return;
     }
     let module = crate::hir::build_module(checker, sidecar, module_path, ast);
-    let checks = encode::verify_module(&module, options);
+    let checks = encode::verify_module(&module);
     VERIFY_CAPTURE.with(|c| {
-        if let Some((_, out)) = c.borrow_mut().as_mut() {
+        if let Some(out) = c.borrow_mut().as_mut() {
             out.push((module_path.to_string(), checks));
         }
     });

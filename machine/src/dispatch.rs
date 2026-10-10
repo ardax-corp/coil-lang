@@ -12,6 +12,7 @@
 //! A/B alternatives (COI-373..376, `COIL_THREADED_DISPATCH`) and removed: they
 //! won ~8% on `fib`, lost ~20% on `tak`, and were flat elsewhere.
 
+use common::int_arith::IntTrap;
 use common::{
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Value, promise,
     unlikely,
@@ -118,14 +119,15 @@ fn is_always_hot(bc: Instruction) -> bool {
 }
 
 #[inline(always)]
-pub(super) fn dense_bin(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) {
+pub(super) fn dense_bin(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) -> Result<(), IntTrap> {
     let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + lhs < stack_cap);
     promise!(sp + rhs < stack_cap);
     let va = stack[sp + lhs];
     let vb = stack[sp + rhs];
-    stack[sp + dest] = crate::dense::eval_bin(kind, va, vb);
+    stack[sp + dest] = crate::dense::eval_bin(kind, va, vb)?;
+    Ok(())
 }
 
 #[inline(always)]
@@ -138,9 +140,15 @@ fn take_code_word(ctx: &mut HotCtx<'_, '_>) -> Byte {
 }
 
 #[inline(always)]
-pub(super) fn dense_bin2(stack: &mut Stack<Value>, sp: usize, first: &Byte, second: &Byte, stack_cap: usize) {
-    dense_bin(stack, sp, first, stack_cap);
-    dense_bin(stack, sp, second, stack_cap);
+pub(super) fn dense_bin2(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    first: &Byte,
+    second: &Byte,
+    stack_cap: usize,
+) -> Result<(), IntTrap> {
+    dense_bin(stack, sp, first, stack_cap)?;
+    dense_bin(stack, sp, second, stack_cap)
 }
 
 /// Payload of [`Instruction::DenseBinJmpf`]: fused slot compare-jump (or twin).
@@ -218,11 +226,24 @@ pub(super) fn dense_cast(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, sta
 }
 
 #[inline(always)]
-pub(super) fn dense_unary(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) {
+pub(super) fn dense_unary(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) -> Result<(), IntTrap> {
     let (kind, dest, src) = opcode.dense_unary_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + src < stack_cap);
-    stack[sp + dest] = crate::dense::eval_unary(kind, stack[sp + src]);
+    stack[sp + dest] = crate::dense::eval_unary(kind, stack[sp + src])?;
+    Ok(())
+}
+
+/// Stop the streak on an int trap; `true` when the op went through.
+#[inline(always)]
+fn hot_int(ctx: &mut HotCtx<'_, '_>, r: Result<(), IntTrap>) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(t) => {
+            ctx.panic_msg = Some(t.message());
+            false
+        }
+    }
 }
 
 #[inline(always)]
@@ -288,12 +309,13 @@ pub(super) fn bin_slot_imm<H: crate::fused::HeapView>(
     opcode: &Byte,
     heap: &H,
     stack_cap: usize,
-) {
+) -> Result<(), IntTrap> {
     let (op, slot, imm) = opcode.bin_slot_imm_parts();
     promise!(sp + slot < stack_cap);
     let lhs = stack[sp + slot];
     let rhs = Value::from(imm);
-    stack.push(crate::fused::eval_bin(op, lhs, rhs, heap));
+    stack.push(crate::fused::eval_bin(op, lhs, rhs, heap)?);
+    Ok(())
 }
 
 #[inline(always)]
@@ -304,7 +326,7 @@ pub(super) fn bin_slot_imm_store<H: crate::fused::HeapView>(
     constants: &[u64],
     heap: &H,
     stack_cap: usize,
-) {
+) -> Result<(), IntTrap> {
     let (op, slot, pool_idx) = opcode.bin_slot_imm_store_parts();
     promise!(pool_idx < constants.len());
     let packed = unsafe { *constants.get_unchecked(pool_idx) };
@@ -313,7 +335,7 @@ pub(super) fn bin_slot_imm_store<H: crate::fused::HeapView>(
     promise!(sp + slot < stack_cap);
     let lhs = stack[sp + slot];
     let rhs = Value::from(imm);
-    let result = crate::fused::eval_bin(op, lhs, rhs, heap);
+    let result = crate::fused::eval_bin(op, lhs, rhs, heap)?;
     let dest_idx = sp + dest;
     promise!(dest_idx < stack_cap);
     stack[dest_idx] = result;
@@ -321,6 +343,7 @@ pub(super) fn bin_slot_imm_store<H: crate::fused::HeapView>(
     if tell < dest_idx + 1 {
         stack.seek(dest_idx + 1);
     }
+    Ok(())
 }
 
 #[inline(always)]
@@ -330,20 +353,21 @@ pub(super) fn bin_slot_slot_store<H: crate::fused::HeapView>(
     opcode: &Byte,
     heap: &H,
     stack_cap: usize,
-) {
+) -> Result<(), IntTrap> {
     let (op, a, b, dest) = opcode.bin_slot_slot_store_parts();
     promise!(sp + a < stack_cap);
     promise!(sp + b < stack_cap);
     promise!(sp + dest < stack_cap);
     let va = stack[sp + a];
     let vb = stack[sp + b];
-    let result = crate::fused::eval_bin(op, va, vb, heap);
+    let result = crate::fused::eval_bin(op, va, vb, heap)?;
     let dest_idx = sp + dest;
     stack[dest_idx] = result;
     let tell = stack.tell();
     if tell < dest_idx + 1 {
         stack.seek(dest_idx + 1);
     }
+    Ok(())
 }
 
 #[inline(always)]
@@ -844,8 +868,8 @@ fn apply_trailing_dense_bin_residue(ctx: &mut HotCtx<'_, '_>) -> bool {
     if unlikely(*next.bytecode() as u8 == Instruction::DenseBin as u8) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
-        dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
-        return true;
+        let r = dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
+        return hot_int(ctx, r);
     }
     false
 }
@@ -866,16 +890,19 @@ fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
     if bc == Instruction::DenseBin as u8 {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
-        dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
-        return true;
+        let r = dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
+        return hot_int(ctx, r);
     }
     if bc == Instruction::DenseBin2 as u8 {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         let tail = take_code_word(ctx);
-        dense_bin2(ctx.stack, ctx.sp, next, &tail, ctx.stack_cap);
+        let r = dense_bin2(ctx.stack, ctx.sp, next, &tail, ctx.stack_cap);
+        if !hot_int(ctx, r) {
+            return false;
+        }
         let _ = apply_trailing_dense_bin_residue(ctx);
-        return true;
+        return ctx.panic_msg.is_none();
     }
     false
 }
@@ -903,17 +930,27 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
         Instruction::DenseBin => {
-            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-            apply_trailing_jmp_cold(ctx);
+            let r = dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            if hot_int(ctx, r) {
+                apply_trailing_jmp_cold(ctx);
+            }
         }
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
-            dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            let r = dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            if !hot_int(ctx, r) {
+                return;
+            }
             let _ = apply_trailing_dense_bin_residue(ctx);
-            apply_trailing_jmp(ctx);
+            if ctx.panic_msg.is_none() {
+                apply_trailing_jmp(ctx);
+            }
         }
         Instruction::DenseBinJmpf => {
-            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            let r = dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            if !hot_int(ctx, r) {
+                return;
+            }
             let tail = take_code_word(ctx);
             let target = dense_bin_jmp_tail(
                 ctx.stack,
@@ -962,7 +999,10 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             dense_cast(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
             let _ = apply_trailing_dense_bin(ctx);
         }
-        Instruction::DenseUnary => dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
+        Instruction::DenseUnary => {
+            let r = dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            hot_int(ctx, r);
+        }
         Instruction::JMP => {
             hot_jump(ctx, opcode.operand_u32() as usize);
         }
@@ -1017,7 +1057,9 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             apply_jump(ctx, target);
         }
         Instruction::BinSlotSlotStore => {
-            bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap)
+            if let Err(t) = bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap) {
+                ctx.panic_msg = Some(t.message());
+            }
         }
         Instruction::DenseIndex => {
             if dense_index(DenseIndexArgs {

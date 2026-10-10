@@ -1024,19 +1024,22 @@ pub(crate) fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
 pub fn logic_eager(body: &HirBody, rhs: HirId) -> bool {
     match &body.expr(rhs).kind {
         HirKind::Lit(_) | HirKind::Local(_) => true,
-        // `x / k` and `x % k` trap only on a zero divisor.
+        // `x / k` and `x % k` trap only on a zero divisor, or `MIN / -1`.
         HirKind::Bin {
             op: BinOp::IntDiv | BinOp::IntRem,
             lhs,
             rhs,
-        } => matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0) && logic_eager(body, *lhs),
+        } => matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0 && k != -1) && logic_eager(body, *lhs),
+        // Other int arithmetic can overflow: `x != MAX && x + 1 > y` must
+        // not compute `x + 1`.
         HirKind::Bin { op, lhs, rhs } => {
-            !matches!(op, BinOp::IntPow | BinOp::StrConcat | BinOp::Overloaded(_))
+            !op.int_may_trap()
+                && !matches!(op, BinOp::StrConcat | BinOp::Overloaded(_))
                 && logic_eager(body, *lhs)
                 && logic_eager(body, *rhs)
         }
         HirKind::Logic { lhs, rhs, .. } => logic_eager(body, *lhs) && logic_eager(body, *rhs),
-        HirKind::Un { operand, .. } => logic_eager(body, *operand),
+        HirKind::Un { operand, .. } => !super::op_may_trap(body, rhs) && logic_eager(body, *operand),
         HirKind::Field { base, .. } => logic_eager(body, *base),
         _ => false,
     }

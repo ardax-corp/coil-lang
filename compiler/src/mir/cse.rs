@@ -160,7 +160,7 @@ fn pre_fully_anticipated(func: &mut MirFunc) -> usize {
             if local.contains(&key) {
                 continue;
             }
-            if !pre_safe(&key) {
+            if !pre_safe(func, &key) {
                 continue;
             }
             let Some(ty) = key_ty(func, &key) else {
@@ -192,7 +192,7 @@ fn anticipated_in(
         let Some(key) = expr_key(inst) else {
             continue;
         };
-        if !pre_safe(&key) {
+        if !pre_safe(func, &key) {
             continue;
         }
         if key_operands(&key)
@@ -232,14 +232,19 @@ fn def_blocks(func: &MirFunc) -> Vec<Option<BlockId>> {
     at
 }
 
-fn pre_safe(key: &ExprKey) -> bool {
+/// Whether an expression may be computed at a fork ahead of the successors
+/// that compute it. Int arithmetic that can trap (`/ %`, and `+ - *` and
+/// negation on overflow) stays put: moving it ahead of a successor's
+/// output or call would change what runs before the panic.
+fn pre_safe(func: &MirFunc, key: &ExprKey) -> bool {
     match *key {
         ExprKey::Const(_) => false,
         ExprKey::Bin {
-            op: MirBinOp::Div | MirBinOp::Rem,
+            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul,
             ty,
             ..
         } if !ty.is_float() => false,
+        ExprKey::Unary { op: MirUnaryOp::Neg, src } if func.ty(src).is_int() => false,
         ExprKey::Bin { .. }
         | ExprKey::Cmp { .. }
         | ExprKey::Unary { .. }

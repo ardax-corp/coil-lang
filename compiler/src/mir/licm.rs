@@ -182,6 +182,9 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 if inst.is_phi() || !hoistable(inst, allow_index, allow_alloc) {
                     continue;
                 }
+                if int_may_trap(func, inst) && !(b.id == lp.header && nothing_observable_before(func, &b.insts[..idx])) {
+                    continue;
+                }
                 if invariant.contains(&inst.dest()) {
                     continue;
                 }
@@ -229,6 +232,27 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
         pre_block.insts.insert(insert_at + i, inst);
     }
     n
+}
+
+/// An int `+ - *` or negation, which traps on overflow (int `/` and `%`
+/// are never hoisted). Hoisting one is safe only when the loop runs it
+/// whenever it is entered and nothing observable runs before it: the
+/// header, after only phis and ops that cannot trap.
+pub(crate) fn int_may_trap(func: &MirFunc, inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul, ty, .. } => ty.is_int(),
+        MirInst::Unary { op: super::inst::MirUnaryOp::Neg, dest, .. } => func.ty(*dest).is_int(),
+        _ => false,
+    }
+}
+
+fn nothing_observable_before(func: &MirFunc, before: &[MirInst]) -> bool {
+    before.iter().all(|i| {
+        i.is_phi()
+            || matches!(i, MirInst::Const { .. } | MirInst::Cmp { .. } | MirInst::Cast { .. })
+            || matches!(i, MirInst::Bin { ty, .. } if ty.is_float())
+            || matches!(i, MirInst::Unary { .. }) && !int_may_trap(func, i)
+    })
 }
 
 fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {

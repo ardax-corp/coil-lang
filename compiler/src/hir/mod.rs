@@ -239,6 +239,26 @@ pub enum BinOp {
     Overloaded(&'static str),
 }
 
+impl BinOp {
+    /// Int arithmetic, which traps on overflow or a zero divisor.
+    pub fn int_may_trap(self) -> bool {
+        matches!(self, BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul | BinOp::IntDiv | BinOp::IntRem | BinOp::IntPow)
+    }
+}
+
+/// Whether the operator at `id` itself (not its operands) can trap: int
+/// arithmetic, or negating an int (`-MIN` overflows).
+pub fn op_may_trap(body: &HirBody, id: HirId) -> bool {
+    let e = body.expr(id);
+    match &e.kind {
+        HirKind::Bin { op, .. } => op.int_may_trap(),
+        HirKind::Un { op: UnOp::Neg, .. } => !e.ty.as_ref().is_some_and(|t| {
+            matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if matches!(n.as_str(), "float" | "f32" | "f64"))
+        }),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,

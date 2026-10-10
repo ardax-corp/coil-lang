@@ -11826,3 +11826,109 @@ fn main() {
     let out = run_contracts_src(&src.replace("OFFSET", "5"), All);
     assert!(out.contains("contract violated: ensures result >= 0 in find"), "got {out:?}");
 }
+
+const INT_PRELUDE: &str = "use io::{stdout, write};
+use string::{format, to_bytes};
+fn say(string s) { write(stdout(), to_bytes(s)); }
+fn num(int n) -> string { return format(\"%i\", n); }
+";
+
+/// `main` runs `body` after `fn big() -> int` (int::MAX, from a call so
+/// nothing folds it) and must panic with `message`.
+fn assert_int_trap(body: &str, message: &str) {
+    let src = format!(
+        "{INT_PRELUDE}fn big() -> int {{ return 9223372036854775807; }}\n\
+         fn small() -> int {{ return 0 - big() - 1; }}\n\
+         fn id(int x) -> int {{ return x; }}\n\
+         fn main() {{\n{body}\n}}\n"
+    );
+    let out = run_example_src(&src);
+    assert!(out.starts_with(&format!("panic: {message}")), "{body}: got {out:?}");
+}
+
+#[test]
+fn int_overflow_traps() {
+    for body in [
+        "say(num(big() + 1));",
+        "say(num(small() - 1));",
+        "say(num(big() * 2));",
+        "say(num(-small()));",
+        "say(num(small() / id(-1)));",
+        "say(num(id(2) ** 63));",
+        "let x = big(); x += 1; say(num(x));",
+        "let x = small(); x -= 1; say(num(x));",
+        "let s = big() - 10; for i in 0..20 { s = s + 1; } say(num(s));",
+        "let s = 1; let i = 0; while i < 100 { s = s * 3; i = i + 1; } say(num(s));",
+    ] {
+        assert_int_trap(body, "integer overflow");
+    }
+}
+
+#[test]
+fn int_division_by_zero_traps() {
+    for body in ["say(num(big() / id(0)));", "say(num(big() % id(0)));"] {
+        assert_int_trap(body, "division by zero");
+    }
+}
+
+#[test]
+fn int_ops_at_the_edges_do_not_trap() {
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn big() -> int {{ return 9223372036854775807; }}
+         fn id(int x) -> int {{ return x; }}
+         fn main() {{
+             let min = 0 - big() - 1;
+             say(num(big() - 1 + 1));
+             say(\" \");
+             say(num(min % id(-1)));
+             say(\" \");
+             if id(-2) ** 63 == min {{ say(\"true\"); }}
+         }}"
+    ));
+    assert_eq!(out, "9223372036854775807 0 true");
+}
+
+/// Vectorized int loops (`V*` lanes) trap like scalar ones; a sum reduce
+/// folds in element order.
+#[test]
+fn vectorized_int_overflow_traps() {
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn scan(Vec<int> v) -> int {{
+             let acc = 0;
+             let i = 0;
+             while i < len(v) {{ acc = acc + v[i]; i = i + 1; }}
+             return acc;
+         }}
+         fn scale(int k, Vec<int> x, Vec<int> y) -> int {{
+             let i = 0;
+             while i < len(x) {{ y[i] = k * x[i]; i = i + 1; }}
+             return y[0];
+         }}
+         fn main() {{
+             let big = 4611686018427387904;
+             let v: Vec<int> = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+             let w: Vec<int> = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, big]);
+             let y: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+             say(num(scan(v)));
+             say(\" \");
+             say(num(scale(2, v, y)));
+             say(\" \");
+             say(num(scale(2, w, y)));
+         }}"
+    ));
+    assert!(out.starts_with("136 2 panic: integer overflow"), "got {out:?}");
+    let out = run_example_src(&format!(
+        "{INT_PRELUDE}fn scan(Vec<int> v) -> int {{
+             let acc = 0;
+             let i = 0;
+             while i < len(v) {{ acc = acc + v[i]; i = i + 1; }}
+             return acc;
+         }}
+         fn main() {{
+             let big = 4611686018427387904;
+             let v: Vec<int> = Vec::from([big, big, 0 - big, 0 - big, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+             say(num(scan(v)));
+         }}"
+    ));
+    assert!(out.starts_with("panic: integer overflow"), "big + big overflows first: got {out:?}");
+}

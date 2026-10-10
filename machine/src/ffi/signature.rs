@@ -68,6 +68,9 @@ pub enum FfiError {
     },
     /// FFI string argument contained an interior NUL.
     InteriorNul,
+    /// A host kernel's int arithmetic trapped; the VM panics with the
+    /// trap's message.
+    IntTrap(common::int_arith::IntTrap),
 }
 
 impl std::fmt::Display for FfiError {
@@ -97,6 +100,7 @@ impl std::fmt::Display for FfiError {
                 write!(f, "FFI library `{name}` (stem `{stem}`) denied: {reason}")
             }
             Self::InteriorNul => write!(f, "FFI string contains an interior NUL"),
+            Self::IntTrap(t) => write!(f, "{}", t.message()),
         }
     }
 }
