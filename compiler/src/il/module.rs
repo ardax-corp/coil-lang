@@ -330,7 +330,7 @@ impl IlModule {
         }
     }
 
-    /// Per-func opts on each body, then concatenate the bodies.
+    /// MIR specialization of each body, then concatenate the bodies.
     ///
     /// `pool` is the module const pool, which MIR specialization reads and
     /// extends.
@@ -340,14 +340,11 @@ impl IlModule {
         pool: &mut Vec<u64>,
     ) -> FlatIl {
         if self.funcs.is_empty() {
-            let (mut ops, remap, func_maps) = self.to_flat();
-            opt::optimize(&mut ops, opts);
-            return (ops, remap, func_maps);
+            return self.to_flat();
         }
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
-            opt::optimize(&mut body.ops, opts);
         }
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
@@ -1535,44 +1532,6 @@ mod tests {
         assert_eq!(m.entry_at_offset.get(&0), Some(&Label(3)));
     }
 
-    #[test]
-    fn empty_funcs_optimizes_whole_buffer() {
-        let mut m = IlModule {
-            prologue: vec![
-                IlOp::Const { imm: 1, loc: loc() },
-                IlOp::Return { loc: loc(), ret_words: 1},
-                IlOp::Const { imm: 9, loc: loc() },
-                IlOp::Return { loc: loc(), ret_words: 1},
-            ],
-            ..IlModule::default()
-        };
-        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
-        assert!(!flat.iter().any(|op| matches!(op, IlOp::Const { imm: 9, .. })));
-        assert!(flat.iter().any(
-            |op| matches!(op, IlOp::ConstReturnImm { .. }) || matches!(op, IlOp::Return { .. })
-        ));
-    }
-
-    #[test]
-    fn optimize_and_flatten_dces_body_only() {
-        // The prologue's dead `CONST 7` stays; the body's dead `CONST 9` goes.
-        let ops = vec![
-            IlOp::Return { loc: loc(), ret_words: 1},
-            IlOp::Const { imm: 7, loc: loc() },
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc(), ret_words: 1},
-            IlOp::Const { imm: 9, loc: loc() },
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let funcs = vec![IlFunc::new("f", None, 2, 6)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
-        assert!(flat.iter().any(|op| matches!(op, IlOp::Const { imm: 7, .. })));
-        assert!(!flat.iter().any(|op| matches!(op, IlOp::Const { imm: 9, .. })));
-        let _ = IlJumpKind::Unconditional;
-        let _ = Label(0);
-    }
-
     /// Raising loop used by Seek-normalize tests. Mandelbrot's innermost loop
     /// is not this shape (no tell-proven self-store); this IL is.
     fn raising_loop() -> Vec<IlOp> {
@@ -1605,7 +1564,6 @@ mod tests {
 
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
-            dead_block: false,
             algebraic: false,
             local_cse: false,
             licm: false,

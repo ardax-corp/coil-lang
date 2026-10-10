@@ -1,44 +1,40 @@
-//! IL optimization passes unlocked by symbolic labels.
+//! Optimization options, levels and stats.
 //!
-//! **Driver (D2).** Production opts run from a static table in [`driver`]
-//! (order matches D1 README). Each [`driver::Pass`] returns a
-//! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
-//! on the table row, not a match in the driver loop).
-//! [`super::IlModule::optimize_and_flatten`] runs the table per body; every
-//! production IL pass is a table row. Fuse-select stays in `lower_optimized`.
-//!
-//! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
+//! No optimization pass runs on the stack IL any more (the last ones went
+//! in 2026-10): the HIR passes and HIR lowering do that work, and the stack
+//! IL only lifts to MIR and fuse-selects in `lower_optimized`. See
+//! `README.md` in this directory.
 
 use super::op::IlOp;
 
-/// Options for [`optimize`].
+/// Optimization switches, set per [`OptLevel`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
-    /// Remove unreachable ops after unconditional JMP / RETURN until a label.
-    pub dead_block: bool,
-    /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
+    /// Constant folding and algebraic identities in the HIR (`hir::fold`).
     pub algebraic: bool,
-    /// Local CSE in the HIR (`hir::cse`), not an IL pass.
+    /// Local CSE in the HIR (`hir::cse`).
     pub local_cse: bool,
-    /// Loop-invariant code motion in the HIR (`hir::licm`), not an IL pass.
+    /// Loop-invariant code motion in the HIR (`hir::licm`).
     pub licm: bool,
     /// HIR counted-loop in-bounds proofs (`hir::bounds`).
     pub loop_bounds: bool,
     /// Return in each branch of a returned `match` / `if` in the HIR
-    /// (`hir::sink_return`), not an IL pass.
+    /// (`hir::sink_return`).
     pub sink_return: bool,
-    /// Full-unroll counted natural loops with a known trip count ≤ 8.
+    /// Full unroll of counted loops with a known trip count ≤ 8 in the HIR
+    /// (`hir::unroll`).
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
     /// HIR scalar replacement: split local enums / tuples into field locals
-    /// before emit (`hir::enum_sroa`, `hir::tuple_sroa`). Not an IL pass; on
-    /// at Standard and above (and Size), off at None / Basic / Debug.
+    /// before emit (`hir::enum_sroa`, `hir::tuple_sroa`). On at Standard and
+    /// above (and Size), off at None / Basic / Debug.
     pub escape_analysis: bool,
     /// Lay out early exits after the function body in HIR lowering
-    /// (`emit_hir`, COI-128). Not an IL pass.
+    /// (`emit_hir`, COI-128).
     pub branch_optimization: bool,
-    /// Record per-pass counters into [`stats::OptStats`] (COI-131). Default **off**.
+    /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
+    /// Default **off**.
     pub collect_stats: bool,
     /// Dense specialize + MIR→LIR body replace. On for every named
     /// opt level, including `-Og` (B8). Debugger-attached compiles
@@ -46,40 +42,7 @@ pub struct OptimizeOptions {
     pub mir_specialize: bool,
 }
 
-// Default is `OptLevel::Standard.options()` (derived from the driver table).
-
-/// Run IL opts in place. Safe to call before [`super::lower`].
-pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions) {
-    if opts.collect_stats {
-        stats::set_iterations(1);
-    }
-    driver::run_once(ops, opts);
-}
-
-/// Run [`optimize`] on each [`super::IlFunc`] emitting span; leave prologue and
-/// inter-function glue untouched. Falls back to whole-buffer opts when `funcs`
-/// is empty (unit tests / buffers without `record_func`).
-///
-/// Thin flat-buffer wrapper over [`super::IlModule::optimize_and_flatten`].
-/// Production lower uses [`super::CodeBuf::lower_in_place`] /
-/// [`super::lower::lower_module_inner`] on an owning module; this
-/// stays for unit tests that mutate a bare `Vec<IlOp>`.
-#[cfg(test)]
-pub fn optimize_per_func(
-    ops: &mut Vec<IlOp>,
-    funcs: &[super::IlFunc],
-    opts: &OptimizeOptions,
-    pool: &mut Vec<u64>,
-) {
-    if funcs.is_empty() {
-        optimize(ops, opts);
-        return;
-    }
-
-    let mut module = super::IlModule::from_flat(ops, funcs);
-    let (optimized, _, _) = module.optimize_and_flatten(opts, pool);
-    *ops = optimized;
-}
+// Default is `OptLevel::Standard.options()`.
 
 /// Map inclusive-exclusive emitting indices to a raw op range, including
 /// leading labels bound at `emit_start`.
@@ -134,7 +97,6 @@ pub(crate) fn emitting_range_to_raw(
     )
 }
 
-mod driver;
 mod labels;
 mod opt_level;
 mod stats;
@@ -146,7 +108,6 @@ pub(crate) use stats::{
 };
 pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 
-mod cfg;
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]
