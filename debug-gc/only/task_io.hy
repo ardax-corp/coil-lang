@@ -31,8 +31,22 @@ fn send_later(int port, int ms, string text) -> int {
         Result::Ok(_) => {},
         Result::Err(_) => panic "write",
     }
-    // Half-close, then wait for the server's close: a closed client socket
-    // sits orphaned in FIN_WAIT_2 and macOS resets it after a timeout.
+    let _ = close(c);
+    return 0;
+}
+
+/// Sends `text`, then waits for the server to close before closing. A client
+/// that closes at once sits orphaned in FIN_WAIT_2, and macOS resets it (the
+/// unread data with it) when the server is slow to accept (GC stress).
+fn send_and_wait_close(int port, string text) -> int {
+    let c = match connect("127.0.0.1", port) {
+        Result::Ok(c) => c,
+        Result::Err(_) => panic "connect",
+    };
+    match write_all(c, to_bytes(text)) {
+        Result::Ok(_) => {},
+        Result::Err(_) => panic "write",
+    }
     let _ = shutdown(c, 1);
     let _ = read_to_end(c);
     let _ = close(c);
@@ -143,7 +157,7 @@ test("connects from many tasks finish while the server task accepts") {
                 );
             let i = 0;
             while i < 8 {
-                s.spawn(fn () use (port) => send_later(port, 0, "abc"));
+                s.spawn(fn () use (port) => send_and_wait_close(port, "abc"));
                 i = i + 1;
             }
             ok_or(server.join(), -100)

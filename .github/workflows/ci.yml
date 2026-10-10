@@ -28,13 +28,12 @@ jobs:
           cargo build --bin coil --bin coil-test
           cargo build --bin coil --features gc-stress --target-dir target/gc-stress
           cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-      - name: half-close split tests, gc-stress, 10 min each
+      - name: task_io.hy (narrow half-close), gc-stress, x3, 15 min each
         if: always()
         timeout-minutes: 50
         run: |
-          for k in 0 1 2 3; do
-            echo "=== split$k: $(head -n 200 debug-gc/split$k/t.hy | grep -m1 '^test(')"
+          for i in 1 2 3; do
             start=$(date +%s)
-            perl -e 'alarm 600; exec @ARGV' ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/split$k 2>&1 | grep -E '^>|FAILED|test result|^ok' || true
+            perl -e 'alarm 900; exec @ARGV' ./target/gc-stress/debug/coil-test -A --root examples/src --root .deps/coil-stdlib/src debug-gc/only 2>&1 | grep -E '^>|FAILED|test result|^ok' || true
             echo "exit=${PIPESTATUS[0]} secs=$(( $(date +%s) - start ))"
           done
