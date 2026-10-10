@@ -5,9 +5,9 @@
 //! `x + 0`, `x * 1`, `x | 0` and friends become `x`, `x * 0` becomes `0`
 //! when `x` is a plain read, `x ** 2` becomes `x * x`, `(x + 1) + 2` becomes
 //! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `x = x` goes, a
-//! `match` on a constructor takes its arm, `!!b` becomes `b`, and `if` on a
-//! literal keeps only the branch it takes. Folds run bottom-up, so they
-//! cascade.
+//! `match` on a constructor takes its arm, `2 * x` becomes `x * 2` (and
+//! `1 < x` becomes `x > 1`), `!!b` becomes `b`, and `if` on a literal keeps
+//! only the branch it takes. Folds run bottom-up, so they cascade.
 
 use super::lower::children;
 use super::{BinOp, HirBody, HirExpr, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind, UnOp};
@@ -48,7 +48,7 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             if let (HirKind::Lit(a), HirKind::Lit(b)) = (&l.kind, &r.kind) {
                 return constant(*op, a, b, e.ty.as_ref()?).map(HirKind::Lit);
             }
-            identity(body, *op, *lhs, *rhs, e)
+            identity(body, *op, *lhs, *rhs, e).or_else(|| literal_right(body, *op, *lhs, *rhs))
         }
         HirKind::Un { op: UnOp::Not, operand } => match &body.expr(*operand).kind {
             HirKind::Un { op: UnOp::Not, operand: inner } => Some(body.expr(*inner).kind.clone()),
@@ -232,6 +232,23 @@ fn step(body: &HirBody, s: HirId) -> Option<(super::LocalId, i64, HirId)> {
         HirKind::Lit(Lit::Int(c)) => Some((x, c, rhs)),
         _ => None,
     }
+}
+
+/// `c op x` is `x op' c` for an `int` literal `c` and a commutative op (or a
+/// flipped compare), so lowering fuses the slot-immediate form.
+fn literal_right(body: &HirBody, op: BinOp, lhs: HirId, rhs: HirId) -> Option<HirKind> {
+    if !matches!(body.expr(lhs).kind, HirKind::Lit(Lit::Int(_))) || matches!(body.expr(rhs).kind, HirKind::Lit(_)) {
+        return None;
+    }
+    let op = match op {
+        BinOp::IntAdd | BinOp::IntMul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Eq | BinOp::Ne => op,
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Le => BinOp::Ge,
+        BinOp::Ge => BinOp::Le,
+        _ => return None,
+    };
+    Some(HirKind::Bin { op, lhs: rhs, rhs: lhs })
 }
 
 /// `x op c` / `c op x` that is just `x` (or just `0`).
