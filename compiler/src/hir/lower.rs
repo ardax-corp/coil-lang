@@ -2171,7 +2171,9 @@ impl Walk<'_> {
                     if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
                         return self.aggregate_arith(id, *lhs, Some(*rhs), depth);
                     }
-                    if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
+                    if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")
+                        && crate::typechecking::generics::Generics::arith_operator_trait(sym).is_none()
+                    {
                         return Err("operator");
                     }
                     if depth != 0 {

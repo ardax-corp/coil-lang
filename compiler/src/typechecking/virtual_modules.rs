@@ -781,6 +781,8 @@ impl VirtualModules {
                 BuiltinExport::TypeClass { name: "Mul" },
                 BuiltinExport::TypeClass { name: "Div" },
                 BuiltinExport::TypeClass { name: "Neg" },
+                BuiltinExport::TypeClass { name: "Rem" },
+                BuiltinExport::TypeClass { name: "Pow" },
                 BuiltinExport::TypeClass { name: "Num" },
                 BuiltinExport::TypeClass { name: "Eq" },
                 BuiltinExport::TypeClass { name: "Ord" },

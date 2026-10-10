@@ -4397,11 +4397,7 @@ impl Compiler {
             ">" => ("Gt", "gt"),
             "<=" => ("Le", "le"),
             ">=" => ("Ge", "ge"),
-            "+" => ("Add", "add"),
-            "-" => ("Sub", "sub"),
-            "*" => ("Mul", "mul"),
-            "/" => ("Div", "div"),
-            _ => return None,
+            _ => crate::typechecking::generics::Generics::arith_operator_trait(sym)?,
         };
         let ty = Self::hir_ty(hir, lhs).or_else(|| Self::hir_ty(hir, rhs))?;
         match self.concrete_operator_target_ty(ty, class, method) {
@@ -4432,6 +4428,8 @@ impl Compiler {
                         "-" => Instruction::SUB,
                         "*" => Instruction::MUL,
                         "/" => Instruction::DIV,
+                        "%" => Instruction::MOD,
+                        "**" => Instruction::Pow,
                         "<" => Instruction::LE,
                         ">" => Instruction::GT,
                         "<=" => Instruction::LEQ,
@@ -4443,6 +4441,8 @@ impl Compiler {
                         "-" => Instruction::SUBF,
                         "*" => Instruction::MULF,
                         "/" => Instruction::DIVF,
+                        "%" => Instruction::MODF,
+                        "**" => Instruction::PowF,
                         "<" => Instruction::LEF,
                         ">" => Instruction::GTF,
                         "<=" => Instruction::LEQF,

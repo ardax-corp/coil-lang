@@ -2258,6 +2258,8 @@ impl Checker {
             ("Sub", &["sub"][..], false),
             ("Mul", &["mul"][..], false),
             ("Div", &["div"][..], false),
+            ("Rem", &["rem"][..], false),
+            ("Pow", &["pow"][..], false),
             ("Lt", &["lt"][..], true),
             ("Le", &["le"][..], true),
             ("Gt", &["gt"][..], true),
@@ -3502,12 +3504,17 @@ impl Checker {
                     &format!("operands of `{}=`", op_name),
                 );
             } else {
-                self.unify(
+                let result = self.unify(
                     &target_ty,
                     &val_ty,
                     &range,
                     &format!("operands of `{}=`", op_name),
                 );
+                // `x op= y` on a bound type parameter: the operator's
+                // dictionary method, as for `x op y`.
+                if let Ty::Var(v) = apply_ty_prune(&self.subst, &result) {
+                    self.bind_arith_operator(v, op_name, id, &range);
+                }
             }
         }
         apply_ty_prune(&self.subst, &target_ty)
@@ -6197,53 +6204,46 @@ impl Checker {
         if !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_arith_operands(&pruned, op, &range);
         }
-        if let Ty::Var(v) = &pruned {
-            let (class, method) = match op {
-                "+" => ("Add", "add"),
-                "-" => ("Sub", "sub"),
-                "*" => ("Mul", "mul"),
-                "/" => ("Div", "div"),
-                _ => {
-                    let in_scope = self
-                        .type_params_in_scope
-                        .iter()
-                        .any(|frame| frame.values().any(|&id| id == *v));
-                    if in_scope {
-                        self.messages.push(Message::error(
-                            ErrorCode::GenericTypeError,
-                            format!(
-                                "Operator `{}` is not available through an arithmetic trait",
-                                op
-                            ),
-                            range,
-                        ));
-                    }
-                    return result;
-                }
-            };
-            if self.user_dict_index(*v, class).is_none() {
-                self.bind_matching_abstract_constraints(Some(*v), class);
-            }
-            if self.user_dict_index(*v, class).is_some() {
-                self.record_bound_operator(id, &range, *v, class, method);
-            } else {
-                let in_scope = self
-                    .type_params_in_scope
-                    .iter()
-                    .any(|frame| frame.values().any(|&id| id == *v));
-                if in_scope {
-                    self.messages.push(Message::error(
-                        ErrorCode::GenericTypeError,
-                        format!(
-                            "Cannot apply `{}` to value of generic type without bound `{}`",
-                            op, class
-                        ),
-                        range,
-                    ));
-                }
-            }
+        if let Ty::Var(v) = pruned {
+            self.bind_arith_operator(v, op, id, &range);
         }
         result
+    }
+
+    /// An arithmetic operator on an open type variable goes through the
+    /// operator's trait (`Add` for `+`, …; `T: Num` covers them through its
+    /// superclasses). A type parameter without the bound is an error.
+    fn bind_arith_operator(&mut self, v: TyVarId, op: &str, id: Option<NodeId>, range: &Range<usize>) {
+        let in_scope = |this: &Self| {
+            this.type_params_in_scope
+                .iter()
+                .any(|frame| frame.values().any(|&id| id == v))
+        };
+        let Some((class, method)) = Generics::arith_operator_trait(op) else {
+            if in_scope(self) {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("Operator `{}` is not available through an arithmetic trait", op),
+                    range.clone(),
+                ));
+            }
+            return;
+        };
+        if self.user_dict_index(v, class).is_none() {
+            self.bind_matching_abstract_constraints(Some(v), class);
+        }
+        if self.user_dict_index(v, class).is_some() {
+            self.record_bound_operator(id, range, v, class, method);
+        } else if in_scope(self) {
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "Cannot apply `{}` to value of generic type without bound `{}`",
+                    op, class
+                ),
+                range.clone(),
+            ));
+        }
     }
 
     /// Instance-lookup shape of a ground operand type (`Sum` enums by name,
@@ -6272,13 +6272,7 @@ impl Checker {
         if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
             return;
         }
-        let trait_name = match op {
-            "+" => Some("Add"),
-            "-" => Some("Sub"),
-            "*" => Some("Mul"),
-            "/" => Some("Div"),
-            _ => None,
-        };
+        let trait_name = Generics::arith_operator_trait(op).map(|(class, _)| class);
         if let Some(class) = trait_name
             && (self
                 .generics
@@ -6297,7 +6291,6 @@ impl Checker {
             (_, Some(class)) => format!(
                 "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
             ),
-            ("%" | "**", None) => format!("`{op}` takes `int` / `float` / `byte` operands"),
             _ => format!("`{op}` takes `int` / `byte` operands"),
         };
         self.messages.push({
@@ -17869,6 +17862,8 @@ impl Checker {
                 | "Mul"
                 | "Div"
                 | "Neg"
+                | "Rem"
+                | "Pow"
                 | "Num"
                 | "Lt"
                 | "Le"

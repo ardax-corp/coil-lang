@@ -4448,6 +4448,8 @@ impl Compiler {
                     ("Sub", "sub", Instruction::SUB),
                     ("Mul", "mul", Instruction::MUL),
                     ("Div", "div", Instruction::DIV),
+                    ("Rem", "rem", Instruction::MOD),
+                    ("Pow", "pow", Instruction::Pow),
                 ],
                 [
                     ("Lt", "lt", Instruction::LE),
@@ -4466,6 +4468,8 @@ impl Compiler {
                     ("Sub", "sub", Instruction::SUBF),
                     ("Mul", "mul", Instruction::MULF),
                     ("Div", "div", Instruction::DIVF),
+                    ("Rem", "rem", Instruction::MODF),
+                    ("Pow", "pow", Instruction::PowF),
                 ],
                 [
                     ("Lt", "lt", Instruction::LEF),

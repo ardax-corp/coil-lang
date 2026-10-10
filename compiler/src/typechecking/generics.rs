@@ -436,6 +436,20 @@ impl Generics {
         format!("{}__{}__{}", class, ty_str, method)
     }
 
+    /// The operator trait and method a binary arithmetic operator dispatches
+    /// through on a bound type parameter or a user type (`%` is `Rem::rem`).
+    pub fn arith_operator_trait(op: &str) -> Option<(&'static str, &'static str)> {
+        Some(match op {
+            "+" => ("Add", "add"),
+            "-" => ("Sub", "sub"),
+            "*" => ("Mul", "mul"),
+            "/" => ("Div", "div"),
+            "%" => ("Rem", "rem"),
+            "**" => ("Pow", "pow"),
+            _ => return None,
+        })
+    }
+
     /// Register the built-in typeclasses and their builtin instances.
     fn register_builtins(&mut self) {
         use super::ty::{INT, Ty, boolean, float, int, string, unit};
@@ -444,13 +458,16 @@ impl Generics {
 
         // Individual arithmetic traits so a type can implement only the
         // operations it supports. `Num` is a convenience supertrait that
-        // implies all of them (see below); `Neg` is unary `-`.
+        // implies all of them (see below); `Neg` is unary `-`, `Rem` is `%`
+        // and `Pow` is `**`.
         for (name, method) in [
             ("Add", "add"),
             ("Sub", "sub"),
             ("Mul", "mul"),
             ("Div", "div"),
             ("Neg", "neg"),
+            ("Rem", "rem"),
+            ("Pow", "pow"),
         ] {
             self.typeclasses.insert(
                 name.into(),
@@ -470,8 +487,8 @@ impl Generics {
             );
         }
 
-        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg
-        // via the flattened superclass dictionary layout. Num itself has no
+        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg +
+        // Rem + Pow via the flattened superclass dictionary layout. Num itself has no
         // methods; call sites resolve operators through the op traits.
         self.typeclasses.insert(
             "Num".into(),
@@ -480,7 +497,7 @@ impl Generics {
                 defined_module: PRELUDE_OPS_MODULE.into(),
                 type_params: vec!["T".into()],
                 param_kinds: vec![Kind::Type],
-                superclasses: vec!["Add".into(), "Sub".into(), "Mul".into(), "Div".into(), "Neg".into()],
+                superclasses: ["Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow"].map(Into::into).to_vec(),
                 assoc_types: vec![],
                 methods: vec![],
             },
@@ -734,6 +751,8 @@ impl Generics {
                 ("Mul", "mul"),
                 ("Div", "div"),
                 ("Neg", "neg"),
+                ("Rem", "rem"),
+                ("Pow", "pow"),
                 ("Lt", "lt"),
                 ("Le", "le"),
                 ("Gt", "gt"),
