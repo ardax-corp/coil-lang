@@ -333,8 +333,8 @@ fn specialize_side(
 fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
     use crate::mir::MirInst;
     func.blocks.iter().flat_map(|b| b.insts.iter()).all(|i| match i {
-        MirInst::Call { dest, dest_hi: None, target, args } => calls.get(&target.0).is_none_or(|abi| {
-            abi.ret_hi.is_none()
+        MirInst::Call { dest, dest_hi, target, args } => calls.get(&target.0).is_none_or(|abi| {
+            abi.ret_hi == dest_hi.map(|h| func.ty(h))
                 && abi.ret == func.ty(*dest)
                 && abi.params.len() == args.len()
                 && abi.params.iter().zip(args).all(|(&p, &a)| p == func.ty(a))

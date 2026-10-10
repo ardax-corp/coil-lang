@@ -6,8 +6,10 @@
 //! built from `if` / `loop` / `break` directly, so none of the operand-stack
 //! replay applies.
 //!
-//! This first phase covers scalar bodies: `int` / `float` / `bool` values,
-//! arithmetic, compares, casts, `let` / assignment, `if`, loops and `return`.
+//! It covers scalar bodies (`int` / `float` / `bool` values, arithmetic,
+//! compares, casts, `let` / assignment, `if`, loops and `return`), plain
+//! calls, and two-word pairs: enums of at most one payload word, ranges and
+//! two-element tuples held as two words, as HIR emission keeps them.
 //! Anything else refuses with the construct's name and the body keeps the
 //! IL lift.
 //!
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, HirBody, HirFlags, HirId, HirKind, HirPat, Lit, LocalId as HirLocal, UnOp};
+use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, Ty};
@@ -43,6 +45,36 @@ enum Val {
     /// Control never reaches past it (`return`, `break`, a loop with no
     /// exit).
     Never,
+    /// A two-word pair: `[payload, tag]`, `[start, end]` or `[a, b]`.
+    Pair(ValueId, ValueId),
+}
+
+/// A call site HIR emission lowered to a plain `CALL`.
+#[derive(Clone, Debug)]
+pub struct HirCallSite {
+    pub target: Label,
+    /// Whether each argument goes as two words.
+    pub pair_args: Vec<bool>,
+    /// Whether the result is two words.
+    pub pair_ret: bool,
+}
+
+/// What HIR emission decided about a body, for lowering it.
+pub struct HirMirInput<'a> {
+    /// Frame slot of each local (the first word of a pair local).
+    pub slots: &'a [Option<u32>],
+    /// Second-word slot and word types of each pair local.
+    pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
+    /// Word types of each expression of a two-word type.
+    pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
+    /// Word types of a two-word result.
+    pub ret_pair: Option<(MirTy, MirTy)>,
+    pub calls: &'a HashMap<u32, HirCallSite>,
+    /// Whether early exits move out of line, as HIR emission's
+    /// `hir_mark_cold`.
+    pub cold_ok: bool,
+    /// Source file of the body, for statement locations.
+    pub file: Option<u32>,
 }
 
 struct Loop {
@@ -56,7 +88,7 @@ struct Loop {
 
 struct Lower<'a> {
     hir: &'a HirBody,
-    slots: &'a [Option<u32>],
+    inp: &'a HirMirInput<'a>,
     b: MirBuilder,
     /// The block being filled.
     cur: BlockId,
@@ -66,19 +98,18 @@ struct Lower<'a> {
     /// Blocks in the order lowering started filling them: source order,
     /// which is how they are laid out.
     order: Vec<BlockId>,
-    /// Source file of the body, for statement locations.
-    file: Option<u32>,
-    /// Entry label of each plain call site HIR emission lowered to a `CALL`.
-    calls: &'a HashMap<u32, Label>,
-    /// Whether early exits move out of line, as HIR emission's
-    /// `hir_mark_cold`.
-    cold_ok: bool,
     /// Ranges of `order` holding an early exit, laid out after the body.
     cold: Vec<(usize, usize)>,
+    /// Bindings HIR emission gave no slot (an identity arm's `x` in
+    /// `Some(x) => x`): never assigned, so their word is read directly.
+    aliases: HashMap<u32, ValueId>,
+    /// The expression being lowered is `return`ed: a `match` or `if`
+    /// returns from each arm instead of joining, as HIR emission does.
+    ret_tail: bool,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
-fn scalar(ty: &Ty) -> Option<MirTy> {
+pub fn scalar(ty: &Ty) -> Option<MirTy> {
     match lower::primitive(ty)? {
         "int" => Some(MirTy::I64),
         "float" => Some(MirTy::F64),
@@ -95,52 +126,54 @@ fn mir(e: MirError) -> Refusal {
     format!("mir: {e}")
 }
 
-/// Lower `hir` to MIR. `slots` is the frame slot of each local, as HIR
-/// lowering assigned them; parameters must sit in slots `0..n`.
-pub fn lower_body(
-    hir: &HirBody,
-    slots: &[Option<u32>],
-    calls: &HashMap<u32, Label>,
-    cold_ok: bool,
-    file: Option<u32>,
-) -> Result<MirFunc, Refusal> {
+/// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
+/// parameter in two.
+pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
     if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
         return Err("body kind".into());
     }
     let root = hir.root.ok_or("no root")?;
     let ret = hir.ret.as_ref().ok_or("return type")?;
     let unit_ret = is_unit(ret);
-    let ret_ty = if unit_ret { MirTy::I64 } else { scalar(ret).ok_or("return type")? };
+    let ret_ty = match inp.ret_pair {
+        _ if unit_ret => MirTy::I64,
+        Some((lo, _)) => lo,
+        None => scalar(ret).ok_or("return type")?,
+    };
     let mut b = MirBuilder::new(hir.name.clone());
     b.set_ret_ty(ret_ty);
-    for (i, &param) in hir.params.iter().enumerate() {
-        if slots.get(param.0 as usize).copied().flatten() != Some(i as u32) {
+    let mut next = 0;
+    for &param in &hir.params {
+        if inp.slots.get(param.0 as usize).copied().flatten() != Some(next) {
             return Err("param slot".into());
         }
-        let ty = hir.local(param).ty.as_ref().and_then(scalar).ok_or("param type")?;
-        let v = b.add_param(ty).map_err(mir)?;
-        b.def_local(LocalId(i as u32), v).map_err(mir)?;
+        let words = match inp.pair_locals.get(&param.0) {
+            Some(&(hi, lo_ty, hi_ty)) if hi == next + 1 => vec![lo_ty, hi_ty],
+            Some(_) => return Err("param slot".into()),
+            None => vec![hir.local(param).ty.as_ref().and_then(scalar).ok_or("param type")?],
+        };
+        for ty in words {
+            let v = b.add_param(ty).map_err(mir)?;
+            b.def_local(LocalId(next), v).map_err(mir)?;
+            next += 1;
+        }
     }
     let cur = b.entry();
     let mut lower = Lower {
         hir,
-        slots,
+        inp,
         b,
         cur,
         loops: Vec::new(),
         unit_ret,
         order: vec![cur],
-        file,
-        calls,
-        cold_ok,
         cold: Vec::new(),
+        aliases: HashMap::new(),
+        ret_tail: false,
     };
     match lower.value(root)? {
         Val::Never => {}
-        Val::Unit if unit_ret => lower.ret_unit()?,
-        Val::V(v) if !unit_ret => lower.b.ret(Some(v)).map_err(mir)?,
-        // A unit body whose tail is a value, or a valued body ending in `()`.
-        _ => return Err("fallthrough value".into()),
+        val => lower.ret(val)?,
     }
     let order = lower.layout();
     let mut func = lower.b.finish().map_err(mir)?;
@@ -278,7 +311,8 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
 
 impl Lower<'_> {
     fn slot(&self, local: HirLocal) -> Result<LocalId, Refusal> {
-        self.slots
+        self.inp
+            .slots
             .get(local.0 as usize)
             .copied()
             .flatten()
@@ -311,12 +345,55 @@ impl Lower<'_> {
         self.b.ret(Some(zero)).map_err(mir)
     }
 
+    /// Return `val`, which must fit the function's result.
+    fn ret(&mut self, val: Val) -> Result<(), Refusal> {
+        match (val, self.inp.ret_pair) {
+            (Val::Unit, _) if self.unit_ret => self.ret_unit(),
+            (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
+            (Val::Pair(lo, hi), Some((lo_ty, hi_ty))) => {
+                if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
+                    return Err("return pair type".into());
+                }
+                self.b.ret_pair(lo, hi).map_err(mir)
+            }
+            // A unit body whose tail is a value, or a valued body ending in `()`.
+            _ => Err("return value".into()),
+        }
+    }
+
+    /// Word types of pair local `local`, with its second slot.
+    fn pair_local(&self, local: HirLocal) -> Option<(LocalId, LocalId, MirTy, MirTy)> {
+        let &(hi, lo_ty, hi_ty) = self.inp.pair_locals.get(&local.0)?;
+        Some((self.slot(local).ok()?, LocalId(hi), lo_ty, hi_ty))
+    }
+
+    /// A zero word of `ty`: the payload of a variant that carries none.
+    fn zero(&mut self, ty: MirTy) -> Result<ValueId, Refusal> {
+        let c = match ty {
+            MirTy::I64 => MirConst::I64(0),
+            MirTy::F64 => MirConst::F64(0),
+            MirTy::Bool => MirConst::Bool(false),
+            _ => return Err("pair word type".into()),
+        };
+        self.b.ins_const(c).map_err(mir)
+    }
+
+    /// `id`'s two words; `None` when control never reaches past it.
+    fn pair(&mut self, id: HirId) -> Result<Option<(ValueId, ValueId)>, Refusal> {
+        match self.value(id)? {
+            Val::Pair(lo, hi) => Ok(Some((lo, hi))),
+            Val::Never => Ok(None),
+            _ => Err("pair operand".into()),
+        }
+    }
+
     /// `id`'s word; refuses `()` and `Never` is passed up as `None`.
     fn word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
             Val::Unit => Err("unit operand".into()),
+            Val::Pair(..) => Err("pair operand".into()),
         }
     }
 
@@ -327,6 +404,7 @@ impl Lower<'_> {
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
         let e = self.hir.expr(id);
+        let returned = std::mem::take(&mut self.ret_tail);
         match &e.kind {
             HirKind::Lit(lit) => {
                 let c = match lit {
@@ -342,6 +420,11 @@ impl Lower<'_> {
                 }
                 Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
             }
+            HirKind::Local(local) if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(*local) => Ok(Val::Pair(
+                self.b.use_local(lo, lo_ty).map_err(mir)?,
+                self.b.use_local(hi, hi_ty).map_err(mir)?,
+            )),
+            HirKind::Local(local) if let Some(&v) = self.aliases.get(&local.0) => Ok(Val::V(v)),
             HirKind::Local(local) => {
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
@@ -392,11 +475,58 @@ impl Lower<'_> {
                 match tail {
                     // The body's own tail is a statement to HIR emission; a
                     // nested block's tail has its statement's location.
-                    Some(tail) if !self.b.pending_loc.is_known() => self.at_stmt(*tail, |l| l.value(*tail)),
-                    Some(tail) => self.value(*tail),
+                    Some(t) if !self.b.pending_loc.is_known() => self.at_stmt(*t, |l| {
+                        l.ret_tail = returned;
+                        l.value(*t)
+                    }),
+                    Some(t) => {
+                        self.ret_tail = returned;
+                        self.value(*t)
+                    }
                     None => Ok(Val::Unit),
                 }
             }
+            HirKind::Let { local, init } if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(*local) => {
+                let init = init.ok_or("uninitialized let")?;
+                let Some((a, b)) = self.pair(init)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(a) != lo_ty || self.b.value_ty(b) != hi_ty {
+                    return Err("let pair type".into());
+                }
+                self.b.def_local(lo, a).map_err(mir)?;
+                self.b.def_local(hi, b).map_err(mir)?;
+                Ok(Val::Unit)
+            }
+            // `let (a, b) = e` of a two-word tuple.
+            HirKind::LetPat { pat: HirPat::Tuple(items), init } if items.len() == 2 => {
+                let Some((a, b)) = self.pair(*init)? else {
+                    return Ok(Val::Never);
+                };
+                for (item, v) in items.iter().zip([a, b]) {
+                    match item {
+                        HirPat::Wild => {}
+                        HirPat::Bind(local) => self.bind(*local, v)?,
+                        _ => return Err("let pattern".into()),
+                    }
+                }
+                Ok(Val::Unit)
+            }
+            HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
+            // `p[0]` / `p[1]` of a two-word tuple local.
+            HirKind::Index { base, index, .. }
+                if let HirKind::Local(local) = self.hir.expr(*base).kind
+                    && let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local)
+                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_))) =>
+            {
+                let (slot, ty) = match self.hir.expr(*index).kind {
+                    HirKind::Lit(Lit::Int(0)) => (lo, lo_ty),
+                    HirKind::Lit(Lit::Int(1)) => (hi, hi_ty),
+                    _ => return Err("tuple index".into()),
+                };
+                Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
+            }
+            HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
                 let ty = self.local_ty(*local)?;
@@ -429,7 +559,7 @@ impl Lower<'_> {
                 self.b.def_local(slot, v).map_err(mir)?;
                 Ok(Val::Unit)
             }
-            HirKind::If { cond, then, els } => self.if_(*cond, *then, *els),
+            HirKind::If { cond, then, els } => self.if_(*cond, *then, *els, returned),
             HirKind::Loop { body } => {
                 let head = self.b.create_block();
                 self.jump(head)?;
@@ -491,10 +621,11 @@ impl Lower<'_> {
                         self.ret_unit()?;
                     }
                     Some(v) => {
-                        let Some(v) = self.word(*v)? else {
-                            return Ok(Val::Never);
-                        };
-                        self.b.ret(Some(v)).map_err(mir)?;
+                        self.ret_tail = true;
+                        match self.value(*v)? {
+                            Val::Never => return Ok(Val::Never),
+                            val => self.ret(val)?,
+                        }
                     }
                     None => return Err("return value".into()),
                 }
@@ -508,7 +639,7 @@ impl Lower<'_> {
     /// when the body never assigns it, `hi` is read once, and the step
     /// adds one after the body (or at a `continue`).
     fn for_range(&mut self, local: HirLocal, iterable: HirId, body: HirId, inclusive: bool, float: bool) -> Result<Val, Refusal> {
-        let [lo, hi] = lower::range_bounds(self.hir, iterable).ok_or("for in range value")?;
+        let bounds = lower::range_bounds(self.hir, iterable);
         let ty = self.local_ty(local)?;
         if ty != if float { MirTy::F64 } else { MirTy::I64 } {
             return Err("for in range type".into());
@@ -528,11 +659,21 @@ impl Lower<'_> {
         if lower::assigns_local(self.hir, body, local) {
             return Err("for in counter assigned".into());
         }
-        let Some(start) = self.word(lo)? else {
-            return Ok(Val::Never);
-        };
-        let Some(end) = self.word(hi)? else {
-            return Ok(Val::Never);
+        // `a..b` written in place, or a range pair (a local or a call).
+        let (start, end) = match bounds {
+            Some([lo, hi]) => {
+                let Some(start) = self.word(lo)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(end) = self.word(hi)? else {
+                    return Ok(Val::Never);
+                };
+                (start, end)
+            }
+            None => match self.pair(iterable)? {
+                Some(pair) => pair,
+                None => return Ok(Val::Never),
+            },
         };
         if self.b.value_ty(start) != ty || self.b.value_ty(end) != ty {
             return Err("for in bound type".into());
@@ -666,7 +807,7 @@ impl Lower<'_> {
     /// `f` with the source location of statement `id`.
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
-        if let Some(file) = self.file {
+        if let Some(file) = self.inp.file {
             let (start, end) = self.hir.expr(id).span;
             self.b.pending_loc = DebugLoc {
                 file,
@@ -679,36 +820,233 @@ impl Lower<'_> {
         out
     }
 
-    /// A plain call of scalar arguments: `CALL` of the entry label HIR
-    /// emission used, with the one-word ABI of the argument and result types.
+    /// A plain call: `CALL` of the entry label HIR emission used, with the
+    /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let target = *self.calls.get(&id.0).ok_or("call")?;
+        let site = self.inp.calls.get(&id.0).ok_or("call")?;
+        if site.pair_args.len() != args.len() {
+            return Err("call arity".into());
+        }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
-        let ret = if unit { MirTy::I64 } else { scalar(ty).ok_or("call type")? };
+        let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
+            Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
+            _ if site.pair_ret => return Err("call type".into()),
+            _ if unit => (MirTy::I64, None),
+            _ => (scalar(ty).ok_or("call type")?, None),
+        };
         let mut words = Vec::with_capacity(args.len());
-        for &arg in args {
-            if self.expr_ty(arg).and_then(scalar).is_none() {
+        for (&arg, &pair) in args.iter().zip(&site.pair_args) {
+            if !pair && self.expr_ty(arg).and_then(scalar).is_none() {
                 return Err("call argument type".into());
             }
-            let Some(v) = self.word(arg)? else {
-                return Ok(Val::Never);
-            };
-            words.push(v);
+            match (self.value(arg)?, pair) {
+                (Val::Never, _) => return Ok(Val::Never),
+                (Val::V(v), false) => words.push(v),
+                (Val::Pair(lo, hi), true) => words.extend([lo, hi]),
+                _ => return Err("call argument".into()),
+            }
         }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
-            ret_hi: None,
+            ret_hi,
         };
-        let (dest, _) = self.b.ins_call(target, words, &abi).map_err(mir)?;
-        Ok(if unit { Val::Unit } else { Val::V(dest) })
+        let (dest, dest_hi) = self.b.ins_call(site.target, words, &abi).map_err(mir)?;
+        Ok(match dest_hi {
+            Some(hi) => Val::Pair(dest, hi),
+            None if unit => Val::Unit,
+            None => Val::V(dest),
+        })
+    }
+
+    /// Bind `local` to the word `v`.
+    fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
+        if self.local_ty(local)? != self.b.value_ty(v) {
+            return Err("binding type".into());
+        }
+        if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
+            let assigned = self.hir.exprs.iter().any(|e| {
+                matches!(e.kind, HirKind::Assign { place, .. } if matches!(self.hir.expr(place).kind, HirKind::Local(l) if l == local))
+            });
+            if assigned {
+                return Err("local slot".into());
+            }
+            self.aliases.insert(local.0, v);
+            return Ok(());
+        }
+        let slot = self.slot(local)?;
+        self.b.def_local(slot, v).map_err(mir)
+    }
+
+    /// A variant, range or tuple built as two words.
+    fn make_pair(&mut self, id: HirId, kind: &MakeKind, args: &[HirId]) -> Result<Val, Refusal> {
+        let (lo_ty, hi_ty) = self.inp.pair_tys[&id.0];
+        let (lo, hi) = match kind {
+            MakeKind::Variant { tag: Some(tag), .. } => {
+                let lo = match args {
+                    [] => self.zero(lo_ty)?,
+                    [arg] => match self.word(*arg)? {
+                        Some(v) => v,
+                        None => return Ok(Val::Never),
+                    },
+                    _ => return Err("variant payload".into()),
+                };
+                (lo, self.b.ins_const(MirConst::I64(i64::from(*tag))).map_err(mir)?)
+            }
+            MakeKind::Range { .. } | MakeKind::Tuple => {
+                let [a, b] = args else {
+                    return Err("make pair".into());
+                };
+                let Some(a) = self.word(*a)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(b) = self.word(*b)? else {
+                    return Ok(Val::Never);
+                };
+                (a, b)
+            }
+            _ => return Err("make pair".into()),
+        };
+        if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
+            return Err("make pair type".into());
+        }
+        Ok(Val::Pair(lo, hi))
+    }
+
+    /// `match` on a `[payload, tag]` pair: each arm but the last tests the
+    /// tag, as HIR emission's `hir_match_pair`.
+    fn match_(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
+        // Arms up to the first catch-all; later ones never run.
+        let reach = arms
+            .iter()
+            .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
+            .map_or(arms.len(), |i| i + 1);
+        let arms = &arms[..reach];
+        if lower::has_nested_test(arms) {
+            return Err("nested match".into());
+        }
+        let (payload, tag) = match self.value(scrutinee)? {
+            Val::Pair(payload, tag) => (payload, tag),
+            Val::Never => return Ok(Val::Never),
+            _ => return Err("match scrutinee".into()),
+        };
+        // `Some(x) => x, None => 0`: a unit variant's payload word is `0`,
+        // so the value is the payload whatever the tag.
+        let zero_arm = |arm: &HirArm| {
+            matches!(arm.pat, HirPat::Variant { fields: HirPatFields::Unit, .. })
+                && matches!(self.hir.expr(arm.body).kind, HirKind::Lit(Lit::Int(0)))
+        };
+        if let [a, b] = arms
+            && (zero_arm(a) && lower::is_identity_arm(self.hir, b) || zero_arm(b) && lower::is_identity_arm(self.hir, a))
+            && self.b.value_ty(payload) == MirTy::I64
+        {
+            return Ok(Val::V(payload));
+        }
+        let last = arms.len() - 1;
+        let mut out = Vec::new();
+        let mut join = None;
+        let mut last_start = None;
+        for (i, arm) in arms.iter().enumerate() {
+            let miss = if i < last {
+                let HirPat::Variant { tag: Some(t), .. } = arm.pat else {
+                    return Err("match arm pattern".into());
+                };
+                let t = self.b.ins_const(MirConst::I64(i64::from(t))).map_err(mir)?;
+                let hit = self.b.ins_cmp(MirCmpOp::Eq, tag, t).map_err(mir)?;
+                let arm_b = self.b.create_block();
+                let miss = self.b.create_block();
+                self.b.branch(hit, arm_b, miss).map_err(mir)?;
+                self.switch(arm_b);
+                Some(miss)
+            } else {
+                None
+            };
+            self.bind_payload(&arm.pat, payload)?;
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+                let to = *join.get_or_insert_with(|| self.b.create_block());
+                self.jump(to)?;
+            }
+            if let Some(miss) = miss {
+                last_start = Some(self.order.len());
+                self.switch(miss);
+            }
+        }
+        // A last arm that only exits (`?`'s `Err(e) => return Err(e)`) is cold.
+        if let Some(start) = last_start
+            && lower::cold_exit(self.hir, arms[last].body)
+        {
+            self.mark_cold(start);
+        }
+        let Some(join) = join else {
+            return Ok(Val::Never);
+        };
+        self.switch(join);
+        self.join(out)
+    }
+
+    /// Bind a match arm's payload names to the payload word.
+    fn bind_payload(&mut self, pat: &HirPat, payload: ValueId) -> Result<(), Refusal> {
+        let HirPat::Variant { fields, .. } = pat else {
+            return match pat {
+                HirPat::Wild => Ok(()),
+                _ => Err("match arm pattern".into()),
+            };
+        };
+        let bound = match fields {
+            HirPatFields::Unit => return Ok(()),
+            HirPatFields::Tuple(items) => match items.as_slice() {
+                [] | [HirPat::Wild] => return Ok(()),
+                [HirPat::Bind(local)] => *local,
+                _ => return Err("payload pattern".into()),
+            },
+            HirPatFields::Record(items) => match items.as_slice() {
+                [] | [(_, HirPat::Wild)] => return Ok(()),
+                [(_, HirPat::Bind(local))] => *local,
+                _ => return Err("payload pattern".into()),
+            },
+        };
+        self.bind(bound, payload)
+    }
+
+    /// The value where the arms reaching the current block meet: one φ per
+    /// word.
+    fn join(&mut self, arms: Vec<(BlockId, Val)>) -> Result<Val, Refusal> {
+        if arms.iter().all(|(_, v)| matches!(v, Val::Unit)) {
+            return Ok(Val::Unit);
+        }
+        let mut lo = Vec::new();
+        let mut hi = Vec::new();
+        for (block, val) in arms {
+            match val {
+                Val::V(v) => lo.push((block, v)),
+                Val::Pair(a, b) => {
+                    lo.push((block, a));
+                    hi.push((block, b));
+                }
+                _ => return Err("arm value".into()),
+            }
+        }
+        if !hi.is_empty() && hi.len() != lo.len() {
+            return Err("arm value".into());
+        }
+        let mut phi = |args: Vec<(BlockId, ValueId)>| -> Result<ValueId, Refusal> {
+            let ty = self.b.value_ty(args[0].1);
+            if args.iter().any(|&(_, v)| self.b.value_ty(v) != ty) {
+                return Err("arm types".into());
+            }
+            self.b.ins_stack_phi(args).map_err(mir)
+        };
+        let lo = phi(lo)?;
+        Ok(if hi.is_empty() { Val::V(lo) } else { Val::Pair(lo, phi(hi)?) })
     }
 
     /// Lay out the blocks lowering started since `order[start]` after the
     /// body; a range nested in one already marked goes with it.
     fn mark_cold(&mut self, start: usize) {
-        if self.cold_ok {
+        if self.inp.cold_ok {
             self.cold.retain(|&(s, _)| s < start);
             self.cold.push((start, self.order.len()));
         }
@@ -725,7 +1063,20 @@ impl Lower<'_> {
         out
     }
 
-    fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>) -> Result<Val, Refusal> {
+    /// The value of an arm body; with `tail`, returned from the arm.
+    fn arm_value(&mut self, body: HirId, tail: bool) -> Result<Val, Refusal> {
+        self.ret_tail = tail;
+        match self.value(body)? {
+            Val::Never => Ok(Val::Never),
+            val if tail => {
+                self.ret(val)?;
+                Ok(Val::Never)
+            }
+            val => Ok(val),
+        }
+    }
+
+    fn if_(&mut self, cond: HirId, then: HirId, els: Option<HirId>, tail: bool) -> Result<Val, Refusal> {
         // `if !c` branches on `c` with the edges swapped, as HIR lowering
         // inverts it.
         let (cond, negated) = match self.hir.expr(cond).kind {
@@ -751,7 +1102,11 @@ impl Lower<'_> {
             let start = self.order.len();
             self.switch(block);
             let val = match arm {
-                Some(arm) => self.value(arm)?,
+                Some(arm) => self.arm_value(arm, tail)?,
+                None if tail => {
+                    self.ret(Val::Unit)?;
+                    Val::Never
+                }
                 None => Val::Unit,
             };
             // The arm a statement `if` leaves by (`then` without an `else`,
@@ -771,21 +1126,7 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         self.switch(join);
-        if arms.iter().all(|(_, v)| matches!(v, Val::Unit)) {
-            return Ok(Val::Unit);
-        }
-        let mut args = Vec::new();
-        for (block, val) in arms {
-            match val {
-                Val::V(v) => args.push((block, v)),
-                _ => return Err("if arm value".into()),
-            }
-        }
-        let ty = self.b.value_ty(args[0].1);
-        if args.iter().any(|&(_, v)| self.b.value_ty(v) != ty) {
-            return Err("if arm types".into());
-        }
-        Ok(Val::V(self.b.ins_stack_phi(args).map_err(mir)?))
+        self.join(arms)
     }
 }
 
