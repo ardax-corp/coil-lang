@@ -169,7 +169,6 @@ pub(crate) fn lower_module_inner(
     capture_ops: bool,
     opts: &opt::OptimizeOptions,
 ) -> Result<Lowered, IlError> {
-    super::bounds::reset_bounds_stats();
     super::canon::reset_canon_stats();
     let (flat, label_remap, func_label_maps) = module.optimize_and_flatten(opts, pool);
     let mut lowered = try_lower_optimized(&flat, pool)?;

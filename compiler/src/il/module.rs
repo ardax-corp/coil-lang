@@ -162,6 +162,19 @@ impl IlModule {
             if let (Some(old), Some(new)) = (old_entry, new_entry) {
                 entry_labels.insert(old, new);
             }
+            // Bodies emitted without a recorded function (dictionary adapter
+            // thunks) sit in glue, which per-body opts never relabel, so its
+            // emit-time ids are the call targets. Another body's opts may
+            // mint the same id, which makes the unique-map fallback refuse.
+            if let Some(g) = module.glue.get(i) {
+                for op in g {
+                    if let IlOp::Label(Label(old)) = op
+                        && let Some(&new) = map.get(old)
+                    {
+                        entry_labels.entry(*old).or_insert(new);
+                    }
+                }
+            }
             func_label_maps.push(map.clone());
             merge_remap_labels(&mut prior_labels, map);
             out.extend(chunk);
@@ -1298,6 +1311,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn to_flat_remaps_call_into_a_glue_body_despite_a_reused_id() {
+        // A dictionary adapter thunk has no recorded function: it sits in the
+        // glue after `method`. Another body's opts minted the same id, so the
+        // unique-map fallback is ambiguous; the glue binding must still win.
+        let loc = loc();
+        let thunk = Label(7);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("method", Some(Label(1)), 0, 1),
+            ops: vec![IlOp::Label(Label(1)), IlOp::Return { loc, ret_words: 1 }],
+        });
+        m.glue.push(vec![IlOp::Label(thunk), IlOp::Return { loc, ret_words: 1 }]);
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("other", Some(Label(2)), 0, 1),
+            ops: vec![IlOp::Label(Label(2)), IlOp::Label(thunk), IlOp::Return { loc, ret_words: 1 }],
+        });
+        m.glue.push(Vec::new());
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", Some(Label(3)), 0, 2),
+            ops: vec![
+                IlOp::Label(Label(3)),
+                IlOp::Entry { kind: EntryKind::Call, arity: 0, target: thunk, loc, ret_words: 1 },
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let bound: Vec<u32> = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(target, bound[1], "the CALL lands on the glue thunk; labels {bound:?}");
+    }
+
     /// Typeclass / default-method CALLs target a body label that is not
     /// `IlFunc.entry`; unique-hit still remaps those.
     #[test]
@@ -1581,7 +1638,6 @@ mod tests {
             branch_optimization: false,
             block_reordering: false,
             collect_stats: false,
-            pure_call_ctx: None,
             mir_specialize: true,
         }
     }

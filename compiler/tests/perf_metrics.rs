@@ -527,23 +527,13 @@ fn perf_indexed_sum_hoists_array_len_once() {
         len_pc < target_rel,
         "ArrayLen at {len_pc} must be before back-edge target {target_rel} (hoisted preheader)"
     );
-    // Fuse-IL records bounds stats; a MIR dense body proves via HEAP_UNCHECKED.
-    if sum.iter().any(|b| *b.bytecode() == Instruction::DenseArrayLen) {
-        assert!(
-            count_dense_unchecked_in(&bc, start, end, false) >= 1,
-            "indexed_sum dense Index under i < len should be unchecked"
-        );
-    } else {
-        let stats = compiler::last_bounds_stats();
-        assert!(
-            stats.array_len_hoists >= 1,
-            "indexed_sum should hoist ArrayLen; stats={stats:?}"
-        );
-        assert!(
-            stats.proven_index >= 1,
-            "indexed_sum Index under i < len should be proven; stats={stats:?}"
-        );
-    }
+    assert!(
+        count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked)
+            + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)
+            + count_dense_unchecked_in(&bc, start, end, false)
+            >= 1,
+        "indexed_sum Index under i < len should be unchecked"
+    );
 }
 
 #[test]
@@ -589,23 +579,6 @@ fn perf_nsieve_proves_fill_bounded_index() {
         count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1
             || count_dense_unchecked_in(&bc, start, end, false) >= 1,
         "nsieve should pin flags in loop preheaders"
-    );
-    let stats = compiler::last_bounds_stats();
-    assert!(
-        stats.proven_index >= 1,
-        "nsieve p-loop Index after fill-to-n should be proven; stats={stats:?}"
-    );
-    assert!(
-        stats.proven_store_index >= 1,
-        "nsieve stride StoreIndex should be proven; stats={stats:?}"
-    );
-    assert!(
-        stats.array_pin_hoists >= 1,
-        "nsieve should hoist ArrayPin; stats={stats:?}"
-    );
-    assert!(
-        stats.index_pin_rewrites >= 1,
-        "nsieve should rewrite index sites to pins; stats={stats:?}"
     );
 }
 
@@ -1638,17 +1611,6 @@ fn aot_p2_vec_scan_dispatch_regression() {
 #[test]
 fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_pure.hy");
-    let stats = compiler::last_bounds_stats();
-    assert!(
-        stats.array_len_hoists >= 1,
-        "len(v) should hoist across pure absorb; stats={stats:?}"
-    );
-    assert!(
-        // HIR keeps the scan's `ArrayPin` and rewrites the read to
-        // `IndexPinUnchecked` instead of proving a plain `Index`.
-        stats.proven_index >= 1 || stats.index_pin_rewrites >= 1,
-        "v[i] under i < len(v) should prove; stats={stats:?}"
-    );
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
@@ -1687,13 +1649,6 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
 #[test]
 fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_impure.hy");
-    let stats = compiler::last_bounds_stats();
-    assert!(
-        // HIR keeps the scan's `ArrayPin` and rewrites the read to
-        // `IndexPinUnchecked` instead of proving a plain `Index`.
-        stats.proven_index >= 1 || stats.index_pin_rewrites >= 1,
-        "v[i] under i < len(v) should prove across absorb; stats={stats:?}"
-    );
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);

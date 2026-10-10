@@ -1,7 +1,7 @@
 //! InstCombine on numeric MIR (COI-281 / COI-285).
 //!
-//! Fuse-IL `algebraic` only matches Load/Const/ConstPool windows. After SSA
-//! lower, identities apply to any `ValueId` (binop results included).
+//! HIR folding (`hir::fold`) only sees literal operands in the source tree.
+//! After SSA lower, identities apply to any `ValueId` (binop results included).
 //!
 //! **Flag policy:** no fast-math / contract / reassoc flag. Default is IEEE-safe
 //! only. FMA is not formed (`a*b+c` stays two roundings; a fused op would

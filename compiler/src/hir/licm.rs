@@ -12,6 +12,10 @@
 //! moves only when every iteration runs it, before any exit, and the loop
 //! is sure to run it once: a `loop` with no condition, or a `while` whose
 //! cheap condition is tested again in front of the hoisted code.
+//!
+//! `len(a)` of an array, `Vec` or string moves when the loop cannot change
+//! a length: element and field writes are fine, an append or a call that
+//! may resize one (an impure call whose effects show no resize is fine) is not.
 
 use std::collections::HashSet;
 
@@ -21,8 +25,10 @@ use super::{BinOp, Callee, HirBody, HirId, HirKind, HirPat, Lit, LocalId, MakeKi
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with invariant expressions moved out of its loops, or `None`
-/// when nothing moves. `pure(name)` admits a call to `name`.
-pub fn hoist(body: &HirBody, pure: impl Fn(&str) -> bool) -> Option<HirBody> {
+/// when nothing moves. `pure(name)` admits a call to `name`; `steady(name)`
+/// says a call to `name` never resizes an array, and `None` means a length
+/// may change at any allocation (a finalizer can resize).
+pub fn hoist(body: &HirBody, pure: impl Fn(&str) -> bool, steady: Option<&dyn Fn(&str) -> bool>) -> Option<HirBody> {
     let root = body.root?;
     let mut loops = Vec::new();
     preorder(body, root, &mut |id| {
@@ -33,7 +39,7 @@ pub fn hoist(body: &HirBody, pure: impl Fn(&str) -> bool) -> Option<HirBody> {
     let mut out: Option<HirBody> = None;
     for lp in loops {
         let cur = out.as_ref().unwrap_or(body);
-        let plan = Plan::new(cur, lp, &pure);
+        let plan = Plan::new(cur, lp, &pure, steady);
         let picks = plan.picks();
         if picks.is_empty() {
             continue;
@@ -63,6 +69,9 @@ struct Plan<'a, P> {
     /// The loop changes nothing on the heap: no field, element or append
     /// write and no call that is not pure.
     heap_quiet: bool,
+    /// No array or `Vec` changes length: no append and no call that may
+    /// resize one.
+    length_quiet: bool,
     /// Expressions every iteration computes before it can leave.
     every: HashSet<HirId>,
     /// The `while` condition to test before trapping code, or `None` when
@@ -72,7 +81,7 @@ struct Plan<'a, P> {
 }
 
 impl<'a, P: Fn(&str) -> bool> Plan<'a, P> {
-    fn new(body: &'a HirBody, lp: HirId, pure: &'a P) -> Self {
+    fn new(body: &'a HirBody, lp: HirId, pure: &'a P, steady: Option<&dyn Fn(&str) -> bool>) -> Self {
         let mut written = HashSet::new();
         let (loop_body, pat) = match &body.expr(lp).kind {
             HirKind::Loop { body: b } => (*b, None),
@@ -98,23 +107,31 @@ impl<'a, P: Fn(&str) -> bool> Plan<'a, P> {
             _ => {}
         });
         let mut heap_quiet = true;
+        let mut length_quiet = steady.is_some();
         preorder(body, loop_body, &mut |id| {
-            heap_quiet &= match &body.expr(id).kind {
-                HirKind::Assign { place, .. } => matches!(body.expr(*place).kind, HirKind::Local(_)),
+            let quiet = match &body.expr(id).kind {
                 HirKind::Append { .. } | HirKind::Resume { .. } | HirKind::Yield { .. } => false,
-                HirKind::Call { callee: Callee::Named { name, .. }, .. } => pure(name),
+                HirKind::Call { callee: Callee::Named { name, .. }, args } => pure(name) || length_read(body, name, args),
                 HirKind::Call { .. } => false,
                 HirKind::Builtin { op, .. } => {
                     matches!(op, super::Builtin::Panic | super::Builtin::TypeOf | super::Builtin::Readonly | super::Builtin::Default)
                 }
                 _ => true,
             };
+            length_quiet &= quiet
+                || matches!(&body.expr(id).kind, HirKind::Call { callee: Callee::Named { name, .. }, .. } if steady.is_some_and(|s| s(name)));
+            heap_quiet &= quiet
+                && match &body.expr(id).kind {
+                    HirKind::Assign { place, .. } => matches!(body.expr(*place).kind, HirKind::Local(_)),
+                    _ => true,
+                };
         });
         let mut plan = Plan {
             body,
             pure,
             written,
             heap_quiet,
+            length_quiet,
             every: HashSet::new(),
             guard: Some(None),
             loop_body,
@@ -264,6 +281,13 @@ impl<'a, P: Fn(&str) -> bool> Plan<'a, P> {
                 let s = if is_int(from) && is_named(to, "float") { Safety::Free } else if scalar(from) && scalar(to) { Safety::Traps } else { return None };
                 Some(s.max(self.invariant(*value)?))
             }
+            // The length of a sequence nothing in the loop resizes.
+            HirKind::Call { callee: Callee::Named { name, .. }, args } if name == "len" && length_read(body, name, args) => {
+                match body.expr(args[0]).kind {
+                    HirKind::Local(l) if self.length_quiet && !self.written.contains(&l) && !body.local(l).captured => Some(Safety::Free),
+                    _ => None,
+                }
+            }
             HirKind::Call { callee: Callee::Named { name, .. }, args } => {
                 if !(self.pure)(name) || !e.ty.as_ref().is_some_and(|t| scalar(t) || is_named(t, "string")) {
                     return None;
@@ -298,6 +322,17 @@ impl<'a, P: Fn(&str) -> bool> Plan<'a, P> {
             _ => None,
         }
     }
+}
+
+/// `len(a)` / `capacity(a)` of an array, `Vec` or string: reads a length
+/// and runs no user code.
+fn length_read(body: &HirBody, name: &str, args: &[HirId]) -> bool {
+    let [a] = args else { return false };
+    matches!(name, "len" | "capacity")
+        && body.expr(*a).ty.as_ref().is_some_and(|t| {
+            let t = ty::strip_readonly(t);
+            matches!(t, Ty::Array { .. }) || ty::vec_element_ty(t).is_some() || is_named(t, "string")
+        })
 }
 
 /// Whether `op` at `id` can trap; `None` for operators that call code.

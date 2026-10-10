@@ -59,29 +59,17 @@ interior `*mut Value` into `elements`.
 
 ### Who creates it
 
-`il::bounds::rewrite_array_pins` (`compiler/src/il/bounds.rs`), after
-`rewrite_proven_index_ops`. Driven from LICM's `loop_bounds` call.
-
-Codegen also consumes [`index_facts`](../../compiler/src/typechecking/index_facts.rs)
+Codegen consumes [`index_facts`](../../compiler/src/typechecking/index_facts.rs)
 sidecar bits: a proven helper `f(a, i)` pins `a` at function entry and emits
 `IndexPinUnchecked`; a length-stable `for x in arr` pins the iterable temp
 and uses `IndexPinUnchecked` for the element load. No new opcodes. Yield still
 clears facts — do not pin across `YieldCoro`.
 
-For each counted loop (`LE` / post-canon `GT` header; unit `+1` or invariant
-positive stride) and each length-invariant array slot in `len_arrays`:
-
-1. Proven `LOAD arr; LOAD i; Index` / `IndexUnchecked` rewrite to
-   `IndexPin` / `IndexPinUnchecked` and drop the array load.
-2. Proven `LOAD arr; LOAD i; <value>; StoreIndex*` rewrite to
-   `StoreIndexPin*`.
-3. `LOAD arr; ArrayPin slot=arr` is inserted in a fresh preheader.
-
-The compiler therefore emits `IndexPinUnchecked` / `StoreIndexPinUnchecked`
-on proven sites (`rewrite_proven_index_ops` runs first). Checked `IndexPin` /
-`StoreIndexPin` exist for the VM contract and tests; production rewrite of
-nsieve uses the unchecked twins
-(`compiler/tests/perf_metrics.rs`, `compiler/src/pipeline.rs`).
+The stack-IL `loop_bounds` pass also pinned arrays in proven counted loops
+(`ArrayPin` in a preheader, `IndexPin*` on the sites). It was removed
+2026-10 when bounds proofs moved to HIR (`hir::bounds`); those loop sites now
+lower to `IndexUnchecked` / `StoreIndexUnchecked`, and MIR-dense bodies use
+`DenseIndex` with the same pin table (COI-372).
 
 The same length-sensitive refusals as Unchecked apply: `ArrayPush`, rebound
 array slot, impure `CALL`, host, FFI, `GetField`/`SetField`, `CallIndirect`,

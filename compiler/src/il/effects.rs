@@ -1,15 +1,11 @@
 //! One effect table for IL ops.
 //!
-//! CSE, LICM and the loop length proof each used to carry their own "is this a
-//! barrier" list, and the lists drifted (GVN missed yields, pinned stores and
-//! residual bytes; LICM missed indirect calls and coroutine resumes). Passes now ask [`effects`] and combine the bits they care
-//! about. Slot stores are not an effect here: every pass already tracks slot
-//! defs itself.
+//! Callers ask [`effects`] and combine the bits they care about. Slot stores
+//! are not an effect here: callers track slot defs themselves.
 
 use common::Instruction;
 
-use super::op::{EntryKind, IlJumpKind, IlOp};
-use super::pure_call::PureCallCtx;
+use super::op::{IlJumpKind, IlOp};
 
 /// Effect bits of one IL op.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -17,8 +13,8 @@ pub(crate) struct Effects(u16);
 
 impl Effects {
     pub(crate) const NONE: Effects = Effects(0);
-    /// Call into user code the purity sidecar cannot prove pure (or any
-    /// non-call `Entry`: tail call, coroutine, code pointer, poly fn).
+    /// Call into user code (or any non-call `Entry`: tail call, coroutine,
+    /// code pointer, poly fn).
     pub(crate) const CALL: Effects = Effects(1 << 0);
     /// Host native, print, FFI.
     pub(crate) const HOST: Effects = Effects(1 << 1);
@@ -46,10 +42,6 @@ impl Effects {
         Effects(self.0 | other.0)
     }
 
-    pub(crate) const fn without(self, mask: Effects) -> Effects {
-        Effects(self.0 & !mask.0)
-    }
-
     pub(crate) const fn any(self, mask: Effects) -> bool {
         self.0 & mask.0 != 0
     }
@@ -69,9 +61,8 @@ impl std::ops::BitOr for Effects {
     }
 }
 
-/// Effects of `op`. A `CALL` is effect-free only when `purity` proves the
-/// callee pure and it returns one word.
-pub(crate) fn effects(op: &IlOp, purity: Option<&PureCallCtx>) -> Effects {
+/// Effects of `op`.
+pub(crate) fn effects(op: &IlOp) -> Effects {
     match op {
         IlOp::HostInvoke { .. } | IlOp::Print { .. } => Effects::HOST,
         IlOp::GetField { .. } => Effects::FIELD_READ,
@@ -80,42 +71,20 @@ pub(crate) fn effects(op: &IlOp, purity: Option<&PureCallCtx>) -> Effects {
         IlOp::MakeTuple { .. } | IlOp::MakeArray { .. } | IlOp::MakeEnum { .. } | IlOp::BoxValue { .. } => {
             Effects::ALLOC
         }
-        IlOp::Entry {
-            kind: EntryKind::Call,
-            target,
-            ret_words,
-            ..
-        } => {
-            if *ret_words == 1 && purity.is_some_and(|c| c.call_is_pure(*target)) {
-                Effects::NONE
-            } else {
-                Effects::CALL
-            }
-        }
         IlOp::Entry { .. } => Effects::CALL,
         IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { .. },
             ..
         } => Effects::MATCH,
-        IlOp::Byte { byte, .. } => byte_effects(byte, purity),
+        IlOp::Byte { byte, .. } => byte_effects(byte),
         _ => Effects::NONE,
     }
 }
 
-fn byte_effects(byte: &common::Byte, purity: Option<&PureCallCtx>) -> Effects {
+fn byte_effects(byte: &common::Byte) -> Effects {
     use Instruction::*;
     match *byte.bytecode() {
-        CALL => {
-            let (_, target) = byte.call_parts();
-            if byte.call_ret_words() == 1
-                && purity.is_some_and(|c| c.call_offset_is_pure(target as u32))
-            {
-                Effects::NONE
-            } else {
-                Effects::CALL
-            }
-        }
-        TailCall | MakeCoro | CallIndirect | ResumeCoro => Effects::CALL,
+        CALL | TailCall | MakeCoro | CallIndirect | ResumeCoro => Effects::CALL,
         HostInvoke | PRINT | FfiInvoke => Effects::HOST,
         FORMAT | STRINGIFY => Effects::FORMAT,
         GetField => Effects::FIELD_READ,
@@ -147,17 +116,17 @@ mod tests {
 
     #[test]
     fn yields_and_pinned_stores_are_effects() {
-        assert!(effects(&byte(Instruction::YieldCoro), None).any(Effects::YIELD));
+        assert!(effects(&byte(Instruction::YieldCoro)).any(Effects::YIELD));
         let pin = IlOp::StoreIndexPin {
             slot: 0,
             loc: DebugLoc::unknown(),
         };
-        assert!(effects(&pin, None).any(Effects::ELEM_WRITE));
+        assert!(effects(&pin).any(Effects::ELEM_WRITE));
     }
 
     #[test]
     fn unmodelled_bytes_are_unknown() {
-        assert_eq!(effects(&byte(Instruction::Seek), None), Effects::UNKNOWN);
-        assert_eq!(effects(&byte(Instruction::ArrayLen), None), Effects::NONE);
+        assert_eq!(effects(&byte(Instruction::Seek)), Effects::UNKNOWN);
+        assert_eq!(effects(&byte(Instruction::ArrayLen)), Effects::NONE);
     }
 }

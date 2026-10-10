@@ -98,11 +98,11 @@ titles can oversell.
 |------|-------------|--------------------------------------------|
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, scalar replacement, unroll). |
 | **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
-| **`local_cse`** (`opt/early_cse.rs`, [#317](https://github.com/ardax-corp/coil-lang/pull/317)) | Intra-block EarlyCSE: stored pure `BinSlot*` / stack bin / cast / `ArrayLen` / `Index` → `Load` | Effect / call / residual `Byte` barriers. No cross-block, no cheap Const→Load (fuse). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
-| **`licm`** ([#315](https://github.com/ardax-corp/coil-lang/pull/315)) | LICM iterates invariant expr chains | Hit: `licm_nested_chains`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
+| **`local_cse`** (`hir/cse.rs`; stack-IL [#317](https://github.com/ardax-corp/coil-lang/pull/317) moved to HIR 2026-10) | Intra-block CSE on HIR: a repeated pure operator / cast / field / element / pure-call value reads the `let` local holding it | Killed by writes to the locals it reads, its holder, or (heap reads) the heap. Hit: `cse_index_recompute`, `cse_cast_recompute`. |
+| **`licm`** (`hir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR 2026-10) | Hoists invariant expressions out of loops on HIR | Hit: `licm_nested_chains`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
 | **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
-| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13). Sidecar `index_facts` extend Unchecked/pin to helpers, for-in, and `i += k` when `0 <= i < len` is proven | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield (`YieldCoro` / `YieldFromCoro`), growing-array, alias-push, and **impure** helper-call loops stay checked. Pure user helpers on `b[i]` are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)). Pins are not saved across yield or on `ObjCoroutine`. |
+| **`loop_bounds`** (`hir/bounds.rs` + `len(a)` hoisting in `hir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
@@ -221,7 +221,7 @@ same length-invariance proof (`LE` / post-canon `GT` headers only).
 `LEQ` / `GEQ` are **not** length / in-bounds proofs (COI-85 / COI-98). Dynamic
 indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 
-`il::bounds.rs` proves **length invariance** per natural loop instead of
+The stack-IL `il::bounds.rs` (removed 2026-10; now `hir::bounds` plus `len(a)` hoisting in `hir::licm`) proved **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
 place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
 an impure call, a host native or any unmodelled op refuses the region. Two invariant
@@ -375,7 +375,7 @@ existing opcode; fits append-only opcode ABI.
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store_at` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
 | `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle` (was `tr`→`zr` LOAD+STORE latch) | ~2.56M dispatches/run before dense MIR | **closed** (dense MIR registers; the `tos_carry` IL rewrite was removed 2026-10, no bench effect); opcode still unproven | Do **not** append `MoveSlot` until a universal residual remains. |
-| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | `il::bounds` proofs + `IndexPin*` (minor 13) on proven loops |
+| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | bounds proofs (`il::bounds`, now `hir::bounds`) + `IndexPin*` (minor 13, dropped with the IL pass) on proven loops |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |
 

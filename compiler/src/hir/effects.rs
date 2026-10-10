@@ -147,6 +147,25 @@ impl ProgramEffects {
 /// `Owner::m` and `module::Owner::m`. A bare `m` is listed when every body
 /// of that short name is pure, here or in `known` (the AST walk's set).
 pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
+    names_where(module, module_path, summaries, known, Summary::is_pure)
+}
+
+/// Functions and methods that never change the length of an array or
+/// `Vec` (no append, resize, yield or unknown code), whatever they are
+/// passed. `known` are names already known to qualify.
+pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
+    names_where(module, module_path, summaries, known, |s| {
+        s.latent == 0 && !s.flags.contains(EffectFlags::RESIZE | EffectFlags::UNKNOWN | EffectFlags::YIELD)
+    })
+}
+
+fn names_where(
+    module: &HirModule,
+    module_path: &str,
+    summaries: &[Summary],
+    known: &HashSet<String>,
+    ok: impl Fn(Summary) -> bool,
+) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut by_short: HashMap<&str, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
@@ -155,17 +174,17 @@ pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], 
             Some((owner, short)) => (Some(owner), short),
             None => (None, local),
         };
-        let pure = s.is_pure() || known.contains(local);
+        let pure = ok(*s) || known.contains(local);
         match (body.kind, owner) {
             (BodyKind::Function, None) => {
-                if s.is_pure() {
+                if ok(*s) {
                     out.insert(local.to_string());
                 }
             }
             // Trait impls (`Show for P::m`) and nested functions keep the
             // AST walk's verdict.
             (BodyKind::Method, Some(owner)) if !owner.contains(' ') && !owner.contains("::") => {
-                if s.is_pure() {
+                if ok(*s) {
                     out.insert(local.to_string());
                     if !module_path.is_empty() {
                         out.insert(body.name.clone());

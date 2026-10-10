@@ -705,8 +705,8 @@ fn int_mul_by_power_of_two_stays_mul() {
     );
 }
 
-/// `x ** 2` strength-reduces to a self-multiply, not `Pow`. The `DUPLICATE`
-/// is re-expanded to a second `LOAD` so it fuses into one `BinSlotSlot`.
+/// `x ** 2` strength-reduces to a self-multiply, not `Pow`: one
+/// `BinSlotSlot`, or a dense `MUL` once the body is that small.
 #[test]
 fn pow_two_emits_self_mul_not_pow() {
     use common::Instruction;
@@ -721,7 +721,7 @@ fn pow_two_emits_self_mul_not_pow() {
             let (op, a, c) = b.bin_slot_slot_parts();
             op == Instruction::MUL as u8 && a == c
         }
-    });
+    }) || bc.last_chunk::<3>().is_some_and(|t| *t[1].bytecode() == Instruction::DenseBin);
     assert!(
         fused_self_mul,
         "expected BinSlotSlot MUL with both operands the same slot; opcodes: {:?}",
@@ -4887,7 +4887,7 @@ fn main() {
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
     let makes = body
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake | Instruction::DenseMakeK))
         .count();
     assert_eq!(makes, 1, "return the zip heap object; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);

@@ -566,6 +566,12 @@ pub struct Compiler {
     recursive_pure: HashSet<String>,
     /// Side-effect-free user `fn` names (loop bounds / COI-99).
     pure_fns: HashSet<String>,
+    /// Functions that never resize an array or `Vec`; recomputed per
+    /// module.
+    steady_fns: HashSet<String>,
+    /// No `fn drop()` can resize an array, so allocating cannot change a
+    /// length.
+    alloc_steady: bool,
     /// HIR effect summaries of every module compiled so far (E1).
     program_effects: crate::hir::effects::ProgramEffects,
     /// Detected independent-parallel-arm fork sites for pure fns.
@@ -734,6 +740,8 @@ impl Default for Compiler {
             recursive_fns: HashSet::new(),
             recursive_pure: HashSet::new(),
             pure_fns: HashSet::new(),
+            steady_fns: HashSet::new(),
+            alloc_steady: false,
             program_effects: Default::default(),
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),

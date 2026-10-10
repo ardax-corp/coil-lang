@@ -2891,8 +2891,7 @@ fn main() {
             );
             assert!(
                 il_pins >= 1,
-                "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins} stats={:?}",
-                crate::last_bounds_stats()
+                "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins}"
             );
             assert_eq!(
                 bc_pins, il_pins,
@@ -2936,11 +2935,6 @@ fn main() -> int {
         let (bytecode, _) = pipeline
             .compile_src_retaining_il(src)
             .expect("compile pure helper scan");
-        let stats = crate::last_bounds_stats();
-        assert!(
-            stats.array_len_hoists >= 1,
-            "len(b) should hoist across pure absorb; stats={stats:?}"
-        );
         let snap = pipeline.cursor_il.as_ref().expect("retained IL");
         let unchecked = snap
             .ops
@@ -2966,11 +2960,9 @@ fn main() -> int {
                     | Instruction::DenseIndexJmpf
             )
         });
-        // `last_bounds_stats` is the last body the pass saw, which depends
-        // on body order, so `b[j]` being proven shows in the output.
         assert!(
-            stats.proven_index >= 1 || unchecked >= 1 || bc_index,
-            "b[j] should be proven under j < len(b) (unchecked or DenseIndex); stats={stats:?}"
+            unchecked >= 1 || bc_index,
+            "b[j] should be proven under j < len(b) (unchecked or DenseIndex)"
         );
         let calls = bytecode
             .iter()
@@ -3004,17 +2996,14 @@ fn main() {
 }
 "#;
         let mut pipeline = Pipeline::new();
-        pipeline
+        let (bytecode, _) = pipeline
             .compile_src(src)
             .expect("compile pushing helper scan");
-        let stats = crate::last_bounds_stats();
-        assert_eq!(
-            stats.array_len_hoists, 0,
-            "pushing callee must refuse ArrayLen hoist; stats={stats:?}"
-        );
-        assert_eq!(
-            stats.proven_index, 0,
-            "pushing callee must not prove Index; stats={stats:?}"
+        let main = fn_ops(&bytecode, &pipeline.program_debug().fn_symbols, "main");
+        assert!(
+            main.iter().all(|b| !is_unchecked_index(*b.bytecode())),
+            "pushing callee must not prove Index; body={:?}",
+            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
     }
 
@@ -3347,7 +3336,6 @@ fn main() -> int {
 "#;
         let mut pipeline = Pipeline::new();
         let (bytecode, _) = pipeline.compile_src(src).expect("compile stride");
-        let stats = crate::last_bounds_stats();
         let unchecked = bytecode
             .iter()
             .filter(|b| is_unchecked_index(*b.bytecode()))
@@ -3356,16 +3344,8 @@ fn main() -> int {
             .iter()
             .any(|b| is_dense_heap_index(*b.bytecode()));
         assert!(
-            stats.proven_index >= 1
-                || stats.index_pin_rewrites >= 1
-                || unchecked >= 1
-                || dense,
-            "i += 2 under j < len should uncheck or densify; stats={stats:?} unchecked={unchecked}"
-        );
-        let pins = bytecode.iter().filter(|b| is_pin_op(*b.bytecode())).count();
-        assert!(
-            pins >= 1 || dense,
-            "stride loop should pin or densify; stats={stats:?}"
+            unchecked >= 1 || dense,
+            "i += 2 under j < len should uncheck or densify; unchecked={unchecked}"
         );
     }
 
@@ -3393,8 +3373,6 @@ fn main() -> int {
 "#;
         let mut pipeline = Pipeline::new();
         let (bytecode, _) = pipeline.compile_src(src).expect("compile mutation");
-        let stats = crate::last_bounds_stats();
-        assert_eq!(stats.proven_index, 0, "grow must not prove Index; stats={stats:?}");
         let main = fn_ops(&bytecode, &pipeline.program_debug().fn_symbols, "main");
         let scan_unchecked = main
             .iter()

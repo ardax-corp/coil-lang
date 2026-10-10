@@ -1,7 +1,6 @@
 //! Operand-order canonicalization for stack IL.
 //!
-//! Rewrites windows into preferred forms so fuse-select, algebraic peeps, and
-//! local CSE match more often:
+//! Rewrites windows into preferred forms so fuse-select matches more often:
 //! - `Const; Load; op` → `Load; Const; op'` (const on RHS)
 //! - `ConstPool; Load; int-op` → demote pool to inline `Const` when safe, then swap
 //! - `Load a; Load b; op` with `a > b` → swapped loads (+ cmp polarity flip)

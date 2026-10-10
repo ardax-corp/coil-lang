@@ -4,8 +4,15 @@ use std::collections::HashMap;
 
 use common::Instruction;
 
-use super::super::bounds::LoopHeaderProof;
 use super::super::op::{IlJumpKind, IlOp, Label};
+
+/// How a counted-loop header compares the induction variable to its bound:
+/// `i < n` (`StrictBound`) or `i <= n` (`TripCount`, one more trip).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoopHeaderProof {
+    StrictBound,
+    TripCount,
+}
 
 /// Hard cap, matching [`crate::const_fold`] C-style / range trip counts.
 pub const MAX_UNROLL_TRIPS: u32 = 8;

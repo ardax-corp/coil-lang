@@ -42,9 +42,9 @@ compiler agree on every edge.
 
 ## Compiler
 
-- Constant folds (IL `algebraic`, MIR `instcombine`, `const_fold`,
+- Constant folds (HIR `fold`, MIR `instcombine`, `const_fold`,
   `const_eval`) fold only an exact result; an op that would trap stays for
-  run time. The IL folder computes in 64 bits like the VM.
+  run time.
 - Rewrites that would move, add or drop a trap are off for ints:
   - `x * 2^n` stays a `MUL` (a shift does not trap); a `byte` still shifts.
   - MIR IV strength reduction is float-only.

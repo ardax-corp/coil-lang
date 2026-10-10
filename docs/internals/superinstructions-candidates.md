@@ -105,8 +105,9 @@ stay `*Jmpf`** (COI-87).
 
 ### Bounds / pin (not fuse-select)
 
-`IndexUnchecked` / `StoreIndexUnchecked` / `ArrayPin` / `IndexPin*` from
-`loop_bounds`. Flagship dense bodies use `DenseIndex` / `DenseStoreIndex`
+`IndexUnchecked` / `StoreIndexUnchecked` from `hir::bounds` and the
+`index_facts` sidecar; `ArrayPin` / `IndexPin*` from the sidecar's helper and
+`for-in` pins. Flagship dense bodies use `DenseIndex` / `DenseStoreIndex`
 instead.
 
 ### MIR specialize / SIMD

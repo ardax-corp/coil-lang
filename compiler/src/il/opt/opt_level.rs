@@ -136,7 +136,6 @@ fn all_off() -> OptimizeOptions {
         branch_optimization: false,
         block_reordering: false,
         collect_stats: false,
-        pure_call_ctx: None,
         mir_specialize: false,
     }
 }
@@ -156,8 +155,10 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
-    // Gate HIR passes in `emit_hir`, not IL table rows: scalar replacement
-    // (enum / tuple SROA), local CSE and loop-invariant code motion.
+    // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
+    // every level), scalar replacement (enum / tuple SROA), local CSE,
+    // loop-invariant code motion and counted-loop bounds proofs.
+    o.algebraic = true;
     let standard = matches!(
         level,
         OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size
@@ -165,6 +166,7 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.escape_analysis = standard;
     o.local_cse = standard;
     o.licm = standard;
+    o.loop_bounds = standard;
     o
 }
 
@@ -302,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn none_pass_names_are_algebraic_only() {
-        assert_eq!(OptLevel::None.pass_names(), vec!["algebraic"]);
+    fn none_runs_no_il_passes() {
+        assert!(OptLevel::None.pass_names().is_empty());
     }
 
     #[test]
