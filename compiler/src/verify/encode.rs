@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{FnCheck, Goal, Options, Param, ParamShape, Query};
+use super::{FnCheck, Goal, Param, ParamShape, Query};
 use crate::hir::{
     BinOp, BodyKind, Builtin, Callee, HirBody, HirId, HirKind, HirModule, HirPat, HirPatFields, Lit,
     LocalId, MakeKind, Span, UnOp,
@@ -33,7 +33,7 @@ const VIOLATED: &str = "contract violated: ";
 const MAX_CALL_DEPTH: u32 = 3;
 
 /// The goals of every function in `module` that has a contract or calls one.
-pub fn verify_module(module: &HirModule, options: Options) -> Vec<FnCheck> {
+pub fn verify_module(module: &HirModule) -> Vec<FnCheck> {
     let mut by_name: HashMap<&str, usize> = HashMap::new();
     for (i, b) in module.bodies.iter().enumerate() {
         if eligible(b) {
@@ -45,7 +45,7 @@ pub fn verify_module(module: &HirModule, options: Options) -> Vec<FnCheck> {
         if !eligible(body) {
             continue;
         }
-        let mut enc = Enc::new(module, &by_name, options);
+        let mut enc = Enc::new(module, &by_name);
         if let Some(check) = enc.function(body)
             && !check.goals.is_empty()
         {
@@ -121,13 +121,11 @@ struct Enc<'m> {
     quiet: u32,
     depth: u32,
     next_seq: u32,
-    options: Options,
 }
 
 impl<'m> Enc<'m> {
-    fn new(module: &'m HirModule, by_name: &'m HashMap<&'m str, usize>, options: Options) -> Self {
+    fn new(module: &'m HirModule, by_name: &'m HashMap<&'m str, usize>) -> Self {
         Self {
-            options,
             module,
             by_name,
             defs: Vec::new(),
@@ -456,10 +454,9 @@ impl<'m> Enc<'m> {
                 let r = match (op, &v) {
                     (UnOp::Not, V::Bool(t)) => V::Bool(self.not(t)),
                     (UnOp::Neg, V::Bv(t)) => {
-                        if self.options.overflow_traps {
-                            let fits = self.def("Bool", format!("(distinct {t} #x8000000000000000)"));
-                            self.assume(&mut st, &fits);
-                        }
+                        // `-MIN` traps.
+                        let fits = self.def("Bool", format!("(distinct {t} #x8000000000000000)"));
+                        self.assume(&mut st, &fits);
                         V::Bv(self.def(BV, format!("(bvneg {t})")))
                     }
                     (UnOp::BitNot, V::Bv(t)) => V::Bv(self.def(BV, format!("(bvnot {t})"))),
@@ -670,8 +667,9 @@ impl<'m> Enc<'m> {
             (V::Bv(x), V::Bv(y)) if !byte => {
                 let arith = |s: &mut Self, f: &str| V::Bv(s.def(BV, format!("({f} {x} {y})")));
                 let cmp = |s: &mut Self, f: &str| V::Bool(s.def("Bool", format!("({f} {x} {y})")));
-                if self.options.overflow_traps && matches!(op, BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul) {
-                    // The result fits: the exact value, computed wider, equals it.
+                if matches!(op, BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul) {
+                    // Overflow traps, so the result fits: the exact value,
+                    // computed wider, equals it.
                     let (w, f) = match op {
                         BinOp::IntAdd => (1, "bvadd"),
                         BinOp::IntSub => (1, "bvsub"),
