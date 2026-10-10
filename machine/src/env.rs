@@ -269,9 +269,9 @@ pub use host_var as env_var;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
+    #[cfg(unix)]
+    static ENV_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn enum_tag(heap: &Heap, v: Value) -> Option<u32> {
         match heap.find_object_by_addr(v.raw() as u64) {
@@ -306,6 +306,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn make_string_array(heap: &mut Heap, items: &[&str]) -> Value {
         let elements: Vec<Value> = items
             .iter()
