@@ -114,7 +114,7 @@ pub struct Pipeline {
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
     extra_dload_stems: Vec<String>,
-    /// CLI / Pipeline API grants and dload pins (coil reads no manifest).
+    /// CLI / Pipeline API grants and dload pins.
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
