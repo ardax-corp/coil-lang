@@ -410,6 +410,13 @@ impl CodeBuf {
         }
     }
 
+    /// Attach the MIR lowered from HIR to the last recorded function.
+    pub fn set_last_func_hir_mir(&mut self, func: crate::mir::MirFunc) {
+        if let Some(f) = self.funcs.last_mut() {
+            f.hir_mir = Some(Box::new(func));
+        }
+    }
+
     /// Mark the last recorded function [`IlFunc::pinned`].
     pub fn set_last_func_pinned(&mut self) {
         if let Some(f) = self.funcs.last_mut() {

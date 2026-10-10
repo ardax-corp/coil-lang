@@ -62,6 +62,15 @@ pub struct OptStats {
     /// Why each fallback body was refused (coarse keys, counted).
     #[serde(default)]
     pub hir_fallback_reasons: Vec<PassHit>,
+    /// Bodies lowered straight from HIR to MIR (`COIL_HIR_MIR`).
+    #[serde(default)]
+    pub hir_mir: usize,
+    /// Bodies whose dense tier came from that MIR rather than the IL lift.
+    #[serde(default)]
+    pub hir_mir_kept: usize,
+    /// Why the other HIR bodies did not lower to MIR (counted).
+    #[serde(default)]
+    pub hir_mir_refused: Vec<PassHit>,
     /// Call sites typed inlining spliced into HIR bodies (`COIL_HIR_INLINE`).
     #[serde(default)]
     pub hir_inlined: usize,
@@ -106,6 +115,11 @@ impl OptStats {
         self.hir_fallback += other.hir_fallback;
         for hit in &other.hir_fallback_reasons {
             note_reason(&mut self.hir_fallback_reasons, &hit.name, hit.applied);
+        }
+        self.hir_mir += other.hir_mir;
+        self.hir_mir_kept += other.hir_mir_kept;
+        for hit in &other.hir_mir_refused {
+            note_reason(&mut self.hir_mir_refused, &hit.name, hit.applied);
         }
         self.hir_inlined += other.hir_inlined;
         for hit in &other.hir_inline_refused {
@@ -163,6 +177,14 @@ impl OptStats {
                 self.hir_lowered, self.hir_fallback
             );
             let mut ranked = self.hir_fallback_reasons.clone();
+            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
+            for hit in ranked {
+                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+            }
+        }
+        if self.hir_mir + self.hir_mir_refused.len() > 0 {
+            let _ = writeln!(out, "  hir mir: {} lowered, {} kept dense", self.hir_mir, self.hir_mir_kept);
+            let mut ranked = self.hir_mir_refused.clone();
             ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
             for hit in ranked {
                 let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
@@ -276,6 +298,19 @@ pub(crate) fn note_hir_fallback(reason: &str) {
         s.hir_fallback += 1;
         note_reason(&mut s.hir_fallback_reasons, reason, 1);
     });
+}
+
+/// Count one body lowered straight to MIR, or why it was not.
+pub(crate) fn note_hir_mir(refused: Option<&str>) {
+    with_stats(|s| match refused {
+        None => s.hir_mir += 1,
+        Some(why) => note_reason(&mut s.hir_mir_refused, why, 1),
+    });
+}
+
+/// Count one body whose dense tier came from MIR lowered from HIR.
+pub(crate) fn note_hir_mir_kept() {
+    with_stats(|s| s.hir_mir_kept += 1);
 }
 
 /// Count `sites` call sites inlined into one HIR body.

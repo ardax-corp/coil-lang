@@ -273,6 +273,9 @@ struct HirEmit {
     /// goes (a loop's back edge): a branch that would jump to its own end
     /// jumps there directly.
     next_jump: Option<IlLabel>,
+    /// A loop was emitted as a chunked fork-join (`hir_par_loop`), which the
+    /// direct MIR lowering does not model.
+    par_loop: bool,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -667,6 +670,9 @@ impl Compiler {
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
+                self.hir_mir = (entry_convs.is_empty() && !self.hir_shared_generic())
+                    .then(|| self.hir_lower_mir(hir, &emit))
+                    .flatten();
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::il::opt::note_hir_lowered();
@@ -694,6 +700,47 @@ impl Compiler {
         };
         self.hir_module = Some(module);
         lowered
+    }
+
+    /// Hand the MIR of the body just lowered to its function record.
+    pub(super) fn attach_hir_mir(&mut self) {
+        if let Some(func) = self.hir_mir.take() {
+            self.bytecode.set_last_func_hir_mir(func);
+        }
+    }
+
+    /// `hir` lowered straight to MIR, when this phase covers it: plain
+    /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
+    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit) -> Option<crate::mir::MirFunc> {
+        if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
+            return None;
+        }
+        let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
+            .filter(|loc| loc.is_known())
+            .map(|loc| loc.file);
+        let plan = &emit.plan;
+        let why = if !plan.pair_locals.is_empty() || !plan.sroa.is_empty() || !plan.stacks.is_empty() {
+            Err("frame-slot aggregate".to_string())
+        } else if !plan.lambdas.is_empty() {
+            Err("lambda".to_string())
+        } else if emit.par_loop {
+            Err("parallel loop".to_string())
+        } else {
+            crate::mir::lower_from_hir(hir, &emit.slots, file)
+        };
+        match why {
+            Ok(func) => {
+                crate::il::opt::note_hir_mir(None);
+                Some(func)
+            }
+            Err(why) => {
+                if std::env::var_os("COIL_HIR_MIR_WHY").is_some() {
+                    eprintln!("hir mir `{}`: {why}", hir.name);
+                }
+                crate::il::opt::note_hir_mir(Some(&why));
+                None
+            }
+        }
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that
@@ -1483,6 +1530,7 @@ impl Compiler {
             boxes: HashMap::new(),
             cold: Vec::new(),
             next_jump: None,
+            par_loop: false,
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -8556,6 +8604,7 @@ impl Compiler {
         emit.slots = saved;
         bb.bind_label(after_worker, self.bytecode.il_mut());
         self.emit_par_loop_chunks(&site, &slots, natives, worker, bb);
+        emit.par_loop = true;
         true
     }
 

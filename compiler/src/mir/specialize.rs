@@ -50,6 +50,7 @@ pub fn try_specialize_body(
         pool,
         calls,
         official_entry,
+        None,
         &mut BodySidecar::default(),
     )
 }
@@ -116,6 +117,9 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
     note_refusal(&LIR_REFUSAL, why)
 }
 
+/// Dense-specialize one body: from `from_hir` (MIR lowered from HIR) when
+/// that keeps, else by lifting `ops`.
+#[allow(clippy::too_many_arguments)]
 pub fn try_specialize_body_side(
     ops: &[IlOp],
     name: &str,
@@ -123,6 +127,31 @@ pub fn try_specialize_body_side(
     pool: &mut Vec<u64>,
     calls: &DenseCallMap,
     official_entry: Option<Label>,
+    from_hir: Option<&crate::mir::MirFunc>,
+    side: &mut BodySidecar,
+) -> Option<(Vec<IlOp>, DenseAbi)> {
+    if let Some(func) = from_hir {
+        let mut direct_side = BodySidecar::default();
+        let mut direct_pool = pool.clone();
+        if let Some(out) = specialize_side(ops, name, entry_sp, &mut direct_pool, calls, official_entry, Some(func), &mut direct_side) {
+            *pool = direct_pool;
+            *side = direct_side;
+            crate::il::opt::note_hir_mir_kept();
+            return Some(out);
+        }
+    }
+    specialize_side(ops, name, entry_sp, pool, calls, official_entry, None, side)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn specialize_side(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &mut Vec<u64>,
+    calls: &DenseCallMap,
+    official_entry: Option<Label>,
+    from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
@@ -172,7 +201,12 @@ pub fn try_specialize_body_side(
     };
     let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
     let mut edge_stack = false;
-    let mut first = attempt(false, false);
+    // MIR lowered from HIR needs no lift; the IL is the fallback.
+    let direct = from_hir.filter(|f| !has_alloc && has_numeric_arith(f));
+    let mut first = match direct {
+        Some(func) => Ok((LowerHints::new(name), func.clone())),
+        None => attempt(false, false),
+    };
     if first.as_ref().is_err_and(edge_refusal) {
         edge_stack = true;
         first = attempt(false, true);
@@ -291,6 +325,18 @@ pub fn try_specialize_body_side(
         return refuse_dense("MakeEnum growth");
     }
     Some((out, abi))
+}
+
+/// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`, as
+/// [`infer_numeric_with`] asks of a lifted body.
+fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
+    use crate::mir::{MirBinOp, MirInst};
+    func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
+        matches!(
+            i,
+            MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div, ty, .. } if ty.is_float() || ty.is_int()
+        ) || matches!(i, MirInst::Bin { op: MirBinOp::Rem, ty, .. } if ty.is_int())
+    })
 }
 
 /// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +

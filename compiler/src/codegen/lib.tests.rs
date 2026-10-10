@@ -2181,8 +2181,10 @@ fn assignment_statement_does_not_emit_duplicate_before_store_pop() {
     );
 }
 
-/// `if !flag { break }` fuses `LogNot; JMPF` into `LogNotJmpf`. (Inversion to
-/// `LogNotJmpt` was `invert_guard_branch`, removed 2026-10.)
+/// `if !flag { break }` costs no separate negation: fuse-IL fuses `LogNot;
+/// JMPF` into `LogNotJmpf`, and a body lowered straight to MIR branches on
+/// `flag` with the edges swapped. (Inversion to `LogNotJmpt` was
+/// `invert_guard_branch`, removed 2026-10.)
 #[test]
 fn not_flag_break_fuses_log_not_jmpf() {
     use common::Instruction;
@@ -2198,10 +2200,12 @@ return i; \
 } \
 fn main() { spin(false); }",
     );
+    let dense = bc.iter().any(|b| matches!(b.bytecode(), Instruction::DenseConst));
+    let fused = bc.iter().any(|b| matches!(b.bytecode(), Instruction::LogNotJmpf));
+    let negated = bc.iter().any(|b| matches!(b.bytecode(), Instruction::LogNot));
     assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpf)),
-        "expected LogNotJmpf for `if !flag {{ break }}`; opcodes={:?}",
+        if dense { !negated } else { fused },
+        "expected LogNotJmpf, or a dense branch on `flag`, for `if !flag {{ break }}`; opcodes={:?}",
         bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
     );
     assert!(
