@@ -8,6 +8,11 @@
 //! Numeric work is forwarded to [`coil_simd`] after packing nested
 //! aggregates into contiguous `f64` / `i64` buffers.
 //!
+//! Int cells use exact arithmetic: a sum, product or quotient that would
+//! overflow or divide by zero is an [`IntTrap`], which the VM raises as a
+//! panic, like the scalar ops. Dot products and matmul cells sum in index
+//! order, as the scalar loop does.
+//!
 //! **Defensive posture:** malformed handles / shape mismatches do **not**
 //! trap. Missing aggregates yield `0` (dot) or zero-filled cells
 //! (matmul/zip/neg) so the VM stays aligned with other silent-fallback
@@ -15,8 +20,52 @@
 //! and codegen never emitting these kernels with bad static shapes.
 
 use common::Value;
+use common::int_arith::{self, IntResult, IntTrap};
 
 use crate::{Heap, ObjArray, ObjTuple, Object};
+
+/// `out[i] = f(a[i], b[i])`, stopping at the first trap.
+fn zip_i64(a: &[i64], b: &[i64], out: &mut [i64], f: fn(i64, i64) -> IntResult) -> Result<(), IntTrap> {
+    for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+        *o = f(x, y)?;
+    }
+    Ok(())
+}
+
+fn neg_i64(a: &[i64], out: &mut [i64]) -> Result<(), IntTrap> {
+    for (o, &x) in out.iter_mut().zip(a) {
+        *o = int_arith::neg(x)?;
+    }
+    Ok(())
+}
+
+fn scale_i64(a: &[i64], s: i64, out: &mut [i64]) -> Result<(), IntTrap> {
+    for (o, &x) in out.iter_mut().zip(a) {
+        *o = int_arith::mul(x, s)?;
+    }
+    Ok(())
+}
+
+fn dot_i64(a: &[i64], b: &[i64]) -> IntResult {
+    a.iter().zip(b).try_fold(0i64, |acc, (&x, &y)| int_arith::add(acc, int_arith::mul(x, y)?))
+}
+
+/// Row-major `c = a (m×k) · b (k×n)`; each cell sums over `k` in order.
+fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize, n: usize) -> Result<(), IntTrap> {
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0i64;
+            for t in 0..k {
+                let (Some(&x), Some(&y)) = (a.get(i * k + t), b.get(t * n + j)) else { continue };
+                acc = int_arith::add(acc, int_arith::mul(x, y)?)?;
+            }
+            if let Some(cell) = c.get_mut(i * n + j) {
+                *cell = acc;
+            }
+        }
+    }
+    Ok(())
+}
 
 fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
     heap.find_object_by_addr(addr)
@@ -148,9 +197,9 @@ fn i64_to_values(cells: &[i64]) -> Vec<Value> {
 }
 
 /// `packed_dot(a, b, meta)` — `meta` bits match former `PackedDot` operands.
-pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Value {
+pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 3 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let a = args[0];
     let b = args[1];
@@ -169,7 +218,7 @@ pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Value {
             bv.resize(len, 0.0);
         }
         let n = len.min(av.len()).min(bv.len());
-        Value::from(coil_simd::dot_f64(&av[..n], &bv[..n]))
+        Ok(Value::from(coil_simd::dot_f64(&av[..n], &bv[..n])))
     } else {
         let mut av = Vec::new();
         let mut bv = Vec::new();
@@ -182,14 +231,14 @@ pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Value {
             bv.resize(len, 0);
         }
         let n = len.min(av.len()).min(bv.len());
-        Value::from(coil_simd::dot_i64(&av[..n], &bv[..n]))
+        Ok(Value::from(dot_i64(&av[..n], &bv[..n])?))
     }
 }
 
 /// `packed_matmul(a, b, meta)` — former `PackedMatMul` operand layout.
-pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Value {
+pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 3 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let a = args[0];
     let b = args[1];
@@ -226,10 +275,10 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Value {
             b_cells.resize(k.saturating_mul(n), 0);
         }
         let mut c = vec![0_i64; m.saturating_mul(n)];
-        coil_simd::matmul_i64(&a_cells, &b_cells, &mut c, m, k, n);
+        matmul_i64(&a_cells, &b_cells, &mut c, m, k, n)?;
         i64_to_values(&c)
     };
-    alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
+    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
 }
 
 /// `packed_matrix_zip(a, b, meta)` — former `PackedMatrixZip` operand layout.
@@ -243,9 +292,9 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Value {
 ///
 /// `zip_kind`: 0 add, 1 sub, 2 eq, 3 ne, 4 lt, 5 le, 6 gt, 7 ge,
 /// 8 and, 9 or, 10 xor, 11 shl, 12 shr, 13 intersect, 14 diff.
-pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
+pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 3 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let a = args[0];
     let b = args[1];
@@ -318,9 +367,9 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
         let mut out = vec![0_i64; len];
         if matches!(zip_kind, 0 | 1) {
             if zip_kind == 1 {
-                coil_simd::zip_sub_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen]);
+                zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::sub)?;
             } else {
-                coil_simd::zip_add_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen]);
+                zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::add)?;
             }
         } else {
             coil_simd::zip_i64_op(
@@ -333,7 +382,7 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
         }
         i64_to_values(&out)
     };
-    alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
+    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
 }
 
 struct PackF64PairArgs<'a> {
@@ -443,9 +492,9 @@ fn pack_i64_pair(args: PackI64PairArgs<'_>) -> (Vec<i64>, Vec<i64>) {
 }
 
 /// `packed_matrix_neg(a, meta)` — former `PackedMatrixNeg` operand layout.
-pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
+pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 2 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let a = args[0];
     let ops = args[1].as_int() as u32;
@@ -476,11 +525,11 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
         if bit_not {
             coil_simd::zip_i64_not(&a_cells, &mut out, byte_width);
         } else {
-            coil_simd::zip_neg_i64(&a_cells, &mut out);
+            neg_i64(&a_cells, &mut out)?;
         }
         i64_to_values(&out)
     };
-    alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
+    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
 }
 
 /// Zip / broadcast / negate for 1-D aggregates (`[T; N]` / `(T,…)`).
@@ -492,9 +541,9 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
 /// - bit 25: result is tuple (else array)
 /// - bit 26: broadcast mode (`args[1]` is scalar; ignored for neg)
 /// - bit 27: scalar is on the left (broadcast only; matters for sub/div)
-pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
+pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 2 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let ops = args[args.len() - 1].as_int() as u32;
     let len = (ops & 0xFFFF) as usize;
@@ -527,17 +576,17 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
             }
             let n = len.min(a.len());
             let mut o = vec![0_i64; n];
-            coil_simd::zip_neg_i64(&a[..n], &mut o);
+            neg_i64(&a[..n], &mut o)?;
             while o.len() < len {
                 o.push(0);
             }
             i64_to_values(&o[..len])
         };
-        return alloc_aggregate(heap, out, is_tuple);
+        return Ok(alloc_aggregate(heap, out, is_tuple));
     }
 
     if args.len() < 3 {
-        return Value::default();
+        return Ok(Value::default());
     }
     let lhs = args[0];
     let rhs = args[1];
@@ -585,24 +634,16 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
             let s = sc_v.as_int();
             let mut o = vec![0_i64; a.len()];
             match op {
-                2 => coil_simd::scale_i64(a, s, &mut o),
+                2 => scale_i64(a, s, &mut o)?,
                 _ => {
                     let b = vec![s; a.len()];
                     match op {
-                        0 => coil_simd::zip_add_i64(a, &b, &mut o),
-                        1 if !scalar_left => coil_simd::zip_sub_i64(a, &b, &mut o),
-                        1 => coil_simd::zip_sub_i64(&b, a, &mut o),
-                        3 if !scalar_left => {
-                            for i in 0..a.len() {
-                                o[i] = a[i] / b[i];
-                            }
-                        }
-                        3 => {
-                            for i in 0..a.len() {
-                                o[i] = b[i] / a[i];
-                            }
-                        }
-                        _ => coil_simd::zip_add_i64(a, &b, &mut o),
+                        0 => zip_i64(a, &b, &mut o, int_arith::add)?,
+                        1 if !scalar_left => zip_i64(a, &b, &mut o, int_arith::sub)?,
+                        1 => zip_i64(&b, a, &mut o, int_arith::sub)?,
+                        3 if !scalar_left => zip_i64(a, &b, &mut o, int_arith::div)?,
+                        3 => zip_i64(&b, a, &mut o, int_arith::div)?,
+                        _ => zip_i64(a, &b, &mut o, int_arith::add)?,
                     }
                 }
             }
@@ -611,7 +652,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
             }
             i64_to_values(&o[..len])
         };
-        return alloc_aggregate(heap, out, is_tuple);
+        return Ok(alloc_aggregate(heap, out, is_tuple));
     }
 
     let out = if is_float {
@@ -651,21 +692,17 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
         let n = len.min(av.len()).min(bv.len());
         let mut o = vec![0_i64; n];
         match op {
-            1 => coil_simd::zip_sub_i64(&av[..n], &bv[..n], &mut o),
-            2 => coil_simd::zip_mul_i64(&av[..n], &bv[..n], &mut o),
-            3 => {
-                for i in 0..o.len() {
-                    o[i] = av[i] / bv[i];
-                }
-            }
-            _ => coil_simd::zip_add_i64(&av[..n], &bv[..n], &mut o),
+            1 => zip_i64(&av[..n], &bv[..n], &mut o, int_arith::sub)?,
+            2 => zip_i64(&av[..n], &bv[..n], &mut o, int_arith::mul)?,
+            3 => zip_i64(&av[..n], &bv[..n], &mut o, int_arith::div)?,
+            _ => zip_i64(&av[..n], &bv[..n], &mut o, int_arith::add)?,
         }
         while o.len() < len {
             o.push(0);
         }
         i64_to_values(&o[..len])
     };
-    alloc_aggregate(heap, out, is_tuple)
+    Ok(alloc_aggregate(heap, out, is_tuple))
 }
 
 /// Stable host-native names (also used by codegen `native_id` lookup).
@@ -713,7 +750,7 @@ mod tests {
         let a = alloc_array(&mut heap, vec![1, 2, 3]);
         let b = alloc_array(&mut heap, vec![4, 5, 6]);
         let meta = Value::from(3_i64); // length=3, int
-        let out = packed_dot(&mut heap, &[a, b, meta]);
+        let out = packed_dot(&mut heap, &[a, b, meta]).unwrap();
         assert_eq!(out.as_int(), 32); // 1*4+2*5+3*6
     }
 
@@ -726,7 +763,7 @@ mod tests {
         let a = alloc_array_f(&mut heap, a_vals);
         let b = alloc_array_f(&mut heap, b_vals);
         let meta = Value::from((64_i64) | (1 << 16));
-        let out = packed_dot(&mut heap, &[a, b, meta]);
+        let out = packed_dot(&mut heap, &[a, b, meta]).unwrap();
         assert!((out.as_float() - expect).abs() < 1e-6);
     }
 
@@ -737,7 +774,7 @@ mod tests {
         let b = alloc_matrix2(&mut heap, [[5, 6], [7, 8]]);
         // m=2,k=2,n=2
         let meta = Value::from((2 | (2 << 8) | (2 << 16)) as i64);
-        let out = packed_matmul(&mut heap, &[a, b, meta]);
+        let out = packed_matmul(&mut heap, &[a, b, meta]).unwrap();
         let rows = aggregate_elements(&heap, out).expect("rows");
         assert_eq!(rows.len(), 2);
         let r0 = aggregate_elements(&heap, rows[0]).expect("r0");
@@ -754,7 +791,7 @@ mod tests {
         let a = alloc_matrix2_f(&mut heap, [[1.0, 2.0], [3.0, 4.0]]);
         let b = alloc_matrix2_f(&mut heap, [[5.0, 6.0], [7.0, 8.0]]);
         let meta = Value::from((2 | (2 << 8) | (2 << 16) | (1 << 24)) as i64);
-        let out = packed_matmul(&mut heap, &[a, b, meta]);
+        let out = packed_matmul(&mut heap, &[a, b, meta]).unwrap();
         let rows = aggregate_elements(&heap, out).expect("rows");
         let r0 = aggregate_elements(&heap, rows[0]).expect("r0");
         assert!((r0[0].as_float() - 19.0).abs() < 1e-9);
@@ -767,13 +804,13 @@ mod tests {
         let a = alloc_matrix2(&mut heap, [[1, 2], [3, 4]]);
         let b = alloc_matrix2(&mut heap, [[1, 1], [1, 1]]);
         let add_meta = Value::from((2 | (2 << 8)) as i64); // Add
-        let sum = packed_matrix_zip(&mut heap, &[a, b, add_meta]);
+        let sum = packed_matrix_zip(&mut heap, &[a, b, add_meta]).unwrap();
         let rows = aggregate_elements(&heap, sum).expect("rows");
         let r0 = aggregate_elements(&heap, rows[0]).expect("r0");
         assert_eq!(r0[0].as_int(), 2);
 
         let neg_meta = Value::from((2 | (2 << 8)) as i64);
-        let neg = packed_matrix_neg(&mut heap, &[a, neg_meta]);
+        let neg = packed_matrix_neg(&mut heap, &[a, neg_meta]).unwrap();
         let nrows = aggregate_elements(&heap, neg).expect("nrows");
         let n0 = aggregate_elements(&heap, nrows[0]).expect("n0");
         assert_eq!(n0[0].as_int(), -1);
@@ -786,14 +823,14 @@ mod tests {
         let b = alloc_array(&mut heap, vec![2, 2, 2, 2, 2, 2, 2, 2]);
         // len=8, op=mul(2), int, array
         let mul_meta = Value::from((8 | (2 << 16)) as i64);
-        let prod = packed_vec_arith(&mut heap, &[a, b, mul_meta]);
+        let prod = packed_vec_arith(&mut heap, &[a, b, mul_meta]).unwrap();
         let elems = aggregate_elements(&heap, prod).expect("prod");
         assert_eq!(elems[0].as_int(), 2);
         assert_eq!(elems[7].as_int(), 16);
 
         // broadcast mul: vec * 3
         let scale_meta = Value::from((8 | (2 << 16) | (1 << 26)) as i64);
-        let scaled = packed_vec_arith(&mut heap, &[a, Value::from(3_i64), scale_meta]);
+        let scaled = packed_vec_arith(&mut heap, &[a, Value::from(3_i64), scale_meta]).unwrap();
         let se = aggregate_elements(&heap, scaled).expect("scaled");
         assert_eq!(se[0].as_int(), 3);
         assert_eq!(se[7].as_int(), 24);
@@ -805,7 +842,7 @@ mod tests {
         let a = alloc_array(&mut heap, vec![1, -2, 3, -4, 5, -6, 7, -8]);
         // unary neg: args = [vec, meta]; op=4
         let neg_meta = Value::from((8 | (4 << 16) | (1 << 25)) as i64); // tuple result
-        let neg = packed_vec_arith(&mut heap, &[a, neg_meta]);
+        let neg = packed_vec_arith(&mut heap, &[a, neg_meta]).unwrap();
         let ne = aggregate_elements(&heap, neg).expect("neg");
         assert_eq!(ne.len(), 8);
         assert_eq!(ne[0].as_int(), -1);
@@ -814,7 +851,7 @@ mod tests {
         let fa = alloc_array_f(&mut heap, vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0]);
         let fb = alloc_array_f(&mut heap, vec![2.0; 8]);
         let div_meta = Value::from((8 | (3 << 16) | (1 << 24)) as i64); // div + float
-        let quot = packed_vec_arith(&mut heap, &[fa, fb, div_meta]);
+        let quot = packed_vec_arith(&mut heap, &[fa, fb, div_meta]).unwrap();
         let qe = aggregate_elements(&heap, quot).expect("quot");
         assert!((qe[0].as_float() - 1.0).abs() < 1e-12);
         assert!((qe[7].as_float() - 8.0).abs() < 1e-12);
@@ -826,7 +863,7 @@ mod tests {
         let v = alloc_array(&mut heap, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         // 10 - v  (broadcast + scalar_left + sub)
         let meta = Value::from((8 | (1 << 16) | (1 << 26) | (1 << 27)) as i64);
-        let out = packed_vec_arith(&mut heap, &[Value::from(10_i64), v, meta]);
+        let out = packed_vec_arith(&mut heap, &[Value::from(10_i64), v, meta]).unwrap();
         let elems = aggregate_elements(&heap, out).expect("sub");
         assert_eq!(elems[0].as_int(), 9);
         assert_eq!(elems[7].as_int(), 2);
@@ -835,14 +872,14 @@ mod tests {
     #[test]
     fn packed_vec_arith_short_args_and_bad_handle_are_silent() {
         let mut heap = Heap::default();
-        assert_eq!(packed_vec_arith(&mut heap, &[]).as_int(), 0);
+        assert_eq!(packed_vec_arith(&mut heap, &[]).unwrap().as_int(), 0);
         // Unary path with too-few args still needs meta; binary needs 3.
         assert_eq!(
-            packed_vec_arith(&mut heap, &[Value::from(1_i64)]).as_int(),
+            packed_vec_arith(&mut heap, &[Value::from(1_i64)]).unwrap().as_int(),
             0
         );
         let meta = Value::from((8 | (2 << 16)) as i64); // zip mul
-        let missing = packed_vec_arith(&mut heap, &[Value::from(0_i64), Value::from(0_i64), meta]);
+        let missing = packed_vec_arith(&mut heap, &[Value::from(0_i64), Value::from(0_i64), meta]).unwrap();
         let elems = aggregate_elements(&heap, missing).expect("zero-filled");
         assert_eq!(elems.len(), 8);
         assert!(elems.iter().all(|v| v.as_int() == 0));
@@ -854,10 +891,23 @@ mod tests {
         let a = alloc_matrix2_f(&mut heap, [[5.0, 7.0], [9.0, 11.0]]);
         let b = alloc_matrix2_f(&mut heap, [[1.0, 2.0], [3.0, 4.0]]);
         let meta = Value::from((2 | (2 << 8) | (1 << 16) | (1 << 24)) as i64); // sub + float
-        let diff = packed_matrix_zip(&mut heap, &[a, b, meta]);
+        let diff = packed_matrix_zip(&mut heap, &[a, b, meta]).unwrap();
         let rows = aggregate_elements(&heap, diff).expect("rows");
         let r0 = aggregate_elements(&heap, rows[0]).expect("r0");
         assert!((r0[0].as_float() - 4.0).abs() < 1e-12);
         assert!((r0[1].as_float() - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn packed_int_ops_trap() {
+        let mut heap = Heap::default();
+        let big = alloc_array(&mut heap, vec![i64::MAX, 1]);
+        let one = alloc_array(&mut heap, vec![1, 1]);
+        let zero = alloc_array(&mut heap, vec![0, 0]);
+        let len2 = 2u32;
+        assert_eq!(packed_dot(&mut heap, &[big, one, Value::from(i64::from(len2))]), Err(IntTrap::Overflow));
+        assert_eq!(packed_vec_arith(&mut heap, &[big, one, Value::from(i64::from(len2))]), Err(IntTrap::Overflow));
+        let div = len2 | (3 << 16);
+        assert_eq!(packed_vec_arith(&mut heap, &[one, zero, Value::from(i64::from(div))]), Err(IntTrap::DivByZero));
     }
 }

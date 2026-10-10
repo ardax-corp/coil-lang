@@ -675,6 +675,7 @@ impl<const S: usize> Machine<S> {
                                         self.stack.push(Value::default());
                                     }
                                 }
+                                Err(crate::FfiError::IntTrap(t)) => int_trap!(t),
                                 Err(e) => {
                                     let name = native.name();
                                     *ip_out = ip;
