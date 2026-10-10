@@ -340,6 +340,9 @@ pub struct Checker {
     /// bodies (COI-109). Kept out of `env` so stubbing cannot perturb
     /// unrelated programs' codegen.
     forward_free_fn_schemes: std::collections::HashMap<String, Scheme>,
+    /// Env index of the frame `check_program` pushed for this module. The
+    /// frames between the natives (0) and it are earlier modules' leftovers.
+    module_frame: usize,
 
     /// Whether the last parameter of `fn_name` is a rest pack (`T... name`).
     /// When true, call sites pack trailing args into a single `Vec<T>` (P4).

@@ -478,6 +478,29 @@ fn module_fn_calls_a_fn_declared_later_in_its_module() {
 }
 
 #[test]
+fn module_forward_fn_is_not_an_earlier_modules_namesake() {
+    // `strs` is checked first and its `fn same(string, string)` stays in the
+    // env; `ints`' contract clause and body name its own later `same`.
+    let manifest = manifest_src_and_stdlib();
+    let files = &[
+        (
+            "src/main.hy",
+            "use strs::{same};\nuse ints::{pick};\nuse io::{stdout, write};\nuse string::{format, to_bytes};\n\
+             fn main() { write(stdout(), to_bytes(format(\"%i\", pick(3)))); }\n",
+        ),
+        ("src/strs.hy", "fn same(string a, string b) -> bool {\n    return a == b;\n}\n"),
+        (
+            "src/ints.hy",
+            "fn pick(int x) -> int\n    ensures same(result, x)\n{\n    if same(x, x) {\n        return x;\n    }\n    return 0;\n}\n\n\
+             fn same(int a, int b) -> bool {\n    return a == b;\n}\n",
+        ),
+    ];
+    let (root, entry) = build_project("module_forward_fn_namesake", &manifest, files, "src/main.hy");
+    let output = run_project(&root, &entry);
+    assert_eq!(output, "3");
+}
+
+#[test]
 fn use_module_file_does_not_reach_subdirectory_files() {
     let manifest = manifest_src_and_stdlib();
     let files = &[
