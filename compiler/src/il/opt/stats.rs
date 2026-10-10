@@ -14,7 +14,6 @@ thread_local! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
     Generic,
-    Branch,
     BlockOrder,
 }
 
@@ -291,6 +290,11 @@ pub(crate) fn note_hir_lowered() {
     with_stats(|s| s.hir_lowered += 1);
 }
 
+/// Count early exits HIR lowering laid out after their function's body.
+pub(crate) fn note_branches_optimized(n: usize) {
+    with_stats(|s| s.branches_optimized += n);
+}
+
 /// Count one function body `--hir` left to the AST codegen, and why.
 pub(crate) fn note_hir_fallback(reason: &str) {
     with_stats(|s| {
@@ -427,7 +431,6 @@ pub(crate) fn collect_delta(delta: &PassDelta) {
         s.stores_eliminated += delta.stores_eliminated;
         match delta.kind {
             PassKind::Generic => {}
-            PassKind::Branch => s.branches_optimized += delta.extra.max(1),
             PassKind::BlockOrder => s.blocks_reordered += delta.extra.max(1),
         }
         s.add_pass(delta.name, delta.ops_delta);

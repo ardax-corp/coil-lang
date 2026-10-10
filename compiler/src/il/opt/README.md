@@ -66,7 +66,7 @@ pipeline. No solo “pass” tests.
 |------|---------|------|
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
 | `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
-| `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |
+| `loop_unroll_factor` | 8 | Trip cap passed to `hir::unroll` (which caps it at 8). |
 | `escape_analysis` | on at Standard+ / Size | Gates HIR enum / tuple scalar replacement in `emit_hir`. Not an IL pass. |
 
 ## Pipeline order
@@ -75,14 +75,12 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `canon` →
-5. `algebraic`
+1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `canon`
 
 **Decision** (`decision_once_at`), in order:
 
-6. `loop_bounds` → 7. `loop_unroll` → 8. `slot_promote`
-(+ `dead_store_at`) → 9. `clone_shared_return` → 10. `branch_optimization`
-→ 11. `block_reordering`
+5. `slot_promote` (+ `dead_store_at`) → 6. `clone_shared_return` →
+7. `block_reordering`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): the
 table runs per body, then the bodies are concatenated. Bare-buffer
@@ -216,21 +214,12 @@ Hit benches: `examples/perf/licm_nested_chains.hy`, `tail_sibling.hy`.
   `IndexUnchecked` / `ArrayPin` for helpers, for-in, and stride; pipeline
   tests in `compiler/src/pipeline.rs`.
 
-## `loop_unroll`
+## `loop_unroll` (moved to the HIR)
 
-**Flag:** `loop_unroll` (default on; off at `-Os`). **Fn:**
-`loop_unroll::unroll_loops`. Honors `loop_unroll_factor`.
-
-- **Input:** Innermost counted natural loop, induction from 0 step +1, trip
-  count ≤ `min(factor, 8)`, header `LE`/`LEQ`/`GT` + `JMPF`.
-- **Output:** Body cloned `trips` times; header/latch dropped. Inner labels
-  reminted. Straight-line height is the sequential composition of the original
-  body.
-- **Refusals:** Nested loops; `Entry` / `HostInvoke` / `Print` / residual
-  CALL/FFI/FORMAT/`TailCall`; `break` / extra exits / foreign jumps into the
-  header; trip 0 or > 8; non-zero induction init; bound stored in the loop.
-- **Tests:** `opt/loop_unroll.tests.rs` `unrolls_simple_const_bound_while`,
-  `call_disables_unroll`, `break_disables_unroll`, `nested_loops_are_not_unrolled`.
+Full unroll of short counted loops runs on the HIR (`hir::unroll`, after
+inlining, before `hir::fold`), still under the `loop_unroll` flag (off at
+`-Os`). The stack-IL pass was removed 2026-10. Hit benches:
+`examples/perf/vec_scan_pure.hy`, `vec_scan_impure.hy`.
 
 ## `slot_promote`
 
@@ -265,23 +254,17 @@ Uses **`tell`**. Cleanup `dead_store_at` runs immediately after.
 - **Tests:** `opt/convoy.tests.rs`
   `clone_shared_return_fuses_const_arm_after_jump_only_clone`.
 
-## `branch_optimization`
+## `branch_optimization` (moved to HIR lowering)
 
-**Flag:** `branch_optimization` (default on). **Fn:**
-`branch_opt::optimize_branches_at`. Uses **`sp`**. Last among IL consumers
-except block reorder / seek. Heuristic only (no profile).
-
-- **Input:** `JMPF`/`JMPT` whose fall-through is a terminating then-arm
-  (no internal jumps/labels) with Known SP at the jump and along the moved arm.
-- **Output:** Invert polarity and move the cold arm after a freshly minted
-  module-wide-unique label. Semantics identical; layout only.
-- **Refusals:** Unknown SP / empty stack at the cond; then-arm with an internal
-  jump or label; suffix that could fall into the moved region;
-  `ValueUnderJmp` / `nofuse` pair-`?` tag jumps (cold invert would turn the
-  shared fail `RETURN` into a join).
-- **Tests:** `opt/branch_opt.rs` `heuristic_moves_return_off_jmpf_fallthrough`,
-  `value_under_jmp_try_refuses_cold_invert`,
-  `refuses_when_cond_jump_has_empty_stack`.
+Early-exit layout happens as `emit_hir` lowers a body, still under the
+`branch_optimization` flag (Standard, Aggressive, Size). An `if` arm or a
+two-arm niche `match` arm that always returns is marked cold; after the
+body's fall-through return, `CodeBuf::move_exits_to_end` moves each marked
+region to the end and inverts the jump that skipped it, so the code after the
+exit falls through. Refused: `ValueUnderJmp` / `nofuse` jumps, a region that
+can fall through, and a body with a closure or thunk entry bound after the
+region (its offset would move). The stack-IL pass was removed 2026-10. Hit
+benches: `examples/perf/fib.hy`, `pair_fib.hy`, `triple_fib.hy`.
 
 ## `block_reordering`
 
@@ -347,10 +330,8 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | loop_bounds | `bounds.rs` | no |
-| loop_unroll | `loop_unroll.tests.rs` | no |
 | slot_promote | `slot_promote.rs` | no |
 | clone_shared_return | `convoy.tests.rs` | no |
-| branch_optimization | `branch_opt.rs` | no |
 | block_reordering | `block_order.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |
 

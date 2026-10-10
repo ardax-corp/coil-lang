@@ -481,6 +481,81 @@ impl CodeBuf {
         self.entry_at_offset.insert(pc, label);
     }
 
+    /// Lay out each region `start..end` after the rest of the buffer: a
+    /// conditional jump just before it skips it to the label bound at
+    /// `end`, and it ends in a return (or a jump). The jump inverts to reach
+    /// it there, so the code it skipped to falls through; a buffer that
+    /// falls off its end jumps over the moved regions. Regions of any other
+    /// shape, or with an entry bound past them (its offset would move), stay.
+    /// Returns how many moved.
+    pub fn move_exits_to_end(&mut self, regions: &[(usize, usize)]) -> usize {
+        let movable: Vec<_> = regions
+            .iter()
+            .filter_map(|&(start, end)| Some((start, end, self.exit_jump(start, end)?)))
+            .collect();
+        if movable.is_empty() {
+            return 0;
+        }
+        self.invalidate_lowered();
+        // A label after the last op (a loop exit) is reached from elsewhere
+        // and falls through into what follows.
+        let done = (!self.il.ops().last().is_some_and(Self::ends_flow)).then(|| self.il.fresh_label());
+        if let Some(done) = done {
+            self.il.emit_jump(IlJumpKind::Unconditional, done);
+        }
+        // Back to front, so each earlier region's indices still hold.
+        for &(start, end, inverted) in movable.iter().rev() {
+            let label = self.il.fresh_label();
+            if let IlOp::Jump { kind, target, .. } = &mut self.il.ops_slice_mut()[start - 1] {
+                *kind = inverted;
+                *target = label;
+            }
+            self.il.note_targeted(label);
+            let len = self.il.raw_len();
+            self.il.move_to_end(start, end, label);
+            // Raw indices past `start` rotate with their ops.
+            let (moved, rest) = (end - start, len - end);
+            for i in &mut self.root_entries {
+                if (start..end).contains(i) {
+                    *i += rest + 1;
+                } else if *i >= end {
+                    *i -= moved;
+                }
+            }
+        }
+        if let Some(done) = done {
+            self.il.bind_label(done);
+        }
+        movable.len()
+    }
+
+    /// No fallthrough past `op`.
+    fn ends_flow(op: &IlOp) -> bool {
+        op.is_terminator() || matches!(op, IlOp::Jump { kind: IlJumpKind::Unconditional, .. })
+    }
+
+    /// The inverted jump kind for [`Self::move_exits_to_end`] of
+    /// `start..end`, when the region has that shape.
+    fn exit_jump(&self, start: usize, end: usize) -> Option<IlJumpKind> {
+        let ops = self.il.ops();
+        let (IlOp::Jump { kind, target, hint, .. }, IlOp::Label(bound)) = (ops.get(start.checked_sub(1)?)?, ops.get(end)?) else {
+            return None;
+        };
+        if hint.blocks_cold_fallthrough_invert() {
+            return None;
+        }
+        let inverted = match kind {
+            IlJumpKind::JumpIfFalse => IlJumpKind::JumpIfTrue,
+            IlJumpKind::JumpIfTrue => IlJumpKind::JumpIfFalse,
+            _ => return None,
+        };
+        if target != bound || !ops[start..end].last().is_some_and(Self::ends_flow) {
+            return None;
+        }
+        let pc = self.il.code_pos_of_raw(start);
+        (!self.entry_at_offset.keys().any(|&p| p >= pc)).then_some(inverted)
+    }
+
     /// Look up the entry label bound at logical code index `pc`, if any.
     pub fn entry_label_for_offset(&self, pc: usize) -> Option<Label> {
         self.entry_at_offset.get(&pc).copied()
@@ -615,6 +690,81 @@ impl CodeBuf {
 mod tests {
     use super::*;
     use common::Instruction;
+
+    /// `if c { return 2 }` then `rest`: the region after the `JumpIfFalse`.
+    fn early_exit(rest: impl FnOnce(&mut CodeBuf)) -> (CodeBuf, (usize, usize)) {
+        let mut buf = CodeBuf::new();
+        let skip = buf.fresh_label();
+        buf.push_const(1);
+        buf.il_mut().emit_jump(IlJumpKind::JumpIfFalse, skip);
+        let start = buf.il().raw_len();
+        buf.push_const(2);
+        buf.push_return();
+        let end = buf.il().raw_len();
+        buf.bind_label(skip);
+        rest(&mut buf);
+        (buf, (start, end))
+    }
+
+    fn consts(buf: &CodeBuf) -> Vec<i32> {
+        buf.ops()
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Const { imm, .. } => Some(*imm),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn move_exits_to_end_inverts_the_jump_and_moves_the_exit() {
+        let (mut buf, region) = early_exit(|b| {
+            b.push_const(3);
+            b.push_return();
+        });
+        assert_eq!(buf.move_exits_to_end(&[region]), 1);
+        let ops = buf.ops();
+        let IlOp::Jump { kind: IlJumpKind::JumpIfTrue, target, .. } = ops[1] else {
+            panic!("the jump into the exit inverts");
+        };
+        assert!(matches!(ops[ops.len() - 3], IlOp::Label(l) if l == target));
+        assert_eq!(consts(&buf), [1, 3, 2]);
+        assert!(!buf.ops().iter().any(|op| matches!(op, IlOp::Jump { kind: IlJumpKind::Unconditional, .. })));
+    }
+
+    #[test]
+    fn move_exits_to_end_jumps_over_the_exit_after_a_trailing_label() {
+        // A loop exit label at the end falls through into the epilogue
+        // emitted later, not into the moved exit.
+        let (mut buf, region) = early_exit(|b| {
+            let exit = b.fresh_label();
+            b.push_const(3);
+            b.il_mut().emit_jump(IlJumpKind::JumpIfFalse, exit);
+            b.bind_label(exit);
+        });
+        assert_eq!(buf.move_exits_to_end(&[region]), 1);
+        let ops = buf.ops();
+        let done = ops.iter().rev().find_map(|op| match op {
+            IlOp::Jump { kind: IlJumpKind::Unconditional, target, .. } => Some(*target),
+            _ => None,
+        });
+        assert!(matches!((done, ops.last()), (Some(d), Some(IlOp::Label(l))) if d == *l));
+    }
+
+    #[test]
+    fn move_exits_to_end_keeps_a_region_that_falls_through() {
+        let mut buf = CodeBuf::new();
+        let skip = buf.fresh_label();
+        buf.push_const(1);
+        buf.il_mut().emit_jump(IlJumpKind::JumpIfFalse, skip);
+        let start = buf.il().raw_len();
+        buf.push_const(2);
+        let end = buf.il().raw_len();
+        buf.bind_label(skip);
+        buf.push_return();
+        assert_eq!(buf.move_exits_to_end(&[(start, end)]), 0);
+        assert_eq!(consts(&buf), [1, 2]);
+    }
 
     #[test]
     fn push_lifts_hot_set_bytes_to_typed_ops() {

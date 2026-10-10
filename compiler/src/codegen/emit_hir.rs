@@ -257,6 +257,10 @@ struct HirEmit {
     /// The array object of each boxed stack array, once boxed: from its
     /// escape on, the local is that object.
     boxes: HashMap<u32, u32>,
+    /// Whether early exits move out of line ([`Compiler::hir_mark_cold`]).
+    cold_ok: bool,
+    /// Raw op ranges of the early exits to lay out after the body.
+    cold: Vec<(usize, usize)>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -644,7 +648,9 @@ impl Compiler {
                     }
                 }
                 if let Some(root) = hir.root {
+                    emit.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_effect(hir, &mut emit, root);
+                    self.hir_cold = std::mem::take(&mut emit.cold);
                 }
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
@@ -1455,6 +1461,8 @@ impl Compiler {
             stacks: HashMap::new(),
             box_at: HashMap::new(),
             boxes: HashMap::new(),
+            cold_ok: false,
+            cold: Vec::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -7702,8 +7710,12 @@ impl Compiler {
                 self.hir_jump(IlJumpKind::JumpIfTrue, other);
             }
         }
+        let start = self.bytecode.il_mut().raw_len();
         arm_on_word(self, emit, first, payload_side, false);
         self.hir_jump(IlJumpKind::Unconditional, end);
+        if lower::cold_exit(hir, first.body) {
+            self.hir_mark_cold(emit, start);
+        }
         self.bytecode.bind_label(other);
         let decode = layout == ValueLayout::NicheResult;
         arm_on_word(self, emit, second, zero_side, decode);
@@ -7717,6 +7729,25 @@ impl Compiler {
         self.hir_effect(hir, emit, id);
         let (start, end) = hir.expr(id).span;
         self.fill_statement_locs(il_start, SimpleSpan::from(start..end));
+    }
+
+    /// Lay out the early exits of the body just lowered after its end (its
+    /// fall-through return emitted, so no jump over them is needed).
+    pub(super) fn flush_hir_cold(&mut self) {
+        let cold = std::mem::take(&mut self.hir_cold);
+        let moved = self.bytecode.move_exits_to_end(&cold);
+        crate::il::opt::note_branches_optimized(moved);
+    }
+
+    /// Lay out the ops since `start`, which the conditional jump just
+    /// before them skips, after the body: an early exit (`if c { return }`)
+    /// is cold, and the code after it falls through.
+    fn hir_mark_cold(&mut self, emit: &mut HirEmit, start: usize) {
+        if emit.cold_ok {
+            let end = self.bytecode.il_mut().raw_len();
+            emit.cold.retain(|&(s, _)| s < start);
+            emit.cold.push((start, end));
+        }
     }
 
     /// `defer use (captures) { body }`, as the AST: `JMP after; thunk:
@@ -8039,7 +8070,11 @@ impl Compiler {
                     None => {
                         self.hir_value(hir, emit, *cond, &BOXED, 0);
                         self.hir_jump(IlJumpKind::JumpIfFalse, end);
+                        let start = self.bytecode.il_mut().raw_len();
                         self.hir_effect(hir, emit, *then);
+                        if lower::cold_exit(hir, *then) {
+                            self.hir_mark_cold(emit, start);
+                        }
                     }
                 }
                 self.bytecode.bind_label(end);
