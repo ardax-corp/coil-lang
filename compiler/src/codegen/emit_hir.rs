@@ -723,8 +723,12 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.pair_locals.is_empty() || !plan.sroa.is_empty() || !plan.stacks.is_empty() {
-            Err("frame-slot aggregate".to_string())
+        let why = if !plan.pair_locals.is_empty() {
+            Err("pair local".to_string())
+        } else if !plan.sroa.is_empty() {
+            Err("scalar-replaced local".to_string())
+        } else if !plan.stacks.is_empty() {
+            Err("stack array".to_string())
         } else if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
         } else if emit.par_loop {
