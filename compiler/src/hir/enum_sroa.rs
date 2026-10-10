@@ -440,6 +440,15 @@ fn arm(body: &mut HirBody, a: HirArm, split: &Split) -> HirArm {
     let mut stmts = Vec::new();
     for (p, &f) in ps.iter().zip(&own) {
         if let HirPat::Bind(b) = p {
+            // A binding read-only like its field reads the field itself.
+            if !body.local(*b).captured
+                && body.local(*b).ty == body.local(f).ty
+                && !super::lower::assigns_local(body, a.body, *b)
+                && !super::lower::assigns_local(body, a.body, f)
+            {
+                rename(body, a.body, *b, f);
+                continue;
+            }
             let ty = body.local(f).ty.clone();
             let read = push(body, HirKind::Local(f), ty, span);
             stmts.push(push(body, HirKind::Let { local: *b, init: Some(read) }, Some(ty::unit()), span));
@@ -454,6 +463,17 @@ fn arm(body: &mut HirBody, a: HirArm, split: &Split) -> HirArm {
     HirArm {
         pat: HirPat::Int(i64::from(*tag)),
         body: arm_body,
+    }
+}
+
+/// Every read of `from` under `id` reads `to`.
+fn rename(body: &mut HirBody, id: HirId, from: LocalId, to: LocalId) {
+    let mut stack = vec![id];
+    while let Some(k) = stack.pop() {
+        if matches!(body.expr(k).kind, HirKind::Local(l) if l == from) {
+            body.exprs[k.0 as usize].kind = HirKind::Local(to);
+        }
+        stack.extend(super::lower::children(body, k));
     }
 }
 

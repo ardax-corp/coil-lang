@@ -5335,6 +5335,21 @@ impl Compiler {
 
     // ---- emit ----
 
+    /// A counted range loop's head at `top`: leave for `exit` once `iv` is
+    /// past `end`.
+    fn hir_range_test(&mut self, top: IlLabel, iv: u32, end: u32, float: bool, inclusive: bool, exit: IlLabel) {
+        self.bytecode.bind_label(top);
+        self.bytecode.push_load(iv);
+        self.bytecode.push_load(end);
+        self.bytecode.push(Byte::new(match (float, inclusive) {
+            (true, true) => Instruction::LEQF,
+            (true, false) => Instruction::LEF,
+            (false, true) => Instruction::LEQ,
+            (false, false) => Instruction::LE,
+        }));
+        self.hir_jump(IlJumpKind::JumpIfFalse, exit);
+    }
+
     fn hir_slot(emit: &HirEmit, local: LocalId) -> u32 {
         emit.slots[local.0 as usize].expect("HIR local read before its let")
     }
@@ -7350,7 +7365,12 @@ impl Compiler {
                 return self.hir_match_search(hir, emit, scrutinee, arms, &plan, want);
             }
         }
-        self.hir_value(hir, emit, scrutinee, &BOXED, depth);
+        // A word local is tested where it lives; anything else stays on
+        // the stack under each test.
+        let local = self.hir_word_local(hir, emit, scrutinee, &BOXED);
+        if local.is_none() {
+            self.hir_value(hir, emit, scrutinee, &BOXED, depth);
+        }
         let end = self.bytecode.fresh_label();
         let last = arms.len() - 1;
         for (i, arm) in arms.iter().enumerate() {
@@ -7362,26 +7382,36 @@ impl Compiler {
             let miss = match backing {
                 Some(backing) if i != last => {
                     let miss = self.bytecode.fresh_label();
-                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    match local {
+                        Some(slot) => self.bytecode.push_load(slot),
+                        None => self.bytecode.push(Byte::new(Instruction::DUPLICATE)),
+                    }
                     self.hir_push_scalar(&backing);
                     self.bytecode.push(Byte::new(Instruction::EQ));
                     self.bytecode.push_op(IlOp::Jump {
                         kind: IlJumpKind::JumpIfFalse,
                         target: miss,
                         loc: DebugLoc::unknown(),
-                        hint: crate::il::FuseHint::nofuse_value_under_jmp(),
+                        hint: if local.is_some() { Default::default() } else { crate::il::FuseHint::nofuse_value_under_jmp() },
                     });
                     Some(miss)
                 }
                 _ => None,
             };
-            match &arm.pat {
-                HirPat::Bind(local) => {
-                    let slot = self.hir_bind_local(hir, *local);
-                    emit.slots[local.0 as usize] = Some(slot);
+            match (&arm.pat, local) {
+                (HirPat::Bind(bound), Some(slot)) => {
+                    let to = self.hir_bind_local(hir, *bound);
+                    emit.slots[bound.0 as usize] = Some(to);
+                    self.bytecode.push_load(slot);
+                    self.bytecode.push_store_pop(to);
+                }
+                (_, Some(_)) => {}
+                (HirPat::Bind(bound), None) => {
+                    let slot = self.hir_bind_local(hir, *bound);
+                    emit.slots[bound.0 as usize] = Some(slot);
                     self.bytecode.push_store_pop(slot);
                 }
-                _ => self.bytecode.push_pop(),
+                (_, None) => self.bytecode.push_pop(),
             }
             match want {
                 Some(want) => self.hir_value(hir, emit, arm.body, want, depth),
@@ -8012,16 +8042,29 @@ impl Compiler {
                     // As the AST: a literal in-range index stores the slot;
                     // any other stages value and index and selects the slot.
                     let want = self.hir_natural(hir, emit, *place).expect("planned index place");
-                    self.hir_value(hir, emit, *value, &want, 0);
                     if let HirKind::Lit(Lit::Int(i)) = hir.expr(*index).kind
                         && (0..n as i64).contains(&i)
                     {
+                        self.hir_value(hir, emit, *value, &want, 0);
                         self.bytecode.push_store_pop(slot + i as u32);
                     } else {
                         let proven = Self::hir_stack_proven(hir, *place, *index, n);
+                        // A word local the index leaves alone is read in
+                        // place; anything else is staged in a temp.
+                        let direct = self
+                            .hir_word_local(hir, emit, *value, &want)
+                            .filter(|_| !lower::assigns_local(hir, *index, Self::hir_local_of(hir, *value)));
+                        let val = match direct {
+                            Some(slot) => slot,
+                            None => {
+                                self.hir_value(hir, emit, *value, &want, 0);
+                                self.expr_depth = 0;
+                                let val = self.alloc_temp_slot();
+                                self.bytecode.push_store_pop(val);
+                                val
+                            }
+                        };
                         self.expr_depth = 0;
-                        let val = self.alloc_temp_slot();
-                        self.bytecode.push_store_pop(val);
                         let idx = self.alloc_temp_slot();
                         self.hir_index_value(hir, emit, *index, 0);
                         self.bytecode.push_store_pop(idx);
@@ -8600,52 +8643,67 @@ impl Compiler {
                 let HirPat::Bind(local) = *pat else {
                     unreachable!("planned range for-in binds a name")
                 };
-                let cur = self.alloc_temp_slot();
-                let end = self.alloc_temp_slot();
-                if let Some([lo, hi]) = lower::range_bounds(hir, iterable) {
+                let alias = !lower::assigns_local(hir, body, local);
+                if alias && custom.is_none()
+                    && let Some([lo, hi]) = lower::range_bounds(hir, iterable)
+                {
+                    // `x` is the IV: the start goes straight into it, and an
+                    // end the body leaves alone is read where it lives.
+                    let x = self.hir_bind_local(hir, local);
+                    emit.slots[local.0 as usize] = Some(x);
                     self.hir_value(hir, emit, lo, &BOXED, 0);
                     self.expr_depth = 0;
-                    self.bytecode.push_store_pop(cur);
-                    self.hir_value(hir, emit, hi, &BOXED, 0);
-                    self.expr_depth = 0;
-                    self.bytecode.push_store_pop(end);
-                } else if let Some(fqn) = &custom {
-                    into_iter(self, emit, fqn);
-                    self.expr_depth = 0;
-                    self.bytecode.push_store_pop(end);
-                    self.bytecode.push_store_pop(cur);
+                    self.bytecode.push_store_pop(x);
+                    let end = match self.hir_word_local(hir, emit, hi, &BOXED) {
+                        Some(slot) if !lower::assigns_local(hir, body, Self::hir_local_of(hir, hi)) => slot,
+                        _ => {
+                            let end = self.alloc_temp_slot();
+                            self.hir_value(hir, emit, hi, &BOXED, 0);
+                            self.expr_depth = 0;
+                            self.bytecode.push_store_pop(end);
+                            end
+                        }
+                    };
+                    self.hir_range_test(top, x, end, float, inclusive, exit);
+                    (step_slot, step_float) = (x, float);
                 } else {
-                    // A range value's `[start, end]`, as `emit_for_in_range`.
-                    let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(inclusive).to_string());
-                    self.hir_value(hir, emit, iterable, &pair, 0);
-                    self.expr_depth = 0;
-                    self.bytecode.push_store_pop(end);
-                    self.bytecode.push_store_pop(cur);
+                    let cur = self.alloc_temp_slot();
+                    let end = self.alloc_temp_slot();
+                    if let Some([lo, hi]) = lower::range_bounds(hir, iterable) {
+                        self.hir_value(hir, emit, lo, &BOXED, 0);
+                        self.expr_depth = 0;
+                        self.bytecode.push_store_pop(cur);
+                        self.hir_value(hir, emit, hi, &BOXED, 0);
+                        self.expr_depth = 0;
+                        self.bytecode.push_store_pop(end);
+                    } else if let Some(fqn) = &custom {
+                        into_iter(self, emit, fqn);
+                        self.expr_depth = 0;
+                        self.bytecode.push_store_pop(end);
+                        self.bytecode.push_store_pop(cur);
+                    } else {
+                        // A range value's `[start, end]`, as `emit_for_in_range`.
+                        let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(inclusive).to_string());
+                        self.hir_value(hir, emit, iterable, &pair, 0);
+                        self.expr_depth = 0;
+                        self.bytecode.push_store_pop(end);
+                        self.bytecode.push_store_pop(cur);
+                    }
+                    let x = self.hir_bind_local(hir, local);
+                    emit.slots[local.0 as usize] = Some(x);
+                    if alias {
+                        // `x` is the IV; a copy would let DestProp kill the step.
+                        self.bytecode.push_load(cur);
+                        self.bytecode.push_store_pop(x);
+                    }
+                    let iv = if alias { x } else { cur };
+                    self.hir_range_test(top, iv, end, float, inclusive, exit);
+                    if !alias {
+                        self.bytecode.push_load(cur);
+                        self.bytecode.push_store_pop(x);
+                    }
+                    (step_slot, step_float) = (iv, float);
                 }
-                let alias = !lower::assigns_local(hir, body, local);
-                let x = self.hir_bind_local(hir, local);
-                emit.slots[local.0 as usize] = Some(x);
-                if alias {
-                    // `x` is the IV; a copy would let DestProp kill the step.
-                    self.bytecode.push_load(cur);
-                    self.bytecode.push_store_pop(x);
-                }
-                let iv = if alias { x } else { cur };
-                self.bytecode.bind_label(top);
-                self.bytecode.push_load(iv);
-                self.bytecode.push_load(end);
-                self.bytecode.push(Byte::new(match (float, inclusive) {
-                    (true, true) => Instruction::LEQF,
-                    (true, false) => Instruction::LEF,
-                    (false, true) => Instruction::LEQ,
-                    (false, false) => Instruction::LE,
-                }));
-                self.hir_jump(IlJumpKind::JumpIfFalse, exit);
-                if !alias {
-                    self.bytecode.push_load(cur);
-                    self.bytecode.push_store_pop(x);
-                }
-                (step_slot, step_float) = (iv, float);
             }
             ForInKind::Array | ForInKind::Dict | ForInKind::Tuple { .. } => {
                 let dict = matches!(kind, ForInKind::Dict);
@@ -8999,8 +9057,15 @@ impl Compiler {
             self.hir_value(hir, emit, rhs, &BOXED, depth + 1);
             return;
         }
+        // A word local the later side leaves alone is read in place.
         let mut staged = [0; 2];
         for (side, id) in [lhs, rhs].into_iter().enumerate() {
+            if let Some(slot) = self.hir_word_local(hir, emit, id, &BOXED)
+                && (side == 1 || !lower::assigns_local(hir, rhs, Self::hir_local_of(hir, id)))
+            {
+                staged[side] = slot;
+                continue;
+            }
             self.hir_value(hir, emit, id, &BOXED, 0);
             self.expr_depth = 0;
             staged[side] = self.alloc_temp_slot();
@@ -9008,6 +9073,24 @@ impl Compiler {
         }
         self.bytecode.push_load(staged[0]);
         self.bytecode.push_load(staged[1]);
+    }
+
+    /// The slot of `id` when it reads a one-word local held as `want`, in
+    /// place (not captured, not split into slots).
+    fn hir_word_local(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Option<u32> {
+        let HirKind::Local(l) = hir.expr(id).kind else { return None };
+        (!hir.local(l).captured
+            && !emit.stacks.contains_key(&l.0)
+            && !emit.sroa.contains_key(&l.0)
+            && self.hir_natural(hir, emit, id).as_ref() == Some(want))
+        .then(|| Self::hir_slot(emit, l))
+    }
+
+    fn hir_local_of(hir: &HirBody, id: HirId) -> LocalId {
+        match hir.expr(id).kind {
+            HirKind::Local(l) => l,
+            _ => unreachable!("a local read"),
+        }
     }
 
     /// A call that emits a real one-word `CALL` of a known function with

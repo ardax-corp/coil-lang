@@ -12,15 +12,10 @@ use super::super::op::IlOp;
 use super::OptimizeOptions;
 use super::stats::{self, PassDelta, PassKind};
 
-/// Context threaded through one pipeline round. Keep this small.
-pub struct PassCtx {
-    pub entry_tell: u32,
-}
-
 /// One named rewrite over a function body (or bare `Vec<IlOp>`).
 pub trait Pass {
     fn name(&self) -> &'static str;
-    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) -> PassDelta;
+    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions) -> PassDelta;
 }
 
 /// Cleanup (profile-agnostic) vs decision (layout / heat).
@@ -54,7 +49,7 @@ pub struct PassSpec {
 
 /// A pass body over a function's ops (growth passes splice / push).
 enum ApplyFn {
-    Grow(fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx) -> usize),
+    Grow(fn(&mut Vec<IlOp>, &OptimizeOptions) -> usize),
 }
 
 impl PassSpec {
@@ -72,14 +67,14 @@ impl Pass for PassSpec {
         self.name
     }
 
-    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) -> PassDelta {
+    fn run(&self, ops: &mut Vec<IlOp>, opts: &OptimizeOptions) -> PassDelta {
         stats::measure_pass(
             ops,
             opts.collect_stats,
             Pass::name(self),
             self.kind,
             |ops| match self.apply {
-                ApplyFn::Grow(apply) => apply(ops, opts, ctx),
+                ApplyFn::Grow(apply) => apply(ops, opts),
             },
         )
     }
@@ -96,22 +91,15 @@ pub fn enabled_pass_names(opts: &OptimizeOptions) -> Vec<&'static str> {
 }
 
 /// One pipeline round: cleanup, then decision.
-pub fn run_once(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32) {
-    let mut ctx = PassCtx {
-        // Cursor seed for the slot-tracking passes (`slot_promote`).
-        entry_tell: entry_sp.max(0) as u32,
-    };
-    run_phase(Phase::Cleanup, ops, opts, &mut ctx);
-    run_phase(Phase::Decision, ops, opts, &mut ctx);
+pub fn run_once(ops: &mut Vec<IlOp>, opts: &OptimizeOptions) {
+    run_phase(Phase::Cleanup, ops, opts);
+    run_phase(Phase::Decision, ops, opts);
 }
 
-fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx) {
-    for spec in PRODUCTION_PASSES {
-        if spec.phase != phase {
-            continue;
-        }
+fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions) {
+    for spec in PRODUCTION_PASSES.iter().filter(|p| p.phase == phase) {
         if spec.enabled(opts) {
-            let delta = spec.run(ops, opts, ctx);
+            let delta = spec.run(ops, opts);
             if opts.collect_stats {
                 stats::collect_delta(&delta);
             }
@@ -121,22 +109,12 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
 
 // Apply wrappers. The usize is a pass-specific count.
 
-fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx) -> usize {
+fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions) -> usize {
     super::cfg::eliminate_dead_blocks(ops);
     0
 }
 
-fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx) -> usize {
-    super::slot_promote::slot_promote(ops, ctx.entry_tell);
-    super::dce::dead_store_at(ops, ctx.entry_tell);
-    0
-}
-
-fn apply_clone_shared_return(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx,
-) -> usize {
+fn apply_clone_shared_return(ops: &mut Vec<IlOp>, _: &OptimizeOptions) -> usize {
     super::convoy::clone_shared_return(ops);
     0
 }
@@ -154,16 +132,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_dead_block),
     },
     PassSpec {
-        name: "slot_promote",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        gate: |o| o.slot_promote,
-        set_flag: |o| o.slot_promote = true,
-        apply: ApplyFn::Grow(apply_slot_promote),
-    },
-    PassSpec {
         name: "clone_shared_return",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -177,11 +145,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
 
 /// D1 README production order (cleanup then decision).
 #[cfg(test)]
-pub const D1_PASS_ORDER: &[&str] = &[
-    "dead_block",
-    "slot_promote",
-    "clone_shared_return",
-];
+pub const D1_PASS_ORDER: &[&str] = &["dead_block", "clone_shared_return"];
 
 #[cfg(test)]
 mod tests {
@@ -202,11 +166,7 @@ mod tests {
         assert_eq!(enabled, subsequence(D1_PASS_ORDER, &enabled));
         assert_eq!(
             enabled,
-            [
-                "dead_block",
-                            "slot_promote",
-                "clone_shared_return",
-            ]
+            ["dead_block", "clone_shared_return"]
         );
     }
 

@@ -19,7 +19,55 @@ pub fn fold(body: &HirBody) -> Option<HirBody> {
     let mut out = body.clone();
     let mut hits = 0;
     post(&mut out, root, &mut hits);
+    drop_unread(&mut out, root, &mut hits);
     (hits > 0).then_some(out)
+}
+
+/// Statements that do nothing go: `x = x` (an identity folded away,
+/// `t = t + 0`), and the `let` and assignments of a literal or a local read
+/// to a local nothing reads (an unrolled counter's steps, say).
+fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
+    let mut places = std::collections::HashSet::new();
+    let mut read = std::collections::HashSet::new();
+    let mut stmts = std::collections::HashSet::new();
+    let mut nodes = Vec::new();
+    let mut stack = vec![root];
+    while let Some(k) = stack.pop() {
+        nodes.push(k);
+        match &body.expr(k).kind {
+            HirKind::Assign { place, .. } => {
+                places.insert(*place);
+            }
+            HirKind::Local(l) if !places.contains(&k) => {
+                read.insert(*l);
+            }
+            HirKind::Block { stmts: ss, .. } => stmts.extend(ss.iter().copied()),
+            HirKind::Clear(ls) => read.extend(ls.iter().copied()),
+            HirKind::Defer { captures, .. } => read.extend(captures.iter().flatten().copied()),
+            _ => {}
+        }
+        stack.extend(children(body, k).into_iter().rev());
+    }
+    let pure = |body: &HirBody, v: HirId| matches!(body.expr(v).kind, HirKind::Lit(_) | HirKind::Local(_));
+    for k in nodes.into_iter().filter(|k| stmts.contains(k)) {
+        let gone = match body.expr(k).kind {
+            HirKind::Let { local, init } => {
+                !read.contains(&local) && !body.local(local).captured && init.is_none_or(|v| pure(body, v))
+            }
+            HirKind::Assign { place, value } => match (&body.expr(place).kind, &body.expr(value).kind) {
+                (HirKind::Local(x), HirKind::Local(y)) if x == y => true,
+                (HirKind::Local(l), _) => !read.contains(l) && !body.local(*l).captured && pure(body, value),
+                _ => false,
+            },
+            _ => false,
+        };
+        if gone {
+            let e = &mut body.exprs[k.0 as usize];
+            e.kind = HirKind::Block { stmts: Vec::new(), tail: None };
+            e.node = None;
+            *hits += 1;
+        }
+    }
 }
 
 fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
@@ -65,12 +113,6 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             HirKind::Lit(Lit::Bool(a)) => Some(HirKind::Lit(Lit::Bool(a))),
             _ => None,
         },
-        // `x = x` (an identity folded away, `t = t + 0`) does nothing.
-        HirKind::Assign { place, value }
-            if matches!((&body.expr(*place).kind, &body.expr(*value).kind), (HirKind::Local(x), HirKind::Local(y)) if x == y) =>
-        {
-            Some(HirKind::Block { stmts: Vec::new(), tail: None })
-        }
         // The branch taken stands in for the `if` when it has the same type.
         HirKind::If { cond, then, els } => {
             let taken = match body.expr(*cond).kind {
