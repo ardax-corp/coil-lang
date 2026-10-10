@@ -129,7 +129,7 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    if hir.is_coro || hir.is_generic || hir.result_mode || !hir.captures.is_empty() {
+    if hir.is_coro || hir.is_generic || !hir.captures.is_empty() {
         return Err("body kind".into());
     }
     let root = hir.root.ok_or("no root")?;
