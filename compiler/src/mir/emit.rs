@@ -1396,16 +1396,23 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 out.push(IlOp::Const { imm: 0, loc });
             }
             if let Some(h) = hi {
-                emit_stack_value(EmitStackValueArgs {
-                    out,
-                    stacked,
-                    v: *h,
-                    func,
-                    plan,
-                    regs,
-                    pool,
-                    loc,
-                })?;
+                // `return v, v` (`None` as `0, 0`): the low word is the
+                // value on top, which `emit_stack_value` would reuse
+                // instead of pushing it a second time.
+                if *lo == Some(*h) {
+                    out.push(IlOp::Dup { loc });
+                } else {
+                    emit_stack_value(EmitStackValueArgs {
+                        out,
+                        stacked,
+                        v: *h,
+                        func,
+                        plan,
+                        regs,
+                        pool,
+                        loc,
+                    })?;
+                }
             }
             out.push(IlOp::Return {
                 loc,
