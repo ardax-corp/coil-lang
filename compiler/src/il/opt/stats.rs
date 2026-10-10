@@ -4,29 +4,9 @@
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 
-use super::super::op::IlOp;
 
 thread_local! {
     static LAST_STATS: RefCell<Option<OptStats>> = const { RefCell::new(None) };
-}
-
-/// How a named pass contributes to the ticket-level counters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PassKind {
-    Generic,
-}
-
-/// Result of one named pass. [`collect_delta`] records this when `collect_stats`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PassDelta {
-    pub name: &'static str,
-    pub kind: PassKind,
-    pub changed: bool,
-    pub ops_delta: i64,
-    pub loads_eliminated: usize,
-    pub stores_eliminated: usize,
-    /// Unroll / branch / block-order count returned by the pass body.
-    pub extra: usize,
 }
 
 /// One named pass that mutated the buffer (aggregated by name).
@@ -91,10 +71,6 @@ pub struct OptStats {
 }
 
 impl OptStats {
-    fn add_pass(&mut self, name: &'static str, ops_delta: i64) {
-        self.merge_pass(name, 1, ops_delta);
-    }
-
     fn merge_pass(&mut self, name: &str, applied: usize, ops_delta: i64) {
         if let Some(hit) = self.passes.iter_mut().find(|p| p.name == name) {
             hit.applied += applied;
@@ -329,10 +305,6 @@ pub(crate) fn note_body_tiers(dense: usize, lir: usize, fuse: usize) {
     });
 }
 
-pub(crate) fn set_iterations(n: usize) {
-    with_stats(|s| s.iterations = n);
-}
-
 fn with_stats(f: impl FnOnce(&mut OptStats)) {
     LAST_STATS.with(|c| {
         if c.borrow().is_none() {
@@ -341,97 +313,6 @@ fn with_stats(f: impl FnOnce(&mut OptStats)) {
         if let Some(s) = c.borrow_mut().as_mut() {
             f(s);
         }
-    });
-}
-
-fn count_loads(ops: &[IlOp]) -> usize {
-    ops.iter()
-        .filter(|op| matches!(op, IlOp::Load { .. } | IlOp::LoadReturnSlot { .. }))
-        .count()
-}
-
-fn count_stores(ops: &[IlOp]) -> usize {
-    ops.iter()
-        .filter(|op| matches!(op, IlOp::StorePop { .. }))
-        .count()
-}
-
-/// Run `f` and, when `collect`, fill a [`PassDelta`] from before/after ops.
-///
-/// When `collect` is off the buffer is not cloned (same as the old
-/// `run_named_pass`); `changed` is then `false`.
-pub(crate) fn measure_pass(
-    ops: &mut Vec<IlOp>,
-    collect: bool,
-    name: &'static str,
-    kind: PassKind,
-    f: impl FnOnce(&mut Vec<IlOp>) -> usize,
-) -> PassDelta {
-    if !collect {
-        let extra = f(ops);
-        return PassDelta {
-            name,
-            kind,
-            changed: false,
-            ops_delta: 0,
-            loads_eliminated: 0,
-            stores_eliminated: 0,
-            extra,
-        };
-    }
-    let before = ops.clone();
-    let extra = f(ops);
-    if *ops == before {
-        return PassDelta {
-            name,
-            kind,
-            changed: false,
-            ops_delta: 0,
-            loads_eliminated: 0,
-            stores_eliminated: 0,
-            extra,
-        };
-    }
-    let ops_delta = ops.len() as i64 - before.len() as i64;
-    let load_delta = count_loads(ops) as i64 - count_loads(&before) as i64;
-    let store_delta = count_stores(ops) as i64 - count_stores(&before) as i64;
-    PassDelta {
-        name,
-        kind,
-        changed: true,
-        ops_delta,
-        loads_eliminated: if load_delta < 0 {
-            (-load_delta) as usize
-        } else {
-            0
-        },
-        stores_eliminated: if store_delta < 0 {
-            (-store_delta) as usize
-        } else {
-            0
-        },
-        extra,
-    }
-}
-
-/// Record a named pass from [`PassDelta`]. No match on pass internals here
-/// beyond the `PassKind` already stored on the delta / table row.
-pub(crate) fn collect_delta(delta: &PassDelta) {
-    if !delta.changed {
-        return;
-    }
-    with_stats(|s| {
-        if delta.ops_delta < 0 {
-            s.ops_eliminated += (-delta.ops_delta) as usize;
-        } else {
-            s.ops_added += delta.ops_delta as usize;
-        }
-        s.loads_eliminated += delta.loads_eliminated;
-        s.stores_eliminated += delta.stores_eliminated;
-        match delta.kind {
-            PassKind::Generic => {}
-        }
-        s.add_pass(delta.name, delta.ops_delta);
     });
 }
 
@@ -482,29 +363,5 @@ mod tests {
         assert!(json.contains("\"ops_eliminated\":5"));
         let round: OptStats = serde_json::from_str(&json).unwrap();
         assert_eq!(round, a);
-    }
-
-    #[test]
-    fn collect_delta_records_named_pass_from_pass_delta() {
-        begin_opt_stats();
-        collect_delta(&PassDelta {
-            name: "dead_block",
-            kind: PassKind::Generic,
-            changed: true,
-            ops_delta: -2,
-            loads_eliminated: 0,
-            stores_eliminated: 0,
-            extra: 0,
-        });
-        let stats = last_opt_stats();
-        assert_eq!(stats.ops_eliminated, 2);
-        assert!(
-            stats
-                .passes
-                .iter()
-                .any(|p| p.name == "dead_block" && p.applied == 1 && p.ops_delta == -2),
-            "{:?}",
-            stats.passes
-        );
     }
 }

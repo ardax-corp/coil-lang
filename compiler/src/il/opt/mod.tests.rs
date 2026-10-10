@@ -24,30 +24,6 @@ fn c(n: i32) -> IlOp {
 }
 
 #[test]
-fn stats_collect_dead_block_and_format() {
-    begin_opt_stats();
-    let mut ops = vec![ret(), c(1), ret()];
-    let mut opts = OptLevel::None.options();
-    opts.dead_block = true;
-    opts.collect_stats = true;
-    optimize(&mut ops, &opts);
-    let stats = last_opt_stats();
-    assert_eq!(stats.iterations, 1);
-    assert!(stats.ops_eliminated >= 2);
-    assert!(
-        stats.passes.iter().any(|p| p.name == "dead_block" && p.applied >= 1),
-        "{:?}",
-        stats.passes
-    );
-    let text = stats.format_text();
-    assert!(text.contains("ops eliminated"));
-    assert!(text.contains("dead_block"));
-    let json = stats.format_json();
-    assert!(json.contains("\"ops_eliminated\""));
-    assert!(json.contains("dead_block"));
-}
-
-#[test]
 fn fact_mul_keeps_call_result_across_opts() {
     use crate::il::{EntryKind, IlFunc, IlModule};
 
@@ -131,18 +107,6 @@ fn fact_mul_keeps_call_result_across_opts() {
         rendered.contains("MUL"),
         "fact multiply disappeared\n{rendered}"
     );
-}
-
-#[test]
-fn stats_off_does_not_record() {
-    begin_opt_stats();
-    let mut ops = vec![ret(), c(1), ret()];
-    let mut opts = OptLevel::None.options();
-    opts.dead_block = true;
-    opts.collect_stats = false;
-    optimize(&mut ops, &opts);
-    let stats = last_opt_stats();
-    assert_eq!(stats, OptStats::default());
 }
 
 #[test]

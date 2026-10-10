@@ -8434,9 +8434,8 @@ impl Compiler {
         // Dict thunks after prologue; keep program_start_offset at first user byte.
         self.program_start_offset = self.bytecode.len() as u32;
         self.setup_entry_offset = self.program_start_offset;
-        // Label the setup / top-level region so `dead_block` keeps it
-        // after prologue HALT / prelude RETURN (reachability is
-        // label-based until entry-aware DCE).
+        // Label the setup / top-level region: it starts after the
+        // prologue HALT / prelude RETURN, so only its entry reaches it.
         self.bytecode.bind_fresh_entry();
         self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
         for hit in &self.mono_plan.cap_hits {
@@ -8748,8 +8747,8 @@ impl Compiler {
             }
             best
         };
-        // Prefer entry labels: IL opts (dead_block) shift emitting indices
-        // before fuse, so raw `functions` / `test_cases` PCs are stale.
+        // Prefer entry labels: MIR specialization and fuse shift emitting
+        // indices, so raw `functions` / `test_cases` PCs are stale.
         // Per-function chunk remaps avoid collisions in the cumulative map.
         let func_label_maps = &lowered.func_label_maps;
         let funcs = self.bytecode.funcs();
