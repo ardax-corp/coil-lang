@@ -25,6 +25,8 @@ pub struct BodyTier {
     pub tier: String,
     pub dense_reason: Option<String>,
     pub lir_reason: Option<String>,
+    /// Why the body did not lower straight from HIR to MIR.
+    pub hir_reason: Option<String>,
 }
 
 /// Counters from IL opts (and typed inlining when compiling). COI-176.
@@ -155,11 +157,12 @@ impl OptStats {
         for b in &self.body_tiers {
             let _ = writeln!(
                 out,
-                "    {}: {} (dense: {}; lir: {})",
+                "    {}: {} (dense: {}; lir: {}; hir: {})",
                 b.name,
                 b.tier,
                 b.dense_reason.as_deref().unwrap_or("-"),
-                b.lir_reason.as_deref().unwrap_or("-")
+                b.lir_reason.as_deref().unwrap_or("-"),
+                b.hir_reason.as_deref().unwrap_or("-")
             );
         }
         if !self.fuse_reasons.is_empty() {

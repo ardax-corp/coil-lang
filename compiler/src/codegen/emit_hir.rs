@@ -674,9 +674,13 @@ impl Compiler {
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
-                self.hir_mir = (entry_convs.is_empty() && !self.hir_shared_generic())
-                    .then(|| self.hir_lower_mir(hir, &emit))
-                    .flatten();
+                self.hir_mir_why = None;
+                self.hir_mir = if entry_convs.is_empty() && !self.hir_shared_generic() {
+                    self.hir_lower_mir(hir, &emit)
+                } else {
+                    self.hir_mir_why = Some("converted or shared generic entry".into());
+                    None
+                };
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::il::opt::note_hir_lowered();
@@ -711,6 +715,9 @@ impl Compiler {
         if let Some(func) = self.hir_mir.take() {
             self.bytecode.set_last_func_hir_mir(func);
         }
+        if let Some(why) = self.hir_mir_why.take() {
+            self.bytecode.set_last_func_hir_mir_why(why);
+        }
     }
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
@@ -741,6 +748,7 @@ impl Compiler {
                     eprintln!("hir mir `{}`: {why}", hir.name);
                 }
                 crate::il::opt::note_hir_mir(Some(&why));
+                self.hir_mir_why = Some(why);
                 None
             }
         }

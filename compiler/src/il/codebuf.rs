@@ -417,6 +417,14 @@ impl CodeBuf {
         }
     }
 
+    /// Record on the last recorded function why it did not lower straight
+    /// from HIR to MIR.
+    pub fn set_last_func_hir_mir_why(&mut self, why: String) {
+        if let Some(f) = self.funcs.last_mut() {
+            f.hir_mir_why = Some(why);
+        }
+    }
+
     /// Mark the last recorded function [`IlFunc::pinned`].
     pub fn set_last_func_pinned(&mut self) {
         if let Some(f) = self.funcs.last_mut() {

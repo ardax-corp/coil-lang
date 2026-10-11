@@ -2,7 +2,7 @@
 """Body tier census: which execution tier each function body gets.
 
 Compiles each file with `coil compile --opt-stats` and reads the per-body
-lines (`name: dense|lir|fuse (dense: why; lir: why)`).
+lines (`name: dense|lir|fuse (dense: why; lir: why; hir: why)`).
 
     # count tiers and refusal reasons, save the per-body result
     scripts/tier_census.py run --coil target/release/coil \
