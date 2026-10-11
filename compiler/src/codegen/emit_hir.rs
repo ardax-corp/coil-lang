@@ -2230,12 +2230,13 @@ impl Compiler {
         if !known(&base) && !self.native.contains_key(&base) && !self.namespace.is_empty() && !base.contains("::") {
             base = format!("{}::{}", self.namespace, base);
         }
+        // A later overload's entry is reserved before its body is emitted.
         let mut key = overload_fn_key(&base, fixed, rest, id);
-        if !self.functions.contains_key(&key) {
+        if !known(&key) {
             let simple = base.rsplit("::").next().unwrap_or(&base);
             key = overload_fn_key(simple, fixed, rest, id);
         }
-        if !self.functions.contains_key(&key) {
+        if !known(&key) {
             return Err("callee-overload");
         }
         let lookup = strip_overload_key(&key).to_string();
@@ -2247,7 +2248,8 @@ impl Compiler {
         {
             return Err("callee-overload");
         }
-        if self.fn_arities.get(&key) != Some(&(fixed as u32, rest)) {
+        // Not emitted yet (a later overload): the checker matched the arity.
+        if self.fn_arities.get(&key).is_some_and(|a| *a != (fixed as u32, rest)) {
             return Err("callee-arity");
         }
         let plain = |id: HirId, unit: bool| -> Result<ValueLayout, &'static str> {
