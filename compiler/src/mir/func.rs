@@ -285,7 +285,8 @@ impl MirFunc {
             } => {
                 let lt = self.ty(*lhs);
                 let rt = self.ty(*rhs);
-                let heap_bit = ty.is_heap_word()
+                // `word & 1` reads a niche `Result`'s tag as an `i64`.
+                let heap_bit = (ty.is_heap_word() || lt.is_heap_word() || rt.is_heap_word())
                     && matches!(
                         op,
                         super::inst::MirBinOp::BitAnd
@@ -369,14 +370,7 @@ impl MirFunc {
                 src,
             } => {
                 let from = self.ty(*src);
-                let ok = match kind {
-                    super::inst::MirCastKind::IntToFloat => from.is_int() && to.is_float(),
-                    super::inst::MirCastKind::Sext => from == MirTy::I32 && *to == MirTy::I64,
-                    super::inst::MirCastKind::FloatToInt => {
-                        from == MirTy::F64 && *to == MirTy::I64
-                    }
-                };
-                if !ok || self.ty(*dest) != *to {
+                if !kind.allows(from, *to) || self.ty(*dest) != *to {
                     return Err(format!("{dest} illegal cast {from} -> {to}"));
                 }
             }

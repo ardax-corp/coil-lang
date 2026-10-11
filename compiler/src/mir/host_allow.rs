@@ -112,7 +112,7 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
 /// heap pointer is one; precise math / packed specs stay exact.
 pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
     actual == expected
-        || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::HeapRef)
+        || (host_spec(id).is_none() && expected == MirTy::I64 && actual.is_heap_word())
 }
 
 /// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).

@@ -219,6 +219,26 @@ pub enum MirCastKind {
     Sext,
     /// `CastFloatToInt` — `f64` → `i64`, truncating toward zero.
     FloatToInt,
+    /// The same word retyped across a pointer niche: a heap pointer
+    /// (`Some` / `Ok`) or the `i64` zero (`None` / `Ok(())`) typed
+    /// `NicheOpt` / `NicheRes`, or such a word known to hold a pointer back
+    /// to `HeapRef`.
+    Niche,
+}
+
+impl MirCastKind {
+    /// Whether a cast of this kind from `from` to `to` is legal.
+    pub fn allows(self, from: MirTy, to: MirTy) -> bool {
+        match self {
+            Self::IntToFloat => from.is_int() && to.is_float(),
+            Self::Sext => from == MirTy::I32 && to == MirTy::I64,
+            Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
+            Self::Niche => {
+                let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
+                (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef)) || (niche(from) && to == MirTy::HeapRef)
+            }
+        }
+    }
 }
 
 /// Value-producing instruction. Phis occupy the prefix of a block.

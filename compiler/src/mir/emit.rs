@@ -915,6 +915,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 MirCastKind::IntToFloat => dense::CAST_I2F,
                 MirCastKind::Sext => dense::CAST_SEXT,
                 MirCastKind::FloatToInt => dense::CAST_F2I,
+                // The same word: a move, or nothing in place.
+                MirCastKind::Niche => {
+                    let (d, s) = (regs[dest.index()], regs[src.index()]);
+                    if d != s {
+                        out.push(move_op(d, s));
+                    }
+                    return Ok(());
+                }
             };
             out.push(byte(
                 Byte::new(Instruction::DenseCast).with_dense_unary(
