@@ -45,6 +45,31 @@ pub struct Summary {
     pub latent: u64,
 }
 
+/// `open(path, "r")` with a literal mode reads or writes only as the mode
+/// says, as the capability check reads it (#886).
+fn open_mode_summary(body: &HirBody, name: &str, args: &[HirId], s: Summary) -> Summary {
+    if name.rsplit("::").next() != Some("open") {
+        return s;
+    }
+    let Some(HirKind::Lit(super::Lit::Str(mode))) = args.get(1).map(|&a| &body.expr(a).kind) else {
+        return s;
+    };
+    let caps = common::open_mode_caps(Some(mode));
+    let mut drop = 0;
+    if !caps.contains(common::Caps::READ) {
+        drop |= EffectFlags::READ;
+    }
+    if !caps.contains(common::Caps::WRITE) {
+        drop |= EffectFlags::WRITE;
+    }
+    let keep = |f: EffectFlags| EffectFlags::from_bits(f.bits() & !drop);
+    Summary {
+        flags: keep(s.flags),
+        visible: keep(s.visible),
+        latent: s.latent,
+    }
+}
+
 impl Summary {
     /// Pure whatever it is passed.
     pub fn is_pure(self) -> bool {
@@ -973,8 +998,11 @@ impl Cx<'_> {
                 self.note_hidden(w, at, EffectFlags::UNKNOWN | EffectFlags::HOST, || "may panic".into())
             }
             Callee::Named { name, def, .. } => {
-                let s = self.named(w, name, *def);
+                let mut s = self.named(w, name, *def);
                 let callee = self.local_body(name, *def);
+                if callee.is_none() {
+                    s = open_mode_summary(body, name, args, s);
+                }
                 self.apply(w, at, name, s, callee, args);
             }
             Callee::Method { name } => {

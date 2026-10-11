@@ -2682,13 +2682,23 @@ impl Checker {
                     if let Ty::Var(v) = pruned {
                         self.record_bound_unary(id, &range, v, ("Neg", "neg", "-"));
                     } else {
-                        self.check_ground_unary_operand(&pruned, ("Neg", "-"), &range);
+                        if !self.check_ground_unary_operand(&pruned, ("Neg", "-"), &range) {
+                            self.check_unary_number(&pruned, "-", &range);
+                        }
                         self.warn_byte_wrap(&pruned, "neg", &range);
                     }
                     pruned
                 }
             }
-            Expression::Positive(e) => self.infer(e),
+            // `+x` is `x`, but only for what `-x` takes (#886).
+            Expression::Positive(e) => {
+                let inner = self.infer(e);
+                let pruned = apply_ty_prune(&self.subst, &inner);
+                if !self.check_ground_unary_operand(&pruned, ("Neg", "+"), &range) {
+                    self.check_unary_number(&pruned, "+", &range);
+                }
+                pruned
+            }
             Expression::Not(e) => {
                 let t = self.infer(e);
                 let pruned = apply_ty_prune(&self.subst, &t);
@@ -6067,6 +6077,22 @@ impl Checker {
             self.messages.push(m);
         }
         true
+    }
+
+    /// Unary `-` / `+` on a builtin type takes `int`, `float` or `byte`.
+    fn check_unary_number(&mut self, ty: &Ty, sym: &str, range: &Range<usize>) {
+        let lookup = Self::operand_instance_lookup_ty(ty);
+        if !matches!(&lookup, Ty::Con(n) if matches!(n.as_str(), "bool" | "string" | "unit")) {
+            return;
+        }
+        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let mut m = Message::error(
+            ErrorCode::TypeMismatch,
+            format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
+            range.clone(),
+        );
+        m.with_help(format!("unary `{sym}` takes `int`, `float` or `byte`"));
+        self.messages.push(m);
     }
 
     fn record_bound_display(&mut self, range: &Range<usize>, var: TyVarId) {
