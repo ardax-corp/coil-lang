@@ -917,7 +917,8 @@ impl Compiler {
                 [] => {}
                 [p] if layout::is_unit(p) => {}
                 [p] => {
-                    let w = word(p)?;
+                    // A heap payload is an opaque word: it only moves.
+                    let w = word(p).or_else(|| (!layout::is_immediate(p)).then_some(MirTy::I64))?;
                     if lo.is_some_and(|l| l != w) {
                         return None;
                     }
