@@ -20,12 +20,14 @@ coil-dissect examples/fib.hy --fn fib --il
 | (none) | Symbol index + full final fused bytecode (function headers interleaved), with the source line (`;; file:line │ text`) shown wherever it changes. Dense register ops are decoded (`r3 = r1`, `r5 = array(r15..r18)`, `r2 = len(r5)`). A `HostInvoke` names the native it calls (`HostInvoke arity=1  ; task_join`) when the `CONST` that pushed its id is found before straight-line argument code |
 | `--no-source` | Bytecode without the interleaved source lines |
 | `--fn <pat>` | Case-insensitive FQN match (exact, substring, trailing segment, `name#N`) |
-| `--il` | Also print **pre-opt** stack IL (snapshot after finalize splices, before lower) |
-| `--il-post` | Also print the **optimized** IL (after IL passes and MIR substitution, before fuse / lowering) |
+| `--il` | Also print the stack IL as emitted (snapshot after finalize splices, before lower) |
+| `--il-post` | Also print the IL after MIR substitution, before fuse / lowering (no IL optimization passes remain) |
+| `--hir` | Also print each body's HIR (typed, desugared tree) |
+| `--expand` | Print the entry file after macro expansion (no bytecode) |
 | `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
 | `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or lost the cost gate to fuse-IL |
-| `--effects` | Also print each function's effects with the first reason for each (`step: uses {write, suspend}: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (read)`). Needs HIR lowering (the default); see [auto-par.md](auto-par.md) |
-| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print the IL counters) |
+| `--effects` | Also print each function's effects with the first reason for each (`step: uses {write, suspend}: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (read)`). See [auto-par.md](auto-par.md) |
+| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers and HIR counters) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
 | `--entry FILE` | Entry `.hy` instead of the positional file |
@@ -39,6 +41,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--allow-ffi-exec` | Allow FFI process-exec symbols (`system`, `execve`, …) |
 | `--allow-dload STEM` | Allow `dload` of STEM (repeatable; `dload("c")` still denied) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (repeatable; not a dload grant) |
+| `--dload-pin STEM=SHA256` / `--dload-trusted STEM` | `dload` integrity: expected library hash, or no hash check |
 
 Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
 
