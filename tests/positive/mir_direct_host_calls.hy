@@ -24,7 +24,7 @@ fn put_all(Stream s, Vec<byte> buf) -> int {
             Result::Err(_) => {
                 return -1;
             },
-        };
+        }
         calls = calls + 1;
     }
     return calls;
@@ -34,7 +34,6 @@ test("math host natives in direct MIR") {
     assert(hyp(3.0, 4.0) == 5.0)?;
     assert(hyp(0.0, 0.0) == 0.0)?;
 }
-
 
 test("write_from result unboxed in direct MIR") {
     let path = "coil_lang_mir_direct_host.txt";

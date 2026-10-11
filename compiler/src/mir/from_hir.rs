@@ -72,6 +72,9 @@ impl HirMirInput<'_> {
     }
 }
 
+/// Each variant's tag and payload arity, in declaration order.
+pub type HostVariants = Vec<(u32, u32)>;
+
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
     /// Frame slot of each local (the first word of a pair local).
@@ -105,7 +108,7 @@ pub struct HirMirInput<'a> {
     /// Host native calls whose arguments and result are plain (boxed
     /// layout) words: the native id, and for a two-word enum result each
     /// variant's tag and payload arity in declaration order.
-    pub hosts: HashMap<u32, (u16, Option<Vec<(u32, u32)>>)>,
+    pub hosts: HashMap<u32, (u16, Option<HostVariants>)>,
     /// `new C(..)` on the heap: the class's type id and its fields' word
     /// types.
     pub news: HashMap<u32, (u32, Vec<MirTy>)>,
