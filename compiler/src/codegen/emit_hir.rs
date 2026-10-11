@@ -6854,7 +6854,7 @@ impl Compiler {
                 if depth == 0 {
                     // Receiver and arguments through temps, as the AST does.
                     let mut temps = Vec::with_capacity(args.len());
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                         if let Some(ty) = boxed(i) {
                             Self::emit_box_if_needed(&mut self.bytecode, &ty);
@@ -6868,7 +6868,7 @@ impl Compiler {
                         self.bytecode.push_load(tmp);
                     }
                 } else {
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
                         if let Some(ty) = boxed(i) {
                             Self::emit_box_if_needed(&mut self.bytecode, &ty);
@@ -6891,6 +6891,30 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
+                // A plain one-word ABI call, each argument in its own layout:
+                // direct MIR calls the same entry.
+                if dicts == 0
+                    && generic.is_none()
+                    && (0..args.len()).all(|i| boxed(i).is_none())
+                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(&IlOp::Entry {
+                        kind: crate::il::EntryKind::Call,
+                        target,
+                        arity,
+                        ret_words: ret_words @ (1 | 2),
+                        ..
+                    }) = self.bytecode.il_mut().ops_slice_mut().last()
+                    && arity == args.len() as u32
+                {
+                    emit.call_targets.insert(
+                        id.0,
+                        crate::mir::HirCallSite {
+                            target,
+                            pair_args: vec![false; args.len()],
+                            pair_ret: ret_words == 2,
+                        },
+                    );
+                }
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
