@@ -75,6 +75,12 @@ impl HirMirInput<'_> {
     }
 }
 
+/// The backing word type of a scalar enum type.
+pub type ScalarEnumFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
+
+/// A scalar enum variant's backing constant, by enum and variant name.
+pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>;
+
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
 
@@ -105,9 +111,9 @@ pub struct HirMirInput<'a> {
     pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
     /// The backing word of a scalar enum type (`#[repr(int)]` /
     /// `#[repr(float)]`).
-    pub scalar_enum: Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>,
+    pub scalar_enum: ScalarEnumFn<'a>,
     /// A scalar enum variant's backing constant, by enum and variant name.
-    pub scalar_variant: Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>,
+    pub scalar_variant: ScalarVariantFn<'a>,
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
