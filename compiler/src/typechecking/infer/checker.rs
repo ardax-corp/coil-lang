@@ -6277,7 +6277,14 @@ impl Checker {
         let pruned = apply_ty_prune(&self.subst, &result);
         if !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_arith_operands(&pruned, op, &range);
-            self.warn_byte_wrap(&pruned, op, &range);
+            // Literal operands whose result fits (`1 + 1`) cannot wrap.
+            let fits = Self::const_int(lhs)
+                .zip(Self::const_int(rhs))
+                .and_then(|(l, r)| Self::const_int_op(op, l, r))
+                .is_some_and(|v| (0..=255).contains(&v));
+            if !fits {
+                self.warn_byte_wrap(&pruned, op, &range);
+            }
         }
         if let Ty::Var(v) = pruned {
             self.bind_arith_operator(v, op, id, &range);
@@ -6298,6 +6305,32 @@ impl Checker {
         let mut msg = Message::warn(ErrorCode::ByteWrap, format!("{what} wraps modulo 256"), range.clone());
         msg.with_help("the result keeps its low 8 bits; convert to `int` first (`x as int`) for exact arithmetic".to_string());
         self.messages.push(msg);
+    }
+
+    /// The value of an integer literal, possibly under casts and `+ - * ** <<`.
+    fn const_int(expr: &Output) -> Option<i64> {
+        let expr = Self::peel_literal_expr(expr);
+        match expr.1.as_ref() {
+            Expression::Integer(n) => Some(*n),
+            Expression::Cast(value, _) => Self::const_int(value),
+            Expression::Add(l, r) => Self::const_int_op("+", Self::const_int(l)?, Self::const_int(r)?),
+            Expression::Sub(l, r) => Self::const_int_op("-", Self::const_int(l)?, Self::const_int(r)?),
+            Expression::Mul(l, r) => Self::const_int_op("*", Self::const_int(l)?, Self::const_int(r)?),
+            Expression::Pow(l, r) => Self::const_int_op("**", Self::const_int(l)?, Self::const_int(r)?),
+            Expression::Shl(l, r) => Self::const_int_op("<<", Self::const_int(l)?, Self::const_int(r)?),
+            _ => None,
+        }
+    }
+
+    fn const_int_op(op: &str, l: i64, r: i64) -> Option<i64> {
+        match op {
+            "+" => l.checked_add(r),
+            "-" => l.checked_sub(r),
+            "*" => l.checked_mul(r),
+            "**" => u32::try_from(r).ok().and_then(|r| l.checked_pow(r)),
+            "<<" => u32::try_from(r).ok().filter(|r| *r < 63).and_then(|r| l.checked_mul(1 << r)),
+            _ => None,
+        }
     }
 
     /// `v` is a type parameter of an enclosing generic item.
