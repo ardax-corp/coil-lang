@@ -916,7 +916,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 MirCastKind::Sext => dense::CAST_SEXT,
                 MirCastKind::FloatToInt => dense::CAST_F2I,
                 // The same word: a move, or nothing in place.
-                MirCastKind::Niche => {
+                MirCastKind::Word => {
                     let (d, s) = (regs[dest.index()], regs[src.index()]);
                     if d != s {
                         out.push(move_op(d, s));
