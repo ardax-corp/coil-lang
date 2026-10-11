@@ -233,8 +233,15 @@ impl Checker {
                 _ => None,
             }
         }));
+        // The trait's own parameters are rigid in every default body, as in
+        // impl methods and free generic fns: `x > 0` on a `T` would make
+        // `T` an `int` while the shared body still gets a boxed `T` (#838).
+        let named: Vec<(String, TyVarId)> =
+            type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
+        let mut reported_params = Vec::new();
         for m in methods {
             let _ = self.infer(m);
+            self.reject_bound_type_params(&named, &mut reported_params, &m.0.into_range());
         }
         self.unshield_bare_names(shield);
         self.active_constraints.truncate(active_len);
