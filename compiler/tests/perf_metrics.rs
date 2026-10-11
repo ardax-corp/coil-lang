@@ -1683,7 +1683,7 @@ fn aot_p2_nsieve_dispatch_regression() {
     );
 }
 
-/// P3 + P4 baseline: `bottom_up` allocates both `Tree` variants (2 `MakeEnumReturn`)
+/// P3 + P4 baseline: `bottom_up` allocates both `Tree` variants (2 makes)
 /// per level and `item_check` unpacks without re-allocating.
 #[test]
 fn aot_p3_binary_trees_make_enum_inventory() {
@@ -1709,17 +1709,13 @@ fn aot_p3_binary_trees_make_enum_inventory() {
         total_calls += calls;
     }
 
+    // Leaf + Node, each made straight into its return: fused
+    // `MakeEnumReturn` on the stack path, `DenseMake; LoadReturnSlot` in
+    // registers.
     let (bottom_up_start, bottom_up_end) = fn_pc_range(&syms, "bottom_up", bc.len());
-    assert_eq!(
-        count_opcodes_in(
-            &bc,
-            bottom_up_start,
-            bottom_up_end,
-            Instruction::MakeEnumReturn
-        ),
-        2,
-        "bottom_up should allocate exactly Leaf + Node via MakeEnumReturn"
-    );
+    let made = count_opcodes_in(&bc, bottom_up_start, bottom_up_end, Instruction::MakeEnumReturn)
+        + count_opcodes_in(&bc, bottom_up_start, bottom_up_end, Instruction::DenseMake);
+    assert_eq!(made, 2, "bottom_up should allocate exactly Leaf + Node");
     assert_eq!(
         count_opcodes_in(&bc, bottom_up_start, bottom_up_end, Instruction::MakeEnum),
         0,
