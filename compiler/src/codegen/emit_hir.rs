@@ -797,7 +797,16 @@ impl Compiler {
             let t = apply_ty_prune(checker.subst(), t);
             checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
         };
-        let word = |t: &Ty| crate::mir::word_mir_ty(t).or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef));
+        let niche = move |t: &Ty| match crate::typechecking::value_layout::value_layout(checker, t) {
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+            ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
+            ValueLayout::Boxed => None,
+        };
+        let word = |t: &Ty| {
+            crate::mir::word_mir_ty(t)
+                .or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef))
+                .or_else(|| niche(t))
+        };
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
@@ -845,17 +854,15 @@ impl Compiler {
         }
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
         let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
-        // Host natives taking and returning plain words (no niche or pair
-        // conversion at the edge).
+        // Host natives taking plain words and returning one (a niche word
+        // comes back as the layout asks; no pair conversion at the edge).
         let hosts = emit
             .plan
             .calls
             .iter()
             .filter_map(|(&i, c)| match c.builtin {
                 Some(HirBuiltin::Host(native))
-                    if c.pair.is_none()
-                        && c.ret == ValueLayout::Boxed
-                        && c.params.iter().all(|&p| p == ValueLayout::Boxed) =>
+                    if c.pair.is_none() && c.params.iter().all(|&p| p == ValueLayout::Boxed) =>
                 {
                     // A two-word enum result is unboxed at the edge, one
                     // `JumpIfMatch` per variant: each variant's tag and arity.
@@ -870,7 +877,8 @@ impl Compiler {
                         ),
                         None => None,
                     };
-                    Some((i, (u16::try_from(native).ok()?, unbox)))
+                    let layout = u8::try_from(c.ret.host_enum_layout()).ok()?;
+                    Some((i, (u16::try_from(native).ok()?, layout, unbox)))
                 }
                 _ => None,
             })
@@ -916,6 +924,7 @@ impl Compiler {
                 };
                 checker.scalar_value_ty(&name).as_ref().and_then(crate::mir::word_mir_ty).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64))
             }),
+            niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
                 if crate::hir::layout::is_scalar_enum_ty(checker, &t)

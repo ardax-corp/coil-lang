@@ -72,6 +72,7 @@ impl HirMirInput<'_> {
         word(ty)
             .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
+            .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
     }
 }
@@ -89,6 +90,11 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// `Some` of nothing; with a variant, its payload field types in
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
+
+/// The word of a pointer-niche `Option` or `Result` type:
+/// [`MirTy::NicheOpt`] when the zero word is one side (`None`, `Ok(())`),
+/// [`MirTy::NicheRes`] when `Err` is the pointer with its low bit set.
+pub type NicheFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
@@ -124,15 +130,17 @@ pub struct HirMirInput<'a> {
     pub scalar_variant: ScalarVariantFn<'a>,
     /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
     pub boxed_enum: BoxedEnumFn<'a>,
+    /// Pointer-niche `Option` / `Result` words.
+    pub niche: NicheFn<'a>,
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
     /// Host native calls whose arguments and result are plain (boxed
-    /// layout) words: the native id, and for a two-word enum result each
+    /// layout) words: the native id, its result layout, and for a two-word enum result each
     /// variant's tag and payload arity in declaration order.
-    pub hosts: HashMap<u32, (u16, Option<HostVariants>)>,
+    pub hosts: HashMap<u32, (u16, u8, Option<HostVariants>)>,
     /// `new C(..)` on the heap: the class's type id and its fields' word
     /// types.
     pub news: HashMap<u32, (u32, Vec<MirTy>)>,
@@ -181,6 +189,12 @@ struct Lower<'a> {
     /// Stack arrays boxed so far, in source order: the local holding each
     /// one's heap array.
     boxes: HashMap<u32, LocalId>,
+    /// Payloads read from a niche word: the word, and whether it was an
+    /// untagged `Err`. Making the same variant again gives the word back.
+    unniche: HashMap<ValueId, (ValueId, bool)>,
+    /// Values made ahead of need (a niche payload a rewrap never reads),
+    /// dropped when unused.
+    spec: HashSet<ValueId>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -308,15 +322,46 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         ret_tail: false,
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
+        unniche: HashMap::new(),
+        spec: HashSet::new(),
     };
     match lower.value(root)? {
         Val::Never => {}
         val => lower.ret(val)?,
     }
     let order = lower.layout();
+    let spec = std::mem::take(&mut lower.spec);
     let mut func = lower.b.finish().map_err(mir)?;
+    prune(&mut func, &spec);
     tidy(&mut func, &order);
     Ok(func)
+}
+
+/// Drop the values in `spec` nothing uses.
+fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
+    loop {
+        let mut used = HashSet::new();
+        for block in &func.blocks {
+            for inst in &block.insts {
+                used.extend(inst.operands());
+            }
+            if let Some(term) = &block.term {
+                term.clone().rewrite_values(|v| {
+                    used.insert(v);
+                    v
+                });
+            }
+        }
+        let mut changed = false;
+        for block in &mut func.blocks {
+            let n = block.insts.len();
+            block.insts.retain(|i| !spec.contains(&i.dest()) || used.contains(&i.dest()));
+            changed |= block.insts.len() != n;
+        }
+        if !changed {
+            return;
+        }
+    }
 }
 
 /// Thread jumps through empty blocks (but not into a φ block from a
@@ -766,6 +811,10 @@ impl Lower<'_> {
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
+            HirKind::Make {
+                kind: MakeKind::Variant { variant, .. },
+                args,
+            } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => self.make_niche(variant, args, niche),
             // A scalar enum's variant is its backing constant.
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
@@ -1497,8 +1546,8 @@ impl Lower<'_> {
     /// A host native: the arguments in order, then `HostInvoke` (the native
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let (native, unbox) = &self.inp.hosts[&id.0];
-        let native = *native;
+        let (native, layout, unbox) = &self.inp.hosts[&id.0];
+        let (native, layout) = (*native, *layout);
         let pair = match (self.inp.pair_tys.get(&id.0), unbox) {
             (Some(&tys), Some(variants)) => Some((tys, variants.clone())),
             (Some(_), None) => return Err("host pair result".into()),
@@ -1518,7 +1567,7 @@ impl Lower<'_> {
             };
             words.push(v);
         }
-        let out = self.b.ins_host_invoke_as(native, words, 0, ret).map_err(mir)?;
+        let out = self.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir)?;
         if let Some(((lo_ty, _), variants)) = pair {
             return self.unbox_pair(out, lo_ty, &variants);
         }
@@ -1759,6 +1808,9 @@ impl Lower<'_> {
         if self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }
+        if let Some(niche) = self.expr_ty(scrutinee).and_then(|t| (self.inp.niche)(t)) {
+            return self.match_niche(scrutinee, arms, niche, tail);
+        }
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
@@ -1876,6 +1928,135 @@ impl Lower<'_> {
             }
         }
         self.join_arms(out)
+    }
+
+    /// The variant a pointer-niche word carries as its payload, and the
+    /// one it does not (the zero word, or `Err` with its low bit set).
+    fn niche_sides(&self, scrutinee: HirId, niche: MirTy) -> (&'static str, &'static str) {
+        let option = self.expr_ty(scrutinee).is_some_and(crate::typechecking::ty::is_option_ty);
+        match niche {
+            MirTy::NicheRes => ("Ok", "Err"),
+            _ if option => ("Some", "None"),
+            _ => ("Err", "Ok"),
+        }
+    }
+
+    /// `match` on a pointer-niche word, as HIR emission's
+    /// `hir_match_niche`: the payload side falls through and is laid out
+    /// first; the zero side (or `Err`, its pointer untagged) is the jump.
+    fn match_niche(&mut self, scrutinee: HirId, arms: &[HirArm], niche: MirTy, tail: bool) -> Result<Val, Refusal> {
+        let (payload_side, other_side) = self.niche_sides(scrutinee, niche);
+        let pick = |side: &str| {
+            arms.iter().find(|a| match &a.pat {
+                HirPat::Variant { variant, .. } => variant == side,
+                _ => true,
+            })
+        };
+        let first = pick(payload_side).ok_or("match arms")?;
+        let second = pick(other_side).ok_or("match arms")?;
+        let Some(w) = self.word(scrutinee)? else {
+            return Ok(Val::Never);
+        };
+        let mut out = Vec::new();
+        if std::ptr::eq(first, second) {
+            self.niche_arm(first, w, false, tail, &mut out)?;
+            return self.join_arms(out);
+        }
+        // The zero word (`LogNot`), or the `Err` bit.
+        let other = if niche == MirTy::NicheRes {
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::BitAnd, w, one).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            self.b.ins_cmp(MirCmpOp::Ne, bit, zero).map_err(mir)?
+        } else {
+            self.b.ins_not(w).map_err(mir)?
+        };
+        let (hit, fall) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(other, hit, fall).map_err(mir)?;
+        let start = self.order.len();
+        self.switch(fall);
+        self.niche_arm(first, w, false, tail, &mut out)?;
+        if lower::cold_exit(self.hir, first.body) {
+            self.mark_cold(start);
+        }
+        self.switch(hit);
+        self.niche_arm(second, w, niche == MirTy::NicheRes, tail, &mut out)?;
+        self.join_arms(out)
+    }
+
+    /// One arm of [`Self::match_niche`]: its binding reads the word itself
+    /// (untagged first for `Err` of a niche `Result`).
+    fn niche_arm(&mut self, arm: &HirArm, w: ValueId, untag: bool, tail: bool, out: &mut Vec<(BlockId, Val)>) -> Result<(), Refusal> {
+        match &arm.pat {
+            HirPat::Wild => {}
+            HirPat::Bind(local) => self.bind(*local, w)?,
+            HirPat::Variant { .. } => {
+                let binds = lower::arm_fields(self.hir, &arm.pat).map_err(|e| e.to_string())?;
+                match binds.as_slice() {
+                    [] | [None] => {}
+                    [Some(local)] => {
+                        let payload = if untag {
+                            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                            let x = self.b.ins_binop(MirBinOp::Xor, w, one).map_err(mir)?;
+                            self.spec.extend([one, x]);
+                            x
+                        } else {
+                            w
+                        };
+                        let payload = self.b.ins_cast(MirCastKind::Niche, MirTy::HeapRef, payload).map_err(mir)?;
+                        self.spec.insert(payload);
+                        self.unniche.insert(payload, (w, untag));
+                        self.bind(*local, payload)?;
+                    }
+                    _ => return Err("payload pattern".into()),
+                }
+            }
+            _ => return Err("match arm pattern".into()),
+        }
+        let val = self.arm_value(arm.body, tail)?;
+        if !matches!(val, Val::Never) {
+            out.push((self.cur, val));
+        }
+        Ok(())
+    }
+
+    /// A variant of a pointer-niche type: the payload word, `Err` with its
+    /// low bit set, or `0` for `None` / `Ok(())`.
+    fn make_niche(&mut self, variant: &str, args: &[HirId], niche: MirTy) -> Result<Val, Refusal> {
+        let zero = |this: &mut Self| -> Result<Val, Refusal> {
+            let z = this.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            Ok(Val::V(this.b.ins_cast(MirCastKind::Niche, niche, z).map_err(mir)?))
+        };
+        let arg = match args {
+            [] => return zero(self),
+            [arg] if lower::is_unit_make(self.hir, *arg) => {
+                if niche == MirTy::NicheRes {
+                    return Err("niche unit payload".into());
+                }
+                return zero(self);
+            }
+            [arg] => *arg,
+            _ => return Err("variant payload".into()),
+        };
+        let Some(v) = self.word(arg)? else {
+            return Ok(Val::Never);
+        };
+        if !self.b.value_ty(v).is_heap_word() {
+            return Err("niche payload type".into());
+        }
+        let err = niche == MirTy::NicheRes && variant == "Err";
+        // `Err(e) => return Err(e)`: the matched word as it was.
+        if let Some(&(w, untagged)) = self.unniche.get(&v)
+            && untagged == err
+            && self.b.value_ty(w) == niche
+        {
+            return Ok(Val::V(w));
+        }
+        if err {
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_binop(MirBinOp::BitOr, v, one).map_err(mir)?));
+        }
+        Ok(Val::V(self.b.ins_cast(MirCastKind::Niche, niche, v).map_err(mir)?))
     }
 
     /// A boxed enum variant pattern's payload word types and the local each
@@ -2047,6 +2228,10 @@ impl Lower<'_> {
     fn join(&mut self, arms: Vec<(BlockId, Val)>) -> Result<Val, Refusal> {
         if arms.iter().all(|(_, v)| matches!(v, Val::Unit)) {
             return Ok(Val::Unit);
+        }
+        // One arm reaches the join: its value dominates it.
+        if let [(_, val)] = arms.as_slice() {
+            return Ok(*val);
         }
         let mut lo = Vec::new();
         let mut hi = Vec::new();
