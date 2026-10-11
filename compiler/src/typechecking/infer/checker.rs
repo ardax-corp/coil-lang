@@ -16419,11 +16419,11 @@ impl Checker {
 
         let mut spec_index = 0usize;
         if let (Some(s), Some(p)) = (fmt_str.as_deref(), params) {
-            for (i, ch) in s.char_indices() {
+            let mut chars = s.chars();
+            while let Some(ch) = chars.next() {
                 if ch == '%' {
-                    // Look ahead for the specifier.
-                    let rest = &s[i + 1..];
-                    let mut chars = rest.chars();
+                    // The specifier is the next char; consume it so a `%%`
+                    // never re-reads its second `%` as a new specifier.
                     if let Some(spec) = chars.next() {
                         // Handle `%%` (literal %). It consumes
                         // no argument.
