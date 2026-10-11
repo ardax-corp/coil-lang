@@ -898,6 +898,26 @@ impl Compiler {
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
+            scalar_enum: Box::new(move |t: &Ty| {
+                let t = apply_ty_prune(checker.subst(), t);
+                if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+                    return None;
+                }
+                let name = match crate::typechecking::ty::strip_readonly(&t) {
+                    Ty::Constructor { owner, .. } => match owner.as_ref() {
+                        Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                        _ => return None,
+                    },
+                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                    _ => return None,
+                };
+                checker.scalar_value_ty(&name).as_ref().and_then(crate::mir::word_mir_ty).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64))
+            }),
+            scalar_variant: Box::new(move |enum_name: &str, variant: &str| match checker.scalar_for(enum_name, variant)? {
+                crate::typechecking::ty::ScalarBacking::Int(n) => Some(crate::mir::MirConst::I64(*n)),
+                crate::typechecking::ty::ScalarBacking::Float(bits) => Some(crate::mir::MirConst::F64(*bits)),
+                _ => None,
+            }),
             heap_fields,
             news,
             pushes,
