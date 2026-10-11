@@ -4152,6 +4152,16 @@ impl Checker {
         }
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
+        // `[1, 2]` where a `Vec<T>` is expected builds that Vec (#890).
+        if len > 0
+            && let Some(exp) = self.expected_here.clone()
+            && let exp = apply_ty_prune(&self.subst, &exp)
+            && let Some(vec_elem) = vec_element_ty(&exp)
+            && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
+        {
+            self.absorb(&s);
+            return apply_ty_prune(&self.subst, &exp);
+        }
         if len == 0 {
             if let Some(exp) = self.expected_here.clone() {
                 let exp = apply_ty_prune(&self.subst, &exp);
@@ -8911,6 +8921,21 @@ impl Checker {
             if ok {
                 return expected;
             }
+        }
+        // An array literal builds a `Vec<T>` where one is expected (#890):
+        // both are the same heap array, and a fresh literal has no alias
+        // that could see the Vec grow.
+        if let Some(vec_elem) = vec_element_ty(&expected)
+            && let Ty::Array { element, .. } = &actual
+            && let Some(expr) = expr
+            && let node = unwrap_expr_wrappers(expr)
+            && matches!(node.1.as_ref(), Expression::Array(items) if !items.is_empty())
+        {
+            let vec_elem = vec_elem.clone();
+            let _ = self.unify(&vec_elem, element, range, context);
+            let ty = apply_ty_prune(&self.subst, &expected);
+            self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+            return ty;
         }
         if let Some(coerced) = self.coerce_scalar_enum_to_backing(&expected, &actual) {
             return coerced;
