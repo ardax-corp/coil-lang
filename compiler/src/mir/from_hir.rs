@@ -8,8 +8,9 @@
 //!
 //! It covers scalar bodies (`int` / `float` / `bool` values, arithmetic,
 //! compares, casts, `let` / assignment, `if`, loops and `return`), plain
-//! calls, and two-word pairs: enums of at most one payload word, ranges and
-//! two-element tuples held as two words, as HIR emission keeps them.
+//! calls, two-word pairs (enums of at most one payload word, ranges and
+//! two-element tuples) and frame-slot aggregates (stack arrays and class
+//! locals one slot per field), each as HIR emission keeps them.
 //! Anything else refuses with the construct's name and the body keeps the
 //! IL lift.
 //!
@@ -69,6 +70,14 @@ pub struct HirMirInput<'a> {
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
+    /// Stack arrays kept in frame slots: first slot, length and element
+    /// type.
+    pub stacks: HashMap<u32, (u32, usize, MirTy)>,
+    /// Class locals kept in frame slots: the type of each field's slot,
+    /// from the local's own.
+    pub sroa: HashMap<u32, Vec<MirTy>>,
+    /// The slot of each field read or written on such a class local.
+    pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// Whether early exits move out of line, as HIR emission's
     /// `hir_mark_cold`.
@@ -486,6 +495,50 @@ impl Lower<'_> {
                     None => Ok(Val::Unit),
                 }
             }
+            HirKind::Let { local, init: Some(init) } if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) => {
+                self.fill_slots(*local, *init)
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Local(local) = self.hir.expr(*place).kind
+                    && self.inp.stacks.contains_key(&local.0) =>
+            {
+                self.fill_slots(local, *value)
+            }
+            // `a[i]++` used for its value reads the old or new element.
+            HirKind::Assign { .. } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
+                Err("adjust value".into())
+            }
+            HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
+                self.stack_store(*place, base, index, *value)
+            }
+            HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
+                let ty = self.expr_ty(*place).and_then(scalar).ok_or("field type")?;
+                let Some(v) = self.word(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != ty {
+                    return Err("field type".into());
+                }
+                self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                Ok(Val::Unit)
+            }
+            HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
+                let ty = self.expr_ty(id).and_then(scalar).ok_or("field type")?;
+                Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
+            }
+            HirKind::Index { base, index, .. }
+                if let HirKind::Local(local) = self.hir.expr(*base).kind
+                    && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0) =>
+            {
+                let Some(k) = self.stack_index(id, *index, n)? else {
+                    return Ok(Val::Never);
+                };
+                let v = match k {
+                    Ok(k) => self.b.use_local(LocalId(slot + k), ty).map_err(mir)?,
+                    Err(idx) => self.stack_select(slot, n, idx, ty)?,
+                };
+                Ok(Val::V(v))
+            }
             HirKind::Let { local, init } if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(*local) => {
                 let init = init.ok_or("uninitialized let")?;
                 let Some((a, b)) = self.pair(init)? else {
@@ -860,6 +913,149 @@ impl Lower<'_> {
         })
     }
 
+    /// Fill the slots of stack array or class local `local` from `init`:
+    /// each item or field into its own slot, or another stack array's slots
+    /// copied, as HIR emission's `hir_stack_array_init`.
+    fn fill_slots(&mut self, local: HirLocal, init: HirId) -> Result<Val, Refusal> {
+        let base = self.slot(local)?.0;
+        let tys = match (self.inp.stacks.get(&local.0), self.inp.sroa.get(&local.0)) {
+            (Some(&(_, n, ty)), _) => vec![ty; n],
+            (None, Some(tys)) => tys.clone(),
+            (None, None) => return Err("frame-slot local".into()),
+        };
+        match &self.hir.expr(init).kind {
+            HirKind::Make {
+                kind: MakeKind::Array | MakeKind::Class(_),
+                args,
+            } if args.len() == tys.len() => {
+                // Every item before any slot changes (`a = [a[1], a[0]]`).
+                let mut words = Vec::with_capacity(args.len());
+                for (&arg, &ty) in args.iter().zip(&tys) {
+                    let Some(v) = self.word(arg)? else {
+                        return Ok(Val::Never);
+                    };
+                    if self.b.value_ty(v) != ty {
+                        return Err("frame-slot item type".into());
+                    }
+                    words.push(v);
+                }
+                for (i, v) in words.into_iter().enumerate() {
+                    self.b.def_local(LocalId(base + i as u32), v).map_err(mir)?;
+                }
+            }
+            HirKind::Local(src) if let Some(&(from, n, ty)) = self.inp.stacks.get(&src.0) && n == tys.len() => {
+                for i in 0..n as u32 {
+                    let v = self.b.use_local(LocalId(from + i), ty).map_err(mir)?;
+                    self.b.def_local(LocalId(base + i), v).map_err(mir)?;
+                }
+            }
+            _ => return Err("frame-slot init".into()),
+        }
+        Ok(Val::Unit)
+    }
+
+    /// A stack array's index: `Ok(k)` for a literal in range, else the
+    /// index word when it needs no bounds check (`None` when control never
+    /// gets past it). An index that might be out of range refuses: HIR
+    /// emission boxes the array to panic there.
+    #[allow(clippy::type_complexity)]
+    fn stack_index(&mut self, node: HirId, index: HirId, n: usize) -> Result<Option<Result<u32, ValueId>>, Refusal> {
+        if let HirKind::Lit(Lit::Int(i)) = self.hir.expr(index).kind
+            && (0..n as i64).contains(&i)
+        {
+            return Ok(Some(Ok(i as u32)));
+        }
+        if !lower::stack_index_proven(self.hir, node, index, n) {
+            return Err("stack index".into());
+        }
+        let Some(mut idx) = self.word(index)? else {
+            return Ok(None);
+        };
+        if self.b.value_ty(idx) != MirTy::I64 {
+            return Err("stack index type".into());
+        }
+        if let Some(m) = lower::index_euclid(self.hir, index) {
+            // `x % m` in an index is Euclidean: `r + ((r >> 63) & m)`.
+            let sh = self.b.ins_const(MirConst::I64(63)).map_err(mir)?;
+            let m = self.b.ins_const(MirConst::I64(i64::from(m))).map_err(mir)?;
+            let sign = self.b.ins_binop(MirBinOp::Shr, idx, sh).map_err(mir)?;
+            let fix = self.b.ins_binop(MirBinOp::BitAnd, sign, m).map_err(mir)?;
+            idx = self.b.ins_binop(MirBinOp::Add, idx, fix).map_err(mir)?;
+        }
+        Ok(Some(Err(idx)))
+    }
+
+    /// Branch on `idx` to each of slots `base..base + n`, as HIR emission's
+    /// select: every slot but the last is tested. `at` runs in each case.
+    fn stack_cases(&mut self, base: u32, n: usize, idx: ValueId, mut at: impl FnMut(&mut Self, LocalId) -> Result<Option<ValueId>, Refusal>) -> Result<Vec<(BlockId, ValueId)>, Refusal> {
+        let mut out = Vec::new();
+        let mut ends = Vec::new();
+        for k in 0..n {
+            let next = if k + 1 < n {
+                let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
+                let hit = self.b.ins_cmp(MirCmpOp::Eq, idx, c).map_err(mir)?;
+                let take = self.b.create_block();
+                let next = self.b.create_block();
+                self.b.branch(hit, take, next).map_err(mir)?;
+                self.switch(take);
+                Some(next)
+            } else {
+                None
+            };
+            if let Some(v) = at(self, LocalId(base + k as u32))? {
+                out.push((self.cur, v));
+            }
+            ends.push(self.cur);
+            if let Some(next) = next {
+                self.switch(next);
+            }
+        }
+        // The join after every case block, as an `if` makes it.
+        let join = self.b.create_block();
+        for end in ends {
+            self.b.switch_to_block(end);
+            self.jump(join)?;
+        }
+        self.switch(join);
+        Ok(out)
+    }
+
+    /// The element of stack array slots `base..base + n` at `idx`.
+    fn stack_select(&mut self, base: u32, n: usize, idx: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
+        let args = self.stack_cases(base, n, idx, |l, slot| Ok(Some(l.b.use_local(slot, ty).map_err(mir)?)))?;
+        self.b.ins_stack_phi(args).map_err(mir)
+    }
+
+    /// `a[i] = v` on a stack array: the value first, then the index, as
+    /// HIR emission stages them.
+    fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
+        let HirKind::Local(local) = self.hir.expr(base).kind else {
+            return Err("assign place".into());
+        };
+        let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0) else {
+            return Err("assign place".into());
+        };
+        let Some(v) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(v) != ty {
+            return Err("stack item type".into());
+        }
+        let Some(k) = self.stack_index(place, index, n)? else {
+            return Ok(Val::Never);
+        };
+        match k {
+            Ok(k) => self.b.def_local(LocalId(slot + k), v).map_err(mir)?,
+            Err(idx) => {
+                self.stack_cases(slot, n, idx, |l, slot| {
+                    l.b.def_local(slot, v).map_err(mir)?;
+                    Ok(None)
+                })?;
+            }
+        }
+        Ok(Val::Unit)
+    }
+
     /// Bind `local` to the word `v`.
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
         if self.local_ty(local)? != self.b.value_ty(v) {
@@ -945,7 +1141,6 @@ impl Lower<'_> {
         }
         let last = arms.len() - 1;
         let mut out = Vec::new();
-        let mut join = None;
         let mut last_start = None;
         for (i, arm) in arms.iter().enumerate() {
             let miss = if i < last {
@@ -966,8 +1161,6 @@ impl Lower<'_> {
             let val = self.arm_value(arm.body, tail)?;
             if !matches!(val, Val::Never) {
                 out.push((self.cur, val));
-                let to = *join.get_or_insert_with(|| self.b.create_block());
-                self.jump(to)?;
             }
             if let Some(miss) = miss {
                 last_start = Some(self.order.len());
@@ -980,11 +1173,7 @@ impl Lower<'_> {
         {
             self.mark_cold(start);
         }
-        let Some(join) = join else {
-            return Ok(Val::Never);
-        };
-        self.switch(join);
-        self.join(out)
+        self.join_arms(out)
     }
 
     /// Bind a match arm's payload names to the payload word.
@@ -1097,7 +1286,6 @@ impl Lower<'_> {
             self.b.branch(c, then_b, else_b).map_err(mir)?;
         }
         let mut arms = Vec::new();
-        let mut join = None;
         for (block, arm) in [(then_b, Some(then)), (else_b, els)] {
             let start = self.order.len();
             self.switch(block);
@@ -1117,14 +1305,22 @@ impl Lower<'_> {
             }
             if !matches!(val, Val::Never) {
                 arms.push((self.cur, val));
-                let to = *join.get_or_insert_with(|| self.b.create_block());
-                self.jump(to)?;
             }
         }
-        // Both arms leave: nothing follows the `if`.
-        let Some(join) = join else {
+        self.join_arms(arms)
+    }
+
+    /// Jump from each arm that falls through to a join made after all of
+    /// them, and give the value there; `Never` when every arm leaves.
+    fn join_arms(&mut self, arms: Vec<(BlockId, Val)>) -> Result<Val, Refusal> {
+        if arms.is_empty() {
             return Ok(Val::Never);
-        };
+        }
+        let join = self.b.create_block();
+        for &(block, _) in &arms {
+            self.b.switch_to_block(block);
+            self.jump(join)?;
+        }
         self.switch(join);
         self.join(arms)
     }
