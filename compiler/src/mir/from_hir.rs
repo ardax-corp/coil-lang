@@ -72,6 +72,7 @@ impl HirMirInput<'_> {
         word(ty)
             .or_else(|| ((self.is_class)(ty) || is_stream(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
+            .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
     }
 }
 
@@ -83,6 +84,11 @@ pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>;
 
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
+
+/// For a boxed user enum type (one word, an `ObjEnum`): with no variant,
+/// `Some` of nothing; with a variant, its payload field types in
+/// declaration order. `None` for every other type.
+pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
@@ -114,6 +120,8 @@ pub struct HirMirInput<'a> {
     pub scalar_enum: ScalarEnumFn<'a>,
     /// A scalar enum variant's backing constant, by enum and variant name.
     pub scalar_variant: ScalarVariantFn<'a>,
+    /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
+    pub boxed_enum: BoxedEnumFn<'a>,
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
@@ -1736,6 +1744,9 @@ impl Lower<'_> {
         if let Some(consts) = self.scalar_arms(scrutinee, arms) {
             return self.match_scalar(scrutinee, arms, &consts, tail);
         }
+        if self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
+            return self.match_boxed(scrutinee, arms, tail);
+        }
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
@@ -1788,6 +1799,91 @@ impl Lower<'_> {
             self.mark_cold(start);
         }
         self.join_arms(out)
+    }
+
+    /// `match` on a boxed enum word, as HIR emission's boxed dispatch: a
+    /// `JumpIfMatch` per arm but the last, which the fallthrough runs (and
+    /// lays out first); a hit reads the variant's payload words.
+    fn match_boxed(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
+        let Some(obj) = self.word(scrutinee)? else {
+            return Ok(Val::Never);
+        };
+        let last = arms.len() - 1;
+        let mut hits = Vec::new();
+        for arm in &arms[..last] {
+            let HirPat::Variant { tag: Some(tag), .. } = arm.pat else {
+                return Err("match arm pattern".into());
+            };
+            let (tys, binds) = self.variant_payload(&ty, &arm.pat)?;
+            let mut words = Vec::with_capacity(tys.len());
+            for (k, &t) in tys.iter().enumerate() {
+                words.push(self.b.ins_match_payload(obj, k as u32, t).map_err(mir)?);
+            }
+            let (hit, miss) = (self.b.create_block(), self.b.create_block());
+            self.b.jump_if_match(obj, tag, words.clone(), hit, miss).map_err(mir)?;
+            hits.push((hit, arm, words, binds));
+            self.switch(miss);
+        }
+        let mut out = Vec::new();
+        let arm = &arms[last];
+        match &arm.pat {
+            HirPat::Variant { .. } => {
+                let (tys, binds) = self.variant_payload(&ty, &arm.pat)?;
+                // The fallthrough unpacks every payload word, or none.
+                if binds.iter().any(Option::is_some) {
+                    let mut words = Vec::with_capacity(tys.len());
+                    for (k, &t) in tys.iter().enumerate() {
+                        words.push(self.b.ins_match_payload(obj, k as u32, t).map_err(mir)?);
+                    }
+                    for (local, w) in binds.iter().zip(words) {
+                        if let Some(local) = local {
+                            self.bind(*local, w)?;
+                        }
+                    }
+                }
+            }
+            HirPat::Bind(local) => self.bind(*local, obj)?,
+            HirPat::Wild => {}
+            _ => return Err("match arm pattern".into()),
+        }
+        let val = self.arm_value(arm.body, tail)?;
+        if !matches!(val, Val::Never) {
+            out.push((self.cur, val));
+        }
+        for (hit, arm, words, binds) in hits {
+            self.switch(hit);
+            for (local, w) in binds.iter().zip(words) {
+                if let Some(local) = local {
+                    self.bind(*local, w)?;
+                }
+            }
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+            }
+        }
+        self.join_arms(out)
+    }
+
+    /// A boxed enum variant pattern's payload word types and the local each
+    /// word binds (`None` for `_` or a `()` field).
+    fn variant_payload(&self, ty: &Ty, pat: &HirPat) -> Result<(Vec<MirTy>, Vec<Option<HirLocal>>), Refusal> {
+        let HirPat::Variant { variant, .. } = pat else {
+            return Err("match arm pattern".into());
+        };
+        let fields = (self.inp.boxed_enum)(ty, Some(variant)).ok_or("variant payload")?;
+        let binds = lower::arm_fields(self.hir, pat).map_err(|e| e.to_string())?;
+        if !binds.is_empty() && binds.len() != fields.len() {
+            return Err("payload pattern".into());
+        }
+        let tys = fields
+            .iter()
+            .map(|t| self.inp.word(t).or_else(|| is_unit(t).then_some(MirTy::I64)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("payload type")?;
+        let binds = if binds.is_empty() { vec![None; tys.len()] } else { binds };
+        Ok((tys, binds))
     }
 
     /// Each arm's constant when `match` tests an `int`, or a scalar enum
