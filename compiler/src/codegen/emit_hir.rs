@@ -280,6 +280,8 @@ struct HirEmit {
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
     call_targets: HashMap<u32, crate::mir::HirCallSite>,
+    /// String table index of each `string` literal, by expression.
+    string_lits: HashMap<u32, u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -895,6 +897,7 @@ impl Compiler {
             sroa,
             fields,
             calls: &emit.call_targets,
+            strings: &emit.string_lits,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -912,6 +915,25 @@ impl Compiler {
                     _ => return None,
                 };
                 checker.scalar_value_ty(&name).as_ref().and_then(crate::mir::word_mir_ty).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64))
+            }),
+            boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
+                let t = apply_ty_prune(checker.subst(), t);
+                if crate::hir::layout::is_scalar_enum_ty(checker, &t)
+                    || crate::typechecking::ty::is_option_ty(&t)
+                    || crate::typechecking::ty::is_result_ty(&t)
+                    || crate::hir::layout::of_resolved(checker, &t) != crate::hir::layout::Layout::Word
+                {
+                    return None;
+                }
+                let name = Self::enum_name_of(&t)?;
+                let variants = checker.enum_variants(&name)?;
+                match variant {
+                    None => Some(Vec::new()),
+                    Some(v) => {
+                        variants.iter().find(|(n, _, _)| n == v)?;
+                        Self::payload_tys_of(checker, &t, v)
+                    }
+                }
             }),
             scalar_variant: Box::new(move |enum_name: &str, variant: &str| match checker.scalar_for(enum_name, variant)? {
                 crate::typechecking::ty::ScalarBacking::Int(n) => Some(crate::mir::MirConst::I64(*n)),
@@ -1770,6 +1792,7 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             call_targets: HashMap::new(),
+            string_lits: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -3883,7 +3906,11 @@ impl Compiler {
 
     /// The enum a type names (through variant and sum types).
     fn hir_enum_name(&self, ty: &Ty) -> Option<String> {
-        let ty = apply_ty_prune(self.checker.subst(), ty);
+        Self::enum_name_of(&apply_ty_prune(self.checker.subst(), ty))
+    }
+
+    /// The enum a resolved type names.
+    fn enum_name_of(ty: &Ty) -> Option<String> {
         fn name(ty: &Ty) -> Option<String> {
             match crate::typechecking::ty::strip_readonly(ty) {
                 Ty::Constructor { owner, .. } => name(owner),
@@ -3895,7 +3922,7 @@ impl Compiler {
                 _ => None,
             }
         }
-        name(&ty)
+        name(ty)
     }
 
     fn hir_same_enum(a: &str, b: &str) -> bool {
@@ -3905,8 +3932,12 @@ impl Compiler {
     /// Payload field types of `variant` in a value of type `ty`, in
     /// declaration order.
     fn hir_payload_tys(&self, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        fn go(this: &Compiler, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
+        Self::payload_tys_of(&self.checker, &apply_ty_prune(self.checker.subst(), ty), variant)
+    }
+
+    /// [`Self::hir_payload_tys`] of a resolved type.
+    fn payload_tys_of(checker: &crate::typechecking::Checker, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
+        fn go(this: &crate::typechecking::Checker, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
             match crate::typechecking::ty::strip_readonly(ty) {
                 Ty::Constructor { owner, .. } => go(this, owner, variant),
                 Ty::Sum { variants, .. } => variants
@@ -3930,11 +3961,10 @@ impl Compiler {
                             _ => None,
                         }
                     } else {
-                        lower::generic_enum_payload(&this.checker, n, variant, args)
+                        lower::generic_enum_payload(this, n, variant, args)
                     }
                 }
                 Ty::Con(n) => this
-                    .checker
                     .enum_variants(n)?
                     .into_iter()
                     .find(|(v, _, _)| v == variant)
@@ -3942,7 +3972,7 @@ impl Compiler {
                 _ => None,
             }
         }
-        go(self, &ty, variant)
+        go(checker, ty, variant)
     }
 
     /// The tag of `variant`, checked against the enum `ty` names.
@@ -5808,9 +5838,9 @@ impl Compiler {
             }
             HirKind::Lit(Lit::Str(raw)) => {
                 let text = unescape_coil_string(raw);
-                let mut bc = CodeBuf::new();
-                self.emit_raw_string_literal(&mut bc, &text);
-                self.bytecode.append(&mut bc);
+                let idx = self.intern_string(&text);
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
             }
             HirKind::Lit(Lit::Unit) => self.bytecode.push_const(0),
             HirKind::Assign { place, value } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
