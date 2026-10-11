@@ -117,6 +117,8 @@ pub struct HirMirInput<'a> {
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// String table index of each `string` literal.
     pub strings: &'a HashMap<u32, u32>,
+    /// `format` calls with only word arguments: the format string's index.
+    pub formats: &'a HashMap<u32, u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -564,6 +566,8 @@ impl Lower<'_> {
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
+            // A unit body's tail value (a call kept for its effect) is dropped.
+            (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
             (Val::Pair(lo, hi), Some((lo_ty, hi_ty))) => {
                 if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
@@ -681,6 +685,7 @@ impl Lower<'_> {
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
+            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
@@ -1584,6 +1589,23 @@ impl Lower<'_> {
         let out = self.b.ins_array_push(arr, v).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         Ok(Val::Unit)
+    }
+
+    /// `format(fmt, ..)` with word arguments: `FORMAT` of the format string
+    /// and each argument, a heap string the collector may see at once.
+    fn format(&mut self, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
+        // The string first, as emission loads it, so the arguments land in
+        // the registers after it.
+        let fmt = self.b.ins_string(fmt).map_err(mir)?;
+        let mut words = Vec::with_capacity(args.len().saturating_sub(1));
+        for &arg in args.iter().skip(1) {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let out = self.b.ins_format(fmt, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native

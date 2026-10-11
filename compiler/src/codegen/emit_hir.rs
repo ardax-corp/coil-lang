@@ -282,6 +282,9 @@ struct HirEmit {
     call_targets: HashMap<u32, crate::mir::HirCallSite>,
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
+    /// String table index of the format string of each `format` call
+    /// whose arguments all print as words (no `%v`), by call.
+    format_strs: HashMap<u32, u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -911,6 +914,7 @@ impl Compiler {
             fields,
             calls: &emit.call_targets,
             strings: &emit.string_lits,
+            formats: &emit.format_strs,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -1822,6 +1826,7 @@ impl Compiler {
             par_loop: false,
             call_targets: HashMap::new(),
             string_lits: HashMap::new(),
+            format_strs: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6557,6 +6562,10 @@ impl Compiler {
                             }
                         }
                         self.emit_string_literal(&fmt);
+                        if !specs.contains(&'v') {
+                            let idx = self.intern_string(&unescape_coil_string(&fmt));
+                            emit.format_strs.insert(id.0, idx);
+                        }
                         for &tmp in &temps {
                             self.bytecode.push_load(tmp);
                         }
