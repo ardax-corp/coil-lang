@@ -3,7 +3,7 @@
 ## Build and test
 
 ```bash
-cargo check --workspace          # lint gate
+cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate
 cargo test --workspace --lib --tests --bins   # required gate (skip Criterion benches)
 cargo build --bin coil --bin coil-test && (ulimit -v 65536; ./target/debug/coil test -j 1)  # leak smoke (64MB)
 ```
@@ -38,6 +38,7 @@ and compares, so a broken or drifting example fails CI.
 |------|----------|
 | Syntax | `parser/` |
 | Types / diagnostics | `compiler/src/typechecking/` |
+| HIR / optimizations | `compiler/src/hir/` |
 | Codegen / IL | `compiler/src/codegen/`, `compiler/src/il/` |
 | VM / natives | `machine/` |
 | Opcodes / archive | `common/` |
