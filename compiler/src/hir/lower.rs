@@ -1441,20 +1441,8 @@ pub fn is_scalar(ty: &Ty) -> bool {
     primitive(ty).is_some()
 }
 
-/// The primitive name of a scalar type, as the cast opcodes key it.
-/// `s as [byte]` / `s as Vec<byte>` on a string: the AST's `to_bytes` call.
-pub fn string_to_bytes(checker: &Checker, from: &Ty, to: &Ty) -> bool {
-    let from = apply_ty_prune(checker.subst(), from);
-    let to = apply_ty_prune(checker.subst(), to);
-    matches!(strip_readonly(&from), Ty::Con(s) if s == coil_ty::STRING)
-        && matches!(
-            strip_readonly(&to),
-            Ty::Array { element, length: coil_ty::ArrayLength::Dynamic, .. }
-                if matches!(element.as_ref(), Ty::Con(n) if n == coil_ty::BYTE)
-        )
-}
-
-/// `[byte]` or `Vec<byte>`: a growable byte array.
+/// `Vec<byte>` (or the checker's internal unsized byte array): a growable
+/// byte array.
 pub fn is_byte_vec(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Array { element, length: coil_ty::ArrayLength::Dynamic } => is_byte(element),
@@ -1474,7 +1462,7 @@ pub fn is_fixed_array(checker: &Checker, ty: &Ty) -> bool {
     )
 }
 
-/// `[byte; N]` or `[byte]`: a string literal typed so is its bytes.
+/// A byte array type: a string literal typed so is its bytes.
 pub fn is_byte_array(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Array { element, .. } if is_byte(element))
 }
@@ -1516,6 +1504,7 @@ pub fn tuple_items(body: &HirBody, id: HirId) -> Option<&[HirId]> {
     }
 }
 
+/// The primitive name of a scalar type, as the cast opcodes key it.
 pub fn primitive(ty: &Ty) -> Option<&'static str> {
     match strip_readonly(ty) {
         Ty::Con(n) if n == coil_ty::INT => Some(coil_ty::INT),
@@ -2294,16 +2283,7 @@ impl Walk<'_> {
                 self.value(*operand, depth)
             }
             // Between scalars: one cast opcode (none for a same-type cast).
-            // `s as [byte]`: the `to_bytes` native id, then the string.
-            HirKind::Cast { value }
-                if self
-                    .ty(*value)
-                    .zip(self.ty(id))
-                    .is_some_and(|(from, to)| string_to_bytes(self.checker, from, to)) =>
-            {
-                self.value(*value, depth + 1)
-            }
-            // `"ab" as [byte]`: the literal is already its bytes.
+            // `"ab" as Vec<byte>`: the literal is already its bytes.
             HirKind::Cast { value }
                 if matches!(body.expr(*value).kind, HirKind::Lit(Lit::Str(_)))
                     && self.ty(*value).is_some_and(is_byte_array)
@@ -2311,8 +2291,8 @@ impl Walk<'_> {
             {
                 Ok(())
             }
-            // `"ab" as Vec<byte>` of a literal typed `[byte; N]`: its bytes'
-            // array, unchanged.
+            // The same cast once the literal is built as its `[byte; N]`
+            // array: that array, unchanged.
             HirKind::Cast { value }
                 if matches!(body.expr(*value).kind, HirKind::Make { kind: MakeKind::Array, .. })
                     && self.ty(*value).is_some_and(is_byte_array)
@@ -2320,8 +2300,7 @@ impl Walk<'_> {
             {
                 self.value(*value, depth)
             }
-            // `v as [byte]` of a `Vec<byte>` (or back): one array object,
-            // passed through as the AST does.
+            // `v as Vec<byte>` of a `Vec<byte>`: the same array object.
             HirKind::Cast { value } if self.ty(*value).is_some_and(is_byte_vec) && self.ty(id).is_some_and(is_byte_vec) => {
                 self.value(*value, depth)
             }

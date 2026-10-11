@@ -4153,13 +4153,6 @@ impl Compiler {
     }
 
     /// An array index, with the AST's Euclidean fix-up for `x % m`.
-    /// `s as [byte]` on a string, which the AST compiles to `to_bytes(s)`.
-    fn hir_string_to_bytes(&self, hir: &HirBody, id: HirId, value: HirId) -> bool {
-        Self::hir_ty(hir, value)
-            .zip(Self::hir_ty(hir, id))
-            .is_some_and(|(from, to)| lower::string_to_bytes(&self.checker, from, to))
-    }
-
     fn hir_index_value(&mut self, hir: &HirBody, emit: &mut HirEmit, index: HirId, depth: u32) {
         self.hir_value(hir, emit, index, &BOXED, depth);
         if let Some(m) = lower::index_euclid(hir, index) {
@@ -5074,10 +5067,6 @@ impl Compiler {
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
-            }
-            HirKind::Cast { value } if self.hir_string_to_bytes(hir, id, *value) => {
-                self.native_id("to_bytes").ok_or("cast")?;
-                self.hir_check_value(hir, emit, *value, &BOXED)?
             }
             HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => {
                 self.hir_check_value(hir, emit, *operand, &BOXED)?
@@ -6116,13 +6105,6 @@ impl Compiler {
                     HirKind::Lit(Lit::Float(f)) => self.hir_push_float(-f),
                     _ => unreachable!(),
                 }
-            }
-            HirKind::Cast { value } if self.hir_string_to_bytes(hir, id, *value) => {
-                // As the AST: `to_bytes` on the string.
-                let native = self.native_id("to_bytes").expect("checked string cast");
-                self.bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
-                self.hir_value(hir, emit, *value, &BOXED, depth + 1);
-                self.bytecode.push_host_invoke(1);
             }
             HirKind::Cast { value } => {
                 self.hir_value(hir, emit, *value, &BOXED, depth);
