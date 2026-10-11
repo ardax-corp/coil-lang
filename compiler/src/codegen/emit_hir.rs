@@ -944,6 +944,7 @@ impl Compiler {
                 }
                 Self::boxed_payloads(checker, &t, variant)
             }),
+            enum_drop: Box::new(move |name: &str| checker.enum_has_drop(name)),
             boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
                 if crate::typechecking::value_layout::value_layout(checker, &t) != ValueLayout::Boxed {

@@ -133,6 +133,9 @@ pub struct HirMirInput<'a> {
     pub scalar_variant: ScalarVariantFn<'a>,
     /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
     pub boxed_enum: BoxedEnumFn<'a>,
+    /// A user enum whose variants carry a drop hook (`TagEnumType` after
+    /// `MakeEnum`), by name.
+    pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -866,6 +869,12 @@ impl Lower<'_> {
                 kind: MakeKind::Variant { variant, .. },
                 args,
             } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => self.make_niche(variant, args, niche),
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
+                args,
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_enum)(t, Some(variant))) => {
+                self.make_boxed(enum_name, *tag, &tys, args)
+            }
             // A scalar enum's variant is its backing constant.
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
@@ -1568,6 +1577,34 @@ impl Lower<'_> {
             self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
         }
         Ok(Val::V(obj))
+    }
+
+    /// A boxed user enum variant: `MakeEnum` of the payload words, pushed
+    /// last field first (it pops field 0 first), as HIR emission's
+    /// `hir_make`.
+    fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
+        if !args.is_empty() && (self.inp.enum_drop)(enum_name) {
+            return Err("make drop enum".into());
+        }
+        let mut words = Vec::with_capacity(args.len());
+        for (&arg, t) in args.iter().zip(tys) {
+            let want = self
+                .inp
+                .word(t)
+                .filter(|_| !is_unit(t))
+                .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                .ok_or("make payload type")?;
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != want {
+                return Err("make payload word".into());
+            }
+            words.push(v);
+        }
+        words.reverse();
+        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
     /// `v.push(x)` on a heap `Vec` of int/float: the Vec, then the value,
