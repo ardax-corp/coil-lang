@@ -1786,11 +1786,13 @@ impl Lower<'_> {
     /// case.
     fn search_node(&mut self, v: ValueId, cases: &[(i64, usize)], blocks: &[Option<BlockId>], default: BlockId) -> Result<(), Refusal> {
         if cases.len() <= crate::hir::match_tree::SEARCH_LEAF {
+            // `!=` falling through to the next test, so a hit is a taken
+            // conditional jump straight to its arm.
             for &(n, arm) in cases {
                 let c = self.b.ins_const(MirConst::I64(n)).map_err(mir)?;
-                let hit = self.b.ins_cmp(MirCmpOp::Eq, v, c).map_err(mir)?;
+                let miss = self.b.ins_cmp(MirCmpOp::Ne, v, c).map_err(mir)?;
                 let next = self.b.create_block();
-                self.b.branch(hit, blocks[arm].expect("case arm has a block"), next).map_err(mir)?;
+                self.b.branch(miss, next, blocks[arm].expect("case arm has a block")).map_err(mir)?;
                 self.switch(next);
             }
             self.b.jump(default).map_err(mir)?;
