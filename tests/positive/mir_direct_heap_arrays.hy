@@ -1,7 +1,7 @@
 // Heap arrays and `Vec`s of `int` / `float` in bodies lowered straight from
 // HIR to MIR: parameters and results, `for x in xs` (with `continue`),
 // index reads (with the Euclidean fix-up for `i % m`) and writes, and
-// `len`.
+// `len`. A fixed-size array bound to another local is a copy.
 
 fn total(Vec<int> v) -> int {
     let t = 0;
@@ -47,6 +47,12 @@ fn mean(Vec<float> v) -> float {
     return s / (len(v) as float);
 }
 
+fn copy_then_write([int; 3] a) -> int {
+    let b = a;
+    b[0] = b[0] + 100;
+    return a[0] * 1000 + b[0] + len(b);
+}
+
 test("heap arrays and Vecs in direct MIR") {
     let v: Vec<int> = Vec::new();
     let i = 0;
@@ -67,4 +73,5 @@ test("heap arrays and Vecs in direct MIR") {
     assert(ring([4, 5, 6], 1) == 54)?;
     let b = bump([1, 2, 3], 2, 40);
     assert(b[2] == 43)?;
+    assert(copy_then_write([1, 2, 3]) == 1104)?;
 }

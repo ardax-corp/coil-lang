@@ -27,7 +27,7 @@ use common::DebugLoc;
 use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
-use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
+use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
 
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
@@ -630,6 +630,7 @@ impl Lower<'_> {
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
+                self.refuse_array_copy(init)?;
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
                 let Some(v) = self.word(init)? else {
@@ -649,6 +650,7 @@ impl Lower<'_> {
                 let HirKind::Local(local) = self.hir.expr(*place).kind else {
                     return Err("assign place".into());
                 };
+                self.refuse_array_copy(*value)?;
                 let ty = self.local_ty(local)?;
                 let slot = self.slot(local)?;
                 let Some(v) = self.word(*value)? else {
@@ -864,6 +866,10 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let lt = self.b.value_ty(l);
+        // `==` on arrays compares elements; only scalars compare as words.
+        if !lt.is_numeric() {
+            return Err("operator operand type".into());
+        }
         let out = match (arith, cmp) {
             (Some(MirBinOp::BitAnd | MirBinOp::BitOr), _) if lt == MirTy::Bool => {
                 self.b.ins_bool_logic(arith.expect("matched"), l, r)
@@ -1052,6 +1058,20 @@ impl Lower<'_> {
             idx = self.b.ins_binop(MirBinOp::Add, idx, fix).map_err(mir)?;
         }
         Ok(Some(idx))
+    }
+
+    /// HIR emission copies a fixed-size array local bound or assigned to
+    /// another (`vec_from_array`); that host call is not lowered here.
+    fn refuse_array_copy(&self, value: HirId) -> Result<(), Refusal> {
+        let HirKind::Local(src) = self.hir.expr(value).kind else {
+            return Ok(());
+        };
+        let copied = !self.inp.stacks.contains_key(&src.0)
+            && matches!(self.expr_ty(value).map(strip_readonly), Some(Ty::Array { length, .. }) if *length != ArrayLength::Dynamic);
+        if copied {
+            return Err("fixed array copy".into());
+        }
+        Ok(())
     }
 
     /// Whether `id` is a heap array this phase lowers (its type is one word).
