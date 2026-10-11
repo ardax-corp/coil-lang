@@ -843,6 +843,36 @@ impl Compiler {
         }
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
         let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
+        // Host natives taking and returning plain words (no niche or pair
+        // conversion at the edge).
+        let hosts = emit
+            .plan
+            .calls
+            .iter()
+            .filter_map(|(&i, c)| match c.builtin {
+                Some(HirBuiltin::Host(native))
+                    if c.pair.is_none()
+                        && c.ret == ValueLayout::Boxed
+                        && c.params.iter().all(|&p| p == ValueLayout::Boxed) =>
+                {
+                    // A two-word enum result is unboxed at the edge, one
+                    // `JumpIfMatch` per variant: each variant's tag and arity.
+                    let ty = Self::hir_ty(hir, HirId(i)).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_return_enum(&self.checker, t)) {
+                        Some(kind) => Some(
+                            self.checker
+                                .enum_variants(&kind)?
+                                .into_iter()
+                                .map(|(_, tag, payload)| (tag, payload.len() as u32))
+                                .collect::<Vec<_>>(),
+                        ),
+                        None => None,
+                    };
+                    Some((i, (u16::try_from(native).ok()?, unbox)))
+                }
+                _ => None,
+            })
+            .collect();
         // As `hir_for_in`'s `pin`: array loops the checker pinned.
         let pinned_for = (0..hir.exprs.len() as u32)
             .filter(|&i| {
@@ -871,6 +901,7 @@ impl Compiler {
             heap_fields,
             news,
             pushes,
+            hosts,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,

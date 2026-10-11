@@ -68,9 +68,12 @@ pub struct HirCallSite {
 impl HirMirInput<'_> {
     /// The MIR type of a one-word value: [`word`], or a class object.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
-        word(ty).or_else(|| (self.is_class)(ty).then_some(MirTy::HeapRef))
+        word(ty).or_else(|| ((self.is_class)(ty) || is_stream(ty)).then_some(MirTy::HeapRef))
     }
 }
+
+/// Each variant's tag and payload arity, in declaration order.
+pub type HostVariants = Vec<(u32, u32)>;
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
@@ -102,6 +105,10 @@ pub struct HirMirInput<'a> {
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
+    /// Host native calls whose arguments and result are plain (boxed
+    /// layout) words: the native id, and for a two-word enum result each
+    /// variant's tag and payload arity in declaration order.
+    pub hosts: HashMap<u32, (u16, Option<HostVariants>)>,
     /// `new C(..)` on the heap: the class's type id and its fields' word
     /// types.
     pub news: HashMap<u32, (u32, Vec<MirTy>)>,
@@ -171,6 +178,11 @@ pub fn word(ty: &Ty) -> Option<MirTy> {
     })
 }
 
+/// An `io` stream: a heap object the GC traces like any other.
+fn is_stream(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
+}
+
 /// The element type of an array or `Vec`.
 fn array_elem(ty: &Ty) -> Option<&Ty> {
     match strip_readonly(ty) {
@@ -223,6 +235,8 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
+    // Host natives are word edges, as the dense lift types them.
+    b.allow_host_edges = true;
     b.set_ret_ty(ret_ty);
     let mut next = 0;
     for &param in &hir.params {
@@ -537,6 +551,7 @@ impl Lower<'_> {
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
+            HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
@@ -1328,6 +1343,72 @@ impl Lower<'_> {
         let out = self.b.ins_array_push(arr, v).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         Ok(Val::Unit)
+    }
+
+    /// A host native: the arguments in order, then `HostInvoke` (the native
+    /// id is the instruction's, not a value the lowering has to find).
+    fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let (native, unbox) = &self.inp.hosts[&id.0];
+        let native = *native;
+        let pair = match (self.inp.pair_tys.get(&id.0), unbox) {
+            (Some(&tys), Some(variants)) => Some((tys, variants.clone())),
+            (Some(_), None) => return Err("host pair result".into()),
+            (None, _) => None,
+        };
+        let unit = self.expr_ty(id).is_some_and(is_unit);
+        let ret = match self.expr_ty(id) {
+            _ if pair.is_some() => Some(MirTy::HeapRef),
+            _ if unit => None,
+            Some(ty) => Some(self.inp.word(ty).ok_or_else(|| format!("host result {}", ty_kind(ty)))?),
+            None => return Err("host result".into()),
+        };
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let out = self.b.ins_host_invoke_as(native, words, 0, ret).map_err(mir)?;
+        if let Some(((lo_ty, _), variants)) = pair {
+            return self.unbox_pair(out, lo_ty, &variants);
+        }
+        Ok(if unit { Val::Unit } else { Val::V(out) })
+    }
+
+    /// A boxed enum word to `[payload, tag]`, as HIR emission's
+    /// `emit_unbox_enum_to_pair`: a `JumpIfMatch` per variant but the last,
+    /// which the fallthrough unpacks.
+    fn unbox_pair(&mut self, obj: ValueId, lo_ty: MirTy, variants: &[(u32, u32)]) -> Result<Val, Refusal> {
+        let Some((&(last_tag, last_arity), rest)) = variants.split_last() else {
+            return Err("host pair variants".into());
+        };
+        let mut out = Vec::with_capacity(variants.len());
+        for &(t, arity) in rest {
+            let word = match arity {
+                0 => None,
+                1 => Some(self.b.ins_match_payload(obj, 0, lo_ty).map_err(mir)?),
+                _ => return Err("host pair arity".into()),
+            };
+            let (hit, miss) = (self.b.create_block(), self.b.create_block());
+            self.b.jump_if_match(obj, t, word.into_iter().collect(), hit, miss).map_err(mir)?;
+            self.switch(hit);
+            let p = match word {
+                Some(w) => w,
+                None => self.zero(lo_ty)?,
+            };
+            let tag = self.b.ins_const(MirConst::I64(i64::from(t))).map_err(mir)?;
+            out.push((self.cur, Val::Pair(p, tag)));
+            self.switch(miss);
+        }
+        let p = match last_arity {
+            0 => self.zero(lo_ty)?,
+            1 => self.b.ins_match_payload(obj, 0, lo_ty).map_err(mir)?,
+            _ => return Err("host pair arity".into()),
+        };
+        let tag = self.b.ins_const(MirConst::I64(i64::from(last_tag))).map_err(mir)?;
+        out.push((self.cur, Val::Pair(p, tag)));
+        self.join_arms(out)
     }
 
     /// `len(x)`: a fixed size (a local or literal is not read), or the

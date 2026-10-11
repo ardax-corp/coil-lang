@@ -397,7 +397,7 @@ impl MirFunc {
                         return Err(format!("{dest} host arg {i} type"));
                     }
                 }
-                if self.ty(*dest) != spec.ret {
+                if !super::host_allow::host_arg_ok(*native_id, spec.ret, self.ty(*dest)) {
                     return Err(format!("{dest} host dest type"));
                 }
             }
