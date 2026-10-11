@@ -18,7 +18,7 @@ fn mul(byte a, byte b) -> byte {
     return a * b;
 }
 
-fn shl(byte a, byte n) -> byte {
+fn shl(byte a, int n) -> byte {
     return a << n;
 }
 
@@ -40,7 +40,7 @@ test("binary operators wrap") {
     assert(c / b(2) == b(22))?;
     assert(sub(b(100), b(200)) == b(156))?;
     assert(mul(b(200), b(100)) == b(32))?;
-    assert(shl(b(200), b(3)) == b(64))?;
+    assert(shl(b(200), 3) == b(64))?;
     assert(neg(b(3)) == b(253))?;
     assert(neg(b(0)) == b(0))?;
 }

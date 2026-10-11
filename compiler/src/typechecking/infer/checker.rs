@@ -2278,12 +2278,14 @@ impl Checker {
             ("Ge", &["ge"][..], true),
             ("Eq", &["eq", "ne"][..], true),
         ] {
+            // A shift count is an `int` whatever is shifted (#883).
+            let shift = matches!(class, "Shl" | "Shr");
             for method in methods {
                 let var = self.counter.fresh();
                 let ty = Ty::Fun(
                     Box::new(Ty::Var(var)),
                     Box::new(Ty::Fun(
-                        Box::new(Ty::Var(var)),
+                        Box::new(if shift { int() } else { Ty::Var(var) }),
                         Box::new(if returns_bool {
                             boolean()
                         } else {
@@ -3513,18 +3515,23 @@ impl Checker {
             Ty::App(..) | Ty::Sum { .. } => true,
             _ => false,
         };
-        if !overloadable
+        // `x op= y` checks like `x = x op y` (#883): a shift count is an
+        // `int`, the other bitwise operators take two operands of one type.
+        if matches!(op, parser::ast::AssignOp::Shl | parser::ast::AssignOp::Shr) {
+            self.unify(&int(), &val_ty, &range, &format!("shift count of `{op_name}=`"));
+            match apply_ty_prune(&self.subst, &target_ty) {
+                Ty::Var(v) => self.bind_arith_operator(v, op_name, id, &range),
+                ground => self.check_ground_arith_operands(&ground, op_name, &range),
+            }
+        } else if !overloadable
             && matches!(
                 op,
-                parser::ast::AssignOp::Shl
-                    | parser::ast::AssignOp::Shr
-                    | parser::ast::AssignOp::BitAnd
-                    | parser::ast::AssignOp::BitOr
-                    | parser::ast::AssignOp::BitXor
+                parser::ast::AssignOp::BitAnd | parser::ast::AssignOp::BitOr | parser::ast::AssignOp::BitXor
             )
         {
-            let _ = unify_with(&self.subst, &target_ty, &int());
-            let _ = unify_with(&self.subst, &val_ty, &int());
+            let result = self.unify(&target_ty, &val_ty, &range, &format!("operands of `{op_name}=`"));
+            let ground = apply_ty_prune(&self.subst, &result);
+            self.check_ground_arith_operands(&ground, op_name, &range);
         } else {
             let tp = apply_ty_prune(&self.subst, &target_ty);
             let vp = apply_ty_prune(&self.subst, &val_ty);
@@ -6271,6 +6278,10 @@ impl Checker {
             return self.infer_aggregate_arith(lp, rp, id, range, op);
         }
 
+        if matches!(op, "<<" | ">>") {
+            return self.infer_shift(lhs, rhs, lt, rt, id, range, op);
+        }
+
         let result = self.unify(&lt, &rt, &range, &format!("operands of `{}`", op));
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
@@ -6290,6 +6301,36 @@ impl Checker {
             self.bind_arith_operator(v, op, id, &range);
         }
         result
+    }
+
+    /// `x << n` / `x >> n`: the count is an `int` whatever `x` is (#883),
+    /// and the result has the type of `x`.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_shift(
+        &mut self,
+        lhs: &Output,
+        rhs: &Output,
+        lt: Ty,
+        rt: Ty,
+        id: Option<NodeId>,
+        range: Range<usize>,
+        op: &str,
+    ) -> Ty {
+        self.unify(&int(), &rt, &range, &format!("shift count of `{op}`"));
+        match apply_ty_prune(&self.subst, &lt) {
+            Ty::Var(v) => self.bind_arith_operator(v, op, id, &range),
+            ground => {
+                self.check_ground_arith_operands(&ground, op, &range);
+                let fits = Self::const_int(lhs)
+                    .zip(Self::const_int(rhs))
+                    .and_then(|(l, r)| Self::const_int_op(op, l, r))
+                    .is_some_and(|v| (0..=255).contains(&v));
+                if !fits {
+                    self.warn_byte_wrap(&ground, op, &range);
+                }
+            }
+        }
+        lt
     }
 
     /// `byte` `+ - * ** <<` and negation keep the low 8 bits of the result

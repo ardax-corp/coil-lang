@@ -5989,10 +5989,15 @@ impl Compiler {
                     // for the instance and stashed in a temp, then the call.
                     debug_assert_eq!(depth, 0);
                     let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                    // A shift count is a plain `int` parameter, not the
+                    // instance's type, so it is not boxed for it (#883).
+                    let shift = matches!(class, "Shl" | "Shr");
                     let mut temps = [0u32; 2];
-                    for (temp, operand) in temps.iter_mut().zip([*lhs, *rhs]) {
+                    for (i, (temp, operand)) in temps.iter_mut().zip([*lhs, *rhs]).enumerate() {
                         self.hir_value(hir, emit, operand, &BOXED, 0);
-                        Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                        if !(shift && i == 1) {
+                            Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                        }
                         self.expr_depth = 0;
                         *temp = self.alloc_temp_slot();
                         self.bytecode.push_store_pop(*temp);
