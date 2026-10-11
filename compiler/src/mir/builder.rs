@@ -386,6 +386,19 @@ impl MirBuilder {
         args: Vec<ValueId>,
         layout: u8,
     ) -> Result<ValueId, MirError> {
+        self.ins_host_invoke_as(native_id, args, layout, None)
+    }
+
+    /// HostInvoke whose result is typed `ret` when given: a generic word
+    /// edge (no precise spec) may name the heap word the checker knows it
+    /// returns; a precise spec must agree.
+    pub fn ins_host_invoke_as(
+        &mut self,
+        native_id: u16,
+        args: Vec<ValueId>,
+        layout: u8,
+        ret: Option<MirTy>,
+    ) -> Result<ValueId, MirError> {
         if !super::host_allow::dense_host_layout_ok(layout) {
             return Err(MirError::msg(format!("host {native_id} layout {layout}")));
         }
@@ -414,7 +427,16 @@ impl MirBuilder {
                 )));
             }
         }
-        let dest = self.alloc(spec.ret);
+        let ret = match ret {
+            None => spec.ret,
+            // A generic edge's boxed result may be a heap reference, as its
+            // arguments may.
+            Some(t) if super::host_allow::host_arg_ok(native_id, spec.ret, t) => t,
+            Some(t) => {
+                return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
+            }
+        };
+        let dest = self.alloc(ret);
         self.push(MirInst::HostInvoke {
             dest,
             native_id,
