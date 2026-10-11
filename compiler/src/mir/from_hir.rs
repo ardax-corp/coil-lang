@@ -1020,6 +1020,9 @@ impl Lower<'_> {
                 self.jump(exit)?;
                 Ok(Val::Never)
             }
+            // Frames from direct MIR are rooted by liveness (stack maps over
+            // live heap values), so a dead local's word roots nothing.
+            HirKind::Clear(_) => Ok(Val::Unit),
             HirKind::Continue => {
                 let lp = self.loops.last_mut().ok_or("continue outside loop")?;
                 lp.cont_used = true;
@@ -2572,7 +2575,16 @@ fn kind_name(kind: &HirKind) -> &'static str {
         HirKind::Make { .. } => "make",
         HirKind::LetPat { .. } => "let pattern",
         HirKind::Append { .. } => "append",
-        HirKind::ForIn { .. } => "for in",
+        HirKind::ForIn { kind, pat, .. } => match kind {
+            Some(ForInKind::Array) if !matches!(pat, HirPat::Bind(_)) => "for in array pattern",
+            Some(ForInKind::Array) => "for in array",
+            Some(ForInKind::Tuple { .. }) => "for in tuple",
+            Some(ForInKind::Dict) => "for in dict",
+            Some(ForInKind::Coroutine) => "for in coroutine",
+            Some(ForInKind::Custom { counted: Some(_), .. }) => "for in counted custom",
+            Some(ForInKind::Custom { .. }) => "for in iterator",
+            _ => "for in",
+        },
         HirKind::Match { .. } => "match",
         HirKind::Lambda { .. } => "lambda",
         HirKind::Yield { .. } | HirKind::Resume { .. } => "coroutine",
