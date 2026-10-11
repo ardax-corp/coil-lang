@@ -3899,11 +3899,17 @@ impl Checker {
         let dst_ty = apply_ty_prune(&self.subst, &dst_ty);
         // Pin expected type so `"/" as byte`, `"hi" as [byte]`, and
         // in-range `65 as byte` type the operand as the target when it
-        // is a coercible literal.
+        // is a coercible literal. Only a bare literal: in `(32 + n) as byte`
+        // the pin would type `32` as byte against an int `n` (#845).
         let prev_expected = self.current_expected.take();
-        if Self::is_byte_ty(&dst_ty) || Self::is_byte_array_ty(&dst_ty).is_some() {
+        let literal = matches!(
+            Self::peel_literal_expr(expr).1.as_ref(),
+            Expression::Integer(_) | Expression::String(_)
+        );
+        if literal && (Self::is_byte_ty(&dst_ty) || Self::is_byte_array_ty(&dst_ty).is_some()) {
             self.current_expected = Some(dst_ty.clone());
         }
+        let msg_len = self.messages.len();
         let src_ty = self.infer(expr);
         self.current_expected = prev_expected;
         let src_ty = apply_ty_prune(&self.subst, &src_ty);
@@ -3981,6 +3987,9 @@ impl Checker {
                         .to_string(),
                 ),
             ),
+            // The operand already failed: its error stands, a second one
+            // on the target only adds noise.
+            (None, Some(_)) if matches!(src_ty, Ty::Var(_)) && self.messages.len() > msg_len => dst_ty,
             _ => self.error_with_help(
                 ErrorCode::TypeMismatch,
                 "cast target must be a primitive type (`int`, `float`, `byte`, or `bool`) or a byte array (`[byte]` / `[byte; N]`)"
