@@ -61,11 +61,11 @@ pub fn emit_lir_with_aliases(
         .map(|(i, _)| regs[i])
         .max()
         .unwrap_or(0);
-    // As `emit_mir`: block labels skip the entries this body calls.
+    // As `emit_mir`: block labels skip the entries this body calls, and the
+    // entry's aliases, which bind at the entry (a block that took one would
+    // bind it a second time).
     let mut reserved = foreign_targets(func, entry_label);
-    for alias in aliases {
-        reserved.remove(&alias.0);
-    }
+    reserved.extend(aliases.iter().map(|alias| alias.0));
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {

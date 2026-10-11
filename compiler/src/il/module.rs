@@ -447,6 +447,7 @@ impl IlModule {
                 body.meta.entry_sp,
                 pool,
                 &body.meta.unboxed_fields,
+                body.meta.hir_mir.as_deref(),
                 &mut side,
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
