@@ -3,7 +3,7 @@
 //! Homogeneous numeric tuples and fixed-length arrays support element-wise
 //! and scalar-broadcast ops. Dynamic `[T] ⊕ [T]` is a hard type error.
 
-use super::ty::{ArrayLength, Ty};
+use super::ty::{ArrayLength, Ty, vec_app_ty, vec_element_ty};
 
 /// Which side of a broadcast is the scalar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +133,11 @@ pub fn classify_arith(ty: &Ty) -> ArithShape {
             elem: element.as_ref().clone(),
             length: *length,
         },
+        // `Vec<T>` is the dynamic-length array (#890).
+        other if vec_element_ty(other).is_some() => ArithShape::Array {
+            elem: vec_element_ty(other).cloned().expect("vec element"),
+            length: ArrayLength::Dynamic,
+        },
         other => ArithShape::Scalar(other.clone()),
     }
 }
@@ -155,7 +160,18 @@ pub fn homogeneous_aggregate_elem(ty: &Ty) -> Option<Ty> {
             }
         }
         Ty::Array { element, .. } => Some(element.as_ref().clone()),
-        _ => None,
+        _ => vec_element_ty(ty).cloned(),
+    }
+}
+
+/// `Vec<T>` as the dynamic-length array it is at runtime; other types as is.
+fn vec_as_dynamic_array(ty: &Ty) -> Ty {
+    match vec_element_ty(ty) {
+        Some(elem) => Ty::Array {
+            element: Box::new(elem.clone()),
+            length: ArrayLength::Dynamic,
+        },
+        None => ty.clone(),
     }
 }
 
@@ -164,6 +180,10 @@ pub fn result_ty_for(shape: &ArithShape) -> Ty {
     match shape {
         ArithShape::Scalar(t) => t.clone(),
         ArithShape::Tuple { elem, arity } => Ty::Tuple(vec![elem.clone(); *arity]),
+        ArithShape::Array {
+            elem,
+            length: ArrayLength::Dynamic,
+        } => vec_app_ty(elem.clone()),
         ArithShape::Array { elem, length } => Ty::Array {
             element: Box::new(elem.clone()),
             length: *length,
@@ -451,6 +471,9 @@ pub fn matrix_of_elem(
 /// operand types alone, for a body the checker recorded none for (a mono
 /// clone of a generic body).
 pub fn recover(lty: &Ty, rty: Option<&Ty>, op: AggregateOp) -> Option<AggregateArithInfo> {
+    let lty = &vec_as_dynamic_array(lty);
+    let rty = rty.map(vec_as_dynamic_array);
+    let rty = rty.as_ref();
     match (op, rty) {
         (AggregateOp::Neg, None) => {
             let elem = homogeneous_aggregate_elem(lty)?;

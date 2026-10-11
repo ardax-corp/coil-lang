@@ -58,7 +58,7 @@ fn niche_option_arm(int n) -> int {
     };
 }
 
-fn int_arm(int k, [int] xs) -> int {
+fn int_arm(int k, Vec<int> xs) -> int {
     return match k {
         0 => 1,
         1 => 1,

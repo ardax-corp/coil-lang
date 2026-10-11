@@ -32,7 +32,7 @@ fn deep(Option<Option<Shape>> o) -> int {
     };
 }
 
-fn total([Shape] shapes) -> int {
+fn total(Vec<Shape> shapes) -> int {
     let acc = 0;
     for s in shapes {
         match s {
@@ -67,7 +67,7 @@ test("three levels deep") {
 }
 
 test("statement match in a loop") {
-    let shapes = [
+    let shapes: Vec<Shape> = [
         Shape::Line(Color::Red, 2),
         Shape::Box { color: Color::Blue, w: 3, h: 4 },
         Shape::Dot(Color::Blue),

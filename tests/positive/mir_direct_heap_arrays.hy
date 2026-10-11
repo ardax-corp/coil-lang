@@ -11,7 +11,7 @@ fn total(Vec<int> v) -> int {
     return t;
 }
 
-fn odd_sum([int] xs) -> int {
+fn odd_sum(Vec<int> xs) -> int {
     let t = 0;
     for x in xs {
         if x % 2 == 0 {
@@ -30,11 +30,11 @@ fn scale(Vec<float> xs, float k) {
     }
 }
 
-fn ring([int] xs, int k) -> int {
+fn ring(Vec<int> xs, int k) -> int {
     return xs[k % 3] * 10 + xs[(k - 7) % 3];
 }
 
-fn bump([int] xs, int at, int by) -> [int] {
+fn bump(Vec<int> xs, int at, int by) -> Vec<int> {
     xs[at] = xs[at] + by;
     return xs;
 }

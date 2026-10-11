@@ -2996,7 +2996,7 @@ fn b6_call_plus_makearray_binds_maps() {
 fn leaf(int n) -> int {
     return n + 1;
 }
-fn wrap(int n) -> [int] {
+fn wrap(int n) -> [int; 2] {
     return [leaf(n), n];
 }
 fn main() {
@@ -3146,7 +3146,7 @@ fn pipeline_inlined_take_makearray_stays_fuse_il() {
     // Inlined take + in-loop Make*: S2l win-or-gate keeps fuse-IL
     // (residual boxing still loses to invert+fuse).
     let src = r#"
-fn take([int] xs) -> int {
+fn take(Vec<int> xs) -> int {
     return xs[0];
 }
 fn hot(int n) -> int {
@@ -3208,7 +3208,7 @@ fn s2l_inloop_escape_make_stays_fuse_or_dense_native() {
     // Escaping `[i, i+1]` cannot SROA. A2 keeps dense only when Make*
     // is DenseMake (no LOAD/StorePop boxing); else fuse-IL.
     let src = r#"
-fn take([int] xs) -> int {
+fn take(Vec<int> xs) -> int {
     return xs[0] + xs[1];
 }
 fn pack(int n) -> int {
@@ -3268,7 +3268,7 @@ fn main() {
 #[test]
 fn s2c_mapped_pair_helper_takes_lir() {
     let src = r#"
-fn pair(int a, int b) -> [int] {
+fn pair(int a, int b) -> [int; 2] {
     return [a, b];
 }
 fn main() {
@@ -5550,7 +5550,7 @@ fn main() {
 #[test]
 fn q6_for_in_range_array_sum_takes_dense() {
     let src = r#"
-fn range_sum([Range<int>] rs) -> int {
+fn range_sum(Vec<Range<int>> rs) -> int {
     let acc = 0;
     for x in rs[0] {
         acc = acc + x;

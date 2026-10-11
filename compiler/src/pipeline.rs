@@ -2249,7 +2249,7 @@ fn main() {
 
         let mut pipeline = Pipeline::new();
         let src = r#"
-fn pair(int a, int b) -> [int] {
+fn pair(int a, int b) -> [int; 2] {
     return [a, b];
 }
 fn main() {

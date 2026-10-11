@@ -7286,7 +7286,7 @@ fn s2b_maps_attach_to_alloc_keep_and_collect_survives() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn keep([int] xs) -> [int] {
+fn keep([int; 3] xs) -> [int; 3] {
     let junk = [1, 2, 3];
     collect();
     let r = xs;
@@ -7296,7 +7296,7 @@ fn keep([int] xs) -> [int] {
     return r;
 }
 fn main() {
-    let a = [42, 7];
+    let a = [42, 7, 0];
     let b = keep(a);
     write(stdout(), to_bytes(format("%i", b[0])));
 }
@@ -7373,7 +7373,7 @@ fn s2b_maps_survive_archive_load_and_collect() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn keep([int] xs) -> [int] {
+fn keep([int; 3] xs) -> [int; 3] {
     let junk = [1, 2, 3];
     collect();
     if junk == xs {
@@ -7382,7 +7382,7 @@ fn keep([int] xs) -> [int] {
     return xs;
 }
 fn main() {
-    let a = [42, 7];
+    let a = [42, 7, 0];
     let b = keep(a);
     write(stdout(), to_bytes(format("%i", b[0])));
 }
@@ -7454,7 +7454,7 @@ fn s2c_mapped_pair_runs_and_keeps_maps() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn pair(int a, int b) -> [int] {
+fn pair(int a, int b) -> Vec<int> {
     return [a, b];
 }
 fn main() {
@@ -7501,7 +7501,7 @@ use string::{format, to_bytes};
 fn leaf(int n) -> int {
     return n + 1;
 }
-fn wrap(int n) -> [int] {
+fn wrap(int n) -> Vec<int> {
     return [leaf(n), n];
 }
 fn main() {
@@ -8646,7 +8646,7 @@ fn aggregate_dynamic_array_broadcast_adds_scalar() {
         r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn add1([int] xs) -> [int] {
+fn add1(Vec<int> xs) -> Vec<int> {
     return xs + 1;
 }
 

@@ -2674,7 +2674,7 @@ impl Checker {
                 if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
                     return self.infer_matrix_neg(pruned, id, range);
                 }
-                if matches!(&pruned, Ty::Tuple(_) | Ty::Array { .. }) {
+                if matches!(&pruned, Ty::Tuple(_) | Ty::Array { .. }) || vec_element_ty(&pruned).is_some() {
                     self.infer_aggregate_neg(pruned, id, range)
                 } else {
                     if let Ty::Var(v) = pruned {
@@ -3895,9 +3895,15 @@ impl Checker {
 
     #[inline(never)]
     fn infer_cast(&mut self, expr: &Output, ty_ann: &Output) -> Ty {
+        let msg_len = self.messages.len();
         let dst_ty = self.parse_type_name(ty_ann);
+        if self.messages.len() > msg_len {
+            // A bad target (`as [byte]`) already reported; still type the operand.
+            let _ = self.infer(expr);
+            return dst_ty;
+        }
         let dst_ty = apply_ty_prune(&self.subst, &dst_ty);
-        // Pin expected type so `"/" as byte`, `"hi" as [byte]`, and
+        // Pin expected type so `"/" as byte`, `"hi" as [byte; 2]`, and
         // in-range `65 as byte` type the operand as the target when it
         // is a coercible literal. Only a bare literal: in `(32 + n) as byte`
         // the pin would type `32` as byte against an int `n` (#845).
@@ -3930,20 +3936,12 @@ impl Checker {
                         ),
                     );
                 }
-                // Non-literal `s as [byte]` → `to_bytes(s)`. Fixed
-                // `[byte; N]` still requires a literal (length known).
-                if matches!(
-                    Self::is_byte_slice_ty(&dst_ty),
-                    Some(crate::typechecking::ty::ArrayLength::Dynamic)
-                ) {
-                    return dst_ty;
-                }
                 return self.error_with_help(
                     ErrorCode::TypeMismatch,
                     "cannot cast `string` to fixed-length `[byte; N]`".to_string(),
                     range,
                     Some(
-                        "use a string literal of length N, or `to_bytes(s)` for a dynamic `[byte]` / `Vec<byte>`"
+                        "use a string literal of length N, or `to_bytes(s)` for a `Vec<byte>`"
                             .to_string(),
                     ),
                 );
@@ -3976,7 +3974,7 @@ impl Checker {
                 ErrorCode::TypeMismatch,
                 format!("cannot cast `{from}` to `{to}`"),
                 range,
-                Some("allowed casts: int↔float, int↔byte, int↔bool; single-byte string literals → byte; string literals → `[byte]` / `[byte; N]`".to_string()),
+                Some("allowed casts: int↔float, int↔byte, int↔bool; single-byte string literals → byte; string literals → `[byte; N]`".to_string()),
             ),
             (None, Some("byte")) if Self::is_string_ty(&src_ty) => self.error_with_help(
                 ErrorCode::TypeMismatch,
@@ -3992,7 +3990,7 @@ impl Checker {
             (None, Some(_)) if matches!(src_ty, Ty::Var(_)) && self.messages.len() > msg_len => dst_ty,
             _ => self.error_with_help(
                 ErrorCode::TypeMismatch,
-                "cast target must be a primitive type (`int`, `float`, `byte`, or `bool`) or a byte array (`[byte]` / `[byte; N]`)"
+                "cast target must be a primitive type (`int`, `float`, `byte`, or `bool`) or a byte array (`[byte; N]`)"
                     .to_string(),
                 ty_ann.0.into_range(),
                 None,
@@ -4152,6 +4150,16 @@ impl Checker {
         }
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
+        // `[1, 2]` where a `Vec<T>` is expected builds that Vec (#890).
+        if len > 0
+            && let Some(exp) = self.expected_here.clone()
+            && let exp = apply_ty_prune(&self.subst, &exp)
+            && let Some(vec_elem) = vec_element_ty(&exp)
+            && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
+        {
+            self.absorb(&s);
+            return apply_ty_prune(&self.subst, &exp);
+        }
         if len == 0 {
             if let Some(exp) = self.expected_here.clone() {
                 let exp = apply_ty_prune(&self.subst, &exp);
@@ -6285,6 +6293,8 @@ impl Checker {
         }
         if matches!(&lp, Ty::Tuple(_) | Ty::Array { .. })
             || matches!(&rp, Ty::Tuple(_) | Ty::Array { .. })
+            || vec_element_ty(&lp).is_some()
+            || vec_element_ty(&rp).is_some()
         {
             return self.infer_aggregate_arith(lp, rp, id, range, op);
         }
@@ -6809,6 +6819,17 @@ impl Checker {
         use crate::typechecking::aggregate_arith::*;
 
         let pruned = apply_ty_prune(&self.subst, &inner);
+        // `-v` on a `Vec<T>` negates it as the dynamic array it is (#890).
+        if let Some(elem) = vec_element_ty(&pruned).cloned() {
+            let as_array = Ty::Array {
+                element: Box::new(elem),
+                length: ArrayLength::Dynamic,
+            };
+            return match self.infer_aggregate_neg(as_array, id, range) {
+                Ty::Array { element, .. } => vec_app_ty(*element),
+                other => other,
+            };
+        }
         if let Ty::Tuple(elems) = &pruned {
             if elems.is_empty() {
                 return self.error_with_help(
@@ -8912,6 +8933,30 @@ impl Checker {
                 return expected;
             }
         }
+        // An array literal builds a `Vec<T>` where one is expected (#890):
+        // both are the same heap array, and a fresh literal has no alias
+        // that could see the Vec grow.
+        if let Some(vec_elem) = vec_element_ty(&expected)
+            && let Ty::Array { element, .. } = &actual
+            && let Some(expr) = expr
+            && let node = unwrap_expr_wrappers(expr)
+            && matches!(node.1.as_ref(), Expression::Array(items) if !items.is_empty())
+        {
+            let vec_elem = vec_elem.clone();
+            let _ = self.unify(&vec_elem, element, range, context);
+            let ty = apply_ty_prune(&self.subst, &expected);
+            self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+            return ty;
+        }
+        // A string literal typed as `[byte; N]` against `Vec<byte>` (a let
+        // pins the literal before this check): its bytes build the Vec.
+        if Self::is_vec_byte_ty(&expected)
+            && Self::is_byte_slice_ty(&actual).is_some()
+            && let Some(expr) = expr
+            && matches!(unwrap_expr_wrappers(expr).1.as_ref(), Expression::String(_))
+        {
+            return expected;
+        }
         if let Some(coerced) = self.coerce_scalar_enum_to_backing(&expected, &actual) {
             return coerced;
         }
@@ -10595,14 +10640,6 @@ impl Checker {
     }
 
     fn parse_type_name(&mut self, ann: &Output) -> Ty {
-        self.parse_type_name_inner(ann, false)
-    }
-
-    fn parse_return_type_name(&mut self, ann: &Output) -> Ty {
-        self.parse_type_name_inner(ann, true)
-    }
-
-    fn parse_type_name_inner(&mut self, ann: &Output, allow_dynamic_slice: bool) -> Ty {
         match ann.1.as_ref() {
             Expression::Identifier(name) | Expression::Type(name) => {
                 let range = ann.0.into_range();
@@ -10652,17 +10689,16 @@ impl Checker {
                     );
                 }
                 if items.len() == 1 {
-                    let elem_ty = self.parse_type_name_inner(&items[0], allow_dynamic_slice);
-                    if matches!(&elem_ty, Ty::Con(name) if name == "byte") || allow_dynamic_slice {
-                        return crate::typechecking::ty::array(elem_ty);
-                    }
+                    // Recover as the `Vec<T>` it should be, so uses of the
+                    // binding don't cascade.
+                    let elem_ty = self.parse_type_name(&items[0]);
                     let _ = self.error_with_help(
                         ErrorCode::GenericTypeError,
                         "dynamic array type `[T]` is not allowed".to_string(),
                         ann.0.into_range(),
-                        Some("use a fixed-length `[T; N]` or growable `Vec<T>`".to_string()),
+                        Some("use `Vec<T>` (an array literal builds one) or a fixed-length `[T; N]`".to_string()),
                     );
-                    return Ty::Var(self.counter.fresh());
+                    return vec_app_ty(elem_ty);
                 }
                 Ty::Var(self.counter.fresh())
             }
@@ -11917,6 +11953,8 @@ impl Checker {
             } if common::is_builtin_ffi_enum(enum_name) => self.ffi_type_tag_from_variant(enum_name, variant_name),
             Expression::Type(name) | Expression::Identifier(name) => self.ffi_type_tag_from_name(name),
             Expression::Array(items) if items.len() == 1 => Some((tag::PTR, 0)),
+            // `Vec<T>` is the same heap array a `[T; N]` passes (#890).
+            Expression::TypeApp { name, args } if *name == "Vec" && args.len() == 1 => Some((tag::PTR, 0)),
             Expression::Tuple(_) => Some((tag::PTR, 0)),
             _ => None,
         }
@@ -12679,13 +12717,13 @@ impl Checker {
                             out.push((name.to_string(), pack));
                         } else {
                             let elem =
-                                self.parse_return_type_name(ty.as_ref().expect("typed rest"));
+                                self.parse_type_name(ty.as_ref().expect("typed rest"));
                             out.push((name.to_string(), vec_app_ty(elem)));
                         }
                     } else {
                         out.push((
                             name.to_string(),
-                            self.parse_return_type_name(ty.as_ref().expect("fixed param type")),
+                            self.parse_type_name(ty.as_ref().expect("fixed param type")),
                         ));
                     }
                 }
@@ -12938,6 +12976,14 @@ impl Checker {
                                 ),
                             );
                         }
+                    }
+                    ref vec if vec_element_ty(vec).is_some() => {
+                        let _ = self.error_with_help(
+                            ErrorCode::GenericTypeError,
+                            "cannot spread dynamic-length array".to_string(),
+                            arg.0.into_range(),
+                            Some("use a tuple or a fixed-length array `[T; N]` at the spread site".to_string()),
+                        );
                     }
                     _ => {
                         let _ = self.error_with_help(
@@ -13733,7 +13779,7 @@ impl Checker {
             self.fn_has_rest.insert(fqn.clone(), has_rest);
 
             let mut fun_ty = match returns {
-                Some(r) => self.parse_return_type_name(r),
+                Some(r) => self.parse_type_name(r),
                 None => Ty::Var(self.counter.fresh()),
             };
             if *is_coro {
@@ -14254,7 +14300,7 @@ impl Checker {
         }
 
         let ret_ty = match returns {
-            Some(r) => self.parse_return_type_name(r),
+            Some(r) => self.parse_type_name(r),
             None => Ty::Var(self.counter.fresh()),
         };
         // A `gen fn` returns its coroutine, as `infer_function_expr` types it:

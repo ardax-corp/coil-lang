@@ -16,7 +16,7 @@ fn sum_field(Holder h) -> int {
     return acc;
 }
 
-fn sum_array([Range<int>] rs) -> int {
+fn sum_array(Vec<Range<int>> rs) -> int {
     let acc = 0;
     for x in rs[0] {
         acc = acc + x;

@@ -1,8 +1,9 @@
 // S2b: live heap in a mapped frame slot survives alloc + collect.
+// Fixed-length array params and returns keep `keep` out of line.
 use gc::collect;
 
-fn keep([int] xs) -> [int] {
-    let junk = [1, 2, 3];
+fn keep([int; 2] xs) -> [int; 2] {
+    let junk = [1, 2];
     collect();
     if junk == xs {
         return junk;

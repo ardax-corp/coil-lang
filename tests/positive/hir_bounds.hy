@@ -1,7 +1,7 @@
 // Counted loops whose index sites are proven in bounds still compute the
 // same sums, and sites the proof must leave checked still read the right
 // element.
-fn sum_while([int] a) -> int {
+fn sum_while(Vec<int> a) -> int {
     let s = 0;
     let i = 0;
     while i < len(a) {
@@ -12,7 +12,7 @@ fn sum_while([int] a) -> int {
     return s;
 }
 
-fn sum_range([int] a) -> int {
+fn sum_range(Vec<int> a) -> int {
     let s = 0;
     for i in 0..len(a) {
         s = s + a[i] * 2;
@@ -20,7 +20,7 @@ fn sum_range([int] a) -> int {
     return s;
 }
 
-fn after_bump([int] a) -> int {
+fn after_bump(Vec<int> a) -> int {
     let s = 0;
     let i = 0;
     while i < len(a) {
@@ -48,7 +48,7 @@ fn filled(int n) -> int {
     return s;
 }
 
-fn bound_let([int] a) -> int {
+fn bound_let(Vec<int> a) -> int {
     let n = len(a);
     let s = 0;
     let i = 0;
@@ -60,7 +60,7 @@ fn bound_let([int] a) -> int {
 }
 
 test("a counted while sums and clears") {
-    let a = [1, 2, 3, 4];
+    let a: Vec<int> = [1, 2, 3, 4];
     assert(sum_while(a) == 10)?;
     assert(a[0] + a[3] == 0)?;
 }

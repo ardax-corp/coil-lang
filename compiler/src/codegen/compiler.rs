@@ -8126,7 +8126,7 @@ impl Compiler {
                                             arg.0.into_range(),
                                         );
                                         m.push(DiagLabel::new(
-                                            "use Int/Ptr after `use ffi::types::{Int, Ptr, …}`, a bare type name, [T], (T, U), or an extern struct".to_string(),
+                                            "use Int/Ptr after `use ffi::types::{Int, Ptr, …}`, a bare type name, Vec<T>, [T; N], (T, U), or an extern struct".to_string(),
                                             arg.0.into_range(),
                                         ));
                                         m

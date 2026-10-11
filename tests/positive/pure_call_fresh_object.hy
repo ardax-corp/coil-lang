@@ -1,6 +1,6 @@
 // coil-lang#790: CSE and LICM must not merge or hoist calls to a pure fn
 // that returns a fresh array: each call gives its own object.
-fn mk() -> [int] {
+fn mk() -> Vec<int> {
     return [0, 0];
 }
 

@@ -15,7 +15,7 @@ fn after_write(int a) -> int {
     return x + (a + 1);
 }
 
-fn elements([int] xs, int k) -> int {
+fn elements(Vec<int> xs, int k) -> int {
     let x = xs[k];
     xs[k] = 100;
     return x + xs[k];

@@ -43,7 +43,7 @@ fn keep(Option<int> o) -> Option<int> {
     return o;
 }
 
-fn store_it(Option<int> o) -> [Option<int>] {
+fn store_it(Option<int> o) -> Vec<Option<int>> {
     return [o, o];
 }
 

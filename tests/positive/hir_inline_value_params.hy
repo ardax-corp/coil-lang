@@ -3,7 +3,7 @@
 // that writes through its array parameter keeps its call, so the caller
 // still sees the write.
 
-fn take([int] xs) -> int {
+fn take([int; 2] xs) -> int {
     return xs[0] + xs[1];
 }
 
@@ -21,7 +21,7 @@ fn first((int, int) p) -> int {
     return p[0];
 }
 
-fn bump([int] xs) -> int {
+fn bump([int; 2] xs) -> int {
     xs[0] = xs[0] + 1;
     return xs[0];
 }

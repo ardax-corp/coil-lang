@@ -1,6 +1,6 @@
 // `x.len()` is the canonical length on every structural type, not only
 // `Vec`: fixed arrays, arrays, tuples and strings.
-fn count([int] xs) -> int {
+fn count(Vec<int> xs) -> int {
     return xs.len();
 }
 

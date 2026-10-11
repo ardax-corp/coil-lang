@@ -23,7 +23,7 @@ test("a match whose arms all raise fits the value's word") {
     assert(second == "other")?;
 }
 
-fn byte_sum([byte] bytes, int n) -> int {
+fn byte_sum(Vec<byte> bytes, int n) -> int {
     let total = 0;
     for i in 0..n {
         total = total + (bytes[i] as int);
@@ -31,10 +31,10 @@ fn byte_sum([byte] bytes, int n) -> int {
     return total;
 }
 
-test("a byte vector cast to a byte array is the same array") {
+test("a byte vector passes to a byte vector param") {
     let v: Vec<byte> = Vec::new();
     v.push(1 as byte);
     v.push(2 as byte);
     v.push(4 as byte);
-    assert(byte_sum(v as [byte], v.len()) == 7)?;
+    assert(byte_sum(v, v.len()) == 7)?;
 }
