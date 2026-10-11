@@ -25,7 +25,8 @@ pub struct BodyTier {
     pub tier: String,
     pub dense_reason: Option<String>,
     pub lir_reason: Option<String>,
-    /// Why the body did not lower straight from HIR to MIR.
+    /// `lowered` when the body lowered straight from HIR to MIR, else why
+    /// not (`None`: not tried).
     pub hir_reason: Option<String>,
 }
 

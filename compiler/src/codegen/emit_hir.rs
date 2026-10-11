@@ -757,7 +757,7 @@ impl Compiler {
     /// What direct MIR lowering needs from emission: slots, call sites, and
     /// the word types of each two-word pair.
     fn hir_mir_input<'a>(
-        &self,
+        &'a self,
         hir: &HirBody,
         emit: &'a HirEmit,
         file: Option<u32>,
@@ -807,6 +807,23 @@ impl Compiler {
                 fields.insert(i as u32, slot);
             }
         }
+        // Fields of heap class objects whose slot holds the word the
+        // field's type names (a generic field holds a boxed value).
+        let checker = &self.checker;
+        let is_class = |t: &Ty| checker.ty_is_class(&apply_ty_prune(checker.subst(), t));
+        let word = |t: &Ty| crate::mir::word_mir_ty(t).or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef));
+        let mut heap_fields = HashMap::new();
+        for (i, e) in hir.exprs.iter().enumerate() {
+            if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(w) = word(&fty)
+                && e.ty.as_ref().and_then(word) == Some(w)
+            {
+                heap_fields.insert(i as u32, (idx, w));
+            }
+        }
         // As `hir_for_in`'s `pin`: array loops the checker pinned.
         let pinned_for = (0..hir.exprs.len() as u32)
             .filter(|&i| {
@@ -831,6 +848,8 @@ impl Compiler {
             calls: &emit.call_targets,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
+            is_class: Box::new(move |t: &Ty| checker.ty_is_class(&apply_ty_prune(checker.subst(), t))),
+            heap_fields,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,

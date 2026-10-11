@@ -65,6 +65,13 @@ pub struct HirCallSite {
     pub pair_ret: bool,
 }
 
+impl HirMirInput<'_> {
+    /// The MIR type of a one-word value: [`word`], or a class object.
+    fn word(&self, ty: &Ty) -> Option<MirTy> {
+        word(ty).or_else(|| (self.is_class)(ty).then_some(MirTy::HeapRef))
+    }
+}
+
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
     /// Frame slot of each local (the first word of a pair local).
@@ -88,6 +95,11 @@ pub struct HirMirInput<'a> {
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
     pub box_at: &'a HashMap<u32, Vec<u32>>,
+    /// Whether a type is a class: its value is a heap object.
+    pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
+    /// Field reads and writes on heap class objects: each field's slot and
+    /// word type, when the field holds the word its type says.
+    pub heap_fields: HashMap<u32, (u32, MirTy)>,
     /// `for x in xs` loops whose array the checker pinned: their reads
     /// need no bounds check.
     pub pinned_for: HashSet<u32>,
@@ -161,6 +173,27 @@ fn array_elem(ty: &Ty) -> Option<&Ty> {
     }
 }
 
+/// A short name for the kind of `ty`, for refusal reasons.
+fn ty_kind(ty: &Ty) -> &'static str {
+    match strip_readonly(ty) {
+        Ty::Con(n) if n == crate::typechecking::ty::STRING => "string",
+        Ty::Con(n) if n == crate::typechecking::ty::BYTE => "byte",
+        Ty::Con(_) => "named",
+        Ty::App(head, _) => match head.as_ref() {
+            Ty::Con(n) if n == "Option" => "option",
+            Ty::Con(n) if n == "Result" => "result",
+            Ty::Con(n) if n == common::BUILTIN_VEC_TYPE => "vec",
+            _ => "generic app",
+        },
+        Ty::Array { .. } => "array",
+        Ty::Tuple(_) => "tuple",
+        Ty::Var(_) => "type variable",
+        Ty::Fun(..) => "function",
+        Ty::Sum { .. } | Ty::Constructor { .. } => "enum",
+        _ => "other",
+    }
+}
+
 fn is_unit(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::UNIT)
 }
@@ -181,7 +214,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         Some((lo, _)) => lo,
-        None => word(ret).ok_or("return type")?,
+        None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
     b.set_ret_ty(ret_ty);
@@ -193,7 +226,10 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         let words = match inp.pair_locals.get(&param.0) {
             Some(&(hi, lo_ty, hi_ty)) if hi == next + 1 => vec![lo_ty, hi_ty],
             Some(_) => return Err("param slot".into()),
-            None => vec![hir.local(param).ty.as_ref().and_then(word).ok_or("param type")?],
+            None => {
+                let ty = hir.local(param).ty.as_ref().ok_or("param type")?;
+                vec![inp.word(ty).ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
+            }
         };
         for ty in words {
             let v = b.add_param(ty).map_err(mir)?;
@@ -371,7 +407,8 @@ impl Lower<'_> {
         if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) {
             return Err("frame-slot local value".into());
         }
-        self.hir.local(local).ty.as_ref().and_then(word).ok_or_else(|| "local type".into())
+        let ty = self.hir.local(local).ty.as_ref().ok_or("local type")?;
+        self.inp.word(ty).ok_or_else(|| format!("local type {}", ty_kind(ty)))
     }
 
     fn temp(&mut self) -> LocalId {
@@ -572,6 +609,29 @@ impl Lower<'_> {
                     return Err("field type".into());
                 }
                 self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                Ok(Val::Unit)
+            }
+            HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
+                let Some(obj) = self.word(*base)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?))
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
+                    && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
+            {
+                // The value, then the object, as HIR emission's `SetField`.
+                let Some(v) = self.word(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != ty {
+                    return Err("field type".into());
+                }
+                let Some(obj) = self.word(base)? else {
+                    return Ok(Val::Never);
+                };
+                self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
                 Ok(Val::Unit)
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
@@ -1007,11 +1067,11 @@ impl Lower<'_> {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
-            _ => (word(ty).ok_or("call type")?, None),
+            _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
-            if !pair && self.expr_ty(arg).and_then(word).is_none() {
+            if !pair && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
             match (self.value(arg)?, pair) {
