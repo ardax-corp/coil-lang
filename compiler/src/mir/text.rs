@@ -125,7 +125,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirCastKind::IntToFloat => format!("fcvt.{to}.{from}"),
                 MirCastKind::Sext => format!("sext.{to}.{from}"),
                 MirCastKind::FloatToInt => format!("ftrunc.{to}.{from}"),
-                MirCastKind::Niche => format!("niche.{to}.{from}"),
+                MirCastKind::Word => format!("word.{to}.{from}"),
             };
             write!(f, "{dest} = {name} {src}")
         }
@@ -702,7 +702,7 @@ impl<'a> Parser<'a> {
                 src,
             });
         }
-        if let Some(rest) = op.strip_prefix("niche.") {
+        if let Some(rest) = op.strip_prefix("word.") {
             let mut parts = rest.split('.');
             let to =
                 MirTy::parse(parts.next().unwrap_or("")).ok_or_else(|| ParseError(op.clone()))?;
@@ -710,7 +710,7 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, to);
             return Ok(MirInst::Cast {
                 dest,
-                kind: MirCastKind::Niche,
+                kind: MirCastKind::Word,
                 to,
                 src,
             });

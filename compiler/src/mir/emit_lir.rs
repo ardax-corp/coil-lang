@@ -1477,7 +1477,7 @@ fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<()
         }
         MirCastKind::Sext => Err(LowerError::Refused("lir sext".into())),
         // The same word, retyped.
-        MirCastKind::Niche => Ok(()),
+        MirCastKind::Word => Ok(()),
     }
 }
 

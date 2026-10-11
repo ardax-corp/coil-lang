@@ -219,11 +219,11 @@ pub enum MirCastKind {
     Sext,
     /// `CastFloatToInt` — `f64` → `i64`, truncating toward zero.
     FloatToInt,
-    /// The same word retyped across a pointer niche: a heap pointer
-    /// (`Some` / `Ok`) or the `i64` zero (`None` / `Ok(())`) typed
-    /// `NicheOpt` / `NicheRes`, or such a word known to hold a pointer back
-    /// to `HeapRef`.
-    Niche,
+    /// The same word retyped: a heap pointer or the `i64` zero (`None` /
+    /// `Ok(())`) as a `NicheOpt` / `NicheRes` word, such a word known to
+    /// hold a pointer as `HeapRef`, or a heap or niche word moved through
+    /// an opaque `i64` pair word and back.
+    Word,
 }
 
 impl MirCastKind {
@@ -233,9 +233,11 @@ impl MirCastKind {
             Self::IntToFloat => from.is_int() && to.is_float(),
             Self::Sext => from == MirTy::I32 && to == MirTy::I64,
             Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
-            Self::Niche => {
+            Self::Word => {
                 let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
-                (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef)) || (niche(from) && to == MirTy::HeapRef)
+                (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef))
+                    || (niche(from) && matches!(to, MirTy::HeapRef | MirTy::I64))
+                    || matches!((from, to), (MirTy::I64, MirTy::HeapRef) | (MirTy::HeapRef, MirTy::I64))
             }
         }
     }
