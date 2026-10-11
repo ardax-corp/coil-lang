@@ -927,22 +927,20 @@ impl Compiler {
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
-                if crate::hir::layout::is_scalar_enum_ty(checker, &t)
-                    || crate::typechecking::ty::is_option_ty(&t)
+                if crate::typechecking::ty::is_option_ty(&t)
                     || crate::typechecking::ty::is_result_ty(&t)
                     || crate::hir::layout::of_resolved(checker, &t) != crate::hir::layout::Layout::Word
                 {
                     return None;
                 }
-                let name = Self::enum_name_of(&t)?;
-                let variants = checker.enum_variants(&name)?;
-                match variant {
-                    None => Some(Vec::new()),
-                    Some(v) => {
-                        variants.iter().find(|(n, _, _)| n == v)?;
-                        Self::payload_tys_of(checker, &t, v)
-                    }
+                Self::boxed_payloads(checker, &t, variant)
+            }),
+            boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
+                let t = apply_ty_prune(checker.subst(), t);
+                if crate::typechecking::value_layout::value_layout(checker, &t) != ValueLayout::Boxed {
+                    return None;
                 }
+                Self::boxed_payloads(checker, &t, variant)
             }),
             scalar_variant: Box::new(move |enum_name: &str, variant: &str| match checker.scalar_for(enum_name, variant)? {
                 crate::typechecking::ty::ScalarBacking::Int(n) => Some(crate::mir::MirConst::I64(*n)),
@@ -971,6 +969,23 @@ impl Compiler {
     /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`
     /// with one payload type across the variants, `[start, end]`, or
     /// `[a, b]`.
+    /// A non-scalar enum type's payload types for `variant` (`Some` of
+    /// nothing without one), as a boxed `ObjEnum` carries them.
+    fn boxed_payloads(checker: &Checker, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
+        if crate::hir::layout::is_scalar_enum_ty(checker, t) {
+            return None;
+        }
+        let name = Self::enum_name_of(t)?;
+        let variants = checker.enum_variants(&name)?;
+        match variant {
+            None => Some(Vec::new()),
+            Some(v) => {
+                variants.iter().find(|(n, _, _)| n == v)?;
+                Self::payload_tys_of(checker, t, v)
+            }
+        }
+    }
+
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
         use crate::hir::layout::{self, Layout, PairKind};
         use crate::mir::{scalar_mir_ty as word, MirTy};
