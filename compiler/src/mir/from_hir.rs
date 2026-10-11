@@ -100,6 +100,9 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// `new C(..)` on the heap: the class's type id and its fields' word
+    /// types.
+    pub news: HashMap<u32, (u32, Vec<MirTy>)>,
     /// `for x in xs` loops whose array the checker pinned: their reads
     /// need no bounds check.
     pub pinned_for: HashSet<u32>,
@@ -601,7 +604,7 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
-                let ty = self.expr_ty(*place).and_then(scalar).ok_or("field type")?;
+                let ty = self.expr_ty(*place).and_then(|t| self.inp.word(t)).ok_or("field type")?;
                 let Some(v) = self.word(*value)? else {
                     return Ok(Val::Never);
                 };
@@ -635,7 +638,7 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
-                let ty = self.expr_ty(id).and_then(scalar).ok_or("field type")?;
+                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
             }
             HirKind::Index { base, index, .. }
@@ -680,6 +683,7 @@ impl Lower<'_> {
             }
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
+            HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             // `p[0]` / `p[1]` of a two-word tuple local.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
@@ -1253,6 +1257,30 @@ impl Lower<'_> {
         }
         let arr = self.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+    }
+
+    /// `new C(..)`: every argument, then the object and each field's store
+    /// (no argument sees the object, so none runs with it allocated).
+    fn make_object(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let (type_id, tys) = &self.inp.news[&id.0];
+        let (type_id, tys) = (*type_id, tys.clone());
+        let mut words = Vec::with_capacity(args.len());
+        for (&arg, ty) in args.iter().zip(tys) {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != ty {
+                return Err("field type".into());
+            }
+            words.push(v);
+        }
+        let nfields = words.len() as u32;
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        for (slot, v) in words.into_iter().enumerate() {
+            self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
+        }
+        Ok(Val::V(obj))
     }
 
     /// `len(x)`: a fixed size (a local or literal is not read), or the

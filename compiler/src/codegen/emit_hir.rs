@@ -776,7 +776,7 @@ impl Compiler {
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
             .collect();
         // Stack arrays and scalar-replaced class locals: one frame slot per
-        // element or field, each a scalar word.
+        // element or field, each one word.
         let mut stacks = HashMap::new();
         for (&local, &n) in &emit.plan.stacks {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
@@ -787,13 +787,22 @@ impl Compiler {
             let base = emit.slots[local as usize].ok_or("stack array slot")?;
             stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
         }
+        // Words in direct MIR: scalars, int/float arrays, and class objects.
+        // A finalizer class stays out: its object's lifetime follows the
+        // frame slots emission clears, not MIR values.
+        let checker = &self.checker;
+        let is_class = move |t: &Ty| {
+            let t = apply_ty_prune(checker.subst(), t);
+            checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
+        };
+        let word = |t: &Ty| crate::mir::word_mir_ty(t).or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef));
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
                 && emit.plan.sroa.contains_key(&local.0)
             {
                 let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
-                let tys: Option<Vec<_>> = tys.iter().map(crate::mir::scalar_mir_ty).collect();
+                let tys: Option<Vec<_>> = tys.iter().map(word).collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
         }
@@ -809,9 +818,6 @@ impl Compiler {
         }
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
-        let checker = &self.checker;
-        let is_class = |t: &Ty| checker.ty_is_class(&apply_ty_prune(checker.subst(), t));
-        let word = |t: &Ty| crate::mir::word_mir_ty(t).or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef));
         let mut heap_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
@@ -822,6 +828,17 @@ impl Compiler {
                 && e.ty.as_ref().and_then(word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
+            }
+        }
+        // `new C(..)` of a class whose every field holds the word its type
+        // names: the type id and each field's word type.
+        let mut news = HashMap::new();
+        for i in 0..hir.exprs.len() as u32 {
+            if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
+                && !checker.class_has_drop(&class)
+                && let Some(words) = tys.iter().map(word).collect::<Option<Vec<_>>>()
+            {
+                news.insert(i, (checker.class_type_id(&class), words));
             }
         }
         // As `hir_for_in`'s `pin`: array loops the checker pinned.
@@ -848,12 +865,22 @@ impl Compiler {
             calls: &emit.call_targets,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
-            is_class: Box::new(move |t: &Ty| checker.ty_is_class(&apply_ty_prune(checker.subst(), t))),
+            is_class: Box::new(is_class),
             heap_fields,
+            news,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,
         })
+    }
+
+    /// A class with a `drop`, or a generic one applied to such a class.
+    fn finalized_class(checker: &crate::typechecking::Checker, ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Con(n) => checker.class_has_drop(n),
+            Ty::App(head, _) => Self::finalized_class(checker, head),
+            _ => false,
+        }
     }
 
     /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`

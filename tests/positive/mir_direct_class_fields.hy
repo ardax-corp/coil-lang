@@ -40,6 +40,27 @@ fn relink(Node x, Acc a) -> int {
     return old;
 }
 
+class Link {
+    pub val: int,
+    pub w: float,
+    pub prev: Acc,
+}
+
+// Each object is allocated after its arguments; the chain keeps every
+// earlier one reachable only through the heap.
+fn chain(int n) -> int {
+    let head = new Acc(0, 0.0, 0);
+    let total = 0;
+    let i = 0;
+    while i < n {
+        let l = new Link(i, 0.25, head);
+        head = new Acc(l.val + head.n, l.w + head.total, i);
+        total = total + l.prev.n;
+        i = i + 1;
+    }
+    return total + head.n;
+}
+
 fn unbox(Box<int> b) -> int {
     b.item = b.item * 3;
     return b.item + 1;
@@ -61,4 +82,8 @@ test("class fields in direct MIR") {
     assert(a.n == 14)?;
     assert(b.n == 8)?;
     assert(unbox(new Box(5)) == 16)?;
+}
+
+test("objects allocated in direct MIR") {
+    assert(chain(100) == 166650)?;
 }
