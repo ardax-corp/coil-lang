@@ -66,9 +66,12 @@ pub struct HirCallSite {
 }
 
 impl HirMirInput<'_> {
-    /// The MIR type of a one-word value: [`word`], or a class object.
+    /// The MIR type of a one-word value: [`word`], a class object or a
+    /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
-        word(ty).or_else(|| ((self.is_class)(ty) || is_stream(ty)).then_some(MirTy::HeapRef))
+        word(ty)
+            .or_else(|| ((self.is_class)(ty) || is_stream(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| (self.scalar_enum)(ty))
     }
 }
 
@@ -100,6 +103,11 @@ pub struct HirMirInput<'a> {
     pub box_at: &'a HashMap<u32, Vec<u32>>,
     /// Whether a type is a class: its value is a heap object.
     pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
+    /// The backing word of a scalar enum type (`#[repr(int)]` /
+    /// `#[repr(float)]`).
+    pub scalar_enum: Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>,
+    /// A scalar enum variant's backing constant, by enum and variant name.
+    pub scalar_variant: Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>,
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
@@ -176,6 +184,15 @@ pub fn word(ty: &Ty) -> Option<MirTy> {
     scalar(ty).or_else(|| {
         matches!(array_elem(ty).and_then(scalar), Some(MirTy::I64 | MirTy::F64)).then_some(MirTy::HeapRef)
     })
+}
+
+/// A variant pattern with no payload: `V` or `V()`.
+fn unit_fields(fields: &HirPatFields) -> bool {
+    match fields {
+        HirPatFields::Unit => true,
+        HirPatFields::Tuple(parts) => parts.is_empty(),
+        HirPatFields::Record(_) => false,
+    }
 }
 
 /// An `io` stream: a heap object the GC traces like any other.
@@ -717,6 +734,13 @@ impl Lower<'_> {
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
+            // A scalar enum's variant is its backing constant.
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, .. },
+                args,
+            } if args.is_empty() && let Some(c) = (self.inp.scalar_variant)(enum_name, variant) => {
+                Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
+            }
             // `p[0]` / `p[1]` of a two-word tuple local.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
@@ -1603,6 +1627,9 @@ impl Lower<'_> {
         if lower::has_nested_test(arms) {
             return Err("nested match".into());
         }
+        if let Some(consts) = self.scalar_arms(scrutinee, arms) {
+            return self.match_scalar(scrutinee, arms, &consts, tail);
+        }
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
@@ -1655,6 +1682,124 @@ impl Lower<'_> {
             self.mark_cold(start);
         }
         self.join_arms(out)
+    }
+
+    /// Each arm's constant when `match` tests an `int`, or a scalar enum
+    /// backed by an `int` or `float`, against literals (`None` for a
+    /// catch-all), as `lower::is_scalar_match`.
+    fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<MirConst>>> {
+        let ty = self.expr_ty(scrutinee)?;
+        let int = matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::INT);
+        if !int && (self.inp.scalar_enum)(ty).is_none() {
+            return None;
+        }
+        arms.iter()
+            .map(|arm| match &arm.pat {
+                HirPat::Wild | HirPat::Bind(_) => Some(None),
+                HirPat::Int(n) if int => Some(Some(MirConst::I64(*n))),
+                HirPat::Variant {
+                    enum_name, variant, fields, ..
+                } if !int && unit_fields(fields) => (self.inp.scalar_variant)(enum_name, variant).map(Some),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `match` of a scalar word on constants: one equality test per arm but
+    /// the last, or a binary search over many `int` literals, as HIR
+    /// emission's `hir_match_scalar` / `hir_match_search`.
+    fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<MirConst>], tail: bool) -> Result<Val, Refusal> {
+        let Some(v) = self.word(scrutinee)? else {
+            return Ok(Val::Never);
+        };
+        let literal = |pat: &HirPat| {
+            let i = arms.iter().position(|a| std::ptr::eq(&a.pat, pat))?;
+            match consts[i] {
+                Some(MirConst::I64(n)) => Some(n),
+                _ => None,
+            }
+        };
+        let last = arms.len() - 1;
+        let mut out = Vec::new();
+        if let Some(plan) = crate::hir::match_tree::int_search(arms, literal) {
+            let mut blocks: Vec<Option<BlockId>> = vec![None; arms.len()];
+            for &(_, arm) in &plan.cases {
+                blocks[arm].get_or_insert_with(|| self.b.create_block());
+            }
+            let default = *blocks[plan.default].get_or_insert_with(|| self.b.create_block());
+            self.search_node(v, &plan.cases, &blocks, default)?;
+            for (i, block) in blocks.into_iter().enumerate() {
+                let Some(block) = block else { continue };
+                self.switch(block);
+                if let HirPat::Bind(local) = arms[i].pat {
+                    self.bind(local, v)?;
+                }
+                let val = self.arm_value(arms[i].body, tail)?;
+                if !matches!(val, Val::Never) {
+                    out.push((self.cur, val));
+                }
+            }
+            return self.join_arms(out);
+        }
+        let mut last_start = None;
+        for (i, arm) in arms.iter().enumerate() {
+            let miss = match consts[i] {
+                Some(c) if i < last => {
+                    let c = self.b.ins_const(c).map_err(mir)?;
+                    let hit = self.b.ins_cmp(MirCmpOp::Eq, v, c).map_err(mir)?;
+                    let arm_b = self.b.create_block();
+                    let miss = self.b.create_block();
+                    self.b.branch(hit, arm_b, miss).map_err(mir)?;
+                    self.switch(arm_b);
+                    Some(miss)
+                }
+                _ => None,
+            };
+            if let HirPat::Bind(local) = arm.pat {
+                self.bind(local, v)?;
+            }
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+            }
+            if let Some(miss) = miss {
+                last_start = Some(self.order.len());
+                self.switch(miss);
+            }
+        }
+        if let Some(start) = last_start
+            && lower::cold_exit(self.hir, arms[last].body)
+        {
+            self.mark_cold(start);
+        }
+        self.join_arms(out)
+    }
+
+    /// Search the sorted `cases` for `v`, as `hir_search_node`: split on the
+    /// middle literal with `<` (bytecode `LE`), and test a small leaf case by
+    /// case.
+    fn search_node(&mut self, v: ValueId, cases: &[(i64, usize)], blocks: &[Option<BlockId>], default: BlockId) -> Result<(), Refusal> {
+        if cases.len() <= crate::hir::match_tree::SEARCH_LEAF {
+            for &(n, arm) in cases {
+                let c = self.b.ins_const(MirConst::I64(n)).map_err(mir)?;
+                let hit = self.b.ins_cmp(MirCmpOp::Eq, v, c).map_err(mir)?;
+                let next = self.b.create_block();
+                self.b.branch(hit, blocks[arm].expect("case arm has a block"), next).map_err(mir)?;
+                self.switch(next);
+            }
+            self.b.jump(default).map_err(mir)?;
+            return Ok(());
+        }
+        let mid = cases.len() / 2;
+        let c = self.b.ins_const(MirConst::I64(cases[mid].0)).map_err(mir)?;
+        let below = self.b.ins_cmp(MirCmpOp::Lt, v, c).map_err(mir)?;
+        let lower = self.b.create_block();
+        let upper = self.b.create_block();
+        self.b.branch(below, lower, upper).map_err(mir)?;
+        self.switch(lower);
+        self.search_node(v, &cases[..mid], blocks, default)?;
+        self.switch(upper);
+        self.search_node(v, &cases[mid..], blocks, default)
     }
 
     /// Bind a match arm's payload names to the payload word.
