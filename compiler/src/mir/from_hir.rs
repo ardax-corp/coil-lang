@@ -9,8 +9,10 @@
 //! It covers scalar bodies (`int` / `float` / `bool` values, arithmetic,
 //! compares, casts, `let` / assignment, `if`, loops and `return`), plain
 //! calls, two-word pairs (enums of at most one payload word, ranges and
-//! two-element tuples) and frame-slot aggregates (stack arrays and class
-//! locals one slot per field), each as HIR emission keeps them.
+//! two-element tuples), frame-slot aggregates (stack arrays and class
+//! locals one slot per field), each as HIR emission keeps them, and heap
+//! arrays and `Vec`s of `int` / `float` that the body reads and writes but
+//! does not allocate.
 //! Anything else refuses with the construct's name and the body keeps the
 //! IL lift.
 //!
@@ -18,20 +20,23 @@
 //! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
 //! numbers as for a lifted body.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
-use crate::typechecking::ty::{strip_readonly, Ty};
+use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::{MirBlock, MirFunc};
 use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
+
+/// First local of the values HIR emission keeps in temp slots.
+const TEMP_BASE: u32 = 1 << 30;
 
 /// Why a body did not lower; the name of the construct or check.
 pub type Refusal = String;
@@ -79,6 +84,11 @@ pub struct HirMirInput<'a> {
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
+    /// `len(x)` calls: a fixed size, or `None` for the array's length.
+    pub lens: &'a HashMap<u32, Option<u32>>,
+    /// `for x in xs` loops whose array the checker pinned: their reads
+    /// need no bounds check.
+    pub pinned_for: HashSet<u32>,
     /// Whether early exits move out of line, as HIR emission's
     /// `hir_mark_cold`.
     pub cold_ok: bool,
@@ -115,6 +125,9 @@ struct Lower<'a> {
     /// The expression being lowered is `return`ed: a `match` or `if`
     /// returns from each arm instead of joining, as HIR emission does.
     ret_tail: bool,
+    /// Next local for a value HIR emission keeps in a temp slot (a `for`
+    /// loop's index), numbered past any frame slot.
+    next_temp: u32,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -124,6 +137,22 @@ pub fn scalar(ty: &Ty) -> Option<MirTy> {
         "float" => Some(MirTy::F64),
         "bool" => Some(MirTy::Bool),
         _ => None,
+    }
+}
+
+/// The MIR type of a one-word value: a scalar, or a heap array or `Vec`
+/// of `int` or `float` (elements are raw words).
+pub fn word(ty: &Ty) -> Option<MirTy> {
+    scalar(ty).or_else(|| {
+        matches!(array_elem(ty).and_then(scalar), Some(MirTy::I64 | MirTy::F64)).then_some(MirTy::HeapRef)
+    })
+}
+
+/// The element type of an array or `Vec`.
+fn array_elem(ty: &Ty) -> Option<&Ty> {
+    match strip_readonly(ty) {
+        Ty::Array { element, .. } => Some(element),
+        _ => vec_element_ty(ty),
     }
 }
 
@@ -147,7 +176,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         Some((lo, _)) => lo,
-        None => scalar(ret).ok_or("return type")?,
+        None => word(ret).ok_or("return type")?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
     b.set_ret_ty(ret_ty);
@@ -159,7 +188,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         let words = match inp.pair_locals.get(&param.0) {
             Some(&(hi, lo_ty, hi_ty)) if hi == next + 1 => vec![lo_ty, hi_ty],
             Some(_) => return Err("param slot".into()),
-            None => vec![hir.local(param).ty.as_ref().and_then(scalar).ok_or("param type")?],
+            None => vec![hir.local(param).ty.as_ref().and_then(word).ok_or("param type")?],
         };
         for ty in words {
             let v = b.add_param(ty).map_err(mir)?;
@@ -179,6 +208,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
+        next_temp: TEMP_BASE,
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -329,8 +359,18 @@ impl Lower<'_> {
             .ok_or_else(|| "local slot".into())
     }
 
+    /// The type of a one-word local. A stack array or class local is
+    /// slots, not a word.
     fn local_ty(&self, local: HirLocal) -> Result<MirTy, Refusal> {
-        self.hir.local(local).ty.as_ref().and_then(scalar).ok_or_else(|| "local type".into())
+        if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) {
+            return Err("frame-slot local value".into());
+        }
+        self.hir.local(local).ty.as_ref().and_then(word).ok_or_else(|| "local type".into())
+    }
+
+    fn temp(&mut self) -> LocalId {
+        self.next_temp += 1;
+        LocalId(self.next_temp - 1)
     }
 
     fn expr_ty(&self, id: HirId) -> Option<&Ty> {
@@ -440,6 +480,7 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
+            HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
@@ -579,6 +620,13 @@ impl Lower<'_> {
                 };
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
+            HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(ForInKind::Array),
+            } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
@@ -733,7 +781,6 @@ impl Lower<'_> {
         }
         self.b.def_local(x, start).map_err(mir)?;
         let head = self.b.create_block();
-        let step = self.b.create_block();
         let exit = self.b.create_block();
         let body_b = self.b.create_block();
         self.jump(head)?;
@@ -743,25 +790,42 @@ impl Lower<'_> {
         let more = self.b.ins_cmp(op, cur, end).map_err(mir)?;
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
+        let one = if float { MirConst::F64(1.0_f64.to_bits()) } else { MirConst::I64(1) };
+        self.counted_body(body, head, exit, x, ty, one)
+    }
+
+    /// A counted loop's body, then `counter += one` and back to `head`. The
+    /// step ends the body's last block unless a `continue` needs it as its
+    /// own target, as HIR emission places it (the shape MIR vectorize
+    /// matches).
+    fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst) -> Result<Val, Refusal> {
+        let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
-            cont: step,
+            cont: step.unwrap_or(head),
             cont_used: false,
             exit: Some(exit),
         });
         let live = self.effect(body);
         let done = self.loops.pop().expect("loop pushed above");
-        if live? {
-            self.jump(step)?;
-        } else if !done.cont_used {
+        let live = live?;
+        match step {
+            Some(step) if live || done.cont_used => {
+                if live {
+                    self.jump(step)?;
+                }
+                self.switch(step);
+            }
+            None if live => {}
             // Nothing reaches the step.
-            self.switch(exit);
-            return Ok(Val::Unit);
+            _ => {
+                self.switch(exit);
+                return Ok(Val::Unit);
+            }
         }
-        self.switch(step);
-        let cur = self.b.use_local(x, ty).map_err(mir)?;
-        let one = self.b.ins_const(if float { MirConst::F64(1.0_f64.to_bits()) } else { MirConst::I64(1) }).map_err(mir)?;
+        let cur = self.b.use_local(counter, ty).map_err(mir)?;
+        let one = self.b.ins_const(one).map_err(mir)?;
         let next = self.b.ins_binop(MirBinOp::Add, cur, one).map_err(mir)?;
-        self.b.def_local(x, next).map_err(mir)?;
+        self.b.def_local(counter, next).map_err(mir)?;
         self.jump(head)?;
         self.switch(exit);
         Ok(Val::Unit)
@@ -886,11 +950,11 @@ impl Lower<'_> {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
-            _ => (scalar(ty).ok_or("call type")?, None),
+            _ => (word(ty).ok_or("call type")?, None),
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
-            if !pair && self.expr_ty(arg).and_then(scalar).is_none() {
+            if !pair && self.expr_ty(arg).and_then(word).is_none() {
                 return Err("call argument type".into());
             }
             match (self.value(arg)?, pair) {
@@ -968,21 +1032,124 @@ impl Lower<'_> {
         if !lower::stack_index_proven(self.hir, node, index, n) {
             return Err("stack index".into());
         }
+        Ok(self.index_word(index)?.map(Err))
+    }
+
+    /// An index's word, with HIR emission's Euclidean fix-up for `x % m`:
+    /// `r + ((r >> 63) & m)`.
+    fn index_word(&mut self, index: HirId) -> Result<Option<ValueId>, Refusal> {
         let Some(mut idx) = self.word(index)? else {
             return Ok(None);
         };
         if self.b.value_ty(idx) != MirTy::I64 {
-            return Err("stack index type".into());
+            return Err("index type".into());
         }
         if let Some(m) = lower::index_euclid(self.hir, index) {
-            // `x % m` in an index is Euclidean: `r + ((r >> 63) & m)`.
             let sh = self.b.ins_const(MirConst::I64(63)).map_err(mir)?;
             let m = self.b.ins_const(MirConst::I64(i64::from(m))).map_err(mir)?;
             let sign = self.b.ins_binop(MirBinOp::Shr, idx, sh).map_err(mir)?;
             let fix = self.b.ins_binop(MirBinOp::BitAnd, sign, m).map_err(mir)?;
             idx = self.b.ins_binop(MirBinOp::Add, idx, fix).map_err(mir)?;
         }
-        Ok(Some(Err(idx)))
+        Ok(Some(idx))
+    }
+
+    /// Whether `id` is a heap array this phase lowers (its type is one word).
+    fn heap_array(&self, id: HirId) -> bool {
+        self.expr_ty(id).and_then(word) == Some(MirTy::HeapRef)
+    }
+
+    /// `xs[i]` on a heap array: the array, then the index, as HIR emission
+    /// pushes them.
+    fn heap_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).and_then(scalar).ok_or("element type")?;
+        let Some(arr) = self.word(base)? else {
+            return Ok(Val::Never);
+        };
+        let Some(idx) = self.index_word(index)? else {
+            return Ok(Val::Never);
+        };
+        let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS);
+        Ok(Val::V(self.b.ins_index(arr, idx, ty, proven).map_err(mir)?))
+    }
+
+    /// `xs[i] = v` on a heap array: the value first, then the array and
+    /// index, as HIR emission stages them. The bounds check stays unless
+    /// the checker proved the index and the value cannot change the array.
+    fn heap_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(place).and_then(scalar).ok_or("element type")?;
+        let Some(v) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(v) != ty {
+            return Err("element type".into());
+        }
+        let Some(arr) = self.word(base)? else {
+            return Ok(Val::Never);
+        };
+        let Some(idx) = self.index_word(index)? else {
+            return Ok(Val::Never);
+        };
+        let mut quiet = true;
+        lower::visit(self.hir, value, &mut |e| {
+            quiet &= !matches!(
+                e.kind,
+                HirKind::Call { .. } | HirKind::Assign { .. } | HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. }
+            );
+        });
+        let unchecked = quiet && self.hir.expr(place).flags.contains(HirFlags::IN_BOUNDS);
+        self.b.ins_store_index(arr, idx, v, unchecked).map_err(mir)?;
+        Ok(Val::Unit)
+    }
+
+    /// `len(x)`: a fixed size (a local or literal is not read), or the
+    /// heap array's length.
+    fn len(&mut self, arg: HirId, fixed: Option<u32>) -> Result<Val, Refusal> {
+        if let Some(n) = fixed {
+            if !matches!(self.hir.expr(arg).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
+                return Err("len operand".into());
+            }
+            return Ok(Val::V(self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?));
+        }
+        if !self.heap_array(arg) {
+            return Err("len operand".into());
+        }
+        let Some(arr) = self.word(arg)? else {
+            return Ok(Val::Never);
+        };
+        Ok(Val::V(self.b.ins_array_len(arr).map_err(mir)?))
+    }
+
+    /// `for x in xs` over a heap array, as HIR emission lowers it: the
+    /// length is read once, and the index steps after the body (or at a
+    /// `continue`).
+    fn for_array(&mut self, id: HirId, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        let ty = self.local_ty(local)?;
+        let elem = self.expr_ty(iterable).and_then(array_elem).and_then(scalar);
+        if elem != Some(ty) {
+            return Err("for in element type".into());
+        }
+        let x = self.slot(local)?;
+        let Some(arr) = self.word(iterable)? else {
+            return Ok(Val::Never);
+        };
+        let len = self.b.ins_array_len(arr).map_err(mir)?;
+        let i = self.temp();
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        self.b.def_local(i, zero).map_err(mir)?;
+        let head = self.b.create_block();
+        let exit = self.b.create_block();
+        let body_b = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+        let more = self.b.ins_cmp(MirCmpOp::Lt, cur, len).map_err(mir)?;
+        self.b.branch(more, body_b, exit).map_err(mir)?;
+        self.switch(body_b);
+        let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+        let item = self.b.ins_index(arr, cur, ty, self.inp.pinned_for.contains(&id.0)).map_err(mir)?;
+        self.b.def_local(x, item).map_err(mir)?;
+        self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1))
     }
 
     /// Branch on `idx` to each of slots `base..base + n`, as HIR emission's
@@ -1029,10 +1196,14 @@ impl Lower<'_> {
     /// `a[i] = v` on a stack array: the value first, then the index, as
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
-        let HirKind::Local(local) = self.hir.expr(base).kind else {
-            return Err("assign place".into());
+        let stack = match self.hir.expr(base).kind {
+            HirKind::Local(local) => self.inp.stacks.get(&local.0).copied(),
+            _ => None,
         };
-        let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0) else {
+        let Some((slot, n, ty)) = stack else {
+            if self.heap_array(base) {
+                return self.heap_store(place, base, index, value);
+            }
             return Err("assign place".into());
         };
         let Some(v) = self.word(value)? else {
