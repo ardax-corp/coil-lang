@@ -3034,10 +3034,15 @@ fn main() {
 
 /// `bottom_up`'s bytecode and the pool, from a fresh pipeline.
 fn bottom_up_body() -> (Vec<common::Byte>, Vec<common::Byte>, Vec<u64>, crate::Pipeline) {
+    fn_body(BOTTOM_UP, "bottom_up")
+}
+
+/// Function `name`'s bytecode, the whole program and the pool.
+fn fn_body(src: &str, name: &str) -> (Vec<common::Byte>, Vec<common::Byte>, Vec<u64>, crate::Pipeline) {
     let mut p = crate::Pipeline::new();
-    let (bc, constants) = p.compile_src(BOTTOM_UP).expect("compile bottom_up");
+    let (bc, constants) = p.compile_src(src).unwrap_or_else(|_| panic!("compile {name}"));
     let syms = p.program_debug().fn_symbols;
-    let i = syms.iter().position(|s| s.name == "bottom_up").expect("bottom_up");
+    let i = syms.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
     let start = syms[i].entry_pc as usize;
     let end = syms.get(i + 1).map(|s| s.entry_pc as usize).unwrap_or(bc.len());
     (bc[start..end].to_vec(), bc, constants, p)
@@ -3100,6 +3105,29 @@ fn pipeline_bottom_up_makes_enums_into_return() {
     p.wire_host_natives(&mut vm);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked(), "bottom_up after DenseMake");
+}
+
+/// `Ok(v) => v, Err(e) => e` yields the payload word either way: the tag
+/// test and both arms fold away, leaving no branch.
+#[test]
+fn same_payload_match_arms_fold_to_no_branch() {
+    let src = r#"
+fn either(Result<int, int> r) -> int {
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(e) => e,
+    };
+}
+fn main() {
+    let _ = either(Result::Ok(1));
+}
+"#;
+    let (body, ..) = fn_body(src, "either");
+    let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+    assert!(
+        names.iter().all(|n| !n.contains("Jmp") && !n.contains("JMP") && !n.contains("JumpIf")),
+        "no branch left; ops={names:?}"
+    );
 }
 
 #[test]
