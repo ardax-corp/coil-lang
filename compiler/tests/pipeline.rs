@@ -1232,10 +1232,11 @@ fn main() {
     assert!(constants.is_empty());
 }
 
+/// A `let` and a re-assignment of the same binding both reach the output:
+/// the stack path stores each to the binding's slot, a body lowered
+/// straight from HIR keeps the binding in a register.
 #[test]
-fn let_binding_emits_store_pop_in_bytecode() {
-    use common::Instruction;
-    let mut pipeline = test_pipeline();
+fn let_binding_and_reassignment_both_print() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -1246,22 +1247,7 @@ use string::{format, to_bytes};
             write(stdout(), to_bytes(format("%i", x)));
         }
     "#;
-    let parser = parser::Pratt::default();
-    let mut ast = parser.parse(src).expect("let-binding program should parse");
-    let (bytecode, _constants) = pipeline.compile_test("", &mut ast);
-    assert!(!bytecode.is_empty(), "program should produce bytecode");
-
-    let binding_store_count = bytecode
-        .iter()
-        .filter(|b| {
-            matches!(b.bytecode(), Instruction::STORE) && b.load_store_single_slot() == Some(0)
-        })
-        .count();
-    assert_eq!(
-        binding_store_count, 2,
-        "expected exactly 2 STORE writes to binding slot 0 for one let + one re-assignment; got {}",
-        binding_store_count
-    );
+    assert_eq!(run_example_src(src), "510");
 }
 
 /// Critical regression: shuffled named args must reorder to declaration
@@ -4776,8 +4762,9 @@ fn main() {
     assert_eq!(output, "18");
 }
 
-/// `if !done { break }` fuses `LogNot; JMPF` and runs. (`LogNotJmpt` came
-/// from `invert_guard_branch`, removed 2026-10.)
+/// `if !done { break }` leaves no standalone `LogNot`: the stack path fuses
+/// `LogNot; JMPF`, and in registers the branch takes its targets swapped.
+/// (`LogNotJmpt` came from `invert_guard_branch`, removed 2026-10.)
 #[test]
 fn not_flag_break_log_not_jmpf_runs() {
     let src = r#"
@@ -4796,10 +4783,10 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
-        bytecode
+        !bytecode
             .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::LogNotJmpf)),
-        "expected LogNotJmpf in bytecode"
+            .any(|b| matches!(b.bytecode(), common::Instruction::LogNot)),
+        "expected the `!` folded into the branch"
     );
     assert_eq!(run_example_src(src), "0");
 }

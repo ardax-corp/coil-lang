@@ -3015,14 +3015,7 @@ fn main() {
     );
 }
 
-/// The payload words of `Node(bottom_up(..), bottom_up(..))` are open
-/// self-call results, which MIR types as `i64` from their use. Lowering
-/// them typed scalar dropped the first subtree from the GC roots across
-/// the second call (and marked it scalar in the object), so the body stays
-/// on the stack path, where `MakeEnumReturnK` carries the pointer kinds.
-#[test]
-fn b6_recursive_make_enum_of_open_calls_stays_on_stack() {
-    let src = r#"
+const BOTTOM_UP: &str = r#"
 enum Tree {
     Leaf,
     Node(Tree, Tree),
@@ -3038,62 +3031,71 @@ fn main() {
     let _ = bottom_up(2);
 }
 "#;
-    let mut p = crate::Pipeline::new();
-    let _ = p.compile_src(src).expect("compile bottom_up");
-    assert!(
-        p.stack_maps().iter().all(|m| m.safepoints.is_empty()),
-        "recursive MakeEnum of call results must not bind scalar-typed maps: {:?}",
-        p.stack_maps()
-    );
+
+/// `bottom_up`'s bytecode and the pool, from a fresh pipeline.
+fn bottom_up_body() -> (Vec<common::Byte>, Vec<common::Byte>, Vec<u64>, crate::Pipeline) {
+    fn_body(BOTTOM_UP, "bottom_up")
 }
 
-#[test]
-fn pipeline_bottom_up_fuses_make_enum_return() {
-    let src = r#"
-enum Tree {
-    Leaf,
-    Node(Tree, Tree),
-}
-#[max_depth(8)]
-fn bottom_up(int depth) -> Tree {
-    if depth == 0 {
-        return Tree::Leaf();
-    }
-    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
-}
-fn main() {
-    let _ = bottom_up(2);
-}
-"#;
+/// Function `name`'s bytecode, the whole program and the pool.
+fn fn_body(src: &str, name: &str) -> (Vec<common::Byte>, Vec<common::Byte>, Vec<u64>, crate::Pipeline) {
     let mut p = crate::Pipeline::new();
-    let (bc, constants) = p.compile_src(src).expect("compile bottom_up");
+    let (bc, constants) = p.compile_src(src).unwrap_or_else(|_| panic!("compile {name}"));
     let syms = p.program_debug().fn_symbols;
-    let i = syms
-        .iter()
-        .position(|s| s.name == "bottom_up")
-        .expect("bottom_up");
+    let i = syms.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
     let start = syms[i].entry_pc as usize;
-    let end = syms
-        .get(i + 1)
-        .map(|s| s.entry_pc as usize)
-        .unwrap_or(bc.len());
-    let body = &bc[start..end];
-    let fused = body
-        .iter()
-        .filter(|b| matches!(*b.bytecode(), Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK))
-        .count();
-    let leftover = body
-        .iter()
-        .filter(|b| matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
-        .count();
+    let end = syms.get(i + 1).map(|s| s.entry_pc as usize).unwrap_or(bc.len());
+    (bc[start..end].to_vec(), bc, constants, p)
+}
+
+/// The payload words of `Node(bottom_up(..), bottom_up(..))` are the
+/// recursive calls' results. The stack lift once typed them scalar (open
+/// call results), which dropped the first subtree from the GC roots across
+/// the second call and marked it scalar in the object. Lowered straight
+/// from HIR they are heap words: both payload words carry pointer kinds.
+#[test]
+fn b6_recursive_make_enum_of_call_results_marks_pointers() {
+    let (body, _, constants, _) = bottom_up_body();
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-    assert_eq!(
-        fused, 2,
-        "COI-388: Leaf + Node should be MakeEnumReturn; ops={names:?}"
-    );
-    assert_eq!(
-        leftover, 0,
-        "COI-388: bottom_up must not leave MakeEnum; RETURN; ops={names:?}"
+    let make = body
+        .iter()
+        .find(|b| *b.bytecode() == Instruction::DenseMakeK)
+        .unwrap_or_else(|| panic!("Node builds with DenseMakeK; ops={names:?}"));
+    let (_, _, arity, _, kinds) = make.dense_make_k_parts(&constants).expect("DenseMakeK pool entry");
+    assert_eq!(arity, 2, "ops={names:?}");
+    for word in 0..2 {
+        assert_eq!(
+            common::packed_word_kind(kinds, word),
+            common::WORD_POINTER,
+            "subtree {word} must be a pointer word; ops={names:?}"
+        );
+    }
+}
+
+/// COI-388 fused `MakeEnum; RETURN` on the stack path; in registers each
+/// variant is one `DenseMake`/`DenseMakeK` straight into its return, with
+/// no stack `MakeEnum` left over.
+#[test]
+fn pipeline_bottom_up_makes_enums_into_return() {
+    let (body, bc, constants, p) = bottom_up_body();
+    let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+    let makes: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(*b.bytecode(), Instruction::DenseMake | Instruction::DenseMakeK))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(makes.len(), 2, "Leaf + Node each make once; ops={names:?}");
+    for i in makes {
+        assert_eq!(
+            body.get(i + 1).map(|b| *b.bytecode()),
+            Some(Instruction::LoadReturnSlot),
+            "a variant returns as it is made; ops={names:?}"
+        );
+    }
+    assert!(
+        body.iter().all(|b| !matches!(*b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+        "bottom_up must not leave a stack MakeEnum; ops={names:?}"
     );
     assert!(
         body.iter().all(|b| *b.bytecode() != Instruction::FORMAT),
@@ -3102,7 +3104,30 @@ fn main() {
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     p.wire_host_natives(&mut vm);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-    assert!(!vm.panicked(), "bottom_up after MakeEnumReturn");
+    assert!(!vm.panicked(), "bottom_up after DenseMake");
+}
+
+/// `Ok(v) => v, Err(e) => e` yields the payload word either way: the tag
+/// test and both arms fold away, leaving no branch.
+#[test]
+fn same_payload_match_arms_fold_to_no_branch() {
+    let src = r#"
+fn either(Result<int, int> r) -> int {
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(e) => e,
+    };
+}
+fn main() {
+    let _ = either(Result::Ok(1));
+}
+"#;
+    let (body, ..) = fn_body(src, "either");
+    let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+    assert!(
+        names.iter().all(|n| !n.contains("Jmp") && !n.contains("JMP") && !n.contains("JumpIf")),
+        "no branch left; ops={names:?}"
+    );
 }
 
 #[test]

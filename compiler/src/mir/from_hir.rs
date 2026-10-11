@@ -117,6 +117,9 @@ pub struct HirMirInput<'a> {
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// String table index of each `string` literal.
     pub strings: &'a HashMap<u32, u32>,
+    /// `format` calls with only word arguments, and string `+` (as
+    /// `"%s%s"`): the format string's index.
+    pub formats: &'a HashMap<u32, u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -130,6 +133,9 @@ pub struct HirMirInput<'a> {
     pub scalar_variant: ScalarVariantFn<'a>,
     /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
     pub boxed_enum: BoxedEnumFn<'a>,
+    /// A user enum whose variants carry a drop hook (`TagEnumType` after
+    /// `MakeEnum`), by name.
+    pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -380,6 +386,35 @@ fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
 /// branch), then lay the blocks out in `order`, dropping the ones nothing
 /// reaches.
 fn tidy(func: &mut MirFunc, order: &[BlockId]) {
+    // A branch whose arms are both empty and end alike (a jump to one block
+    // with the same φ values from each, or the same return) goes the same
+    // way either way: jump to one arm.
+    for i in 0..func.blocks.len() {
+        let Some(Terminator::Br { taken, not_taken, .. }) = func.blocks[i].term else {
+            continue;
+        };
+        let empty = |x: BlockId| x != func.entry && func.block(x).insts.is_empty();
+        if taken == not_taken || !empty(taken) || !empty(not_taken) {
+            continue;
+        }
+        let same = match (&func.block(taken).term, &func.block(not_taken).term) {
+            (Some(Terminator::Jump { dest: c }), Some(Terminator::Jump { dest: c2 })) => {
+                c == c2
+                    && func.block(*c).insts.iter().all(|inst| match inst {
+                        MirInst::Phi { args, .. } => {
+                            let from = |x: BlockId| args.iter().find(|(f, _)| *f == x).map(|&(_, v)| v);
+                            from(taken) == from(not_taken)
+                        }
+                        _ => true,
+                    })
+            }
+            (Some(t @ Terminator::Return { .. }), Some(t2)) => t == t2,
+            _ => false,
+        };
+        if same {
+            func.blocks[i].term = Some(Terminator::Jump { dest: taken });
+        }
+    }
     loop {
         let mut changed = false;
         for i in 0..func.blocks.len() {
@@ -564,6 +599,8 @@ impl Lower<'_> {
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
+            // A unit body's tail value (a call kept for its effect) is dropped.
+            (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
             (Val::Pair(lo, hi), Some((lo_ty, hi_ty))) => {
                 if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
@@ -634,7 +671,19 @@ impl Lower<'_> {
 
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
-        Ok(!matches!(self.value(id)?, Val::Never))
+        // A host's two-word result nobody reads stays the boxed word it
+        // comes back as: no unboxing to a pair just to drop it.
+        self.raw_host = self.host_pair(id);
+        let out = self.value(id);
+        self.raw_host = false;
+        Ok(!matches!(out?, Val::Never))
+    }
+
+    /// A host call whose result is a boxed enum unboxed to a pair.
+    fn host_pair(&self, id: HirId) -> bool {
+        matches!(self.hir.expr(id).kind, HirKind::Call { .. })
+            && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
+            && self.inp.pair_tys.contains_key(&id.0)
     }
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
@@ -678,9 +727,12 @@ impl Lower<'_> {
                 let slot = self.slot(*local)?;
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
+            // `a + b` on strings is `format("%s%s", a, b)`.
+            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
+            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
@@ -733,6 +785,14 @@ impl Lower<'_> {
                     if !self.stmt(stmt)? {
                         return Ok(Val::Never);
                     }
+                }
+                // A `()` block's host-call tail is dropped (`main`'s
+                // `write(..)`): its result stays raw.
+                if let Some(t) = *tail
+                    && self.expr_ty(id).is_some_and(is_unit)
+                    && self.host_pair(t)
+                {
+                    self.raw_host = true;
                 }
                 match tail {
                     // The body's own tail is a statement to HIR emission, and
@@ -858,6 +918,12 @@ impl Lower<'_> {
                 kind: MakeKind::Variant { variant, .. },
                 args,
             } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => self.make_niche(variant, args, niche),
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
+                args,
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_enum)(t, Some(variant))) => {
+                self.make_boxed(enum_name, *tag, &tys, args)
+            }
             // A scalar enum's variant is its backing constant.
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
@@ -1562,6 +1628,34 @@ impl Lower<'_> {
         Ok(Val::V(obj))
     }
 
+    /// A boxed user enum variant: `MakeEnum` of the payload words, pushed
+    /// last field first (it pops field 0 first), as HIR emission's
+    /// `hir_make`.
+    fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
+        if !args.is_empty() && (self.inp.enum_drop)(enum_name) {
+            return Err("make drop enum".into());
+        }
+        let mut words = Vec::with_capacity(args.len());
+        for (&arg, t) in args.iter().zip(tys) {
+            let want = self
+                .inp
+                .word(t)
+                .filter(|_| !is_unit(t))
+                .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                .ok_or("make payload type")?;
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != want {
+                return Err("make payload word".into());
+            }
+            words.push(v);
+        }
+        words.reverse();
+        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+    }
+
     /// `v.push(x)` on a heap `Vec` of int/float: the Vec, then the value,
     /// then `ArrayPush` (a safepoint: it may grow the storage).
     fn push(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
@@ -1584,6 +1678,23 @@ impl Lower<'_> {
         let out = self.b.ins_array_push(arr, v).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         Ok(Val::Unit)
+    }
+
+    /// `format(fmt, args)` with word arguments: `FORMAT` of the format string
+    /// and each argument, a heap string the collector may see at once.
+    fn format(&mut self, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
+        // The string first, as emission loads it, so the arguments land in
+        // the registers after it.
+        let fmt = self.b.ins_string(fmt).map_err(mir)?;
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let out = self.b.ins_format(fmt, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native
