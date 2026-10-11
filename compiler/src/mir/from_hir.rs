@@ -70,7 +70,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_stream(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
     }
@@ -109,6 +109,8 @@ pub struct HirMirInput<'a> {
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
+    /// String table index of each `string` literal.
+    pub strings: &'a HashMap<u32, u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -210,6 +212,10 @@ fn unit_fields(fields: &HirPatFields) -> bool {
 }
 
 /// An `io` stream: a heap object the GC traces like any other.
+fn is_string(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+}
+
 fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
 }
@@ -558,7 +564,12 @@ impl Lower<'_> {
                     Lit::Str(raw) if self.expr_ty(id).and_then(lower::primitive) == Some(crate::typechecking::ty::BYTE) => {
                         MirConst::I64(i64::from(lower::byte_literal(raw).ok_or("byte literal")?))
                     }
-                    Lit::Str(_) => return Err("string literal".into()),
+                    Lit::Str(_) => match self.inp.strings.get(&id.0) {
+                        Some(&idx) if self.expr_ty(id).is_some_and(is_string) => {
+                            return Ok(Val::V(self.b.ins_string(idx).map_err(mir)?));
+                        }
+                        _ => return Err("string literal".into()),
+                    },
                 };
                 // A literal typed `byte` (or anything else) is not this phase's.
                 if self.expr_ty(id).and_then(scalar) != Some(c.ty()) {
@@ -1558,7 +1569,8 @@ impl Lower<'_> {
             }
             return Ok(Val::V(self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?));
         }
-        if !self.heap_array(arg) {
+        // `ArrayLen` reads a string's byte length too.
+        if !self.heap_array(arg) && !self.expr_ty(arg).is_some_and(is_string) {
             return Err("len operand".into());
         }
         let Some(arr) = self.word(arg)? else {
@@ -2109,6 +2121,9 @@ impl Lower<'_> {
             return Err("if condition".into());
         }
         let then_b = self.b.create_block();
+        if els.is_none() && !tail {
+            return self.if_then(c, negated, then_b, then);
+        }
         let else_b = self.b.create_block();
         if negated {
             self.b.branch(c, else_b, then_b).map_err(mir)?;
@@ -2138,6 +2153,28 @@ impl Lower<'_> {
             }
         }
         self.join_arms(arms)
+    }
+
+    /// A statement `if` without an `else`: the false edge goes straight to
+    /// the join, so no empty block sits in front of it.
+    fn if_then(&mut self, c: ValueId, negated: bool, then_b: BlockId, then: HirId) -> Result<Val, Refusal> {
+        let join = self.b.create_block();
+        if negated {
+            self.b.branch(c, join, then_b).map_err(mir)?;
+        } else {
+            self.b.branch(c, then_b, join).map_err(mir)?;
+        }
+        let start = self.order.len();
+        self.switch(then_b);
+        if matches!(self.arm_value(then, false)?, Val::Never) {
+            if lower::cold_exit(self.hir, then) {
+                self.mark_cold(start);
+            }
+        } else {
+            self.jump(join)?;
+        }
+        self.switch(join);
+        Ok(Val::Unit)
     }
 
     /// Jump from each arm that falls through to a join made after all of

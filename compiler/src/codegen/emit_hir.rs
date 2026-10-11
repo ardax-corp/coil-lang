@@ -280,6 +280,8 @@ struct HirEmit {
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
     call_targets: HashMap<u32, crate::mir::HirCallSite>,
+    /// String table index of each `string` literal, by expression.
+    string_lits: HashMap<u32, u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -895,6 +897,7 @@ impl Compiler {
             sroa,
             fields,
             calls: &emit.call_targets,
+            strings: &emit.string_lits,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -1789,6 +1792,7 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             call_targets: HashMap::new(),
+            string_lits: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -5834,9 +5838,9 @@ impl Compiler {
             }
             HirKind::Lit(Lit::Str(raw)) => {
                 let text = unescape_coil_string(raw);
-                let mut bc = CodeBuf::new();
-                self.emit_raw_string_literal(&mut bc, &text);
-                self.bytecode.append(&mut bc);
+                let idx = self.intern_string(&text);
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
             }
             HirKind::Lit(Lit::Unit) => self.bytecode.push_const(0),
             HirKind::Assign { place, value } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
