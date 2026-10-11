@@ -230,6 +230,10 @@ impl<const S: usize> Machine<S> {
                         while let Some(ch) = chars.next() {
                             if ch == '%' {
                                 match chars.peek() {
+                                    Some('%') => {
+                                        chars.next();
+                                        message.push('%');
+                                    }
                                     Some('i') => {
                                         chars.next();
                                         message.push_str(&params.pop().as_int().to_string());
@@ -300,6 +304,18 @@ impl<const S: usize> Machine<S> {
                         match head {
                             Some(head) => self.push_concat_str(head, &message, ip),
                             None => self.push_new_string(message, ip),
+                        }
+                    } else {
+                        // No arguments: the only specifier left to apply is
+                        // `%%`, so the literal is reused unless it has one.
+                        let fmt = self.stack.pop();
+                        let ptr = fmt.as_ptr::<GcData<ObjString>>();
+                        let format_string = (unsafe { &*ptr }).as_ref().data.as_str();
+                        if format_string.contains("%%") {
+                            let message = format_string.replace("%%", "%");
+                            self.push_new_string(message, ip);
+                        } else {
+                            self.stack.push(fmt);
                         }
                     }
                 }
