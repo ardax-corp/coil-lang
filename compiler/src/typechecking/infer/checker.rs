@@ -14164,7 +14164,30 @@ impl Checker {
         {
             return;
         }
+        let scheme = self.free_fn_stub_scheme(name, type_params, args, returns, where_constraints, is_coro);
+        // Bare too: a module's own body calls a later `fn` by its short name.
+        if key != name {
+            self.forward_free_fn_schemes.insert(name.to_string(), scheme.clone());
+        }
+        self.forward_free_fn_schemes.insert(key, scheme);
+    }
 
+    /// The scheme a free `fn` declares in its signature, before its body is
+    /// inferred (a forward stub or a pre-registered overload).
+    fn free_fn_stub_scheme(
+        &mut self,
+        name: &str,
+        type_params: &[parser::ast::TypeParam],
+        args: &Output,
+        returns: Option<&Output>,
+        where_constraints: &[parser::ast::WhereConstraint],
+        is_coro: bool,
+    ) -> Scheme {
+        let key = if self.current_module.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", self.current_module, name)
+        };
         let msg_len = self.messages.len();
         let is_generic = !type_params.is_empty();
         let mut param_vars: Vec<TyVarId> = Vec::new();
@@ -14237,25 +14260,14 @@ impl Checker {
         }
         fun_ty = Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false);
 
-        if is_generic {
+        let scheme = if is_generic {
             self.type_params_in_scope.pop();
-            let scheme =
-                Scheme::poly_with_kinds(param_vars, param_kinds, param_constraints, fun_ty);
-            self.forward_free_fn_schemes
-                .insert(name.to_string(), scheme.clone());
-            if key != name {
-                self.forward_free_fn_schemes.insert(key, scheme);
-            }
+            Scheme::poly_with_kinds(param_vars, param_kinds, param_constraints, fun_ty)
         } else {
-            // Bare too: a module's own body calls a later `fn` by its short
-            // name (generic ones above already were).
-            let scheme = Scheme::mono(fun_ty);
-            if key != name {
-                self.forward_free_fn_schemes.insert(name.to_string(), scheme.clone());
-            }
-            self.forward_free_fn_schemes.insert(key, scheme);
-        }
+            Scheme::mono(fun_ty)
+        };
         self.messages.truncate(msg_len);
+        scheme
     }
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so
@@ -14287,6 +14299,66 @@ impl Checker {
                     returns.as_ref(),
                     where_constraints,
                     *is_coro,
+                );
+            }
+        }
+        self.pre_register_overloads(children);
+    }
+
+    /// Register every overload of a name declared more than once in this
+    /// file, in declaration order, so a body calling one declared further
+    /// down still sees it (#848). `infer_function` later replaces each
+    /// candidate's scheme with the inferred one. A family with an untyped or
+    /// rest parameter is left to the main walk.
+    fn pre_register_overloads(&mut self, children: &[Output]) {
+        let mut decls: HashMap<&str, Vec<&Output>> = HashMap::new();
+        let mut order: Vec<&str> = Vec::new();
+        for child in children {
+            if let Expression::Function { name, .. } = child.1.as_ref() {
+                let entry = decls.entry(*name).or_default();
+                if entry.is_empty() {
+                    order.push(*name);
+                }
+                entry.push(child);
+            }
+        }
+        for name in order {
+            let family = &decls[name];
+            let plain_params = family.iter().all(|f| {
+                let Expression::Function { args, .. } = f.1.as_ref() else { return false };
+                match args.1.as_ref() {
+                    Expression::Fragment(items) => items.iter().all(|a| {
+                        matches!(a.1.as_ref(), Expression::Argument { ty: Some(_), is_rest: false, .. })
+                    }),
+                    _ => true,
+                }
+            });
+            if family.len() < 2 || !plain_params {
+                continue;
+            }
+            let key = if self.current_module.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}::{}", self.current_module, name)
+            };
+            for f in family {
+                let Expression::Function { type_params, args, returns, where_constraints, is_coro, .. } = f.1.as_ref()
+                else {
+                    continue;
+                };
+                let scheme =
+                    self.free_fn_stub_scheme(name, type_params, args, returns.as_ref(), where_constraints, *is_coro);
+                let param_names = Self::syntactic_param_names(args);
+                self.register_overload_candidate(
+                    &key,
+                    OverloadCandidate {
+                        id: 0,
+                        fixed_arity: param_names.len(),
+                        is_rest: false,
+                        scheme,
+                        param_names,
+                    },
+                    &f.0.into_range(),
                 );
             }
         }

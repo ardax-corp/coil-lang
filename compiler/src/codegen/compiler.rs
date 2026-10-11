@@ -813,7 +813,8 @@ impl Compiler {
                     if Self::is_coro_with_body(child) {
                         self.coroutine_fns.insert(qualified.clone());
                     }
-                    self.reserve_function_entry(qualified);
+                    let key = self.overload_entry_key(name, &qualified, child);
+                    self.reserve_function_entry(key);
                 }
                 Expression::Implementation { owner, methods, .. } => {
                     let owner_key = self.resolve_class_ident(owner);
@@ -2552,8 +2553,22 @@ impl Compiler {
                 } else {
                     format!("{}::{}", self.namespace, name)
                 };
-                self.reserve_function_entry(qualified);
+                let key = self.overload_entry_key(name, &qualified, child);
+                self.reserve_function_entry(key);
             }
+        }
+    }
+
+    /// The table key a free `fn` is emitted under: `name#arity.id` for an
+    /// overload (as `compile_function`), so a call emitted before a later
+    /// overload's body still finds its entry (#848).
+    fn overload_entry_key(&self, name: &str, qualified: &str, decl: &Output) -> String {
+        if !(self.checker.is_overloaded(name) || self.checker.is_overloaded(qualified)) {
+            return qualified.to_string();
+        }
+        match self.checker.overload_decl_at(decl.0.start, decl.0.end) {
+            Some((id, fixed, rest)) => overload_fn_key(qualified, fixed, rest, id),
+            None => qualified.to_string(),
         }
     }
 

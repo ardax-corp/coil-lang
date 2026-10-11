@@ -789,6 +789,19 @@ impl Checker {
         mut new_candidate: OverloadCandidate,
         range: &Range<usize>,
     ) {
+        // Pre-registered by `pre_register_overloads`: keep its id, take the
+        // inferred scheme.
+        if let Some(&(id, ..)) = self.overload_decl_by_span.get(&(range.start, range.end))
+            && let Some(existing) = self
+                .overload_sets
+                .get_mut(key)
+                .and_then(|c| c.iter_mut().find(|c| c.id == id))
+        {
+            existing.scheme = new_candidate.scheme.clone();
+            let def = self.intern_overload_def(key, id);
+            self.schemes_by_def.insert(def, new_candidate.scheme);
+            return;
+        }
         new_candidate.id = self
             .overload_sets
             .get(key)
