@@ -6949,7 +6949,7 @@ impl Compiler {
                 if dicts == 0
                     && generic.is_none()
                     && let Some(&IlOp::Entry {
-                        kind: crate::il::EntryKind::Call,
+                        kind: crate::il::EntryKind::Call | crate::il::EntryKind::TailCall,
                         target,
                         arity,
                         ret_words: ret_words @ (1 | 2),
