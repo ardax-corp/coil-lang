@@ -1006,6 +1006,19 @@ impl Lower<'_> {
         if arith.is_none() && cmp.is_none() {
             return Err(format!("operator {op:?}"));
         }
+        if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
+            return out;
+        }
+        if let Some((x, n, shift)) = self.strength_reduce(op, lhs, rhs) {
+            let Some(v) = self.word(x)? else {
+                return Ok(Val::Never);
+            };
+            if self.expr_ty(id).and_then(scalar) != Some(self.b.value_ty(v)) {
+                return Err("operator type".into());
+            }
+            let k = self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_binop(shift, v, k).map_err(mir)?));
+        }
         let Some(l) = self.word(lhs)? else {
             return Ok(Val::Never);
         };
@@ -1031,6 +1044,86 @@ impl Lower<'_> {
             (None, None) => unreachable!("refused above"),
         };
         Ok(Val::V(out.map_err(mir)?))
+    }
+
+    /// As HIR emission's `hir_strength_reduce`: `x / 2^n` as `x >> n` when
+    /// `x` is a `byte` or proved non-negative, and `x * 2^n` as `x << n`
+    /// when `x` is a `byte`. An int multiply stays: a shift would not trap
+    /// on overflow.
+    fn strength_reduce(&self, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, MirBinOp)> {
+        let pow2 = |id: HirId| self.int_imm(id).and_then(crate::const_fold::strength_div_int);
+        let byte = |id: HirId| self.expr_ty(id).is_some_and(lower::is_byte);
+        let nonneg = self.hir.expr(lhs).flags.contains(HirFlags::NONNEG) || byte(lhs);
+        match op {
+            BinOp::IntMul => pow2(rhs)
+                .filter(|_| byte(lhs))
+                .map(|n| (lhs, n, MirBinOp::Shl))
+                .or_else(|| pow2(lhs).filter(|_| byte(rhs)).map(|n| (rhs, n, MirBinOp::Shl))),
+            BinOp::IntDiv if nonneg => pow2(rhs).map(|n| (lhs, n, MirBinOp::Shr)),
+            _ => None,
+        }
+    }
+
+    /// As HIR emission's `hir_bitop_identity`: a bitwise identity or
+    /// annihilator lowers to its operand or a constant. Only a local or
+    /// literal operand is dropped, so an effect still runs.
+    fn bitop_identity(&mut self, id: HirId, op: BinOp, lhs: HirId, rhs: HirId) -> Option<Result<Val, Refusal>> {
+        let trivial = |id: HirId| matches!(self.hir.expr(id).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_) | Lit::Bool(_)));
+        let same = matches!((&self.hir.expr(lhs).kind, &self.hir.expr(rhs).kind), (HirKind::Local(a), HirKind::Local(b)) if a == b);
+        let operand = || match (self.int_imm(lhs), self.int_imm(rhs)) {
+            (Some(k), None) if trivial(rhs) => Some((rhs, k)),
+            (None, Some(k)) if trivial(lhs) => Some((lhs, k)),
+            _ => None,
+        };
+        let out: Result<HirId, i64> = match op {
+            BinOp::BitAnd | BinOp::BitOr if same => Ok(lhs),
+            BinOp::BitXor if same => Err(0),
+            BinOp::BitAnd => match operand()? {
+                (_, 0) => Err(0),
+                (x, -1) => Ok(x),
+                _ => return None,
+            },
+            BinOp::BitOr => match operand()? {
+                (x, 0) => Ok(x),
+                (_, -1) => Err(-1),
+                _ => return None,
+            },
+            BinOp::BitXor => match operand()? {
+                (x, 0) => Ok(x),
+                _ => return None,
+            },
+            BinOp::Shl | BinOp::Shr if self.int_imm(rhs) == Some(0) => Ok(lhs),
+            _ => return None,
+        };
+        Some(match out {
+            Ok(x) => self.value(x),
+            Err(k) => {
+                let c = match self.expr_ty(id).and_then(scalar)? {
+                    MirTy::I64 => MirConst::I64(k),
+                    MirTy::Bool => MirConst::Bool(k != 0),
+                    _ => return None,
+                };
+                self.b.ins_const(c).map(Val::V).map_err(mir)
+            }
+        })
+    }
+
+    /// An integer literal, or a `const` local bound to one (HIR emission's
+    /// `hir_int_imm`; `const` globals do not reach direct MIR).
+    fn int_imm(&self, id: HirId) -> Option<i64> {
+        match &self.hir.expr(id).kind {
+            HirKind::Lit(Lit::Int(k)) => Some(*k),
+            HirKind::Local(local) if self.hir.local(*local).kind == crate::hir::LocalKind::Const => {
+                self.hir.exprs.iter().find_map(|e| match e.kind {
+                    HirKind::Let { local: l, init: Some(init) } if l == *local => match self.hir.expr(init).kind {
+                        HirKind::Lit(Lit::Int(k)) => Some(k),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn logic(&mut self, and: bool, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
