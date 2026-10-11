@@ -4,8 +4,7 @@
 
 Playable text adventure over **stdin/stdout**: rooms/items (`world.hy`),
 byte-line command parse (`commands.hy`), save encode/decode (`save.hy`),
-REPL + file/stdin IO in `main.hy`. Multiple `use …::*` imports resolve on
-the **entry** file.
+REPL + file/stdin IO in `main.hy`.
 
 ## Play (interactive)
 
@@ -52,8 +51,7 @@ Expected gist: Hall → Library (take key) → inventory → Hall → Garden →
 1. Stream IO stays in the entry file for clarity; dependency modules may call
    IO HostInvoke + `?` (see regression `multi_file_io_hostinvoke_try_in_dependency`).
 2. No `read_line` builtin — batch `read_to_end` + `\n` split (Ctrl+D / pipe).
-3. No `\n` string escapes; prompts use spaces.
-4. Commands compared as `[byte]` (not `from_bytes`).
-5. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels (`99`).
-6. Prefer `let s = stdin(); read_to_end(s)` (nested HostInvoke was buggy; fixed).
-7. Test harness is CWD-`./tests` only.
+3. Commands compared as `[byte]` (not `from_bytes`).
+4. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels (`99`).
+5. Prefer `let s = stdin(); read_to_end(s)` (nested HostInvoke was buggy; fixed).
+6. Test harness is CWD-`./tests` only.

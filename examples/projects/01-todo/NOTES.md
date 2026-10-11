@@ -26,6 +26,5 @@ and a sibling module imported via `use board::{…}`.
 2. **Enum fields on classes** — `t.status == Status::Todo` has crashed the VM;
    status is stored as `int` instead.
 3. **Empty `[Task] = []` is unreliable** — boards use a sentinel task at index 0.
-4. **No `\n` string escapes** — demo separates fields with `" | "`.
-5. **`coil test` only scans `./tests` relative to CWD** — must `cd` into
+4. **`coil test` only scans `./tests` relative to CWD** — must `cd` into
    the project (no `--project` flag yet).

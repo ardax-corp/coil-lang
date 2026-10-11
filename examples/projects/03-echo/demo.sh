@@ -7,6 +7,8 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="${BIN:-$CARGO_TARGET_DIR/release/coil}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-10}"
+# coil reads no coil.toml: pass the project and stdlib roots as flags.
+ROOTS=(--root "$HERE/src" --root "$ROOT/.deps/coil-stdlib/src" --root "$ROOT/../coil-stdlib/src")
 
 if [[ ! -x "$BIN" ]]; then
   echo "Building release coil…"
@@ -14,4 +16,4 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 rm -f "$ROOT/out.hyc" "$HERE/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" --allow-net "$HERE/src/main.hy"
+timeout "${TIMEOUT_SECS}s" "$BIN" "${ROOTS[@]}" --allow-net "$HERE/src/main.hy"

@@ -1,6 +1,7 @@
 # Showcase example projects
 
-Three escalating apps under `examples/projects/`. Each has its own `coil.toml`,
+Three escalating apps under `examples/projects/`. Each has its own `coil.toml`
+(a spool manifest; `coil` itself reads none, so plain runs pass `--root`),
 `src/`, co-located `tests/`, and `NOTES.md`. **Do not** put these suites under
 repo-root `tests/` (that tree is for language/compiler harness cases).
 
@@ -48,10 +49,14 @@ Manual equivalent (no scripts):
 
 ```bash
 rm -f out.hyc
-cargo run --release -- examples/projects/01-todo/src/main.hy
-timeout 10s cargo run --release -- --allow-read --allow-write examples/projects/02-adventure/src/main.hy \
-  < examples/projects/02-adventure/transcript.txt
-timeout 10s cargo run --release -- --allow-net examples/projects/03-echo/src/main.hy
+cargo run --release -- --root examples/projects/01-todo/src --root ../coil-stdlib/src \
+  examples/projects/01-todo/src/main.hy
+timeout 10s cargo run --release -- --allow-read --allow-write \
+  --root examples/projects/02-adventure/src --root ../coil-stdlib/src \
+  examples/projects/02-adventure/src/main.hy < examples/projects/02-adventure/transcript.txt
+timeout 10s cargo run --release -- --allow-net \
+  --root examples/projects/03-echo/src --root ../coil-stdlib/src \
+  examples/projects/03-echo/src/main.hy
 ```
 
 ## Per-project unit tests
@@ -80,12 +85,11 @@ ergonomics (no `coil test --project …` yet).
 See each project's `NOTES.md` for detail. Highlights:
 
 1. No `read_line` builtin; adventure uses `read_to_end` + `\n` split (Ctrl+D / pipe).
-2. No `\n` escapes in string literals (prompts use spaces).
-3. Prefer `let s = stdin(); read_to_end(s)` — nested `read_to_end(stdin())` was a
+2. Prefer `let s = stdin(); read_to_end(s)` — nested `read_to_end(stdin())` was a
    HostInvoke arg-order bug (fixed; regression: `examples/io_nested_host.hy`).
-4. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels.
-5. Test harness is CWD-`./tests` only; pipe adventure transcripts under `timeout`.
-6. Multi-file IO HostInvoke + `?` in a dependency is supported (regression:
+3. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels.
+4. Test harness is CWD-`./tests` only; pipe adventure transcripts under `timeout`.
+5. Multi-file IO HostInvoke + `?` in a dependency is supported (regression:
    `multi_file_io_hostinvoke_try_in_dependency` in
    `compiler/tests/namespace.rs`); demos may still keep Stream IO in the
    entry for layout clarity.
