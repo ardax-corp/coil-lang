@@ -70,6 +70,75 @@ pub fn encode_draft(func: &MirFunc) -> Option<DraftFrameMap> {
     })
 }
 
+/// A map built from MIR itself, for a body whose MIR did not come from
+/// lifting its stack IL (HIR to MIR): one site per allocation, each the
+/// frame registers (`regs`, from LIR emission) of every heap value live at
+/// any site, plus the parameters. Emission may place a tree allocation
+/// where it is used, so per-site sets would not follow the bytecode order;
+/// the union does, and a slot holding a non-heap word there is skipped by
+/// the collector. `None` when the body has no GC edge.
+pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Option<DraftFrameMap> {
+    let mut func = func.clone();
+    fill_live_roots(&mut func);
+    if func.gc_roots.is_empty() {
+        return None;
+    }
+    let mut slots: BTreeSet<u16> = (0..func.params.len()).filter_map(|i| u16::try_from(i).ok()).collect();
+    for set in &func.gc_roots {
+        for v in &set.values {
+            let slotted = func.params.contains(v) || need_slot.get(v.index()).copied().unwrap_or(false);
+            if slotted && let Some(&r) = regs.get(v.index()) {
+                slots.insert(u16::from(r));
+            }
+        }
+    }
+    // One site per allocating instruction: each emits one alloc opcode.
+    let n = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. }))
+        .count();
+    if n == 0 {
+        return None;
+    }
+    let slots: Vec<u16> = slots.into_iter().collect();
+    Some(DraftFrameMap {
+        name: func.name.clone(),
+        sites: vec![slots.clone(); n],
+        frame_slots: slots,
+    })
+}
+
+/// Whether direct MIR can give its allocating body maps: every allocation
+/// is followed by its `GcBarrier` (as [`encode_draft`] pairs them).
+pub fn mir_maps_ok(func: &MirFunc) -> bool {
+    let mut any = false;
+    for block in &func.blocks {
+        let mut pending = false;
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc { .. } | MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => {
+                    if pending {
+                        return false;
+                    }
+                    pending = true;
+                }
+                MirInst::GcBarrier { .. } => {
+                    pending = false;
+                    any = true;
+                }
+                _ if pending => return false,
+                _ => {}
+            }
+        }
+        if pending {
+            return false;
+        }
+    }
+    any
+}
+
 fn take_slots(func: &MirFunc, at: ValueId, into: &mut BTreeSet<u16>) {
     if let Some(side) = func.live_roots_at(at) {
         for s in &side.slots {
