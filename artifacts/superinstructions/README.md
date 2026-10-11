@@ -19,5 +19,5 @@ Checksums (`coil run` of compiled `.hyc`):
 
 `dissect/*.fn.txt` — hot function bytecode.
 `dissect/*.bytecode.txt` — full program bytecode (includes stdlib helpers).
-`opt-stats/*.txt` — `--opt-stats` (IL passes only).
+`opt-stats/*.txt` — `--opt-stats` (IL passes only; those passes were removed 2026-10, so these dumps are historical).
 `ngrams.txt` — weighted opcode n-grams (order-of-magnitude trip weights).

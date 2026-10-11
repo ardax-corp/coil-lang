@@ -12,9 +12,11 @@ Coil `int` arithmetic is exact or it panics, in every build
 | `a ** b` with `b < 0` | `negative exponent` |
 
 `MIN % -1` is `0`. Shifts and bitwise operators do not trap. Floats keep
-IEEE behaviour (`inf`, `NaN`). Wrapping, checked and saturating arithmetic
-are explicit operations in coil-stdlib
-([coil-stdlib#27](https://github.com/ardax-corp/coil-stdlib/issues/27)).
+IEEE behaviour (`inf`, `NaN`). Checked, wrapping, saturating and
+overflowing arithmetic are userland traits in coil-stdlib's `arith` module
+(`Checked`, `Wrapping`, `Saturating`, `Overflowing`;
+[coil-stdlib#29](https://github.com/ardax-corp/coil-stdlib/pull/29)). There
+is no overflow mode flag (`coil verify --overflow` was removed).
 
 Before this, a release VM wrapped silently and a debug VM aborted the
 process, and `x / 0` aborted in both.

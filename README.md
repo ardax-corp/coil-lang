@@ -50,7 +50,7 @@ Primitives (`int`, `float`, `string`, `bool`, `byte`), scalar-backed enums and `
 coil/
 ├── common/     # Opcodes, values, archive format
 ├── parser/     # Pratt parser, AST
-├── compiler/   # HM typechecker, stack IL codegen, pipeline
+├── compiler/   # HM typechecker, HIR optimizations + lowering to stack IL / MIR, pipeline
 ├── machine/    # VM, heap/GC, FFI, host natives
 ├── coil-*/     # CLI helpers (debug, dissect, fmt, lsp) and coil-embed (packaged-app runner, not an embed library)
 ├── examples/   # Runnable demos

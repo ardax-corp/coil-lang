@@ -10,6 +10,8 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="${BIN:-$CARGO_TARGET_DIR/release/coil}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-10}"
+# coil reads no coil.toml: pass the project and stdlib roots as flags.
+ROOTS=(--root "$HERE/src" --root "$ROOT/.deps/coil-stdlib/src" --root "$ROOT/../coil-stdlib/src")
 ENTRY="$HERE/src/main.hy"
 
 if [[ ! -x "$BIN" ]]; then
@@ -30,13 +32,13 @@ Usage: demo.sh [--ci]
 EOF
     ;;
   --ci | -c)
-    timeout "${TIMEOUT_SECS}s" "$BIN" "$ENTRY" <"$HERE/transcript.txt"
+    timeout "${TIMEOUT_SECS}s" "$BIN" "${ROOTS[@]}" --allow-read --allow-write "$ENTRY" <"$HERE/transcript.txt"
     ;;
   "")
     if [[ -t 0 ]]; then
-      exec "$BIN" "$ENTRY"
+      exec "$BIN" "${ROOTS[@]}" --allow-read --allow-write "$ENTRY"
     else
-      timeout "${TIMEOUT_SECS}s" "$BIN" "$ENTRY"
+      timeout "${TIMEOUT_SECS}s" "$BIN" "${ROOTS[@]}" --allow-read --allow-write "$ENTRY"
     fi
     ;;
   *)

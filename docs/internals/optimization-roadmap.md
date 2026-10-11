@@ -75,9 +75,10 @@ known-finite only — see [mir.md](mir.md#p11--mir-float-pipeline-coi-285)):
 - Codegen: `new Class(args).field` scalar replacement (no temp instance).
 - Operand order: `hir::fold` puts an `int` literal on the right (the stack-IL `canon` pass was removed 2026-10).
 
-LICM now iterates invariant float/int expression chains (nested loops can hoist
-more than one chain per call). Integer `i * c` strength reduction is on after
-`loop_bounds`. Float `cast(i)` affine SR is **refused** (not IEEE-exact).
+LICM (`hir::licm`) hoists invariant expression chains, nested loops included.
+There is no integer `i * c` strength reduction any more: the stack-IL pass was
+removed 2026-10, and MIR IV strength reduction is float-only because int
+overflow traps ([int-overflow.md](int-overflow.md)).
 
 Next AOT priorities below remain the main gap vs Lua on `mandelbrot` /
 `tak` / `nsieve` / `binary_trees`. Extra benches on `main`:
@@ -89,36 +90,37 @@ hit benches for the late-August opt revival (`iv_mul_sr`, `licm_nested_chains`,
 
 ## Landed since register-win harvest (ceiling contract)
 
-Late-August IL work is **on `main`** under [`OptLevel`](../../compiler/src/il/opt/opt_level.rs)
+Late-August IL work (since moved to HIR or removed, 2026-10) is **on `main`** under [`OptLevel`](../../compiler/src/il/opt/opt_level.rs)
 (`Standard` = default production). This is what actually ships — not a textbook
 pass list. Ceilings from the Aug investigation batch still bind; Linear Done
 titles can oversell.
 
 | Area | What landed | Ceiling (do not overshoot in docs or code) |
 |------|-------------|--------------------------------------------|
-| **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, scalar replacement, unroll). |
-| **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
+| **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + `sink_return`; `Debug` = HIR constant folding only (no scalar replacement, unroll or inlining). |
+| **try flatten** (codegen, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
 | **`local_cse`** (`hir/cse.rs`; stack-IL [#317](https://github.com/ardax-corp/coil-lang/pull/317) moved to HIR 2026-10) | Intra-block CSE on HIR: a repeated pure operator / cast / field / element / pure-call value reads the `let` local holding it | Killed by writes to the locals it reads, its holder, or (heap reads) the heap. Hit: `cse_index_recompute`, `cse_cast_recompute`. |
 | **`licm`** (`hir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR 2026-10) | Hoists invariant expressions out of loops on HIR | Hit: `licm_nested_chains`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
 | **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
 | **`loop_bounds`** (`hir/bounds.rs` + `len(a)` hoisting in `hir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
 | **`loop_unroll`** (`hir/unroll.rs`; stack-IL pass removed 2026-10) | Full unroll of counted loops, trip ≤ 8, after inlining; each copy reads the counter as a literal, then `hir::fold` folds the copies (merging `x = x + a; x = x + b`) | Calls, exits, closures and inner loops that do not unroll themselves refuse; nests flatten over up to 3 rounds; ≤ 512 added nodes per loop. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
-| **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
+| **`*Jmpt`** | fuse-select emits fused `*Jmpt` twins (the IL `JMPF; JMP` → `JMPT` invert was removed 2026-10) | Loop headers stay `*Jmpf` (COI-87). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
 | ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
-| **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
-| **Branch layout / block reorder** | Heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
+| **`collect_stats`** | Body tiers and HIR lowering / inlining counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
+| **Branch layout / block reorder** | Heuristic: HIR lowering lays early exits out after the body (`CodeBuf::move_exits_to_end`); the stack-IL passes were removed 2026-10 | Default **on** (COI-128 / COI-129). |
 
-Inlining / predicate peel / direct `new Class(args).field` scalar replacement
-live in **codegen**, not `il/opt` (self-recursive peel refused, COI-86). Try
+Inlining (the HIR typed inliner) and direct `new Class(args).field` scalar
+replacement live in **HIR / codegen**, not `il/opt`; the caller-side predicate
+peel went with the AST codegen (2026-10). Try
 flatten and sibling `TailCall` are also codegen. No JIT — Cranelift section
 below remains a feasibility sketch. **PGO is gone**
 ([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no flags, ingest,
 instrumentation, heat knobs, or `BranchProfile`. Branch layout / block reorder
 stay heuristic.
 
-Pass headers in `compiler/src/il/**` are the source of truth when this table
+Pass headers in `compiler/src/hir/**` are the source of truth when this table
 and Linear disagree.
 
 ## Hit-bench prove rule
@@ -194,7 +196,7 @@ Operand height (`il::sp`) is a different quantity from the `tell` cursor —
 [limitations](limitations.md#il-optimizations-low). The cursor-only
 `slot_promote_at` slice was removed 2026-10 (no bench effect).
 
-What slot promotion does not do yet (see
+What the removed slot promotion pass did not do (historical; see
 [limitations](limitations.md#il-optimizations-low)):
 
 - **Real slot liveness.** Without it, promotion must leave every slot with a

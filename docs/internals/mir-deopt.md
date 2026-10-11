@@ -31,8 +31,8 @@ source-level MIR stepping rewrite.
   native tier must refuse incomplete maps — do not resume from them.
 - Debugger-attached compiles (`Pipeline::set_debugger_attached`, used by
   `coil debug`) and `-Og` / `OptLevel::Debug` **keep**
-  `OptimizeOptions::mir_specialize`. `-Og` still uses Basic IL cleanup
-  only (no slot promote, escape SROA, unroll, or GVN). Stops stay on
+  `OptimizeOptions::mir_specialize`. `-Og` otherwise runs only the HIR constant fold
+  (no inlining, scalar replacement or unroll). Stops stay on
   the reconstruct (fuse-IL, LIR, or dense).
 
 ## Doctrine

@@ -32,7 +32,7 @@ island does not fire there.
 **Register VM / Cranelift are later levers**, not prerequisites. Do not
 block islands on P5. Do not revive PGO.
 
-**I8 entry (post I1–I3 / A3 / B1).** After stack-IL opts, `IlModule` tries
+**I8 entry (post I1–I3 / A3 / B1).** After HIR lowering (no stack-IL opts remain since 2026-10), `IlModule` tries
 dense specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
 has **no LIR reconstruct wall**. Walls today: unmapped I5 alloc, one-word I6
 `CALL` (Q7 densifies one-word self-`CALL` instead; HostInvoke word edges now

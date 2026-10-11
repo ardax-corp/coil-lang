@@ -26,7 +26,7 @@ the stack).
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / leftover unmapped heap. One-word `CALL` (Q7), two-slot helper / self / sibling `CALL` / `RETURN` (B3 / B7 / C1), niche / two-slot match (Q8), and mapped `ArrayPush` (B6) lower |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
-| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
+| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
 | text form | Print / parse for round-trip tests |
@@ -115,8 +115,8 @@ After SSA lower, **GVN** runs on the numeric function before dense emit
 tree and adds fully-anticipated fork PRE. HIR CSE (`hir::cse`) only sees
 source-level expressions within a block; this pass also numbers values
 lowering introduces and `DIV`/`MOD`/`DIVF`/`MODF` across blocks.
-Fuse-IL CSE / LICM are unchanged for non-MIR bodies (stack-IL InstCombine
-was removed 2026-10). Hit
+Non-MIR (fuse-IL) bodies get only the HIR CSE / LICM (the stack-IL passes,
+InstCombine included, were removed 2026-10). Hit
 benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
 
 ## P6 — MIR LICM + widen specialize (COI-280)

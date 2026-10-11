@@ -9,7 +9,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
 - Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
-- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status.Ok`, `Status.Ok + 1`). Show/String of a scalar case is the backing (`Status.Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
+- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Show/String of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
 - Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two-slot `[payload, tag]` on a *direct* `CALL`/`RETURN`. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`. Free `fn f<T>(T) -> Option<T>` is still `E0127`.
 
 ## Expression forms
@@ -25,8 +25,8 @@ lambda      fn (T x) use (y) => expr   // first-class fn values; named fns CALL 
 array lit   [1, 2, 3]
 tuple       (a, b)
 dict        { key: val, … }
-enum ctor   Status.Ok, Option.Some(x), Color.Red
-raise       raise "msg"        // catchable Result.Err (not process abort)
+enum ctor   Status::Ok, Option::Some(x), Color::Red
+raise       raise "msg"        // catchable Result::Err (not process abort)
 panic       panic "msg"        // abort process; CLI/embed exit 1 (Q5)
 try?        expr?              // Result early return
 default     expr ?? default
@@ -37,14 +37,15 @@ for         for x in iter { … }
 
 ## Pattern forms (match / let)
 
-- Literals, identifiers, `_` (nested wildcard only), `default` (whole-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E.A`, `E.B(x)`.
+- Literals, identifiers, `_` (nested wildcard only), `default` (whole-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E::A`, `E::B(x)`.
 - Nested record patterns on enum variants use slot-based unpack (compiler detail).
 - `let` destructuring: tuples and records only (no enum ctor patterns in `let`).
 
 ## IO patterns
 
 ```coil
-use io::{stdout, stderr, open, read, write, write_all, close, from_bytes, to_bytes};
+use io::{stdout, open, close};
+use io::sync::{write_all, read_to_end};   // coil-stdlib
 use string::{format, to_bytes};
 
 // Write formatted text
@@ -56,7 +57,7 @@ let buf = read_to_end(s)?;
 close(s)?;
 ```
 
-Buffers are `[byte]`, not `string`. Convert via `string::to_bytes` / `from_bytes`.
+Buffers are `Vec<byte>`, not `string`. Convert via `string::to_bytes` / `from_bytes`.
 
 Sync adapters exist for blocking-style loops on non-blocking streams — see [io](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/io.md) (`/docs/references/io`).
 
@@ -64,22 +65,22 @@ Sync adapters exist for blocking-style loops on non-blocking streams — see [io
 
 ```coil
 fn fallible() -> Result<int, string> {
-    if bad { return Result.Err("oops"); }
-    return Result.Ok(42);
+    if bad { return Result::Err("oops"); }
+    return Result::Ok(42);
 }
 
 fn caller() -> Result<int, string> {
     let x = fallible()?;   // propagate Err
-    return Result.Ok(x + 1);
+    return Result::Ok(x + 1);
 }
 
 match opt {
-    Option.None => 0,
-    Option.Some(v) => v,
+    Option::None => 0,
+    Option::Some(v) => v,
 }
 ```
 
-Constructor names are per-enum. Qualified form is canonical (`Status.Ok`, `Result.Ok(x)`, `Option.Some(x)`). Bare `Some`/`None`/`Ok`/`Err` is prelude sugar only when a single in-scope enum owns that case; otherwise it is a compile error and you must write `Enum.Case`.
+Constructor names are per-enum. Qualified form is canonical (`Status::Ok`, `Result::Ok(x)`, `Option::Some(x)`). Bare `Some`/`None`/`Ok`/`Err` is prelude sugar only when a single in-scope enum owns that case; otherwise it is a compile error and you must write `Enum::Case`.
 
 `assert(cond)?` in tests — returns `Result<(), string>`.
 
@@ -89,7 +90,7 @@ use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 ## Module resolution
 
 1. Virtual modules (`prelude`, `io`, `ffi`, …) — compiler-owned.
-2. `mod name;` or `use` of user module → disk file relative to project/`coil.toml`.
+2. `mod name;` or `use` of user module → disk file under a `--root` search root.
 3. Entry script namespace is empty; other files get prefix from path.
 
 `use foo::bar as b;` — `as` on concrete imports and brace items.
@@ -98,8 +99,8 @@ use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 
 | Attribute | Target |
 |-----------|--------|
-| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show/String use the backing word (`Status.Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
-| `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
+| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show/String use the backing word (`Status::Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
+| `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status::Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
 | Attribute macro `#[name(...)]` | `fn`, methods, `class`, `enum` — declared `attr name(FnDecl f, …) -> Code` / `attr name(TypeDecl t, …) -> Code` in another module; returns the code that replaces the item. Stacked ones apply outermost first |
 | User derive `#[derive(X)]` | `class`, `enum` — `derive X(TypeDecl t) -> Code attrs(helper)` in another module; `#[helper(...)]` on fields / variants |
 | Function-style macro `name!(…)` | expression, statement or top-level item — `macro name(Expr a, …) -> Code` in another module; each argument is an ordinary expression, a last `Vec<Expr>` takes the rest |
@@ -132,4 +133,4 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## What does NOT exist
 
-See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`): no general `sort`, string slice/trim builtins, `sin`/`sqrt`, HTTP in VM, manual alloc/free.
+See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in VM, manual alloc/free.

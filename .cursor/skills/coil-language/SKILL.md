@@ -4,7 +4,7 @@ description: >-
   Write and reason about coil programs (.hy): syntax, HM types, modules, virtual
   builtins, coroutines, FFI, and tests. Use when authoring or editing coil source,
   explaining coil syntax, debugging type errors, or when the user mentions .hy files,
-  coil.toml, or coil language features.
+  coil language features.
 ---
 
 # coil language
@@ -61,11 +61,11 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 
 | Topic | Rule |
 |-------|------|
-| Functions | `fn name(T arg) -> R { … }`; `async fn` for coroutines |
+| Functions | `fn name(T arg) -> R { … }`; `gen fn` for coroutines (`async fn` is the old spelling; `coil fmt` rewrites it) |
 | Variables | `let x = e;` / `const x = e;`; destructuring `let (a,b) = …`, `let { x } = …` |
 | Control | `if`/`else`, `if let P = e`, `while`, `while let P = e`, `for x in` / `for (k, v) in`, `break`/`continue` |
-| Types | Primitives `int` `float` `string` `bool` `byte`; arrays `[T]` / `[T; N]`; tuples; dicts as anonymous records |
-| Enums | `enum E { A, B(T) }`; constructors are per-enum (`Status.Ok` next to `Result.Ok`). Canonical spelling is `Enum.Case` (`Status.Ok`, `Option.Some(x)`, `Color.Red`). Bare `Some`/`None`/`Ok`/`Err` is sugar only when unambiguous. `match e { … }` with record/nested patterns. `default` is the only whole-arm catch-all; `_` is nested wildcard only (`Result.Err(_)`, `Some(_)`, tuple/record slots). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. `#[derive(Show, Eq, Ord, Hash)]` composes with `#[repr]`. Runtime is the unboxed literal; type is still `E`. Show of a scalar case is the backing (`Status.Ok` → `200`). In expression position the value implicitly coerces to the backing (`let n: int = Status.Ok`). No reverse coerce (`int` → `Status`) and no matching raw `200` on a `Status` scrutinee. Payload enums are niche, two-slot, or boxed `ObjEnum` by shape (heap Option / heap-heap Result niches; immediate-Ok / arity-≤1 two-slot on direct CALL — [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297); arity-2 immediate products [#302](https://github.com/ardax-corp/coil-lang/pull/302)); not always boxed. |
+| Types | Primitives `int` `float` `string` `bool` `byte`; fixed arrays `[T; N]`, growable `Vec<T>` (a bare `[T]` type is an error); tuples; dicts as anonymous records |
+| Enums | `enum E { A, B(T) }`; constructors are per-enum (`Status::Ok` next to `Result::Ok`). Canonical spelling is `Enum::Case` (`Status::Ok`, `Option::Some(x)`, `Color::Red`). Bare `Some`/`None`/`Ok`/`Err` is sugar only when unambiguous. `match e { … }` with record/nested patterns. `default` is the only whole-arm catch-all; `_` is nested wildcard only (`Result::Err(_)`, `Some(_)`, tuple/record slots). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. `#[derive(Show, Eq, Ord, Hash)]` composes with `#[repr]`. Runtime is the unboxed literal; type is still `E`. Show of a scalar case is the backing (`Status::Ok` → `200`). In expression position the value implicitly coerces to the backing (`let n: int = Status::Ok`). No reverse coerce (`int` → `Status`) and no matching raw `200` on a `Status` scrutinee. Payload enums are niche, two-slot, or boxed `ObjEnum` by shape (heap Option / heap-heap Result niches; immediate-Ok / arity-≤1 two-slot on direct CALL — [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297); arity-2 immediate products [#302](https://github.com/ardax-corp/coil-lang/pull/302)); not always boxed. |
 | Errors | Built-in `Option`/`Result`; `raise` (catchable `Err`), `?`, `??`, `?.`. `panic` **aborts the process** (Q5). Checksum / CLI boards use `panic`, not `raise`. |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
@@ -88,7 +88,7 @@ userland modules. Prelude is auto-injected.
 
 | Module | Typical import | Notes |
 |--------|----------------|-------|
-| `io` | `use io::{stdout, open, read, write};` | `Stream`, `[byte]`, files, TCP/UDP; non-blocking L0 |
+| `io` | `use io::{stdout, open, read, write};` | `Stream`, `Vec<byte>` buffers, files, TCP/UDP; non-blocking L0 |
 | `string` | `use string::{format, to_bytes, from_bytes};` | Formatting / UTF-8 bytes |
 | `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
@@ -97,11 +97,11 @@ userland modules. Prelude is auto-injected.
 | `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | pure Coil calendar/format package; not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 
-`byte` is 0..=255; integer literals coerce under `byte` / `[byte]` expectations.
+`byte` is 0..=255; integer literals coerce under `byte` / `Vec<byte>` / `[byte; N]` expectations.
 
 ## Coroutines
 
-`async fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
+`gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
 
 Tutorial: [08-coroutines](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/08-coroutines.md) (`/docs/manual/tutorial/08-coroutines`).
 
@@ -113,11 +113,11 @@ test("addition") {
 }
 ```
 
-Body is Result mode. `raise` / failed `assert` is a catchable `Err` (harness fails the case). `panic` aborts that VM; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result.Err` and exits 0. `#[test]` on `fn` is a type error.
+Body is Result mode. `raise` / failed `assert` is a catchable `Err` (harness fails the case). `panic` aborts that VM; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result::Err` and exits 0. `#[test]` on `fn` is a type error.
 
 ## Multi-file projects
 
-`coil.toml` at project root; entry file has empty namespace. See [project-config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) (`/docs/references/project-config`).
+Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.toml` / `coil.lock` ([spool](https://github.com/ardax-corp/spool) turns its manifest into flags). Entry file has empty namespace. See [project-config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) (`/docs/references/project-config`).
 
 ## Learn by example
 
@@ -138,11 +138,11 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 1. **`main` + `test()`** — do not combine in one file.
 2. **Assuming stdlib** — no `sort` or HTTP in the VM; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
 3. **Missing `use`** — `io`/`string` are not auto-imported.
-4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
+4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
 7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`. Free `fn f<T>(T) -> Option<T>` is still `E0127`; put that return on an inherent method.
-8. **`raise` is not abort** — `raise` returns `Result.Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
+8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
 
 ## Debugging programs
 

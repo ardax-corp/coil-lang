@@ -4,7 +4,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 
 | Document | Contents |
 |----------|----------|
-| [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
+| [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → stack IL / MIR lowering → archive → execute |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
 | [Numeric MIR](mir.md) | COI-267/268: SSA sidecar + dense numeric bytecode (Value ABI at edges) |
 | [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I8 IL→MIR entry; I4 FORMAT/string **reopened** under Q9 (delivery ladder); A/B rules |
@@ -18,7 +18,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Denser MIR leftovers](mir-dense-leftovers.md) | Post A0–C3 kick list (D0 `nsieve` keep; D1 class maps; D2 dense field; D3 boxed multi-payload match; Q9 `main` fuse) |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
 | [Specialize refuse](specialize-refuse.md) | Hard walls vs Q6–Q9 ladders / cost gate; B1–B9; C1 self two-slot CALL; **S8** fusion not gated on specialize keep |
-| [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
+| [IL lowering](../../compiler/src/il/opt/README.md) | No IL optimization passes remain (removed 2026-10): where each former pass went in HIR, `sp` vs `tell`, fuse-select contract |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [Threaded execute dispatch](threaded-dispatch.md) | COI-373–376 G0–G3 A/B record (table / hotmatch removed); G3 hot/cold I-cache split |
@@ -31,7 +31,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Shared-heap sendability](shared-heap-sendability.md) | COI-363 C0 whitelist; C1 loop steal (E6); C2 expression IPA without PortableValue copy (E7) |
 | [Contracts](contracts.md) | `requires` / `ensures`: syntax, typing, effect-free clauses, HIR checks, caller blame (`contract_fail`, HostInvoke **159**), `--contracts` levels, generated tests, `coil verify` (SMT) |
 | [Tasks](tasks.md) | `task::scope` / `spawn` / `join` / `sleep` / `yield_now` / `cancel` / `timeout` / `shield` / `channel` / `blocking` on one VM: scheduler, suspension points, child panics, cancellation, the `defer` unwinder, waits on other threads; HostInvoke **144–158** |
-| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
+| [IO reactor](io-reactor.md) | Sync adapter waits + `wait_readable` / `wait_writable` (task-aware) / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
@@ -51,11 +51,12 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | Crate | Role |
 |-------|------|
 | `parser` | Pratt parser and AST |
-| `compiler` | HM typechecker, stack IL codegen, pipeline |
+| `compiler` | HM typechecker, HIR (optimizations, lowering to stack IL), numeric MIR, pipeline |
 | `machine` | VM, heap/GC, FFI (libffi), host natives |
 | `common` | Opcodes, values, archive format |
 | `coil-simd` | Stable SIMD helpers (`std::arch`) for numeric / byte kernels |
-| `coil-cli` | Shared CLI argument parsing (`try_run_embedded` for packaged apps) |
+| `coil-cli` | Shared CLI helpers: archive load, VM execute, git-style dispatch (`try_run_embedded` for packaged apps) |
+| `coil-args` | Shared clap flag groups (host grants, module roots, opt level) for `coil` and its helper binaries |
 | `reporting` | Diagnostics rendering (ariadne) |
 | `coil-embed` | Packaged-app runner: a small bin that calls `coil_cli::try_run_embedded`. **Not** an embed-the-VM library. |
 
