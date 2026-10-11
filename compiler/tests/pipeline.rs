@@ -7286,7 +7286,7 @@ fn s2b_maps_attach_to_alloc_keep_and_collect_survives() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn keep(Vec<int> xs) -> Vec<int> {
+fn keep([int; 3] xs) -> [int; 3] {
     let junk = [1, 2, 3];
     collect();
     let r = xs;
@@ -7296,7 +7296,7 @@ fn keep(Vec<int> xs) -> Vec<int> {
     return r;
 }
 fn main() {
-    let a = [42, 7];
+    let a = [42, 7, 0];
     let b = keep(a);
     write(stdout(), to_bytes(format("%i", b[0])));
 }
@@ -7373,7 +7373,7 @@ fn s2b_maps_survive_archive_load_and_collect() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn keep(Vec<int> xs) -> Vec<int> {
+fn keep([int; 3] xs) -> [int; 3] {
     let junk = [1, 2, 3];
     collect();
     if junk == xs {
@@ -7382,7 +7382,7 @@ fn keep(Vec<int> xs) -> Vec<int> {
     return xs;
 }
 fn main() {
-    let a = [42, 7];
+    let a = [42, 7, 0];
     let b = keep(a);
     write(stdout(), to_bytes(format("%i", b[0])));
 }
