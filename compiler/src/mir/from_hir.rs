@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{lower, BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
@@ -32,7 +32,7 @@ use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::{MirBlock, MirFunc};
-use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
 /// First local of the values HIR emission keeps in temp slots.
@@ -65,6 +65,13 @@ pub struct HirCallSite {
     pub pair_ret: bool,
 }
 
+impl HirMirInput<'_> {
+    /// The MIR type of a one-word value: [`word`], or a class object.
+    fn word(&self, ty: &Ty) -> Option<MirTy> {
+        word(ty).or_else(|| (self.is_class)(ty).then_some(MirTy::HeapRef))
+    }
+}
+
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
     /// Frame slot of each local (the first word of a pair local).
@@ -86,6 +93,18 @@ pub struct HirMirInput<'a> {
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
+    /// Statements before which frame-slot locals box (they escape there).
+    pub box_at: &'a HashMap<u32, Vec<u32>>,
+    /// Whether a type is a class: its value is a heap object.
+    pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
+    /// Field reads and writes on heap class objects: each field's slot and
+    /// word type, when the field holds the word its type says.
+    pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// `Vec::push` calls HIR emission inlines.
+    pub pushes: HashSet<u32>,
+    /// `new C(..)` on the heap: the class's type id and its fields' word
+    /// types.
+    pub news: HashMap<u32, (u32, Vec<MirTy>)>,
     /// `for x in xs` loops whose array the checker pinned: their reads
     /// need no bounds check.
     pub pinned_for: HashSet<u32>,
@@ -128,6 +147,9 @@ struct Lower<'a> {
     /// Next local for a value HIR emission keeps in a temp slot (a `for`
     /// loop's index), numbered past any frame slot.
     next_temp: u32,
+    /// Stack arrays boxed so far, in source order: the local holding each
+    /// one's heap array.
+    boxes: HashMap<u32, LocalId>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -156,6 +178,27 @@ fn array_elem(ty: &Ty) -> Option<&Ty> {
     }
 }
 
+/// A short name for the kind of `ty`, for refusal reasons.
+fn ty_kind(ty: &Ty) -> &'static str {
+    match strip_readonly(ty) {
+        Ty::Con(n) if n == crate::typechecking::ty::STRING => "string",
+        Ty::Con(n) if n == crate::typechecking::ty::BYTE => "byte",
+        Ty::Con(_) => "named",
+        Ty::App(head, _) => match head.as_ref() {
+            Ty::Con(n) if n == "Option" => "option",
+            Ty::Con(n) if n == "Result" => "result",
+            Ty::Con(n) if n == common::BUILTIN_VEC_TYPE => "vec",
+            _ => "generic app",
+        },
+        Ty::Array { .. } => "array",
+        Ty::Tuple(_) => "tuple",
+        Ty::Var(_) => "type variable",
+        Ty::Fun(..) => "function",
+        Ty::Sum { .. } | Ty::Constructor { .. } => "enum",
+        _ => "other",
+    }
+}
+
 fn is_unit(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::UNIT)
 }
@@ -176,7 +219,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         Some((lo, _)) => lo,
-        None => word(ret).ok_or("return type")?,
+        None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
     b.set_ret_ty(ret_ty);
@@ -188,7 +231,10 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         let words = match inp.pair_locals.get(&param.0) {
             Some(&(hi, lo_ty, hi_ty)) if hi == next + 1 => vec![lo_ty, hi_ty],
             Some(_) => return Err("param slot".into()),
-            None => vec![hir.local(param).ty.as_ref().and_then(word).ok_or("param type")?],
+            None => {
+                let ty = hir.local(param).ty.as_ref().ok_or("param type")?;
+                vec![inp.word(ty).ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
+            }
         };
         for ty in words {
             let v = b.add_param(ty).map_err(mir)?;
@@ -209,6 +255,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         aliases: HashMap::new(),
         ret_tail: false,
         next_temp: TEMP_BASE,
+        boxes: HashMap::new(),
     };
     match lower.value(root)? {
         Val::Never => {}
@@ -365,7 +412,8 @@ impl Lower<'_> {
         if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) {
             return Err("frame-slot local value".into());
         }
-        self.hir.local(local).ty.as_ref().and_then(word).ok_or_else(|| "local type".into())
+        let ty = self.hir.local(local).ty.as_ref().ok_or("local type")?;
+        self.inp.word(ty).ok_or_else(|| format!("local type {}", ty_kind(ty)))
     }
 
     fn temp(&mut self) -> LocalId {
@@ -474,6 +522,9 @@ impl Lower<'_> {
                 self.b.use_local(hi, hi_ty).map_err(mir)?,
             )),
             HirKind::Local(local) if let Some(&v) = self.aliases.get(&local.0) => Ok(Val::V(v)),
+            HirKind::Local(local) if let Some(&slot) = self.boxes.get(&local.0) => {
+                Ok(Val::V(self.b.use_local(slot, MirTy::HeapRef).map_err(mir)?))
+            }
             HirKind::Local(local) => {
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
@@ -481,6 +532,7 @@ impl Lower<'_> {
             }
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
+            HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
@@ -526,10 +578,12 @@ impl Lower<'_> {
                     // The body's own tail is a statement to HIR emission; a
                     // nested block's tail has its statement's location.
                     Some(t) if !self.b.pending_loc.is_known() => self.at_stmt(*t, |l| {
+                        l.box_before(*t)?;
                         l.ret_tail = returned;
                         l.value(*t)
                     }),
                     Some(t) => {
+                        self.box_before(*t)?;
                         self.ret_tail = returned;
                         self.value(*t)
                     }
@@ -553,7 +607,7 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
-                let ty = self.expr_ty(*place).and_then(scalar).ok_or("field type")?;
+                let ty = self.expr_ty(*place).and_then(|t| self.inp.word(t)).ok_or("field type")?;
                 let Some(v) = self.word(*value)? else {
                     return Ok(Val::Never);
                 };
@@ -563,13 +617,37 @@ impl Lower<'_> {
                 self.b.def_local(LocalId(slot), v).map_err(mir)?;
                 Ok(Val::Unit)
             }
+            HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
+                let Some(obj) = self.word(*base)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?))
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
+                    && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
+            {
+                // The value, then the object, as HIR emission's `SetField`.
+                let Some(v) = self.word(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != ty {
+                    return Err("field type".into());
+                }
+                let Some(obj) = self.word(base)? else {
+                    return Ok(Val::Never);
+                };
+                self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
+                Ok(Val::Unit)
+            }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
-                let ty = self.expr_ty(id).and_then(scalar).ok_or("field type")?;
+                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
             }
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
-                    && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0) =>
+                    && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0)
+                    && !self.boxes.contains_key(&local.0) =>
             {
                 let Some(k) = self.stack_index(id, *index, n)? else {
                     return Ok(Val::Never);
@@ -607,6 +685,8 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
+            HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
+            HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             // `p[0]` / `p[1]` of a two-word tuple local.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
@@ -924,7 +1004,45 @@ impl Lower<'_> {
     /// source location, as HIR emission gives its IL ops (line breakpoints,
     /// source views). Nested statements keep their own.
     fn stmt(&mut self, id: HirId) -> Result<bool, Refusal> {
-        self.at_stmt(id, |l| l.effect(id))
+        self.at_stmt(id, |l| {
+            l.box_before(id)?;
+            l.effect(id)
+        })
+    }
+
+    /// Box the stack arrays that escape first in statement (or block tail)
+    /// `id` into one heap array each, as HIR emission's `hir_box_before`:
+    /// every use after it in source order goes through the array.
+    fn box_before(&mut self, id: HirId) -> Result<(), Refusal> {
+        let Some(locals) = self.inp.box_at.get(&id.0) else {
+            return Ok(());
+        };
+        for &local in locals {
+            let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
+                return Err("boxed class local".into());
+            };
+            if !matches!(ty, MirTy::I64 | MirTy::F64) {
+                return Err("boxed stack array type".into());
+            }
+            let mut items = Vec::with_capacity(n);
+            for i in 0..n as u32 {
+                items.push(self.b.use_local(LocalId(base + i), ty).map_err(mir)?);
+            }
+            let arr = self.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
+            let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+            let slot = self.temp();
+            self.b.def_local(slot, arr).map_err(mir)?;
+            self.boxes.insert(local, slot);
+        }
+        Ok(())
+    }
+
+    /// The heap array a boxed stack array local `id` names.
+    fn boxed(&self, id: HirId) -> Option<LocalId> {
+        match self.hir.expr(id).kind {
+            HirKind::Local(local) => self.boxes.get(&local.0).copied(),
+            _ => None,
+        }
     }
 
     /// `f` with the source location of statement `id`.
@@ -946,7 +1064,12 @@ impl Lower<'_> {
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let site = self.inp.calls.get(&id.0).ok_or("call")?;
+        let Some(site) = self.inp.calls.get(&id.0) else {
+            return Err(match &self.hir.expr(id).kind {
+                HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, .. } => format!("call `{name}`"),
+                _ => "call value".to_string(),
+            });
+        };
         if site.pair_args.len() != args.len() {
             return Err("call arity".into());
         }
@@ -956,11 +1079,11 @@ impl Lower<'_> {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
-            _ => (word(ty).ok_or("call type")?, None),
+            _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
-            if !pair && self.expr_ty(arg).and_then(word).is_none() {
+            if !pair && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
             match (self.value(arg)?, pair) {
@@ -987,6 +1110,9 @@ impl Lower<'_> {
     /// each item or field into its own slot, or another stack array's slots
     /// copied, as HIR emission's `hir_stack_array_init`.
     fn fill_slots(&mut self, local: HirLocal, init: HirId) -> Result<Val, Refusal> {
+        if self.boxes.contains_key(&local.0) {
+            return Err("refill boxed stack array".into());
+        }
         let base = self.slot(local)?.0;
         let tys = match (self.inp.stacks.get(&local.0), self.inp.sroa.get(&local.0)) {
             (Some(&(_, n, ty)), _) => vec![ty; n],
@@ -1089,7 +1215,8 @@ impl Lower<'_> {
         let Some(idx) = self.index_word(index)? else {
             return Ok(Val::Never);
         };
-        let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS);
+        // A boxed stack array's read is always checked, as HIR emission's.
+        let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
         Ok(Val::V(self.b.ins_index(arr, idx, ty, proven).map_err(mir)?))
     }
 
@@ -1117,8 +1244,74 @@ impl Lower<'_> {
                 HirKind::Call { .. } | HirKind::Assign { .. } | HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. }
             );
         });
-        let unchecked = quiet && self.hir.expr(place).flags.contains(HirFlags::IN_BOUNDS);
+        let unchecked = quiet && self.hir.expr(place).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
         self.b.ins_store_index(arr, idx, v, unchecked).map_err(mir)?;
+        Ok(Val::Unit)
+    }
+
+    /// `[a, b, ..]` on the heap: each item, then the array. The array word
+    /// is the safepoint's, as the IL lift reads it.
+    fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).and_then(array_elem).and_then(scalar).ok_or("element type")?;
+        let mut items = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != ty {
+                return Err("element type".into());
+            }
+            items.push(v);
+        }
+        let arr = self.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+    }
+
+    /// `new C(..)`: every argument, then the object and each field's store
+    /// (no argument sees the object, so none runs with it allocated).
+    fn make_object(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let (type_id, tys) = &self.inp.news[&id.0];
+        let (type_id, tys) = (*type_id, tys.clone());
+        let mut words = Vec::with_capacity(args.len());
+        for (&arg, ty) in args.iter().zip(tys) {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != ty {
+                return Err("field type".into());
+            }
+            words.push(v);
+        }
+        let nfields = words.len() as u32;
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        for (slot, v) in words.into_iter().enumerate() {
+            self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
+        }
+        Ok(Val::V(obj))
+    }
+
+    /// `v.push(x)` on a heap `Vec` of int/float: the Vec, then the value,
+    /// then `ArrayPush` (a safepoint: it may grow the storage).
+    fn push(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
+        let &[recv, value] = args else {
+            return Err("push arity".into());
+        };
+        let ty = self.expr_ty(recv).and_then(array_elem).and_then(scalar);
+        if !self.heap_array(recv) {
+            return Err("push receiver".into());
+        }
+        let Some(arr) = self.word(recv)? else {
+            return Ok(Val::Never);
+        };
+        let Some(v) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        if Some(self.b.value_ty(v)) != ty {
+            return Err("push value type".into());
+        }
+        let out = self.b.ins_array_push(arr, v).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         Ok(Val::Unit)
     }
 
@@ -1217,7 +1410,7 @@ impl Lower<'_> {
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
         let stack = match self.hir.expr(base).kind {
-            HirKind::Local(local) => self.inp.stacks.get(&local.0).copied(),
+            HirKind::Local(local) if !self.boxes.contains_key(&local.0) => self.inp.stacks.get(&local.0).copied(),
             _ => None,
         };
         let Some((slot, n, ty)) = stack else {

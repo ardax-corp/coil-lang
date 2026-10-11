@@ -29,6 +29,8 @@ pub struct IlFunc {
     /// The body lowered straight from HIR to MIR, when it could be: the
     /// register tiers start from it instead of lifting the IL.
     pub hir_mir: Option<Box<crate::mir::MirFunc>>,
+    /// Why the body did not lower straight from HIR to MIR (`--opt-stats`).
+    pub hir_mir_why: Option<String>,
 }
 
 impl IlFunc {
@@ -58,6 +60,7 @@ impl IlFunc {
             unboxed_fields: Vec::new(),
             pinned: false,
             hir_mir: None,
+            hir_mir_why: None,
         }
     }
 }

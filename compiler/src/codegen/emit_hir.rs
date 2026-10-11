@@ -674,9 +674,13 @@ impl Compiler {
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
-                self.hir_mir = (entry_convs.is_empty() && !self.hir_shared_generic())
-                    .then(|| self.hir_lower_mir(hir, &emit))
-                    .flatten();
+                self.hir_mir_why = None;
+                self.hir_mir = if entry_convs.is_empty() && !self.hir_shared_generic() {
+                    self.hir_lower_mir(hir, &emit)
+                } else {
+                    self.hir_mir_why = Some("converted or shared generic entry".into());
+                    None
+                };
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::il::opt::note_hir_lowered();
@@ -711,6 +715,9 @@ impl Compiler {
         if let Some(func) = self.hir_mir.take() {
             self.bytecode.set_last_func_hir_mir(func);
         }
+        if let Some(why) = self.hir_mir_why.take() {
+            self.bytecode.set_last_func_hir_mir_why(why);
+        }
     }
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
@@ -723,9 +730,7 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.box_at.is_empty() {
-            Err("boxed frame-slot aggregate".to_string())
-        } else if !plan.lambdas.is_empty() {
+        let why = if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
         } else if emit.par_loop {
             Err("parallel loop".to_string())
@@ -743,6 +748,7 @@ impl Compiler {
                     eprintln!("hir mir `{}`: {why}", hir.name);
                 }
                 crate::il::opt::note_hir_mir(Some(&why));
+                self.hir_mir_why = Some(why);
                 None
             }
         }
@@ -751,7 +757,7 @@ impl Compiler {
     /// What direct MIR lowering needs from emission: slots, call sites, and
     /// the word types of each two-word pair.
     fn hir_mir_input<'a>(
-        &self,
+        &'a self,
         hir: &HirBody,
         emit: &'a HirEmit,
         file: Option<u32>,
@@ -770,7 +776,7 @@ impl Compiler {
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
             .collect();
         // Stack arrays and scalar-replaced class locals: one frame slot per
-        // element or field, each a scalar word.
+        // element or field, each one word.
         let mut stacks = HashMap::new();
         for (&local, &n) in &emit.plan.stacks {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
@@ -781,13 +787,22 @@ impl Compiler {
             let base = emit.slots[local as usize].ok_or("stack array slot")?;
             stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
         }
+        // Words in direct MIR: scalars, int/float arrays, and class objects.
+        // A finalizer class stays out: its object's lifetime follows the
+        // frame slots emission clears, not MIR values.
+        let checker = &self.checker;
+        let is_class = move |t: &Ty| {
+            let t = apply_ty_prune(checker.subst(), t);
+            checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
+        };
+        let word = |t: &Ty| crate::mir::word_mir_ty(t).or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef));
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
                 && emit.plan.sroa.contains_key(&local.0)
             {
                 let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
-                let tys: Option<Vec<_>> = tys.iter().map(crate::mir::scalar_mir_ty).collect();
+                let tys: Option<Vec<_>> = tys.iter().map(word).collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
         }
@@ -801,6 +816,33 @@ impl Compiler {
                 fields.insert(i as u32, slot);
             }
         }
+        // Fields of heap class objects whose slot holds the word the
+        // field's type names (a generic field holds a boxed value).
+        let mut heap_fields = HashMap::new();
+        for (i, e) in hir.exprs.iter().enumerate() {
+            if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(w) = word(&fty)
+                && e.ty.as_ref().and_then(word) == Some(w)
+            {
+                heap_fields.insert(i as u32, (idx, w));
+            }
+        }
+        // `new C(..)` of a class whose every field holds the word its type
+        // names: the type id and each field's word type.
+        let mut news = HashMap::new();
+        for i in 0..hir.exprs.len() as u32 {
+            if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
+                && !checker.class_has_drop(&class)
+                && let Some(words) = tys.iter().map(word).collect::<Option<Vec<_>>>()
+            {
+                news.insert(i, (checker.class_type_id(&class), words));
+            }
+        }
+        let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
+        let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
         // As `hir_for_in`'s `pin`: array loops the checker pinned.
         let pinned_for = (0..hir.exprs.len() as u32)
             .filter(|&i| {
@@ -824,10 +866,24 @@ impl Compiler {
             fields,
             calls: &emit.call_targets,
             lens: &emit.plan.lens,
+            box_at: &emit.plan.box_at,
+            is_class: Box::new(is_class),
+            heap_fields,
+            news,
+            pushes,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,
         })
+    }
+
+    /// A class with a `drop`, or a generic one applied to such a class.
+    fn finalized_class(checker: &crate::typechecking::Checker, ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Con(n) => checker.class_has_drop(n),
+            Ty::App(head, _) => Self::finalized_class(checker, head),
+            _ => false,
+        }
     }
 
     /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`

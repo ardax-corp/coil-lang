@@ -488,6 +488,10 @@ impl IlModule {
                     tier: tier[i].to_string(),
                     dense_reason: dense_why[i].take(),
                     lir_reason: lir_why[i].take(),
+                    hir_reason: match &body.meta.hir_mir {
+                        Some(_) => Some("lowered".to_string()),
+                        None => body.meta.hir_mir_why.clone(),
+                    },
                 });
             }
         }
