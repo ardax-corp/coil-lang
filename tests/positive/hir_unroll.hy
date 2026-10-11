@@ -10,7 +10,7 @@ fn counted(int x) -> int {
     return s * 10 + i;
 }
 
-fn bound_local([int] a) -> int {
+fn bound_local(Vec<int> a) -> int {
     let n = 4;
     let s = 0;
     let j = 1;
@@ -36,7 +36,7 @@ fn nested(int x) -> int {
     return s;
 }
 
-fn stores([int] a) -> [int] {
+fn stores(Vec<int> a) -> Vec<int> {
     let i = 0;
     while i <= 2 {
         a[i] = a[i] + i;

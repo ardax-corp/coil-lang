@@ -3,7 +3,7 @@
 // `op=`, `len`, and the builtin Vec constructor and methods. The
 // language harness also runs under `--hir`, so each case pins both
 // codegens.
-fn sum_arr([int] xs) -> int {
+fn sum_arr(Vec<int> xs) -> int {
     let total = 0;
     let i = 0;
     while i < len(xs) {
@@ -13,7 +13,7 @@ fn sum_arr([int] xs) -> int {
     return total;
 }
 
-fn fill([int] xs, int v) {
+fn fill(Vec<int> xs, int v) {
     let i = 0;
     while i < xs.len() {
         xs[i] = v + i;
@@ -26,7 +26,7 @@ fn pair_sum((int, int, int) t) -> int {
     return t[0] + t[1] * t[2];
 }
 
-fn ring([int] xs, int k) -> int {
+fn ring(Vec<int> xs, int k) -> int {
     return xs[k % 3] + xs[(k + 1) % 3];
 }
 
@@ -34,7 +34,7 @@ fn make_tuple(int a) -> (int, string, int) {
     return (a, "x", a * 2);
 }
 
-fn heap_arr(int a) -> [int] {
+fn heap_arr(int a) -> Vec<int> {
     return [a, a + 1, a + 2];
 }
 
@@ -44,7 +44,7 @@ fn nested(int a) -> int {
     return t[0] + t[2] + xs[1] + len(xs);
 }
 
-fn staged([int] xs, int a) -> int {
+fn staged(Vec<int> xs, int a) -> int {
     return xs[sum_arr(xs) % 3] + a;
 }
 

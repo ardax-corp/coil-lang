@@ -1,14 +1,16 @@
-// String-to-bytes casts and array `==` / `!=` lower from HIR.
+// String-to-bytes conversions and array `==` / `!=` lower from HIR.
+use string::to_bytes;
+
 fn same(string a, string b) -> bool {
-    return (a as [byte]) == (b as [byte]);
+    return to_bytes(a) == to_bytes(b);
 }
 
 test("string as bytes") {
     let s = "hey";
-    let b = s as [byte];
+    let b = to_bytes(s);
     assert(len(b) == 3)?;
     assert((b[0] as int) == 104)?;
-    assert(b == ("hey" as [byte]))?;
+    assert(b == to_bytes("hey"))?;
 }
 
 test("literal as Vec<byte>") {

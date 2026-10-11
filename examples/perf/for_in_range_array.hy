@@ -3,7 +3,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-fn range_sum([Range<int>] rs) -> int {
+fn range_sum(Vec<Range<int>> rs) -> int {
     let acc = 0;
     for x in rs[0] {
         acc = acc + x;

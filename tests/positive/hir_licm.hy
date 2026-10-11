@@ -67,7 +67,7 @@ fn changes(int n) -> int {
     return s;
 }
 
-fn over([int] xs, int k) -> float {
+fn over(Vec<int> xs, int k) -> float {
     let s = 0.0;
     for x in xs {
         s = s + (k as float) * 0.5 + (x as float);

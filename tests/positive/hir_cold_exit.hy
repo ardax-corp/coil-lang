@@ -7,7 +7,7 @@ fn fib(int n) -> int {
     return fib(n - 1) + fib(n - 2);
 }
 
-fn first_over([int] xs, int lim) -> int {
+fn first_over(Vec<int> xs, int lim) -> int {
     let i = 0;
     while i < len(xs) {
         if xs[i] > lim {

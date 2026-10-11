@@ -35,7 +35,7 @@ fn operand(int a, int k) -> int {
     };
 }
 
-fn count_sevens([int] xs) -> int {
+fn count_sevens(Vec<int> xs) -> int {
     let hits = 0;
     for x in xs {
         match x {

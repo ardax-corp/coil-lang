@@ -4,7 +4,7 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-fn take([int] xs) -> int {
+fn take(Vec<int> xs) -> int {
     return xs[0] + xs[1];
 }
 

@@ -8,7 +8,7 @@ fn count_range(Range<int> r) -> int {
     return n;
 }
 
-fn count_array([int] xs) -> int {
+fn count_array(Vec<int> xs) -> int {
     let n = 0;
     for _ in xs {
         n = n + 1;

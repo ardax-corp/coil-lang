@@ -34,7 +34,7 @@ fn guarded(int b) -> bool {
     return b > 0 && counted(b);
 }
 
-fn classify(int s, [int] t) -> int {
+fn classify(int s, Vec<int> t) -> int {
     if s == three() {
         return 1;
     }

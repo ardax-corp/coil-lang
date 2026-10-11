@@ -2674,7 +2674,7 @@ impl Checker {
                 if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
                     return self.infer_matrix_neg(pruned, id, range);
                 }
-                if matches!(&pruned, Ty::Tuple(_) | Ty::Array { .. }) {
+                if matches!(&pruned, Ty::Tuple(_) | Ty::Array { .. }) || vec_element_ty(&pruned).is_some() {
                     self.infer_aggregate_neg(pruned, id, range)
                 } else {
                     if let Ty::Var(v) = pruned {
@@ -6293,6 +6293,8 @@ impl Checker {
         }
         if matches!(&lp, Ty::Tuple(_) | Ty::Array { .. })
             || matches!(&rp, Ty::Tuple(_) | Ty::Array { .. })
+            || vec_element_ty(&lp).is_some()
+            || vec_element_ty(&rp).is_some()
         {
             return self.infer_aggregate_arith(lp, rp, id, range, op);
         }
@@ -6817,6 +6819,17 @@ impl Checker {
         use crate::typechecking::aggregate_arith::*;
 
         let pruned = apply_ty_prune(&self.subst, &inner);
+        // `-v` on a `Vec<T>` negates it as the dynamic array it is (#890).
+        if let Some(elem) = vec_element_ty(&pruned).cloned() {
+            let as_array = Ty::Array {
+                element: Box::new(elem),
+                length: ArrayLength::Dynamic,
+            };
+            return match self.infer_aggregate_neg(as_array, id, range) {
+                Ty::Array { element, .. } => vec_app_ty(*element),
+                other => other,
+            };
+        }
         if let Ty::Tuple(elems) = &pruned {
             if elems.is_empty() {
                 return self.error_with_help(
@@ -8934,6 +8947,15 @@ impl Checker {
             let ty = apply_ty_prune(&self.subst, &expected);
             self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
             return ty;
+        }
+        // A string literal typed as `[byte; N]` against `Vec<byte>` (a let
+        // pins the literal before this check): its bytes build the Vec.
+        if Self::is_vec_byte_ty(&expected)
+            && Self::is_byte_slice_ty(&actual).is_some()
+            && let Some(expr) = expr
+            && matches!(unwrap_expr_wrappers(expr).1.as_ref(), Expression::String(_))
+        {
+            return expected;
         }
         if let Some(coerced) = self.coerce_scalar_enum_to_backing(&expected, &actual) {
             return coerced;

@@ -1,15 +1,15 @@
 // Element-wise array and tuple operators lower from HIR: literal items and
 // stack-array slots are read in place, other operands from temps, a static
 // shape of at least 8 takes the packed kernel and a dynamic length loops.
-fn first([int] xs) -> int {
+fn first([int; 2] xs) -> int {
     return xs[0];
 }
 
-fn neg_dyn([int] xs) -> [int] {
+fn neg_dyn(Vec<int> xs) -> Vec<int> {
     return -xs;
 }
 
-fn scale_dyn([int] xs, int k) -> [int] {
+fn scale_dyn(Vec<int> xs, int k) -> Vec<int> {
     return k * xs;
 }
 

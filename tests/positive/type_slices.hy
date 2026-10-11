@@ -1,20 +1,21 @@
-// Dynamic [T] policy: [byte] in lets, [int] in fn signatures only.
-fn head([int] xs) -> int {
+// There is no `[T]` (#890): `Vec<T>` is the one unknown-length array, and
+// an array or string literal builds one where it is expected.
+fn head(Vec<int> xs) -> int {
     return xs[0];
 }
 
-fn empty_row() -> [int] {
-    let xs: [int; 0] = [];
+fn empty_row() -> Vec<int> {
+    let xs: Vec<int> = [];
     return xs;
 }
 
-test("dynamic int slice param indexes at runtime") {
+test("Vec param takes an array literal and indexes at runtime") {
     let n = head([7, 8, 9]);
     assert(n == 7)?;
 }
 
-test("byte slice from string literal") {
-    let buf: [byte] = "ok";
+test("Vec<byte> from a string literal") {
+    let buf: Vec<byte> = "ok";
     assert(len(buf) == 2)?;
 }
 
@@ -23,7 +24,7 @@ test("fixed array keeps static length") {
     assert(len(xs) == 2)?;
 }
 
-test("fn return of empty dynamic slice") {
+test("fn return of an empty Vec") {
     let row = empty_row();
     assert(len(row) == 0)?;
 }

@@ -8,7 +8,7 @@ fn twice(int -> int f, int x) -> int {
     return apply(f, apply(f, x));
 }
 
-fn fold_pairs([int] xs, int -> int -> int step) -> int {
+fn fold_pairs(Vec<int> xs, int -> int -> int step) -> int {
     let acc = 0;
     for x in xs {
         let next = step(acc);
@@ -21,7 +21,7 @@ fn label(int -> string show, int n) -> string {
     return show(n) + "!";
 }
 
-fn total(int -> int f, [int] xs) -> int {
+fn total(int -> int f, Vec<int> xs) -> int {
     let sum = 0;
     for x in xs {
         sum = sum + f(x) * 2;

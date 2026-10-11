@@ -33,7 +33,7 @@ fn exhaustive(Op op) -> int {
     };
 }
 
-fn count([Op] ops) -> int {
+fn count(Vec<Op> ops) -> int {
     let acc = 0;
     for op in ops {
         match op {
@@ -75,6 +75,6 @@ test("an exhaustive match needs no catch-all") {
 }
 
 test("a statement match in a loop") {
-    let ops = [Op::Add(1, 1, 1), Op::Add(2, 1, 0), Op::Nop, Op::Add(3, 3, 3)];
+    let ops: Vec<Op> = [Op::Add(1, 1, 1), Op::Add(2, 1, 0), Op::Nop, Op::Add(3, 3, 3)];
     assert(count(ops) == 211, "count")?;
 }

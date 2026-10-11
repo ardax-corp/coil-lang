@@ -63,7 +63,7 @@ trait Combine<T> {
     fn twice(T a, int k) -> int {
         return a.combine(k, a) * 2;
     }
-    fn sum_all(T a, [T] xs) -> int {}
+    fn sum_all(T a, Vec<T> xs) -> int {}
 }
 
 impl Combine for Point {
@@ -71,7 +71,7 @@ impl Combine for Point {
         return a.x + k + b.x;
     }
 
-    pub fn sum_all(Point a, [Point] xs) -> int {
+    pub fn sum_all(Point a, Vec<Point> xs) -> int {
         let s = a.x;
         for p in xs {
             s = s + p.x;
@@ -85,7 +85,7 @@ impl Combine for int {
         return a * 100 + k * 10 + b;
     }
 
-    pub fn sum_all(int a, [int] xs) -> int {
+    pub fn sum_all(int a, Vec<int> xs) -> int {
         let s = a;
         for x in xs {
             s = s + x;
@@ -102,7 +102,7 @@ fn g_twice<T: Combine>(T a, int k) -> int {
     return a.twice(k);
 }
 
-fn g_sum<T: Combine>(T a, [T] xs) -> int {
+fn g_sum<T: Combine>(T a, Vec<T> xs) -> int {
     return a.sum_all(xs);
 }
 
