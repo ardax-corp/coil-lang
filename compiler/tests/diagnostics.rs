@@ -2891,12 +2891,12 @@ fn main() {
 fn byte_arithmetic_warns_byte_wrap() {
     let msgs = check_messages(
         r#"
-fn f(byte a, byte b) -> int {
+fn f(byte a, byte b, int c) -> int {
     let s = a + b;
     let d = a - b;
     let m = a * b;
     let p = a ** b;
-    let l = a << b;
+    let l = a << c;
     let n = -a;
     let x = a;
     x += b;
@@ -2905,12 +2905,12 @@ fn f(byte a, byte b) -> int {
     let k = a & b;
     let o = a | b;
     let e = a ^ b;
-    let h = a >> b;
+    let h = a >> c;
     let i = 1 + 2;
     return i;
 }
 fn main() {
-    let _ = f(1 as byte, 2 as byte);
+    let _ = f(1 as byte, 2 as byte, 3);
 }
 "#,
     );

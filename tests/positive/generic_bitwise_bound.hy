@@ -8,16 +8,16 @@ fn low_bits<T: Integral>(T x, T mask) -> T {
     return x & mask;
 }
 
-fn mix<T: Integral>(T a, T b) -> T {
-    return ((a << b) | (a >> b)) ^ ~a;
+fn mix<T: Integral>(T a, int n) -> T {
+    return ((a << n) | (a >> n)) ^ ~a;
 }
 
 fn integral_arith<T: Integral>(T a, T b) -> T {
     return (a + b) * b % (a ** b);
 }
 
-fn shl_only<T: Shl>(T a, T b) -> T {
-    return a << b;
+fn shl_only<T: Shl>(T a, int n) -> T {
+    return a << n;
 }
 
 fn not_only<T: BitNot>(T a) -> T {
@@ -57,14 +57,14 @@ impl BitXor for Flags {
 }
 
 impl Shl for Flags {
-    pub fn shl(Flags a, Flags b) -> Flags {
-        return new Flags(a.bits << b.bits);
+    pub fn shl(Flags a, int n) -> Flags {
+        return new Flags(a.bits << n);
     }
 }
 
 impl Shr for Flags {
-    pub fn shr(Flags a, Flags b) -> Flags {
-        return new Flags(a.bits >> b.bits);
+    pub fn shr(Flags a, int n) -> Flags {
+        return new Flags(a.bits >> n);
     }
 }
 
@@ -100,7 +100,7 @@ test("int through the single traits") {
 test("byte through the single traits") {
     let b: byte = 12 as byte;
     let m: byte = 10 as byte;
-    assert(shl_only(b, 1 as byte) == (b << (1 as byte)))?;
+    assert(shl_only(b, 1) == (b << 1))?;
     assert(or_in_place(b, m) == (b | m))?;
 }
 
@@ -110,13 +110,14 @@ test("user class bitwise operators") {
     assert((a & b).bits == 8)?;
     assert((a | b).bits == 14)?;
     assert((a ^ b).bits == 6)?;
-    assert((a << new Flags(1)).bits == 24)?;
-    assert((a >> new Flags(2)).bits == 3)?;
+    assert((a << 1).bits == 24)?;
+    assert((a >> 2).bits == 3)?;
     assert((~a).bits == 3)?;
     let c = new Flags(1);
     c |= new Flags(2);
-    c <<= new Flags(1);
+    c <<= 1;
     assert(c.bits == 6)?;
+    assert(shl_only(a, 1).bits == 24)?;
     assert(not_only(a).bits == 3)?;
     assert(or_in_place(a, b).bits == 14)?;
 }
