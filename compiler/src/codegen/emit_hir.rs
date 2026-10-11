@@ -6563,7 +6563,7 @@ impl Compiler {
                         }
                         self.emit_string_literal(&fmt);
                         if !specs.contains(&'v') {
-                            let idx = self.intern_string(&unescape_coil_string(&fmt));
+                            let idx = self.intern_string(unescape_coil_string(&fmt));
                             emit.format_strs.insert(id.0, idx);
                         }
                         for &tmp in &temps {
