@@ -628,13 +628,20 @@ impl Lower<'_> {
                     }
                 }
                 match tail {
-                    // The body's own tail is a statement to HIR emission; a
-                    // nested block's tail has its statement's location.
-                    Some(t) if !self.b.pending_loc.is_known() => self.at_stmt(*t, |l| {
-                        l.box_before(*t)?;
-                        l.ret_tail = returned;
-                        l.value(*t)
-                    }),
+                    // The body's own tail is a statement to HIR emission, and
+                    // so is a `return`, `break` or `continue` ending a nested
+                    // block (an `if` arm's `return lo;`); any other nested
+                    // tail has its statement's location.
+                    Some(t)
+                        if !self.b.pending_loc.is_known()
+                            || matches!(self.hir.expr(*t).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) =>
+                    {
+                        self.at_stmt(*t, |l| {
+                            l.box_before(*t)?;
+                            l.ret_tail = returned;
+                            l.value(*t)
+                        })
+                    }
                     Some(t) => {
                         self.box_before(*t)?;
                         self.ret_tail = returned;
