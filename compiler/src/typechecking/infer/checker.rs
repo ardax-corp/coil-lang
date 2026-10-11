@@ -2677,6 +2677,7 @@ impl Checker {
                         self.record_bound_unary(id, &range, v, ("Neg", "neg", "-"));
                     } else {
                         self.check_ground_unary_operand(&pruned, ("Neg", "-"), &range);
+                        self.warn_byte_wrap(&pruned, "neg", &range);
                     }
                     pruned
                 }
@@ -3554,7 +3555,9 @@ impl Checker {
                 }
             }
         }
-        apply_ty_prune(&self.subst, &target_ty)
+        let target = apply_ty_prune(&self.subst, &target_ty);
+        self.warn_byte_wrap(&target, op_name, &range);
+        target
     }
 
     #[inline(never)]
@@ -6274,11 +6277,27 @@ impl Checker {
         let pruned = apply_ty_prune(&self.subst, &result);
         if !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_arith_operands(&pruned, op, &range);
+            self.warn_byte_wrap(&pruned, op, &range);
         }
         if let Ty::Var(v) = pruned {
             self.bind_arith_operator(v, op, id, &range);
         }
         result
+    }
+
+    /// `byte` `+ - * ** <<` and negation keep the low 8 bits of the result
+    /// (coil-lang#882). Wrapping is defined, but it is easy to hit by
+    /// accident, so it warns.
+    fn warn_byte_wrap(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
+        if !matches!(ty, Ty::Con(n) if n == crate::typechecking::ty::BYTE)
+            || !matches!(op, "+" | "-" | "*" | "**" | "<<" | "neg")
+        {
+            return;
+        }
+        let what = if op == "neg" { "`-` on a `byte`".to_string() } else { format!("`byte` `{op}`") };
+        let mut msg = Message::warn(ErrorCode::ByteWrap, format!("{what} wraps modulo 256"), range.clone());
+        msg.with_help("the result keeps its low 8 bits; convert to `int` first (`x as int`) for exact arithmetic".to_string());
+        self.messages.push(msg);
     }
 
     /// `v` is a type parameter of an enclosing generic item.

@@ -63,6 +63,8 @@ pub enum ErrorCode {
     PrivateMember,
     /// Call to a deprecated function (warning; the help names the replacement).
     Deprecated,
+    /// `byte` arithmetic whose result wraps modulo 256 (warning).
+    ByteWrap,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -167,6 +169,7 @@ impl ErrorCode {
             Self::UnsupportedGenericOptionReturn => "E0127",
             Self::PrivateMember => "E0128",
             Self::Deprecated => "E0129",
+            Self::ByteWrap => "E0130",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -253,6 +256,7 @@ impl ErrorCode {
             Self::UnsupportedGenericOptionReturn => "unsupported free generic Option return",
             Self::PrivateMember => "private member is not accessible",
             Self::Deprecated => "deprecated function",
+            Self::ByteWrap => "byte arithmetic wraps",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -347,6 +351,7 @@ mod tests {
             | UnsupportedGenericOptionReturn
             | PrivateMember
             | Deprecated
+            | ByteWrap
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -423,6 +428,7 @@ mod tests {
             UnsupportedGenericOptionReturn,
             PrivateMember,
             Deprecated,
+            ByteWrap,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
