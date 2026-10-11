@@ -801,6 +801,15 @@ impl Compiler {
                 fields.insert(i as u32, slot);
             }
         }
+        // As `hir_for_in`'s `pin`: array loops the checker pinned.
+        let pinned_for = (0..hir.exprs.len() as u32)
+            .filter(|&i| {
+                let node = hir.expr(HirId(i));
+                let (start, end) = node.span;
+                matches!(node.kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })
+                    && (node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n)) || self.typed_sidecar.is_for_in_pin_span(start, end))
+            })
+            .collect();
         let ret_pair = match &emit.plan.ret {
             Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
             Rep::Word(_) => None,
@@ -814,6 +823,8 @@ impl Compiler {
             sroa,
             fields,
             calls: &emit.call_targets,
+            lens: &emit.plan.lens,
+            pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,
         })
