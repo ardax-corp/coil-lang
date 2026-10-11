@@ -1467,7 +1467,8 @@ impl Lower<'_> {
                 let lo = match args {
                     [] => self.zero(lo_ty)?,
                     [arg] => match self.word(*arg)? {
-                        Some(v) => v,
+                        Some(v) if self.b.value_ty(v) == lo_ty => v,
+                        Some(_) => return Err("variant payload type".into()),
                         None => return Ok(Val::Never),
                     },
                     _ => return Err("variant payload".into()),
