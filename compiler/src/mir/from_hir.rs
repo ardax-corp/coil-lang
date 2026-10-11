@@ -671,7 +671,19 @@ impl Lower<'_> {
 
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
-        Ok(!matches!(self.value(id)?, Val::Never))
+        // A host's two-word result nobody reads stays the boxed word it
+        // comes back as: no unboxing to a pair just to drop it.
+        self.raw_host = self.host_pair(id);
+        let out = self.value(id);
+        self.raw_host = false;
+        Ok(!matches!(out?, Val::Never))
+    }
+
+    /// A host call whose result is a boxed enum unboxed to a pair.
+    fn host_pair(&self, id: HirId) -> bool {
+        matches!(self.hir.expr(id).kind, HirKind::Call { .. })
+            && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
+            && self.inp.pair_tys.contains_key(&id.0)
     }
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
@@ -773,6 +785,14 @@ impl Lower<'_> {
                     if !self.stmt(stmt)? {
                         return Ok(Val::Never);
                     }
+                }
+                // A `()` block's host-call tail is dropped (`main`'s
+                // `write(..)`): its result stays raw.
+                if let Some(t) = *tail
+                    && self.expr_ty(id).is_some_and(is_unit)
+                    && self.host_pair(t)
+                {
+                    self.raw_host = true;
                 }
                 match tail {
                     // The body's own tail is a statement to HIR emission, and
