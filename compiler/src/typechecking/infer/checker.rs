@@ -1654,6 +1654,8 @@ impl Checker {
         self.push_scope();
         self.module_frame = self.env.depth() - 1;
 
+        // Imported classes first: a forward signature names them (#888).
+        self.pre_import_classes(ast);
         // Forward-declare free fns so earlier `impl` methods can call them.
         self.pre_register_free_functions(ast);
         // Trait instances before the main walk so later `impl` still feeds `for x in`.
@@ -14268,6 +14270,45 @@ impl Checker {
         };
         self.messages.truncate(msg_len);
         scheme
+    }
+
+    /// Bind each class or enum a top-level `use` imports from another file,
+    /// as the `use` itself does in the main walk, so a forward `fn`
+    /// signature that names it resolves `Rec` to `rec::Rec` (#888).
+    fn pre_import_classes(&mut self, ast: &Output) {
+        let children = match ast.1.as_ref() {
+            Expression::Program(c) | Expression::Fragment(c) | Expression::Block(c) => c.as_slice(),
+            _ => return,
+        };
+        let mut uses = Vec::new();
+        for child in children {
+            Self::collect_top_level_uses(child, &mut uses);
+        }
+        for (path, name, alias) in uses {
+            if path.is_empty() || name == "*" {
+                continue;
+            }
+            let fqn = format!("{}::{name}", path.join("::"));
+            if self.is_class(&fqn) || self.enums.contains_key(&fqn) {
+                self.reexport_module_item(&fqn, alias.unwrap_or(name));
+            }
+        }
+    }
+
+    fn collect_top_level_uses<'a>(node: &'a Output, out: &mut Vec<(&'a [String], &'a str, Option<&'a str>)>) {
+        match node.1.as_ref() {
+            Expression::Statement(inner)
+            | Expression::ExprStatement(inner)
+            | Expression::Expr(inner)
+            | Expression::Group(inner) => Self::collect_top_level_uses(inner, out),
+            Expression::Fragment(children) | Expression::Block(children) => {
+                for child in children {
+                    Self::collect_top_level_uses(child, out);
+                }
+            }
+            Expression::Use { path, name, alias } => out.push((path, name, alias.as_deref())),
+            _ => {}
+        }
     }
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so

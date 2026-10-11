@@ -7,3 +7,12 @@ class Rec {
 fn make(int n) -> Rec {
     return new Rec(n);
 }
+
+enum Shape {
+    Dot,
+    Sq(int),
+}
+
+fn square(int n) -> Shape {
+    return Shape::Sq(n);
+}
