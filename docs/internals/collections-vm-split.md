@@ -30,7 +30,7 @@ Constrained ops (`insert` / `get_or` / …) are **inherent methods** on
 type-tied operations should be methods, not free functions — the compiler
 applies `impl` type-param bounds to method schemes and emits dictionary
 arguments on inherent method `CALL` (same ABI as free generics). Free generic
-functions that return `Option<T>` are still `E0127` (shared body boxes `T`).
+functions may return `Option<T>` (#884).
 Ground `Option` / `Result` values use niche, two-slot, or boxed `ObjEnum` by
 shape (COI-92) — not a single boxed ABI.
 
@@ -41,7 +41,6 @@ shape (COI-92) — not a single boxed ABI.
 | Gap | Impact | Recommended hoist |
 |-----|--------|-------------------|
 | `[Option<T>]` / `[Foo<K,V>]` | Nested generics in array element types parse | Done — write `[Option<int>]` directly |
-| Free `fn f<T>(T) -> Option<T>` | Still `E0127` (shared body boxes `T`); put that return on an inherent method. Ground `Option`/`Result` elsewhere is niche / two-slot / boxed by shape | — |
 | Functional `List` recursion past the VM limit panics with `stack overflow` | Prefer mutable class list for very long lists | — |
 
 ## Future (only if measured)

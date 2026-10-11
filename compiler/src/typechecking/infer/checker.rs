@@ -12473,48 +12473,6 @@ impl Checker {
 
     //  Functions (monomorphic recursion)
 
-    /// Free generic functions compile one shared body and box type-param
-    /// arguments. `Option::Some(x)` then wraps that box, so a caller that
-    /// expects a native `Option<int>` / `Option<string>` payload is wrong.
-    /// Inherent methods are monomorphized (they unbox `T` at the specialized
-    /// body start) and stay valid.
-    fn reject_free_generic_option_return(
-        &mut self,
-        name: &str,
-        is_generic: bool,
-        param_vars: &[TyVarId],
-        fun_ty: &Ty,
-        range: &Range<usize>,
-    ) {
-        // Shared generic bodies box `T`. Wrapping that box in `Option` /
-        // matching it as `Option<int>` is still a residual codegen hole
-        // (E0127). Inherent methods are monomorphized and stay valid.
-        if !is_generic || !self.registering_overloadable_fn {
-            return;
-        }
-        let resolved = apply_ty_prune(&self.subst, fun_ty);
-        let mut ret = &resolved;
-        while let Ty::Fun(_, inner) = ret {
-            ret = inner;
-        }
-        let Some(payload) = option_inner(ret) else {
-            return;
-        };
-        let payload_vars = ftv_ty(&payload);
-        if !param_vars.iter().any(|v| payload_vars.contains(v)) {
-            return;
-        }
-        let mut msg = Message::error(
-            ErrorCode::UnsupportedGenericOptionReturn,
-            format!("free function `{name}` cannot return Option of a type parameter"),
-            range.clone(),
-        );
-        msg.with_help(
-            "put this on an inherent `impl` method; a shared generic body boxes T and would wrap that box inside Option".to_string(),
-        );
-        self.messages.push(msg);
-    }
-
     /// A generic `fn` taken as a value runs its shared body, which boxes `T`.
     /// Call sites through the value only unbox a *bare* `T` param / return,
     /// so a type parameter nested inside `Option<T>` / `Vec<T>` / tuples /
@@ -12542,7 +12500,7 @@ impl Checker {
             return;
         }
         let mut msg = Message::error(
-            ErrorCode::UnsupportedGenericOptionReturn,
+            ErrorCode::UnsupportedGenericFnValue,
             format!("generic function `{name}` cannot be used as a value: a type parameter is nested in its signature"),
             range.clone(),
         );
