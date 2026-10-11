@@ -125,6 +125,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirCastKind::IntToFloat => format!("fcvt.{to}.{from}"),
                 MirCastKind::Sext => format!("sext.{to}.{from}"),
                 MirCastKind::FloatToInt => format!("ftrunc.{to}.{from}"),
+                MirCastKind::Niche => format!("niche.{to}.{from}"),
             };
             write!(f, "{dest} = {name} {src}")
         }
@@ -697,6 +698,19 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::Cast {
                 dest,
                 kind: MirCastKind::FloatToInt,
+                to,
+                src,
+            });
+        }
+        if let Some(rest) = op.strip_prefix("niche.") {
+            let mut parts = rest.split('.');
+            let to =
+                MirTy::parse(parts.next().unwrap_or("")).ok_or_else(|| ParseError(op.clone()))?;
+            let src = self.value()?;
+            ensure_ty(types, dest, to);
+            return Ok(MirInst::Cast {
+                dest,
+                kind: MirCastKind::Niche,
                 to,
                 src,
             });
