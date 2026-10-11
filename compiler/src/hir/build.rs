@@ -1473,12 +1473,87 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(coil_ty::boolean()),
             _ => self.ty_at(b, lhs),
         });
-        self.emit_ty(b, node, HirKind::Bin { op, lhs, rhs }, ty)
+        if op == BinOp::IntPow && is_byte(ty.as_ref()) {
+            return self.byte_pow(b, span_of(node), lhs, rhs);
+        }
+        let id = self.emit_ty(b, node, HirKind::Bin { op, lhs, rhs }, ty);
+        self.wrap_byte(b, id)
     }
 
     fn unary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, e: &Output<'_>, op: UnOp) -> HirId {
         let operand = self.expr(b, e);
-        self.emit(b, node, HirKind::Un { op, operand })
+        let id = self.emit(b, node, HirKind::Un { op, operand });
+        self.wrap_byte(b, id)
+    }
+
+    /// `byte` `+ - * <<` and negation keep the low 8 bits of the int result
+    /// (coil-lang#882): `id & 255`. Anything else is returned as is.
+    fn wrap_byte(&self, b: &mut BodyBuilder, id: HirId) -> HirId {
+        let e = &b.body.exprs[id.0 as usize];
+        let wraps = match &e.kind {
+            HirKind::Bin { op, .. } => matches!(op, BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul | BinOp::Shl),
+            HirKind::Un { op, .. } => *op == UnOp::Neg,
+            _ => false,
+        };
+        if !wraps || !is_byte(e.ty.as_ref()) {
+            return id;
+        }
+        let (span, ty) = (e.span, e.ty.clone());
+        let mask = self.synth(b, span, HirKind::Lit(Lit::Int(255)), ty.clone());
+        self.synth(b, span, HirKind::Bin { op: BinOp::BitAnd, lhs: id, rhs: mask }, ty)
+    }
+
+    /// `byte` `base ** exp` modulo 256 without an int overflow: square and
+    /// multiply over the 8 bits of `exp`, masking every step.
+    fn byte_pow(&self, b: &mut BodyBuilder, span: Span, base: HirId, exp: HirId) -> HirId {
+        let byte = Some(coil_ty::byte());
+        let unit = Some(coil_ty::unit());
+        let mut stmts = Vec::new();
+        let mut bind = |cx: &Self, b: &mut BodyBuilder, name: &str, init: HirId| {
+            let t = b.temp(name, byte.clone());
+            stmts.push(cx.synth(b, span, HirKind::Let { local: t, init: Some(init) }, unit.clone()));
+            t
+        };
+        let lit = |cx: &Self, b: &mut BodyBuilder, n: i64| cx.synth(b, span, HirKind::Lit(Lit::Int(n)), Some(coil_ty::byte()));
+        let read = |cx: &Self, b: &mut BodyBuilder, t: LocalId| cx.synth(b, span, HirKind::Local(t), Some(coil_ty::byte()));
+        let bin = |cx: &Self, b: &mut BodyBuilder, op: BinOp, lhs: HirId, rhs: HirId| {
+            cx.synth(b, span, HirKind::Bin { op, lhs, rhs }, Some(coil_ty::byte()))
+        };
+        let e = bind(self, b, "pow$exp", exp);
+        let mut sq = bind(self, b, "pow$sq", base);
+        let one = lit(self, b, 1);
+        let mut acc = bind(self, b, "pow$acc", one);
+        for i in 0..8 {
+            // factor = bit * sq + (bit ^ 1): `sq` when bit `i` of `exp` is set, else 1.
+            let ev = read(self, b, e);
+            let k = lit(self, b, i);
+            let shifted = bin(self, b, BinOp::Shr, ev, k);
+            let one = lit(self, b, 1);
+            let bit = bin(self, b, BinOp::BitAnd, shifted, one);
+            let bit = bind(self, b, "pow$bit", bit);
+            let bv = read(self, b, bit);
+            let sv = read(self, b, sq);
+            let taken = bin(self, b, BinOp::IntMul, bv, sv);
+            let bv = read(self, b, bit);
+            let one = lit(self, b, 1);
+            let skipped = bin(self, b, BinOp::BitXor, bv, one);
+            let factor = bin(self, b, BinOp::IntAdd, taken, skipped);
+            let av = read(self, b, acc);
+            let prod = bin(self, b, BinOp::IntMul, av, factor);
+            let mask = lit(self, b, 255);
+            let next = bin(self, b, BinOp::BitAnd, prod, mask);
+            acc = bind(self, b, "pow$acc", next);
+            if i < 7 {
+                let l = read(self, b, sq);
+                let r = read(self, b, sq);
+                let prod = bin(self, b, BinOp::IntMul, l, r);
+                let mask = lit(self, b, 255);
+                let next = bin(self, b, BinOp::BitAnd, prod, mask);
+                sq = bind(self, b, "pow$sq", next);
+            }
+        }
+        let tail = read(self, b, acc);
+        self.synth(b, span, HirKind::Block { stmts, tail: Some(tail) }, byte)
     }
 
     /// `x op= e` as `x = x op e`. The place is built twice (read and write);
@@ -1501,7 +1576,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let rhs = self.expr(b, value);
         let lhs_ty = self.ty_at(b, read);
         let bin_op = resolve_bin(sym, lhs_ty.as_ref(), self.ty_at(b, rhs).as_ref());
-        let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs }, lhs_ty);
+        let bin = if bin_op == BinOp::IntPow && is_byte(lhs_ty.as_ref()) {
+            self.byte_pow(b, span_of(node), read, rhs)
+        } else {
+            let bin = self.synth(b, span_of(node), HirKind::Bin { op: bin_op, lhs: read, rhs }, lhs_ty);
+            self.wrap_byte(b, bin)
+        };
         let place = self.expr(b, target);
         self.fill_ty(b, place, bin);
         let id = self.emit(b, node, HirKind::Assign { place, value: bin });
@@ -2428,6 +2508,10 @@ pub(crate) fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> B
         };
     }
     BinOp::Overloaded(op)
+}
+
+fn is_byte(ty: Option<&Ty>) -> bool {
+    matches!(ty.map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::BYTE)
 }
 
 /// A pattern that matches every value.
