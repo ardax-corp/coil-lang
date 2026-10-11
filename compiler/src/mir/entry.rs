@@ -72,10 +72,18 @@ pub fn lir_refuse_with(
     maps_ok: bool,
 ) -> Option<LirRefuse> {
     let _ = unboxed_fields;
-    hard_refuse(ops, maps_ok)
+    hard_refuse(ops, maps_ok, false)
 }
 
-fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
+/// The walls for a body whose LIR comes from MIR lowered from HIR: that
+/// MIR reads and writes class fields itself and maps its own allocations
+/// (`maps_ok` from [`super::stackmap::mir_maps_ok`]), so neither is a wall
+/// on the stack IL it replaces.
+pub fn lir_refuse_direct(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
+    hard_refuse(ops, maps_ok, true)
+}
+
+fn hard_refuse(ops: &[IlOp], maps_ok: bool, fields_ok: bool) -> Option<LirRefuse> {
     for op in ops {
         match op {
             IlOp::Entry {
@@ -93,7 +101,7 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 ..
             } => return Some(LirRefuse::Alloc),
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
-            IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => {
+            IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } if !fields_ok => {
                 return Some(LirRefuse::HeapField);
             }
             IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => return Some(LirRefuse::Box),

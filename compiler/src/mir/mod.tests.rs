@@ -6240,3 +6240,49 @@ fn br_taken_path_jumps_over_false_edge_phi_moves() {
         "taken path must jump over the false-edge moves"
     );
 }
+
+/// MIR lowered from HIR maps its own allocations: one site per allocation,
+/// each covering the parameters and the frame register of every heap value
+/// live across one, and the count matches the alloc opcodes LIR emits.
+#[test]
+fn direct_mir_stack_map_from_regs() {
+    let text = "func @keep(v0: heapref, v1: i64) -> i64 {
+bb0:
+    v2 = alloc.array v1, v1
+    v3 = gcbarrier.safepoint v2
+    v4 = alloc.array v1
+    v5 = gcbarrier.safepoint v4
+    v6 = arraylen v0
+    v7 = arraylen v3
+    v8 = arraylen v5
+    v9 = iadd v6, v7
+    v10 = iadd v9, v8
+    return v10
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    assert!(super::stackmap::mir_maps_ok(&f));
+    let (_, _, map) = super::emit_lir::lir_sidecars(&f);
+    let map = map.expect("allocating body has a map");
+    assert_eq!(map.sites.len(), 2);
+    assert!(map.frame_slots.contains(&0), "param slot: {map:?}");
+    assert!(map.frame_slots.len() >= 2, "array held across the second alloc: {map:?}");
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, true).expect("mapped LIR");
+    let allocs = lir
+        .iter()
+        .filter(|op| matches!(op, IlOp::MakeArray { .. }) || matches!(op, IlOp::Byte { byte, .. } if super::stackmap::is_alloc_opcode(*byte.bytecode())))
+        .count();
+    assert_eq!(allocs, map.sites.len());
+
+    // An allocation whose barrier does not follow it is not mapped.
+    let unpaired = "func @loose(v0: i64) -> heapref {
+bb0:
+    v1 = alloc.array v0
+    v2 = iadd v0, v0
+    v3 = gcbarrier.safepoint v1
+    return v3
+}";
+    let g = parse_func(unpaired).expect(unpaired);
+    assert!(!super::stackmap::mir_maps_ok(&g));
+}

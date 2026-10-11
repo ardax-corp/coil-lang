@@ -141,15 +141,27 @@ pub fn emit_lir_with_aliases(
     Ok(out)
 }
 
-pub(super) fn lir_sidecars(
-    func: &MirFunc,
-) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
+pub(super) type LirSidecars = (
+    std::collections::HashMap<u32, u32>,
+    super::deopt::DraftDeoptMap,
+    Option<super::stackmap::DraftFrameMap>,
+);
+
+/// Debug slot remap, deopt map and (for a body with GC edges) the stack map
+/// of `func`, in the frame registers LIR emission assigns.
+pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let plan = EmitPlan::new(func);
     let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let stack_map = if func.has_gc_edge() && !regs.is_empty() {
+        super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
+    } else {
+        None
+    };
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),
+        stack_map,
     )
 }
 

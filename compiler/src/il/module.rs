@@ -435,6 +435,7 @@ impl IlModule {
         let pinned = self.funcs.iter().filter(|b| b.meta.pinned).count();
         let dense_kept = self.funcs.len() - pending.len() - pinned;
         let mut lir_kept = 0usize;
+        let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
         for i in pending.iter().copied() {
             if !opts.mir_specialize {
                 break;
@@ -460,6 +461,9 @@ impl IlModule {
                     }
                     if let Some(deopt) = side.deopt {
                         side_deopts.push(deopt);
+                    }
+                    if let Some(map) = side.stack_map {
+                        mir_maps.insert(body.meta.name.clone(), map);
                     }
                     body.ops = lir;
                     tier[i] = "lir";
@@ -504,7 +508,10 @@ impl IlModule {
         // bodies before the loop cursor raises (added just below).
         if opts.mir_specialize {
             for body in &self.funcs {
-                if let Some(draft) = crate::mir::try_build_draft(
+                // A LIR body from MIR lowered from HIR carries its own map.
+                if let Some(draft) = mir_maps.remove(&body.meta.name) {
+                    self.stack_map_drafts.push(draft);
+                } else if let Some(draft) = crate::mir::try_build_draft(
                     &body.ops,
                     &body.meta.name,
                     body.meta.entry_sp,

@@ -24,6 +24,9 @@ pub struct BodySidecar {
     /// Allocating dense body: its registers may sit past the cursor, so its
     /// frame needs a decoded extent (see `precise_frames`).
     pub needs_frame_extent: bool,
+    /// GC map of a LIR body built from MIR lowered from HIR (no stack IL
+    /// lift to draw it from).
+    pub stack_map: Option<super::stackmap::DraftFrameMap>,
 }
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
@@ -645,23 +648,29 @@ pub fn try_lower_abi_body_side(
     if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
         return refuse("post-loop alloc return");
     }
-    let maps_ok =
-        has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);
-    if let Some(wall) = lir_refuse_with(ops, unboxed_fields, maps_ok) {
+    // MIR lowered from HIR needs no lift, and maps its own allocations
+    // (`lir_tail` builds the body's draft from it).
+    let direct = from_hir.filter(|f| !has_alloc || super::stackmap::mir_maps_ok(f));
+    let wall = match direct {
+        Some(_) => super::entry::lir_refuse_direct(ops, has_alloc),
+        None => {
+            let maps_ok = has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);
+            lir_refuse_with(ops, unboxed_fields, maps_ok)
+        }
+    };
+    if let Some(wall) = wall {
         return refuse(format!("lir wall {wall:?}"));
     }
-    // MIR lowered from HIR needs no lift; until it builds its own GC maps,
-    // only a body that allocates nothing takes it.
-    let mut func = match from_hir {
-        Some(func) if !has_alloc => func.clone(),
-        _ => lift_lir(ops, name, entry_sp, pool, unboxed_fields, has_alloc)?,
+    let mut func = match direct {
+        Some(func) => func.clone(),
+        None => lift_lir(ops, name, entry_sp, pool, unboxed_fields, has_alloc)?,
     };
     if has_alloc {
         crate::mir::sroa(&mut func);
     } else {
         crate::mir::cse(&mut func);
     }
-    lir_tail(ops, name, pool, has_alloc, func, side)
+    lir_tail(ops, name, pool, has_alloc, direct.is_some(), func, side)
 }
 
 /// Lift `ops` to MIR for the LIR tier.
@@ -695,7 +704,8 @@ fn lift_lir(ops: &[IlOp], name: &str, entry_sp: u32, pool: &[u64], unboxed_field
 }
 
 /// Emit the LIR tier's stack IL from `func`.
-fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, mut func: crate::mir::MirFunc, side: &mut BodySidecar) -> Option<Vec<IlOp>> {
+#[allow(clippy::too_many_arguments)]
+fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, direct: bool, mut func: crate::mir::MirFunc, side: &mut BodySidecar) -> Option<Vec<IlOp>> {
     super::deopt::fill_deopt_maps(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
@@ -710,9 +720,18 @@ fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, mut 
         })
         .filter(|&l| Some(l) != entry)
         .collect();
-    let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
+    let (remap, deopt, mut stack_map) = super::emit_lir::lir_sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
+    // SROA may have taken every allocation out; then there is nothing to map.
+    if direct && func.has_gc_edge() {
+        let Some(map) = stack_map.take() else {
+            return refuse("no MIR stack map");
+        };
+        let mut map = map;
+        map.name = name.to_string();
+        side.stack_map = Some(map);
+    }
     capture_mir(name, "lir", &func);
     let out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
         Ok(o) => o,
