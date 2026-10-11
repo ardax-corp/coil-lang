@@ -5635,7 +5635,6 @@ fn generic_call_emits_box_and_unbox() {
 
 /// Inherent methods returning Option<T> must not UnboxValue the call result
 /// (that would turn a valid heap object / niche pointer into garbage).
-/// Free `fn f<T>(T) -> Option<T>` is a type error (E0127); see diagnostics.
 #[test]
 fn generic_method_returning_option_does_not_unbox_enum() {
     use common::Instruction;

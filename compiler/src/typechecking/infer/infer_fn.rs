@@ -644,7 +644,6 @@ impl Checker {
         self.in_test_case = prev_in_test;
         fun_ty = Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), self_ty.is_some());
         self.unify(&Ty::Var(alpha), &fun_ty, range, "function type");
-        self.reject_free_generic_option_return(name, is_generic, &param_vars, &fun_ty, range);
 
         if !is_generic {
             let resolved = apply_ty_prune(&self.subst, &fun_ty);

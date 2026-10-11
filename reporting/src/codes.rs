@@ -54,11 +54,10 @@ pub enum ErrorCode {
     ExpressionNestingTooDeep,
     /// Invalid `fn drop(self)` (wrong owner, arity, static, duplicate, …).
     InvalidDrop,
-    /// Free generic `fn f<T>(...) -> Option<U>` where `U` mentions a type
-    /// parameter. A shared generic body boxes `T`; wrapping that box in
-    /// Option corrupts native payloads. Inherent methods are monomorphized
-    /// and stay valid.
-    UnsupportedGenericOptionReturn,
+    /// Generic `fn` taken as a value when a type parameter is nested in its
+    /// signature (`Vec<T>`, `Option<T>`, tuples, classes). Not supported yet:
+    /// call it directly or wrap it in a lambda at a concrete type.
+    UnsupportedGenericFnValue,
     /// Private field or inherent method used outside its type's `impl`.
     PrivateMember,
     /// Call to a deprecated function (warning; the help names the replacement).
@@ -166,7 +165,7 @@ impl ErrorCode {
             Self::DeferNeverRuns => "E0123",
             Self::ExpressionNestingTooDeep => "E0125",
             Self::InvalidDrop => "E0126",
-            Self::UnsupportedGenericOptionReturn => "E0127",
+            Self::UnsupportedGenericFnValue => "E0127",
             Self::PrivateMember => "E0128",
             Self::Deprecated => "E0129",
             Self::ByteWrap => "E0130",
@@ -253,7 +252,7 @@ impl ErrorCode {
             Self::DeferNeverRuns => "defer will never run on function exit",
             Self::ExpressionNestingTooDeep => "expression nested too deeply for the compiler",
             Self::InvalidDrop => "invalid drop method",
-            Self::UnsupportedGenericOptionReturn => "unsupported free generic Option return",
+            Self::UnsupportedGenericFnValue => "generic function value with a nested type parameter",
             Self::PrivateMember => "private member is not accessible",
             Self::Deprecated => "deprecated function",
             Self::ByteWrap => "byte arithmetic wraps",
@@ -348,7 +347,7 @@ mod tests {
             | DeferNeverRuns
             | ExpressionNestingTooDeep
             | InvalidDrop
-            | UnsupportedGenericOptionReturn
+            | UnsupportedGenericFnValue
             | PrivateMember
             | Deprecated
             | ByteWrap
@@ -425,7 +424,7 @@ mod tests {
             DeferNeverRuns,
             ExpressionNestingTooDeep,
             InvalidDrop,
-            UnsupportedGenericOptionReturn,
+            UnsupportedGenericFnValue,
             PrivateMember,
             Deprecated,
             ByteWrap,
