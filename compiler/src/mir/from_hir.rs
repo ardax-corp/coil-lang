@@ -386,6 +386,32 @@ fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
 /// branch), then lay the blocks out in `order`, dropping the ones nothing
 /// reaches.
 fn tidy(func: &mut MirFunc, order: &[BlockId]) {
+    // A branch whose arms are both empty jumps to one block, with the same
+    // φ values from each, goes there either way: jump to one arm.
+    for i in 0..func.blocks.len() {
+        let Some(Terminator::Br { taken, not_taken, .. }) = func.blocks[i].term else {
+            continue;
+        };
+        let hop = |x: BlockId| match func.block(x).term {
+            Some(Terminator::Jump { dest }) if func.block(x).insts.is_empty() && x != func.entry => Some(dest),
+            _ => None,
+        };
+        let (Some(c), Some(c2)) = (hop(taken), hop(not_taken)) else {
+            continue;
+        };
+        let same = c == c2
+            && taken != not_taken
+            && func.block(c).insts.iter().all(|inst| match inst {
+                MirInst::Phi { args, .. } => {
+                    let from = |x: BlockId| args.iter().find(|(f, _)| *f == x).map(|&(_, v)| v);
+                    from(taken) == from(not_taken)
+                }
+                _ => true,
+            });
+        if same {
+            func.blocks[i].term = Some(Terminator::Jump { dest: taken });
+        }
+    }
     loop {
         let mut changed = false;
         for i in 0..func.blocks.len() {
