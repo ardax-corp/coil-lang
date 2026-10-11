@@ -1112,7 +1112,10 @@ impl<const S: usize> Machine<S> {
                         note_make_fast();
                     }
                     let lo = sp + base;
-                    let addr = if kind >= common::dense::MAKE_ENUM {
+                    let addr = if kind >= common::dense::MAKE_ENUM && arity == 0 {
+                        // A payload-less variant is shared, as `MakeEnum`.
+                        self.heap.immortal_unit_enum(u32::from(kind - common::dense::MAKE_ENUM)).addr()
+                    } else if kind >= common::dense::MAKE_ENUM {
                         // Inline payloads read the registers directly (no Vec).
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload =
