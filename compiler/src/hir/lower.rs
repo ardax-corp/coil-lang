@@ -1204,6 +1204,48 @@ pub fn let_pat_shape(pat: &HirPat) -> bool {
     }
 }
 
+/// `x % m` with a literal `m` and a dividend not proven non-negative:
+/// the AST adds a Euclidean fix-up after an array index.
+pub fn index_euclid(hir: &HirBody, index: HirId) -> Option<i32> {
+    let HirKind::Bin {
+        op: BinOp::IntRem,
+        lhs,
+        rhs,
+    } = hir.expr(index).kind
+    else {
+        return None;
+    };
+    let HirKind::Lit(Lit::Int(m)) = hir.expr(rhs).kind else {
+        return None;
+    };
+    if m <= 0 || m > i32::MAX as i64 {
+        return None;
+    }
+    let nonneg = match hir.expr(lhs).kind {
+        HirKind::Lit(Lit::Int(n)) => n >= 0,
+        _ => hir.expr(lhs).flags.contains(HirFlags::NONNEG),
+    };
+    (!nonneg).then_some(m as i32)
+}
+
+/// Whether a stack-array index needs no bounds check, as the AST's
+/// `stack_array_index_proven`: the checker proved it, or it is
+/// `i % m` with `0 < m <= n`.
+pub fn stack_index_proven(hir: &HirBody, node: HirId, index: HirId, n: usize) -> bool {
+    if hir.expr(node).flags.contains(HirFlags::IN_BOUNDS) {
+        return true;
+    }
+    let HirKind::Bin {
+        op: BinOp::IntRem,
+        rhs,
+        ..
+    } = hir.expr(index).kind
+    else {
+        return false;
+    };
+    matches!(hir.expr(rhs).kind, HirKind::Lit(Lit::Int(m)) if m > 0 && m as usize <= n)
+}
+
 /// `[start, end]` of a `for` over a range literal.
 pub fn range_bounds(body: &HirBody, iterable: HirId) -> Option<[HirId; 2]> {
     match &body.expr(iterable).kind {
@@ -1256,6 +1298,13 @@ pub fn has_own_continue(hir: &HirBody, body: HirId) -> bool {
         HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
         _ => children(hir, body).into_iter().any(|k| has_own_continue(hir, k)),
     }
+}
+
+/// Whether `id` reads `local` anywhere in it.
+pub fn reads_local(hir: &HirBody, id: HirId, local: LocalId) -> bool {
+    let mut found = false;
+    visit(hir, id, &mut |e| found |= matches!(e.kind, HirKind::Local(l) if l == local));
+    found
 }
 
 /// Whether `local` is assigned anywhere in `body`.

@@ -723,10 +723,8 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.sroa.is_empty() {
-            Err("scalar-replaced local".to_string())
-        } else if !plan.stacks.is_empty() {
-            Err("stack array".to_string())
+        let why = if !plan.box_at.is_empty() {
+            Err("boxed frame-slot aggregate".to_string())
         } else if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
         } else if emit.par_loop {
@@ -771,6 +769,38 @@ impl Compiler {
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
             .collect();
+        // Stack arrays and scalar-replaced class locals: one frame slot per
+        // element or field, each a scalar word.
+        let mut stacks = HashMap::new();
+        for (&local, &n) in &emit.plan.stacks {
+            let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+            let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element),
+                _ => None,
+            };
+            let base = emit.slots[local as usize].ok_or("stack array slot")?;
+            stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
+        }
+        let mut sroa = HashMap::new();
+        for e in &hir.exprs {
+            if let HirKind::Let { local, init: Some(init) } = e.kind
+                && emit.plan.sroa.contains_key(&local.0)
+            {
+                let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
+                let tys: Option<Vec<_>> = tys.iter().map(crate::mir::scalar_mir_ty).collect();
+                sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
+            }
+        }
+        let mut fields = HashMap::new();
+        for (i, e) in hir.exprs.iter().enumerate() {
+            if let HirKind::Field { base, name } = &e.kind
+                && let HirKind::Local(local) = hir.expr(*base).kind
+                && emit.plan.sroa.contains_key(&local.0)
+            {
+                let slot = self.hir_sroa_slot(hir, emit, *base, name).ok_or("scalar-replaced field")?;
+                fields.insert(i as u32, slot);
+            }
+        }
         let ret_pair = match &emit.plan.ret {
             Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
             Rep::Word(_) => None,
@@ -780,6 +810,9 @@ impl Compiler {
             pair_locals,
             pair_tys,
             ret_pair,
+            stacks,
+            sroa,
+            fields,
             calls: &emit.call_targets,
             cold_ok: emit.plan.cold_ok,
             file,
@@ -3954,30 +3987,6 @@ impl Compiler {
         })
     }
 
-    /// `x % m` with a literal `m` and a dividend not proven non-negative:
-    /// the AST adds a Euclidean fix-up after an array index.
-    fn hir_index_euclid(hir: &HirBody, index: HirId) -> Option<i32> {
-        let HirKind::Bin {
-            op: BinOp::IntRem,
-            lhs,
-            rhs,
-        } = hir.expr(index).kind
-        else {
-            return None;
-        };
-        let HirKind::Lit(Lit::Int(m)) = hir.expr(rhs).kind else {
-            return None;
-        };
-        if m <= 0 || m > i32::MAX as i64 {
-            return None;
-        }
-        let nonneg = match hir.expr(lhs).kind {
-            HirKind::Lit(Lit::Int(n)) => n >= 0,
-            _ => hir.expr(lhs).flags.contains(HirFlags::NONNEG),
-        };
-        (!nonneg).then_some(m as i32)
-    }
-
     /// An array index, with the AST's Euclidean fix-up for `x % m`.
     /// `s as [byte]` on a string, which the AST compiles to `to_bytes(s)`.
     fn hir_string_to_bytes(&self, hir: &HirBody, id: HirId, value: HirId) -> bool {
@@ -3988,7 +3997,7 @@ impl Compiler {
 
     fn hir_index_value(&mut self, hir: &HirBody, emit: &mut HirEmit, index: HirId, depth: u32) {
         self.hir_value(hir, emit, index, &BOXED, depth);
-        if let Some(m) = Self::hir_index_euclid(hir, index) {
+        if let Some(m) = lower::index_euclid(hir, index) {
             let mut bc = CodeBuf::new();
             self.emit_euclid_rem_fixup(&mut bc, m);
             self.bytecode.append(&mut bc);
@@ -4768,6 +4777,16 @@ impl Compiler {
     fn hir_stack_array_init(&mut self, hir: &HirBody, emit: &mut HirEmit, local: LocalId, init: HirId) {
         let base = Self::hir_slot(emit, local);
         match &hir.expr(init).kind {
+            HirKind::Make { args, .. } if args.iter().any(|&a| lower::reads_local(hir, a, local)) => {
+                // `a = [a[1], a[0]]`: every item before any slot changes.
+                let want = self.hir_stack_rep(hir, local);
+                for (i, &arg) in args.iter().enumerate() {
+                    self.hir_value(hir, emit, arg, &want, i as u32);
+                }
+                for i in (0..args.len()).rev() {
+                    self.bytecode.push_store_pop(base + i as u32);
+                }
+            }
             HirKind::Make { args, .. } => {
                 let want = self.hir_stack_rep(hir, local);
                 for (i, &arg) in args.iter().enumerate() {
@@ -4835,24 +4854,6 @@ impl Compiler {
             Some(Ty::Array { element, .. }) => self.value_layout(element),
             _ => ValueLayout::Boxed,
         })
-    }
-
-    /// Whether a stack-array index needs no bounds check, as the AST's
-    /// `stack_array_index_proven`: the checker proved it, or it is
-    /// `i % m` with `0 < m <= n`.
-    fn hir_stack_proven(hir: &HirBody, node: HirId, index: HirId, n: usize) -> bool {
-        if hir.expr(node).flags.contains(HirFlags::IN_BOUNDS) {
-            return true;
-        }
-        let HirKind::Bin {
-            op: BinOp::IntRem,
-            rhs,
-            ..
-        } = hir.expr(index).kind
-        else {
-            return false;
-        };
-        matches!(hir.expr(rhs).kind, HirKind::Lit(Lit::Int(m)) if m > 0 && m as usize <= n)
     }
 
     /// `base.name` as a field of a frame-slot class local: its slot.
@@ -6135,7 +6136,7 @@ impl Compiler {
                 {
                     self.bytecode.push_load(slot + i as u32);
                 } else {
-                    let proven = Self::hir_stack_proven(hir, id, *index, n);
+                    let proven = lower::stack_index_proven(hir, id, *index, n);
                     self.hir_index_value(hir, emit, *index, depth);
                     self.expr_depth = depth;
                     let idx = self.alloc_temp_slot();
@@ -8272,7 +8273,7 @@ impl Compiler {
                         self.hir_value(hir, emit, *value, &want, 0);
                         self.bytecode.push_store_pop(slot + i as u32);
                     } else {
-                        let proven = Self::hir_stack_proven(hir, *place, *index, n);
+                        let proven = lower::stack_index_proven(hir, *place, *index, n);
                         // A word local the index leaves alone is read in
                         // place; anything else is staged in a temp.
                         let direct = self
