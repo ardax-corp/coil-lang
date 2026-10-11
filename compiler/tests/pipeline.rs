@@ -11642,3 +11642,24 @@ fn vectorized_int_overflow_traps() {
     ));
     assert!(out.starts_with("panic: integer overflow"), "big + big overflows first: got {out:?}");
 }
+
+/// #890: a call to an import from a missing module reports the module
+/// error only, not also the internal "cannot lower `main` yet" (E0801).
+#[test]
+fn missing_module_reports_no_internal_lowering_error() {
+    let dir = std::env::temp_dir().join(format!("coil-890-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("main.hy");
+    std::fs::write(&entry, "use nothere::x;\nfn main() {\n    x();\n}\n").expect("write entry");
+    let mut pipeline = test_pipeline();
+    assert!(pipeline.compile_src_from_file(entry.to_str().expect("utf-8")).is_err());
+    let errors: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| *m.kind() == reporting::MessageKind::ERROR)
+        .map(|m| (m.code(), m.message().to_string()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(errors.iter().any(|(_, m)| m.contains("Module not found")), "{errors:?}");
+    assert!(!errors.iter().any(|(_, m)| m.contains("cannot lower")), "{errors:?}");
+}
