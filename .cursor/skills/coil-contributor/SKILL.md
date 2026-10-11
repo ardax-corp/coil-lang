@@ -9,7 +9,7 @@ description: >-
 
 # coil contributor
 
-coil is a Rust workspace: parse → HM typecheck → stack IL codegen → IL opts → lower → `.hyc` archive → VM.
+coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → stack IL lowering → MIR tiers / fuse-select → `.hyc` archive → VM.
 
 Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this skill covers **where to change code** and **verification**.
 
@@ -19,7 +19,7 @@ Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this 
 coil/
 ├── common/       # Instruction opcodes, Value, archive (ARCHIVE_VERSION)
 ├── parser/       # Pratt parser, AST
-├── compiler/     # HM typechecker, stack IL (compiler/src/il/), pipeline
+├── compiler/     # HM typechecker, HIR (compiler/src/hir/), stack IL (compiler/src/il/), MIR, pipeline
 ├── machine/      # VM, heap/GC, FFI, host natives (HostInvoke)
 ├── coil-simd/    # Stable std::arch SIMD kernels (packed LA, bytes)
 ├── src/main.rs   # CLI: run, compile, test, debug, dissect
@@ -36,13 +36,14 @@ Pipeline detail: [docs/internals/pipeline.md](docs/internals/pipeline.md).
 |------|------------------|
 | Syntax / grammar | `parser/` |
 | Types / diagnostics | `compiler/src/typechecking/` |
-| Codegen / IL opts | `compiler/src/lib.rs`, `compiler/src/il/` |
+| Optimizations | HIR passes in `compiler/src/hir/` (no IL optimization passes remain) |
+| Codegen | `compiler/src/codegen/` (`emit_hir.rs`), `compiler/src/il/` |
 | Opcodes / VM handlers | `common/` (Instruction), `machine/src/vm.rs` |
 | Archive format | `common/src/archive.rs` |
 | Host natives / virtual modules | `compiler/` (resolve), `machine/` (HostInvoke) |
 | CLI | `src/main.rs` |
 
-Single compilation path: stack codegen in `compiler/src/lib.rs` — no register VM.
+Single compilation path: HIR lowering in `compiler/src/codegen/emit_hir.rs` (the AST codegen was removed 2026-10) — no register VM.
 
 ## Hard invariants (never skip)
 
@@ -85,7 +86,7 @@ rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 2178309 (defa
 1. Draft plan for large language changes (do not edit attached plan files during impl).
 2. Parser + AST if syntax changes.
 3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/references/error-codes.md`).
-4. Codegen — `BlockBuilder` / `IlBuilder`; extend IL opts only when justified.
+4. Codegen — `BlockBuilder` / `IlBuilder`; new optimizations go in HIR passes, not the stack IL.
 5. VM only if new opcode (rare) or runtime behavior.
 6. coil-website `src/content/docs/` (manual/references; routes `/docs/…`) + example in `examples/` or `tests/`.
 7. Bump archive **minor** for additive bytecode; bump **major** if bytecode/tag/opcode incompatible.
@@ -97,7 +98,7 @@ Auto: `prelude`, `prelude::ops`, `prelude::test`, `prelude::math`.
 
 Explicit `use`: `ffi`, `io`, `thread`, `env`, `string`, `gc`, `clock`. Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
-Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). Archive **major 4 / minor 19** appends `MakeEnumReturn` (COI-388 X3). Minor 18 appends `DenseIndexJmpf` (COI-379 S4). Minor 17 appends `DenseBinJmpf` (COI-377 S1). Minor 16 appends `DenseBin2` (COI-381 S2). Minor 15 appends HostInvoke `thread_spawn_shared` (**137**, COI-365 E6). Minor 14 persists S2b stack maps (COI-359 E1). Minor 13 persists `operand_stack_slots` (COI-358 E0). Minor 12 appends `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (COI-356 D2). Minor 11 appends `DenseArrayPush` (COI-344 B6). Minor 10 appends dense-native heap ops (`DenseIndex` … `DensePush`, COI-335). Minor 9 appends `VReduce` / `VFma` (S5b V1). Minor 8 appends compiler-only `VLoad` / `VStore` / `VBin` / `VMove` (eight numeric lanes; `coil-simd`). Minor 7 appends HostInvoke `simd_axpy_reduce` (**136**). Minor 6 appends MIR dense opcodes (`DenseBin` … `DenseCast`). Minor 5 appends M1 `prelude::math` HostInvoke **125–135** (`atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh`). `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
+Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). Archive is **major 4 / minor 36** (later minors: AGENTS.md). Minor 19 appends `MakeEnumReturn` (COI-388 X3). Minor 18 appends `DenseIndexJmpf` (COI-379 S4). Minor 17 appends `DenseBinJmpf` (COI-377 S1). Minor 16 appends `DenseBin2` (COI-381 S2). Minor 15 appends HostInvoke `thread_spawn_shared` (**137**, COI-365 E6). Minor 14 persists S2b stack maps (COI-359 E1). Minor 13 persists `operand_stack_slots` (COI-358 E0). Minor 12 appends `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (COI-356 D2). Minor 11 appends `DenseArrayPush` (COI-344 B6). Minor 10 appends dense-native heap ops (`DenseIndex` … `DensePush`, COI-335). Minor 9 appends `VReduce` / `VFma` (S5b V1). Minor 8 appends compiler-only `VLoad` / `VStore` / `VBin` / `VMove` (eight numeric lanes; `coil-simd`). Minor 7 appends HostInvoke `simd_axpy_reduce` (**136**). Minor 6 appends MIR dense opcodes (`DenseBin` … `DenseCast`). Minor 5 appends M1 `prelude::math` HostInvoke **125–135** (`atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh`). `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
 
 Prefer compiler builtins over userland for core type machinery.
 
@@ -109,7 +110,7 @@ Prefer compiler builtins over userland for core type machinery.
 |------|-----|
 | `coil dissect file.hy --fn pat` | IL/bytecode dump without running |
 | `coil debug file.hy -x script --batch` | VM debugger (see coil-debug skill) |
-| `coil fmt [--check] path` | Pretty-print `.hy` (AST; comments dropped) |
+| `coil fmt [--check] path` | Pretty-print `.hy` (AST; keeps `//` / `///` comments) |
 | `poop` | Instruction/HW counter baselines |
 | `valgrind` | Leaks, callgrind |
 | `heaptrack` | Allocation tracing |

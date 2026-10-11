@@ -9,7 +9,9 @@
 | `machine/src/vm.rs` | Main dispatch loop, `promise!` opcode ceiling |
 | `compiler/src/codegen/` | Codegen driver (`Compiler`, `finalize_bytecode`, `do_compile`) |
 | `compiler/src/lib.rs` | Crate root: re-exports, `#[macro_use] mod codegen` |
-| `compiler/src/il/` | IL ops, lower, fuse-select, opts |
+| `compiler/src/hir/` | HIR build, typed inliner, optimization passes (fold, cse, licm, bounds, unroll, sroa, sink_return) |
+| `compiler/src/codegen/emit_hir.rs` | HIR → stack IL lowering |
+| `compiler/src/il/` | IL ops, MIR lift, lower, fuse-select (no optimization passes) |
 | `compiler/src/typechecking/infer/` | HM `Checker` (`mod.rs` types + `checker.rs` impl) |
 | `parser/src/` | Pratt parser |
 | `machine/src/packed_la.rs` | LA ops via HostInvoke (no LA opcodes); uses `coil-simd` |
@@ -18,7 +20,7 @@
 ## Codegen / VM invariants
 
 - **`STORE`**: pops TOS into slot(s); `cursor = max(cursor, slot + 1)`. Match bindings skip store (`UNPACK` / `JUMP_IF_MATCH`). `StorePop` is deprecated alias — compiler never emits. Packed multi-slot `LOAD`/`STORE`: `[31:24]=n` (1..=3), three slot bytes; `n==0` → wide single slot in low 24 bits.
-- **Stack IL**: symbolic labels until `finalize_bytecode` → per-body opts + **single** `il::lower` after concat. Nested fused returns must `capture_nested_return`.
+- **Stack IL**: symbolic labels until `finalize_bytecode` → per-body MIR tiers + **single** `il::lower` after concat.
 - **Type aliases**: scoped; same-frame duplicates are errors; inner may shadow outer.
 - Packed LA (`dot`/`matmul`/`Matrix`) → `HostInvoke` in `machine/src/packed_la.rs` (no LA opcodes); kernels go through `coil-simd`.
 
@@ -26,8 +28,8 @@
 
 - `BlockBuilder`: thin wrapper over `IlBuilder` labels; no absolute PC patching in emitters.
 - **Method-based APIs** — prefer inherent/`impl` methods over free functions for type-tied ops (stdlib, new language surface). Free generic fns returning enums are codegen-fragile; see `docs/internals/limitations.md`.
-- `ConstEnv`: scalar const folding; constant branch/loop elimination; loop unroll ≤8.
-- Tiny direct-call inlining; one-level self-`CALL` peel; `TailCall` for eligible self- and sibling-cycle recursion ([#316](https://github.com/ardax-corp/coil-lang/pull/316)). Two-slot `?` flatten is codegen (`emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)), not InstCombine.
+- `hir::fold`: scalar const folding and algebraic identities; `if` on a literal keeps one branch; `hir::unroll`: full unroll of counted loops ≤8 trips.
+- Typed inlining in HIR (`hir::inline`); `TailCall` for eligible self- and sibling-cycle recursion ([#316](https://github.com/ardax-corp/coil-lang/pull/316)). Two-slot `?` flatten is codegen ([#307](https://github.com/ardax-corp/coil-lang/pull/307)), not InstCombine.
 - Match: arms without nested tests dispatch on the outer tag (`JumpIfMatch`, last arm `Unpack`); payload field `k` binds at `payload_base + k`. A match with a literal or constructor nested in a payload lowers arm by arm (`compile_match_sequential`): scrutinee in a slot, per-arm tests that push opened payloads above it, misses pop back and fall into the next arm. Nested niche `Option`/`Result` words are tested by layout (`0` / bit 0), not `JumpIfMatch`.
 - Enum fields: `LoadField` (index); typed class fields: `LoadField` / `SetField` with slot operand; dict fields: `GetField`/`SetField` (interned names).
 - **Return layout:** `typechecking::return_layout::two_word_return_enum` classifies two-slot returns on *direct* `CALL`/`RETURN` (`Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums as `[payload, tag]`; arity-2 immediate products as `[a, b]`). `CALL` bit 31 / `RETURN` operand `2`. Niches stay one word. See [limitations.md](docs/internals/limitations.md) COI-92.
@@ -68,7 +70,7 @@ Current version: check `ARCHIVE_MAJOR` / `ARCHIVE_MINOR` in `common/src/archive.
 
 ## Perf philosophy
 
-Prefer over new opcodes / IL opts:
+Prefer over new opcodes / optimization passes:
 - Allocation reduction in hot paths
 - Bounds-check elimination
 - Hot-loop tuning in VM
@@ -76,7 +78,7 @@ Prefer over new opcodes / IL opts:
 
 Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archives under `examples/perf/`). Hit-bench prove rule: [optimization-roadmap.md](../../../docs/internals/optimization-roadmap.md#hit-bench-prove-rule). PGO was removed ([#301](https://github.com/ardax-corp/coil-lang/pull/301)). See AGENTS.md user preferences.
 
-Current archive: **major 4 / minor 23** (`common/src/archive.rs`) — minor 23 appends `TagEnumType` (enum `fn drop()`, COI-26); minor 22 adds precise-map frame extents and `DenseCast` `CAST_F2I`; minor 21 persists precise frame maps; minor 20 is HostInvoke `stream_fd` (**138**); minor 19 is `MakeEnumReturn` (COI-388 X3); minor 18 is `DenseIndexJmpf` (COI-379 S4); minor 17 is `DenseBinJmpf` (COI-377 S1); minor 16 is `DenseBin2` (COI-381 S2); minor 15 appends HostInvoke `thread_spawn_shared` (**137**); minor 14 persists S2b stack maps; minor 13 persists `operand_stack_slots`; minor 12 is dense field / Object make; minor 11 is `DenseArrayPush`; minor 10 is dense-native heap ops (`DenseIndex` … `DensePush`); minor 9 is `VReduce` / `VFma` (S5b V1); minor 8 is compiler-only SIMD (`VLoad` … `VMove`); minor 7 is HostInvoke `simd_axpy_reduce` (**136**); minor 6 is MIR dense numeric opcodes; minor 5 is M1 math HostInvoke **125–135**.
+Current archive: **major 4 / minor 36** (`common/src/archive.rs`; minors 24–36 in AGENTS.md) — minor 23 appends `TagEnumType` (enum `fn drop()`, COI-26); minor 22 adds precise-map frame extents and `DenseCast` `CAST_F2I`; minor 21 persists precise frame maps; minor 20 is HostInvoke `stream_fd` (**138**); minor 19 is `MakeEnumReturn` (COI-388 X3); minor 18 is `DenseIndexJmpf` (COI-379 S4); minor 17 is `DenseBinJmpf` (COI-377 S1); minor 16 is `DenseBin2` (COI-381 S2); minor 15 appends HostInvoke `thread_spawn_shared` (**137**); minor 14 persists S2b stack maps; minor 13 persists `operand_stack_slots`; minor 12 is dense field / Object make; minor 11 is `DenseArrayPush`; minor 10 is dense-native heap ops (`DenseIndex` … `DensePush`); minor 9 is `VReduce` / `VFma` (S5b V1); minor 8 is compiler-only SIMD (`VLoad` … `VMove`); minor 7 is HostInvoke `simd_axpy_reduce` (**136**); minor 6 is MIR dense numeric opcodes; minor 5 is M1 math HostInvoke **125–135**.
 
 | Tree | When to update |
 |------|----------------|
