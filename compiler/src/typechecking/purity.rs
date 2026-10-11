@@ -1316,7 +1316,7 @@ fn main() { return; }
     fn index_store_marks_function_impure() {
         let set = pure_set(
             r#"
-fn bump([int] a, int n) -> int {
+fn bump(Vec<int> a, int n) -> int {
     a[0] = n;
     if n <= 1 { return a[0]; }
     return bump(a, n - 1) + bump(a, n - 2);
@@ -1856,12 +1856,12 @@ fn main() { return; }
     #[test]
     fn writes_that_a_caller_could_see_stay_impure() {
         for (why, body) in [
-            ("param", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } xs[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+            ("param", "fn rec(Vec<int> xs, int n) -> int { if n <= 1 { return n; } xs[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
             ("alias", "fn rec(int n) -> int { if n <= 1 { return n; } let a = [0]; let b = a; b[0] = n; return rec(n - 1) + rec(n - 2); }"),
             ("stored", "fn rec(int n) -> int { if n <= 1 { return n; } let a = [0]; let b = [a]; a[0] = n; return rec(n - 1) + rec(n - 2) + b[0][0]; }"),
-            ("nested", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } let a = [xs]; a[0][0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
-            ("shadowed", "fn rec([int] a, int n) -> int { if n <= 1 { return n; } if n > 5 { let a = [0]; a[0] = 1; } a[0] = n; return rec(a, n - 1) + rec(a, n - 2); }"),
-            ("reassigned", "fn rec([int] xs, int n) -> int { if n <= 1 { return n; } let a = [0]; a = xs; a[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+            ("nested", "fn rec(Vec<int> xs, int n) -> int { if n <= 1 { return n; } let a = [xs]; a[0][0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
+            ("shadowed", "fn rec(Vec<int> a, int n) -> int { if n <= 1 { return n; } if n > 5 { let a = [0]; a[0] = 1; } a[0] = n; return rec(a, n - 1) + rec(a, n - 2); }"),
+            ("reassigned", "fn rec(Vec<int> xs, int n) -> int { if n <= 1 { return n; } let a = [0]; a = xs; a[0] = n; return rec(xs, n - 1) + rec(xs, n - 2); }"),
         ] {
             let set = pure_set(&format!("{body}\nfn main() {{ return; }}\n"));
             assert!(!set.contains("rec"), "{why}: {set:?}");

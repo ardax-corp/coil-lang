@@ -1064,7 +1064,7 @@ fn main() { return; }
     fn heap_index_store_is_named() {
         let ast = parse(
             r#"
-fn rec([int] a, int n) -> int {
+fn rec(Vec<int> a, int n) -> int {
     if n <= 1 {
         a[0] = n;
         return n;

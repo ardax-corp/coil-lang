@@ -1492,7 +1492,7 @@ fn main() {
 fn spread_dynamic_array_reports_diagnostic() {
     let msgs = check_messages(
         r#"
-fn rows() -> [int] { return [1, 2, 3]; }
+fn rows() -> Vec<int> { return [1, 2, 3]; }
 fn f(int x) -> int { return x; }
 fn main() {
     f(...rows());
@@ -1907,7 +1907,7 @@ fn array_element_type_mismatch_errors() {
 fn dynamic_array_zip_is_hard_error() {
     let (_ty, msgs) = check(
         r#"
-fn zip([int] a, [int] b) -> [int] {
+fn zip(Vec<int> a, Vec<int> b) -> Vec<int> {
     return a + b;
 }
 fn main() {}

@@ -12977,6 +12977,14 @@ impl Checker {
                             );
                         }
                     }
+                    ref vec if vec_element_ty(vec).is_some() => {
+                        let _ = self.error_with_help(
+                            ErrorCode::GenericTypeError,
+                            "cannot spread dynamic-length array".to_string(),
+                            arg.0.into_range(),
+                            Some("use a tuple or a fixed-length array `[T; N]` at the spread site".to_string()),
+                        );
+                    }
                     _ => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,

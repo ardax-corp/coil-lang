@@ -27,43 +27,43 @@ fn proven(src: &str) -> Vec<bool> {
 
 #[test]
 fn a_counted_while_proves_reads_and_stores() {
-    let src = "fn f([int] a) -> int { let s = 0; let i = 0; while i < len(a) { s = s + a[i]; a[i] = 0; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; let i = 0; while i < len(a) { s = s + a[i]; a[i] = 0; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![true, true]);
 }
 
 #[test]
 fn a_read_after_the_bump_stays_checked() {
-    let src = "fn f([int] a) -> int { let s = 0; let i = 0; while i < len(a) { i = i + 1; s = s + a[i]; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; let i = 0; while i < len(a) { i = i + 1; s = s + a[i]; } return s; }";
     assert_eq!(proven(src), vec![false]);
 }
 
 #[test]
 fn a_bound_from_a_len_let_counts_until_a_resize() {
-    let src = "fn f([int] a) -> int { let n = len(a); let s = 0; let i = 0; while i < n { s = s + a[i]; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let n = len(a); let s = 0; let i = 0; while i < n { s = s + a[i]; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![true]);
-    let src = "fn f([int] a, [int] b) -> int { let n = len(a); a = b; let s = 0; let i = 0; while i < n { s = s + a[i]; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a, Vec<int> b) -> int { let n = len(a); a = b; let s = 0; let i = 0; while i < n { s = s + a[i]; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![false]);
 }
 
 #[test]
 fn a_loop_that_appends_or_steps_down_stays_checked() {
-    let src = "fn f([int] a) -> int { let s = 0; let i = 0; while i < len(a) { s = s + a[i]; a += [1]; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; let i = 0; while i < len(a) { s = s + a[i]; a += [1]; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![false]);
-    let src = "fn f([int] a) -> int { let s = 0; let i = 2; while i < len(a) { s = s + a[i]; i = i - 1; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; let i = 2; while i < len(a) { s = s + a[i]; i = i - 1; } return s; }";
     assert_eq!(proven(src), vec![false]);
 }
 
 #[test]
 fn a_negative_or_unknown_start_stays_checked() {
-    let src = "fn f([int] a, int k) -> int { let s = 0; let i = k; while i < len(a) { s = s + a[i]; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a, int k) -> int { let s = 0; let i = k; while i < len(a) { s = s + a[i]; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![false]);
 }
 
 #[test]
 fn a_range_loop_proves_reads_unless_it_writes_its_index() {
-    let src = "fn f([int] a) -> int { let s = 0; for i in 0..len(a) { s = s + a[i]; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; for i in 0..len(a) { s = s + a[i]; } return s; }";
     assert_eq!(proven(src), vec![true]);
-    let src = "fn f([int] a) -> int { let s = 0; for i in 0..len(a) { s = s + a[i]; i = i + 1; } return s; }";
+    let src = "fn f(Vec<int> a) -> int { let s = 0; for i in 0..len(a) { s = s + a[i]; i = i + 1; } return s; }";
     assert_eq!(proven(src), vec![false]);
 }
 
@@ -83,6 +83,6 @@ fn a_stride_from_a_counted_index_proves_its_store() {
 
 #[test]
 fn a_stride_of_unknown_size_stays_checked() {
-    let src = "fn f([int] a, int s) -> int { let k = 0; while k < len(a) { a[k] = 0; k = k + s; } return 0; }";
+    let src = "fn f(Vec<int> a, int s) -> int { let k = 0; while k < len(a) { a[k] = 0; k = k + s; } return 0; }";
     assert_eq!(proven(src), vec![false]);
 }

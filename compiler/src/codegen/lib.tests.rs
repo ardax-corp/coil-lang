@@ -868,7 +868,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         // A parameter, not a literal: MIR→LIR scalar-replaces a literal array.
-        "fn show([int] xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
+        "fn show(Vec<int> xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
     );
     let len_at = bc
         .iter()
@@ -1461,7 +1461,7 @@ fn main() {
 #[test]
 fn construct_emits_make_enum_with_correct_tag_and_arity() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn keep(int x) -> [Option<int>] { return [Option::Some(x)]; }");
+    let (bc, _pool) = compile_src("fn keep(int x) -> Vec<Option<int>> { return [Option::Some(x)]; }");
 
     // Find the MAKE_ENUM instruction. Its operands encode
     // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
@@ -2250,7 +2250,7 @@ fn for_in_array_emits_array_len_index_and_back_edge() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         // A parameter, not a literal: MIR→LIR scalar-replaces a literal array.
-        "fn show([int] xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
+        "fn show(Vec<int> xs) { for x in xs { write(stdout(), to_bytes(format(\"%i\", x))); } }\nfn main() { show([1, 2, 3]); }",
     );
     let has_len = bc
         .iter()

@@ -2804,7 +2804,7 @@ fn array_dynamic_length_no_oob_check() {
     // Function-returned arrays are dynamic-length; OOB
     // access is allowed (the user said SQL/JSON results
     // must not be flagged).
-    let src = "fn get_array() -> [int] { return [1, 2, 3]; } \
+    let src = "fn get_array() -> Vec<int> { return [1, 2, 3]; } \
                    fn main() { let arr = get_array(); let _ = arr[10]; }";
     let (_c, msgs) = check_warn(src);
     assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
@@ -2971,7 +2971,7 @@ fn parenthesised_arithmetic_works_in_binary_op() {
 fn array_dynamic_length_param_lets_runtime_index() {
     // Function param is dynamic-length ,  must allow any
     // index.
-    let src = "fn head([int] arr) -> int { return arr[0]; }";
+    let src = "fn head(Vec<int> arr) -> int { return arr[0]; }";
     let (_c, msgs) = check_warn(src);
     assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
 }
@@ -6593,20 +6593,15 @@ trait Pointer<P: * -> *> {
 }
 
 #[test]
-fn byte_array_annotation_accepts_string_literal() {
-    let (mut c, _) = check(r#"let b: [byte] = "Hi";"#);
+fn byte_vec_annotation_accepts_string_literal() {
+    let (mut c, _) = check(r#"let b: Vec<byte> = "Hi";"#);
     let msgs = c.take_messages();
     assert!(msgs.is_empty(), "{:?}", msgs);
     let ty = c
         .codegen_var_type("b")
         .map(|t| apply_ty_prune(c.subst(), t))
         .expect("b");
-    match ty {
-        Ty::Array { element, .. } => {
-            assert_eq!(*element, crate::typechecking::ty::byte());
-        }
-        other => panic!("expected [byte], got {other}"),
-    }
+    assert_eq!(ty, crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()));
 }
 
 #[test]
@@ -6644,20 +6639,15 @@ fn byte_annotation_rejects_multi_byte_string_literal() {
 }
 
 #[test]
-fn byte_array_literal_coerces_from_string_literals() {
-    let (mut c, _) = check(r#"let buf: [byte] = ["a", "b", "\n"];"#);
+fn byte_vec_literal_coerces_from_string_literals() {
+    let (mut c, _) = check(r#"let buf: Vec<byte> = ["a", "b", "\n"];"#);
     let msgs = c.take_messages();
     assert!(msgs.is_empty(), "{:?}", msgs);
     let ty = c
         .codegen_var_type("buf")
         .map(|t| apply_ty_prune(c.subst(), t))
         .expect("buf");
-    match ty {
-        Ty::Array { element, .. } => {
-            assert_eq!(*element, crate::typechecking::ty::byte());
-        }
-        other => panic!("expected [byte], got {other}"),
-    }
+    assert_eq!(ty, crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()));
 }
 
 #[test]
@@ -6716,23 +6706,10 @@ fn string_literal_cast_to_vec_byte_ok() {
 }
 
 #[test]
-fn string_var_cast_to_byte_slice_ok() {
-    let (mut c, _) = check(r#"fn main() { let s = "hi"; let b = s as [byte]; }"#);
-    let msgs = c.take_messages();
-    assert!(msgs.is_empty(), "{:?}", msgs);
-    let ty = c
-        .codegen_var_type("b")
-        .map(|t| apply_ty_prune(c.subst(), t))
-        .expect("b");
-    match ty {
-        Ty::Array {
-            element,
-            length: crate::typechecking::ty::ArrayLength::Dynamic,
-        } => {
-            assert_eq!(*element, crate::typechecking::ty::byte());
-        }
-        other => panic!("expected [byte], got {other}"),
-    }
+fn string_var_cast_to_dynamic_bytes_rejected() {
+    let msgs = assert_messages(r#"fn main() { let s = "hi"; let b = s as [byte]; }"#);
+    assert_eq!(msgs.len(), 1, "one error, no cascade: {:?}", msgs);
+    assert!(msgs[0].message().contains("dynamic array type `[T]`"), "{:?}", msgs);
 }
 
 #[test]
@@ -6843,20 +6820,15 @@ fn f() -> byte {
 }
 
 #[test]
-fn byte_array_literal_coerces_from_int_literals() {
-    let (mut c, _) = check("let buf: [byte] = [1, 2, 3];");
+fn byte_vec_literal_coerces_from_int_literals() {
+    let (mut c, _) = check("let buf: Vec<byte> = [1, 2, 3];");
     let msgs = c.take_messages();
     assert!(msgs.is_empty(), "{:?}", msgs);
     let ty = c
         .codegen_var_type("buf")
         .map(|t| apply_ty_prune(c.subst(), t))
         .expect("buf");
-    match ty {
-        Ty::Array { element, .. } => {
-            assert_eq!(*element, crate::typechecking::ty::byte());
-        }
-        other => panic!("expected [byte], got {other}"),
-    }
+    assert_eq!(ty, crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()));
 }
 
 #[test]
@@ -8187,17 +8159,16 @@ fn dynamic_int_slice_in_let_binding_errors() {
 }
 
 #[test]
-fn dynamic_non_byte_slice_in_fn_return_ok() {
-    let src = "fn rows() -> [int] { return [1, 2, 3]; }";
-    let (mut c, _) = check(src);
-    assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+fn dynamic_slice_in_fn_return_errors() {
+    let msgs = assert_messages("fn rows() -> [int] { return [1, 2, 3]; }");
+    assert!(msgs.iter().any(|m| m.message().contains("dynamic array type `[T]`")), "{:?}", msgs);
 }
 
 #[test]
-fn dynamic_slice_fn_param_allows_runtime_index() {
-    let src = "fn at([int] xs, int i) -> int { return xs[i]; }";
-    let (mut c, _) = check(src);
-    assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+fn dynamic_slice_fn_param_errors() {
+    let msgs = assert_messages("fn at([int] xs, int i) -> int { return xs[i]; }");
+    assert_eq!(msgs.len(), 1, "one error, no cascade: {:?}", msgs);
+    assert!(msgs[0].message().contains("dynamic array type `[T]`"), "{:?}", msgs);
 }
 
 #[test]
