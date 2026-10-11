@@ -723,9 +723,7 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.box_at.is_empty() {
-            Err("boxed frame-slot aggregate".to_string())
-        } else if !plan.lambdas.is_empty() {
+        let why = if !plan.lambdas.is_empty() {
             Err("lambda".to_string())
         } else if emit.par_loop {
             Err("parallel loop".to_string())
@@ -824,6 +822,7 @@ impl Compiler {
             fields,
             calls: &emit.call_targets,
             lens: &emit.plan.lens,
+            box_at: &emit.plan.box_at,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,

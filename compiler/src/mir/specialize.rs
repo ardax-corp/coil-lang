@@ -202,7 +202,7 @@ fn specialize_side(
     let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
     let mut edge_stack = false;
     // MIR lowered from HIR needs no lift; the IL is the fallback.
-    let direct = from_hir.filter(|f| !has_alloc && has_numeric_arith(f) && calls_agree(f, calls));
+    let direct = from_hir.filter(|f| has_numeric_arith(f) && calls_agree(f, calls));
     let mut first = match direct {
         Some(func) => Ok((LowerHints::new(name), func.clone())),
         None => attempt(false, false),
