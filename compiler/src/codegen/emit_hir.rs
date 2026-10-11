@@ -841,6 +841,8 @@ impl Compiler {
                 news.insert(i, (checker.class_type_id(&class), words));
             }
         }
+        let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
+        let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
         // As `hir_for_in`'s `pin`: array loops the checker pinned.
         let pinned_for = (0..hir.exprs.len() as u32)
             .filter(|&i| {
@@ -868,6 +870,7 @@ impl Compiler {
             is_class: Box::new(is_class),
             heap_fields,
             news,
+            pushes,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,

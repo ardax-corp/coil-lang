@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{lower, BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
@@ -100,6 +100,8 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// `Vec::push` calls HIR emission inlines.
+    pub pushes: HashSet<u32>,
     /// `new C(..)` on the heap: the class's type id and its fields' word
     /// types.
     pub news: HashMap<u32, (u32, Vec<MirTy>)>,
@@ -530,6 +532,7 @@ impl Lower<'_> {
             }
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
+            HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
@@ -1061,7 +1064,12 @@ impl Lower<'_> {
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let site = self.inp.calls.get(&id.0).ok_or("call")?;
+        let Some(site) = self.inp.calls.get(&id.0) else {
+            return Err(match &self.hir.expr(id).kind {
+                HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, .. } => format!("call `{name}`"),
+                _ => "call value".to_string(),
+            });
+        };
         if site.pair_args.len() != args.len() {
             return Err("call arity".into());
         }
@@ -1281,6 +1289,30 @@ impl Lower<'_> {
             self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
         }
         Ok(Val::V(obj))
+    }
+
+    /// `v.push(x)` on a heap `Vec` of int/float: the Vec, then the value,
+    /// then `ArrayPush` (a safepoint: it may grow the storage).
+    fn push(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
+        let &[recv, value] = args else {
+            return Err("push arity".into());
+        };
+        let ty = self.expr_ty(recv).and_then(array_elem).and_then(scalar);
+        if !self.heap_array(recv) {
+            return Err("push receiver".into());
+        }
+        let Some(arr) = self.word(recv)? else {
+            return Ok(Val::Never);
+        };
+        let Some(v) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        if Some(self.b.value_ty(v)) != ty {
+            return Err("push value type".into());
+        }
+        let out = self.b.ins_array_push(arr, v).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        Ok(Val::Unit)
     }
 
     /// `len(x)`: a fixed size (a local or literal is not read), or the
