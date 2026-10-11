@@ -2048,7 +2048,8 @@ fn assign_bitand_fuses_bin_slot_slot_store() {
 }
 
 /// `x = a && b` assignment fuses to `BinSlotSlotStore(AND)`, or keeps
-/// `BinSlotSlot(AND)` when returning the computed value on stack.
+/// `BinSlotSlot(AND)` when returning the computed value on stack. MIR
+/// lowers bool `&` to `BITAND` (the same on 0/1 words).
 #[test]
 fn assign_logical_and_fuses_bin_slot_slot_store() {
     use common::Instruction;
@@ -2064,7 +2065,7 @@ fn assign_logical_and_fuses_bin_slot_slot_store() {
     });
     let stack_return = bc.iter().any(|b| {
         *b.bytecode() == Instruction::BinSlotSlot
-            && b.bin_slot_slot_parts().0 == Instruction::AND as u8
+            && [Instruction::AND as u8, Instruction::BITAND as u8].contains(&b.bin_slot_slot_parts().0)
     });
     assert!(
         fused || stack_return,

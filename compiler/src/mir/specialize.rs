@@ -624,7 +624,7 @@ pub fn try_lower_abi_body_with(
     pool: &mut Vec<u64>,
     unboxed_fields: &[(u32, u32)],
 ) -> Option<Vec<IlOp>> {
-    try_lower_abi_body_side(ops, name, entry_sp, pool, unboxed_fields, &mut BodySidecar::default())
+    try_lower_abi_body_side(ops, name, entry_sp, pool, unboxed_fields, None, &mut BodySidecar::default())
 }
 
 
@@ -634,6 +634,7 @@ pub fn try_lower_abi_body_side(
     entry_sp: u32,
     pool: &mut Vec<u64>,
     unboxed_fields: &[(u32, u32)],
+    from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
@@ -649,6 +650,22 @@ pub fn try_lower_abi_body_side(
     if let Some(wall) = lir_refuse_with(ops, unboxed_fields, maps_ok) {
         return refuse(format!("lir wall {wall:?}"));
     }
+    // MIR lowered from HIR needs no lift; until it builds its own GC maps,
+    // only a body that allocates nothing takes it.
+    let mut func = match from_hir {
+        Some(func) if !has_alloc => func.clone(),
+        _ => lift_lir(ops, name, entry_sp, pool, unboxed_fields, has_alloc)?,
+    };
+    if has_alloc {
+        crate::mir::sroa(&mut func);
+    } else {
+        crate::mir::cse(&mut func);
+    }
+    lir_tail(ops, name, pool, has_alloc, func, side)
+}
+
+/// Lift `ops` to MIR for the LIR tier.
+fn lift_lir(ops: &[IlOp], name: &str, entry_sp: u32, pool: &[u64], unboxed_fields: &[(u32, u32)], has_alloc: bool) -> Option<crate::mir::MirFunc> {
     let inferred = if has_alloc {
         infer_lir_across_alloc(ops, pool.len(), entry_sp)
     } else {
@@ -660,7 +677,7 @@ pub fn try_lower_abi_body_side(
     };
     let mut hints = LowerHints::new(name);
     hints.slot_ty = inferred.slot_ty;
-    hints.pool = pool.clone();
+    hints.pool = pool.to_vec();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
     hints.entry_tell = Some(entry_sp);
@@ -671,15 +688,14 @@ pub fn try_lower_abi_body_side(
     hints.allow_index = true;
     hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
     hints.allow_host_edges = true;
-    let mut func = match try_lower_numeric(ops, &hints) {
-        Ok(f) => f,
-        Err(e) => return refuse(format!("lower: {e}")),
-    };
-    if has_alloc {
-        crate::mir::sroa(&mut func);
-    } else {
-        crate::mir::cse(&mut func);
+    match try_lower_numeric(ops, &hints) {
+        Ok(f) => Some(f),
+        Err(e) => refuse(format!("lower: {e}")),
     }
+}
+
+/// Emit the LIR tier's stack IL from `func`.
+fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, mut func: crate::mir::MirFunc, side: &mut BodySidecar) -> Option<Vec<IlOp>> {
     super::deopt::fill_deopt_maps(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
