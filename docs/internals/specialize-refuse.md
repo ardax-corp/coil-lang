@@ -1,6 +1,6 @@
 # Dense specialize refuse inventory
 
-`try_specialize_body` runs after stack-IL opts. Infer + SSA lower + dense emit
+`try_specialize_body` runs on the stack IL as HIR lowering emitted it (no IL optimization passes remain). Infer + SSA lower + dense emit
 (or P12 saxpy-reduce) replace a whole function. Leftovers try IL→MIR→LIR.
 Keep/refuse is **checksum + cost vs fuse-IL**. Everything else stays fuse-IL.
 

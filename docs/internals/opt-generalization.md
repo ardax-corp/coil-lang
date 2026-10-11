@@ -17,7 +17,7 @@ tables shrink toward.
 ## Principles
 
 1. **MIR is the default** for eligible bodies. Fuse-IL is the fallback
-   lowerer, not a second optimizer to beat. After stack-IL opts, lift →
+   lowerer, not a second optimizer to beat. After HIR lowering (no stack-IL opts remain), lift →
    SSA opt → dense or MIR→LIR. Keep fuse-IL when the body is ineligible
    or the cost gate loses. Do not grow fuse-only peeps that exist only to
    outscore a dense reconstruct.

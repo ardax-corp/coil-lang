@@ -139,9 +139,7 @@ coverage: lcov written to target/coverage/lcov.info
   a tree-shake root, so an unused function is emitted and reports as uncovered
   instead of vanishing. Generic functions never instantiated have no code and
   do not appear.
-- **Opt level.** Coverage runs at the tests' `-O` (default Standard). In
-  coverage compiles, tiny-inlined callee bytes keep the callee's source line
-  (debug info only; the bytecode is identical). Other rewrites (self-unroll,
+- **Opt level.** Coverage runs at the tests' `-O` (default Standard). Rewrites (HIR inlining,
   MIR / dense) can still move a few lines: on the repo suite -O2 reports 8 of
   1326 lines uncovered that `-Og` covers.
 - **Release builds** build `coil` / `coil-embed` in their own cargo invocation:

@@ -71,7 +71,7 @@ Three things keep loop frames precise:
    `CONST 0; STORE b-1` preheader that raises the entry cursor to the
    back-edge one `b`.
    - `b` comes from the tell analysis, iterated one loop pass at a time.
-   - The raise runs after IL optimization and MIR tiering, so neither sees
+   - The raise runs after MIR tiering, so neither sees
      it; dense / LIR bodies manage their own frame.
    - It applies only to loops that can reach a GC safepoint, and only when
      the tell analysis confirms the entry cursor is below `b` (so slot `b-1`

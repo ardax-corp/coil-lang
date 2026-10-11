@@ -51,10 +51,9 @@ boxed object (slots are only a pre-escape rewrite). Value-array semantics
 and always-heap are non-goals.
 
 Compiler (A1 [COI-334](https://linear.app/ardax/issue/COI-334) + Q1
-[COI-323](https://linear.app/ardax/issue/COI-323)): codegen
-`emit_escape_stack_array` boxes once (the IL `escape_analysis` pass was
+[COI-323](https://linear.app/ardax/issue/COI-323)): codegen boxes once (the IL `escape_analysis` pass was
 removed 2026-10). A refused
-tiny-inline / peel must not leave a stale box cache (that was a fresh
+inline must not leave a stale box cache (that was a fresh
 `LOAD` of an unwritten slot). S2g's old fresh-`MakeArray`-per-edge policy
 is gone.
 
