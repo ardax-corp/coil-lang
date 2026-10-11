@@ -2888,6 +2888,55 @@ fn main() {
 }
 
 #[test]
+fn byte_arithmetic_warns_byte_wrap() {
+    let msgs = check_messages(
+        r#"
+fn f(byte a, byte b) -> int {
+    let s = a + b;
+    let d = a - b;
+    let m = a * b;
+    let p = a ** b;
+    let l = a << b;
+    let n = -a;
+    let x = a;
+    x += b;
+    let q = a / b;
+    let r = a % b;
+    let k = a & b;
+    let o = a | b;
+    let e = a ^ b;
+    let h = a >> b;
+    let i = 1 + 2;
+    return i;
+}
+fn main() {
+    let _ = f(1 as byte, 2 as byte);
+}
+"#,
+    );
+    let wraps: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::ByteWrap))
+        .map(|m| m.message().to_string())
+        .collect();
+    for op in ["`+`", "`-`", "`*`", "`**`", "`<<`", "`-` on a `byte`"] {
+        assert!(
+            wraps.iter().any(|m| m.contains(op)),
+            "expected ByteWrap (E0130) for {op}, got: {wraps:?}"
+        );
+    }
+    // `+ - * ** <<`, negation and `+=`; nothing for `/ % & | ^ >>` or ints.
+    assert_eq!(wraps.len(), 7, "{wraps:?}");
+    assert!(
+        msgs.iter().all(|m| m.code() == Some(ErrorCode::ByteWrap)),
+        "byte wrap must stay a warning only: {:?}",
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn block_on_drive_wait_ready_warn_deprecated() {
     let msgs = check_messages(
         r#"

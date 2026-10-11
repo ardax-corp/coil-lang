@@ -18,6 +18,16 @@ overflowing arithmetic are userland traits in coil-stdlib's `arith` module
 [coil-stdlib#29](https://github.com/ardax-corp/coil-stdlib/pull/29)). There
 is no overflow mode flag (`coil verify --overflow` was removed).
 
+`byte` arithmetic wraps modulo 256 instead
+([coil-lang#882](https://github.com/ardax-corp/coil-lang/issues/882)): a
+`byte` is the same immediate word as an `int`, so HIR build masks the int
+result of `+ - * <<` and unary `-` with `& 255` (`build::wrap_byte`), and
+lowers `**` to a square-and-multiply over the exponent's 8 bits that masks
+every step (`build::byte_pow`), so it never reaches an int overflow. The
+checker warns E0130 (`ByteWrap`) on each of these operators and their
+compound forms. Later work may prove a range was checked first and turn an
+unchecked wrap into an error.
+
 Before this, a release VM wrapped silently and a debug VM aborted the
 process, and `x / 0` aborted in both.
 

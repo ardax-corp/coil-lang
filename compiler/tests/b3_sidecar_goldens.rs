@@ -55,7 +55,7 @@ const CORPUS: &[&str] = &[
 /// stack-IL `clone_shared_return` pass grows `option_pair.hy` by one op
 /// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "3186422f0e51b124_1250"),
+    ("arithmetic.hy", "1c4fd7821bb0df2a_1256"),
     ("functions.hy", "cf7d45d5c7dd59f6_274"),
     ("loops.hy", "fccb38b755e5d4eb_217"),
     ("option_pair.hy", "41bf3fac648c10c5_340"),
