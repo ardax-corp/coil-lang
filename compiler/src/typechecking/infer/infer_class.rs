@@ -233,8 +233,26 @@ impl Checker {
                 _ => None,
             }
         }));
+        // The trait's own parameters are rigid in every default body, as in
+        // impl methods and free generic fns: `x > 0` on a `T` would make
+        // `T` an `int` while the shared body still gets a boxed `T` (#838).
+        // A required method's clauses are only a template: each impl gets a
+        // copy typed with its own parameter types (`inherit_trait_contracts`),
+        // so a binding they make is not reported here.
+        let named: Vec<(String, TyVarId)> =
+            type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
+        let mut settled = Vec::new();
         for m in methods {
             let _ = self.infer(m);
+            if method_defs.iter().any(|d| d.has_default && Some(d.name.as_str()) == trait_method_name(m)) {
+                self.reject_bound_type_params(&named, &mut settled, &m.0.into_range());
+            } else {
+                settled.extend(
+                    param_vars
+                        .iter()
+                        .filter(|p| !matches!(apply_ty_prune(&self.subst, &Ty::Var(**p)), Ty::Var(_))),
+                );
+            }
         }
         self.unshield_bare_names(shield);
         self.active_constraints.truncate(active_len);
@@ -1091,5 +1109,14 @@ impl Checker {
         self.active_constraints.truncate(prev_constraints_len);
         self.pop_type_params_for_type_parsing(pushed);
         let _ = range;
+    }
+}
+
+/// The name of a trait item that declares a method.
+fn trait_method_name<'a>(item: &'a Output<'a>) -> Option<&'a str> {
+    match item.1.as_ref() {
+        Expression::Function { name, .. } => Some(name),
+        Expression::Method(_, body) => trait_method_name(body),
+        _ => None,
     }
 }
