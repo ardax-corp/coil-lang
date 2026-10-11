@@ -155,7 +155,8 @@ struct Lower<'a> {
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
 pub fn scalar(ty: &Ty) -> Option<MirTy> {
     match lower::primitive(ty)? {
-        "int" => Some(MirTy::I64),
+        // A byte is its value as an int word (casts mask it).
+        "int" | "byte" => Some(MirTy::I64),
         "float" => Some(MirTy::F64),
         "bool" => Some(MirTy::Bool),
         _ => None,
@@ -509,6 +510,9 @@ impl Lower<'_> {
                     Lit::Float(f) => MirConst::F64(f.to_bits()),
                     Lit::Bool(v) => MirConst::Bool(*v),
                     Lit::Unit => return Ok(Val::Unit),
+                    Lit::Str(raw) if self.expr_ty(id).and_then(lower::primitive) == Some(crate::typechecking::ty::BYTE) => {
+                        MirConst::I64(i64::from(lower::byte_literal(raw).ok_or("byte literal")?))
+                    }
                     Lit::Str(_) => return Err("string literal".into()),
                 };
                 // A literal typed `byte` (or anything else) is not this phase's.
@@ -551,12 +555,23 @@ impl Lower<'_> {
                 Ok(Val::V(out.map_err(mir)?))
             }
             HirKind::Cast { value } => {
+                let names = (self.expr_ty(*value).and_then(lower::primitive), self.expr_ty(id).and_then(lower::primitive));
                 let from = self.expr_ty(*value).and_then(scalar);
                 let to = self.expr_ty(id).and_then(scalar);
                 let Some(v) = self.word(*value)? else {
                     return Ok(Val::Never);
                 };
                 let out = match (from, to) {
+                    // `CastIntToByte` / `CastByteToInt`: the low eight bits.
+                    _ if matches!(names, (Some("int" | "byte"), Some("byte")) | (Some("byte"), Some("int"))) => {
+                        if names.0 == names.1 {
+                            v
+                        } else {
+                            let mask = self.b.ins_const(MirConst::I64(0xff)).map_err(mir)?;
+                            self.b.ins_binop(MirBinOp::BitAnd, v, mask).map_err(mir)?
+                        }
+                    }
+                    _ if names.0 == Some("byte") || names.1 == Some("byte") => return Err("cast".into()),
                     (Some(a), Some(b)) if a == b => v,
                     (Some(MirTy::I64), Some(MirTy::F64)) => {
                         self.b.ins_cast(MirCastKind::IntToFloat, MirTy::F64, v).map_err(mir)?
