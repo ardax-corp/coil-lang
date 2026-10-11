@@ -54,11 +54,13 @@ const CORPUS: &[&str] = &[
 /// Returning at a returned `match`'s join in lowering instead of the
 /// stack-IL `clone_shared_return` pass grows `option_pair.hy` by one op
 /// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
+/// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
+/// fuse to dense (`option_pair.hy` grows by three).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "1c4fd7821bb0df2a_1256"),
     ("functions.hy", "cf7d45d5c7dd59f6_274"),
     ("loops.hy", "fccb38b755e5d4eb_217"),
-    ("option_pair.hy", "41bf3fac648c10c5_340"),
+    ("option_pair.hy", "c490ff2e6a2fb35e_343"),
     ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
 ];
 
