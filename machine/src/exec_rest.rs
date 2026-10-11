@@ -230,6 +230,10 @@ impl<const S: usize> Machine<S> {
                         while let Some(ch) = chars.next() {
                             if ch == '%' {
                                 match chars.peek() {
+                                    Some('%') => {
+                                        chars.next();
+                                        message.push('%');
+                                    }
                                     Some('i') => {
                                         chars.next();
                                         message.push_str(&params.pop().as_int().to_string());
