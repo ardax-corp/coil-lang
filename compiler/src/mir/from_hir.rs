@@ -386,28 +386,31 @@ fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
 /// branch), then lay the blocks out in `order`, dropping the ones nothing
 /// reaches.
 fn tidy(func: &mut MirFunc, order: &[BlockId]) {
-    // A branch whose arms are both empty jumps to one block, with the same
-    // φ values from each, goes there either way: jump to one arm.
+    // A branch whose arms are both empty and end alike (a jump to one block
+    // with the same φ values from each, or the same return) goes the same
+    // way either way: jump to one arm.
     for i in 0..func.blocks.len() {
         let Some(Terminator::Br { taken, not_taken, .. }) = func.blocks[i].term else {
             continue;
         };
-        let hop = |x: BlockId| match func.block(x).term {
-            Some(Terminator::Jump { dest }) if func.block(x).insts.is_empty() && x != func.entry => Some(dest),
-            _ => None,
-        };
-        let (Some(c), Some(c2)) = (hop(taken), hop(not_taken)) else {
+        let empty = |x: BlockId| x != func.entry && func.block(x).insts.is_empty();
+        if taken == not_taken || !empty(taken) || !empty(not_taken) {
             continue;
+        }
+        let same = match (&func.block(taken).term, &func.block(not_taken).term) {
+            (Some(Terminator::Jump { dest: c }), Some(Terminator::Jump { dest: c2 })) => {
+                c == c2
+                    && func.block(*c).insts.iter().all(|inst| match inst {
+                        MirInst::Phi { args, .. } => {
+                            let from = |x: BlockId| args.iter().find(|(f, _)| *f == x).map(|&(_, v)| v);
+                            from(taken) == from(not_taken)
+                        }
+                        _ => true,
+                    })
+            }
+            (Some(t @ Terminator::Return { .. }), Some(t2)) => t == t2,
+            _ => false,
         };
-        let same = c == c2
-            && taken != not_taken
-            && func.block(c).insts.iter().all(|inst| match inst {
-                MirInst::Phi { args, .. } => {
-                    let from = |x: BlockId| args.iter().find(|(f, _)| *f == x).map(|&(_, v)| v);
-                    from(taken) == from(not_taken)
-                }
-                _ => true,
-            });
         if same {
             func.blocks[i].term = Some(Terminator::Jump { dest: taken });
         }
