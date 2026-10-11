@@ -380,7 +380,7 @@ impl Checker {
             // Honor `async fn -> T`: unify declared T with the yield/
             // return slot so annotation mismatches are diagnosed.
             if let Some(r) = returns {
-                let declared = self.parse_return_type_name(r);
+                let declared = self.parse_type_name(r);
                 self.unify(
                     &yield_ty,
                     &declared,
@@ -393,7 +393,7 @@ impl Checker {
         } else {
             (
                 match returns {
-                    Some(r) => self.parse_return_type_name(r),
+                    Some(r) => self.parse_type_name(r),
                     None => Ty::Var(self.counter.fresh()),
                 },
                 None,
