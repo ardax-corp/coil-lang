@@ -288,8 +288,14 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    if hir.is_coro || hir.is_generic || !hir.captures.is_empty() {
-        return Err("body kind".into());
+    if hir.is_coro {
+        return Err("body kind coroutine".into());
+    }
+    if hir.is_generic {
+        return Err("body kind generic".into());
+    }
+    if !hir.captures.is_empty() {
+        return Err("body kind closure".into());
     }
     let root = hir.root.ok_or("no root")?;
     let ret = hir.ret.as_ref().ok_or("return type")?;
