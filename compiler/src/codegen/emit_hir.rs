@@ -6000,6 +6000,8 @@ impl Compiler {
                 let mut fmt = CodeBuf::new();
                 self.emit_raw_string_literal(&mut fmt, "%s%s");
                 self.bytecode.append(&mut fmt);
+                let idx = self.intern_string("%s%s");
+                emit.format_strs.insert(id.0, idx);
                 if staged {
                     self.bytecode.push_load(temps[0]);
                     self.bytecode.push_load(temps[1]);
