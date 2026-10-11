@@ -4170,6 +4170,15 @@ impl<const S: usize> Machine<S> {
                     self.stack[sp + dest] = Value::from(addr);
                     self.maybe_gc_after_alloc(ip);
                 }
+                Instruction::DensePush => {
+                    let (arity, base) = opcode.dense_move_parts();
+                    if arity > 0 {
+                        promise!(sp + base + arity - 1 < stack_cap);
+                    }
+                    for i in 0..arity {
+                        self.stack.push(self.stack[sp + base + i]);
+                    }
+                }
                 _ => match self.exec_rest(opcode, &mut ip, &mut sp, code, constants, stack_cap) {
                     dispatch::RestFlow::Continue => {}
                     dispatch::RestFlow::Done(paused) => return paused,

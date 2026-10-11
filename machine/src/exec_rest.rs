@@ -1101,15 +1101,6 @@ impl<const S: usize> Machine<S> {
                         Err(t) => int_trap!(t),
                     }
                 }
-                Instruction::DensePush => {
-                    let (arity, base) = opcode.dense_move_parts();
-                    if arity > 0 {
-                        promise!(sp + base + arity - 1 < stack_cap);
-                    }
-                    for i in 0..arity {
-                        self.stack.push(self.stack[sp + base + i]);
-                    }
-                }
                 Instruction::DenseArrayPush => {
                     let (_, dest, arr, val) = opcode.dense_abc_parts();
                     promise!(sp + dest < stack_cap);
