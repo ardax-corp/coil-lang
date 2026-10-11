@@ -95,7 +95,7 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
 - **Tests:** `il/lower.rs` `lower_fuses_bin_slot_slot`, `lower_fuses_bin_slot_imm`,
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
   `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
-  `lower_refuses_const_return_across_value_join`,
+  `lower_refuses_const_return_fuse_when_uncond_jmp_binds_producer`,
   `fuse_select_refuses_residual_byte_in_window`. Retired float chain:
   `cast_float_chain_is_not_fused`.
 
