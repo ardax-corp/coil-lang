@@ -3313,7 +3313,12 @@ impl Checker {
                     let params = type_params.iter().map(|tp| tp.name.to_string()).collect();
                     self.register_generic_alias(name, params, param_vars, alias_ty, range);
                 }
-                let _ = self.infer(ty); // ID alignment
+                // ID alignment only: the annotation is not a value, so drop
+                // what inferring it as one reports (`[P; 2]` reads as an
+                // array of `P` and `2`).
+                let msg_len = self.messages.len();
+                let _ = self.infer(ty);
+                self.messages.truncate(msg_len);
                 unit_ty()
             }
             Expression::ExternStruct(decl) => {

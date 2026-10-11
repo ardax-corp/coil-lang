@@ -451,6 +451,11 @@ impl Compiler {
     /// it uses a construct outside what the compiler can emit.
     pub(super) fn report_unlowered(&mut self, span: &SimpleSpan, name: &str) {
         let reason = self.hir_refusal.take().unwrap_or("no-hir-body");
+        // After a real error (a missing module, a type error) the body is
+        // usually unlowerable because of it; this internal error is noise.
+        if self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR) {
+            return;
+        }
         let mut message = Message::error(
             ErrorCode::CodegenError,
             format!("the compiler cannot lower `{name}` yet ({reason})"),
