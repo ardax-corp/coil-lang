@@ -209,6 +209,7 @@ impl Checker {
             ffi_fn_param_invoke_ret: HashMap::new(),
             ffi_fn_param_invoke_args: HashMap::new(),
             current_function: None,
+            extern_fns: HashSet::new(),
             extern_variadic: HashSet::new(),
             extern_variadic_nfixed: HashMap::new(),
             variadic_call_arg_tags: HashMap::new(),
@@ -1558,6 +1559,7 @@ impl Checker {
         self.ffi_fn_param_invoke_ret.clear();
         self.ffi_fn_param_invoke_args.clear();
         self.current_function = None;
+        self.extern_fns.clear();
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
         self.ffi_exec_names.clear();
@@ -3613,6 +3615,7 @@ impl Checker {
                 .fold(ret_ty, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)));
             self.env
                 .insert_top(decl.name.to_string(), Scheme::mono(fn_ty.clone()));
+            self.extern_fns.insert(decl.name.to_string());
             if decl.variadic {
                 self.extern_variadic.insert(decl.name.to_string());
                 self.extern_variadic_nfixed
@@ -8510,6 +8513,7 @@ impl Checker {
                 }
             }
         }
+        let extern_call = name.is_some_and(|n| self.extern_fns.contains(n));
         for (i, arg) in arg_tys.iter().enumerate() {
             let mut pending_constraints = Vec::new();
             loop {
@@ -8528,6 +8532,12 @@ impl Checker {
                                 arg_exprs.and_then(|args| args.get(i)),
                                 &range,
                             );
+                        } else if let Some(elem) = extern_call
+                            .then(|| self.fixed_array_for_extern_vec(param.as_ref(), arg))
+                            .flatten()
+                        {
+                            // C sees one pointer to the elements either way.
+                            self.unify(&elem.0, &elem.1, &range, "function argument");
                         } else {
                             self.coerce_or_unify(
                                 param.as_ref(),
@@ -8593,6 +8603,18 @@ impl Checker {
             }
         }
         current
+    }
+
+    /// The `(Vec element, array element)` pair when an extern `Vec<T>`
+    /// param is given a fixed `[T; N]`.
+    fn fixed_array_for_extern_vec(&self, param: &Ty, arg: &Ty) -> Option<(Ty, Ty)> {
+        let param = apply_ty_prune(&self.subst, param);
+        let arg = apply_ty_prune(&self.subst, arg);
+        let elem = vec_element_ty(&param)?.clone();
+        match strip_readonly(&arg) {
+            Ty::Array { element, length: ArrayLength::Static(_) } => Some((elem, element.as_ref().clone())),
+            _ => None,
+        }
     }
 
     /// Apply a partially-filled call where named holes may skip parameters.

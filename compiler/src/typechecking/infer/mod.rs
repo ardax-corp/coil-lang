@@ -551,6 +551,10 @@ pub struct Checker {
     /// Enclosing function during body inference (`invoke` param refinement).
     current_function: Option<String>,
 
+    /// Functions declared in `extern` blocks: a `Vec<T>` param there
+    /// also takes a fixed `[T; N]`, passed as the same pointer.
+    extern_fns: HashSet<String>,
+
     /// Extern functions declared with bare `...` (C varargs).
     extern_variadic: HashSet<String>,
 

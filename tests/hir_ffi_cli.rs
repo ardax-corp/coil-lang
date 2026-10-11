@@ -150,5 +150,33 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &dynamic);
+
+    // A `Vec<T>` extern param is a pointer to the elements; a fixed
+    // `[T; N]` passes the same way, as `[T]` params took it (#890).
+    let arrays = tmp.join("arrays.hy");
+    std::fs::write(
+        &arrays,
+        r#"
+extern "sum" {
+    fn sum_array(Vec<int> arr, int n) -> int;
+}
+
+fn main() {
+    let v: Vec<int> = [1, 2, 3];
+    if sum_array(v, 3) != 6 {
+        panic "Vec argument failed";
+    }
+    let fixed: [int; 3] = [10, 20, 12];
+    if sum_array(fixed, 3) != 42 {
+        panic "fixed array argument failed";
+    }
+    if sum_array([4, 5], 2) != 9 {
+        panic "literal argument failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &arrays);
     let _ = std::fs::remove_dir_all(&tmp);
 }
