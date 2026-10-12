@@ -1,6 +1,6 @@
 // Function-style macros from `examples/src/fn_macros.hy` in expression,
 // statement and item position.
-use fn_macros::{square, check, sum, quad, describe, counter, swap};
+use fn_macros::{square, check, sum, quad, describe, counter, swap, ensure, count};
 
 // Item position: the output is declarations.
 counter!(Clicks);
@@ -52,4 +52,13 @@ test("item position: the output is declarations") {
     let c = new Clicks(0);
     c.bump();
     assert(c.bump() == 2)?;
+}
+
+test("a macro overloads by arity") {
+    assert(ensure!(1 + 1 == 2) == Result::Ok(()))?;
+    assert(ensure!(1 > 2) == Result::Err("ensure failed: 1 > 2"))?;
+    assert(ensure!(1 > 2, "custom") == Result::Err("custom"))?;
+    assert(count!() == 0)?;
+    assert(count!(a) == 1)?;
+    assert(count!(a, b + c, d) == 3)?;
 }

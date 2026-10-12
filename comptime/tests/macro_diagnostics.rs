@@ -156,6 +156,26 @@ fn function_macro_parameters_are_exprs() {
     expect("macro_fn_bad_param", &["macro `takes_int` parameter `n` must be an `Expr`"]);
 }
 
+#[test]
+fn function_macro_overloads_must_differ_in_arity() {
+    expect(
+        "macro_fn_overload_duplicate",
+        &["macro `twice` is declared twice for 1 argument(s)"],
+    );
+    expect(
+        "macro_fn_overload_rest_overlap",
+        &["macro `all` is declared twice for 2 argument(s)"],
+    );
+}
+
+#[test]
+fn function_macro_overload_arity_lists_every_arity() {
+    expect(
+        "macro_fn_overload_arity",
+        &["macro `ensure!` takes 1 or 2 argument(s), found 3"],
+    );
+}
+
 /// Each failed call is reported once: the checker and codegen stay quiet
 /// about the call left in the tree.
 #[test]
