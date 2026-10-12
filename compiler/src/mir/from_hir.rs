@@ -111,6 +111,9 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
+/// A variant's payload field names, by enum and variant name.
+pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
+
 /// A two-word enum's name and its variants' tags and payload word types.
 pub type PairVariantsFn<'a> = Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>;
 
@@ -167,7 +170,7 @@ pub struct HirMirInput<'a> {
     pub pair_variants: PairVariantsFn<'a>,
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
-    pub payload_names: Box<dyn Fn(&str, &str) -> Vec<String> + 'a>,
+    pub payload_names: PayloadNamesFn<'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
