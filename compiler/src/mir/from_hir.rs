@@ -171,6 +171,9 @@ pub struct HirMirInput<'a> {
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
     pub payload_names: PayloadNamesFn<'a>,
+    /// Nested matches dispatch on their outer tag first, as HIR emission's
+    /// `hir_match_grouped` (`COIL_HIR_MATCH_TREE`).
+    pub match_tree: bool,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -2421,6 +2424,12 @@ impl Lower<'_> {
         if self.b.value_ty(obj) != MirTy::HeapRef {
             return Err("nested match scrutinee".into());
         }
+        if self.inp.match_tree
+            && let Some(tree) = crate::hir::match_tree::outer_groups(arms)
+            && tree.groups.iter().all(|g| (self.inp.scalar_variant)(g.enum_name, g.variant).is_none())
+        {
+            return self.match_grouped(&tree, obj, &ty, tail);
+        }
         let last = arms.len() - 1;
         let mut out = Vec::new();
         for (i, arm) in arms.iter().enumerate() {
@@ -2435,6 +2444,101 @@ impl Lower<'_> {
             }
         }
         self.join_arms(out)
+    }
+
+    /// A nested match as a decision tree on its outer tag, as HIR
+    /// emission's `hir_match_grouped`: one `JumpIfMatch` per variant, then
+    /// that variant's rows test only their sub-patterns. A group whose rows
+    /// all miss runs the catch-all, emitted once.
+    fn match_grouped(&mut self, tree: &crate::hir::match_tree::OuterTree<'_>, obj: ValueId, ty: &Ty, tail: bool) -> Result<Val, Refusal> {
+        let catch = tree.catch_all.map(|_| self.b.create_block());
+        let tested = if catch.is_some() { tree.groups.len() } else { tree.groups.len() - 1 };
+        let mut groups = Vec::with_capacity(tree.groups.len());
+        for (gi, g) in tree.groups.iter().enumerate() {
+            let field_tys = (self.inp.boxed_view)(ty, Some(g.variant)).ok_or("nested variant payload")?;
+            let mut words = Vec::with_capacity(field_tys.len());
+            for (k, t) in field_tys.iter().enumerate() {
+                let w = self.payload_word_ty(t)?;
+                words.push(self.b.ins_match_payload(obj, k as u32, w).map_err(mir)?);
+            }
+            if gi < tested {
+                let HirPat::Variant { tag: Some(tag), .. } = g.rows[0].1.pat else {
+                    return Err("match arm pattern".into());
+                };
+                let (hit, miss) = (self.b.create_block(), self.b.create_block());
+                self.b.jump_if_match(obj, tag, words.clone(), hit, miss).map_err(mir)?;
+                groups.push((hit, field_tys, words));
+                self.switch(miss);
+            } else {
+                // The last tag left just unpacks.
+                groups.push((self.cur, field_tys, words));
+            }
+        }
+        let mut out = Vec::new();
+        if let (Some(catch), Some(arm)) = (catch, tree.catch_all) {
+            self.jump(catch)?;
+            self.switch(catch);
+            self.nested_test(&arm.pat, obj, ty, None)?;
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+            }
+        }
+        for (g, (block, field_tys, words)) in tree.groups.iter().zip(groups) {
+            self.switch(block);
+            for (r, &(fields, arm)) in g.rows.iter().enumerate() {
+                // With no catch-all, exhaustiveness covers this tag with its
+                // rows: the last one needs no test.
+                let last = r + 1 == g.rows.len();
+                let miss = match catch {
+                    None if last => None,
+                    Some(c) if last => Some(c),
+                    _ => Some(self.b.create_block()),
+                };
+                let subs = self.sub_patterns(g.enum_name, g.variant, fields);
+                if !subs.is_empty() && subs.len() != field_tys.len() {
+                    return Err("payload pattern".into());
+                }
+                for ((sub, &w), t) in subs.iter().zip(&words).zip(&field_tys) {
+                    if let Some(sub) = sub {
+                        if matches!(sub, HirPat::Variant { .. }) && (self.inp.niche)(t).is_some() {
+                            return Err("nested niche pattern".into());
+                        }
+                        self.nested_test(sub, w, t, miss)?;
+                    }
+                }
+                let val = self.arm_value(arm.body, tail)?;
+                if !matches!(val, Val::Never) {
+                    out.push((self.cur, val));
+                }
+                match miss {
+                    Some(m) if !last => self.switch(m),
+                    _ => {}
+                }
+            }
+        }
+        self.join_arms(out)
+    }
+
+    /// A variant pattern's sub-patterns in payload word order.
+    fn sub_patterns<'p>(&self, enum_name: &str, variant: &str, fields: &'p HirPatFields) -> Vec<Option<&'p HirPat>> {
+        match fields {
+            HirPatFields::Unit => Vec::new(),
+            HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
+            HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
+                .iter()
+                .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
+                .collect(),
+        }
+    }
+
+    /// The word a boxed variant's payload field of type `t` reads as.
+    fn payload_word_ty(&self, t: &Ty) -> Result<MirTy, Refusal> {
+        self.inp
+            .word(t)
+            .or_else(|| is_unit(t).then_some(MirTy::I64))
+            .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+            .ok_or_else(|| "payload type".into())
     }
 
     /// Test `v` of type `ty` against `pat`, branching to `miss` when it
@@ -2481,25 +2585,13 @@ impl Lower<'_> {
                     return Err("nested variant word".into());
                 }
                 let field_tys = (self.inp.boxed_view)(ty, Some(variant)).ok_or("nested variant payload")?;
-                let subs: Vec<Option<&HirPat>> = match fields {
-                    HirPatFields::Unit => Vec::new(),
-                    HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
-                    HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
-                        .iter()
-                        .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
-                        .collect(),
-                };
+                let subs = self.sub_patterns(enum_name, variant, fields);
                 if !subs.is_empty() && subs.len() != field_tys.len() {
                     return Err("payload pattern".into());
                 }
                 let mut words = Vec::with_capacity(field_tys.len());
                 for (k, t) in field_tys.iter().enumerate() {
-                    let w = self
-                        .inp
-                        .word(t)
-                        .or_else(|| is_unit(t).then_some(MirTy::I64))
-                        .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
-                        .ok_or("payload type")?;
+                    let w = self.payload_word_ty(t)?;
                     words.push(self.b.ins_match_payload(v, k as u32, w).map_err(mir)?);
                 }
                 if let Some(miss) = miss {

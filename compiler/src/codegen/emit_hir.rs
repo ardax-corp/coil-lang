@@ -960,6 +960,7 @@ impl Compiler {
                 Self::boxed_payloads(checker, &t, variant)
             }),
             enum_drop: Box::new(move |name: &str| checker.enum_has_drop(name)),
+            match_tree: self.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
