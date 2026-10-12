@@ -33,6 +33,22 @@ pub fn host_may_hoist(id: u16) -> bool {
 }
 
 impl MirInst {
+    /// Int arithmetic or negation (overflow, a zero divisor) or a checked
+    /// index: an op that can panic, so it runs even when its value is
+    /// unused (#925).
+    pub fn may_trap(&self, func: &super::func::MirFunc) -> bool {
+        use super::inst::{MirBinOp, MirUnaryOp};
+        use super::ty::MirTy;
+        match self {
+            Self::Bin { op, ty, .. } => {
+                *ty == MirTy::I64 && matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem)
+            }
+            Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
+            Self::Index { unchecked, .. } => !unchecked,
+            _ => false,
+        }
+    }
+
     /// Impure HostInvoke / CALL / alloc / field store — never silently hoist.
     pub fn is_effect_barrier(&self) -> bool {
         match self {
