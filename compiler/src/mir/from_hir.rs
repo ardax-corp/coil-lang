@@ -818,6 +818,18 @@ impl Lower<'_> {
             let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
+        // A numeric range: its typed object, start and end its fields, as
+        // HIR emission's `emit_box_range_slots`.
+        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+            use crate::typechecking::return_layout as rl;
+            let inclusive = rl::range_kind_inclusive(&kind).ok_or("box pair type")?;
+            let type_id = rl::range_heap_type_id(inclusive);
+            let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+            let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, hi, None, Some(1)).map_err(mir)?;
+            return Ok(Val::V(obj));
+        }
         self.box_pair(ty, lo, hi)
     }
 
@@ -1838,12 +1850,17 @@ impl Lower<'_> {
     }
 
     /// `[a, b, ..]` on the heap: each item, then the array. The array word
-    /// is the safepoint's, as the IL lift reads it.
+    /// is the safepoint's, as the IL lift reads it. Heap elements are
+    /// boxed words of an array of unknown element kind, as the lift builds.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).and_then(array_elem).and_then(scalar).ok_or("element type")?;
+        let ty = self
+            .expr_ty(id)
+            .and_then(|t| array_elem(t).and_then(scalar).or_else(|| self.inp.elem_word(t)))
+            .ok_or("element type")?;
         let mut items = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
+            let v = if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
             };
             if self.b.value_ty(v) != ty {
