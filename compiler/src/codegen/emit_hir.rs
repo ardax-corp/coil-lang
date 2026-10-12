@@ -746,7 +746,7 @@ impl Compiler {
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
     fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
-        if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
+        if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
