@@ -7290,11 +7290,15 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    let maps = pipeline.stack_maps();
+    // Fuse-IL bodies carry no S2b map; keep()'s precise frame map lists
+    // its array parameter at the collect.
+    let maps = pipeline.precise_frames();
     assert!(
-        maps.iter()
-            .any(|m| m.frame_slots.contains(&0) && !m.safepoints.is_empty()),
-        "keep() should have a mapped heap slot 0: {maps:?}"
+        maps.iter().any(|m| m
+            .at_pc
+            .iter()
+            .any(|at| at.slots.iter().any(|&s| common::precise_slot_index(s) == 0))),
+        "keep() should have a precise heap slot 0: {maps:?}"
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(out, "42");
@@ -7399,9 +7403,10 @@ fn main() {
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
     assert!(decoded.stack_maps_persisted);
     assert_eq!(decoded.program.stack_maps.as_slice(), pipeline.stack_maps());
+    assert_eq!(decoded.program.precise_frames.as_slice(), pipeline.precise_frames());
     assert!(
-        !decoded.program.stack_maps.is_empty(),
-        "mapped keep() must persist S2b maps"
+        !decoded.program.precise_frames.is_empty(),
+        "keep() must persist its precise frame maps"
     );
 
     let loaded = &decoded.program;
@@ -7451,13 +7456,11 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    // Fuse-IL bodies carry no S2b map; precise frame maps root them.
     assert!(
-        pipeline
-            .stack_maps()
-            .iter()
-            .any(|m| !m.safepoints.is_empty()),
-        "S2c pair/main should keep real maps: {:?}",
-        pipeline.stack_maps()
+        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
+        "pair/main should have precise frame maps: {:?}",
+        pipeline.precise_frames()
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(out, "7");
@@ -7498,13 +7501,11 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    // Fuse-IL bodies carry no S2b map; precise frame maps root them.
     assert!(
-        pipeline
-            .stack_maps()
-            .iter()
-            .any(|m| !m.safepoints.is_empty()),
-        "B6 CALL+MakeArray should bind maps: {:?}",
-        pipeline.stack_maps()
+        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
+        "CALL+MakeArray should have precise frame maps: {:?}",
+        pipeline.precise_frames()
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(out, "5");

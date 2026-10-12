@@ -463,26 +463,17 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
-        // Dense and LIR bodies carry maps built from their MIR; a fuse-IL
-        // body's map is lifted from its stack IL. Drafts see bodies before
-        // the loop cursor raises (added just below).
+        // Dense and LIR bodies carry GC maps built from their MIR. A fuse-IL
+        // body needs none: its precise frame map (a dataflow over its final
+        // bytecode, `precise_frames`) or the conservative frame scan already
+        // roots every slot. Drafts see bodies before the loop cursor raises
+        // (added just below).
         let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
         if opts.mir_specialize {
             for (i, body) in self.funcs.iter().enumerate() {
                 if let Some(draft) = mir_maps.remove(&body.meta.name) {
                     self.stack_map_drafts.push(draft);
                     map_from[i] = "mir";
-                } else if tier[i] == "fuse"
-                    && let Some(draft) = crate::mir::try_build_draft(
-                        &body.ops,
-                        &body.meta.name,
-                        body.meta.entry_sp,
-                        pool,
-                        &body.meta.unboxed_fields,
-                    )
-                {
-                    self.stack_map_drafts.push(draft);
-                    map_from[i] = "il";
                 }
             }
         }

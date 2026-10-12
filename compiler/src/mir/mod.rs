@@ -77,7 +77,7 @@ pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word a
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
-pub use stackmap::{bind_drafts, is_alloc_opcode, try_build_draft, DraftFrameMap};
+pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,

@@ -3635,10 +3635,13 @@ fn main() {
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
     );
+    // A fuse-IL body carries no S2b map; its precise frame map roots it.
     assert!(
-        p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
-        "D1 InitTyped+field body should bind maps: {:?}",
-        p.stack_maps()
+        p.precise_frames()
+            .iter()
+            .any(|m| m.entry_pc as usize == start && !m.at_pc.is_empty()),
+        "InitTyped+field body should have a precise frame map: {:?}",
+        p.precise_frames()
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
