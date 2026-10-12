@@ -1,10 +1,6 @@
 use super::*;
 use crate::il::{IlJumpKind, IlOp, Label};
-use common::{Byte, DebugLoc, Instruction};
-
-fn loc() -> DebugLoc {
-    DebugLoc::unknown()
-}
+use common::{Byte, Instruction};
 
 fn is_dense_bin_op(inst: Instruction) -> bool {
     matches!(
@@ -4496,7 +4492,7 @@ fn br_taken_path_jumps_over_false_edge_phi_moves() {
     // b = a; if cond { a = a + 1; } return a + b;
     // `b` keeps the pre-branch `a` live past the join, so the join's phi
     // cannot share its register and the false edge needs a move.
-    let text = "func @br_phi(v0: i64, v1: i64) -> i64 {
+    let text = "func @br_phi(v0: bool, v1: i64) -> i64 {
 bb0:
     brif v0, bb1, bb2
 bb1:

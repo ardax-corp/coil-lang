@@ -203,14 +203,6 @@ pub fn bind_drafts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::{IlOp, Label};
-    use crate::mir::builder::MirBuilder;
-    use crate::mir::inst::{LocalId, MirAllocKind, MirCmpOp, MirConst, MirGcKind};
-    use common::DebugLoc;
-
-    fn loc() -> DebugLoc {
-        DebugLoc::unknown()
-    }
 
     #[test]
     fn slot_draft_keeps_heap_locals_only() {

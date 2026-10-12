@@ -324,7 +324,7 @@ fn term_uses(term: &Terminator) -> Vec<ValueId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::{IlOp, Label};
+    use crate::il::IlOp;
     use crate::mir::builder::MirBuilder;
     use crate::mir::inst::{MirAllocKind, MirCmpOp, MirConst, MirGcKind};
     use common::{Byte, DebugLoc};
