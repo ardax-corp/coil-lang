@@ -282,12 +282,18 @@ impl Reactor {
         // Each spare may itself wait on IO and need another; the cap only
         // bounds a burst of queued jobs, not a chain of waits.
         let cap = MAX_SPARES;
-        if self
-            .spares
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < cap).then_some(n + 1))
-            .is_err()
-        {
-            return;
+        let mut n = self.spares.load(Ordering::SeqCst);
+        loop {
+            if n >= cap {
+                return;
+            }
+            match self
+                .spares
+                .compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(seen) => n = seen,
+            }
         }
         let Some(job) = self.steal_job() else {
             self.spares.fetch_sub(1, Ordering::SeqCst);
