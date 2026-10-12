@@ -101,3 +101,9 @@ test("a byte vector costs about a byte per element") {
     assert(grown < 200000)?;
     assert(v[99999] as int == 99999 % 256)?;
 }
+
+test("element-wise matrix ops read packed rows") {
+    let q = matrix([[34 as byte, 0 as byte]]);
+    let flipped = ~q;
+    assert(flipped[0][0] as int == 221 && flipped[0][1] as int == 255)?;
+}
