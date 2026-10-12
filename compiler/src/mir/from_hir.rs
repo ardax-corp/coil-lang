@@ -1148,6 +1148,12 @@ impl Lower<'_> {
                 body,
                 kind: Some(ForInKind::Array),
             } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body, None),
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(ForInKind::Coroutine),
+            } => self.for_coroutine(*local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             // `let _ = e`: nothing can read `_`.
             HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" => {
@@ -1373,6 +1379,37 @@ impl Lower<'_> {
     /// step ends the body's last block unless a `continue` needs it as its
     /// own target, as HIR emission places it (the shape MIR vectorize
     /// matches).
+    /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
+    /// stop once the handle is done (its completion value is never bound).
+    fn for_coroutine(&mut self, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        let ty = self.local_ty(local)?;
+        let Some(h) = self.word(iterable)? else {
+            return Ok(Val::Never);
+        };
+        let head = self.b.create_block();
+        let body_b = self.b.create_block();
+        let exit = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
+        self.bind(local, x)?;
+        let done = self.b.ins_done_coro(h).map_err(mir)?;
+        self.b.branch(done, exit, body_b).map_err(mir)?;
+        self.switch(body_b);
+        self.loops.push(Loop {
+            cont: head,
+            cont_used: false,
+            exit: Some(exit),
+        });
+        let live = self.effect(body);
+        self.loops.pop();
+        if live? {
+            self.jump(head)?;
+        }
+        self.switch(exit);
+        Ok(Val::Unit)
+    }
+
     fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst) -> Result<Val, Refusal> {
         let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
