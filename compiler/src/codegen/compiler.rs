@@ -804,7 +804,13 @@ impl Compiler {
     fn reserve_program_callable_entries(&mut self, children: &[Output]) {
         for child in children {
             match child.1.as_ref() {
-                Expression::Function { name, .. } => {
+                Expression::Function {
+                    name,
+                    type_params,
+                    args,
+                    body,
+                    ..
+                } => {
                     let qualified = if self.namespace.is_empty() {
                         name.to_string()
                     } else {
@@ -815,6 +821,9 @@ impl Compiler {
                     }
                     let key = self.overload_entry_key(name, &qualified, child);
                     self.reserve_function_entry(key);
+                    if body.is_some() {
+                        self.reserve_mono_entries(&qualified, type_params, args, name);
+                    }
                 }
                 Expression::Implementation { owner, methods, .. } => {
                     let owner_key = self.resolve_class_ident(owner);
@@ -5847,7 +5856,7 @@ impl Compiler {
         }
     }
 
-    pub(super) fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
+    pub(crate) fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
         match ty {
             Ty::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
             Ty::Fun(a, r) => Ty::Fun(
@@ -5876,6 +5885,57 @@ impl Compiler {
         }
     }
 
+    /// The planned mono clones of generic `source_name`, each with the
+    /// overrides that make it emit (an empty set emits none).
+    fn planned_mono_specializations<'compiler>(
+        &self,
+        qualified: &str,
+        type_params: &[parser::ast::TypeParam<'compiler>],
+        source_name: &str,
+    ) -> Vec<crate::monomorphize::MonoSpecialization> {
+        if type_params.is_empty() || self.mono_plan.is_empty() {
+            return Vec::new();
+        }
+        let def_id = self
+            .checker
+            .def_id_of(source_name)
+            .or_else(|| self.checker.interned_def(&self.namespace, source_name));
+        if let Some(id) = def_id {
+            self.mono_plan.specializations_for_def(id).cloned().collect()
+        } else {
+            self.mono_plan
+                .specializations_for_fn(qualified)
+                .chain(self.mono_plan.specializations_for_fn(source_name))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn mono_clone_name(qualified: &str, key: &MonoKey) -> String {
+        let subst_ids = key.subst.iter().map(|id| id.0.to_string()).collect::<Vec<_>>().join("$");
+        format!("{}$mono${}${}", qualified, key.def_id.raw(), subst_ids)
+    }
+
+    /// Name and reserve every mono clone of a generic function before any
+    /// body is emitted, so a clone emitted earlier can call one emitted
+    /// later (`twice<int>` calling `wrap<int>`, #915).
+    fn reserve_mono_entries<'compiler>(
+        &mut self,
+        qualified: &str,
+        type_params: &[parser::ast::TypeParam<'compiler>],
+        args: &Output<'compiler>,
+        source_name: &str,
+    ) {
+        for spec in self.planned_mono_specializations(qualified, type_params, source_name) {
+            if self.mono_names.contains_key(&spec.key) || self.mono_overrides_for_args(type_params, args, &spec.key).is_empty() {
+                continue;
+            }
+            let name = Self::mono_clone_name(qualified, &spec.key);
+            self.reserve_function_entry(name.clone());
+            self.mono_names.insert(spec.key, name);
+        }
+    }
+
     fn emit_mono_specializations_for_function<'compiler>(
         &mut self,
         qualified: &str,
@@ -5888,26 +5948,7 @@ impl Compiler {
         let Some(body) = body else {
             return;
         };
-        if type_params.is_empty() || self.mono_plan.is_empty() {
-            return;
-        }
-
-        let def_id = self
-            .checker
-            .def_id_of(source_name)
-            .or_else(|| self.checker.interned_def(&self.namespace, source_name));
-        let specializations = if let Some(id) = def_id {
-            self.mono_plan
-                .specializations_for_def(id)
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            self.mono_plan
-                .specializations_for_fn(qualified)
-                .chain(self.mono_plan.specializations_for_fn(source_name))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        let specializations = self.planned_mono_specializations(qualified, type_params, source_name);
         if specializations.is_empty() {
             return;
         }
@@ -5923,19 +5964,7 @@ impl Compiler {
             }
             let type_param_tys = self.mono_type_param_tys_for(type_params, &specialization.key);
 
-            let subst_ids = specialization
-                .key
-                .subst
-                .iter()
-                .map(|id| id.0.to_string())
-                .collect::<Vec<_>>()
-                .join("$");
-            let mono_name = format!(
-                "{}$mono${}${}",
-                qualified,
-                specialization.key.def_id.raw(),
-                subst_ids
-            );
+            let mono_name = Self::mono_clone_name(qualified, &specialization.key);
             let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
             self.mono_offsets
                 .insert(specialization.key.clone(), clone_offset);

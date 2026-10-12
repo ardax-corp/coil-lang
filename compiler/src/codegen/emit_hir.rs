@@ -2572,7 +2572,7 @@ impl Compiler {
         }
         self.mono_plan
             .specialization_for_call(key, &self.hir_mono_key_tys(strip_overload_key(key), arg_tys))
-            .is_some_and(|spec| self.mono_offsets.contains_key(&spec.key))
+            .is_some_and(|spec| self.mono_offsets.contains_key(&spec.key) || self.mono_names.contains_key(&spec.key))
     }
 
     /// The types a mono clone is keyed by (`Compiler::mono_call_offset`):
@@ -2609,9 +2609,6 @@ impl Compiler {
             .mono_plan
             .specialization_for_call(&key, &self.hir_mono_key_tys(lookup, arg_tys.clone()))
             .ok_or("callee-generic")?;
-        if !self.mono_offsets.contains_key(&spec.key) {
-            return Err("callee-generic");
-        }
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
         if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) || self.two_word_return_kind(lookup).is_some() {
             return Err("callee-generic");
@@ -3770,7 +3767,14 @@ impl Compiler {
         // word whose own types are ground. A body forwarding its
         // dictionaries also passes its own bare type parameters, already
         // boxed words.
-        let open = |ty: &Ty| !forwarded.is_empty() && matches!(ty, Ty::Var(_));
+        // A shared generic body (no dictionaries to forward) passes its own
+        // bare type parameters the same way (#915).
+        let shared = !self.compiling_mono_clone
+            && self
+                .current_function_table_key
+                .as_deref()
+                .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k)));
+        let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
             (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty)).then_some(ty)
@@ -6980,6 +6984,10 @@ impl Compiler {
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
                 let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
+                // Temps only at depth 0, as the method path: under pending
+                // operands (`u.label() + ":"`) a temp slot sits at the
+                // call's own depth, so the result would land above it.
+                let stage = stage && depth == 0;
                 let mut temps = Vec::with_capacity(args.len());
                 for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                     let at = if stage { depth } else { depth + i as u32 };

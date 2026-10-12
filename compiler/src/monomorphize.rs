@@ -161,7 +161,8 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_escaped_generic_refs(ast, &sigs, false, &mut escaped);
 
     let mut candidates = Vec::new();
-    collect_candidates(ast, checker, &sigs, &mut intern, &mut candidates);
+    collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
+    collect_transitive(ast, checker, &sigs, &mut intern, &mut candidates);
 
     let (specializations, retargets, cap_hits) = apply_caps(candidates);
     MonoPlan {
@@ -171,6 +172,96 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
         escaped_generic_fns: escaped,
         cap_hits,
     }
+}
+
+/// The generic calls inside each planned clone's body whose arguments are
+/// ground at the clone's type arguments (`fn twice<T>(T x) { wrap(x) }`
+/// planned at `int` needs `wrap<int>`, #915): a clone calling the shared
+/// body instead would hand back an `Option` around a boxed `T`.
+fn collect_transitive(
+    ast: &Output,
+    checker: &Checker,
+    sigs: &HashMap<String, GenericFnSig>,
+    intern: &mut TyInterner,
+    candidates: &mut Vec<MonoCandidate>,
+) {
+    let mut seen: BTreeSet<MonoKey> = BTreeSet::new();
+    let mut work = Vec::new();
+    for c in candidates.iter() {
+        if seen.insert(c.specialization.key.clone()) {
+            work.push(c.specialization.clone());
+        }
+    }
+    while let Some(spec) = work.pop() {
+        if seen.len() > MAX_TOTAL_SPECIALIZATIONS {
+            break;
+        }
+        let Some(sig) = sigs.get(&spec.fn_name) else {
+            continue;
+        };
+        let Some(params) = checker.fn_param_tys(&spec.fn_name) else {
+            continue;
+        };
+        let mut map = HashMap::new();
+        for (param, tp) in params.iter().zip(&sig.param_type_params) {
+            if let (Ty::Var(v), Some(i)) = (apply_ty_prune(checker.subst(), param), tp)
+                && let Some(ty) = spec.key.subst.get(*i).and_then(|id| intern.get(*id))
+            {
+                map.insert(v, ty.clone());
+            }
+        }
+        if map.is_empty() {
+            continue;
+        }
+        let ty_of = |e: &Output| ground_ty_at(checker, e, &map);
+        let mut found = Vec::new();
+        with_fn_body(ast, &spec.fn_name, &mut |body| {
+            collect_candidates(body, checker, &ty_of, sigs, intern, &mut found)
+        });
+        for c in found {
+            if seen.insert(c.specialization.key.clone()) {
+                work.push(c.specialization.clone());
+            }
+            candidates.push(c);
+        }
+    }
+}
+
+/// [`ground_ty`] inside a generic body, its type parameters bound by `map`.
+fn ground_ty_at(checker: &Checker, expr: &Output, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Option<Ty> {
+    match expr.1.as_ref() {
+        Expression::NamedArg(_, inner)
+        | Expression::Group(inner)
+        | Expression::Expr(inner)
+        | Expression::Statement(inner) => return ground_ty_at(checker, inner, map),
+        _ => {}
+    }
+    if let Some(ty) = ground_ty(checker, expr) {
+        return Some(ty);
+    }
+    let ty = checker.lookup_for_codegen_span(expr.0.start, expr.0.end)?;
+    concrete_ty(&crate::Compiler::apply_ty_var_map(&ty, map))
+}
+
+/// Run `f` on the body of the function named `name`; whether it was found.
+fn with_fn_body(node: &Output, name: &str, f: &mut dyn FnMut(&Output)) -> bool {
+    if let Expression::Function { name: n, body, .. } = node.1.as_ref() {
+        let Some(body) = body else {
+            return false;
+        };
+        if *n == name {
+            f(body);
+            return true;
+        }
+        return with_fn_body(body, name, f);
+    }
+    let mut found = false;
+    walk_children(node, &mut |child| {
+        if !found {
+            found = with_fn_body(child, name, f);
+        }
+    });
+    found
 }
 
 /// Alias kept for in-crate tests.
@@ -258,6 +349,7 @@ fn type_param_ref_index(ty: &Output, type_params: &[String]) -> Option<usize> {
 fn collect_candidates(
     node: &Output,
     checker: &Checker,
+    ty_of: &dyn Fn(&Output) -> Option<Ty>,
     sigs: &HashMap<String, GenericFnSig>,
     intern: &mut TyInterner,
     out: &mut Vec<MonoCandidate>,
@@ -266,7 +358,7 @@ fn collect_candidates(
         if let Expression::Identifier(fn_name) = name.1.as_ref()
             && let Some(sig) = sigs.get(*fn_name)
             && let Some(specialization) =
-                candidate_for_call(fn_name, sig, args.as_deref(), checker, intern)
+                candidate_for_call(fn_name, sig, args.as_deref(), checker, ty_of, intern)
         {
             out.push(MonoCandidate {
                 span: node.0,
@@ -275,14 +367,14 @@ fn collect_candidates(
         }
         if let Some(args) = args {
             for arg in args {
-                collect_candidates(arg, checker, sigs, intern, out);
+                collect_candidates(arg, checker, ty_of, sigs, intern, out);
             }
         }
         return;
     }
 
     walk_children(node, &mut |child| {
-        collect_candidates(child, checker, sigs, intern, out)
+        collect_candidates(child, checker, ty_of, sigs, intern, out)
     });
 }
 
@@ -291,6 +383,7 @@ fn candidate_for_call(
     sig: &GenericFnSig,
     args: Option<&[Output]>,
     checker: &Checker,
+    ty_of: &dyn Fn(&Output) -> Option<Ty>,
     intern: &mut TyInterner,
 ) -> Option<MonoSpecialization> {
     if sig.type_params.is_empty() {
@@ -340,7 +433,7 @@ fn candidate_for_call(
         sig.param_type_params.as_slice()
     };
     for (arg, tp_idx) in fixed_args.iter().zip(fixed_tps.iter()) {
-        let arg_ty = ground_ty(checker, arg)?;
+        let arg_ty = ty_of(arg)?;
         bind(&mut subst, *tp_idx, &arg_ty)?;
         arg_types.push(arg_ty);
     }
@@ -355,7 +448,7 @@ fn candidate_for_call(
         } else {
             let mut elem_ty: Option<Ty> = None;
             for arg in &rest_args {
-                let t = ground_ty(checker, arg)?;
+                let t = ty_of(arg)?;
                 match &elem_ty {
                     None => elem_ty = Some(t.clone()),
                     Some(prev) if prev != &t => return None,
