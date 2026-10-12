@@ -158,10 +158,10 @@ fn package_fib_embedded_run_prints_55() {
     let _ = std::fs::remove_file(&out);
 }
 
-/// `coil package` falls back to `coil` itself when no `coil-embed` sits beside
-/// it, so the full CLI must run an embedded program too.
+/// Only `coil-embed` can run a package: the full `coil` never reads an
+/// embedded program, so packaging with it as the runner must fail.
 #[test]
-fn package_with_coil_as_runner_runs_embedded_program() {
+fn package_rejects_coil_as_runner() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -185,22 +185,11 @@ fn package_with_coil_as_runner_runs_embedded_program() {
         "--runner",
         &bin,
     ]);
-    let status = package.status().expect("spawn coil package");
-    assert!(status.success(), "package failed");
-
-    let run = run_with_timeout(&out, 30);
-    assert!(
-        run.status.success(),
-        "packaged app failed: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("2178309"),
-        "expected fib(32)=2178309, stdout={stdout}"
-    );
-
-    let _ = std::fs::remove_file(&out);
+    let output = package.output().expect("spawn coil package");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "package with coil as runner succeeded");
+    assert!(stderr.contains("coil-embed"), "stderr={stderr}");
+    assert!(!out.exists(), "no packaged output expected");
 }
 
 #[test]
