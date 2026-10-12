@@ -103,6 +103,8 @@ impl HirMirInput<'_> {
         let elem = array_elem(arr)?;
         match scalar(elem) {
             Some(t @ (MirTy::I64 | MirTy::F64)) => Some(t),
+            // A type parameter's element: the opaque word as stored.
+            _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
             _ => self.heap_elem(elem),
         }
     }
@@ -405,7 +407,7 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
     let collects = func.blocks.iter().flat_map(|b| &b.insts).any(|i| {
         !matches!(
             i,
-            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. }
+            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. }
         )
     });
     if collects {
@@ -1557,6 +1559,13 @@ impl Lower<'_> {
                     && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0)
                     && !self.boxes.contains_key(&local.0) =>
             {
+                let lit = matches!(self.hir.expr(*index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
+                if !lit && !lower::stack_index_proven(self.hir, id, *index, n) {
+                    let Some(idx) = self.index_word(*index)? else {
+                        return Ok(Val::Never);
+                    };
+                    return Ok(Val::V(self.stack_select_checked(slot, n, idx, ty)?));
+                }
                 let Some(k) = self.stack_index(id, *index, n)? else {
                     return Ok(Val::Never);
                 };
@@ -2682,8 +2691,7 @@ impl Lower<'_> {
             return Ok(Val::V(self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?));
         }
         // `ArrayLen` reads a string's byte length too.
-        let opaque = self.inp.opaque_vars && self.expr_ty(arg).and_then(array_elem).is_some_and(is_var);
-        if !self.heap_array(arg) && !opaque && !self.expr_ty(arg).is_some_and(is_string) {
+        if !self.heap_array(arg) && !self.expr_ty(arg).is_some_and(is_string) {
             return Err("len operand".into());
         }
         let Some(arr) = self.word(arg)? else {
@@ -2852,6 +2860,41 @@ impl Lower<'_> {
     fn stack_select(&mut self, base: u32, n: usize, idx: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
         let args = self.stack_cases(base, n, idx, |l, slot| Ok(Some(l.b.use_local(slot, ty).map_err(mir)?)))?;
         self.b.ins_stack_phi(args).map_err(mir)
+    }
+
+    /// [`Self::stack_select`] of an index that may be out of range: as HIR
+    /// emission, an out-of-range index boxes the array and indexes that,
+    /// which panics.
+    fn stack_select_checked(&mut self, base: u32, n: usize, idx: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let top = self.b.ins_const(MirConst::I64(n as i64)).map_err(mir)?;
+        let neg = self.b.ins_cmp(MirCmpOp::Lt, idx, zero).map_err(mir)?;
+        let oob = self.b.create_block();
+        let low = self.b.create_block();
+        let inb = self.b.create_block();
+        self.b.branch(neg, oob, low).map_err(mir)?;
+        self.switch(low);
+        let over = self.b.ins_cmp(MirCmpOp::Ge, idx, top).map_err(mir)?;
+        self.b.branch(over, oob, inb).map_err(mir)?;
+        self.switch(inb);
+        let v = self.stack_select(base, n, idx, ty)?;
+        let in_end = self.cur;
+        self.switch(oob);
+        let mut words = Vec::with_capacity(n);
+        for k in 0..n as u32 {
+            words.push(self.b.use_local(LocalId(base + k), ty).map_err(mir)?);
+        }
+        let arr = self.b.ins_alloc(MirAllocKind::Array, words).map_err(mir)?;
+        let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+        let w = self.b.ins_index(arr, idx, ty, false).map_err(mir)?;
+        let oob_end = self.cur;
+        let join = self.b.create_block();
+        self.b.switch_to_block(in_end);
+        self.jump(join)?;
+        self.b.switch_to_block(oob_end);
+        self.jump(join)?;
+        self.switch(join);
+        self.b.ins_stack_phi(vec![(in_end, v), (oob_end, w)]).map_err(mir)
     }
 
     /// `a[i] = v` on a stack array: the value first, then the index, as
