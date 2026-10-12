@@ -476,6 +476,32 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
+        // S2b: prefer a draft from the final body (fuse-IL / LIR). Dense
+        // keep the pre-MIR snapshot so looping Make* still bind. Drafts see
+        // bodies before the loop cursor raises (added just below).
+        let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
+        if opts.mir_specialize {
+            for (i, body) in self.funcs.iter().enumerate() {
+                // A LIR body from MIR lowered from HIR carries its own map.
+                if let Some(draft) = mir_maps.remove(&body.meta.name) {
+                    self.stack_map_drafts.push(draft);
+                    map_from[i] = "mir";
+                } else if let Some(draft) = crate::mir::try_build_draft(
+                    &body.ops,
+                    &body.meta.name,
+                    body.meta.entry_sp,
+                    pool,
+                    &body.meta.unboxed_fields,
+                ) {
+                    self.stack_map_drafts.push(draft);
+                    map_from[i] = "il";
+                } else if let Some(draft) = pre_maps.remove(&body.meta.name) {
+                    self.stack_map_drafts.push(draft);
+                    map_from[i] = "il snapshot";
+                }
+            }
+        }
+
         if opts.collect_stats {
             let (dense, fuse) = if opts.mir_specialize {
                 (dense_kept, pending.len() - lir_kept + pinned)
@@ -493,33 +519,12 @@ impl IlModule {
                         Some(_) => Some("lowered".to_string()),
                         None => body.meta.hir_mir_why.clone(),
                     },
+                    map: (map_from[i] != "-").then(|| map_from[i].to_string()),
                 });
             }
         }
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);
-
-        // S2b: prefer a draft from the final body (fuse-IL / LIR). Dense
-        // keep the pre-MIR snapshot so looping Make* still bind. Drafts see
-        // bodies before the loop cursor raises (added just below).
-        if opts.mir_specialize {
-            for body in &self.funcs {
-                // A LIR body from MIR lowered from HIR carries its own map.
-                if let Some(draft) = mir_maps.remove(&body.meta.name) {
-                    self.stack_map_drafts.push(draft);
-                } else if let Some(draft) = crate::mir::try_build_draft(
-                    &body.ops,
-                    &body.meta.name,
-                    body.meta.entry_sp,
-                    pool,
-                    &body.meta.unboxed_fields,
-                ) {
-                    self.stack_map_drafts.push(draft);
-                } else if let Some(draft) = pre_maps.remove(&body.meta.name) {
-                    self.stack_map_drafts.push(draft);
-                }
-            }
-        }
 
         if opts.mir_specialize {
             self.apply_loop_cursor_raises(&tier);

@@ -11,6 +11,10 @@ lines (`name: dense|lir|fuse (dense: why; lir: why; hir: why)`).
     # compare two saved runs; exits 1 when any body drops a tier
     scripts/tier_census.py compare old.json new.json
 
+Each body also reports where its GC stack map came from (`mir`, `il`,
+`il snapshot`, or `-` for none; `unbound` when its sites did not match the
+body's alloc opcodes); `compare` lists bodies that lose a bound map.
+
 Environment variables set for `run` (for example `COIL_HIR_MIR=0`) reach the
 compiler, so one binary can be compared against itself under a switch.
 """
@@ -59,8 +63,23 @@ def bodies(coil, roots, path, out):
         name = m["name"]
         seen[name] += 1
         key = name if seen[name] == 1 else f"{name}#{seen[name]}"
-        result[key] = {"tier": m["tier"], "why": m["why"]}
+        result[key] = {"tier": m["tier"], "why": m["why"], "map": map_source(m["why"])}
     return result
+
+
+def map_source(why):
+    """Where the body's GC stack map came from, `-` when it has none."""
+    for part in why.split("; "):
+        key, _, text = part.partition(": ")
+        if key == "map":
+            return text
+    return "-"
+
+
+def bound(body):
+    """Whether the body has a stack map that bound to its bytecode."""
+    source = body.get("map", "-")
+    return source != "-" and not source.endswith(" unbound")
 
 
 def reasons(why):
@@ -68,7 +87,7 @@ def reasons(why):
     out = []
     for part in why.split("; "):
         tier, _, text = part.partition(": ")
-        if text and text != "-":
+        if tier != "map" and text and text != "-":
             out.append(f"{tier}: {re.sub(r'[0-9]+', '#', text)}")
     return out
 
@@ -85,16 +104,19 @@ def run(args):
             else:
                 census[path] = found
     tiers = collections.Counter()
+    maps = collections.Counter()
     why = collections.Counter()
     for found in census.values():
         for body in found.values():
             tiers[body["tier"]] += 1
+            maps[(body["tier"], body.get("map", "-"))] += 1
             if body["tier"] != "dense":
                 why.update(reasons(body["why"]))
     total = sum(tiers.values())
     print(f"{len(census)} files, {total} bodies: " + ", ".join(f"{tiers[t]} {t}" for t in ("dense", "lir", "fuse")))
     if failed:
         print(f"{len(failed)} files did not compile: " + " ".join(failed[:10]))
+    print("stack maps by tier: " + ", ".join(f"{t} {m} {n}" for (t, m), n in sorted(maps.items()) if m != "-"))
     print("top refusals:")
     for text, count in why.most_common(args.top):
         print(f"  {count:6} {text}")
@@ -108,7 +130,7 @@ def compare(args):
         old = json.load(f)
     with open(args.new) as f:
         new = json.load(f)
-    up, down, gone = [], [], 0
+    up, down, unmapped, gone = [], [], [], 0
     for path, bodies_old in old.items():
         bodies_new = new.get(path)
         if bodies_new is None:
@@ -125,11 +147,13 @@ def compare(args):
                 up.append(row)
             elif step < 0:
                 down.append(row)
-    print(f"{len(up)} bodies up a tier, {len(down)} down, {gone} not found in the new run")
-    for label, rows in (("down", down), ("up", up)):
+            if bound(body) and not bound(other):
+                unmapped.append((path, name, body["map"], "-", other["why"]))
+    print(f"{len(up)} bodies up a tier, {len(down)} down, {len(unmapped)} lost a stack map, {gone} not found in the new run")
+    for label, rows in (("down", down), ("unmapped", unmapped), ("up", up)):
         for path, name, a, b, why in rows[: args.top]:
-            print(f"  {label}: {path} {name}: {a} -> {b}" + (f" ({why})" if label == "down" else ""))
-    return 1 if down else 0
+            print(f"  {label}: {path} {name}: {a} -> {b}" + (f" ({why})" if label != "up" else ""))
+    return 1 if down or unmapped else 0
 
 
 def main():
