@@ -363,13 +363,12 @@ fn array_buffer_from_value(
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
     let addr = value.raw() as u64;
     if let Some(obj) = heap.find_object_by_addr(addr) {
-        let elements: &[Value] = match &obj {
-            Object::Array(gc) => gc.as_ref().elements(),
-            Object::Tuple(gc) => gc.as_ref().elements(),
-            _ => &[],
+        let mut buf: Vec<i64> = match &obj {
+            Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
+            Object::Tuple(gc) => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
+            _ => Vec::new(),
         };
-        if !elements.is_empty() {
-            let mut buf: Vec<i64> = elements.iter().map(|v| v.as_int()).collect();
+        if !buf.is_empty() {
             let ptr = buf.as_mut_ptr() as *mut c_void;
             bufs.push(buf);
             return Ok((ptr, Some(addr)));
@@ -387,16 +386,17 @@ fn byte_buffer_from_value(
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
     let addr = value.raw() as u64;
     let obj = heap.find_object_by_addr(addr);
-    let (elements, copy_back): (&[Value], bool) = match &obj {
-        Some(Object::Array(gc)) => (gc.as_ref().elements(), true),
-        Some(Object::Tuple(gc)) => (gc.as_ref().elements(), false),
+    let (mut buf, copy_back): (Vec<u8>, bool) = match &obj {
+        Some(Object::Array(gc)) => (gc.as_ref().iter().map(|v| v.as_int() as u8).collect(), true),
+        Some(Object::Tuple(gc)) => {
+            (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
+        }
         _ => {
             return Err(FfiError::Unsupported(
                 "Bytes argument must be a Vec<byte>".into(),
             ));
         }
     };
-    let mut buf: Vec<u8> = elements.iter().map(|v| v.as_int() as u8).collect();
     // Never hand C a dangling pointer for an empty buffer.
     buf.reserve(1);
     let ptr = buf.as_mut_ptr() as *mut c_void;
@@ -832,7 +832,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ret.as_int(), 258);
-        let after: Vec<i64> = gc.as_ref().elements().iter().map(|v| v.as_int()).collect();
+        let after: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
         assert_eq!(after, vec![200, 201, 202]);
     }
 

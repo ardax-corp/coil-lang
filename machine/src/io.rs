@@ -345,7 +345,7 @@ pub fn stream_read(
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
     let capacity = match heap.find_object_by_addr(buf.raw() as u64) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len(),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     stream_read_into(heap, stream, buf, capacity)
@@ -360,7 +360,7 @@ fn stream_read_into(
 ) -> Result<Option<usize>, IoErrorTag> {
     let buf_addr = buf.raw() as u64;
     let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len().min(cap),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len().min(cap),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -391,8 +391,8 @@ fn stream_read_into(
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (dst, src) in arr.elements_mut()[..n].iter_mut().zip(tmp[..n].iter()) {
-            *dst = Value::from(*src as i64);
+        for (i, src) in tmp[..n].iter().enumerate() {
+            arr.set(i, Value::from(*src as i64));
         }
         Ok(Some(n))
     } else {
@@ -418,13 +418,13 @@ pub fn stream_write_from(
     let buf_addr = buf.raw() as u64;
     let bytes: Vec<u8> = match heap.find_object_by_addr(buf_addr) {
         Some(Object::Array(arr_gc)) => {
-            let elems = &arr_gc.as_ref().elements();
+            let arr = arr_gc.as_ref();
             let start = offset as usize;
-            if start > elems.len() {
+            if start > arr.len() {
                 return Err(IoErrorTag::InvalidInput);
             }
-            elems[start..]
-                .iter()
+            arr.iter()
+                .skip(start)
                 .map(|v| {
                     let n = v.as_int();
                     if !(0..=255).contains(&n) { 0 } else { n as u8 }
@@ -470,7 +470,7 @@ pub fn stream_read_exact(
     let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
-    let need = arr_gc.as_ref().elements().len();
+    let need = arr_gc.as_ref().len();
     if need == 0 {
         return Ok(Some(0));
     }
@@ -500,13 +500,13 @@ pub fn stream_read_exact(
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                let chunk: Vec<Value> = src.as_ref().elements()[..n].to_vec();
+                let chunk: Vec<Value> = src.as_ref().slice_to_vec(0, n);
                 let Some(Object::Array(mut dst)) = heap.find_object_by_addr(buf_addr) else {
                     return Err(IoErrorTag::Other);
                 };
-                let elems = dst.as_mut().elements_mut();
+                let dst = dst.as_mut();
                 for (i, v) in chunk.into_iter().enumerate() {
-                    elems[filled + i] = v;
+                    dst.set(filled + i, v);
                 }
                 filled += n;
             }
@@ -538,7 +538,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                for v in &src.as_ref().elements()[..n] {
+                for v in src.as_ref().iter().take(n) {
                     acc.push(v.as_int() as u8);
                 }
             }
@@ -562,7 +562,6 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
     };
     let bytes: Vec<u8> = arr_gc
         .as_ref()
-        .elements()
         .iter()
         .map(|v| v.as_int() as u8)
         .collect();
@@ -1287,7 +1286,7 @@ pub fn udp_send_to(
 pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value, IoErrorTag> {
     let buf_addr = buf.raw() as u64;
     let capacity = match heap.find_object_by_addr(buf_addr) {
-        Some(Object::Array(arr_gc)) => arr_gc.as_ref().elements().len(),
+        Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
     if capacity == 0 {
@@ -1330,8 +1329,8 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (dst, src) in arr.elements_mut()[..n].iter_mut().zip(tmp[..n].iter()) {
-            *dst = Value::from(*src as i64);
+        for (i, src) in tmp[..n].iter().enumerate() {
+            arr.set(i, Value::from(*src as i64));
         }
     }
 
@@ -1399,7 +1398,6 @@ pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
     match heap.find_object_by_addr(v.raw() as u64) {
         Some(Object::Array(arr_gc)) => Ok(arr_gc
             .as_ref()
-            .elements()
             .iter()
             .map(|e| {
                 let n = e.as_int();
@@ -1507,7 +1505,6 @@ mod tests {
         match heap.find_object_by_addr(v.raw() as u64) {
             Some(Object::Array(gc)) => gc
                 .as_ref()
-                .elements()
                 .iter()
                 .map(|e| e.as_int() as u8)
                 .collect(),

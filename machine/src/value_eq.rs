@@ -105,14 +105,16 @@ fn values_eq_rec(
     };
     match (oa, ob) {
         (Object::Array(ga), Object::Array(gb)) => {
-            let ea = &ga.as_ref().elements();
-            let eb = &gb.as_ref().elements();
+            let (ea, eb) = (ga.as_ref(), gb.as_ref());
             if ea.len() != eb.len() {
                 return false;
             }
+            if let (Some(x), Some(y)) = (ea.bytes(), eb.bytes()) {
+                return x == y;
+            }
             ea.iter()
                 .zip(eb.iter())
-                .all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev))
+                .all(|(x, y)| values_eq_rec(heap, x, y, fwd, rev))
         }
         (Object::Tuple(ga), Object::Tuple(gb)) => {
             let ea = &ga.as_ref().elements();
@@ -173,7 +175,7 @@ mod tests {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
             panic!("expected array at {addr:#x}");
         };
-        gc.payload_mut().elements_mut()[index] = value;
+        gc.payload_mut().words_mut()[index] = value;
     }
 
     #[test]

@@ -424,9 +424,8 @@ mod tests {
             panic!("expected array");
         };
         arr.as_ref()
-            .elements()
             .iter()
-            .map(|e| value_as_string(heap, *e).unwrap())
+            .map(|e| value_as_string(heap, e).unwrap())
             .collect()
     }
 

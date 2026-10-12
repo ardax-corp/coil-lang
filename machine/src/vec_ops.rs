@@ -27,7 +27,7 @@ pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let cap = match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Array(gc)) => gc.as_ref().elements().capacity(),
+        Some(Object::Array(gc)) => gc.as_ref().capacity(),
         _ => 0,
     };
     Value::from(cap as i64)
@@ -38,12 +38,8 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let extra = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
     if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
-        let old_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
-        gc.as_mut().elements_mut_no_new_values().reserve(extra);
-        let new_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
-        if old_bytes != new_bytes {
-            heap.account_resize(old_bytes, new_bytes);
-        }
+        gc.as_mut().reserve(extra);
+        heap.account_array(gc.as_mut());
     }
     Value::from(0i64)
 }
@@ -52,7 +48,7 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
-        gc.as_mut().elements_mut_no_new_values().clear();
+        gc.as_mut().clear();
     }
     Value::from(0i64)
 }
@@ -61,7 +57,7 @@ pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Array(mut gc)) => match gc.as_mut().elements_mut_no_new_values().pop() {
+        Some(Object::Array(mut gc)) => match gc.as_mut().pop() {
             Some(v) => pack_vec_option(heap, Some(v)),
             None => pack_vec_option(heap, None),
         },
@@ -77,16 +73,12 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, &'stati
     let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
         return Err("Vec::insert on non-array");
     };
-    let old_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
-    let len = gc.as_ref().elements().len();
+    let len = gc.as_ref().len();
     if index < 0 || (index as usize) > len {
         return Err("index out of bounds");
     }
-    gc.as_mut().elements_mut().insert(index as usize, value);
-    let new_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
-    if old_bytes != new_bytes {
-        heap.account_resize(old_bytes, new_bytes);
-    }
+    gc.as_mut().insert(index as usize, value);
+    heap.account_array(gc.as_mut());
     Ok(Value::from(0i64))
 }
 
@@ -96,11 +88,11 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Array(mut gc)) => {
-            let len = gc.as_ref().elements().len();
+            let len = gc.as_ref().len();
             if index < 0 || (index as usize) >= len {
                 pack_vec_option(heap, None)
             } else {
-                let v = gc.as_mut().elements_mut_no_new_values().remove(index as usize);
+                let v = gc.as_mut().remove(index as usize);
                 pack_vec_option(heap, Some(v))
             }
         }
@@ -111,11 +103,11 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let elements = match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Array(gc)) => gc.as_ref().elements().clone(),
-        _ => Vec::new(),
+    let arr = match heap.find_object_by_addr(handle.raw() as u64) {
+        Some(Object::Array(gc)) => gc.as_ref().copy(),
+        _ => ObjArray::new(Vec::new()),
     };
-    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+    let (obj, _) = heap.alloc(arr, Object::Array);
     Value::from(obj.addr())
 }
 
@@ -148,7 +140,7 @@ mod tests {
 
     fn array_ints(heap: &Heap, v: Value) -> Vec<i64> {
         match heap.find_object_by_addr(v.raw() as u64) {
-            Some(Object::Array(gc)) => gc.as_ref().elements().iter().map(|e| e.as_int()).collect(),
+            Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| e.as_int()).collect(),
             _ => panic!("expected array"),
         }
     }
