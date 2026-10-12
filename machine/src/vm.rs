@@ -2054,7 +2054,24 @@ impl<const S: usize> Machine<S> {
             let Some(map) = common::map_for_ip(&self.stack_maps, ip) else {
                 continue;
             };
+            // A frame-wide map (no safepoints) lists a body's heap locals at
+            // every PC, including ones not stored yet, whose words still hold
+            // an earlier callee's stale values. Root only those the frame's
+            // precise map has stored at this PC; without one the frame is
+            // scanned conservatively anyway.
+            let stored = if map.safepoints.is_empty() {
+                let hi = if i + 1 < n { self.frames[i + 1].get() } else { self.stack.as_slice().len() };
+                match self.trusted_precise_slots(i, sp, hi) {
+                    Some(slots) => Some(slots),
+                    None => continue,
+                }
+            } else {
+                None
+            };
             for &slot in map.slots_at(ip) {
+                if stored.is_some_and(|s| !s.iter().any(|&p| common::precise_slot_index(p) == slot as usize)) {
+                    continue;
+                }
                 visit(sp.saturating_add(slot as usize));
             }
         }
