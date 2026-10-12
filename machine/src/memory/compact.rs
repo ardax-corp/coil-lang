@@ -523,4 +523,31 @@ mod tests {
             assert_eq!(e.as_ref().payload[0].as_int(), v as i64);
         }
     }
+
+    /// The planner's free-slot budget across chunks of one size class: a
+    /// chunk's own free slots stop counting when it is evacuated, after
+    /// earlier moves may have spent them (an underflow before).
+    #[test]
+    fn plan_with_sparse_chunks_before_a_fuller_one_does_not_underflow() {
+        let mut heap = Heap::default();
+        let mut by_chunk: std::collections::BTreeMap<usize, Vec<u64>> = Default::default();
+        for i in 0..400_000 {
+            let (s, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(i))), Object::Enum);
+            let chunk = heap.slab.chunk_of(s.addr()).expect("slab object");
+            by_chunk.entry(chunk).or_default().push(s.addr());
+        }
+        // Every chunk but the last keeps one object; one full chunk keeps
+        // all but as many as there are sparse chunks.
+        let chunks: Vec<Vec<u64>> = by_chunk.into_values().collect();
+        let (last, rest) = chunks.split_last().expect("chunks");
+        let (dense, sparse) = rest.split_last().expect("two chunks");
+        let _ = last;
+        assert!(dense.len() > sparse.len() + 1, "{} slots, {} sparse chunks", dense.len(), sparse.len());
+        let mut roots: Vec<u64> = sparse.iter().map(|c| c[0]).collect();
+        roots.extend(&dense[sparse.len()..]);
+        full_collect(&mut heap, &roots);
+        if let Some(plan) = heap.evacuate_plan(&[], false) {
+            heap.evacuate_finish(plan);
+        }
+    }
 }
