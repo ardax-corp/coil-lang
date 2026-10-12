@@ -764,6 +764,12 @@ impl Lower<'_> {
             let hi = self.b.ins_index(v, one, hi_ty, false).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
+        // A boxed numeric range: a typed object, start and end its fields.
+        if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
+            let lo = self.b.ins_heap_field_load(v, None, 0, lo_ty).map_err(mir)?;
+            let hi = self.b.ins_heap_field_load(v, None, 1, hi_ty).map_err(mir)?;
+            return Ok(Val::Pair(lo, hi));
+        }
         if hi_ty != MirTy::I64 {
             return Err("unbox pair type".into());
         }
