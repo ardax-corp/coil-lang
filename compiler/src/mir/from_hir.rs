@@ -1706,9 +1706,9 @@ impl Lower<'_> {
             }
             return Ok(Val::Unit);
         }
-        if lower::assigns_local(self.hir, body, local) {
-            return Err("for in counter assigned".into());
-        }
+        // A body that assigns `x` steps a counter of its own, copied into
+        // `x` each trip, as HIR emission's.
+        let assigned = lower::assigns_local(self.hir, body, local);
         // `a..b` written in place, or a range pair (a local or a call).
         let (start, end) = match bounds {
             _ if let Some(target) = into_iter => {
@@ -1742,19 +1742,24 @@ impl Lower<'_> {
         if self.b.value_ty(start) != ty || self.b.value_ty(end) != ty {
             return Err("for in bound type".into());
         }
-        self.b.def_local(x, start).map_err(mir)?;
+        let counter = if assigned { self.temp() } else { x };
+        self.b.def_local(counter, start).map_err(mir)?;
         let head = self.b.create_block();
         let exit = self.b.create_block();
         let body_b = self.b.create_block();
         self.jump(head)?;
         self.switch(head);
-        let cur = self.b.use_local(x, ty).map_err(mir)?;
+        let cur = self.b.use_local(counter, ty).map_err(mir)?;
         let op = if inclusive { MirCmpOp::Le } else { MirCmpOp::Lt };
         let more = self.b.ins_cmp(op, cur, end).map_err(mir)?;
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
+        if assigned {
+            let cur = self.b.use_local(counter, ty).map_err(mir)?;
+            self.b.def_local(x, cur).map_err(mir)?;
+        }
         let one = if float { MirConst::F64(1.0_f64.to_bits()) } else { MirConst::I64(1) };
-        self.counted_body(body, head, exit, x, ty, one)
+        self.counted_body(body, head, exit, counter, ty, one)
     }
 
     /// A counted loop's body, then `counter += one` and back to `head`. The
@@ -2835,6 +2840,12 @@ impl Lower<'_> {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
             HirKind::Field { .. } => self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef),
+            // So does an array element.
+            HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                self.heap_array(base)
+                    && self.expr_ty(base).and_then(|t| self.inp.elem_word(t)) == Some(MirTy::HeapRef)
+                    && self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_view)(t, None).is_some())
+            }
             _ => false,
         };
         let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
