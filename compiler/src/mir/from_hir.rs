@@ -194,6 +194,8 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
+    /// Element-wise array and tuple operators, by expression.
+    pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
     /// each field's key index and word type, in literal order.
     pub records: HashMap<u32, Vec<(u32, MirTy)>>,
@@ -295,6 +297,16 @@ fn unit_fields(fields: &HirPatFields) -> bool {
 /// An `io` stream: a heap object the GC traces like any other.
 fn is_string(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+}
+
+/// Where an element-wise operand's elements come from.
+enum AggSrc {
+    /// Literal items, each read as reached.
+    Items(Vec<HirId>),
+    /// Stack array slots `base..base + n`.
+    Slots(u32, usize),
+    Pair(ValueId, ValueId),
+    Word(ValueId),
 }
 
 /// What a counted array loop walks.
@@ -831,6 +843,290 @@ impl Lower<'_> {
         self.unbox_pair(v, lo_ty, &variants)
     }
 
+    /// An element-wise operator, as HIR emission's `hir_aggregate`: a
+    /// static shape item by item (literal array items read in place, as
+    /// they are reached), a dynamic array in a loop pushing each result.
+    fn aggregate(&mut self, id: HirId, info: &crate::typechecking::AggregateArithInfo, lhs: HirId, rhs: Option<HirId>) -> Result<Val, Refusal> {
+        use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
+        // The packed kernel's edge takes its operands as untyped words.
+        if lower::aggregate_packed(info).is_some() {
+            return Err("packed aggregate".into());
+        }
+        let op = match info.op {
+            AggregateOp::Add => Some(MirBinOp::Add),
+            AggregateOp::Sub => Some(MirBinOp::Sub),
+            AggregateOp::Mul => Some(MirBinOp::Mul),
+            AggregateOp::Div => Some(MirBinOp::Div),
+            AggregateOp::Mod => Some(MirBinOp::Rem),
+            AggregateOp::Neg => None,
+            AggregateOp::Pow => return Err("aggregate pow".into()),
+        };
+        let float = match info.kind {
+            K::ZipTuple { elem_is_float, .. }
+            | K::ZipArray { elem_is_float, .. }
+            | K::BroadcastTuple { elem_is_float, .. }
+            | K::BroadcastArray { elem_is_float, .. }
+            | K::NegTuple { elem_is_float, .. }
+            | K::NegArray { elem_is_float, .. } => elem_is_float,
+        };
+        let ty = if float { MirTy::F64 } else { MirTy::I64 };
+        // Every operand's elements (and a scalar) must be that word.
+        for &o in std::iter::once(&lhs).chain(rhs.as_ref()) {
+            let t = self.expr_ty(o).ok_or("aggregate operand")?;
+            let elem = match strip_readonly(t) {
+                Ty::Tuple(items) => {
+                    let words = items.iter().map(scalar).collect::<Option<Vec<_>>>().ok_or("aggregate operand")?;
+                    words.iter().all(|&w| w == ty).then_some(ty)
+                }
+                _ => array_elem(t).and_then(scalar).or_else(|| scalar(t)),
+            };
+            if elem != Some(ty) {
+                return Err("aggregate operand".into());
+            }
+        }
+        let apply = |l: &mut Self, a: ValueId, b: Option<ValueId>| -> Result<ValueId, Refusal> {
+            match (op, b) {
+                (Some(op), Some(b)) => l.b.ins_binop(op, a, b).map_err(mir),
+                (None, None) => l.b.ins_neg(a).map_err(mir),
+                _ => Err("aggregate operands".into()),
+            }
+        };
+        let tuple_out = |l: &mut Self, items: Vec<ValueId>| -> Result<Val, Refusal> {
+            if l.inp.pair_tys.contains_key(&id.0) {
+                return match items[..] {
+                    [a, b] => Ok(Val::Pair(a, b)),
+                    _ => Err("aggregate pair".into()),
+                };
+            }
+            let obj = l.b.ins_alloc(MirAllocKind::Tuple, items).map_err(mir)?;
+            Ok(Val::V(l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+        };
+        let array_out = |l: &mut Self, items: Vec<ValueId>| -> Result<Val, Refusal> {
+            let obj = l.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
+            Ok(Val::V(l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+        };
+        match info.kind {
+            K::NegTuple { arity, .. } => {
+                let Some(t) = self.agg_operand(lhs, false)? else {
+                    return Ok(Val::Never);
+                };
+                let mut out = Vec::with_capacity(arity);
+                for i in 0..arity {
+                    let Some(a) = self.agg_elem(&t, i, ty)? else {
+                        return Ok(Val::Never);
+                    };
+                    out.push(apply(self, a, None)?);
+                }
+                tuple_out(self, out)
+            }
+            K::ZipTuple { arity, .. } | K::BroadcastTuple { arity, .. } => {
+                let rhs = rhs.ok_or("aggregate rhs")?;
+                let Some(a) = self.agg_operand(lhs, false)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(b) = self.agg_operand(rhs, false)? else {
+                    return Ok(Val::Never);
+                };
+                let scalar_on = match info.kind {
+                    K::BroadcastTuple { scalar_on, .. } => Some(scalar_on),
+                    _ => None,
+                };
+                let mut out = Vec::with_capacity(arity);
+                for i in 0..arity {
+                    let x = match scalar_on {
+                        Some(ScalarSide::Left) => self.agg_scalar(&a)?,
+                        _ => self.agg_elem(&a, i, ty)?,
+                    };
+                    let Some(x) = x else {
+                        return Ok(Val::Never);
+                    };
+                    let y = match scalar_on {
+                        Some(ScalarSide::Right) => self.agg_scalar(&b)?,
+                        _ => self.agg_elem(&b, i, ty)?,
+                    };
+                    let Some(y) = y else {
+                        return Ok(Val::Never);
+                    };
+                    out.push(apply(self, x, Some(y))?);
+                }
+                tuple_out(self, out)
+            }
+            K::NegArray { length: Some(n), .. } => {
+                let Some(src) = self.agg_operand(lhs, true)? else {
+                    return Ok(Val::Never);
+                };
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let Some(a) = self.agg_elem(&src, i, ty)? else {
+                        return Ok(Val::Never);
+                    };
+                    out.push(apply(self, a, None)?);
+                }
+                array_out(self, out)
+            }
+            K::ZipArray { length: n, .. } => {
+                let rhs = rhs.ok_or("aggregate rhs")?;
+                let Some(s0) = self.agg_operand(lhs, true)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(s1) = self.agg_operand(rhs, true)? else {
+                    return Ok(Val::Never);
+                };
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let Some(a) = self.agg_elem(&s0, i, ty)? else {
+                        return Ok(Val::Never);
+                    };
+                    let Some(b) = self.agg_elem(&s1, i, ty)? else {
+                        return Ok(Val::Never);
+                    };
+                    out.push(apply(self, a, Some(b))?);
+                }
+                array_out(self, out)
+            }
+            K::BroadcastArray { length: Some(n), scalar_on, .. } => {
+                let rhs = rhs.ok_or("aggregate rhs")?;
+                let (vec, sc) = match scalar_on {
+                    ScalarSide::Right => (lhs, rhs),
+                    ScalarSide::Left => (rhs, lhs),
+                };
+                let Some(src) = self.agg_operand(vec, true)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(k) = self.agg_operand(sc, false)? else {
+                    return Ok(Val::Never);
+                };
+                let k = self.agg_scalar(&k)?.ok_or("aggregate scalar")?;
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let Some(e) = self.agg_elem(&src, i, ty)? else {
+                        return Ok(Val::Never);
+                    };
+                    let v = match scalar_on {
+                        ScalarSide::Right => apply(self, e, Some(k))?,
+                        ScalarSide::Left => apply(self, k, Some(e))?,
+                    };
+                    out.push(v);
+                }
+                array_out(self, out)
+            }
+            K::NegArray { length: None, .. } | K::BroadcastArray { length: None, .. } => {
+                let scalar_on = match info.kind {
+                    K::BroadcastArray { scalar_on, .. } => Some(scalar_on),
+                    _ => None,
+                };
+                // Both operands first, in order, as emission's temps.
+                let Some(a) = self.word(lhs)? else {
+                    return Ok(Val::Never);
+                };
+                let b = match rhs {
+                    Some(r) => match self.word(r)? {
+                        Some(v) => Some(v),
+                        None => return Ok(Val::Never),
+                    },
+                    None => None,
+                };
+                let (arr, k) = match scalar_on {
+                    Some(ScalarSide::Left) => (b.ok_or("aggregate rhs")?, Some(a)),
+                    Some(ScalarSide::Right) => (a, Some(b.ok_or("aggregate rhs")?)),
+                    None => (a, None),
+                };
+                if self.b.value_ty(arr) != MirTy::HeapRef || k.is_some_and(|k| self.b.value_ty(k) != ty) {
+                    return Err("aggregate operand".into());
+                }
+                // `out` and the index live in temps across the loop.
+                let len = self.b.ins_array_len(arr).map_err(mir)?;
+                let empty = self.b.ins_alloc(MirAllocKind::Array, Vec::new()).map_err(mir)?;
+                let empty = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![empty]).map_err(mir)?;
+                let out = self.temp();
+                self.b.def_local(out, empty).map_err(mir)?;
+                let i = self.temp();
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                self.b.def_local(i, zero).map_err(mir)?;
+                let head = self.b.create_block();
+                let body = self.b.create_block();
+                let exit = self.b.create_block();
+                self.jump(head)?;
+                self.switch(head);
+                let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+                let more = self.b.ins_cmp(MirCmpOp::Lt, cur, len).map_err(mir)?;
+                self.b.branch(more, body, exit).map_err(mir)?;
+                self.switch(body);
+                let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+                let acc = self.b.use_local(out, MirTy::HeapRef).map_err(mir)?;
+                let e = self.b.ins_index(arr, cur, ty, false).map_err(mir)?;
+                let v = match (scalar_on, k) {
+                    (Some(ScalarSide::Left), Some(k)) => apply(self, k, Some(e))?,
+                    (_, k) => apply(self, e, k)?,
+                };
+                let pushed = self.b.ins_array_push(acc, v).map_err(mir)?;
+                let pushed = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![pushed]).map_err(mir)?;
+                self.b.def_local(out, pushed).map_err(mir)?;
+                let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                let next = self.b.ins_binop(MirBinOp::Add, cur, one).map_err(mir)?;
+                self.b.def_local(i, next).map_err(mir)?;
+                self.jump(head)?;
+                self.switch(exit);
+                Ok(Val::V(self.b.use_local(out, MirTy::HeapRef).map_err(mir)?))
+            }
+        }
+    }
+
+    /// How an aggregate operand's elements are read: literal array items
+    /// (only when `items`, read as reached), stack array slots, a pair, or
+    /// a heap word (a scalar for a broadcast's other side).
+    fn agg_operand(&mut self, id: HirId, items: bool) -> Result<Option<AggSrc>, Refusal> {
+        if items && let Some(src) = lower::aggregate_src(self.hir, &self.inp.stacks.iter().map(|(&k, &(_, n, _))| (k, n)).collect(), id) {
+            match src {
+                lower::AggregateSrc::Items(items) => return Ok(Some(AggSrc::Items(items))),
+                lower::AggregateSrc::Slots(local) if self.boxed(id).is_none() => {
+                    let (base, n, _) = self.inp.stacks[&local.0];
+                    return Ok(Some(AggSrc::Slots(base, n)));
+                }
+                _ => {}
+            }
+        }
+        if self.inp.pair_tys.contains_key(&id.0) {
+            return Ok(self.pair(id)?.map(|(a, b)| AggSrc::Pair(a, b)));
+        }
+        Ok(self.word(id)?.map(AggSrc::Word))
+    }
+
+    /// Element `i` of an aggregate operand, of word type `ty`.
+    fn agg_elem(&mut self, src: &AggSrc, i: usize, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
+        let v = match src {
+            AggSrc::Items(items) => {
+                let Some(v) = self.word(*items.get(i).ok_or("aggregate item")?)? else {
+                    return Ok(None);
+                };
+                v
+            }
+            AggSrc::Slots(base, n) if i < *n => self.b.use_local(LocalId(base + i as u32), ty).map_err(mir)?,
+            AggSrc::Pair(a, b) => match i {
+                0 => *a,
+                1 => *b,
+                _ => return Err("aggregate item".into()),
+            },
+            AggSrc::Word(w) if self.b.value_ty(*w) == MirTy::HeapRef => {
+                let c = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
+                self.b.ins_index(*w, c, ty, false).map_err(mir)?
+            }
+            _ => return Err("aggregate item".into()),
+        };
+        if self.b.value_ty(v) != ty {
+            return Err("aggregate item type".into());
+        }
+        Ok(Some(v))
+    }
+
+    /// The scalar side of a broadcast.
+    fn agg_scalar(&mut self, src: &AggSrc) -> Result<Option<ValueId>, Refusal> {
+        match src {
+            AggSrc::Word(w) if self.b.value_ty(*w).is_numeric() => Ok(Some(*w)),
+            _ => Err("aggregate scalar".into()),
+        }
+    }
+
     /// A boxed tuple: its fields in order, then `Alloc`.
     fn make_tuple(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
         let mut words = Vec::with_capacity(args.len());
@@ -943,6 +1239,8 @@ impl Lower<'_> {
             }
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
+            HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
+            HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
@@ -1231,7 +1529,7 @@ impl Lower<'_> {
                 iterable,
                 body,
                 kind: Some(ForInKind::Tuple { arity }),
-            } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity as usize)),
+            } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity)),
             HirKind::ForIn {
                 pat: HirPat::Bind(local),
                 iterable,

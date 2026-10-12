@@ -1039,6 +1039,15 @@ impl Compiler {
             heap_fields,
             record_fields,
             records,
+            aggregates: emit
+                .plan
+                .ops
+                .iter()
+                .filter_map(|(&i, op)| match op {
+                    HirOp::Aggregate(info) => Some((i, info.clone())),
+                    _ => None,
+                })
+                .collect(),
             news,
             pushes,
             hosts,
