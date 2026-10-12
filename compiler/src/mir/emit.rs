@@ -1256,6 +1256,18 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::Print { loc });
         }
+        MirInst::StrEq { dest, lhs, rhs, ne } => {
+            // `DenseCmp` compares words; VM `EQ` compares strings by content.
+            emit_dense_push(out, &[*lhs, *rhs], regs, scratch, loc)?;
+            out.push(IlOp::Bin {
+                op: if *ne { Instruction::NEQ } else { Instruction::EQ },
+                loc,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
     }
     Ok(())
 }
@@ -2042,6 +2054,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
                 MirInst::Stringify { .. } | MirInst::Print { .. } => 1,
+                MirInst::StrEq { .. } => 2,
                 _ => 0,
             };
             n = n.max(u8::try_from(w).unwrap_or(u8::MAX));

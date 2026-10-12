@@ -432,6 +432,15 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
+    /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
+    /// by content. Dest is `bool`; `lhs` / `rhs` are string
+    /// [`MirTy::HeapRef`] words. Strings are immutable, so it is pure.
+    StrEq {
+        dest: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        ne: bool,
+    },
 }
 
 /// Heap object constructed by [`MirInst::Alloc`].
@@ -550,7 +559,8 @@ impl MirInst {
             | Self::String { dest, .. }
             | Self::Print { dest, .. }
             | Self::Format { dest, .. }
-            | Self::Stringify { dest, .. } => dest,
+            | Self::Stringify { dest, .. }
+            | Self::StrEq { dest, .. } => dest,
         }
     }
 
@@ -589,7 +599,7 @@ impl MirInst {
     pub fn operands(&self) -> Vec<ValueId> {
         match self {
             Self::Const { .. } => Vec::new(),
-            Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
@@ -649,7 +659,7 @@ impl MirInst {
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
             Self::Const { .. } => {}
-            Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } => {
+            Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => {
                 *lhs = map(*lhs);
                 *rhs = map(*rhs);
             }

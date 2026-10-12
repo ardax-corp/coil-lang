@@ -941,6 +941,18 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::StrEq { dest, lhs, rhs, ne } => {
+            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
+            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Bin {
+                op: str_eq_op(*ne),
+                loc,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
     }
     Ok(())
 }
@@ -1454,6 +1466,24 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
             Ok(())
         }
+        MirInst::StrEq { lhs, rhs, ne, .. } => {
+            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
+            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Bin {
+                op: str_eq_op(*ne),
+                loc,
+            });
+            Ok(())
+        }
+    }
+}
+
+/// VM `EQ` / `NEQ`: strings compare by content.
+fn str_eq_op(ne: bool) -> Instruction {
+    if ne {
+        Instruction::NEQ
+    } else {
+        Instruction::EQ
     }
 }
 

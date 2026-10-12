@@ -631,6 +631,14 @@ impl MirFunc {
                     return Err(format!("{dest} Stringify src type"));
                 }
             }
+            MirInst::StrEq { dest, lhs, rhs, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} StrEq dest is not bool"));
+                }
+                if self.ty(*lhs) != MirTy::HeapRef || self.ty(*rhs) != MirTy::HeapRef {
+                    return Err(format!("{dest} StrEq operand type"));
+                }
+            }
             MirInst::Phi { dest, ty, args } => {
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} phi type"));

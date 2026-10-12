@@ -485,7 +485,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::String { .. }
         | MirInst::Print { .. }
         | MirInst::Format { .. }
-        | MirInst::Stringify { .. } => {
+        | MirInst::Stringify { .. }
+        | MirInst::StrEq { .. } => {
             return None
         }
     })

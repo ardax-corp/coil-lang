@@ -302,6 +302,9 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             Ok(())
         }
         MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
+        MirInst::StrEq { dest, lhs, rhs, ne } => {
+            write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
+        }
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -874,6 +877,18 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::Stringify { dest, src });
+        }
+        if op == "streq" || op == "strne" {
+            let lhs = self.value()?;
+            self.expect(',')?;
+            let rhs = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::StrEq {
+                dest,
+                lhs,
+                rhs,
+                ne: op == "strne",
+            });
         }
         Err(ParseError(format!("unknown op {op}")))
     }

@@ -2026,6 +2026,10 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let lt = self.b.value_ty(l);
+        let strings = [lhs, rhs].iter().all(|&e| self.expr_ty(e).is_some_and(is_string));
+        if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
+        }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
             return Err("operator operand type".into());
