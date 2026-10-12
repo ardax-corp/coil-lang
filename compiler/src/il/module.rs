@@ -73,7 +73,7 @@ impl IlModule {
             .filter(|(_, f)| f.code_start < f.code_end)
             .map(|(i, f)| {
                 let (s, e) = opt::emitting_range_to_raw(ops, f.code_start, f.code_end);
-                (i, s, e)
+                (i, entry_label_start(ops, s, f.entry), e)
             })
             .filter(|(_, s, e)| s < e)
             .collect();
@@ -620,6 +620,28 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// Drop `JMP L` when `L` is the next label: it is a fall-through. Passes that
 /// turn stack words into slots misread the words such a jump carries (an
 /// `Unpack` payload went to the wrong slots, #771).
+/// Move a body's raw start back over the labels before it to its own entry
+/// label. [`opt::emitting_range_to_raw`] stops at a label some earlier op
+/// jumps to, which is right for the previous body's trailing if-end but not
+/// for `main`'s entry, which the setup prologue jumps to. Left in the gap,
+/// that label shares the previous body's chunk, whose per-body opts may mint
+/// the same id for a loop label; the two then flatten to one, and the loop's
+/// back edge lands in `main` (#907).
+fn entry_label_start(ops: &[IlOp], start: usize, entry: Option<Label>) -> usize {
+    let Some(entry) = entry else {
+        return start;
+    };
+    let mut s = start;
+    while s > 0 && !ops[s - 1].emits_code() {
+        match ops[s - 1].bind_label() {
+            Some(l) if l == entry => return s - 1,
+            Some(_) => s -= 1,
+            None => return start,
+        }
+    }
+    start
+}
+
 fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
     let mut i = 0;
     while i + 1 < ops.len() {
