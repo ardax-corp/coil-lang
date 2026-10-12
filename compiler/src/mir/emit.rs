@@ -2610,7 +2610,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } => Ok(None),
-        MirAllocKind::Dict | MirAllocKind::DictEntries | MirAllocKind::Coro { .. } => Ok(None),
+        MirAllocKind::Dict | MirAllocKind::DictEntries | MirAllocKind::Coro { .. } | MirAllocKind::Boxed { .. } => Ok(None),
     }
 }
 
@@ -2707,6 +2707,7 @@ pub(super) fn il_for_alloc(
             loc,
             ret_words: 1,
         }),
+        MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
     }
 }
 

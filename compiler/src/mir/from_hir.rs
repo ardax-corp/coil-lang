@@ -68,6 +68,17 @@ pub struct HirCallSite {
     pub coro: bool,
 }
 
+/// A user operator HIR emission lowered to its trait instance method's
+/// plain `CALL`, each operand boxed as the instance takes it.
+#[derive(Clone, Debug)]
+pub struct HirOpCall {
+    pub site: HirCallSite,
+    /// The `BoxValue` tag of the operand type.
+    pub tag: u32,
+    /// A shift count passes as its plain `int` (#883).
+    pub shift: bool,
+}
+
 impl HirMirInput<'_> {
     /// The MIR type of a one-word value: [`word`], a class object or a
     /// scalar enum's backing word.
@@ -165,6 +176,11 @@ pub struct HirMirInput<'a> {
     /// `assert` calls: the default message's string table index, `None`
     /// when the call passes its own.
     pub asserts: &'a HashMap<u32, Option<u32>>,
+    /// User operators that call their trait instance method.
+    pub op_calls: &'a HashMap<u32, HirOpCall>,
+    /// User operators with no instance: the raw opcode on the operands'
+    /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
+    pub op_prims: &'a HashSet<u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -1484,6 +1500,8 @@ impl Lower<'_> {
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
+            HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
+            HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
@@ -2421,6 +2439,86 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// `lhs op rhs` through the operand type's instance method: each
+    /// operand boxed (a shift count as its `int`), then the `CALL`, as HIR
+    /// emission's `HirOp::Call`.
+    fn op_call(&mut self, id: HirId, lhs: HirId, rhs: HirId, call: &HirOpCall) -> Result<Val, Refusal> {
+        let site = &call.site;
+        if site.pair_ret || site.coro || site.pair_args.len() != 2 {
+            return Err("operator call shape".into());
+        }
+        let ret = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("operator result type")?;
+        let mut words = Vec::with_capacity(2);
+        for (i, operand) in [lhs, rhs].into_iter().enumerate() {
+            if call.shift && i == 1 {
+                let Some(v) = self.word(operand)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != MirTy::I64 {
+                    return Err("operator shift count".into());
+                }
+                words.push(v);
+                continue;
+            }
+            // Only a heap carrier: its boxed form is the word itself.
+            let ty = self.expr_ty(operand).ok_or("operator operand type")?;
+            if self.inp.word(ty).is_some_and(|t| t != MirTy::HeapRef) {
+                return Err("operator operand word".into());
+            }
+            let Some(v) = self.boxed_word(operand)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != MirTy::HeapRef {
+                return Err("operator operand boxed".into());
+            }
+            let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
+            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+        }
+        let abi = DenseAbi {
+            params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
+            ret,
+            ret_hi: None,
+        };
+        let (dest, _) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        Ok(Val::V(dest))
+    }
+
+    /// `lhs op rhs` on a user type with no instance, as HIR emission's raw
+    /// opcode: `==` / `!=` of two heap words (the VM's structural `EQ`), or
+    /// a number-backed scalar enum's backing words.
+    fn op_prim(&mut self, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
+        let (Some(l), Some(r)) = (self.word(lhs)?, self.word(rhs)?) else {
+            return Ok(Val::Never);
+        };
+        let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
+        if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+        }
+        if lt != rt || !matches!(lt, MirTy::I64 | MirTy::F64) {
+            return Err(format!("operator {sym} words"));
+        }
+        let cmp = match sym {
+            "==" => MirCmpOp::Eq,
+            "!=" => MirCmpOp::Ne,
+            "<" => MirCmpOp::Lt,
+            ">" => MirCmpOp::Gt,
+            "<=" => MirCmpOp::Le,
+            ">=" => MirCmpOp::Ge,
+            _ => {
+                let op = match sym {
+                    "+" => MirBinOp::Add,
+                    "-" => MirBinOp::Sub,
+                    "*" => MirBinOp::Mul,
+                    "/" => MirBinOp::Div,
+                    "%" => MirBinOp::Rem,
+                    _ => return Err(format!("operator {sym}")),
+                };
+                return Ok(Val::V(self.b.ins_binop(op, l, r).map_err(mir)?));
+            }
+        };
+        Ok(Val::V(self.b.ins_cmp(cmp, l, r).map_err(mir)?))
     }
 
     /// `assert(c)` / `assert(c, msg)`: `Ok(())` (the zero word) when `c`
