@@ -50,7 +50,10 @@ Runtimes that predate `WORD_BYTE` ignore the stamp, so no archive bump.
 with one copy; writes, `from_bytes` and FFI `Bytes` (tag 15) take
 `to_byte_vec` (one copy when packed). FFI `Bytes` still copies into a
 separate buffer and back: handing C the array's own buffer is unsafe if a
-callback grows the array. Packed arrays cross threads and channels as
+callback grows the array. FFI `ConstBytes` (tag 16) is the read-only form: a
+`Vec<byte>` is copied in once and never back, and a `string` is lent in
+place (its bytes never move or change; the VM roots in-flight FFI
+arguments until the call returns). Packed arrays cross threads and channels as
 `PortableValue::Bytes`.
 
 ## Measurements
