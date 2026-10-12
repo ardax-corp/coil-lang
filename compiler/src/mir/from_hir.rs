@@ -2479,7 +2479,10 @@ impl Lower<'_> {
             [] => return zero(self),
             [arg] if lower::is_unit_make(self.hir, *arg) => {
                 if niche == MirTy::NicheRes {
-                    return Err("niche unit payload".into());
+                    // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
+                    let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+                    let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+                    return Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?));
                 }
                 return zero(self);
             }
