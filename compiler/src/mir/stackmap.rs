@@ -203,6 +203,9 @@ pub fn bind_drafts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::builder::MirBuilder;
+    use crate::mir::inst::{LocalId, MirAllocKind, MirConst, MirGcKind};
+    use crate::mir::ty::MirTy;
 
     #[test]
     fn slot_draft_keeps_heap_locals_only() {
