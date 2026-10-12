@@ -23,9 +23,10 @@ the stack).
 | `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
-| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / leftover unmapped heap. One-word `CALL` (Q7), two-slot helper / self / sibling `CALL` / `RETURN` (B3 / B7 / C1), niche / two-slot match (Q8), and mapped `ArrayPush` (B6) lower |
-| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
-| `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
+| `lower_from_hir` | HIR body → SSA. Both MIR tiers start here; since M4 there is no stack-IL lift for them |
+| `try_lower_numeric` | Pre-fuse `IlOp` → SSA, only to draw S2b stack maps for allocating fuse-IL bodies (`try_build_draft`) until M5 |
+| `try_specialize_body_side` | MIR from HIR + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
+| `try_lower_abi_body_side` | MIR from HIR + SROA/CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
