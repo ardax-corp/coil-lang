@@ -270,7 +270,7 @@ impl EmitPlan {
             }
         }
 
-        keep_memory_order(func, &mut tree);
+        keep_memory_order(func, &mut tree, &fused);
 
         let mut need_slot = vec![false; n];
         for p in &func.params {
@@ -399,43 +399,54 @@ fn reads_memory(inst: &MirInst) -> bool {
     )
 }
 
-/// An inline operand is emitted where its user is: a read must not move
-/// past a write between its definition and there (`let s = o.f; o.f = x;
-/// return s;`).
-fn keep_memory_order(func: &MirFunc, tree: &mut [bool]) {
+/// An inline operand is emitted where its user is, which may reorder it
+/// past a memory op between: a read past a write (`let s = o.f; o.f = x;
+/// return s;`) or a write past either. Such an operand keeps its slot.
+fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
     for block in &func.blocks {
         let insts = &block.insts;
-        for inst in insts {
-            if writes_memory(inst) {
-                for d in inst.dests() {
-                    tree[d.index()] = false;
+        let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        loop {
+            let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
+            // Instruction indices in the order emission reaches them.
+            let mut order = Vec::with_capacity(insts.len());
+            fn visit(v: ValueId, at: &HashMap<ValueId, usize>, insts: &[MirInst], inline: &dyn Fn(ValueId) -> bool, order: &mut Vec<usize>) {
+                let Some(&k) = at.get(&v) else { return };
+                if !inline(v) {
+                    return;
+                }
+                for op in insts[k].operands() {
+                    visit(op, at, insts, inline, order);
+                }
+                order.push(k);
+            }
+            let is_inline = |v: ValueId| inline(v, tree);
+            for (k, inst) in insts.iter().enumerate() {
+                if inst.is_phi() || is_inline(inst.dest()) {
+                    continue;
+                }
+                for op in inst.operands() {
+                    visit(op, &at, insts, &is_inline, &mut order);
+                }
+                order.push(k);
+            }
+            if let Some(term) = &block.term {
+                for v in term_values(term) {
+                    visit(v, &at, insts, &is_inline, &mut order);
                 }
             }
-        }
-        // Where each inline value is emitted: at its user, or where an
-        // inline user is emitted in turn (users follow their operands).
-        let len = insts.len();
-        let mut at: HashMap<ValueId, usize> = HashMap::new();
-        if let Some(term) = &block.term {
-            for v in term_values(term) {
-                at.insert(v, len);
-            }
-        }
-        for k in (0..len).rev() {
-            let dest = insts[k].dest();
-            let pos = if tree[dest.index()] { at.get(&dest).copied().unwrap_or(k) } else { k };
-            for v in insts[k].operands() {
-                at.entry(v).or_insert(pos);
-            }
-        }
-        for (d, inst) in insts.iter().enumerate() {
-            let dest = inst.dest();
-            if !tree[dest.index()] || !reads_memory(inst) {
-                continue;
-            }
-            let end = at.get(&dest).copied().unwrap_or(d);
-            if insts[d + 1..end.min(len)].iter().any(writes_memory) {
-                tree[dest.index()] = false;
+            let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
+            // A later-defined op emitted first means an earlier one was
+            // delayed past it.
+            let late = mem.iter().enumerate().find_map(|(i, &a)| {
+                mem[i + 1..]
+                    .iter()
+                    .find(|&&b| b < a && (writes_memory(&insts[a]) || writes_memory(&insts[b])))
+                    .map(|&b| insts[b].dest())
+            });
+            match late {
+                Some(v) if tree[v.index()] => tree[v.index()] = false,
+                _ => break,
             }
         }
     }
