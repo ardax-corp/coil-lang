@@ -2678,12 +2678,15 @@ fn has_e0127(src: &str) -> bool {
         .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericFnValue))
 }
 
+// #916: the checker accepts a generic fn with a nested type parameter read
+// as a value; codegen reports E0127 only where no clone can stand in for it
+// (tests/compile_fail/generic_fn_value_copied.hy).
 #[test]
-fn generic_fn_value_with_nested_type_param_is_rejected() {
-    assert!(has_e0127(
+fn generic_fn_value_with_nested_type_param_passes_checker() {
+    assert!(!has_e0127(
         "fn head<T>(Vec<T> v) -> T { return v[0]; }\nfn main() { let f = head; }"
     ));
-    assert!(has_e0127(
+    assert!(!has_e0127(
         "fn wrap<T>(T a) -> (T, int) { return (a, 1); }\nfn main() { let f = wrap; }"
     ));
 }
