@@ -24,6 +24,10 @@ told about (`ObjArray::take_resize` / `Heap::account_array`), not the live
 one, so a pack or unpack between accounting points can never underflow the
 heap byte count at sweep.
 
+Code that wants a word slice (the packed LA kernels' `elements_of`, `vload`)
+must widen a packed array, never treat `words() == None` as "not an array":
+#939 caught `~matrix([[34 as byte, …]])` reading packed rows as zeros.
+
 ## Construction stamp
 
 `common::WORD_BYTE` (3) is an array element kind next to `WORD_POINTER`.
@@ -57,6 +61,6 @@ Release build, `COIL_AUTO_PAR=0`, 4-core cloud box (run-to-run spread about
 | Change | Bench | Before | After |
 |---|---|---|---|
 | Storage kind + API (#937) | gc_int_vec, binary_trees_nohoist, nsieve, fib (15 interleaved runs) | main | within noise (-3% to -8%) |
-| Compiler stamp | deflate 1 MiB round trip (`perf-checkup/benches/stdlib/b_defl.hy`), max RSS | 55 MB | 26 MB |
-| Compiler stamp | same, compress / inflate / zlib inflate | 6.3 / 1.8 / 1.5 s | 6.1 / 1.5 / 1.3 s |
+| Compiler stamp (#939) | deflate 1 MiB round trip (`perf-checkup/benches/stdlib/b_defl.hy`), max RSS | 55 MB | 26 MB |
+| Compiler stamp (#939) | same, compress / inflate / zlib inflate | 6.3 / 1.8 / 1.5 s | 6.1 / 1.5 / 1.3 s |
 | Byte paths | same | — | RSS 26 MB, times within noise of the stamp row (compute bound) |
