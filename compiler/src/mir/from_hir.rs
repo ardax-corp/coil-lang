@@ -2956,9 +2956,13 @@ impl Lower<'_> {
 
     /// Bind `local` to the word `v`.
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
-        if self.local_ty(local)? != self.b.value_ty(v) {
-            return Err("binding type".into());
-        }
+        let ty = self.local_ty(local)?;
+        let v = match (self.b.value_ty(v), ty) {
+            (from, to) if from == to => v,
+            // A `bool` payload read from an `i64` pair word.
+            (MirTy::I64, MirTy::Bool) => self.fit(v, ty)?,
+            _ => return Err("binding type".into()),
+        };
         if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
             let assigned = self.hir.exprs.iter().any(|e| {
                 matches!(e.kind, HirKind::Assign { place, .. } if matches!(self.hir.expr(place).kind, HirKind::Local(l) if l == local))
@@ -2990,7 +2994,9 @@ impl Lower<'_> {
                     // A two-word payload rides boxed.
                     [arg] => match self.word_or_boxed(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
-                        Some(v) if lo_ty == MirTy::I64 && self.b.value_ty(v).is_heap_word() => self.fit(v, lo_ty)?,
+                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || self.b.value_ty(v) == MirTy::Bool) => {
+                            self.fit(v, lo_ty)?
+                        }
                         Some(_) => return Err("variant payload type".into()),
                         None => return Ok(Val::Never),
                     },

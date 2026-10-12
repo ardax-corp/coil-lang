@@ -1154,10 +1154,14 @@ impl Compiler {
                 [p] => {
                     // A heap payload is an opaque word: it only moves.
                     let w = word(p).or_else(|| (!layout::is_immediate(p)).then_some(MirTy::I64))?;
-                    if lo.is_some_and(|l| l != w) {
-                        return None;
-                    }
-                    lo = Some(w);
+                    lo = match lo {
+                        None => Some(w),
+                        Some(l) if l == w => Some(w),
+                        // A `bool` payload beside an `i64` one rides as the
+                        // same 0/1 word.
+                        Some(MirTy::Bool | MirTy::I64) if matches!(w, MirTy::Bool | MirTy::I64) => Some(MirTy::I64),
+                        Some(_) => return None,
+                    };
                 }
                 _ => return None,
             }

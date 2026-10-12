@@ -221,8 +221,8 @@ pub enum MirCastKind {
     FloatToInt,
     /// The same word retyped: a heap pointer or the `i64` zero (`None` /
     /// `Ok(())`) as a `NicheOpt` / `NicheRes` word, such a word known to
-    /// hold a pointer as `HeapRef`, or a heap or niche word moved through
-    /// an opaque `i64` pair word and back.
+    /// hold a pointer as `HeapRef`, or a heap, niche or `bool` word moved
+    /// through an opaque `i64` pair word and back.
     Word,
 }
 
@@ -238,6 +238,8 @@ impl MirCastKind {
                 (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef))
                     || (niche(from) && matches!(to, MirTy::HeapRef | MirTy::I64))
                     || matches!((from, to), (MirTy::I64, MirTy::HeapRef) | (MirTy::HeapRef, MirTy::I64))
+                    // A `bool` word is 0 or 1: as an `i64` it is the same bits.
+                    || matches!((from, to), (MirTy::Bool, MirTy::I64) | (MirTy::I64, MirTy::Bool))
             }
         }
     }
