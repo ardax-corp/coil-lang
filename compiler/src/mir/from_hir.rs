@@ -2090,7 +2090,9 @@ impl Lower<'_> {
         let unit = is_unit(ty);
         let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
-            Some(_) if raw => (MirTy::HeapRef, None),
+            // A callee returning the two-word value boxed (a depth-checked
+            // body): the word, unboxed where a pair is read.
+            Some(_) if raw || (!site.pair_ret && (self.inp.boxed_view)(ty, None).is_some()) => (MirTy::HeapRef, None),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
