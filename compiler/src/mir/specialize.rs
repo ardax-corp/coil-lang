@@ -3,18 +3,14 @@
 
 use common::Instruction;
 
-use crate::il::{IlJumpKind, IlOp, Label};
+use crate::il::{IlOp, Label};
 
 use std::collections::HashMap;
 
 use super::abi::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
-use super::entry::lir_refuse_with;
 use super::gc::refuses_alloc;
-use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc, infer_numeric_with};
-use super::lower::{try_lower_numeric, LowerHints};
-use super::stackmap::has_real_maps;
 
 /// C3 sidecar from a dense / LIR replace (named lets + deopt maps).
 #[derive(Clone, Debug, Default)]
@@ -27,35 +23,6 @@ pub struct BodySidecar {
     /// GC map of a LIR body built from MIR lowered from HIR (no stack IL
     /// lift to draw it from).
     pub stack_map: Option<super::stackmap::DraftFrameMap>,
-}
-
-/// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
-/// not reuse that id or concat lands calls on a loop header.
-///
-/// If `ops` is a specialized numeric body, return dense IL plus its ABI.
-///
-/// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
-/// then saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted
-/// HostInvoke edges box → call → unbox; COI-291 dense→dense `CALL` when
-/// `calls` lists the callee).
-pub fn try_specialize_body(
-    ops: &[IlOp],
-    name: &str,
-    entry_sp: u32,
-    pool: &mut Vec<u64>,
-    calls: &DenseCallMap,
-    official_entry: Option<Label>,
-) -> Option<(Vec<IlOp>, DenseAbi)> {
-    try_specialize_body_side(
-        ops,
-        name,
-        entry_sp,
-        pool,
-        calls,
-        official_entry,
-        None,
-        &mut BodySidecar::default(),
-    )
 }
 
 type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
@@ -120,51 +87,46 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
     note_refusal(&LIR_REFUSAL, why)
 }
 
-/// Dense-specialize one body: from `from_hir` (MIR lowered from HIR) when
-/// that keeps, else by lifting `ops`.
+/// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
+/// not reuse that id or concat lands calls on a loop header.
+///
+/// Dense-specialize one body from `from_hir` (MIR lowered from HIR):
+/// dense IL plus its ABI when it beats `ops` (fuse-IL).
+///
+/// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
+/// then saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted
+/// HostInvoke edges box → call → unbox; COI-291 dense→dense `CALL` when
+/// `calls` lists the callee).
 #[allow(clippy::too_many_arguments)]
 pub fn try_specialize_body_side(
     ops: &[IlOp],
     name: &str,
-    entry_sp: u32,
     pool: &mut Vec<u64>,
     calls: &DenseCallMap,
     official_entry: Option<Label>,
     from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
-    if let Some(func) = from_hir {
-        let mut direct_side = BodySidecar::default();
-        let mut direct_pool = pool.clone();
-        if let Some(out) = specialize_side(ops, name, entry_sp, &mut direct_pool, calls, official_entry, Some(func), &mut direct_side) {
-            *pool = direct_pool;
-            *side = direct_side;
-            crate::il::opt::note_hir_mir_kept();
-            return Some(out);
-        }
-    }
-    if no_lift() {
-        return None;
-    }
-    specialize_side(ops, name, entry_sp, pool, calls, official_entry, None, side)
-}
-
-/// `COIL_NO_LIFT=1`: MIR tiers take only MIR lowered from HIR, never a lift
-/// of the IL (the census of what deleting the lift would cost).
-fn no_lift() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("COIL_NO_LIFT").as_deref(), Ok("1" | "true" | "on" | "yes")))
+    let Some(func) = from_hir else {
+        return refuse_dense("no MIR from HIR");
+    };
+    let mut direct_side = BodySidecar::default();
+    let mut direct_pool = pool.clone();
+    let out = specialize_side(ops, name, &mut direct_pool, calls, official_entry, func, &mut direct_side)?;
+    *pool = direct_pool;
+    *side = direct_side;
+    crate::il::opt::note_hir_mir_kept();
+    Some(out)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn specialize_side(
     ops: &[IlOp],
     name: &str,
-    entry_sp: u32,
     pool: &mut Vec<u64>,
     calls: &DenseCallMap,
     official_entry: Option<Label>,
-    from_hir: Option<&crate::mir::MirFunc>,
+    from_hir: &crate::mir::MirFunc,
     side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
@@ -201,44 +163,13 @@ fn specialize_side(
     // Registers may sit past the cursor at a safepoint, and generic host
     // results are heap words typed `i64` that S2b maps miss: cover the frame.
     side.needs_frame_extent = has_alloc;
-    // Strict first. An allocating body whose slots are recycled across types
-    // (format args, then a string) retries with LIR-style typing; a body that
-    // leaves values on the stack across an edge (two-slot `?`, match arms)
-    // retries with stack φs and must then win a loop-weighted cost compare.
-    let attempt = |recycle, edge_stack| {
-        let relax = DenseRelax {
-            recycle,
-            edge_stack,
-        };
-        lower_dense_attempt(ops, name, entry_sp, pool, calls, has_alloc, relax)
-    };
-    let edge_refusal = |e: &String| e.contains("operand stack at CFG edge");
-    let mut edge_stack = false;
-    // MIR lowered from HIR needs no lift; the IL is the fallback.
-    let direct = from_hir.filter(|f| has_numeric_arith(f) && calls_agree(f, calls));
-    let mut first = match direct {
-        Some(func) => Ok((LowerHints::new(name), func.clone())),
-        None => attempt(false, false),
-    };
-    if first.as_ref().is_err_and(edge_refusal) {
-        edge_stack = true;
-        first = attempt(false, true);
+    if !has_numeric_arith(from_hir) {
+        return refuse_dense("no numeric arith");
     }
-    let (hints, mut func) = match first {
-        Ok(v) => v,
-        Err(e) if has_alloc => {
-            let mut retry = attempt(true, edge_stack);
-            if !edge_stack && retry.as_ref().is_err_and(edge_refusal) {
-                edge_stack = true;
-                retry = attempt(true, true);
-            }
-            match retry {
-                Ok(v) => v,
-                Err(_) => return refuse_dense(e),
-            }
-        }
-        Err(e) => return refuse_dense(e),
-    };
+    if !calls_agree(from_hir, calls) {
+        return refuse_dense("call ABI");
+    }
+    let mut func = from_hir.clone();
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
     crate::mir::licm(&mut func);
@@ -261,7 +192,7 @@ fn specialize_side(
     if count_store_index(ops) > 0 && stores_ssa == 0 {
         return refuse_dense("store index dropped in SSA");
     }
-    let Some(abi) = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty) else {
+    let Some(abi) = DenseAbi::from_func_and_live_ins(&func, ops, &HashMap::new()) else {
         return refuse_dense("dense abi");
     };
     let entry = official_entry.or_else(|| {
@@ -316,23 +247,6 @@ fn specialize_side(
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return refuse_dense("dense cost gate");
     }
-    // Stack φs cost moves on every edge and loops skip the gate above:
-    // compare dispatches after fuse-select, where fuse-IL packs its loop
-    // tests and slot arithmetic.
-    if edge_stack {
-        let dense_cost = crate::il::fused_dispatch_cost(&out, pool);
-        if dense_cost > crate::il::fused_dispatch_cost(ops, pool) {
-            return refuse_dense("dense edge-stack cost gate");
-        }
-        // Dense is tried first; a stack-φ body must not pre-empt the MIR→LIR
-        // reconstruct the next tier would pick.
-        let mut lir_pool = pool.clone();
-        if let Some(lir) = try_lower_abi_body(ops, name, entry_sp, &mut lir_pool)
-            && dense_cost > crate::il::fused_dispatch_cost(&lir, &lir_pool)
-        {
-            return refuse_dense("dense edge-stack loses to LIR");
-        }
-    }
     // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
     if count_make_enum(&out) > count_make_enum(ops) {
         return refuse_dense("MakeEnum growth");
@@ -340,8 +254,6 @@ fn specialize_side(
     Some((out, abi))
 }
 
-/// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`, as
-/// [`infer_numeric_with`] asks of a lifted body.
 /// Every `CALL` in `func` uses its callee's dense ABI, when the callee has one.
 fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
     use crate::mir::MirInst;
@@ -356,6 +268,7 @@ fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
     })
 }
 
+/// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`.
 fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
     use crate::mir::{MirBinOp, MirInst};
     func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
@@ -364,107 +277,6 @@ fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
             MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div, ty, .. } if ty.is_float() || ty.is_int()
         ) || matches!(i, MirInst::Bin { op: MirBinOp::Rem, ty, .. } if ty.is_int())
     })
-}
-
-/// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
-/// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
-/// as match — that densifies `if !flag` and drops LogNotJmpt.
-/// Relaxations a dense retry may ask for.
-#[derive(Clone, Copy)]
-struct DenseRelax {
-    /// Type recycled slots by last use (LIR-style).
-    recycle: bool,
-    /// Carry operand-stack values across CFG edges as stack φs.
-    edge_stack: bool,
-}
-
-/// Infer + lower a dense body; `Err` is the refusal key.
-fn lower_dense_attempt(
-    ops: &[IlOp],
-    name: &str,
-    entry_sp: u32,
-    pool: &[u64],
-    calls: &DenseCallMap,
-    has_alloc: bool,
-    relax: DenseRelax,
-) -> Result<(LowerHints, crate::mir::MirFunc), String> {
-    let DenseRelax {
-        recycle,
-        edge_stack,
-    } = relax;
-    let inferred = if has_alloc {
-        infer_numeric_across_alloc(ops, pool.len(), entry_sp, calls, recycle)
-    } else {
-        infer_numeric_with(ops, pool.len(), entry_sp, calls)
-    };
-    let inferred = inferred.map_err(|e| format!("infer: {e}"))?;
-    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
-        return Err("no numeric arith".into());
-    }
-    let mut hints = LowerHints::new(name);
-    hints.allow_match = edge_stack
-        || match_shaped_il(ops)
-        || inferred
-            .slot_ty
-            .values()
-            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
-    hints.slot_ty = inferred.slot_ty;
-    hints.pool = pool.to_vec();
-    hints.pool_ty = inferred.pool_ty;
-    hints.calls = calls.clone();
-    hints.allow_alloc = has_alloc;
-    hints.allow_string = has_alloc;
-    hints.allow_index = true;
-    hints.allow_effects = true;
-    hints.allow_heap_fields = true;
-    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
-    hints.param_count = live_params
-        .as_ref()
-        .map(|p| p.len() as u32)
-        .unwrap_or(entry_sp)
-        .max(entry_sp);
-    hints.entry_tell = Some(entry_sp);
-    let func = try_lower_numeric(ops, &hints).map_err(|e| format!("lower: {e}"))?;
-    Ok((hints, func))
-}
-
-fn match_shaped_il(ops: &[IlOp]) -> bool {
-    let mut i = 0;
-    while i < ops.len() {
-        match &ops[i] {
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { .. },
-                ..
-            } => return true,
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => return true,
-            IlOp::Dup { .. }
-                if peek_tag_or_niche_test(&ops[i + 1..]) => {
-                    return true;
-                }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-fn peek_tag_or_niche_test(ops: &[IlOp]) -> bool {
-    match ops {
-        [IlOp::LogNot { .. }, IlOp::Jump {
-            kind: IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse,
-            ..
-        }, ..] => true,
-        [IlOp::Const { .. }, IlOp::Bin { op, .. }, IlOp::Jump { kind, .. }, ..]
-            if matches!(*op, Instruction::EQ | Instruction::NEQ)
-                && matches!(
-                    kind,
-                    IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
-                ) =>
-        {
-            true
-        }
-        _ => false,
-    }
 }
 
 /// Index / open CALL dests default to i64 when the next IL is StorePop.
@@ -610,43 +422,14 @@ fn emit_cost(ops: &[IlOp]) -> usize {
         .sum()
 }
 
-/// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
-///
-/// Dense may miss (compare-only / cost). Production `IlModule` replace
-/// uses this after stack-IL
-/// opts; `emit_lir` keeps single-use return/cmp values on the stack. Do
-/// not re-opt the reconstruct (`MOD` rematerializes). Call / host / box /
-/// I4 string/format may lift (Q9 R1). FORMAT / STRINGIFY need S2b maps
-/// (Q9 R3). I5 alloc needs S2b maps ([`lir_eligible_with`]).
-/// Keep/refuse is the LIR cost gate in `IlModule`, not a feature floor.
-pub fn try_lower_abi_body(
-    ops: &[IlOp],
-    name: &str,
-    entry_sp: u32,
-    pool: &mut Vec<u64>,
-) -> Option<Vec<IlOp>> {
-    try_lower_abi_body_with(ops, name, entry_sp, pool, &[])
-}
-
-/// Like [`try_lower_abi_body`], with unboxed class field ranges from
-/// codegen (`local_escape` → consecutive slots).
-pub fn try_lower_abi_body_with(
-    ops: &[IlOp],
-    name: &str,
-    entry_sp: u32,
-    pool: &mut Vec<u64>,
-    unboxed_fields: &[(u32, u32)],
-) -> Option<Vec<IlOp>> {
-    try_lower_abi_body_side(ops, name, entry_sp, pool, unboxed_fields, None, &mut BodySidecar::default())
-}
-
-
+/// MIR→LIR for a body dense specialize misses (I8): `from_hir` (MIR
+/// lowered from HIR) emitted as stack IL with `emit_lir` keeping
+/// single-use values on the stack. Keep/refuse is the LIR cost gate in
+/// `IlModule`, not a feature floor.
 pub fn try_lower_abi_body_side(
     ops: &[IlOp],
     name: &str,
-    entry_sp: u32,
     pool: &mut Vec<u64>,
-    unboxed_fields: &[(u32, u32)],
     from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
 ) -> Option<Vec<IlOp>> {
@@ -658,65 +441,29 @@ pub fn try_lower_abi_body_side(
     if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
         return refuse("post-loop alloc return");
     }
-    // MIR lowered from HIR needs no lift, and maps its own allocations
-    // (`lir_tail` builds the body's draft from it).
-    let direct = from_hir.filter(|f| !has_alloc || super::stackmap::mir_maps_ok(f));
-    let wall = match direct {
-        Some(_) => super::entry::lir_refuse_direct(ops, has_alloc),
-        None => {
-            let maps_ok = has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);
-            lir_refuse_with(ops, unboxed_fields, maps_ok)
-        }
+    // MIR lowered from HIR maps its own allocations (`lir_tail` builds the
+    // body's draft from it).
+    let Some(direct) = from_hir else {
+        return refuse("no MIR from HIR");
     };
-    if let Some(wall) = wall {
+    if has_alloc && !super::stackmap::mir_maps_ok(direct) {
+        return refuse("no MIR maps");
+    }
+    if let Some(wall) = super::entry::lir_refuse_direct(ops, has_alloc) {
         return refuse(format!("lir wall {wall:?}"));
     }
-    let mut func = match direct {
-        Some(func) => func.clone(),
-        None if no_lift() => return refuse("no lift"),
-        None => lift_lir(ops, name, entry_sp, pool, unboxed_fields, has_alloc)?,
-    };
+    let mut func = direct.clone();
     if has_alloc {
         crate::mir::sroa(&mut func);
     } else {
         crate::mir::cse(&mut func);
     }
-    lir_tail(ops, name, pool, has_alloc, direct.is_some(), func, side)
-}
-
-/// Lift `ops` to MIR for the LIR tier.
-fn lift_lir(ops: &[IlOp], name: &str, entry_sp: u32, pool: &[u64], unboxed_fields: &[(u32, u32)], has_alloc: bool) -> Option<crate::mir::MirFunc> {
-    let inferred = if has_alloc {
-        infer_lir_across_alloc(ops, pool.len(), entry_sp)
-    } else {
-        infer_lir(ops, pool.len(), entry_sp)
-    };
-    let inferred = match inferred {
-        Ok(v) => v,
-        Err(e) => return refuse(format!("infer: {e}")),
-    };
-    let mut hints = LowerHints::new(name);
-    hints.slot_ty = inferred.slot_ty;
-    hints.pool = pool.to_vec();
-    hints.pool_ty = inferred.pool_ty;
-    hints.param_count = entry_sp;
-    hints.entry_tell = Some(entry_sp);
-    hints.allow_match = true;
-    hints.unboxed_fields = unboxed_fields.to_vec();
-    hints.allow_fields = !unboxed_fields.is_empty();
-    hints.allow_alloc = has_alloc;
-    hints.allow_index = true;
-    hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
-    hints.allow_host_edges = true;
-    match try_lower_numeric(ops, &hints) {
-        Ok(f) => Some(f),
-        Err(e) => refuse(format!("lower: {e}")),
-    }
+    lir_tail(ops, name, pool, has_alloc, func, side)
 }
 
 /// Emit the LIR tier's stack IL from `func`.
 #[allow(clippy::too_many_arguments)]
-fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, direct: bool, mut func: crate::mir::MirFunc, side: &mut BodySidecar) -> Option<Vec<IlOp>> {
+fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, mut func: crate::mir::MirFunc, side: &mut BodySidecar) -> Option<Vec<IlOp>> {
     super::deopt::fill_deopt_maps(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
@@ -735,7 +482,7 @@ fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, dire
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
     // SROA may have taken every allocation out; then there is nothing to map.
-    if direct && func.has_gc_edge() {
+    if func.has_gc_edge() {
         let Some(map) = stack_map.take() else {
             return refuse("no MIR stack map");
         };
@@ -748,15 +495,6 @@ fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, dire
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),
     };
-    // Direct MIR maps its own allocations: one it proved dead is gone from
-    // the maps too.
-    if has_alloc && !direct {
-        let before = ops.iter().filter(|o| refuses_alloc(o)).count();
-        let after = out.iter().filter(|o| refuses_alloc(o)).count();
-        if after < before {
-            return refuse("alloc sites dropped");
-        }
-    }
     if has_sroa_select_cfg(ops) && !select_reconstruct_ok(ops, &out) {
         return refuse("select reconstruct");
     }
