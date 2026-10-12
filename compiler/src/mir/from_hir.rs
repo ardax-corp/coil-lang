@@ -416,6 +416,18 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// `Result<(), E>`.
+fn unit_result(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::App(head, args) => matches!(head.as_ref(), Ty::Con(n) if n == "Result") && args.first().is_some_and(is_unit),
+        Ty::Sum { name, variants } => {
+            name == "Result"
+                && variants.iter().any(|(v, payload)| v == "Ok" && matches!(payload, crate::typechecking::ty::EnumVariantPayloadTy::Tuple(items) if items.iter().all(is_unit)))
+        }
+        _ => false,
+    }
+}
+
 fn is_unit(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Con(n) => n == crate::typechecking::ty::UNIT,
@@ -800,6 +812,17 @@ impl Lower<'_> {
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
+            // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
+            // emission's `CONST 0; RETURN`.
+            (Val::Unit, None) if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                // `Ok(())` is the zero word of a `NicheOpt` result.
+                if self.b.func().ret_ty != Some(MirTy::NicheOpt) {
+                    return Err("return value".into());
+                }
+                let ok = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let ok = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, ok).map_err(mir)?;
+                self.b.ret(Some(ok)).map_err(mir)
+            }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
