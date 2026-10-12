@@ -28,6 +28,10 @@ pub struct BodyTier {
     /// `lowered` when the body lowered straight from HIR to MIR, else why
     /// not (`None`: not tried).
     pub hir_reason: Option<String>,
+    /// Where the body's GC stack map came from (`mir`, `il`, `il snapshot`;
+    /// `None`: no map).
+    #[serde(default)]
+    pub map: Option<String>,
 }
 
 /// Counters from IL opts (and typed inlining when compiling). COI-176.
@@ -158,12 +162,13 @@ impl OptStats {
         for b in &self.body_tiers {
             let _ = writeln!(
                 out,
-                "    {}: {} (dense: {}; lir: {}; hir: {})",
+                "    {}: {} (dense: {}; lir: {}; hir: {}; map: {})",
                 b.name,
                 b.tier,
                 b.dense_reason.as_deref().unwrap_or("-"),
                 b.lir_reason.as_deref().unwrap_or("-"),
-                b.hir_reason.as_deref().unwrap_or("-")
+                b.hir_reason.as_deref().unwrap_or("-"),
+                b.map.as_deref().unwrap_or("-")
             );
         }
         if !self.fuse_reasons.is_empty() {
