@@ -277,6 +277,9 @@ struct Lower<'a> {
     word_src: HashMap<ValueId, ValueId>,
     /// The next host call leaves its boxed enum result boxed (a `match`
     /// dispatches on it directly).
+    /// Niche words made from a known variant: whether it is the second
+    /// (`Some` / `Err`) and its payload word.
+    known_niche: HashMap<ValueId, (bool, Option<ValueId>)>,
     raw_host: bool,
 }
 
@@ -545,6 +548,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         unniche: HashMap::new(),
         spec: HashSet::new(),
         word_src: HashMap::new(),
+        known_niche: HashMap::new(),
         raw_host: false,
     };
     match lower.value(root)? {
@@ -887,6 +891,15 @@ impl Lower<'_> {
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
         if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
             return Err("boxed niche return".into());
+        }
+        // A word made from a known variant boxes as that variant.
+        if let Some(&(second, payload)) = self.known_niche.get(&w) {
+            let payload = match payload {
+                Some(p) => Some(self.fit(p, MirTy::HeapRef)?),
+                None if layout == ValueLayout::NicheUnitResult && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
+                None => None,
+            };
+            return self.make_enum(u32::from(second), payload);
         }
         let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         // Whether `w` is the second variant: `Some` (non-zero), or `Err`
@@ -3584,7 +3597,9 @@ impl Lower<'_> {
     fn make_niche(&mut self, variant: &str, args: &[HirId], niche: MirTy) -> Result<Val, Refusal> {
         let zero = |this: &mut Self| -> Result<Val, Refusal> {
             let z = this.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-            Ok(Val::V(this.b.ins_cast(MirCastKind::Word, niche, z).map_err(mir)?))
+            let w = this.b.ins_cast(MirCastKind::Word, niche, z).map_err(mir)?;
+            this.known_niche.insert(w, (false, None));
+            Ok(Val::V(w))
         };
         let arg = match args {
             [] => return zero(self),
@@ -3597,7 +3612,9 @@ impl Lower<'_> {
                     // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
                     let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
                     let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-                    return Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?));
+                    let w = self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?;
+                    self.known_niche.insert(w, (false, Some(obj)));
+                    return Ok(Val::V(w));
                 }
                 return zero(self);
             }
@@ -3611,18 +3628,26 @@ impl Lower<'_> {
             return Err("niche payload type".into());
         }
         let err = niche == MirTy::NicheRes && variant == "Err";
-        // `Err(e) => return Err(e)`: the matched word as it was.
+        // `Err(e) => return Err(e)`: the matched word as it was (a body
+        // returning it boxed makes the known variant instead).
         if let Some(&(w, untagged)) = self.unniche.get(&v)
             && untagged == err
             && self.b.value_ty(w) == niche
+            && self.inp.ret_boxed_niche.is_none()
         {
             return Ok(Val::V(w));
         }
-        if err {
+        let w = if err {
             let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            return Ok(Val::V(self.b.ins_binop(MirBinOp::BitOr, v, one).map_err(mir)?));
-        }
-        Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, v).map_err(mir)?))
+            self.b.ins_binop(MirBinOp::BitOr, v, one).map_err(mir)?
+        } else {
+            self.b.ins_cast(MirCastKind::Word, niche, v).map_err(mir)?
+        };
+        // `Ok` of a niche `Result` is its first variant; `Some` and `Err`
+        // of a zero niche the second.
+        let second = !(niche == MirTy::NicheRes && variant == "Ok");
+        self.known_niche.insert(w, (second, Some(v)));
+        Ok(Val::V(w))
     }
 
     /// A boxed enum variant pattern's payload word types and the local each
