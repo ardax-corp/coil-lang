@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(ARCHIVE_MAJOR, 4);
         assert_eq!(ARCHIVE_MINOR, 37);
         assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 37));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.36");
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.37");
     }
 
     #[test]
