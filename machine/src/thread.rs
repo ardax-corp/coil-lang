@@ -188,6 +188,8 @@ pub enum PortableValue {
     Immediate(u64),
     String(String),
     Array(Vec<PortableValue>),
+    /// A packed byte array (`Vec<byte>` / `Vec<bool>`), kept packed.
+    Bytes(Vec<u8>),
     Tuple(Vec<PortableValue>),
     Enum {
         tag: u32,
@@ -212,6 +214,7 @@ impl std::fmt::Debug for PortableValue {
             Self::Immediate(v) => write!(f, "Immediate({v})"),
             Self::String(s) => write!(f, "String({s:?})"),
             Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
+            Self::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
             Self::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             Self::Enum {
                 tag,
@@ -243,6 +246,7 @@ impl PartialEq for PortableValue {
             (Self::Immediate(a), Self::Immediate(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
             (
                 Self::Enum {
@@ -875,6 +879,9 @@ fn encode_value(
     }
     match obj {
         Object::String(gc) => Ok(PortableValue::String(gc.as_ref().data.to_string())),
+        Object::Array(gc) if gc.as_ref().is_packed() => {
+            Ok(PortableValue::Bytes(gc.as_ref().to_byte_vec()))
+        }
         Object::Array(gc) => {
             let mut out = Vec::with_capacity(gc.as_ref().len());
             for e in gc.as_ref().iter() {
@@ -969,6 +976,10 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
                 elements.push(decode_portable(heap, e)?);
             }
             let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+            Ok(Value::from(obj.addr()))
+        }
+        PortableValue::Bytes(bytes) => {
+            let (obj, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Tuple(elems) => {
@@ -1860,6 +1871,19 @@ mod tests {
                 }),
             Some("hi".into())
         );
+    }
+
+    #[test]
+    fn portable_roundtrip_keeps_byte_arrays_packed() {
+        let mut heap = Heap::default();
+        let (arr, _) = heap.alloc(ObjArray::from_bytes(vec![1, 2, 255]), Object::Array);
+        let pv = value_to_portable(&heap, Value::from(arr.addr())).unwrap();
+        assert_eq!(pv, PortableValue::Bytes(vec![1, 2, 255]));
+        let back = portable_to_value(&mut heap, pv).unwrap();
+        let Some(Object::Array(gc)) = heap.find_object_by_addr(back.raw() as u64) else {
+            panic!("not an array");
+        };
+        assert_eq!(gc.as_ref().bytes(), Some(&[1u8, 2, 255][..]));
     }
 
     #[test]
