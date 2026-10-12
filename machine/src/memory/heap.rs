@@ -1172,7 +1172,7 @@ impl Heap {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
             return;
         };
-        gc.as_mut().overwrite_prefix(bytes.iter().map(|&b| Value::from(i64::from(b))));
+        gc.as_mut().write_bytes_at(0, bytes);
     }
 
     /// True if `addr` is a live heap object.
@@ -2792,6 +2792,28 @@ impl ObjArray {
         match &mut self.data {
             ArrayData::Words(w) => w.reserve(extra),
             ArrayData::Bytes(b) => b.reserve(extra),
+        }
+    }
+
+    /// The elements narrowed to bytes (`as u8`): one copy when packed.
+    pub fn to_byte_vec(&self) -> Vec<u8> {
+        match &self.data {
+            ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),
+            ArrayData::Bytes(b) => b.clone(),
+        }
+    }
+
+    /// Overwrite elements `at..` with `bytes` (bytes past the end are
+    /// dropped): one copy when packed.
+    pub fn write_bytes_at(&mut self, at: usize, bytes: &[u8]) {
+        let n = bytes.len().min(self.len().saturating_sub(at));
+        match &mut self.data {
+            ArrayData::Bytes(b) => b[at..at + n].copy_from_slice(&bytes[..n]),
+            ArrayData::Words(w) => {
+                for (slot, &b) in w[at..at + n].iter_mut().zip(bytes) {
+                    *slot = word_of(b);
+                }
+            }
         }
     }
 
@@ -4850,6 +4872,25 @@ mod tests {
         assert_eq!(a.take_resize(), None);
         a.set(0, Value::from(1000i64));
         assert_eq!(a.take_resize(), Some((2, 16)));
+    }
+
+    #[test]
+    fn byte_copies_work_on_both_storages() {
+        for packed in [false, true] {
+            let mut a = if packed {
+                ObjArray::from_bytes(vec![0; 4])
+            } else {
+                ObjArray::new(words(&[0, 0, 0, 0]))
+            };
+            a.write_bytes_at(1, &[7, 8, 9, 10]);
+            assert_eq!(ints(&a), vec![0, 7, 8, 9], "packed {packed}");
+            assert_eq!(a.to_byte_vec(), vec![0, 7, 8, 9], "packed {packed}");
+            assert_eq!(a.is_packed(), packed);
+        }
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(ObjArray::from_bytes(vec![0; 2]), Object::Array);
+        heap.update_array_bytes(obj.addr(), &[3, 4, 5]);
+        assert_eq!(gc.as_ref().bytes(), Some(&[3u8, 4][..]));
     }
 
     #[test]

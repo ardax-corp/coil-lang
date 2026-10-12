@@ -391,9 +391,7 @@ fn stream_read_into(
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (i, src) in tmp[..n].iter().enumerate() {
-            arr.set(i, Value::from(*src as i64));
-        }
+        arr.write_bytes_at(0, &tmp[..n]);
         Ok(Some(n))
     } else {
         Ok(None)
@@ -422,6 +420,9 @@ pub fn stream_write_from(
             let start = offset as usize;
             if start > arr.len() {
                 return Err(IoErrorTag::InvalidInput);
+            }
+            if let Some(b) = arr.bytes() {
+                return stream_write_bytes(heap, stream, &b[start..]);
             }
             arr.iter()
                 .skip(start)
@@ -475,11 +476,7 @@ pub fn stream_read_exact(
         return Ok(Some(0));
     }
     // One reusable scratch for the whole call (no per-iteration Coil alloc).
-    let scratch_vals: Vec<Value> = (0..need).map(|_| Value::from(0_i64)).collect();
-    let (scratch_obj, _) = heap.alloc(
-        ObjArray::new(scratch_vals),
-        Object::Array,
-    );
+    let (scratch_obj, _) = heap.alloc(ObjArray::from_bytes(vec![0; need]), Object::Array);
     let scratch = Value::from(scratch_obj.addr());
     let mut filled = 0usize;
     while filled < need {
@@ -500,14 +497,11 @@ pub fn stream_read_exact(
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                let chunk: Vec<Value> = src.as_ref().slice_to_vec(0, n);
+                let chunk = src.as_ref().to_byte_vec();
                 let Some(Object::Array(mut dst)) = heap.find_object_by_addr(buf_addr) else {
                     return Err(IoErrorTag::Other);
                 };
-                let dst = dst.as_mut();
-                for (i, v) in chunk.into_iter().enumerate() {
-                    dst.set(filled + i, v);
-                }
+                dst.as_mut().write_bytes_at(filled, &chunk[..n]);
                 filled += n;
             }
             Err(IoErrorTag::WouldBlock) => {
@@ -523,11 +517,7 @@ pub fn stream_read_exact(
 pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag> {
     let mut acc: Vec<u8> = Vec::new();
     let chunk_size = 4096usize;
-    let scratch_vals: Vec<Value> = (0..chunk_size).map(|_| Value::from(0_i64)).collect();
-    let (scratch_obj, _) = heap.alloc(
-        ObjArray::new(scratch_vals),
-        Object::Array,
-    );
+    let (scratch_obj, _) = heap.alloc(ObjArray::from_bytes(vec![0; chunk_size]), Object::Array);
     let scratch = Value::from(scratch_obj.addr());
     loop {
         match stream_read(heap, stream, scratch) {
@@ -538,8 +528,9 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
                 else {
                     return Err(IoErrorTag::Other);
                 };
-                for v in src.as_ref().iter().take(n) {
-                    acc.push(v.as_int() as u8);
+                match src.as_ref().bytes() {
+                    Some(b) => acc.extend_from_slice(&b[..n]),
+                    None => acc.extend(src.as_ref().iter().take(n).map(|v| v.as_int() as u8)),
                 }
             }
             Err(IoErrorTag::WouldBlock) => wait_readable(heap, stream)?,
@@ -549,8 +540,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
             Err(e) => return Err(e),
         }
     }
-    let elements: Vec<Value> = acc.iter().map(|&b| Value::from(b as i64)).collect();
-    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::from_bytes(acc), Object::Array);
     Ok(Value::from(obj.addr()))
 }
 
@@ -560,11 +550,7 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
     let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
-    let bytes: Vec<u8> = arr_gc
-        .as_ref()
-        .iter()
-        .map(|v| v.as_int() as u8)
-        .collect();
+    let bytes: Vec<u8> = arr_gc.as_ref().to_byte_vec();
     let mut offset = 0usize;
     while offset < bytes.len() {
         match stream_write_bytes(heap, stream, &bytes[offset..]) {
@@ -1329,9 +1315,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        for (i, src) in tmp[..n].iter().enumerate() {
-            arr.set(i, Value::from(*src as i64));
-        }
+        arr.write_bytes_at(0, &tmp[..n]);
     }
 
     let host_str = match peer {
@@ -1396,20 +1380,9 @@ pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
 /// Read a heap `Vec<byte>` (Array carrier) into a Rust `Vec<u8>`.
 pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
     match heap.find_object_by_addr(v.raw() as u64) {
-        Some(Object::Array(arr_gc)) => Ok(arr_gc
-            .as_ref()
-            .iter()
-            .map(|e| {
-                let n = e.as_int();
-                if (0..=255).contains(&n) {
-                    n as u8
-                } else {
-                    // Out-of-range elements are a typechecker bug; clamp
-                    // defensively rather than panicking in the host.
-                    n as u8
-                }
-            })
-            .collect()),
+        // Out-of-range word elements would be a typechecker bug; they
+        // narrow (`as u8`) rather than panic in the host.
+        Some(Object::Array(arr_gc)) => Ok(arr_gc.as_ref().to_byte_vec()),
         _ => Err(IoErrorTag::InvalidInput),
     }
 }
@@ -1430,11 +1403,11 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, IoErrorTag> {
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
     // One pass over the string's bytes (no intermediate `String` copy).
-    let elements: Vec<Value> = match heap.find_object_by_addr(peel_one_boxed(heap, s).raw() as u64) {
-        Some(Object::String(gc)) => gc.as_ref().data.bytes().map(|b| Value::from(b as i64)).collect(),
+    let bytes: Vec<u8> = match heap.find_object_by_addr(peel_one_boxed(heap, s).raw() as u64) {
+        Some(Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
         _ => Vec::new(),
     };
-    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);
     Value::from(obj.addr())
 }
 
@@ -1697,6 +1670,10 @@ mod tests {
         };
         let buf = to_bytes(&mut heap, s);
         assert_eq!(array_bytes(&heap, buf), b"Hi");
+        assert!(
+            matches!(heap.find_object_by_addr(buf.raw() as u64), Some(Object::Array(gc)) if gc.as_ref().is_packed()),
+            "to_bytes builds a packed array"
+        );
         let back = from_bytes(&mut heap, buf).expect("round-trip");
         assert_eq!(value_as_string(&heap, back).unwrap(), "Hi");
     }

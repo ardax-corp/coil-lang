@@ -387,7 +387,7 @@ fn byte_buffer_from_value(
     let addr = value.raw() as u64;
     let obj = heap.find_object_by_addr(addr);
     let (mut buf, copy_back): (Vec<u8>, bool) = match &obj {
-        Some(Object::Array(gc)) => (gc.as_ref().iter().map(|v| v.as_int() as u8).collect(), true),
+        Some(Object::Array(gc)) => (gc.as_ref().to_byte_vec(), true),
         Some(Object::Tuple(gc)) => {
             (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
         }
