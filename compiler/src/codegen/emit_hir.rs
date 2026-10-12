@@ -815,7 +815,10 @@ impl Compiler {
         };
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
-                .or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef))
+                .or_else(|| {
+                    let string = matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING);
+                    (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
+                })
                 .or_else(|| niche(t))
         };
         let mut sroa = HashMap::new();
