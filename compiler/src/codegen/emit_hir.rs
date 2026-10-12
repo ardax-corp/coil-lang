@@ -288,6 +288,9 @@ struct HirEmit {
     /// String table index of the format string of each `format` call
     /// whose arguments all print as words (no `%v`), by call.
     format_strs: HashMap<u32, u32>,
+    /// Each `assert` call: the string table index of its default message,
+    /// or `None` when it passes its own.
+    asserts: HashMap<u32, Option<u32>>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1048,6 +1051,7 @@ impl Compiler {
             into_iters: &emit.into_iters,
             strings: &emit.string_lits,
             formats: &emit.format_strs,
+            asserts: &emit.asserts,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -2006,6 +2010,7 @@ impl Compiler {
             into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
+            asserts: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6740,10 +6745,18 @@ impl Compiler {
                         self.bytecode.push_const(0);
                         self.hir_jump(IlJumpKind::Unconditional, end);
                         self.bytecode.bind_label(fail);
-                        match args.get(1) {
-                            Some(&msg) => self.hir_value(hir, emit, msg, &Rep::Word(params[1]), depth),
-                            None => self.emit_string_literal("assertion failed"),
-                        }
+                        let default = match args.get(1) {
+                            Some(&msg) => {
+                                self.hir_value(hir, emit, msg, &Rep::Word(params[1]), depth);
+                                None
+                            }
+                            None => {
+                                let idx = self.intern_string("assertion failed");
+                                self.bytecode.push_string(idx);
+                                Some(idx)
+                            }
+                        };
+                        emit.asserts.insert(id.0, default);
                         self.bytecode.bind_label(end);
                     }
                     HirBuiltin::BlockOn => self.hir_block_on(hir, emit, args[0]),

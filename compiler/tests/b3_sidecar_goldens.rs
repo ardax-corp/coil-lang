@@ -57,9 +57,9 @@ const CORPUS: &[&str] = &[
 /// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
 /// fuse to dense (`option_pair.hy` grows by three).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "4c3f37e7c8500500_1259"),
-    ("functions.hy", "cf7d45d5c7dd59f6_274"),
-    ("loops.hy", "fccb38b755e5d4eb_217"),
+    ("arithmetic.hy", "08946876e664c67f_1289"),
+    ("functions.hy", "236cccdbe25aa2b5_280"),
+    ("loops.hy", "3db0f12002dc0891_237"),
     ("option_pair.hy", "c490ff2e6a2fb35e_343"),
     ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
 ];
