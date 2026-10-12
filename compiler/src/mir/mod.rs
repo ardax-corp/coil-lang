@@ -70,7 +70,7 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit_lir::emit_lir;
 pub use entry::LirRefuse;
-pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirMirInput};
+pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirMirInput, HirOpCall};
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
