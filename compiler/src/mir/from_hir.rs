@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
@@ -63,6 +63,8 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
+    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    pub coro: bool,
 }
 
 impl HirMirInput<'_> {
@@ -70,7 +72,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -280,6 +282,11 @@ fn unit_fields(fields: &HirPatFields) -> bool {
 /// An `io` stream: a heap object the GC traces like any other.
 fn is_string(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+}
+
+/// A coroutine handle type, `coroutine<Y, R>`: one heap word.
+fn is_coroutine(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine"))
 }
 
 fn is_stream(ty: &Ty) -> bool {
@@ -914,6 +921,13 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { args, .. } => self.call(id, args),
+            HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
+            HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
+                let Some(h) = self.word(*handle)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_done_coro(h).map_err(mir)?))
+            }
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
                 let Some(v) = self.word(*operand)? else {
@@ -1686,6 +1700,14 @@ impl Lower<'_> {
                 _ => return Err("call argument".into()),
             }
         }
+        // `MakeCoro`: the arguments move into a new coroutine's frame.
+        if site.coro {
+            if ret != MirTy::HeapRef || ret_hi.is_some() {
+                return Err("coroutine handle type".into());
+            }
+            let h = self.b.ins_alloc(MirAllocKind::Coro { target: site.target }, words).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?));
+        }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
@@ -1697,6 +1719,26 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// `resume h` / `resume h with v`: the coroutine runs to its next
+    /// `yield`, whose word is the value.
+    fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("resume type")?;
+        let unit = is_unit(ty);
+        let dest_ty = if unit { MirTy::I64 } else { self.inp.word(ty).ok_or("resume type")? };
+        let send = match value {
+            Some(v) => match self.word(v)? {
+                Some(w) => Some(w),
+                None => return Ok(Val::Never),
+            },
+            None => None,
+        };
+        let Some(h) = self.word(handle)? else {
+            return Ok(Val::Never);
+        };
+        let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        Ok(if unit { Val::Unit } else { Val::V(out) })
     }
 
     /// Fill the slots of stack array or class local `local` from `init`:
