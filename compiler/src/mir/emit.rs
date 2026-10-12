@@ -13,7 +13,7 @@ use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
     Terminator, ValueId,
 };
-use super::lower::LowerError;
+use super::error::LowerError;
 use super::ty::MirTy;
 
 /// Emit dense IL for `func`. Preserves `entry_label` so CALL targets stay valid.

@@ -117,7 +117,6 @@ impl MirFunc {
             .unwrap_or_else(DebugLoc::unknown)
     }
 
-    /// Sidecar row for the Alloc or GcBarrier whose dest is `at`.
     pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
         self.gc_roots.iter().find(|s| s.at == at)
     }

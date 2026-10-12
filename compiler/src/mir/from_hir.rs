@@ -1,8 +1,8 @@
 //! Lower a planned HIR body straight to MIR (HIR to MIR plan, phase M1).
 //!
-//! The IL lift ([`super::lower`]) rebuilds MIR from the stack IL and guesses
-//! each slot's type from the opcodes that touch it. Here the types come from
-//! the checker, locals are read and written by name, and control flow is
+//! MIR used to be rebuilt from the stack IL by a lift that guessed each
+//! slot's type from the opcodes that touch it (retired in M4/M5). Here the
+//! types come from the checker, locals are read and written by name, and control flow is
 //! built from `if` / `loop` / `break` directly, so none of the operand-stack
 //! replay applies.
 //!

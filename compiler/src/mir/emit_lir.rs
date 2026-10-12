@@ -22,7 +22,7 @@ use super::inst::{
     Terminator, ValueId,
 };
 use super::layout::MirLayout;
-use super::lower::LowerError;
+use super::error::LowerError;
 use super::ty::MirTy;
 
 /// Emit fuse-IL for `func`. Preserves `entry_label` so CALL targets stay valid.
