@@ -56,9 +56,6 @@ pub struct MirBuilder {
     pub pending_loc: DebugLoc,
     /// Last match-arm `Seek` (payload_base for arity-0 JumpIfMatch).
     pub match_seek: Option<u32>,
-    /// Scrutinee slot of the `JumpIfMatch` / `Unpack` being lowered, from
-    /// the IL cursor (`tell - 1`): the VM writes payloads from here up.
-    pub match_base: Option<u32>,
 }
 
 impl MirBuilder {
@@ -77,7 +74,6 @@ impl MirBuilder {
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
             match_seek: None,
-            match_base: None,
         }
     }
 
@@ -856,18 +852,6 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::GcBarrier { dest, kind, roots })?;
-        self.snapshot_slots(dest);
-        Ok(dest)
-    }
-
-    /// Debugger stop / deopt placeholder (I7). Dest is a `bool` token.
-    pub fn ins_deopt(
-        &mut self,
-        kind: super::inst::MirDeoptKind,
-        loc: common::DebugLoc,
-    ) -> Result<ValueId, MirError> {
-        let dest = self.alloc(MirTy::Bool);
-        self.push(MirInst::Deopt { dest, kind, loc })?;
         self.snapshot_slots(dest);
         Ok(dest)
     }

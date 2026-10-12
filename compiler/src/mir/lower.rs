@@ -14,7 +14,7 @@ use common::Instruction;
 
 use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
 
-use super::abi::{DenseAbi, DenseCallMap};
+use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::gc::is_alloc_inst;
@@ -53,16 +53,10 @@ impl From<MirError> for LowerError {
 pub struct LowerHints {
     pub name: String,
     pub slot_ty: HashMap<u32, MirTy>,
-    pub default_int: MirTy,
-    pub default_float: MirTy,
     pub pool: Vec<u64>,
     pub pool_ty: Vec<Option<MirTy>>,
     /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
     pub param_count: u32,
-    /// Leaf-first dense callees (COI-291). Empty still allows an open
-    /// one-word `CALL` / `TailCall` (S3 / Q7) and two-slot open CALL
-    /// (B3 / B7 sibling and mutual TailCall).
-    pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,
     /// I3: unboxed class field ranges `(base, n)` from local_escape codegen.
@@ -78,18 +72,10 @@ pub struct LowerHints {
     pub allow_index: bool,
     /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
-    /// MIR→LIR: generic host word edges only (see `MirBuilder::allow_host_edges`).
-    pub allow_host_edges: bool,
-    /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
-    /// Production specialize leaves this off; emit skips the markers.
-    pub allow_deopt: bool,
     /// Q9 R1: `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` → SSA.
     pub allow_string: bool,
     /// S2b map lift: skip SSA verify so mixed heap/i64 returns still encode slots.
     pub skip_verify: bool,
-    /// Frame cursor at body entry. With `allow_match`, pins match payloads
-    /// to the scrutinee's slot instead of guessing from the arm's loads.
-    pub entry_tell: Option<u32>,
 }
 
 impl Default for LowerHints {
@@ -97,12 +83,9 @@ impl Default for LowerHints {
         Self {
             name: "numeric".into(),
             slot_ty: HashMap::new(),
-            default_int: MirTy::I64,
-            default_float: MirTy::F64,
             pool: Vec::new(),
             pool_ty: Vec::new(),
             param_count: 0,
-            calls: DenseCallMap::new(),
             allow_match: false,
             unboxed_fields: Vec::new(),
             allow_fields: false,
@@ -110,11 +93,8 @@ impl Default for LowerHints {
             allow_alloc: false,
             allow_index: false,
             allow_effects: false,
-            allow_host_edges: false,
-            allow_deopt: false,
             allow_string: false,
             skip_verify: false,
-            entry_tell: None,
         }
     }
 }
@@ -128,7 +108,7 @@ impl LowerHints {
     }
 
     fn slot(&self, slot: u32) -> MirTy {
-        self.slot_ty.get(&slot).copied().unwrap_or(self.default_int)
+        self.slot_ty.get(&slot).copied().unwrap_or(MirTy::I64)
     }
 
     fn pool_const(&self, idx: u32) -> Result<MirConst, LowerError> {
@@ -141,7 +121,7 @@ impl LowerHints {
             .get(idx as usize)
             .copied()
             .flatten()
-            .unwrap_or(self.default_int);
+            .unwrap_or(MirTy::I64);
         Ok(match ty {
             MirTy::I32 => MirConst::I32(bits as i32),
             MirTy::I64 => MirConst::I64(bits as i64),
@@ -179,7 +159,6 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
     b.allow_effects = hints.allow_effects;
-    b.allow_host_edges = hints.allow_host_edges;
     b.skip_verify = hints.skip_verify;
     for i in 0..hints.param_count {
         let ty = hints.slot(i);
@@ -211,14 +190,6 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
     }
 
-    let tells = hints
-        .entry_tell
-        .filter(|_| hints.allow_match)
-        .map(|t| crate::il::tell::analyze_il_at(ops, t));
-    let match_base = |idx: usize| -> Option<u32> {
-        let t = tells.as_ref()?.tell_before(idx).known()?;
-        t.checked_sub(1)
-    };
     let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = HashMap::new();
     let mut started: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
     let mut overlap_defs: HashMap<BlockId, Vec<(LocalId, ValueId)>> = HashMap::new();
@@ -255,16 +226,13 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
                 rest = taken_ops(ops, *target);
             }
             b.pending_loc = op.loc();
-            b.match_base = match_base(i);
             lower_op(&mut b, &mut tos, op, next, rest, hints)?;
-            maybe_ins_deopt(&mut b, op, hints)?;
         }
         if b.func().block(bid).term.is_none() {
             let last = ops.get(end.saturating_sub(1));
             if let Some(op) = last {
                 b.pending_loc = op.loc();
             }
-            b.match_base = end.checked_sub(1).and_then(match_base);
             emit_term(EmitTermArgs {
                 b: &mut b,
                 tos: &mut tos,
@@ -453,14 +421,6 @@ fn bind_match_payloads(args: BindMatchPayloadsArgs<'_>) -> Result<Vec<ValueId>, 
         && (slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return)) {
             slot = Some(base);
         }
-    // Known cursor: the VM overwrites the scrutinee slot with payload[0].
-    // The arm's first load need not be payload[0] (lowering may read the
-    // field slot in place), so the exact base wins over the guess.
-    if let Some(base) = b.match_base
-        && slot.is_some()
-    {
-        slot = Some(base);
-    }
     if let Some(slot) = slot {
         for (i, &p) in payloads.iter().enumerate() {
             let local = LocalId(slot + i as u32);
@@ -611,15 +571,6 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         overlap_defs,
     } = args;
 
-    if hints.allow_deopt
-        && let Some(op) = last
-            && matches!(
-                op,
-                IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
-            )
-                && let Some(kind) = super::deopt::boundary_for_op(op) {
-                    b.ins_deopt(kind, op.loc())?;
-                }
     match last {
         Some(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
@@ -686,11 +637,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
             b.ret(Some(v))?;
         }
         Some(IlOp::ConstReturnImm { imm, .. }) => {
-            let c = match hints.default_int {
-                MirTy::I32 => MirConst::I32(*imm as i32),
-                _ => MirConst::I64(i64::from(*imm)),
-            };
-            let v = b.ins_const(c)?;
+            let v = b.ins_const(MirConst::I64(i64::from(*imm)))?;
             b.ret(Some(v))?;
         }
         Some(IlOp::BinReturn { op, .. }) => {
@@ -809,11 +756,7 @@ fn lower_op(
             Ok(())
         }
         IlOp::Const { imm, .. } => {
-            let c = match hints.default_int {
-                MirTy::I32 => MirConst::I32(*imm),
-                _ => MirConst::I64(i64::from(*imm)),
-            };
-            tos.push(b.ins_const(c)?);
+            tos.push(b.ins_const(MirConst::I64(i64::from(*imm)))?);
             Ok(())
         }
         IlOp::ConstPool { idx, .. } => {
@@ -851,7 +794,7 @@ fn lower_op(
         }
         IlOp::BinSlotImm { op, slot, imm, .. } => {
             let inst = Instruction::from(*op);
-            let ty = bin_operand_ty(inst, hints);
+            let ty = bin_operand_ty(inst);
             let lhs = b.use_local(LocalId(u32::from(*slot)), ty)?;
             let rhs = b.ins_const(match ty {
                 MirTy::I32 => MirConst::I32(i32::from(*imm)),
@@ -865,7 +808,7 @@ fn lower_op(
         }
         IlOp::BinSlotSlot { op, a, b: bs, .. } => {
             let inst = Instruction::from(*op);
-            let ty = bin_operand_ty(inst, hints);
+            let ty = bin_operand_ty(inst);
             let lhs = b.use_local(LocalId(u32::from(*a)), ty)?;
             let rhs = b.use_local(LocalId(u32::from(*bs)), ty)?;
             tos.push(apply_bin(b, inst, lhs, rhs)?);
@@ -927,27 +870,17 @@ fn lower_op(
             } else {
                 (call_result_ty(hints, next, rest), None)
             };
-            let abi = if let Some(abi) = hints.calls.get(&target.0) {
-                if abi.params.len() != n {
-                    return Err(LowerError::Refused("CALL arity".into()));
-                }
-                if super::abi::is_multi_word_ret(*ret_words) != abi.ret_hi.is_some() {
-                    return Err(LowerError::Refused("CALL ret width".into()));
-                }
-                abi.clone()
-            } else {
-                let params: Vec<MirTy> = args.iter().map(|&a| b.func().ty(a)).collect();
-                if !dest_ty.is_word_lane() || params.iter().any(|t| !t.is_word_lane()) {
-                    return Err(LowerError::Refused("CALL".into()));
-                }
-                if dest_hi_ty.is_some_and(|t| !t.is_word_lane()) {
-                    return Err(LowerError::Refused("CALL hi".into()));
-                }
-                DenseAbi {
-                    params,
-                    ret: dest_ty,
-                    ret_hi: dest_hi_ty,
-                }
+            let params: Vec<MirTy> = args.iter().map(|&a| b.func().ty(a)).collect();
+            if !dest_ty.is_word_lane() || params.iter().any(|t| !t.is_word_lane()) {
+                return Err(LowerError::Refused("CALL".into()));
+            }
+            if dest_hi_ty.is_some_and(|t| !t.is_word_lane()) {
+                return Err(LowerError::Refused("CALL hi".into()));
+            }
+            let abi = DenseAbi {
+                params,
+                ret: dest_ty,
+                ret_hi: dest_hi_ty,
             };
             let (lo, hi) = b.ins_call(*target, args, &abi)?;
             tos.push(lo);
@@ -1051,22 +984,6 @@ fn lower_op(
     }
 }
 
-fn maybe_ins_deopt(b: &mut MirBuilder, op: &IlOp, hints: &LowerHints) -> Result<(), LowerError> {
-    if !hints.allow_deopt {
-        return Ok(());
-    }
-    if matches!(
-        op,
-        IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
-    ) {
-        return Ok(());
-    }
-    if let Some(kind) = super::deopt::boundary_for_op(op) {
-        b.ins_deopt(kind, op.loc())?;
-    }
-    Ok(())
-}
-
 fn lower_byte(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
@@ -1079,9 +996,9 @@ fn lower_byte(
         Instruction::INC | Instruction::DEC => {
             let (slot, _prefix, is_float) = byte.inc_dec_parts();
             let ty = if is_float {
-                hints.default_float
+                MirTy::F64
             } else {
-                hints.default_int
+                MirTy::I64
             };
             let cur = b.use_local(LocalId(slot as u32), ty)?;
             let one = if is_float {
@@ -1102,7 +1019,7 @@ fn lower_byte(
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("cast stack".into()))?;
-            let to = hints.default_float;
+            let to = MirTy::F64;
             tos.push(b.ins_cast(MirCastKind::IntToFloat, to, v)?);
             Ok(())
         }
@@ -1376,11 +1293,11 @@ fn const_native_id(b: &MirBuilder, v: ValueId) -> Option<u16> {
     None
 }
 
-fn bin_operand_ty(inst: Instruction, hints: &LowerHints) -> MirTy {
+fn bin_operand_ty(inst: Instruction) -> MirTy {
     if is_float_inst(inst) {
-        hints.default_float
+        MirTy::F64
     } else {
-        hints.default_int
+        MirTy::I64
     }
 }
 
@@ -1890,27 +1807,6 @@ mod tests {
                 )
             })
         }));
-    }
-
-    #[test]
-    fn lowering_deopt_stop_on_return() {
-        let loc = common::DebugLoc {
-            file: 0,
-            start_byte: 0,
-            end_byte: 3,
-        };
-        let ops = vec![
-            IlOp::Label(Label(0)),
-            IlOp::Load { slot: 0, loc },
-            IlOp::Return { loc, ret_words: 1 },
-        ];
-        let mut hints = LowerHints::new("ret");
-        hints.slot_ty.insert(0, MirTy::I64);
-        hints.param_count = 1;
-        hints.allow_deopt = true;
-        let f = try_lower_numeric(&ops, &hints).expect("deopt return");
-        f.verify().unwrap();
-        assert!(f.has_deopt_edge());
     }
 
     #[test]

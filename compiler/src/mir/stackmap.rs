@@ -149,18 +149,6 @@ fn take_slots(func: &MirFunc, at: ValueId, into: &mut BTreeSet<u16>) {
     }
 }
 
-/// True when an allocating body encodes a real S2b draft (one or more sites).
-pub fn has_real_maps(
-    ops: &[IlOp],
-    name: &str,
-    entry_sp: u32,
-    pool: &[u64],
-    unboxed_fields: &[(u32, u32)],
-) -> bool {
-    try_build_draft(ops, name, entry_sp, pool, unboxed_fields)
-        .is_some_and(|d| !d.sites.is_empty())
-}
-
 /// Lift an allocating body for maps (and S2c specialize / LIR eligibility).
 pub fn try_build_draft(
     ops: &[IlOp],

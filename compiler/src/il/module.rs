@@ -349,9 +349,8 @@ impl IlModule {
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
-        // I8: leftovers then try IL→MIR→LIR (`lir_eligible`); fuse-IL if
-        // a LIR reconstruct wall hits. Q6–Q8 first rungs enter dense +
-        // cost; they are not LIR walls.
+        // I8: leftovers then try MIR→LIR (MIR lowered from HIR); fuse-IL if
+        // a LIR reconstruct wall (`lir_refuse_direct`) hits.
         // S2d: snapshot maps from stack-IL before dense replace (dense residuals
         // cannot re-infer). Re-lift after LIR / fuse-IL when that succeeds.
         self.stack_map_drafts.clear();
@@ -389,7 +388,6 @@ impl IlModule {
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
                     &body.ops,
                     &body.meta.name,
-                    body.meta.entry_sp,
                     pool,
                     &dense_calls,
                     body.meta.entry,
@@ -445,9 +443,7 @@ impl IlModule {
             if let Some(lir) = crate::mir::try_lower_abi_body_side(
                 &body.ops,
                 &body.meta.name,
-                body.meta.entry_sp,
                 pool,
-                &body.meta.unboxed_fields,
                 body.meta.hir_mir.as_deref(),
                 &mut side,
             ) {

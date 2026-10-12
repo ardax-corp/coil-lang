@@ -1,19 +1,11 @@
 //! I8 — which leftover bodies enter MIR→LIR after dense specialize.
 //!
-//! Production is two-phase after stack-IL opts (`IlModule`):
-//! 1. [`crate::mir::try_specialize_body`] — numeric dense + cost gate.
-//! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when there is
-//!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
-//!
-//! Hard refuse is **LIR reconstruct** walls: unmapped alloc, one-word
-//! `CALL`, escaping fields, box. HostInvoke word edges lift (LIR emits
-//! `CONST id; args; HostInvoke`); untyped native ids refuse in the builder.
-//! Q6 counted `for`, Q7 one-word dense `CALL`, Q8 niche / two-slot `Br`,
-//! and D3 boxed multi-payload `Unpack` / `JumpIfMatch` are not walls —
-//! they lift; keep/refuse is the cost gate. LIR reconstructs multi-word `CALL`
-//! (B3 / C1); one-word `CALL` / `TailCall` stay dense-or-fuse. Heap index
-//! is not a wall after A2. Fuse-IL stays the fallback.
-//! There is no second AST walker.
+//! Both MIR tiers lower from HIR (M4: there is no stack-IL lift). Dense
+//! goes first ([`crate::mir::try_specialize_body_side`]); a body it misses
+//! tries LIR ([`crate::mir::try_lower_abi_body_side`]), which `IlModule`
+//! keeps only when cost ≤ fuse. The walls below are what the stack IL the
+//! LIR replaces must not hold: one-word `CALL`, unmapped alloc, box.
+//! Fuse-IL stays the fallback.
 
 use common::Instruction;
 
@@ -29,50 +21,8 @@ pub enum LirRefuse {
     /// I6: user `CALL` / `TailCall` / other `Entry` (LIR reconstruct wall;
     /// Q7 one-word self-`CALL` is dense + cost, not this refuse).
     Call,
-    /// Escaping / heap-backed field ops (LIR reconstruct wall; D1 maps
-    /// bind; D2 dense-native reconstruct is the keep path).
-    HeapField,
     /// `BoxValue` / `UnboxValue`.
     Box,
-}
-
-/// Production LIR entry after dense specialize misses.
-///
-/// Eligible when there is no **LIR reconstruct** wall. Walls stay I5
-/// alloc without maps, one-word `CALL` (Q7 densifies one-word self-`CALL`
-/// instead), escaping fields, box. HostInvoke word edges lift.
-/// Counted `for` (Q6), niche / two-slot match (Q8), and boxed
-/// multi-payload `Unpack` / `JumpIfMatch` (D3) are not LIR walls. Q9 R1:
-/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R3 maps
-/// `FORMAT` / `STRINGIFY` (unmapped format is an alloc wall). Q9 R2 densifies
-/// `from_bytes` / `to_bytes` HostInvoke. Heap index /
-/// `ArrayLen` / `StoreIndex` may lift (A2).
-/// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
-/// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
-pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
-    lir_eligible_with(ops, unboxed_fields, false)
-}
-
-/// Like [`lir_eligible`], with S2c maps: `maps_ok` lets alloc through.
-pub fn lir_eligible_with(
-    ops: &[IlOp],
-    unboxed_fields: &[(u32, u32)],
-    maps_ok: bool,
-) -> bool {
-    lir_refuse_with(ops, unboxed_fields, maps_ok).is_none()
-}
-
-pub fn lir_refuse(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> Option<LirRefuse> {
-    lir_refuse_with(ops, unboxed_fields, false)
-}
-
-pub fn lir_refuse_with(
-    ops: &[IlOp],
-    unboxed_fields: &[(u32, u32)],
-    maps_ok: bool,
-) -> Option<LirRefuse> {
-    let _ = unboxed_fields;
-    hard_refuse(ops, maps_ok, false)
 }
 
 /// The walls for a body whose LIR comes from MIR lowered from HIR: that
@@ -80,10 +30,6 @@ pub fn lir_refuse_with(
 /// (`maps_ok` from [`super::stackmap::mir_maps_ok`]), so neither is a wall
 /// on the stack IL it replaces.
 pub fn lir_refuse_direct(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
-    hard_refuse(ops, maps_ok, true)
-}
-
-fn hard_refuse(ops: &[IlOp], maps_ok: bool, fields_ok: bool) -> Option<LirRefuse> {
     for op in ops {
         match op {
             IlOp::Entry {
@@ -101,9 +47,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool, fields_ok: bool) -> Option<LirRefuse
                 ..
             } => return Some(LirRefuse::Alloc),
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
-            IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } if !fields_ok => {
-                return Some(LirRefuse::HeapField);
-            }
             IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => return Some(LirRefuse::Box),
             op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
@@ -141,8 +84,7 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -168,8 +110,7 @@ mod tests {
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -192,8 +133,7 @@ mod tests {
                 hint: Default::default(),
             },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -205,8 +145,7 @@ mod tests {
             IlOp::Load { slot: 0, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -222,8 +161,7 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -236,14 +174,14 @@ mod tests {
             loc,
             ret_words: 1,
         }];
-        assert_eq!(lir_refuse(&call, &[]), Some(LirRefuse::Call));
+        assert_eq!(lir_refuse_direct(&call, false), Some(LirRefuse::Call));
         let host = [IlOp::HostInvoke {
             arity: 0,
             layout: 0,
             loc,
         }];
         // HostInvoke lifts; the MIR builder refuses untyped native ids.
-        assert_eq!(lir_refuse(&host, &[]), None);
+        assert_eq!(lir_refuse_direct(&host, false), None);
     }
 
     #[test]
@@ -256,8 +194,7 @@ mod tests {
             loc,
             ret_words: 2,
         }];
-        assert_eq!(lir_refuse(&call, &[]), None);
-        assert!(lir_eligible(&call, &[]));
+        assert_eq!(lir_refuse_direct(&call, false), None);
         let tail = [IlOp::Entry {
             kind: crate::il::EntryKind::TailCall,
             arity: 1,
@@ -265,7 +202,7 @@ mod tests {
             loc,
             ret_words: 2,
         }];
-        assert_eq!(lir_refuse(&tail, &[]), Some(LirRefuse::Call));
+        assert_eq!(lir_refuse_direct(&tail, false), Some(LirRefuse::Call));
         let wide = [IlOp::Entry {
             kind: crate::il::EntryKind::Call,
             arity: 1,
@@ -274,7 +211,7 @@ mod tests {
             ret_words: 3,
         }];
         assert_eq!(
-            lir_refuse(&wide, &[]),
+            lir_refuse_direct(&wide, false),
             Some(LirRefuse::Call),
             "N>MAX_MODELED_RET_WORDS stays a LIR reconstruct wall"
         );
@@ -290,9 +227,8 @@ mod tests {
             IlOp::MakeArray { elem_kind: 0, arity: 2, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
-        assert_eq!(lir_refuse_with(&ops, &[], true), None);
-        assert!(lir_eligible_with(&ops, &[], true));
+        assert_eq!(lir_refuse_direct(&ops, false), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_direct(&ops, true), None);
     }
 
     #[test]
@@ -308,8 +244,8 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
-        assert_eq!(lir_refuse_with(&ops, &[], true), None);
+        assert_eq!(lir_refuse_direct(&ops, false), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_direct(&ops, true), None);
     }
 
     #[test]
@@ -322,8 +258,8 @@ mod tests {
             IlOp::byte(Byte::new(Instruction::ArrayPush)),
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
-        assert_eq!(lir_refuse_with(&ops, &[], true), None);
+        assert_eq!(lir_refuse_direct(&ops, false), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_direct(&ops, true), None);
     }
 
     #[test]
@@ -340,9 +276,8 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
-        assert_eq!(lir_refuse_with(&ops, &[], true), None);
-        assert!(!lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_direct(&ops, true), None);
     }
 
     #[test]
@@ -355,8 +290,7 @@ mod tests {
             IlOp::byte(Byte::new(Instruction::DoneCoro)),
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -368,8 +302,7 @@ mod tests {
             IlOp::Index { loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -392,8 +325,7 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -409,8 +341,7 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 
     #[test]
@@ -430,15 +361,14 @@ mod tests {
             },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
         let jim2 = [IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 2 },
             target: Label(1),
             loc,
             hint: Default::default(),
         }];
-        assert_eq!(lir_refuse(&jim2, &[]), None);
+        assert_eq!(lir_refuse_direct(&jim2, false), None);
     }
 
     /// COI-385: packed dense ops are not a `hard_refuse` / `lir_eligible` tax.
@@ -453,7 +383,6 @@ mod tests {
             IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), None);
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse_direct(&ops, false), None);
     }
 }

@@ -72,24 +72,23 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
-pub use entry::{lir_eligible, lir_refuse, LirRefuse};
+pub use entry::LirRefuse;
 pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirMirInput};
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::{bind_drafts, is_alloc_opcode, try_build_draft, DraftFrameMap};
 pub use inst::{
-    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
+    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
-pub use infer::{infer_lir_with_seed, numeric_work_ops};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
 pub use specialize::{
-    take_dense_refusal, take_lir_refusal, try_lower_abi_body, try_lower_abi_body_side, try_lower_abi_body_with,
-    try_specialize_body, try_specialize_body_side, BodySidecar,
+    take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
+    try_specialize_body_side, BodySidecar,
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;

@@ -746,7 +746,7 @@ impl Compiler {
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
     fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
-        if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
+        if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
@@ -757,6 +757,10 @@ impl Compiler {
             Err("lambda".to_string())
         } else if emit.par_loop {
             Err("parallel loop".to_string())
+        } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
+            // The debugger reads split class / array locals from their
+            // frame slots; direct MIR keeps them in registers or folds them.
+            Err("split local under a debugger".to_string())
         } else {
             self.hir_mir_input(hir, emit, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
