@@ -395,6 +395,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         Some((lo, _)) => lo,
         // A tuple not returned as a pair comes back boxed.
         None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
+        // So does any two-word value (a body called through a function
+        // value, or depth-checked).
+        None if inp.word(ret).is_none() && (inp.boxed_view)(ret, None).is_some() => MirTy::HeapRef,
         None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
@@ -801,6 +804,15 @@ impl Lower<'_> {
                 }
             }
             _ => Err("pair operand".into()),
+        }
+    }
+
+    /// `id`'s word, or its box when it is a two-word value.
+    fn word_or_boxed(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
+        if self.inp.pair_tys.contains_key(&id.0) {
+            self.boxed_word(id)
+        } else {
+            self.word(id)
         }
     }
 
@@ -2804,7 +2816,8 @@ impl Lower<'_> {
                         }
                         self.zero(lo_ty)?
                     }
-                    [arg] => match self.word(*arg)? {
+                    // A two-word payload rides boxed.
+                    [arg] => match self.word_or_boxed(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
                         Some(v) if lo_ty == MirTy::I64 && self.b.value_ty(v).is_heap_word() => self.fit(v, lo_ty)?,
                         Some(_) => return Err("variant payload type".into()),
@@ -2818,10 +2831,10 @@ impl Lower<'_> {
                 let [a, b] = args else {
                     return Err("make pair".into());
                 };
-                let Some(a) = self.word(*a)? else {
+                let Some(a) = self.word_or_boxed(*a)? else {
                     return Ok(Val::Never);
                 };
-                let Some(b) = self.word(*b)? else {
+                let Some(b) = self.word_or_boxed(*b)? else {
                     return Ok(Val::Never);
                 };
                 (a, b)
