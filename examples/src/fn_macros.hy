@@ -73,7 +73,7 @@ macro ensure(Expr cond, Expr msg) -> Code {
     return quote expr { ensure_result(${cond}, ${msg}) };
 }
 
-pub fn ensure_result(bool cond, string msg) -> Result<(), string> {
+fn ensure_result(bool cond, string msg) -> Result<(), string> {
     if cond {
         return Result::Ok(());
     }
