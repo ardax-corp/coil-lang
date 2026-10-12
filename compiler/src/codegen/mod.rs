@@ -613,6 +613,9 @@ pub struct Compiler {
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
     hir_mir_why: Option<String>,
+    /// Frame words at entry of the function being compiled (its arguments
+    /// and dictionaries), when its compile path records them.
+    hir_entry_sp: Option<u32>,
     /// Raw op ranges of the early exits the last HIR body marked cold, laid
     /// out after its epilogue ([`Compiler::flush_hir_cold`]).
     hir_cold: Vec<(usize, usize)>,
@@ -782,6 +785,7 @@ impl Default for Compiler {
             ),
             hir_mir: None,
             hir_mir_why: None,
+            hir_entry_sp: None,
             hir_inline_mono: !matches!(
                 std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
                 Ok("0" | "false" | "off" | "no")

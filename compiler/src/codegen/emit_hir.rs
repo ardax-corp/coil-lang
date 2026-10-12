@@ -479,6 +479,7 @@ impl Compiler {
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
         self.hir_refusal = None;
+        let entry_sp = self.hir_entry_sp.take();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -682,14 +683,23 @@ impl Compiler {
                         }
                     }
                 }
+                let body_ops = self.bytecode.ops().len();
                 if let Some(root) = hir.root {
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
                 self.hir_mir_why = None;
-                self.hir_mir = if entry_convs.is_empty() && !self.hir_shared_generic() {
-                    self.hir_lower_mir(hir, &emit)
+                // A shared generic body with no open parameter takes its
+                // dictionaries as trailing parameters it never reads.
+                let shared = self.hir_shared_generic();
+                let open = hir.params.iter().any(|&p| self.hir_open_ty(hir.local(p).ty.as_ref()));
+                self.hir_mir = if entry_convs.is_empty() && !shared {
+                    self.hir_lower_mir(hir, &emit, None)
+                } else if entry_convs.is_empty() && !open && let Some(entry) = entry_sp
+                    && !self.hir_reads_dicts(body_ops)
+                {
+                    self.hir_lower_mir(hir, &emit, Some(entry))
                 } else {
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
@@ -735,7 +745,7 @@ impl Compiler {
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
-    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit) -> Option<crate::mir::MirFunc> {
+    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
         if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
             return None;
         }
@@ -748,7 +758,7 @@ impl Compiler {
         } else if emit.par_loop {
             Err("parallel loop".to_string())
         } else {
-            self.hir_mir_input(hir, emit, file)
+            self.hir_mir_input(hir, emit, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
         };
         match why {
@@ -774,6 +784,7 @@ impl Compiler {
         hir: &HirBody,
         emit: &'a HirEmit,
         file: Option<u32>,
+        entry_words: Option<u32>,
     ) -> Result<crate::mir::HirMirInput<'a>, String> {
         let mut pair_locals = HashMap::new();
         for &local in emit.plan.pair_locals.keys() {
@@ -980,6 +991,15 @@ impl Compiler {
             .collect();
         let ret_pair = match &emit.plan.ret {
             Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
+            // A body that returns a niche-layout value boxed (a test body's
+            // `Result`) builds the box, which direct MIR does not.
+            Rep::Word(ValueLayout::Boxed)
+                if hir.ret.as_ref().is_some_and(|t| {
+                    matches!(self.value_layout(t), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
+                }) =>
+            {
+                return Err("boxed niche return".into());
+            }
             Rep::Word(_) => None,
         };
         Ok(crate::mir::HirMirInput {
@@ -1079,6 +1099,8 @@ impl Compiler {
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,
+            entry_words,
+            opaque_vars: hir.is_generic,
         })
     }
 
@@ -1141,10 +1163,14 @@ impl Compiler {
                 [p] => {
                     // A heap payload is an opaque word: it only moves.
                     let w = word(p).or_else(|| (!layout::is_immediate(p)).then_some(MirTy::I64))?;
-                    if lo.is_some_and(|l| l != w) {
-                        return None;
-                    }
-                    lo = Some(w);
+                    lo = match lo {
+                        None => Some(w),
+                        Some(l) if l == w => Some(w),
+                        // A `bool` payload beside an `i64` one rides as the
+                        // same 0/1 word.
+                        Some(MirTy::Bool | MirTy::I64) if matches!(w, MirTy::Bool | MirTy::I64) => Some(MirTy::I64),
+                        Some(_) => return None,
+                    };
                 }
                 _ => return None,
             }
@@ -5951,6 +5977,14 @@ impl Compiler {
         !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
     }
 
+    /// Whether the ops from `start` on read a dictionary slot.
+    fn hir_reads_dicts(&self, start: usize) -> bool {
+        let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
+        self.bytecode.ops()[start..].iter().filter_map(IlOp::as_encode_byte).any(|b| {
+            *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
+        })
+    }
+
     /// Whether `ty` is a bare type variable.
     fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
         ty.is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), ty), Ty::Var(_)))
@@ -7165,12 +7199,19 @@ impl Compiler {
                 {
                     let call = &emit.plan.calls[&id.0];
                     let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
+                    // A `TailCall`'s callee returns for this function, so in
+                    // this function's words, whatever the call's own rep.
+                    let pair_ret = if entry_kind == crate::il::EntryKind::TailCall {
+                        matches!(emit.plan.ret, Rep::Pair(_))
+                    } else {
+                        ret_words == 2
+                    };
                     emit.call_targets.insert(
                         id.0,
                         crate::mir::HirCallSite {
                             target,
                             pair_args,
-                            pair_ret: ret_words == 2,
+                            pair_ret,
                             coro: entry_kind == crate::il::EntryKind::MakeCoro,
                         },
                     );

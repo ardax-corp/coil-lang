@@ -77,6 +77,8 @@ impl HirMirInput<'_> {
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
             .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e)).map(|_| MirTy::HeapRef))
+            .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
+            .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
     }
 
     /// An array element type held as a heap word: a string, class, array,
@@ -101,6 +103,8 @@ impl HirMirInput<'_> {
         let elem = array_elem(arr)?;
         match scalar(elem) {
             Some(t @ (MirTy::I64 | MirTy::F64)) => Some(t),
+            // A type parameter's element: the opaque word as stored.
+            _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
             _ => self.heap_elem(elem),
         }
     }
@@ -216,6 +220,12 @@ pub struct HirMirInput<'a> {
     pub cold_ok: bool,
     /// Source file of the body, for statement locations.
     pub file: Option<u32>,
+    /// Frame words at entry when trailing dictionary parameters follow
+    /// the body's own (a shared generic instance): each is one heap word.
+    pub entry_words: Option<u32>,
+    /// A generic body's type parameter values are opaque words it only
+    /// moves (a raw scalar or a box, as the caller passed it).
+    pub opaque_vars: bool,
 }
 
 struct Loop {
@@ -362,6 +372,62 @@ fn ty_kind(ty: &Ty) -> &'static str {
     }
 }
 
+fn is_var(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Var(_))
+}
+
+/// A generic body moves its type parameter values but never reads them:
+/// no operator, field, index, call or constructor takes one (any of them
+/// could read a box as its payload), and nothing that can collect runs
+/// while one is live in a word the frame maps don't trace.
+fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
+    let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
+    let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+    if !any {
+        return Ok(());
+    }
+    for e in &hir.exprs {
+        let read = match &e.kind {
+            HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
+            HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
+            HirKind::Index { base, index, .. } => var(base) || var(index),
+            HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
+            HirKind::Append { base, value } => var(base) || var(value),
+            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
+            HirKind::If { cond, .. } => var(cond),
+            HirKind::Match { scrutinee, .. } => var(scrutinee),
+            HirKind::LetPat { init, .. } => var(init),
+            _ => false,
+        };
+        if read {
+            return Err("type variable read".into());
+        }
+    }
+    let collects = func.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        !matches!(
+            i,
+            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. }
+        )
+    });
+    if collects {
+        return Err("type variable across a call".into());
+    }
+    Ok(())
+}
+
+/// `Result<(), E>`.
+fn unit_result(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::App(head, args) => matches!(head.as_ref(), Ty::Con(n) if n == "Result") && args.first().is_some_and(is_unit),
+        Ty::Sum { name, variants } => {
+            name == "Result"
+                && variants.iter().any(|(v, payload)| v == "Ok" && matches!(payload, crate::typechecking::ty::EnumVariantPayloadTy::Tuple(items) if items.iter().all(is_unit)))
+        }
+        _ => false,
+    }
+}
+
 fn is_unit(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Con(n) => n == crate::typechecking::ty::UNIT,
@@ -378,10 +444,11 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    if hir.is_coro {
+    // A `gen fn` that never yields runs to its return like a function.
+    if hir.is_coro && hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Yield { .. })) {
         return Err("body kind coroutine".into());
     }
-    if hir.is_generic {
+    if hir.is_generic && !inp.opaque_vars {
         return Err("body kind generic".into());
     }
     if !hir.captures.is_empty() {
@@ -389,6 +456,14 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     let root = hir.root.ok_or("no root")?;
     let ret = hir.ret.as_ref().ok_or("return type")?;
+    // A `gen fn` returns its final value as its coroutine's last resume.
+    let ret = match strip_readonly(ret) {
+        Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
+        _ => ret,
+    };
+    if hir.is_coro && !is_unit(ret) && scalar(ret).is_none() {
+        return Err("body kind coroutine".into());
+    }
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
@@ -428,6 +503,15 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             next += 1;
         }
     }
+    if let Some(entry) = inp.entry_words {
+        if entry < next {
+            return Err("param slot".into());
+        }
+        // Dictionaries: never read by a body this lowering takes.
+        for _ in next..entry {
+            b.add_param(MirTy::HeapRef).map_err(mir)?;
+        }
+    }
     let cur = b.entry();
     let mut lower = Lower {
         hir,
@@ -456,6 +540,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let mut func = lower.b.finish().map_err(mir)?;
     prune(&mut func, &spec);
     tidy(&mut func, &order);
+    if inp.opaque_vars {
+        opaque_moves_only(hir, &func)?;
+    }
     Ok(func)
 }
 
@@ -725,6 +812,17 @@ impl Lower<'_> {
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
+            // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
+            // emission's `CONST 0; RETURN`.
+            (Val::Unit, None) if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                // `Ok(())` is the zero word of a `NicheOpt` result.
+                if self.b.func().ret_ty != Some(MirTy::NicheOpt) {
+                    return Err("return value".into());
+                }
+                let ok = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let ok = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, ok).map_err(mir)?;
+                self.b.ret(Some(ok)).map_err(mir)
+            }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
@@ -1484,6 +1582,13 @@ impl Lower<'_> {
                     && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0)
                     && !self.boxes.contains_key(&local.0) =>
             {
+                let lit = matches!(self.hir.expr(*index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
+                if !lit && !lower::stack_index_proven(self.hir, id, *index, n) {
+                    let Some(idx) = self.index_word(*index)? else {
+                        return Ok(Val::Never);
+                    };
+                    return Ok(Val::V(self.stack_select_checked(slot, n, idx, ty)?));
+                }
                 let Some(k) = self.stack_index(id, *index, n)? else {
                     return Ok(Val::Never);
                 };
@@ -2780,6 +2885,41 @@ impl Lower<'_> {
         self.b.ins_stack_phi(args).map_err(mir)
     }
 
+    /// [`Self::stack_select`] of an index that may be out of range: as HIR
+    /// emission, an out-of-range index boxes the array and indexes that,
+    /// which panics.
+    fn stack_select_checked(&mut self, base: u32, n: usize, idx: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let top = self.b.ins_const(MirConst::I64(n as i64)).map_err(mir)?;
+        let neg = self.b.ins_cmp(MirCmpOp::Lt, idx, zero).map_err(mir)?;
+        let oob = self.b.create_block();
+        let low = self.b.create_block();
+        let inb = self.b.create_block();
+        self.b.branch(neg, oob, low).map_err(mir)?;
+        self.switch(low);
+        let over = self.b.ins_cmp(MirCmpOp::Ge, idx, top).map_err(mir)?;
+        self.b.branch(over, oob, inb).map_err(mir)?;
+        self.switch(inb);
+        let v = self.stack_select(base, n, idx, ty)?;
+        let in_end = self.cur;
+        self.switch(oob);
+        let mut words = Vec::with_capacity(n);
+        for k in 0..n as u32 {
+            words.push(self.b.use_local(LocalId(base + k), ty).map_err(mir)?);
+        }
+        let arr = self.b.ins_alloc(MirAllocKind::Array, words).map_err(mir)?;
+        let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+        let w = self.b.ins_index(arr, idx, ty, false).map_err(mir)?;
+        let oob_end = self.cur;
+        let join = self.b.create_block();
+        self.b.switch_to_block(in_end);
+        self.jump(join)?;
+        self.b.switch_to_block(oob_end);
+        self.jump(join)?;
+        self.switch(join);
+        self.b.ins_stack_phi(vec![(in_end, v), (oob_end, w)]).map_err(mir)
+    }
+
     /// `a[i] = v` on a stack array: the value first, then the index, as
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
@@ -2816,9 +2956,13 @@ impl Lower<'_> {
 
     /// Bind `local` to the word `v`.
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
-        if self.local_ty(local)? != self.b.value_ty(v) {
-            return Err("binding type".into());
-        }
+        let ty = self.local_ty(local)?;
+        let v = match (self.b.value_ty(v), ty) {
+            (from, to) if from == to => v,
+            // A `bool` payload read from an `i64` pair word.
+            (MirTy::I64, MirTy::Bool) => self.fit(v, ty)?,
+            _ => return Err("binding type".into()),
+        };
         if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
             let assigned = self.hir.exprs.iter().any(|e| {
                 matches!(e.kind, HirKind::Assign { place, .. } if matches!(self.hir.expr(place).kind, HirKind::Local(l) if l == local))
@@ -2850,7 +2994,9 @@ impl Lower<'_> {
                     // A two-word payload rides boxed.
                     [arg] => match self.word_or_boxed(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
-                        Some(v) if lo_ty == MirTy::I64 && self.b.value_ty(v).is_heap_word() => self.fit(v, lo_ty)?,
+                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || self.b.value_ty(v) == MirTy::Bool) => {
+                            self.fit(v, lo_ty)?
+                        }
                         Some(_) => return Err("variant payload type".into()),
                         None => return Ok(Val::Never),
                     },
