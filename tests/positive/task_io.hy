@@ -69,8 +69,12 @@ fn body_len(Stream c) -> int {
     return n;
 }
 
+/// Waits for the server to close before closing (`send_and_wait_close`):
+/// the server is slow to read under GC stress, and macOS resets a client
+/// that already closed, dropping "late data" (#869).
 fn send_late(int port) -> int {
-    return send_later(port, 30, "late data");
+    sleep_ms(30);
+    return send_and_wait_close(port, "late data");
 }
 
 gen fn read_all(Stream c) -> int {

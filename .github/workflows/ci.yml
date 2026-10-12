@@ -225,6 +225,8 @@ jobs:
   harness-variants:
     name: harness variants (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung IO test fails here instead of holding the runner for 6 h (#869).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

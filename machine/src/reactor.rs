@@ -97,6 +97,9 @@ pub struct TestReport {
     pub timed_out: bool,
 }
 
+/// Most spare threads [`Reactor::help_off_stack`] keeps alive at once.
+const MAX_SPARES: usize = 64;
+
 /// Per-root-VM work-stealing reactor.
 pub struct Reactor {
     injector: Injector<Job>,
@@ -118,6 +121,8 @@ pub struct Reactor {
     join_timeouts: AtomicUsize,
     /// Join parks on `sleep_cvar` until a result or stealable job (no poll).
     join_parks: AtomicUsize,
+    /// Live spare threads started by [`Self::help_off_stack`].
+    spares: AtomicUsize,
     shutdown: AtomicBool,
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -140,6 +145,7 @@ impl Reactor {
             join_helps: AtomicUsize::new(0),
             join_timeouts: AtomicUsize::new(0),
             join_parks: AtomicUsize::new(0),
+            spares: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             worker_handles: Mutex::new(Vec::new()),
         })
@@ -264,6 +270,50 @@ impl Reactor {
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
             run_help_job(self, job);
+        }
+    }
+
+    /// Run a queued job on a spare thread, never on this one. An IO wait helps
+    /// this way: a job nested under the wait could itself wait on the frame it
+    /// sits on (a spawned client waiting for the server that is accepting it),
+    /// and both would park on one OS stack forever (#869, COI-116). Spares
+    /// exit once no job is queued.
+    pub fn help_off_stack(self: &Arc<Self>) {
+        // Each spare may itself wait on IO and need another; the cap only
+        // bounds a burst of queued jobs, not a chain of waits.
+        let cap = MAX_SPARES;
+        let mut n = self.spares.load(Ordering::SeqCst);
+        loop {
+            if n >= cap {
+                return;
+            }
+            match self
+                .spares
+                .compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(seen) => n = seen,
+            }
+        }
+        let Some(job) = self.steal_job() else {
+            self.spares.fetch_sub(1, Ordering::SeqCst);
+            return;
+        };
+        let reactor = Arc::clone(self);
+        let spawned = thread::Builder::new()
+            .name("coil-reactor-spare".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let mut job = Some(job);
+                while let Some(j) = job.take().or_else(|| reactor.steal_job()) {
+                    run_help_job(&reactor, j);
+                }
+                reactor.spares.fetch_sub(1, Ordering::SeqCst);
+            });
+        if let Err(e) = spawned {
+            // The job moved into the failed closure is dropped with it; the
+            // OS is out of threads, which nothing below can recover from.
+            panic!("coil reactor spare thread: {e}");
         }
     }
 

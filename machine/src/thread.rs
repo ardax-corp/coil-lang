@@ -597,7 +597,8 @@ fn host_end_shared_steal(published: Value) {
     });
 }
 
-/// Block on IO readiness using the bound VM's reactors (CPU help-steal when present).
+/// Block on IO readiness using the bound VM's reactors. Queued CPU jobs run on
+/// a spare thread meanwhile, never nested under the wait (#869).
 pub(crate) fn host_io_wait(
     handle: crate::io_handle::WaitHandle,
     interest: crate::io_reactor::Interest,
@@ -613,7 +614,7 @@ pub(crate) fn host_io_wait(
         }
     });
     match (io, cpu) {
-        (Some(io), Some(cpu)) => io.wait_fd_helping(handle, interest, timeout, || cpu.help_once()),
+        (Some(io), Some(cpu)) => io.wait_fd_helping(handle, interest, timeout, || cpu.help_off_stack()),
         (Some(io), None) => io.wait_fd(handle, interest, timeout),
         (None, _) => IoReactor::new().wait_fd(handle, interest, timeout),
     }
