@@ -794,7 +794,12 @@ impl Compiler {
         for (&local, &n) in &emit.plan.stacks {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
             let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
-                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element),
+                // A heap element's slot holds its boxed word.
+                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                    use crate::typechecking::value_layout::{value_layout, word_kind};
+                    (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
+                        .then_some(crate::mir::MirTy::HeapRef)
+                }),
                 _ => None,
             };
             let base = emit.slots[local as usize].ok_or("stack array slot")?;

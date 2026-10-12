@@ -2032,7 +2032,7 @@ impl Lower<'_> {
             let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
                 return Err("boxed class local".into());
             };
-            if !matches!(ty, MirTy::I64 | MirTy::F64) {
+            if !matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::HeapRef) {
                 return Err("boxed stack array type".into());
             }
             let mut items = Vec::with_capacity(n);
@@ -2384,7 +2384,9 @@ impl Lower<'_> {
                 .filter(|_| !is_unit(t))
                 .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
                 .ok_or("make payload type")?;
-            let Some(v) = self.word(arg)? else {
+            // A two-word payload is stored boxed.
+            let v = if want == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
             };
             if self.b.value_ty(v) != want {
