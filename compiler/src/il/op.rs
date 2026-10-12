@@ -520,7 +520,7 @@ impl IlOp {
             IlOp::MakeArray {
                 arity, elem_kind, ..
             } => {
-                if *elem_kind == common::WORD_POINTER && *arity <= 0xFFFF {
+                if matches!(*elem_kind, common::WORD_POINTER | common::WORD_BYTE) && *arity <= 0xFFFF {
                     Byte::new(Instruction::MakeArrayK)
                         .with_operand_u32((u32::from(*elem_kind) << 16) | *arity)
                 } else {

@@ -4779,9 +4779,16 @@ impl Compiler {
         }
     }
 
-    /// Thunk for `Vec::{name}` whose elements are ground pointers.
-    pub(super) fn pointer_vec_ctor_name(name: &str) -> String {
-        format!("{}::{name}$ptr", common::BUILTIN_VEC_TYPE)
+    /// Thunk for `Vec::{name}` stamped with element kind `stamp`
+    /// (`$ptr` for ground pointers, `$bytes` for packed bytes / bools);
+    /// `None` for an unstamped kind.
+    pub(super) fn stamped_vec_ctor_name(name: &str, stamp: u8) -> Option<String> {
+        let suffix = match stamp {
+            common::WORD_POINTER => "ptr",
+            common::WORD_BYTE => "bytes",
+            _ => return None,
+        };
+        Some(format!("{}::{name}${suffix}", common::BUILTIN_VEC_TYPE))
     }
 
     /// Emit intrinsic bodies for builtin `Vec<T>` methods and register
@@ -4848,15 +4855,24 @@ impl Compiler {
         // static fn from(arr) -> Vec<T>
         emit_host(self, format!("{owner}::from"), "vec_from_array", &[0]);
 
-        // Constructors for a ground pointer element type (`Vec<Node>`): the
-        // same bodies, then `TagArrayKind` so marking treats the elements as
-        // precise references. Call sites pick them by static type.
-        for (name, native) in [
-            ("new", None),
-            ("with_capacity", Some("vec_with_capacity")),
-            ("from", Some("vec_from_array")),
-        ] {
-            let fqn = Self::pointer_vec_ctor_name(name);
+        // Constructors for a ground pointer element type (`Vec<Node>`) or a
+        // byte / bool one: the same bodies, then `TagArrayKind` so marking
+        // treats the elements as precise references, or the runtime packs
+        // them one byte each. Call sites pick them by static type.
+        for (stamp, (name, native)) in [common::WORD_POINTER, common::WORD_BYTE]
+            .into_iter()
+            .flat_map(|stamp| {
+                [
+                    ("new", None),
+                    ("with_capacity", Some("vec_with_capacity")),
+                    ("from", Some("vec_from_array")),
+                ]
+                .map(|ctor| (stamp, ctor))
+            })
+        {
+            let Some(fqn) = Self::stamped_vec_ctor_name(name, stamp) else {
+                continue;
+            };
             if self.functions.contains_key(&fqn) {
                 continue;
             }
@@ -4877,9 +4893,8 @@ impl Compiler {
                 }
                 None => self.bytecode.push_make_array(0),
             }
-            self.bytecode.push(
-                Byte::new(Instruction::TagArrayKind).with_operand_u32(common::WORD_POINTER as u32),
-            );
+            self.bytecode
+                .push(Byte::new(Instruction::TagArrayKind).with_operand_u32(stamp as u32));
             self.bytecode.push_return();
         }
 
@@ -5751,7 +5766,7 @@ impl Compiler {
             let ctor = name
                 .strip_prefix(common::BUILTIN_VEC_TYPE)
                 .and_then(|n| n.strip_prefix("::"))
-                .map(|n| n.strip_suffix("$ptr").unwrap_or(n));
+                .map(|n| n.strip_suffix("$ptr").or_else(|| n.strip_suffix("$bytes")).unwrap_or(n));
             if matches!(ctor, Some("new" | "with_capacity" | "from")) {
                 let params = match ctor {
                     Some("with_capacity") => vec![common::WORD_SCALAR],
