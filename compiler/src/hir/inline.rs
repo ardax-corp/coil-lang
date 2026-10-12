@@ -417,7 +417,7 @@ impl Inliner<'_> {
         out: &mut Vec<HirId>,
     ) -> Option<HirId> {
         while self.body.exprs.len() - self.original <= growth {
-            let Some((call, callee, shape)) = self.site_in(s, callee_of) else {
+            let Some((call, callee, shape, spills)) = self.site_in(s, callee_of) else {
                 match self.in_place.then(|| self.in_place_site(s, callee_of, true)).flatten() {
                     Some((call, callee, shape)) => {
                         self.splice_in_place(call, callee, &shape);
@@ -435,6 +435,9 @@ impl Inliner<'_> {
                     _ => Site::Nested,
                 }
             };
+            for a in spills {
+                out.push(self.spill(a));
+            }
             let mut hoisted = Vec::new();
             let result = self.splice(call, callee, &shape, site, &mut hoisted);
             // A parameter's `let` holds the call's argument, whose own calls
@@ -464,12 +467,13 @@ impl Inliner<'_> {
     }
 
     /// The first call in statement `s`, in evaluation order, that can be
-    /// hoisted: every operand evaluated before it is pure.
+    /// hoisted: every operand evaluated before it is pure, or may only trap
+    /// and goes into a temp first (the returned operands, in order).
     fn site_in<'a>(
         &self,
         s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
-    ) -> Option<(HirId, &'a HirBody, Shape)> {
+    ) -> Option<(HirId, &'a HirBody, Shape, Vec<HirId>)> {
         let b = &self.body;
         let root = match &b.expr(s).kind {
             HirKind::Let { init: Some(i), .. } => *i,
@@ -491,27 +495,36 @@ impl Inliner<'_> {
             _ => s,
         };
         let mut found = None;
-        let _ = self.search(root, callee_of, &mut found);
-        found.filter(|(call, _, shape)| *call == root || !shape.heap_result)
+        let mut spills = Vec::new();
+        let _ = self.search(root, callee_of, &mut found, &mut spills);
+        found
+            .filter(|(call, _, shape)| *call == root || !shape.heap_result)
+            .map(|(call, callee, shape)| (call, callee, shape, spills))
     }
 
     /// Walk `e` in evaluation order. `Err` stops at an operand that is not
-    /// pure, since a later call cannot move ahead of it.
+    /// pure, since a later call cannot move ahead of it. An operand that
+    /// only may trap (int `+`, ...) goes to `spills`: evaluated into a temp
+    /// first, it still traps before the call runs (coil-lang#856).
     fn search<'a>(
         &self,
         e: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
         found: &mut Option<(HirId, &'a HirBody, Shape)>,
+        spills: &mut Vec<HirId>,
     ) -> Result<(), ()> {
         let b = &self.body;
-        let seq = |ids: &[HirId], found: &mut Option<_>| -> Result<(), ()> {
+        let seq = |ids: &[HirId], found: &mut Option<_>, spills: &mut Vec<HirId>| -> Result<(), ()> {
             for &a in ids {
-                self.search(a, callee_of, found)?;
+                self.search(a, callee_of, found, spills)?;
                 if found.is_some() {
                     return Ok(());
                 }
                 if !self.pure(a) {
-                    return Err(());
+                    if !self.spillable(a) {
+                        return Err(());
+                    }
+                    spills.push(a);
                 }
             }
             Ok(())
@@ -526,15 +539,26 @@ impl Inliner<'_> {
                 // A call's own arguments are bound in order ahead of the
                 // spliced body, so they need not be pure; only a nested
                 // call past an impure argument cannot move.
+                let mark = spills.len();
                 for &a in args {
-                    let nested = self.search(a, callee_of, found);
+                    let before = spills.len();
+                    let nested = self.search(a, callee_of, found, spills);
                     if found.is_some() {
                         return Ok(());
                     }
-                    if nested.is_err() || !self.pure(a) {
+                    if nested.is_err() {
+                        spills.truncate(before);
                         break;
                     }
+                    if !self.pure(a) {
+                        if !self.spillable(a) {
+                            break;
+                        }
+                        spills.push(a);
+                    }
                 }
+                // The call's own arguments bind ahead of its body anyway.
+                spills.truncate(mark);
                 if (e.0 as usize) < self.original
                     && let Some((callee, shape)) = callee_of(e)
                     && callee.params.len() == args.len()
@@ -544,15 +568,17 @@ impl Inliner<'_> {
                 }
                 Err(())
             }
-            HirKind::Bin { lhs, rhs, .. } => seq(&[*lhs, *rhs], found),
-            HirKind::Index { base, index, .. } => seq(&[*base, *index], found),
-            HirKind::Make { args, .. } => seq(args, found),
+            HirKind::Bin { lhs, rhs, .. } => seq(&[*lhs, *rhs], found, spills),
+            HirKind::Index { base, index, .. } => seq(&[*base, *index], found, spills),
+            HirKind::Make { args, .. } => seq(args, found, spills),
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } => {
-                self.search(*x, callee_of, found)
+                self.search(*x, callee_of, found, spills)
             }
             // The scrutinee or condition runs first; the arms and branches
             // are not pure, which the enclosing operand checks.
-            HirKind::Match { scrutinee: x, .. } | HirKind::If { cond: x, .. } => self.search(*x, callee_of, found),
+            HirKind::Match { scrutinee: x, .. } | HirKind::If { cond: x, .. } => {
+                self.search(*x, callee_of, found, spills)
+            }
             _ if self.pure(e) => Ok(()),
             _ => Err(()),
         }
@@ -652,23 +678,51 @@ impl Inliner<'_> {
         e.node = None;
     }
 
-    /// Reads only locals and literals, with no effect and no trap but int
-    /// overflow. A call hoisted ahead of an int `+ - *` that overflows runs
-    /// before the panic instead of not at all; spilling such an operand
-    /// into a temp first would keep the order (coil-lang#856).
+    /// Reads only locals and literals, with no effect and no trap.
     fn pure(&self, e: HirId) -> bool {
         match &self.body.expr(e).kind {
             HirKind::Lit(_) | HirKind::Local(_) => true,
             HirKind::Bin { op, lhs, rhs } => {
-                !matches!(
-                    op,
-                    BinOp::IntDiv | BinOp::IntRem | BinOp::IntPow | BinOp::Overloaded(_)
-                ) && self.pure(*lhs)
-                    && self.pure(*rhs)
+                !op.int_may_trap() && !matches!(op, BinOp::Overloaded(_)) && self.pure(*lhs) && self.pure(*rhs)
             }
-            HirKind::Un { operand, .. } => self.pure(*operand),
+            HirKind::Un { operand, .. } => !super::op_may_trap(&self.body, e) && self.pure(*operand),
             _ => false,
         }
+    }
+
+    /// Reads only locals and literals, with no effect, but int arithmetic
+    /// that may trap: a call cannot run before it, but it can run first
+    /// into a temp ([`Inliner::spill`]).
+    fn spillable(&self, e: HirId) -> bool {
+        match &self.body.expr(e).kind {
+            HirKind::Lit(_) | HirKind::Local(_) => true,
+            HirKind::Bin { op, lhs, rhs } => {
+                !matches!(op, BinOp::Overloaded(_)) && self.spillable(*lhs) && self.spillable(*rhs)
+            }
+            HirKind::Un { operand, .. } => self.spillable(*operand),
+            _ => false,
+        }
+    }
+
+    /// `let t = e;` for the hoisted statements, with `e`'s node now reading
+    /// `t`, so `e` (and its trap) runs before the call that hoists.
+    fn spill(&mut self, e: HirId) -> HirId {
+        let moved = self.body.expr(e).clone();
+        let local = LocalId(self.body.locals.len() as u32);
+        self.body.locals.push(HirLocal {
+            name: format!("__inl_spill{}", local.0),
+            ty: moved.ty.clone(),
+            kind: LocalKind::Temp,
+            captured: false,
+        });
+        let span = moved.span;
+        let init = HirId(self.body.exprs.len() as u32);
+        self.body.exprs.push(moved);
+        let node = &mut self.body.exprs[e.0 as usize];
+        node.kind = HirKind::Local(local);
+        node.node = None;
+        node.flags = HirFlags::default();
+        self.push(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
     }
 
     /// Splice `callee` in for `call`: hoisted statements go to `out`. For
