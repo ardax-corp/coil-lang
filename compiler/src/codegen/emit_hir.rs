@@ -794,7 +794,12 @@ impl Compiler {
         for (&local, &n) in &emit.plan.stacks {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
             let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
-                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element),
+                // A heap element's slot holds its boxed word.
+                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                    use crate::typechecking::value_layout::{value_layout, word_kind};
+                    (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
+                        .then_some(crate::mir::MirTy::HeapRef)
+                }),
                 _ => None,
             };
             let base = emit.slots[local as usize].ok_or("stack array slot")?;
@@ -815,7 +820,10 @@ impl Compiler {
         };
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
-                .or_else(|| is_class(t).then_some(crate::mir::MirTy::HeapRef))
+                .or_else(|| {
+                    let string = matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING);
+                    (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
+                })
                 .or_else(|| niche(t))
         };
         let mut sroa = HashMap::new();
@@ -855,7 +863,14 @@ impl Compiler {
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
-                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && Self::hir_ty(hir, *base).is_some_and(|t| {
+                    is_class(t) || {
+                        // A record variant's field: its payload slot of the
+                        // boxed enum (a pair boxed first).
+                        let t = apply_ty_prune(checker.subst(), t);
+                        self.hir_variant_field(&t, name).is_some()
+                    }
+                })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
                 && let Some(w) = field_word(&fty)
                 && e.ty.as_ref().and_then(field_word) == Some(w)
@@ -908,7 +923,17 @@ impl Compiler {
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && !checker.class_has_drop(&class)
-                && let Some(words) = tys.iter().map(word).collect::<Option<Vec<_>>>()
+                && let Some(words) = tys
+                    .iter()
+                    .map(|t| {
+                        // A two-word field value is stored boxed.
+                        word(t).or_else(|| {
+                            (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
+                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                .then_some(crate::mir::MirTy::HeapRef)
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
             {
                 news.insert(i, (checker.class_type_id(&class), words));
             }
