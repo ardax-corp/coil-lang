@@ -351,12 +351,21 @@ pub fn resolve_default_runner() -> Result<PathBuf, String> {
     if embed.is_file() {
         return Ok(embed);
     }
-    eprintln!(
-        "warning: `coil-embed` not found next to {}; packaging with full `coil` as runner \
-         (install `coil-embed` for a smaller packaged binary)",
+    Err(format!(
+        "`coil-embed` not found next to {}; install it beside `coil` or pass `--runner PATH`",
         exe.display()
-    );
-    Ok(exe)
+    ))
+}
+
+/// Marker `coil-embed` keeps in its image so `coil package` can tell a real
+/// runner from any other binary. Stored reversed here so this crate's own
+/// rodata never contains it: only `coil-embed` holds it forwards.
+const RUNNER_MARKER_REVERSED: &[u8] = b"1v:rennur-debme-lioc";
+
+/// Whether `bytes` is a `coil-embed` image (it carries [`RUNNER_MARKER_REVERSED`] forwards).
+pub fn is_coil_embed_runner(bytes: &[u8]) -> bool {
+    let marker: Vec<u8> = RUNNER_MARKER_REVERSED.iter().rev().copied().collect();
+    bytes.windows(marker.len()).any(|w| w == marker.as_slice())
 }
 
 /// Stdout/stderr writer selection for SARIF / LSP / pretty reports.
