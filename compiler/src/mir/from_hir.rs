@@ -157,8 +157,13 @@ pub struct HirMirInput<'a> {
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
-    /// String table index of each `string` literal.
+    /// String table index of each `string` literal, and of each `const`
+    /// global folded to a string.
     pub strings: &'a HashMap<u32, u32>,
+    /// Static slot of each `Global` read or assigned that is a static.
+    pub statics: &'a HashMap<u32, u32>,
+    /// Folded value of each `Global` that is a `const`.
+    pub consts: &'a HashMap<u32, crate::const_fold::ConstValue>,
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
@@ -1480,6 +1485,7 @@ impl Lower<'_> {
                 let slot = self.slot(*local)?;
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
+            HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
@@ -1820,6 +1826,9 @@ impl Lower<'_> {
                 // `x++` used for its value reads the old or new `x`.
                 if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) {
                     return Err("adjust value".into());
+                }
+                if let HirKind::Global { .. } = self.hir.expr(*place).kind {
+                    return self.store_static(*place, *value);
                 }
                 let HirKind::Local(local) = self.hir.expr(*place).kind else {
                     return Err("assign place".into());
@@ -2572,6 +2581,59 @@ impl Lower<'_> {
             return Err("fixed array copy".into());
         }
         Ok(())
+    }
+
+    /// The word type of a static `id` names: as a local of its type. A
+    /// two-word static is one boxed word; its pair is not this phase's.
+    fn static_ty(&self, id: HirId) -> Result<MirTy, Refusal> {
+        if self.inp.pair_tys.contains_key(&id.0) {
+            return Err("pair static".into());
+        }
+        let ty = self.expr_ty(id).ok_or("static type")?;
+        self.inp
+            .word(ty)
+            .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+            .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef))
+            .ok_or_else(|| format!("static type {}", ty_kind(ty)))
+    }
+
+    /// A `Global` read: a static's word (`LoadStatic`) or a folded
+    /// `const`. A function used as a value is not this phase's.
+    fn global(&mut self, id: HirId) -> Result<Val, Refusal> {
+        use crate::const_fold::ConstValue;
+        if let Some(&slot) = self.inp.statics.get(&id.0) {
+            let ty = self.static_ty(id)?;
+            return Ok(Val::V(self.b.ins_load_static(slot, ty).map_err(mir)?));
+        }
+        let c = match self.inp.consts.get(&id.0) {
+            Some(ConstValue::Int(n)) => MirConst::I64(*n),
+            Some(ConstValue::Float(f)) => MirConst::F64(f.to_bits()),
+            Some(ConstValue::Bool(b)) => MirConst::Bool(*b),
+            Some(ConstValue::Str(_)) => match self.inp.strings.get(&id.0) {
+                Some(&idx) if self.expr_ty(id).is_some_and(is_string) => return Ok(Val::V(self.b.ins_string(idx).map_err(mir)?)),
+                _ => return Err("const string".into()),
+            },
+            None => return Err("global".into()),
+        };
+        if self.expr_ty(id).and_then(scalar) != Some(c.ty()) {
+            return Err("const type".into());
+        }
+        Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
+    }
+
+    /// `STATIC = v`: the value, then `StoreStatic`, as HIR emission. The
+    /// value is stored as is (no fixed-array copy).
+    fn store_static(&mut self, place: HirId, value: HirId) -> Result<Val, Refusal> {
+        let slot = *self.inp.statics.get(&place.0).ok_or("assign place")?;
+        let ty = self.static_ty(place)?;
+        let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(value)? } else { self.word(value)? }) else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(v) != ty {
+            return Err("assign type".into());
+        }
+        self.b.ins_store_static(slot, v).map_err(mir)?;
+        Ok(Val::Unit)
     }
 
     /// Whether `id` is a heap array this phase lowers (its type is one word).

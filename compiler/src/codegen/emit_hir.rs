@@ -1050,6 +1050,8 @@ impl Compiler {
             calls: &emit.call_targets,
             into_iters: &emit.into_iters,
             strings: &emit.string_lits,
+            statics: &emit.plan.statics,
+            consts: &emit.plan.consts,
             formats: &emit.format_strs,
             asserts: &emit.asserts,
             lens: &emit.plan.lens,
@@ -6180,9 +6182,16 @@ impl Compiler {
             }
             HirKind::Global { .. } => {
                 let value = emit.plan.consts[&id.0].clone();
-                let mut bc = CodeBuf::new();
-                self.emit_const_value(&value, &mut bc);
-                self.bytecode.append(&mut bc);
+                if let crate::const_fold::ConstValue::Str(text) = &value {
+                    // As `emit_const_value`; direct MIR reads the index.
+                    let idx = self.intern_string(text);
+                    emit.string_lits.insert(id.0, idx);
+                    self.bytecode.push_string(idx);
+                } else {
+                    let mut bc = CodeBuf::new();
+                    self.emit_const_value(&value, &mut bc);
+                    self.bytecode.append(&mut bc);
+                }
             }
             HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) || emit.plan.sroa.contains_key(&local.0) => {
                 let slot = *emit.boxes.get(&local.0).expect("frame-slot local boxed before its escape");

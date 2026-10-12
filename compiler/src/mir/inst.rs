@@ -376,6 +376,20 @@ pub enum MirInst {
         dest: ValueId,
         handle: ValueId,
     },
+    /// `LoadStatic slot`: a global static's word. Dest is the static's
+    /// word type (a heap word is [`MirTy::HeapRef`]). Reads memory a
+    /// [`Self::StoreStatic`] or call may write: never CSE'd or hoisted.
+    LoadStatic {
+        dest: ValueId,
+        slot: u32,
+    },
+    /// `StoreStatic slot`: write `value` to a global static. Dest is a
+    /// `bool` unit token, as [`Self::Print`]. A side effect.
+    StoreStatic {
+        dest: ValueId,
+        slot: u32,
+        value: ValueId,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -552,6 +566,8 @@ impl MirInst {
             | Self::ArrayLen { dest, .. }
             | Self::ResumeCoro { dest, .. }
             | Self::DoneCoro { dest, .. }
+            | Self::LoadStatic { dest, .. }
+            | Self::StoreStatic { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -643,6 +659,8 @@ impl MirInst {
                 v
             }
             Self::DoneCoro { handle, .. } => vec![*handle],
+            Self::LoadStatic { .. } => Vec::new(),
+            Self::StoreStatic { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -719,6 +737,8 @@ impl MirInst {
                 }
             }
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
+            Self::LoadStatic { .. } => {}
+            Self::StoreStatic { value, .. } => *value = map(*value),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);

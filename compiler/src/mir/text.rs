@@ -245,6 +245,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             Ok(())
         }
         MirInst::DoneCoro { dest, handle } => write!(f, "{dest} = donecoro {handle}"),
+        MirInst::LoadStatic { dest, slot } => write!(f, "{dest} = loadstatic {slot}"),
+        MirInst::StoreStatic { dest, slot, value } => write!(f, "{dest} = storestatic {slot}, {value}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -644,6 +646,18 @@ impl<'a> Parser<'a> {
             let handle = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::DoneCoro { dest, handle });
+        }
+        if op == "loadstatic" {
+            let slot = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::LoadStatic { dest, slot });
+        }
+        if op == "storestatic" {
+            let slot = self.uint()? as u32;
+            self.expect(',')?;
+            let value = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::StoreStatic { dest, slot, value });
         }
         if op == "arraypush" {
             let array = self.value()?;
