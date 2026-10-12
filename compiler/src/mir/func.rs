@@ -1,6 +1,6 @@
 //! MIR function / block containers and SSA verification.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use common::DebugLoc;
 
@@ -67,6 +67,11 @@ pub struct MirFunc {
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
+    /// Locals (frame slots, for MIR lowered from HIR) a heap word was
+    /// stored in: the fuse-IL body of the same HIR keeps them there.
+    pub heap_slots: BTreeSet<LocalId>,
+    /// Locals a non-heap word was stored in.
+    pub word_slots: BTreeSet<LocalId>,
 }
 
 impl MirFunc {
@@ -87,6 +92,8 @@ impl MirFunc {
             term_locs: HashMap::new(),
             debug_slots: HashMap::new(),
             deopt_sites: Vec::new(),
+            heap_slots: BTreeSet::new(),
+            word_slots: BTreeSet::new(),
             opaque_words: false,
         }
     }

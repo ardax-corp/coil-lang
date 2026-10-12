@@ -118,6 +118,11 @@ impl MirBuilder {
     /// Bind a source local to an SSA value in the current block.
     pub fn def_local(&mut self, local: LocalId, val: ValueId) -> Result<(), MirError> {
         let b = self.cur()?;
+        if self.func.ty(val).is_heap_word() {
+            self.func.heap_slots.insert(local);
+        } else {
+            self.func.word_slots.insert(local);
+        }
         self.write_variable(local, b, val);
         Ok(())
     }

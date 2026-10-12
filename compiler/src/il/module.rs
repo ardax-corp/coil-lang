@@ -463,15 +463,25 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
-        // Dense and LIR bodies carry GC maps built from their MIR. A fuse-IL
-        // body needs none: its precise frame map (a dataflow over its final
-        // bytecode, `precise_frames`) or the conservative frame scan already
-        // roots every slot. Drafts see bodies before the loop cursor raises
-        // (added just below).
+        // Dense and LIR bodies carry GC maps built from their MIR. An
+        // allocating fuse-IL body with MIR from HIR keeps its heap words in
+        // the slots of that MIR's locals, which its map pins at every PC;
+        // its staging temps, and every slot of a body without MIR, are
+        // rooted by its precise frame map (`precise_frames`) or the
+        // conservative frame scan. Drafts see bodies before the loop cursor
+        // raises (added just below).
         let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
         if opts.mir_specialize {
             for (i, body) in self.funcs.iter().enumerate() {
                 if let Some(draft) = mir_maps.remove(&body.meta.name) {
+                    self.stack_map_drafts.push(draft);
+                    map_from[i] = "mir";
+                } else if tier[i] == "fuse"
+                    && body.ops.iter().any(crate::mir::refuses_alloc)
+                    && let Some(func) = body.meta.hir_mir.as_deref()
+                {
+                    let mut draft = crate::mir::encode_draft_slots(func);
+                    draft.name = body.meta.name.clone();
                     self.stack_map_drafts.push(draft);
                     map_from[i] = "mir";
                 }

@@ -21,6 +21,7 @@ use super::ty::MirTy;
 pub struct DraftFrameMap {
     pub name: String,
     /// Live heap slots at the n-th alloc site (Make* / InitTyped order).
+    /// Empty: `frame_slots` hold at every PC of the body.
     pub sites: Vec<Vec<u16>>,
     /// Frame-wide heap slots (params + union of sites).
     pub frame_slots: Vec<u16>,
@@ -108,6 +109,25 @@ pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Opt
         sites: vec![slots.clone(); n],
         frame_slots: slots,
     })
+}
+
+/// The map of a fuse-IL body emitted from the same HIR as `func` (MIR
+/// lowered from HIR): its frame slots are `func`'s locals, so every local a
+/// heap word was stored in (a heap parameter included) holds at every PC. A
+/// slot that also holds a non-heap word at some point is left to the
+/// precise frame map, so no scalar is read as a handle. A body that keeps
+/// no heap word in a slot gets an empty map.
+pub fn encode_draft_slots(func: &MirFunc) -> DraftFrameMap {
+    let frame_slots = func
+        .heap_slots
+        .difference(&func.word_slots)
+        .filter_map(|l| u16::try_from(l.0).ok())
+        .collect();
+    DraftFrameMap {
+        name: func.name.clone(),
+        sites: Vec::new(),
+        frame_slots,
+    }
 }
 
 /// Whether direct MIR can give its allocating body maps: every allocation
@@ -258,6 +278,15 @@ pub fn bind_drafts(
             .unwrap_or(bytecode.len() as u32);
         let start = *entry_pc as usize;
         let end = (end_pc as usize).min(bytecode.len());
+        if draft.sites.is_empty() {
+            out.push(FrameStackMap {
+                entry_pc: *entry_pc,
+                end_pc,
+                frame_slots: draft.frame_slots.clone(),
+                safepoints: Vec::new(),
+            });
+            continue;
+        }
         let mut alloc_pcs = Vec::new();
         for (off, b) in bytecode[start..end].iter().enumerate() {
             if is_alloc_opcode(*b.bytecode()) {
@@ -321,6 +350,47 @@ mod tests {
             "slot 0: {:?}",
             draft.sites[0]
         );
+    }
+
+    #[test]
+    fn slot_draft_keeps_heap_locals_only() {
+        // Slot 0: a heap param. Slot 1: an int. Slot 2: an array, later an
+        // int, so the precise frame map keeps it instead.
+        let mut b = MirBuilder::new("slots");
+        let xs = b.add_param(MirTy::HeapRef).unwrap();
+        b.def_local(LocalId(0), xs).unwrap();
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        b.def_local(LocalId(1), n).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        b.def_local(LocalId(2), g).unwrap();
+        b.def_local(LocalId(2), n).unwrap();
+        b.ret(Some(xs)).unwrap();
+        let f = b.finish().unwrap();
+        let draft = encode_draft_slots(&f);
+        assert!(draft.sites.is_empty());
+        assert_eq!(draft.frame_slots, vec![0]);
+    }
+
+    #[test]
+    fn bind_slot_draft_holds_at_every_pc() {
+        let draft = DraftFrameMap {
+            name: "keep".into(),
+            sites: Vec::new(),
+            frame_slots: vec![0, 3],
+        };
+        let bytecode = vec![
+            Byte::new(Instruction::CONST).with_const_inline(1),
+            Byte::new(Instruction::MakeArray).with_operand_u32(1),
+            Byte::new(Instruction::RETURN),
+        ];
+        let maps = bind_drafts(&[draft], &bytecode, &[("keep".into(), 0)]);
+        assert_eq!(maps.len(), 1);
+        assert!(maps[0].safepoints.is_empty());
+        assert_eq!(maps[0].frame_slots, vec![0, 3]);
+        for pc in 0..3 {
+            assert_eq!(maps[0].slots_at(pc), &[0, 3]);
+        }
     }
 
     #[test]
