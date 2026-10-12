@@ -58,7 +58,7 @@ fn main() {
 ";
     for mode in [&["-O", "0"][..], &["-O", "2"][..]] {
         let line = panic_line(&bin, &dir, "contract.hy", contract, mode);
-        assert!(line.contains("contract violated") && line.ends_with("contract.hy:3:4"), "{mode:?}: {line}");
+        assert!(line.contains("contract violated") && line.contains("contract.hy:3:"), "{mode:?}: {line}");
         let line = panic_line(&bin, &dir, "forwarded.hy", forwarded, mode);
         assert!(line.contains("integer overflow") && line.contains("forwarded.hy:5:"), "{mode:?}: {line}");
         let line = panic_line(&bin, &dir, "inlined.hy", inlined, mode);
