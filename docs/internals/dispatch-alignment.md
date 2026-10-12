@@ -24,11 +24,15 @@ LTO lays its code out differently. A fresh build of the same source in
 another directory flipped it (`coil run` slow at 0x2b, packaged fast at 0x1b).
 On a 4-core cloud x86 box the two were at parity: the effect is CPU-specific.
 
-## Fix
+## Mitigation (not enabled)
 
-`.cargo/config.toml` passes `-C llvm-args=-align-loops=64` on x86_64. Loop
-headers start on a 64-byte boundary, so the jump's offset no longer depends on
-the surrounding code: 0x1b in both binaries in every build measured.
+Building with `-C llvm-args=-align-loops=64` on x86_64 starts loop headers on
+a 64-byte boundary, so the jump's offset no longer depends on the surrounding
+code: 0x1b in both binaries in every build measured. It is not in
+`.cargo/config.toml`: release speed stays down to layout until dispatch
+itself stops depending on one jump (below). To try it:
+`RUSTFLAGS="-C link-arg=-Wl,-z,keep-text-section-prefix -C llvm-args=-align-loops=64"`
+(RUSTFLAGS replaces the config's rustflags, hence the repeated link arg).
 
 Zen 4, sequential, `coil run` / packaged (ms):
 
