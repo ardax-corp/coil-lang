@@ -960,6 +960,7 @@ impl Compiler {
                 Self::boxed_payloads(checker, &t, variant)
             }),
             enum_drop: Box::new(move |name: &str| checker.enum_has_drop(name)),
+            match_tree: self.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
@@ -6918,7 +6919,7 @@ impl Compiler {
                     && (0..args.len()).all(|i| boxed(i).is_none())
                     && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
                     && let Some(&IlOp::Entry {
-                        kind: crate::il::EntryKind::Call,
+                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::MakeCoro),
                         target,
                         arity,
                         ret_words: ret_words @ (1 | 2),
@@ -6932,6 +6933,7 @@ impl Compiler {
                             target,
                             pair_args: vec![false; args.len()],
                             pair_ret: ret_words == 2,
+                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
                         },
                     );
                 }
@@ -7066,7 +7068,7 @@ impl Compiler {
                 if dicts == 0
                     && generic.is_none()
                     && let Some(&IlOp::Entry {
-                        kind: crate::il::EntryKind::Call | crate::il::EntryKind::TailCall,
+                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::TailCall | crate::il::EntryKind::MakeCoro),
                         target,
                         arity,
                         ret_words: ret_words @ (1 | 2),
@@ -7082,6 +7084,7 @@ impl Compiler {
                             target,
                             pair_args,
                             pair_ret: ret_words == 2,
+                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
                         },
                     );
                 }

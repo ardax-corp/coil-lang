@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
@@ -63,6 +63,8 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
+    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    pub coro: bool,
 }
 
 impl HirMirInput<'_> {
@@ -70,7 +72,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -171,6 +173,9 @@ pub struct HirMirInput<'a> {
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
     pub payload_names: PayloadNamesFn<'a>,
+    /// Nested matches dispatch on their outer tag first, as HIR emission's
+    /// `hir_match_grouped` (`COIL_HIR_MATCH_TREE`).
+    pub match_tree: bool,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -277,6 +282,11 @@ fn unit_fields(fields: &HirPatFields) -> bool {
 /// An `io` stream: a heap object the GC traces like any other.
 fn is_string(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+}
+
+/// A coroutine handle type, `coroutine<Y, R>`: one heap word.
+fn is_coroutine(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine"))
 }
 
 fn is_stream(ty: &Ty) -> bool {
@@ -815,6 +825,18 @@ impl Lower<'_> {
             let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
+        // A numeric range: its typed object, start and end its fields, as
+        // HIR emission's `emit_box_range_slots`.
+        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+            use crate::typechecking::return_layout as rl;
+            let inclusive = rl::range_kind_inclusive(kind).ok_or("box pair type")?;
+            let type_id = rl::range_heap_type_id(inclusive);
+            let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+            let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, hi, None, Some(1)).map_err(mir)?;
+            return Ok(Val::V(obj));
+        }
         self.box_pair(ty, lo, hi)
     }
 
@@ -899,6 +921,13 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { args, .. } => self.call(id, args),
+            HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
+            HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
+                let Some(h) = self.word(*handle)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_done_coro(h).map_err(mir)?))
+            }
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
                 let Some(v) = self.word(*operand)? else {
@@ -1119,6 +1148,12 @@ impl Lower<'_> {
                 body,
                 kind: Some(ForInKind::Array),
             } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body, None),
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(ForInKind::Coroutine),
+            } => self.for_coroutine(*local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             // `let _ = e`: nothing can read `_`.
             HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" => {
@@ -1344,6 +1379,37 @@ impl Lower<'_> {
     /// step ends the body's last block unless a `continue` needs it as its
     /// own target, as HIR emission places it (the shape MIR vectorize
     /// matches).
+    /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
+    /// stop once the handle is done (its completion value is never bound).
+    fn for_coroutine(&mut self, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        let ty = self.local_ty(local)?;
+        let Some(h) = self.word(iterable)? else {
+            return Ok(Val::Never);
+        };
+        let head = self.b.create_block();
+        let body_b = self.b.create_block();
+        let exit = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
+        self.bind(local, x)?;
+        let done = self.b.ins_done_coro(h).map_err(mir)?;
+        self.b.branch(done, exit, body_b).map_err(mir)?;
+        self.switch(body_b);
+        self.loops.push(Loop {
+            cont: head,
+            cont_used: false,
+            exit: Some(exit),
+        });
+        let live = self.effect(body);
+        self.loops.pop();
+        if live? {
+            self.jump(head)?;
+        }
+        self.switch(exit);
+        Ok(Val::Unit)
+    }
+
     fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst) -> Result<Val, Refusal> {
         let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
@@ -1671,6 +1737,14 @@ impl Lower<'_> {
                 _ => return Err("call argument".into()),
             }
         }
+        // `MakeCoro`: the arguments move into a new coroutine's frame.
+        if site.coro {
+            if ret != MirTy::HeapRef || ret_hi.is_some() {
+                return Err("coroutine handle type".into());
+            }
+            let h = self.b.ins_alloc(MirAllocKind::Coro { target: site.target }, words).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?));
+        }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
@@ -1682,6 +1756,26 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// `resume h` / `resume h with v`: the coroutine runs to its next
+    /// `yield`, whose word is the value.
+    fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("resume type")?;
+        let unit = is_unit(ty);
+        let dest_ty = if unit { MirTy::I64 } else { self.inp.word(ty).ok_or("resume type")? };
+        let send = match value {
+            Some(v) => match self.word(v)? {
+                Some(w) => Some(w),
+                None => return Ok(Val::Never),
+            },
+            None => None,
+        };
+        let Some(h) = self.word(handle)? else {
+            return Ok(Val::Never);
+        };
+        let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        Ok(if unit { Val::Unit } else { Val::V(out) })
     }
 
     /// Fill the slots of stack array or class local `local` from `init`:
@@ -1835,12 +1929,17 @@ impl Lower<'_> {
     }
 
     /// `[a, b, ..]` on the heap: each item, then the array. The array word
-    /// is the safepoint's, as the IL lift reads it.
+    /// is the safepoint's, as the IL lift reads it. Heap elements are
+    /// boxed words of an array of unknown element kind, as the lift builds.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).and_then(array_elem).and_then(scalar).ok_or("element type")?;
+        let ty = self
+            .expr_ty(id)
+            .and_then(|t| array_elem(t).and_then(scalar).or_else(|| self.inp.elem_word(t)))
+            .ok_or("element type")?;
         let mut items = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
+            let v = if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
             };
             if self.b.value_ty(v) != ty {
@@ -2421,6 +2520,12 @@ impl Lower<'_> {
         if self.b.value_ty(obj) != MirTy::HeapRef {
             return Err("nested match scrutinee".into());
         }
+        if self.inp.match_tree
+            && let Some(tree) = crate::hir::match_tree::outer_groups(arms)
+            && tree.groups.iter().all(|g| (self.inp.scalar_variant)(g.enum_name, g.variant).is_none())
+        {
+            return self.match_grouped(&tree, obj, &ty, tail);
+        }
         let last = arms.len() - 1;
         let mut out = Vec::new();
         for (i, arm) in arms.iter().enumerate() {
@@ -2435,6 +2540,101 @@ impl Lower<'_> {
             }
         }
         self.join_arms(out)
+    }
+
+    /// A nested match as a decision tree on its outer tag, as HIR
+    /// emission's `hir_match_grouped`: one `JumpIfMatch` per variant, then
+    /// that variant's rows test only their sub-patterns. A group whose rows
+    /// all miss runs the catch-all, emitted once.
+    fn match_grouped(&mut self, tree: &crate::hir::match_tree::OuterTree<'_>, obj: ValueId, ty: &Ty, tail: bool) -> Result<Val, Refusal> {
+        let catch = tree.catch_all.map(|_| self.b.create_block());
+        let tested = if catch.is_some() { tree.groups.len() } else { tree.groups.len() - 1 };
+        let mut groups = Vec::with_capacity(tree.groups.len());
+        for (gi, g) in tree.groups.iter().enumerate() {
+            let field_tys = (self.inp.boxed_view)(ty, Some(g.variant)).ok_or("nested variant payload")?;
+            let mut words = Vec::with_capacity(field_tys.len());
+            for (k, t) in field_tys.iter().enumerate() {
+                let w = self.payload_word_ty(t)?;
+                words.push(self.b.ins_match_payload(obj, k as u32, w).map_err(mir)?);
+            }
+            if gi < tested {
+                let HirPat::Variant { tag: Some(tag), .. } = g.rows[0].1.pat else {
+                    return Err("match arm pattern".into());
+                };
+                let (hit, miss) = (self.b.create_block(), self.b.create_block());
+                self.b.jump_if_match(obj, tag, words.clone(), hit, miss).map_err(mir)?;
+                groups.push((hit, field_tys, words));
+                self.switch(miss);
+            } else {
+                // The last tag left just unpacks.
+                groups.push((self.cur, field_tys, words));
+            }
+        }
+        let mut out = Vec::new();
+        if let (Some(catch), Some(arm)) = (catch, tree.catch_all) {
+            self.jump(catch)?;
+            self.switch(catch);
+            self.nested_test(&arm.pat, obj, ty, None)?;
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+            }
+        }
+        for (g, (block, field_tys, words)) in tree.groups.iter().zip(groups) {
+            self.switch(block);
+            for (r, &(fields, arm)) in g.rows.iter().enumerate() {
+                // With no catch-all, exhaustiveness covers this tag with its
+                // rows: the last one needs no test.
+                let last = r + 1 == g.rows.len();
+                let miss = match catch {
+                    None if last => None,
+                    Some(c) if last => Some(c),
+                    _ => Some(self.b.create_block()),
+                };
+                let subs = self.sub_patterns(g.enum_name, g.variant, fields);
+                if !subs.is_empty() && subs.len() != field_tys.len() {
+                    return Err("payload pattern".into());
+                }
+                for ((sub, &w), t) in subs.iter().zip(&words).zip(&field_tys) {
+                    if let Some(sub) = sub {
+                        if matches!(sub, HirPat::Variant { .. }) && (self.inp.niche)(t).is_some() {
+                            return Err("nested niche pattern".into());
+                        }
+                        self.nested_test(sub, w, t, miss)?;
+                    }
+                }
+                let val = self.arm_value(arm.body, tail)?;
+                if !matches!(val, Val::Never) {
+                    out.push((self.cur, val));
+                }
+                match miss {
+                    Some(m) if !last => self.switch(m),
+                    _ => {}
+                }
+            }
+        }
+        self.join_arms(out)
+    }
+
+    /// A variant pattern's sub-patterns in payload word order.
+    fn sub_patterns<'p>(&self, enum_name: &str, variant: &str, fields: &'p HirPatFields) -> Vec<Option<&'p HirPat>> {
+        match fields {
+            HirPatFields::Unit => Vec::new(),
+            HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
+            HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
+                .iter()
+                .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
+                .collect(),
+        }
+    }
+
+    /// The word a boxed variant's payload field of type `t` reads as.
+    fn payload_word_ty(&self, t: &Ty) -> Result<MirTy, Refusal> {
+        self.inp
+            .word(t)
+            .or_else(|| is_unit(t).then_some(MirTy::I64))
+            .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+            .ok_or_else(|| "payload type".into())
     }
 
     /// Test `v` of type `ty` against `pat`, branching to `miss` when it
@@ -2481,25 +2681,13 @@ impl Lower<'_> {
                     return Err("nested variant word".into());
                 }
                 let field_tys = (self.inp.boxed_view)(ty, Some(variant)).ok_or("nested variant payload")?;
-                let subs: Vec<Option<&HirPat>> = match fields {
-                    HirPatFields::Unit => Vec::new(),
-                    HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
-                    HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
-                        .iter()
-                        .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
-                        .collect(),
-                };
+                let subs = self.sub_patterns(enum_name, variant, fields);
                 if !subs.is_empty() && subs.len() != field_tys.len() {
                     return Err("payload pattern".into());
                 }
                 let mut words = Vec::with_capacity(field_tys.len());
                 for (k, t) in field_tys.iter().enumerate() {
-                    let w = self
-                        .inp
-                        .word(t)
-                        .or_else(|| is_unit(t).then_some(MirTy::I64))
-                        .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
-                        .ok_or("payload type")?;
+                    let w = self.payload_word_ty(t)?;
                     words.push(self.b.ins_match_payload(v, k as u32, w).map_err(mir)?);
                 }
                 if let Some(miss) = miss {
