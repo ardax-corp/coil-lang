@@ -7153,12 +7153,19 @@ impl Compiler {
                 {
                     let call = &emit.plan.calls[&id.0];
                     let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
+                    // A `TailCall`'s callee returns for this function, so in
+                    // this function's words, whatever the call's own rep.
+                    let pair_ret = if entry_kind == crate::il::EntryKind::TailCall {
+                        matches!(emit.plan.ret, Rep::Pair(_))
+                    } else {
+                        ret_words == 2
+                    };
                     emit.call_targets.insert(
                         id.0,
                         crate::mir::HirCallSite {
                             target,
                             pair_args,
-                            pair_ret: ret_words == 2,
+                            pair_ret,
                             coro: entry_kind == crate::il::EntryKind::MakeCoro,
                         },
                     );
