@@ -6,6 +6,8 @@
 //! Single-use values (return words, cmp immediates) stay on the stack instead
 //! of `STORE`+`LOAD`. That is the quality gap vs naive SSA slot reconstruct.
 
+use std::collections::HashMap;
+
 use common::{Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
@@ -268,6 +270,8 @@ impl EmitPlan {
             }
         }
 
+        keep_memory_order(func, &mut tree);
+
         let mut need_slot = vec![false; n];
         for p in &func.params {
             need_slot[p.index()] = true;
@@ -371,6 +375,70 @@ fn mark_tree(args: MarkTreeArgs<'_>) -> bool {
     }
     tree[i] = true;
     true
+}
+
+/// A write or call: emitted where it stands, never as an inline operand.
+fn writes_memory(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::HeapFieldStore { .. }
+            | MirInst::FieldStore { .. }
+            | MirInst::StoreIndex { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::Call { .. }
+            | MirInst::HostInvoke { .. }
+            | MirInst::ResumeCoro { .. }
+            | MirInst::Print { .. }
+    )
+}
+
+fn reads_memory(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. }
+    )
+}
+
+/// An inline operand is emitted where its user is: a read must not move
+/// past a write between its definition and there (`let s = o.f; o.f = x;
+/// return s;`).
+fn keep_memory_order(func: &MirFunc, tree: &mut [bool]) {
+    for block in &func.blocks {
+        let insts = &block.insts;
+        for inst in insts {
+            if writes_memory(inst) {
+                for d in inst.dests() {
+                    tree[d.index()] = false;
+                }
+            }
+        }
+        // Where each inline value is emitted: at its user, or where an
+        // inline user is emitted in turn (users follow their operands).
+        let len = insts.len();
+        let mut at: HashMap<ValueId, usize> = HashMap::new();
+        if let Some(term) = &block.term {
+            for v in term_values(term) {
+                at.insert(v, len);
+            }
+        }
+        for k in (0..len).rev() {
+            let dest = insts[k].dest();
+            let pos = if tree[dest.index()] { at.get(&dest).copied().unwrap_or(k) } else { k };
+            for v in insts[k].operands() {
+                at.entry(v).or_insert(pos);
+            }
+        }
+        for (d, inst) in insts.iter().enumerate() {
+            let dest = inst.dest();
+            if !tree[dest.index()] || !reads_memory(inst) {
+                continue;
+            }
+            let end = at.get(&dest).copied().unwrap_or(d);
+            if insts[d + 1..end.min(len)].iter().any(writes_memory) {
+                tree[dest.index()] = false;
+            }
+        }
+    }
 }
 
 fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
