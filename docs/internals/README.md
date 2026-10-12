@@ -22,6 +22,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [Threaded execute dispatch](threaded-dispatch.md) | COI-373–376 G0–G3 A/B record (table / hotmatch removed); G3 hot/cold I-cache split |
+| [Packed byte arrays](packed-bytes.md) | #927: `Vec<byte>` / `Vec<bool>` one byte per element; lossless `Bytes` storage, `WORD_BYTE` construction stamp, byte copies for I/O / FFI / threads; measurements |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark (no write barrier) + lazy sweep; moving GC deferred |
 | [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (default on, `COIL_GC_COMPACT=0` off); precise refs rewritten, ambiguous ones pin |
