@@ -50,12 +50,8 @@ pub struct MirBuilder {
     /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
     /// map-lift shortcuts `allow_effects` enables in lowering.
     pub allow_host_edges: bool,
-    /// S2b: fill roots without SSA verify.
-    pub skip_verify: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
     pub pending_loc: DebugLoc,
-    /// Last match-arm `Seek` (payload_base for arity-0 JumpIfMatch).
-    pub match_seek: Option<u32>,
 }
 
 impl MirBuilder {
@@ -71,9 +67,7 @@ impl MirBuilder {
             finished: false,
             allow_effects: false,
             allow_host_edges: false,
-            skip_verify: false,
             pending_loc: DebugLoc::unknown(),
-            match_seek: None,
         }
     }
 
@@ -98,23 +92,6 @@ impl MirBuilder {
         Ok(v)
     }
 
-    /// A store named `val` a source local at `loc`: give the instruction
-    /// that produced it the store's location. A variable's defining store
-    /// carries the variable's def site (see `crate::debug_vars`); in SSA the
-    /// store vanishes, so its producer must carry the tag into the register
-    /// it is assigned.
-    pub fn retag_stored_value(&mut self, val: ValueId, loc: DebugLoc) {
-        if !loc.is_known() {
-            return;
-        }
-        if let Some(old) = self.func.value_locs.get_mut(&val) {
-            if old.is_known() && *old != loc {
-                self.func.op_locs.entry(val).or_insert(*old);
-            }
-            *old = loc;
-        }
-    }
-
     /// Bind a source local to an SSA value in the current block.
     pub fn def_local(&mut self, local: LocalId, val: ValueId) -> Result<(), MirError> {
         let b = self.cur()?;
@@ -133,18 +110,9 @@ impl MirBuilder {
         Ok(self.read_variable(local, ty, b))
     }
 
-    /// `local`'s definition in the current block, without reading through
-    /// predecessors (no φ is inserted).
-    pub fn local_def_here(&self, local: LocalId) -> Option<ValueId> {
-        let b = self.current?;
-        self.current_def[b.index()].get(&local).copied()
-    }
-
-    /// Field ops need a heapref object. Map lifts (`skip_verify`) only encode
-    /// liveness, so a niche word already tested on this path is accepted.
+    /// Field ops need a heapref object.
     fn field_object_ok(&self, object: ValueId) -> bool {
-        let ty = self.resolve_ty(object);
-        ty == MirTy::HeapRef || (self.skip_verify && ty.is_heap_word())
+        self.resolve_ty(object) == MirTy::HeapRef
     }
 
     fn is_const_one(&self, v: ValueId) -> bool {
@@ -996,9 +964,7 @@ impl MirBuilder {
             super::gc::fill_live_roots(&mut self.func);
         }
         super::deopt::fill_deopt_maps(&mut self.func);
-        if !self.skip_verify {
-            self.func.verify().map_err(MirError::msg)?;
-        }
+        self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }
 

@@ -156,8 +156,8 @@ fn specialize_side(
     // still refuses at infer/lower (`MAX_MODELED_RET_WORDS`).
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
-    let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
-    if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
+    let inloop_alloc = has_alloc_inside_loop(ops);
+    if has_alloc && has_post_loop_alloc_return(ops) {
         return refuse_dense("post-loop alloc return");
     }
     // Registers may sit past the cursor at a safepoint, and generic host
@@ -234,7 +234,7 @@ fn specialize_side(
     }
     // In-loop Make*: keep dense only when heap ops are native (S2l / A2).
     if inloop_alloc
-        && super::infer::has_alloc_inside_loop(&out)
+        && has_alloc_inside_loop(&out)
         && residual_heap_box(&out)
     {
         return refuse_dense("boxed in-loop alloc");
@@ -244,7 +244,7 @@ fn specialize_side(
     // the body is a select diamond or still has in-loop Make*.
     // Native in-loop Make* / ArrayPush amortize prologue Seek (A2 / B6).
     // Boxed leftover reconstruct is already refused above.
-    let loop_tax = super::infer::has_back_edge(ops) && !select_cfg;
+    let loop_tax = has_back_edge(ops) && !select_cfg;
     // Q7 self-CALL is eligible; keep/refuse is still this cost compare.
     // B2 convoys CALL on the stack so tight fib/tak can win without
     // skipping the gate (the old Seek + STORE reconstruct was ~2× fib).
@@ -442,7 +442,7 @@ pub fn try_lower_abi_body_side(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
+    if has_alloc && has_post_loop_alloc_return(ops) {
         return refuse("post-loop alloc return");
     }
     // MIR lowered from HIR maps its own allocations (`lir_tail` builds the
@@ -685,4 +685,72 @@ mod cost_gate_tests {
         ];
         assert_eq!(emit_cost(&dense), 2);
     }
+}
+
+/// True when a jump targets an earlier label (counted / while loops).
+fn has_back_edge(ops: &[IlOp]) -> bool {
+    !loop_ranges(ops).is_empty()
+}
+
+/// Make* / InitTyped between a loop header and its back-edge.
+/// Preheader alloc plus an index loop is not this — S2d may specialize those
+/// when S2b maps exist.
+fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
+    let loops = loop_ranges(ops);
+    if loops.is_empty() {
+        return false;
+    }
+    ops.iter().enumerate().any(|(i, op)| {
+        super::gc::refuse_reason(op).is_some() && loops.iter().any(|&(h, j)| h <= i && i < j)
+    })
+}
+
+/// Every Make* / InitTyped sits after the last back-edge and that tail only
+/// shapes the result (`return [sum]`: no call / host / format work). Those
+/// bodies stay fuse-IL so COI-87 invert+fuse remains observable. A tail that
+/// does real work after the loop (formatted output, a discarded `Result`
+/// from a call) does not refuse the body: its hot loop may still take MIR.
+fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
+    use crate::il::effects::{Effects, effects};
+    if has_alloc_inside_loop(ops) {
+        return false;
+    }
+    let loops = loop_ranges(ops);
+    if loops.is_empty() {
+        return false;
+    }
+    let last_back = loops.iter().map(|&(_, j)| j).max().unwrap_or(0);
+    let mut any = false;
+    for (i, op) in ops.iter().enumerate() {
+        if super::gc::refuse_reason(op).is_some() {
+            any = true;
+            if i < last_back {
+                return false;
+            }
+        }
+    }
+    let tail_works = ops[last_back..]
+        .iter()
+        .any(|op| effects(op).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
+    any && !tail_works
+}
+
+fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
+    let mut label_at = HashMap::new();
+    for (i, op) in ops.iter().enumerate() {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+            label_at.entry(*id).or_insert(i);
+        }
+    }
+    let mut ranges = Vec::new();
+    for (j, op) in ops.iter().enumerate() {
+        if let IlOp::Jump {
+            target: Label(id), ..
+        } = op
+            && let Some(&h) = label_at.get(id)
+                && h < j {
+                    ranges.push((h, j));
+                }
+    }
+    ranges
 }

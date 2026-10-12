@@ -327,7 +327,6 @@ mod tests {
     use crate::il::{IlOp, Label};
     use crate::mir::builder::MirBuilder;
     use crate::mir::inst::{MirAllocKind, MirCmpOp, MirConst, MirGcKind};
-    use crate::mir::lower::{try_lower_numeric, LowerHints};
     use common::{Byte, DebugLoc};
 
     fn loc() -> DebugLoc {
@@ -506,48 +505,4 @@ mod tests {
         assert!(r2.contains(&a) && r2.contains(&c), "second: {r2:?}");
     }
 
-    #[test]
-    fn il_lower_roots_new_object_and_live_slot() {
-        let loc = loc();
-        let ops = vec![
-            IlOp::Label(Label(0)),
-            IlOp::Const { imm: 1, loc },
-            IlOp::MakeArray { elem_kind: 0, arity: 1, loc },
-            IlOp::StorePop { slot: 1, loc },
-            IlOp::Load { slot: 0, loc },
-            IlOp::Const { imm: 0, loc },
-            IlOp::Bin {
-                op: common::Instruction::EQ,
-                loc,
-            },
-            IlOp::Load { slot: 1, loc },
-            IlOp::Const { imm: 0, loc },
-            IlOp::Bin {
-                op: common::Instruction::EQ,
-                loc,
-            },
-            IlOp::Bin {
-                op: common::Instruction::AND,
-                loc,
-            },
-            IlOp::Return { loc, ret_words: 1 },
-        ];
-        let mut hints = LowerHints::new("keep_slot");
-        hints.allow_alloc = true;
-        hints.param_count = 1;
-        hints.slot_ty.insert(0, MirTy::HeapRef);
-        hints.slot_ty.insert(1, MirTy::HeapRef);
-        let f = try_lower_numeric(&ops, &hints).expect("lower");
-        f.verify().unwrap();
-        let xs = f.params[0];
-        let (obj, g, roots) = alloc_and_barrier(&f);
-        assert!(roots.contains(&obj), "new object: {roots:?}");
-        assert!(roots.contains(&xs), "live slot/param: {roots:?}");
-        let side = f.live_roots_at(g).expect("barrier sidecar");
-        assert!(
-            side.slots.iter().any(|s| s.0 == 0),
-            "IL slot 0: {:?}",
-            side.slots
-        );
-    }
 }

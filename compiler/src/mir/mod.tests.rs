@@ -1918,291 +1918,6 @@ fn mandelbrot_inner_is_typed_ssa() {
 }
 
 #[test]
-fn lowering_mandelbrot_like_il() {
-    // zr,zi,cr,ci in slots 0..3 (f64); iter slot 4; max slot 5 (i64).
-    let four = 0u32;
-    let two = 1u32;
-    let ops = vec![
-        IlOp::Const { imm: 0, loc: loc() },
-        IlOp::StorePop {
-            slot: 4,
-            loc: loc(),
-        },
-        IlOp::Label(Label(0)),
-        IlOp::Load {
-            slot: 4,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 5,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::LE,
-            loc: loc(),
-        },
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(2),
-            loc: loc(),
-            hint: Default::default(),
-        },
-        IlOp::Load {
-            slot: 0,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 0,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::MULF,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 6,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 1,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 1,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::MULF,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 7,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 6,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 7,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::ADDF,
-            loc: loc(),
-        },
-        IlOp::ConstPool {
-            idx: four,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::GTF,
-            loc: loc(),
-        },
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(1),
-            loc: loc(),
-            hint: Default::default(),
-        },
-        IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target: Label(2),
-            loc: loc(),
-            hint: Default::default(),
-        },
-        IlOp::Label(Label(1)),
-        IlOp::Load {
-            slot: 6,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 7,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::SUBF,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 2,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::ADDF,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 8,
-            loc: loc(),
-        },
-        IlOp::ConstPool {
-            idx: two,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 0,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::MULF,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 1,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::MULF,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 3,
-            loc: loc(),
-        },
-        IlOp::Bin {
-            op: Instruction::ADDF,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 1,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 8,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 0,
-            loc: loc(),
-        },
-        IlOp::Load {
-            slot: 4,
-            loc: loc(),
-        },
-        IlOp::Const { imm: 1, loc: loc() },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc: loc(),
-        },
-        IlOp::StorePop {
-            slot: 4,
-            loc: loc(),
-        },
-        IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target: Label(0),
-            loc: loc(),
-            hint: Default::default(),
-        },
-        IlOp::Label(Label(2)),
-        IlOp::Load {
-            slot: 4,
-            loc: loc(),
-        },
-        IlOp::Return {
-            loc: loc(),
-            ret_words: 1,
-        },
-    ];
-    let mut hints = LowerHints::new("mandel_il");
-    for s in 0..4 {
-        hints.slot_ty.insert(s, MirTy::F64);
-    }
-    hints.slot_ty.insert(4, MirTy::I64);
-    hints.slot_ty.insert(5, MirTy::I64);
-    hints.slot_ty.insert(6, MirTy::F64);
-    hints.slot_ty.insert(7, MirTy::F64);
-    hints.slot_ty.insert(8, MirTy::F64);
-    hints.pool = vec![4.0f64.to_bits(), 2.0f64.to_bits()];
-    hints.pool_ty = vec![Some(MirTy::F64), Some(MirTy::F64)];
-    let f = try_lower_numeric(&ops, &hints).expect("lower mandel-like IL");
-    f.verify().unwrap();
-    let mut pool = hints.pool.clone();
-    let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("emit");
-    assert!(
-        dense.iter().any(|op| matches!(
-            op,
-            IlOp::Byte { byte, .. } if is_dense_bin_op(*byte.bytecode())
-        )),
-        "dense emit must use DenseBin"
-    );
-    assert!(f.blocks.iter().any(|bl| {
-        bl.insts.iter().any(|i| {
-            matches!(
-                i,
-                MirInst::Bin {
-                    op: MirBinOp::Mul,
-                    ty: MirTy::F64,
-                    ..
-                }
-            )
-        })
-    }));
-}
-
-#[test]
-fn i1_lower_carries_heap_and_niche_words() {
-    let loc = loc();
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    for ty in [MirTy::HeapRef, MirTy::NicheOpt, MirTy::NicheRes] {
-        let mut hints = LowerHints::new("carry");
-        hints.slot_ty.insert(0, ty);
-        hints.param_count = 1;
-        let f = try_lower_numeric(&ops, &hints).expect("lower heap/niche copy");
-        f.verify().unwrap();
-        assert_eq!(f.ty(f.params[0]), ty);
-        assert_eq!(f.ret_ty, Some(ty));
-        assert_eq!(f.ret_layout, ty.layout());
-        let mut pool = Vec::new();
-        assert!(
-            emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
-            "Q8: niche / HeapRef are dense word lanes"
-        );
-    }
-}
-
-#[test]
-fn niche_word_is_one_value_lir() {
-    // Err = ptr | 1; one-word heap-heap Result (no pair opcode).
-    let loc = loc();
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 1, loc },
-        IlOp::Bin {
-            op: Instruction::BITOR,
-            loc,
-        },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let mut hints = LowerHints::new("niche_err");
-    hints.slot_ty.insert(0, MirTy::I64);
-    hints.param_count = 1;
-    let f = try_lower_numeric(&ops, &hints).expect("lower niche word");
-    f.verify().unwrap();
-    assert_eq!(f.ret_layout, MirLayout::Word);
-    let mut pool = Vec::new();
-    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("emit niche");
-    assert!(
-        lir.iter()
-            .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
-    );
-    assert!(
-        lir.iter().any(|op| matches!(
-            op,
-            IlOp::BinSlotSlot { op, .. } | IlOp::BinSlotImm { op, .. }
-                if common::Instruction::from(*op) == Instruction::BITOR
-        ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
-        "niche LIR must emit BITOR"
-    );
-}
-
-#[test]
 fn b6_nsieve_binds_grow_maps() {
     let src = r#"
 fn fill(int n) -> int {
@@ -3264,39 +2979,6 @@ fn main() {
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-}
-
-#[test]
-fn emit_dense_forwards_known_debugloc() {
-    let loc = DebugLoc {
-        file: 0,
-        start_byte: 10,
-        end_byte: 20,
-    };
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 1, loc },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc,
-        },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let mut hints = LowerHints::new("add1");
-    hints.slot_ty.insert(0, MirTy::I64);
-    hints.param_count = 1;
-    let f = try_lower_numeric(&ops, &hints).expect("lower");
-    assert!(
-        f.value_locs.values().any(|l| l.is_known()),
-        "lower must keep known dest locs"
-    );
-    let mut pool = Vec::new();
-    let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("emit");
-    assert!(
-        dense.iter().any(|op| op.loc().is_known()),
-        "C3 dense emit must forward known DebugLoc"
-    );
 }
 
 #[test]
@@ -4777,59 +4459,25 @@ fn main() {
     assert!(!vm.panicked(), "range assign checksum");
 }
 
-/// `NEGF` on a heap element read (typed `i64` by default) must not lower to
-/// integer negation of the float bits (it printed `-3.0` for `-(1.5)`).
-#[test]
-fn float_opcode_on_word_operand_refuses_lift() {
-    let loc = loc();
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 0, loc },
-        IlOp::Index { loc },
-        IlOp::byte(Byte::new(Instruction::NEGF)),
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let mut hints = LowerHints::new("neg_elem");
-    hints.param_count = 1;
-    hints.allow_index = true;
-    hints.slot_ty.insert(0, super::ty::MirTy::HeapRef);
-    let err = match try_lower_numeric(&ops, &hints) {
-        Ok(f) => panic!("NEGF on an i64 word must refuse, got:\n{f}"),
-        Err(e) => e.to_string(),
-    };
-    assert!(err.contains("NEGF"), "{err}");
-}
-
-/// `JMPT` on an int word (two-slot tag, `i & 1`) lowers as `x != 0` and LIR
-/// branches on `x` directly again (no extra compare in the reconstruct).
+/// A branch on `x != 0` for an int word (two-slot tag, `i & 1`): LIR
+/// branches on `x` directly (no extra compare in the reconstruct).
 #[test]
 fn int_branch_cond_lowers_and_lir_branches_on_word() {
-    let loc = loc();
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 1, loc },
-        IlOp::Bin {
-            op: Instruction::BITAND,
-            loc,
-        },
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfTrue,
-            target: Label(1),
-            loc,
-            hint: Default::default(),
-        },
-        IlOp::Const { imm: 10, loc },
-        IlOp::Return { loc, ret_words: 1 },
-        IlOp::Label(Label(1)),
-        IlOp::Const { imm: 20, loc },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let mut hints = LowerHints::new("odd");
-    hints.param_count = 1;
-    hints.slot_ty.insert(0, super::ty::MirTy::I64);
-    let f = try_lower_numeric(&ops, &hints).expect("int cond lowers");
+    let text = "func @odd(v0: i64) -> i64 {
+bb0:
+    v1 = iconst.i64 1
+    v2 = iand v0, v1
+    v3 = iconst.i64 0
+    v4 = icmp.ne v2, v3
+    brif v4, bb1, bb2
+bb1:
+    v5 = iconst.i64 20
+    return v5
+bb2:
+    v6 = iconst.i64 10
+    return v6
+}";
+    let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let mut pool = Vec::new();
     let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits");
@@ -4840,170 +4488,27 @@ fn int_branch_cond_lowers_and_lir_branches_on_word() {
     assert!(!has_ne, "LIR must branch on the word, not `!= 0`");
 }
 
-/// Fuse-IL recycles a slot: a two-slot CALL word first, a heap array later.
-/// The CALL words are typed by their own live range, so the map lift binds.
-#[test]
-fn two_slot_call_words_follow_their_live_range_type() {
-    let loc = loc();
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Entry {
-            kind: crate::il::EntryKind::Call,
-            arity: 1,
-            target: Label(1),
-            loc,
-            ret_words: 2,
-        },
-        IlOp::StorePop { slot: 2, loc },
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Load { slot: 1, loc },
-        IlOp::Load { slot: 2, loc },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc,
-        },
-        IlOp::StorePop { slot: 3, loc },
-        IlOp::Load { slot: 3, loc },
-        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Load { slot: 1, loc },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let draft = super::stackmap::try_build_draft(&ops, "pairs", 1, &[], &[]);
-    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "recycled slot must still map");
-}
-
-/// A staging `Seek` must not push a slot whose heap type comes from a later
-/// live range (only `Seek tmp+1` after an in-block store re-exposes it).
-#[test]
-fn staging_seek_does_not_push_recycled_heap_slot() {
-    let loc = loc();
-    let jump = |kind, target| IlOp::Jump {
-        kind,
-        target,
-        loc,
-        hint: Default::default(),
-    };
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Label(Label(1)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 10, loc },
-        IlOp::Bin {
-            op: Instruction::LE,
-            loc,
-        },
-        jump(crate::il::IlJumpKind::JumpIfFalse, Label(2)),
-        IlOp::byte(Byte::new(Instruction::Seek).with_operand_u32(2)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Const { imm: 1, loc },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc,
-        },
-        IlOp::StorePop { slot: 0, loc },
-        jump(crate::il::IlJumpKind::Unconditional, Label(1)),
-        IlOp::Label(Label(2)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Load { slot: 1, loc },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let draft = super::stackmap::try_build_draft(&ops, "stage", 1, &[], &[]);
-    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "staging Seek must not unbalance");
-}
-
-/// `match f(i)` on a heap-heap niche Result: the CALL word is `niche_res`,
-/// `word & 1` is the tag, and each arm loads a field from its payload.
-#[test]
-fn niche_result_match_with_field_loads_maps() {
-    let loc = loc();
-    let jump = |kind, target| IlOp::Jump {
-        kind,
-        target,
-        loc,
-        hint: Default::default(),
-    };
-    let bin = |op| IlOp::Bin { op, loc };
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 0, loc },
-        IlOp::Entry {
-            kind: crate::il::EntryKind::Call,
-            arity: 1,
-            target: Label(9),
-            loc,
-            ret_words: 1,
-        },
-        IlOp::Dup { loc },
-        IlOp::Const { imm: 1, loc },
-        bin(Instruction::BITAND),
-        jump(crate::il::IlJumpKind::JumpIfTrue, Label(1)),
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Load { slot: 1, loc },
-        IlOp::LoadField { index: 0, loc },
-        jump(crate::il::IlJumpKind::Unconditional, Label(2)),
-        IlOp::Label(Label(1)),
-        IlOp::Const { imm: 1, loc },
-        bin(Instruction::XOR),
-        IlOp::StorePop { slot: 2, loc },
-        IlOp::Load { slot: 2, loc },
-        IlOp::LoadField { index: 0, loc },
-        IlOp::Label(Label(2)),
-        IlOp::StorePop { slot: 3, loc },
-        IlOp::Load { slot: 3, loc },
-        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Load { slot: 1, loc },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let draft = super::stackmap::try_build_draft(&ops, "niche_match", 1, &[], &[]);
-    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "niche Result match must map");
-}
-
 /// #548: a `Br` whose false edge carries phi moves and whose taken block is
 /// the layout successor. The false-edge moves are emitted between the
 /// branch and the taken block, so the taken path must jump over them.
 #[test]
 fn br_taken_path_jumps_over_false_edge_phi_moves() {
-    let loc = loc();
     // b = a; if cond { a = a + 1; } return a + b;
     // `b` keeps the pre-branch `a` live past the join, so the join's phi
     // cannot share its register and the false edge needs a move.
-    let ops = vec![
-        IlOp::Label(Label(0)),
-        IlOp::Load { slot: 1, loc },
-        IlOp::StorePop { slot: 2, loc },
-        IlOp::Load { slot: 0, loc },
-        IlOp::Jump {
-            kind: IlJumpKind::JumpIfFalse,
-            target: Label(1),
-            loc,
-            hint: Default::default(),
-        },
-        IlOp::Load { slot: 1, loc },
-        IlOp::Const { imm: 1, loc },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc,
-        },
-        IlOp::StorePop { slot: 1, loc },
-        IlOp::Label(Label(1)),
-        IlOp::Load { slot: 1, loc },
-        IlOp::Load { slot: 2, loc },
-        IlOp::Bin {
-            op: Instruction::ADD,
-            loc,
-        },
-        IlOp::Return { loc, ret_words: 1 },
-    ];
-    let mut hints = LowerHints::new("br_phi");
-    hints.slot_ty.insert(0, MirTy::I64);
-    hints.slot_ty.insert(1, MirTy::I64);
-    hints.param_count = 2;
-    let f = try_lower_numeric(&ops, &hints).expect("lower br + phi");
+    let text = "func @br_phi(v0: i64, v1: i64) -> i64 {
+bb0:
+    brif v0, bb1, bb2
+bb1:
+    v2 = iconst.i64 1
+    v3 = iadd v1, v2
+    jump bb2
+bb2:
+    v4 = phi.i64 [bb0: v1, bb1: v3]
+    v5 = iadd v4, v1
+    return v5
+}";
+    let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let br = f
         .blocks

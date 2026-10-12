@@ -45,24 +45,22 @@ mod deopt;
 mod entry;
 mod effects;
 mod emit;
+mod error;
 mod gc;
 mod host_allow;
 mod emit_lir;
 mod func;
-mod infer;
 mod inst;
 mod instcombine;
 mod layout;
 mod licm;
 mod from_hir;
-mod lower;
 mod pack;
 mod specialize;
 mod sroa;
 mod vectorize;
 mod strength;
 mod stackmap;
-mod string_barrier;
 mod text;
 mod ty;
 
@@ -86,7 +84,7 @@ pub use inst::{
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
-pub use lower::{LowerError, LowerHints, try_lower_numeric};
+pub use error::LowerError;
 pub use specialize::{
     take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
     try_specialize_body_side, BodySidecar,

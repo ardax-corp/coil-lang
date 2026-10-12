@@ -117,23 +117,8 @@ impl MirFunc {
             .unwrap_or_else(DebugLoc::unknown)
     }
 
-    /// Sidecar row for the Alloc or GcBarrier whose dest is `at`.
-    pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
-        self.gc_roots.iter().find(|s| s.at == at)
-    }
-
     pub fn ty(&self, v: ValueId) -> MirTy {
         self.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
-    }
-
-    /// True when any HostInvoke is impure (I6).
-    pub fn has_impure_host(&self) -> bool {
-        self.blocks.iter().any(|b| {
-            b.insts.iter().any(|i| match i {
-                MirInst::HostInvoke { native_id, .. } => !super::effects::host_is_pure(*native_id),
-                _ => false,
-            })
-        })
     }
 
     /// True when any inst is an alloc or GC placeholder (I5).
