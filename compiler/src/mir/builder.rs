@@ -108,8 +108,14 @@ impl MirBuilder {
     /// store vanishes, so its producer must carry the tag into the register
     /// it is assigned.
     pub fn retag_stored_value(&mut self, val: ValueId, loc: DebugLoc) {
-        if loc.is_known() && self.func.value_locs.contains_key(&val) {
-            self.func.value_locs.insert(val, loc);
+        if !loc.is_known() {
+            return;
+        }
+        if let Some(old) = self.func.value_locs.get_mut(&val) {
+            if old.is_known() && *old != loc {
+                self.func.op_locs.entry(val).or_insert(*old);
+            }
+            *old = loc;
         }
     }
 

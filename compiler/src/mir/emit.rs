@@ -89,6 +89,7 @@ pub fn emit_dense(
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
         let mut stacked: Vec<ValueId> = Vec::new();
+        let mut starts: Vec<(usize, ValueId)> = Vec::new();
         let loc = func.term_loc(block.id);
         seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, &plan, &regs, loc);
         for inst in &block.insts {
@@ -103,6 +104,7 @@ pub fn emit_dense(
             if is_tail_call_inst(block, inst) {
                 continue;
             }
+            starts.push((out.len(), inst.dest()));
             let loc = func.loc_of(inst.dest());
             if let MirInst::Call {
                 dest,
@@ -221,6 +223,8 @@ pub fn emit_dense(
             })?;
             stacked.clear();
         }
+        let end = out.len();
+        restore_block_op_locs(&mut out, &starts, end, func);
         emit_term(EmitTermArgs {
             out: &mut out,
             stacked: &mut stacked,
@@ -2173,6 +2177,48 @@ fn emit_call(args: EmitCallArgs<'_>) -> Result<(), LowerError> {
     }
     store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
     Ok(())
+}
+
+/// Give the call or trapping op among `ops` (emitted for a value whose
+/// loc is `value`, a variable's def site) the op's own loc `own`, so a panic
+/// reports the op's line rather than the variable's (#841, #885).
+/// [`restore_op_locs`] over one block's insts: `starts` holds where each
+/// inst's ops begin, up to `end`.
+pub(super) fn restore_block_op_locs(out: &mut [IlOp], starts: &[(usize, ValueId)], end: usize, func: &MirFunc) {
+    for (i, &(start, v)) in starts.iter().enumerate() {
+        if !func.op_locs.contains_key(&v) {
+            continue;
+        }
+        let stop = starts.get(i + 1).map_or(end, |&(s, _)| s);
+        restore_op_locs(&mut out[start..stop], func.loc_of(v), func.op_loc(v));
+    }
+}
+
+pub(super) fn restore_op_locs(ops: &mut [IlOp], value: DebugLoc, own: DebugLoc) {
+    if !own.is_known() || own == value {
+        return;
+    }
+    let traps = |op: u8| {
+        [Instruction::ADD, Instruction::SUB, Instruction::MUL, Instruction::DIV, Instruction::MOD, Instruction::Pow]
+            .iter()
+            .any(|&i| i as u8 == op)
+    };
+    for op in ops {
+        let mine = match op {
+            IlOp::Entry { kind, .. } => matches!(kind, crate::il::EntryKind::Call | crate::il::EntryKind::TailCall),
+            IlOp::HostInvoke { .. } | IlOp::Index { .. } => true,
+            IlOp::Bin { op, .. } => traps(*op as u8),
+            IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => traps(*op),
+            IlOp::Byte { byte, .. } => matches!(
+                byte.bytecode(),
+                Instruction::NEG | Instruction::CallIndirect | Instruction::HostInvoke | Instruction::HostInvokeNiche
+            ),
+            _ => false,
+        };
+        if mine && op.loc() == value {
+            op.set_loc(own);
+        }
+    }
 }
 
 fn store_call_dests(

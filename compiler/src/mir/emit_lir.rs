@@ -12,7 +12,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
-    max_label_hint, paired_alloc_dest, take_label, term_cmp_dest,
+    max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label, term_cmp_dest,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -92,10 +92,12 @@ pub fn emit_lir_with_aliases(
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
+        let mut starts: Vec<(usize, ValueId)> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
             }
+            starts.push((out.len(), inst.dest()));
             let loc = func.loc_of(inst.dest());
             if let MirInst::MatchPayload { dest, scrutinee, index } = inst {
                 if is_jim_term_payload(func, *dest) {
@@ -124,6 +126,8 @@ pub fn emit_lir_with_aliases(
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
         }
+        let end = out.len();
+        restore_block_op_locs(&mut out, &starts, end, func);
         emit_term(EmitTermArgs {
             out: &mut out,
             block,
@@ -1187,6 +1191,19 @@ fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerEr
     Ok(())
 }
 
+/// Int arithmetic or negation (overflow, a zero divisor) or a checked
+/// index: an op that can panic.
+fn tree_may_trap(func: &MirFunc, inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Bin { op, ty, .. } => {
+            *ty == MirTy::I64 && matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem)
+        }
+        MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
+        MirInst::Index { unchecked, .. } => !unchecked,
+        _ => false,
+    }
+}
+
 fn emit_stack(
     out: &mut Vec<IlOp>,
     v: ValueId,
@@ -1206,7 +1223,12 @@ fn emit_stack(
     let Some((bid, idx)) = plan.def[v.index()] else {
         return Err(LowerError::Refused("tree value has no def".into()));
     };
-    match &func.block(bid).insts[idx] {
+    let inst = &func.block(bid).insts[idx];
+    // A forwarded op that can panic keeps its own line, not its
+    // consumer's (#885).
+    let own = func.op_loc(v);
+    let loc = if own.is_known() && tree_may_trap(func, inst) { own } else { loc };
+    match inst {
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {
             op, ty, lhs, rhs, ..
