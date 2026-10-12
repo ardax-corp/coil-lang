@@ -472,6 +472,35 @@ pointer across a helper or allocation call in this tier.
 - Disable JIT dispatch while debugger state is attached, or force a deopt
   boundary before every debugger-visible operation.
 
+### Headroom measurement (2026-10-12)
+
+Release `main` at `ecb6a7a`, `COIL_AUTO_PAR=0`, scaled benches from the
+2026-10 perf checkup, best of 3-5 runs. LuaJIT `-joff` is LuaJIT's
+interpreter alone, so its JIT column over it is a reference for what a JIT
+buys over a fast interpreter on the same programs.
+
+| Bench | Coil | Lua 5.4 | LuaJIT `-joff` | LuaJIT |
+|-------|-----:|--------:|---------------:|-------:|
+| fib(32) | 43 ms | 87 ms | 73 ms | 13 ms |
+| tak(24,16,8) | 46 ms | 40 ms | 25 ms | 10 ms |
+| mandelbrot 1000x50 | 739 ms | 734 ms | 443 ms | 54 ms |
+| nsieve 2^22 | 384 ms | 377 ms | 207 ms | 75 ms |
+| binary_trees d16 | 1,693 ms | 1,461 ms | 799 ms | 589 ms |
+| Option&lt;int&gt; churn 20M | 656 ms | 562 ms | 303 ms | 39 ms |
+| Result `?` churn 20M | 2,547 ms | 1,596 ms | 863 ms | 125 ms |
+| match_enum_loop | 57 ms | 115 ms | 66 ms | 6.3 ms |
+
+Callgrind: the mandelbrot inner iteration is 6.3 dispatches and ~570 native
+instructions (~24 of loop overhead per dispatch, ~32 per dense arithmetic
+sub-op, including the second `match` on the kind in `dense::eval_bin`); a
+`fib` call is ~1.85 dispatches and ~97 instructions; binary_trees spends
+~45% in GC, allocation, `find_enum_exact` and `eq_values`. Estimated native
+headroom over today's VM: 3-10x numeric loops, 2-4x calls, Option/Result and
+array loops, 1.2-1.6x allocation-bound code. Interpreter-level fixes (kind
+specialised dense ops, dispatch overhead, short-circuit conditions staying in
+the dense streak, enum tag reads) are estimated at 1.5-2x on the same loops
+and come first.
+
 ## Staged gates
 
 1. **Baseline gate:** `perf_matrix.sh` produces metadata and raw results for
