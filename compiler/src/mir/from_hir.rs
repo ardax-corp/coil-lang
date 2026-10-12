@@ -74,6 +74,26 @@ impl HirMirInput<'_> {
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
+            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e)).map(|_| MirTy::HeapRef))
+    }
+
+    /// An array element type held as a heap word: a string, class, array,
+    /// boxed enum or boxed tuple.
+    fn heap_elem(&self, elem: &Ty) -> Option<MirTy> {
+        let heap = self.word(elem) == Some(MirTy::HeapRef)
+            || matches!(strip_readonly(elem), Ty::Tuple(items) if !items.is_empty())
+            || (self.boxed_view)(elem, None).is_some();
+        heap.then_some(MirTy::HeapRef)
+    }
+
+    /// The word type of an array's elements that direct MIR reads and
+    /// writes: `int` or `float`, or a heap word.
+    fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
+        let elem = array_elem(arr)?;
+        match scalar(elem) {
+            Some(t @ (MirTy::I64 | MirTy::F64)) => Some(t),
+            _ => self.heap_elem(elem),
+        }
     }
 }
 
@@ -708,6 +728,15 @@ impl Lower<'_> {
         match self.value(id)? {
             Val::Pair(lo, hi) => Ok(Some((lo, hi))),
             Val::Never => Ok(None),
+            // A boxed word (an element read, a boxed local) unboxed.
+            Val::V(v) if self.b.value_ty(v) == MirTy::HeapRef && let Some(&(lo_ty, hi_ty)) = self.inp.pair_tys.get(&id.0) => {
+                let ty = self.expr_ty(id).ok_or("pair operand")?.clone();
+                match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
+                    Val::Pair(lo, hi) => Ok(Some((lo, hi))),
+                    Val::Never => Ok(None),
+                    _ => Err("pair operand".into()),
+                }
+            }
             _ => Err("pair operand".into()),
         }
     }
@@ -1149,9 +1178,19 @@ impl Lower<'_> {
                 self.jump(exit)?;
                 Ok(Val::Never)
             }
-            // Frames from direct MIR are rooted by liveness (stack maps over
-            // live heap values), so a dead local's word roots nothing.
-            HirKind::Clear(_) => Ok(Val::Unit),
+            // A scalar's word roots nothing. A heap local's must be zeroed
+            // (its register is scanned until overwritten), which direct MIR
+            // cannot say: such a body keeps HIR emission's clearing stores.
+            HirKind::Clear(locals)
+                if locals.iter().all(|&l| {
+                    !self.inp.stacks.contains_key(&l.0)
+                        && !self.inp.sroa.contains_key(&l.0)
+                        && !self.inp.pair_locals.contains_key(&l.0)
+                        && self.local_ty(l).is_ok_and(|t| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool))
+                }) =>
+            {
+                Ok(Val::Unit)
+            }
             HirKind::Continue => {
                 let lp = self.loops.last_mut().ok_or("continue outside loop")?;
                 lp.cont_used = true;
@@ -1692,13 +1731,19 @@ impl Lower<'_> {
 
     /// Whether `id` is a heap array this phase lowers (its type is one word).
     fn heap_array(&self, id: HirId) -> bool {
-        self.expr_ty(id).and_then(word) == Some(MirTy::HeapRef)
+        self.expr_ty(id).is_some_and(|t| self.inp.word(t) == Some(MirTy::HeapRef) && self.inp.elem_word(t).is_some())
     }
 
     /// `xs[i]` on a heap array: the array, then the index, as HIR emission
     /// pushes them.
     fn heap_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).and_then(scalar).ok_or("element type")?;
+        let ty = match self.expr_ty(base) {
+            // A tuple's field: a scalar.
+            Some(t) if matches!(strip_readonly(t), Ty::Tuple(_)) => self.expr_ty(id).and_then(scalar),
+            Some(t) => self.inp.elem_word(t),
+            None => None,
+        }
+        .ok_or("element type")?;
         let Some(arr) = self.word(base)? else {
             return Ok(Val::Never);
         };
@@ -1714,8 +1759,9 @@ impl Lower<'_> {
     /// index, as HIR emission stages them. The bounds check stays unless
     /// the checker proved the index and the value cannot change the array.
     fn heap_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(place).and_then(scalar).ok_or("element type")?;
-        let Some(v) = self.word(value)? else {
+        let ty = self.expr_ty(base).and_then(|t| self.inp.elem_word(t)).ok_or("element type")?;
+        let v = if ty == MirTy::HeapRef { self.boxed_word(value)? } else { self.word(value)? };
+        let Some(v) = v else {
             return Ok(Val::Never);
         };
         if self.b.value_ty(v) != ty {
@@ -1852,14 +1898,15 @@ impl Lower<'_> {
         let &[recv, value] = args else {
             return Err("push arity".into());
         };
-        let ty = self.expr_ty(recv).and_then(array_elem).and_then(scalar);
+        let ty = self.expr_ty(recv).and_then(|t| self.inp.elem_word(t));
         if !self.heap_array(recv) {
             return Err("push receiver".into());
         }
         let Some(arr) = self.word(recv)? else {
             return Ok(Val::Never);
         };
-        let Some(v) = self.word(value)? else {
+        let v = if ty == Some(MirTy::HeapRef) { self.boxed_word(value)? } else { self.word(value)? };
+        let Some(v) = v else {
             return Ok(Val::Never);
         };
         if Some(self.b.value_ty(v)) != ty {
