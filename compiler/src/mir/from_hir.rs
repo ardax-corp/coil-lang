@@ -111,6 +111,9 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
+/// A two-word enum's name and its variants' tags and payload word types.
+pub type PairVariantsFn<'a> = Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>;
+
 /// The word of a pointer-niche `Option` or `Result` type:
 /// [`MirTy::NicheOpt`] when the zero word is one side (`None`, `Ok(())`),
 /// [`MirTy::NicheRes`] when `Err` is the pointer with its low bit set.
@@ -161,7 +164,7 @@ pub struct HirMirInput<'a> {
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
-    pub pair_variants: Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>,
+    pub pair_variants: PairVariantsFn<'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
