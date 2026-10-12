@@ -1177,6 +1177,8 @@ impl<const S: usize> Machine<S> {
         };
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
+            // A caller's saved ip is its return address: name the call.
+            let ip = if frame_idx + 1 == self.frames.len() { ip } else { ip.saturating_sub(1) };
             // The bootstrap frame (prologue `CALL main`) is not user code.
             if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
                 continue;

@@ -1402,6 +1402,7 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 let out = match op {
+                    UnOp::Neg if self.b.value_ty(v) == MirTy::I64 => self.at_expr(id, |l| Ok(l.b.ins_neg(v)))?,
                     UnOp::Neg => self.b.ins_neg(v),
                     UnOp::Not if self.b.value_ty(v) == MirTy::Bool => self.b.ins_not(v),
                     UnOp::BitNot if self.b.value_ty(v) == MirTy::I64 => {
@@ -2038,7 +2039,11 @@ impl Lower<'_> {
                 if self.expr_ty(id).and_then(scalar) != Some(lt) {
                     return Err("operator type".into());
                 }
-                self.b.ins_binop(arith, l, r)
+                if op.int_may_trap() {
+                    self.at_expr(id, |l2| Ok(l2.b.ins_binop(arith, l, r)))?
+                } else {
+                    self.b.ins_binop(arith, l, r)
+                }
             }
             (None, Some(cmp)) => self.b.ins_cmp(cmp, l, r),
             (None, None) => unreachable!("refused above"),
@@ -2221,6 +2226,13 @@ impl Lower<'_> {
         out
     }
 
+    /// `f` with the source location of expression `id`: an op that can
+    /// panic, or a call, reports its own line rather than its statement's
+    /// (#841, #885).
+    fn at_expr<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
+        self.at_stmt(id, f)
+    }
+
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
@@ -2289,7 +2301,7 @@ impl Lower<'_> {
             ret,
             ret_hi,
         };
-        let (dest, dest_hi) = self.b.ins_call(site.target, words, &abi).map_err(mir)?;
+        let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
             None if unit => Val::Unit,
@@ -2662,7 +2674,7 @@ impl Lower<'_> {
             };
             words.push(v);
         }
-        let out = self.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir)?;
+        let out = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir))?;
         if let Some(((lo_ty, _), variants)) = pair {
             return self.unbox_pair(out, lo_ty, &variants);
         }

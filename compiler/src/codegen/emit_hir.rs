@@ -5948,8 +5948,13 @@ impl Compiler {
     /// Push `id` as `want`, on top of `depth` live operands.
     fn hir_value(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, want: &Rep, depth: u32) {
         let next_jump = emit.next_jump.take();
+        let il_start = self.bytecode.il_mut().ops_slice_mut().len();
         self.hir_value_unpacked(hir, emit, id, want, depth);
         emit.next_jump = next_jump;
+        if matches!(hir.expr(id).kind, HirKind::Call { .. }) {
+            // A call reports its own line, not its statement's (#841).
+            self.mark_call_locs(il_start, hir.expr(id).span);
+        }
         // A call or dictionary operator typed a bare type parameter can
         // return its value boxed (an instance thunk, a closure adapter);
         // a shared generic body keeps such values raw (#802).
@@ -6251,6 +6256,9 @@ impl Compiler {
                 } else {
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
                     self.bytecode.push(Byte::new(Self::hir_bin_instruction(*op, float)));
+                    if !float && op.int_may_trap() {
+                        self.mark_last_op_loc(hir.expr(id).span);
+                    }
                 }
             }
             HirKind::Logic { and, lhs, rhs } if lower::logic_eager(hir, *rhs) => {
@@ -6354,6 +6362,9 @@ impl Compiler {
                     UnOp::BitNot => Instruction::NOT,
                     UnOp::Not => Instruction::LogNot,
                 }));
+                if !float && *op == UnOp::Neg {
+                    self.mark_last_op_loc(hir.expr(id).span);
+                }
             }
             HirKind::Call {
                 callee: Callee::Value(f),

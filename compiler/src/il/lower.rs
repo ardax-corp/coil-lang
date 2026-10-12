@@ -490,16 +490,16 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
     {
         let w = [a, b, c];
         if let Some(fused) = try_fold_const_bin_local(&w, pool) {
-            return Some((Slot::Byte(fused, window[0].loc()), 3));
+            return Some((Slot::Byte(fused, fused_loc(window, 3)), 3));
         }
         if let Some(fused) = try_fuse_bin_slot_imm_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 3));
+            return Some((Slot::Byte(fused, fused_loc(window, 3)), 3));
         }
         if let Some(fused) = try_fuse_const_load_bin_slot_imm_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 3));
+            return Some((Slot::Byte(fused, fused_loc(window, 3)), 3));
         }
         if let Some(fused) = try_fuse_bin_slot_slot_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 3));
+            return Some((Slot::Byte(fused, fused_loc(window, 3)), 3));
         }
     }
     if window.len() >= 2
@@ -552,23 +552,23 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
         && let (Some(a), Some(b)) = (slot_as_byte(&window[0]), slot_as_byte(&window[1]))
     {
         if let Some(fused) = try_fuse_bin_slot_imm_store_local(&a, &b, pool) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
         if let Some(fused) = try_fuse_bin_slot_slot_store_local(&a, &b) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
         let w = [a, b];
         if let Some(fused) = try_fuse_load_return_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
         if let Some(fused) = try_fuse_const_return_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
         if let Some(fused) = try_fuse_bin_return_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
         if let Some(fused) = try_fuse_make_enum_return_local(&w) {
-            return Some((Slot::Byte(fused, window[0].loc()), 2));
+            return Some((Slot::Byte(fused, fused_loc(window, 2)), 2));
         }
     }
     // After patterns that consume individual LOAD/STORE: pack adjacent runs.
@@ -650,7 +650,7 @@ fn try_fuse_load_const_op_store(window: &[Slot], pool: &mut Vec<u64>) -> Option<
             src,
             idx as u16,
         ),
-        window[0].loc(),
+        fused_loc(window, 4),
     ))
 }
 
@@ -676,8 +676,30 @@ fn try_fuse_load_load_op_store(window: &[Slot]) -> Option<Slot> {
             b,
             dest,
         ),
-        window[0].loc(),
+        fused_loc(window, 4),
     ))
+}
+
+/// The location a fused op takes from the `n` slots it replaces: an op
+/// among them that can panic keeps its own (it may be a forwarded
+/// expression's, on another line than its operands; #885), else the first.
+fn fused_loc(window: &[Slot], n: usize) -> DebugLoc {
+    let traps = |op: Instruction| {
+        matches!(
+            op,
+            Instruction::ADD | Instruction::SUB | Instruction::MUL | Instruction::DIV | Instruction::MOD | Instruction::Pow | Instruction::NEG
+        )
+    };
+    window[..n.min(window.len())]
+        .iter()
+        .find(|s| {
+            slot_as_byte(s).is_some_and(|b| match *b.bytecode() {
+                Instruction::BinSlotImm => traps(Instruction::from(b.bin_slot_imm_parts().0)),
+                Instruction::BinSlotSlot => traps(Instruction::from(b.bin_slot_slot_parts().0)),
+                op => traps(op),
+            })
+        })
+        .map_or_else(|| window[0].loc(), Slot::loc)
 }
 
 fn slot_as_byte(s: &Slot) -> Option<Byte> {

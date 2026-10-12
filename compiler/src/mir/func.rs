@@ -54,6 +54,10 @@ pub struct MirFunc {
     pub gc_roots: Vec<LiveRootSet>,
     /// Dest → source loc from the IL op that produced it (C3 sparse DebugLoc).
     pub value_locs: HashMap<ValueId, DebugLoc>,
+    /// A call's or trapping op's own loc where a variable's defining store
+    /// retagged its value with the variable's def site: a panic there
+    /// reports the op's line (#841, #885).
+    pub op_locs: HashMap<ValueId, DebugLoc>,
     /// Block terminator loc (Return / Jump / Br).
     pub term_locs: HashMap<BlockId, DebugLoc>,
     /// Last SSA def of each IL local after construction (named-let remap).
@@ -76,6 +80,7 @@ impl MirFunc {
             slot_env: HashMap::new(),
             gc_roots: Vec::new(),
             value_locs: HashMap::new(),
+            op_locs: HashMap::new(),
             term_locs: HashMap::new(),
             debug_slots: HashMap::new(),
             deopt_sites: Vec::new(),
@@ -87,6 +92,11 @@ impl MirFunc {
             .get(&v)
             .copied()
             .unwrap_or_else(DebugLoc::unknown)
+    }
+
+    /// The location of the op that produced `v` itself (see `op_locs`).
+    pub fn op_loc(&self, v: ValueId) -> DebugLoc {
+        self.op_locs.get(&v).copied().unwrap_or_else(|| self.loc_of(v))
     }
 
     pub fn term_loc(&self, b: BlockId) -> DebugLoc {
