@@ -3813,17 +3813,6 @@ impl Compiler {
             }
             boxed.push(Some(ty.clone()));
         }
-        // An unbounded shared body keeps `T` boxed, so a boxed `T` inside
-        // the result it builds (`Option<T>`) stays boxed: only a mono clone
-        // returns it at the ground type (#915). A bounded body keeps raw
-        // words (#802).
-        let nested_ret = receivers == 0
-            && scheme.constraints.is_empty()
-            && !matches!(cur, Ty::Var(_))
-            && crate::typechecking::subst::ftv(cur).iter().any(|v| scheme.bounds.contains(v));
-        if nested_ret && boxed.iter().any(Option::is_some) {
-            return Err("callee-generic");
-        }
         // Every constraint needs a ground instance (the AST would emit fewer
         // dictionaries than the body unpacks otherwise).
         let mut vars = HashMap::new();
@@ -6991,6 +6980,10 @@ impl Compiler {
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
                 let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
+                // Temps only at depth 0, as the method path: under pending
+                // operands (`u.label() + ":"`) a temp slot sits at the
+                // call's own depth, so the result would land above it.
+                let stage = stage && depth == 0;
                 let mut temps = Vec::with_capacity(args.len());
                 for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                     let at = if stage { depth } else { depth + i as u32 };
