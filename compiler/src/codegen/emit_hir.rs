@@ -829,6 +829,11 @@ impl Compiler {
             ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
             ValueLayout::Boxed => None,
         };
+        // A generic body's type variable values are opaque words it only
+        // moves; a generic class's shared method sees its class's
+        // parameters as type variables too.
+        let is_var = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
+        let opaque_vars = hir.is_generic || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var));
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -836,6 +841,17 @@ impl Compiler {
                     (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
                 })
                 .or_else(|| niche(t))
+                .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
+                // An `Option` / `Result` open in a type variable is a boxed
+                // enum object.
+                .or_else(|| {
+                    let t = apply_ty_prune(checker.subst(), t);
+                    (opaque_vars
+                        && (crate::typechecking::ty::is_option_ty(&t) || crate::typechecking::ty::is_result_ty(&t))
+                        && crate::typechecking::value_layout::value_layout(checker, &t) == ValueLayout::Boxed
+                        && crate::hir::layout::of_resolved(checker, &t) == crate::hir::layout::Layout::Word)
+                        .then_some(crate::mir::MirTy::HeapRef)
+                })
         };
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
@@ -1097,7 +1113,7 @@ impl Compiler {
             cold_ok: emit.plan.cold_ok,
             file,
             entry_words,
-            opaque_vars: hir.is_generic,
+            opaque_vars,
             ret_boxed_niche,
         })
     }

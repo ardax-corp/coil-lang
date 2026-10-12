@@ -381,7 +381,7 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index, call or constructor takes one (any of them
+/// no operator, field, index, call or constructor but `new` takes one (any of them
 /// could read a box as its payload), and nothing that can collect runs
 /// while one is live in a word the frame maps don't trace.
 fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
@@ -395,6 +395,10 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
             HirKind::Index { base, index, .. } => var(base) || var(index),
+            // An object's fields carry no word kinds: it holds the word as
+            // HIR emission's object does. A variant or tuple would mark it
+            // a scalar.
+            HirKind::Make { kind: MakeKind::Class(_), .. } => false,
             HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
@@ -408,14 +412,22 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
             return Err("type variable read".into());
         }
     }
-    let collects = func.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-        !matches!(
-            i,
-            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. }
-        )
-    });
-    if collects {
-        return Err("type variable across a call".into());
+    // A type variable's word is an `i64` the collector does not trace: no
+    // `i64` may stay live past an instruction that can collect (a word one
+    // consumes, such as an object's field, is fine). Parameters are the
+    // exception: the frame map lists every parameter slot.
+    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
+    let live = super::gc::liveness_after(func);
+    for (b, block) in func.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            let moves = matches!(
+                inst,
+                MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
+            );
+            if !moves && live[b][i].iter().any(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)) {
+                return Err("type variable across a call".into());
+            }
+        }
     }
     Ok(())
 }
@@ -1710,6 +1722,14 @@ impl Lower<'_> {
                 kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
                 args,
             } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_enum)(t, Some(variant))) => {
+                self.make_boxed(enum_name, *tag, &tys, args)
+            }
+            // An `Option` / `Result` neither niche nor a pair (its payload
+            // open in a generic class's shared method) is boxed too.
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
+                args,
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant))) => {
                 self.make_boxed(enum_name, *tag, &tys, args)
             }
             // A scalar enum's variant is its backing constant.
