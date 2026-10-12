@@ -189,6 +189,7 @@ impl BodyBuilder {
                 locals: Vec::new(),
                 exprs: Vec::new(),
                 root: None,
+                aliased_fn_values: Vec::new(),
             },
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
@@ -269,6 +270,68 @@ impl BodyBuilder {
     fn finish(self) -> HirBody {
         self.body
     }
+}
+
+/// `let g = wrap; g(2.5)` for a generic `wrap` with a type parameter nested
+/// in its signature: each call through `g` becomes a call of `wrap` by name,
+/// which reaches the mono clone for its argument types (#916). The let
+/// generalizes `g`, so it holds a `PolyFn` whose shared body would hand back
+/// an `Option` around a boxed `T`. Only when `g` is never assigned and every
+/// read of it is a call's callee.
+fn alias_generic_fn_calls(body: &mut HirBody, checker: &Checker) {
+    let mut aliases: HashMap<LocalId, HirId> = HashMap::new();
+    for e in &body.exprs {
+        if let HirKind::Let { local, init: Some(init) } = &e.kind
+            && let HirKind::Global { name, .. } = &body.expr(*init).kind
+            && checker.generic_fn_value_nested(name)
+            && matches!(body.local(*local).kind, LocalKind::Let)
+        {
+            aliases.insert(*local, *init);
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    let mut callees: HashMap<HirId, LocalId> = HashMap::new();
+    for e in &body.exprs {
+        if let HirKind::Call { callee: Callee::Value(f), .. } = &e.kind
+            && let HirKind::Local(l) = body.expr(*f).kind
+        {
+            callees.insert(*f, l);
+        }
+    }
+    for (i, e) in body.exprs.iter().enumerate() {
+        match &e.kind {
+            HirKind::Local(l) if aliases.contains_key(l) && !callees.contains_key(&HirId(i as u32)) => {
+                aliases.remove(l);
+            }
+            HirKind::Assign { place, .. } => {
+                if let HirKind::Local(l) = body.expr(*place).kind {
+                    aliases.remove(&l);
+                }
+            }
+            _ => {}
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    for i in 0..body.exprs.len() {
+        let HirKind::Call { callee: Callee::Value(f), args } = &body.exprs[i].kind else {
+            continue;
+        };
+        let Some(global) = callees.get(f).and_then(|l| aliases.get(l)) else {
+            continue;
+        };
+        let HirKind::Global { name, def } = &body.exprs[global.0 as usize].kind else {
+            continue;
+        };
+        body.exprs[i].kind = HirKind::Call {
+            callee: Callee::Named { name: name.clone(), def: *def, overload: None },
+            args: args.clone(),
+        };
+    }
+    body.aliased_fn_values.extend(aliases.into_values());
 }
 
 /// Peel `Expr` / `Group` / `Statement` / one-item `Fragment` wrappers.
@@ -503,7 +566,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let root = self.expr(&mut tb, body);
                 self.implicit_ok_return(&mut tb, root);
                 tb.body.root = Some(root);
-                self.module.bodies.push(tb.finish());
+                let mut body = tb.finish();
+                alias_generic_fn_calls(&mut body, self.checker);
+                self.module.bodies.push(body);
             }
             Expression::Class { name: class, fields, .. } => {
                 for field in fields {
@@ -670,7 +735,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 }
             }
         }
-        self.module.bodies.push(b.finish());
+        let mut body = b.finish();
+        alias_generic_fn_calls(&mut body, self.checker);
+        self.module.bodies.push(body);
     }
 
     /// A Result-mode body with a unit `Ok` that can fall off its end returns

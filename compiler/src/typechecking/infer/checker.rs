@@ -4300,7 +4300,6 @@ impl Checker {
         let scheme = self.env.lookup(name).cloned();
         match scheme {
             Some(s) => {
-                self.reject_generic_fn_value_layout(name, &s, &range);
                 self.instantiate_ty(&s)
             }
             None => {
@@ -12473,19 +12472,18 @@ impl Checker {
 
     //  Functions (monomorphic recursion)
 
-    /// A generic `fn` taken as a value runs its shared body, which boxes `T`.
-    /// Call sites through the value only unbox a *bare* `T` param / return,
-    /// so a type parameter nested inside `Option<T>` / `Vec<T>` / tuples /
-    /// classes would be read with the wrong layout. Refuse those (E0127).
-    fn reject_generic_fn_value_layout(&mut self, name: &str, scheme: &Scheme, range: &Range<usize>) {
-        if scheme.bounds.is_empty() {
-            return;
-        }
+    /// A generic function with a type parameter nested in its signature
+    /// (`fn wrap<T>(T x) -> Option<T>`): read as a value, it needs the mono
+    /// clone at the read's ground type (#916); its shared body boxes `T`.
+    pub fn generic_fn_value_nested(&self, name: &str) -> bool {
         let Some(def) = self.local_defs.get(name).copied() else {
-            return;
+            return false;
         };
-        if self.schemes_by_def.get(&def) != Some(scheme) {
-            return;
+        let Some(scheme) = self.schemes_by_def.get(&def) else {
+            return false;
+        };
+        if scheme.bounds.is_empty() {
+            return false;
         }
         let mut parts = Self::fun_param_tys(&scheme.ty);
         let mut ret = &scheme.ty;
@@ -12493,21 +12491,9 @@ impl Checker {
             ret = inner;
         }
         parts.push(ret.clone());
-        let nested = parts.iter().any(|t| {
-            !matches!(t, Ty::Var(_)) && ftv_ty(t).iter().any(|v| scheme.bounds.contains(v))
-        });
-        if !nested {
-            return;
-        }
-        let mut msg = Message::error(
-            ErrorCode::UnsupportedGenericFnValue,
-            format!("generic function `{name}` cannot be used as a value: a type parameter is nested in its signature"),
-            range.clone(),
-        );
-        msg.with_help(
-            format!("call `{name}` directly, or wrap it in a lambda at a concrete type (`fn (int x) => {name}(x)`)"),
-        );
-        self.messages.push(msg);
+        parts
+            .iter()
+            .any(|t| !matches!(t, Ty::Var(_)) && ftv_ty(t).iter().any(|v| scheme.bounds.contains(v)))
     }
 
     /// True when two function schemes have unifiable parameter lists (same shape).

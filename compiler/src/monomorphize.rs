@@ -137,12 +137,18 @@ struct GenericFnSig {
     param_type_params: Vec<Option<usize>>,
     /// Parallel to `param_type_params`: true when the formal is `T... name`.
     param_is_rest: Vec<bool>,
+    /// A `let g = wrap;` local named for `wrap`, whose calls the HIR makes
+    /// calls of `wrap` (#916).
+    alias: bool,
 }
 
 #[derive(Clone, Debug)]
 struct MonoCandidate {
     span: SimpleSpan,
     specialization: MonoSpecialization,
+    /// A call through a `let g = wrap;` alias, which has no shared-body
+    /// fallback past the caps (#916).
+    value: bool,
 }
 
 /// Explicit monomorphize pass: after check, before emit.
@@ -159,6 +165,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
 
     let mut escaped = BTreeSet::new();
     collect_escaped_generic_refs(ast, &sigs, false, &mut escaped);
+    collect_generic_fn_aliases(ast, checker, &mut sigs);
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
@@ -334,6 +341,7 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         type_params: type_param_names,
         param_type_params,
         param_is_rest,
+        alias: false,
     }
 }
 
@@ -363,6 +371,7 @@ fn collect_candidates(
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
+                value: sig.alias,
             });
         }
         if let Some(args) = args {
@@ -376,6 +385,33 @@ fn collect_candidates(
     walk_children(node, &mut |child| {
         collect_candidates(child, checker, ty_of, sigs, intern, out)
     });
+}
+
+/// `let g = wrap;` for a generic `wrap` with a type parameter nested in its
+/// signature: `g` plans like `wrap`, since the HIR calls `wrap` by name
+/// through it (`alias_generic_fn_calls`, #916). A shadowed or reassigned
+/// `g` at worst plans a clone no call uses.
+fn collect_generic_fn_aliases(node: &Output, checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
+    if let Expression::Fragment(items) = node.1.as_ref()
+        && let [decl, init] = items.as_slice()
+        && let Expression::Variable(name, _) = decl.1.as_ref()
+        && let Expression::Identifier(f) = peel(init).1.as_ref()
+        && !sigs.contains_key(*name)
+        && checker.generic_fn_value_nested(f)
+        && let Some(sig) = sigs.get(*f)
+    {
+        let mut sig = sig.clone();
+        sig.alias = true;
+        sigs.insert(name.to_string(), sig);
+    }
+    walk_children(node, &mut |child| collect_generic_fn_aliases(child, checker, sigs));
+}
+
+fn peel<'a, 'e>(node: &'a Output<'e>) -> &'a Output<'e> {
+    match node.1.as_ref() {
+        Expression::Expr(inner) | Expression::Group(inner) | Expression::Statement(inner) => peel(inner),
+        _ => node,
+    }
 }
 
 fn candidate_for_call(
@@ -648,7 +684,7 @@ fn apply_caps(
         let count = per_fn.entry(key.def_id).or_default();
         let per_fn_hit = *count >= MAX_SPECIALIZATIONS_PER_FN;
         let total_hit = specializations.len() >= MAX_TOTAL_SPECIALIZATIONS;
-        if per_fn_hit || total_hit {
+        if (per_fn_hit || total_hit) && !candidate.value {
             cap_hits.push(MonoCapHit {
                 call_span: candidate.span,
                 fn_name: candidate.specialization.fn_name.clone(),
@@ -1182,6 +1218,7 @@ mod tests {
 
     fn dummy_candidate(i: usize, def: u32, fn_name: &str) -> MonoCandidate {
         MonoCandidate {
+            value: false,
             span: SimpleSpan::from(i..i + 1),
             specialization: MonoSpecialization {
                 key: MonoKey {
