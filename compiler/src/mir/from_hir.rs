@@ -111,6 +111,9 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
+/// A variant's payload field names, by enum and variant name.
+pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
+
 /// A two-word enum's name and its variants' tags and payload word types.
 pub type PairVariantsFn<'a> = Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>;
 
@@ -165,6 +168,9 @@ pub struct HirMirInput<'a> {
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
     pub pair_variants: PairVariantsFn<'a>,
+    /// A variant's payload field names in declaration order, by enum and
+    /// variant name (a record pattern's fields in word order).
+    pub payload_names: PayloadNamesFn<'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -679,6 +685,15 @@ impl Lower<'_> {
         }
     }
 
+    /// `return` of a one-word function with no value: `0`, as HIR
+    /// emission's `CONST 0; RETURN`.
+    fn ret_zero(&mut self) -> Result<(), Refusal> {
+        let ty = self.b.func().ret_ty.ok_or("return value")?;
+        let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let z = self.fit(z, ty)?;
+        self.b.ret(Some(z)).map_err(mir)
+    }
+
     /// Word types of pair local `local`, with its second slot.
     fn pair_local(&self, local: HirLocal) -> Option<(LocalId, LocalId, MirTy, MirTy)> {
         let &(hi, lo_ty, hi_ty) = self.inp.pair_locals.get(&local.0)?;
@@ -762,6 +777,12 @@ impl Lower<'_> {
             let lo = self.b.ins_index(v, zero, lo_ty, false).map_err(mir)?;
             let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
             let hi = self.b.ins_index(v, one, hi_ty, false).map_err(mir)?;
+            return Ok(Val::Pair(lo, hi));
+        }
+        // A boxed numeric range: a typed object, start and end its fields.
+        if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
+            let lo = self.b.ins_heap_field_load(v, None, 0, lo_ty).map_err(mir)?;
+            let hi = self.b.ins_heap_field_load(v, None, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
         if hi_ty != MirTy::I64 {
@@ -1222,6 +1243,15 @@ impl Lower<'_> {
                         }
                         self.ret_unit()?;
                     }
+                    // A `()`-typed value (`return check(x)?`, a unit
+                    // `match`) or a bare `return` in a one-word `Result<(),
+                    // E>` function: the value for its effect, then `0`.
+                    Some(v) if self.inp.ret_pair.is_none() && (lower::is_unit_make(self.hir, *v) || self.expr_ty(*v).is_some_and(is_unit)) => {
+                        if !self.effect(*v)? {
+                            return Ok(Val::Never);
+                        }
+                        self.ret_zero()?;
+                    }
                     Some(v) => {
                         self.ret_tail = true;
                         match self.value(*v)? {
@@ -1229,6 +1259,7 @@ impl Lower<'_> {
                             val => self.ret(val)?,
                         }
                     }
+                    None if self.inp.ret_pair.is_none() => self.ret_zero()?,
                     None => return Err("return value".into()),
                 }
                 Ok(Val::Never)
@@ -2187,6 +2218,13 @@ impl Lower<'_> {
             MakeKind::Variant { tag: Some(tag), .. } => {
                 let lo = match args {
                     [] => self.zero(lo_ty)?,
+                    // A `()` payload: `0`, after a `()`-typed value's effect.
+                    [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+                        if !self.effect(*arg)? {
+                            return Ok(Val::Never);
+                        }
+                        self.zero(lo_ty)?
+                    }
                     [arg] => match self.word(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
                         Some(v) if lo_ty == MirTy::I64 && self.b.value_ty(v).is_heap_word() => self.fit(v, lo_ty)?,
@@ -2227,12 +2265,17 @@ impl Lower<'_> {
             .map_or(arms.len(), |i| i + 1);
         let arms = &arms[..reach];
         if lower::has_nested_test(arms) {
-            return Err("nested match".into());
+            return self.match_nested(scrutinee, arms, tail);
         }
         if let Some(consts) = self.scalar_arms(scrutinee, arms) {
             return self.match_scalar(scrutinee, arms, &consts, tail);
         }
-        let boxed_local = matches!(self.hir.expr(scrutinee).kind, HirKind::Local(l) if self.boxed_local(l));
+        let boxed_local = match self.hir.expr(scrutinee).kind {
+            HirKind::Local(l) => self.boxed_local(l),
+            // A class field holds a two-word enum boxed.
+            HirKind::Field { .. } => self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef),
+            _ => false,
+        };
         let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
@@ -2363,6 +2406,124 @@ impl Lower<'_> {
         self.join_arms(out)
     }
 
+    /// A `match` whose patterns test inside a payload, as HIR emission's
+    /// `hir_match_seq`: the scrutinee boxed, then each arm's tests in turn,
+    /// a miss falling to the next arm. The last arm tests nothing: the
+    /// checker proved the match exhaustive.
+    fn match_nested(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
+        if (self.inp.boxed_view)(&ty, None).is_none() {
+            return Err("nested match type".into());
+        }
+        let Some(obj) = self.boxed_word(scrutinee)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(obj) != MirTy::HeapRef {
+            return Err("nested match scrutinee".into());
+        }
+        let last = arms.len() - 1;
+        let mut out = Vec::new();
+        for (i, arm) in arms.iter().enumerate() {
+            let miss = (i < last).then(|| self.b.create_block());
+            self.nested_test(&arm.pat, obj, &ty, miss)?;
+            let val = self.arm_value(arm.body, tail)?;
+            if !matches!(val, Val::Never) {
+                out.push((self.cur, val));
+            }
+            if let Some(miss) = miss {
+                self.switch(miss);
+            }
+        }
+        self.join_arms(out)
+    }
+
+    /// Test `v` of type `ty` against `pat`, branching to `miss` when it
+    /// fails (none: the pattern cannot fail), and bind its locals.
+    fn nested_test(&mut self, pat: &HirPat, v: ValueId, ty: &Ty, miss: Option<BlockId>) -> Result<(), Refusal> {
+        match pat {
+            HirPat::Wild => Ok(()),
+            HirPat::Bind(local) => {
+                if self.hir.local(*local).ty.as_ref().is_some_and(is_unit) {
+                    return Ok(());
+                }
+                self.bind(*local, v)
+            }
+            HirPat::Int(n) => {
+                let Some(miss) = miss else {
+                    return Ok(());
+                };
+                if self.b.value_ty(v) != MirTy::I64 {
+                    return Err("nested int pattern".into());
+                }
+                let k = self.b.ins_const(MirConst::I64(*n)).map_err(mir)?;
+                let hit = self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir)?;
+                let next = self.b.create_block();
+                self.b.branch(hit, next, miss).map_err(mir)?;
+                self.switch(next);
+                Ok(())
+            }
+            HirPat::Variant { enum_name, variant, tag, fields } => {
+                if let Some(c) = (self.inp.scalar_variant)(enum_name, variant) {
+                    let Some(miss) = miss else {
+                        return Ok(());
+                    };
+                    if !matches!(c, MirConst::I64(_)) || self.b.value_ty(v) != MirTy::I64 {
+                        return Err("nested scalar pattern".into());
+                    }
+                    let k = self.b.ins_const(c).map_err(mir)?;
+                    let hit = self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir)?;
+                    let next = self.b.create_block();
+                    self.b.branch(hit, next, miss).map_err(mir)?;
+                    self.switch(next);
+                    return Ok(());
+                }
+                if self.b.value_ty(v) != MirTy::HeapRef {
+                    return Err("nested variant word".into());
+                }
+                let field_tys = (self.inp.boxed_view)(ty, Some(variant)).ok_or("nested variant payload")?;
+                let subs: Vec<Option<&HirPat>> = match fields {
+                    HirPatFields::Unit => Vec::new(),
+                    HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
+                    HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
+                        .iter()
+                        .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
+                        .collect(),
+                };
+                if !subs.is_empty() && subs.len() != field_tys.len() {
+                    return Err("payload pattern".into());
+                }
+                let mut words = Vec::with_capacity(field_tys.len());
+                for (k, t) in field_tys.iter().enumerate() {
+                    let w = self
+                        .inp
+                        .word(t)
+                        .or_else(|| is_unit(t).then_some(MirTy::I64))
+                        .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                        .ok_or("payload type")?;
+                    words.push(self.b.ins_match_payload(v, k as u32, w).map_err(mir)?);
+                }
+                if let Some(miss) = miss {
+                    let tag = tag.ok_or("match arm pattern")?;
+                    let hit = self.b.create_block();
+                    self.b.jump_if_match(v, tag, words.clone(), hit, miss).map_err(mir)?;
+                    self.switch(hit);
+                }
+                for ((sub, w), t) in subs.iter().zip(words).zip(&field_tys) {
+                    if let Some(sub) = sub {
+                        // A niche-word payload tests as its own layout; only
+                        // boxed and scalar payloads are tested here.
+                        if matches!(sub, HirPat::Variant { .. }) && (self.inp.niche)(t).is_some() {
+                            return Err("nested niche pattern".into());
+                        }
+                        self.nested_test(sub, w, t, miss)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err("match arm pattern".into()),
+        }
+    }
+
     /// The variant a pointer-niche word carries as its payload, and the
     /// one it does not (the zero word, or `Err` with its low bit set).
     fn niche_sides(&self, scrutinee: HirId, niche: MirTy) -> (&'static str, &'static str) {
@@ -2466,9 +2627,16 @@ impl Lower<'_> {
         };
         let arg = match args {
             [] => return zero(self),
-            [arg] if lower::is_unit_make(self.hir, *arg) => {
+            // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then `Ok(())`.
+            [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+                if !self.effect(*arg)? {
+                    return Ok(Val::Never);
+                }
                 if niche == MirTy::NicheRes {
-                    return Err("niche unit payload".into());
+                    // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
+                    let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+                    let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+                    return Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?));
                 }
                 return zero(self);
             }
