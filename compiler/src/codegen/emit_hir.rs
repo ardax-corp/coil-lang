@@ -963,7 +963,18 @@ impl Compiler {
                 if rl::is_two_word_product_kind(&kind) || rl::is_range_kind(&kind) {
                     return None;
                 }
-                let variants = checker.enum_variants(&kind)?.into_iter().map(|(_, tag, payload)| (tag, payload.len() as u32)).collect();
+                let mut variants = Vec::new();
+                for (name, tag, _) in checker.enum_variants(&kind)? {
+                    let payload = Self::payload_tys_of(checker, &t, &name)?;
+                    let word = match payload.as_slice() {
+                        [] => None,
+                        [p] if crate::hir::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
+                        [p] if !crate::hir::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
+                        [p] => Some(crate::mir::scalar_mir_ty(p)?),
+                        _ => return None,
+                    };
+                    variants.push((tag, word));
+                }
                 Some((kind, variants))
             }),
             boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {

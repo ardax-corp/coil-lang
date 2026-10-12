@@ -137,8 +137,9 @@ pub struct HirMirInput<'a> {
     /// `MakeEnum`), by name.
     pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
     /// The enum a two-word enum type pairs (not a tuple or range) and its
-    /// variants' tags and payload word counts, in declaration order.
-    pub pair_variants: Box<dyn Fn(&Ty) -> Option<(String, HostVariants)> + 'a>,
+    /// variants' tags and payload word types (none for no payload), in
+    /// declaration order.
+    pub pair_variants: Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -314,6 +315,8 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         Some((lo, _)) => lo,
+        // A tuple not returned as a pair comes back boxed.
+        None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
         None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
@@ -330,8 +333,11 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             Some(_) => return Err("param slot".into()),
             None => {
                 let ty = hir.local(param).ty.as_ref().ok_or("param type")?;
-                // A two-word type not passed as a pair comes boxed.
-                let word = inp.word(ty).or_else(|| (inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef));
+                // A two-word type or tuple not passed as a pair comes boxed.
+                let word = inp
+                    .word(ty)
+                    .or_else(|| (inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                    .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef));
                 vec![word.ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
             }
         };
@@ -586,6 +592,11 @@ impl Lower<'_> {
         self.inp
             .word(ty)
             .or_else(|| self.boxed_local(local).then_some(MirTy::HeapRef))
+            // A tuple not kept as a pair is a heap tuple.
+            .or_else(|| {
+                (!self.inp.pair_locals.contains_key(&local.0) && matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()))
+                    .then_some(MirTy::HeapRef)
+            })
             .ok_or_else(|| format!("local type {}", ty_kind(ty)))
     }
 
@@ -628,6 +639,22 @@ impl Lower<'_> {
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
+            // A two-word value the function returns boxed.
+            (Val::Pair(lo, hi), None) if self.b.func().ret_ty == Some(MirTy::HeapRef) => {
+                let ty = self.hir.ret.clone().ok_or("return type")?;
+                match self.box_pair_val(&ty, lo, hi)? {
+                    Val::V(v) => self.b.ret(Some(v)).map_err(mir),
+                    _ => Err("return value".into()),
+                }
+            }
+            // A boxed value the function returns as a pair.
+            (Val::V(v), Some((lo_ty, hi_ty))) if self.b.value_ty(v) == MirTy::HeapRef => {
+                let ty = self.hir.ret.clone().ok_or("return type")?;
+                match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
+                    Val::Pair(lo, hi) => self.b.ret_pair(lo, hi).map_err(mir),
+                    _ => Err("return value".into()),
+                }
+            }
             (Val::Pair(lo, hi), Some((lo_ty, hi_ty))) => {
                 if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
                     return Err("return pair type".into());
@@ -683,6 +710,69 @@ impl Lower<'_> {
             Val::Never => Ok(None),
             _ => Err("pair operand".into()),
         }
+    }
+
+    /// `id`'s word, a two-word value boxed to one, as HIR emission's
+    /// conversion of a pair to a boxed local or return.
+    fn boxed_word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
+        match self.value(id)? {
+            Val::V(v) => Ok(Some(v)),
+            Val::Never => Ok(None),
+            Val::Unit => Err("unit operand".into()),
+            Val::Pair(lo, hi) => {
+                let ty = self.expr_ty(id).ok_or("pair operand")?.clone();
+                match self.box_pair_val(&ty, lo, hi)? {
+                    Val::V(v) => Ok(Some(v)),
+                    _ => Err("pair operand".into()),
+                }
+            }
+        }
+    }
+
+    /// A boxed word of two-word type `ty` as its pair, as HIR emission's
+    /// `emit_unbox_product_to_pair` / `emit_unbox_enum_to_pair`.
+    fn unbox_word(&mut self, ty: &Ty, v: ValueId, lo_ty: MirTy, hi_ty: MirTy) -> Result<Val, Refusal> {
+        if let Ty::Tuple(items) = strip_readonly(ty) {
+            if items.len() != 2 {
+                return Err("unbox pair type".into());
+            }
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            let lo = self.b.ins_index(v, zero, lo_ty, false).map_err(mir)?;
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let hi = self.b.ins_index(v, one, hi_ty, false).map_err(mir)?;
+            return Ok(Val::Pair(lo, hi));
+        }
+        if hi_ty != MirTy::I64 {
+            return Err("unbox pair type".into());
+        }
+        let (_, variants) = (self.inp.pair_variants)(ty).ok_or("unbox pair type")?;
+        let variants: Vec<(u32, u32)> = variants.iter().map(|&(t, w)| (t, u32::from(w.is_some()))).collect();
+        self.unbox_pair(v, lo_ty, &variants)
+    }
+
+    /// A boxed tuple: its fields in order, then `Alloc`.
+    fn make_tuple(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let obj = self.b.ins_alloc(MirAllocKind::Tuple, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+    }
+
+    /// A pair of type `ty` boxed: a two-field tuple, or an enum value.
+    fn box_pair_val(&mut self, ty: &Ty, lo: ValueId, hi: ValueId) -> Result<Val, Refusal> {
+        if let Ty::Tuple(items) = strip_readonly(ty) {
+            if items.len() != 2 {
+                return Err("box pair type".into());
+            }
+            let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
+        }
+        self.box_pair(ty, lo, hi)
     }
 
     /// `id`'s word; refuses `()` and `Never` is passed up as `None`.
@@ -944,6 +1034,7 @@ impl Lower<'_> {
             }
             _ if lower::is_unit_make(self.hir, id) => Ok(Val::Unit),
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
+            HirKind::Make { kind: MakeKind::Tuple, args } => self.make_tuple(args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             HirKind::Make {
@@ -977,6 +1068,8 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
+            // A boxed tuple's field: the same `Index`.
+            HirKind::Index { base, index, kind: IndexKind::Tuple } => self.heap_index(id, *base, *index),
             HirKind::ForIn {
                 pat: HirPat::Bind(local),
                 iterable,
@@ -993,7 +1086,7 @@ impl Lower<'_> {
                 self.refuse_array_copy(init)?;
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
-                let Some(v) = self.word(init)? else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(init)? } else { self.word(init)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -1013,7 +1106,7 @@ impl Lower<'_> {
                 self.refuse_array_copy(*value)?;
                 let ty = self.local_ty(local)?;
                 let slot = self.slot(local)?;
-                let Some(v) = self.word(*value)? else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -1473,12 +1566,20 @@ impl Lower<'_> {
                 (Val::V(v), false) => words.push(v),
                 (Val::Pair(lo, tag), false) if boxed => {
                     let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
-                    match self.box_pair(&ty, lo, tag)? {
+                    match self.box_pair_val(&ty, lo, tag)? {
                         Val::V(v) => words.push(v),
                         _ => return Ok(Val::Never),
                     }
                 }
                 (Val::Pair(lo, hi), true) => words.extend([lo, hi]),
+                // A boxed value the callee takes as a pair.
+                (Val::V(v), true) if self.b.value_ty(v) == MirTy::HeapRef && let Some(&(lo_ty, hi_ty)) = self.inp.pair_tys.get(&arg.0) => {
+                    let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
+                    match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
+                        Val::Pair(lo, hi) => words.extend([lo, hi]),
+                        _ => return Ok(Val::Never),
+                    }
+                }
                 _ => return Err("call argument".into()),
             }
         }
@@ -1716,14 +1817,15 @@ impl Lower<'_> {
         if (self.inp.enum_drop)(&name) {
             return Err("box drop enum".into());
         }
-        let Some((&(last_tag, last_arity), rest)) = variants.split_last() else {
+        let Some((&(last_tag, last_word), rest)) = variants.split_last() else {
             return Err("box pair variants".into());
         };
-        let make = |this: &mut Self, t: u32, arity: u32| -> Result<ValueId, Refusal> {
-            let words = match arity {
-                0 => Vec::new(),
-                1 => vec![lo],
-                _ => return Err("box pair arity".into()),
+        // A heap payload rides the pair as an opaque word: the object
+        // types it back, so the collector traces it.
+        let make = |this: &mut Self, t: u32, word: Option<MirTy>| -> Result<ValueId, Refusal> {
+            let words = match word {
+                None => Vec::new(),
+                Some(ty) => vec![this.fit(lo, ty)?],
             };
             let obj = this.b.ins_alloc(MirAllocKind::Enum { tag: t }, words).map_err(mir)?;
             this.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
@@ -1739,7 +1841,7 @@ impl Lower<'_> {
             out.push((self.cur, Val::V(obj)));
             self.switch(next);
         }
-        let obj = make(self, last_tag, last_arity)?;
+        let obj = make(self, last_tag, last_word)?;
         out.push((self.cur, Val::V(obj)));
         self.join_arms(out)
     }
