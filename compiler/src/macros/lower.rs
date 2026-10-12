@@ -4,7 +4,8 @@
 //! - `attr name(FnDecl f, string msg) -> Code { … }` → `fn __attr_name(…)`
 //!   (the first parameter must be `FnDecl` or `TypeDecl`)
 //! - `macro name(Expr a, Vec<Expr> rest) -> Code { … }` → `fn __macro_name(…)`
-//!   (`Expr` parameters, the last one possibly `Vec<Expr>`)
+//!   (`Expr` parameters, the last one possibly `Vec<Expr>`; overloads by
+//!   arity lower to `__macro_name__1`, … for later declarations)
 //! - `quote kind { text ${e} $(xs) sep * }` →
 //!   `new Code("text" + e.src() + join(xs, "sep"))`
 //!
@@ -21,7 +22,7 @@ use parser::ast::{Expression, Output, QuotePart};
 use parser::SimpleSpan;
 use reporting::{ErrorCode, Message};
 
-use super::{attr_fn_name, derive_fn_name, macro_fn_name, MacroDecl, MacroInput, MacroKind, MACRO_MODULE};
+use super::{attr_fn_name, derive_fn_name, macro_overload_fn_name, MacroDecl, MacroInput, MacroKind, MACRO_MODULE};
 use crate::attrs::{fresh_span, leak};
 
 /// Suffix hygienic renaming appends to quote-local names.
@@ -249,18 +250,42 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
                     span.into_range(),
                 ));
             }
-            out.decls.push(MacroDecl {
+            // Overloads by arity, under the rules for functions: no two may
+            // accept the same number of arguments.
+            let overloads: Vec<&MacroDecl> = out
+                .decls
+                .iter()
+                .filter(|d| d.kind == MacroKind::Function && d.name == *name)
+                .collect();
+            let decl = MacroDecl {
                 kind: MacroKind::Function,
                 name: name.to_string(),
-                fn_name: macro_fn_name(name),
+                fn_name: macro_overload_fn_name(name, overloads.len()),
                 helpers: Vec::new(),
                 input: MacroInput::Exprs,
                 params: params.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect(),
-            });
+            };
+            if let Some(clash) = overloads.iter().find(|d| arities_overlap(d.arity(), decl.arity())) {
+                let mut msg = Message::error(
+                    ErrorCode::DuplicateOverload,
+                    format!(
+                        "macro `{name}` is declared twice for {} argument(s): overloads must take different numbers of arguments",
+                        overlap_arity(clash.arity(), decl.arity())
+                    ),
+                    span.into_range(),
+                );
+                msg.with_help(
+                    "choose distinct arities, or give the fixed overload fewer parameters than the rest overload's fixed prefix"
+                        .to_string(),
+                );
+                out.messages.push(msg);
+            }
+            let fn_name = decl.fn_name.clone();
+            out.decls.push(decl);
             let func = Expression::Function {
                 docs: std::mem::take(docs),
                 attrs: Vec::new(),
-                name: leak(macro_fn_name(name)),
+                name: leak(fn_name),
                 is_coro: false,
                 is_static: false,
                 type_params: Vec::new(),
@@ -274,6 +299,23 @@ fn lower_item<'a>(item: &mut Output<'a>, out: &mut Lowered) {
             *item.1 = func;
         }
         _ => {}
+    }
+}
+
+/// Whether two macro arities `(fixed, rest)` accept a common argument count.
+fn arities_overlap(a: (usize, bool), b: (usize, bool)) -> bool {
+    match (a, b) {
+        ((_, true), (_, true)) => true,
+        ((n, false), (k, true)) | ((k, true), (n, false)) => n >= k,
+        ((n, false), (m, false)) => n == m,
+    }
+}
+
+/// The smallest argument count two overlapping arities both accept.
+fn overlap_arity(a: (usize, bool), b: (usize, bool)) -> String {
+    match (a, b) {
+        ((n, true), (m, true)) => format!("{} or more", n.max(m)),
+        ((n, false), _) | (_, (n, false)) => n.to_string(),
     }
 }
 

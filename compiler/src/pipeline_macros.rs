@@ -233,12 +233,19 @@ impl Pipeline {
         let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
             return Err(None);
         };
-        let own = self
-            .ast_cache
-            .get(file)
-            .and_then(|c| c.macro_decls().iter().find(|d| d.kind == p.kind && d.name == p.name))
-            .cloned();
-        if let Some(decl) = own {
+        // A function-style macro may be overloaded by arity: the call's
+        // argument count picks the declaration.
+        let argc = match find_call(ast, p.target).map(|c| c.1.as_ref()) {
+            Some(Expression::MacroCall { args, .. }) if p.kind == MacroKind::Function => Some(args.len()),
+            _ => None,
+        };
+        let pick = |file: &Path, name: &str| -> Result<Option<MacroDecl>, Message> {
+            match self.ast_cache.get(file) {
+                Some(c) => pick_decl(c.macro_decls(), p, name, argc),
+                None => Ok(None),
+            }
+        };
+        if let Some(decl) = pick(file, &p.name).map_err(Some)? {
             let module = self.namespace_for(file);
             return Ok((file.to_path_buf(), decl, module));
         }
@@ -261,12 +268,8 @@ impl Pipeline {
                 continue;
             };
             let Some(candidate) = candidate else { continue };
-            if let Some(decl) = self.ast_cache.get(&candidate).and_then(|c| {
-                c.macro_decls()
-                    .iter()
-                    .find(|d| d.kind == p.kind && d.name == item)
-                    .cloned()
-            }) && !found.iter().any(|(f, _)| *f == candidate)
+            if let Some(decl) = pick(&candidate, &item).map_err(Some)?
+                && !found.iter().any(|(f, _)| *f == candidate)
             {
                 found.push((candidate, decl));
             }
@@ -274,10 +277,7 @@ impl Pipeline {
         // Macro output may use its provider's other macros without an import.
         if found.is_empty()
             && let Some(provider) = &p.from_provider
-            && let Some(decl) = self
-                .ast_cache
-                .get(provider)
-                .and_then(|c| c.macro_decls().iter().find(|d| d.kind == p.kind && d.name == p.name).cloned())
+            && let Some(decl) = pick(provider, &p.name).map_err(Some)?
         {
             found.push((provider.clone(), decl));
         }
@@ -937,6 +937,33 @@ fn find_call<'b, 'a>(node: &'b Output<'a>, target: parser::SimpleSpan) -> Option
     found
 }
 
+/// The declaration of `name` in `decls` that `p` uses. Overloads of a
+/// function-style macro are told apart by the call's `argc`; with one
+/// declaration its own arity check reports a mismatch (`encode_call`).
+fn pick_decl(decls: &[MacroDecl], p: &PendingMacro, name: &str, argc: Option<usize>) -> Result<Option<MacroDecl>, Message> {
+    let candidates: Vec<&MacroDecl> = decls.iter().filter(|d| d.kind == p.kind && d.name == name).collect();
+    let (Some(argc), [_, _, ..]) = (argc, candidates.as_slice()) else {
+        return Ok(candidates.first().map(|d| (*d).clone()));
+    };
+    if let Some(decl) = candidates.iter().find(|d| d.accepts(argc)) {
+        return Ok(Some((*decl).clone()));
+    }
+    let mut arities: Vec<&MacroDecl> = candidates;
+    arities.sort_by_key(|d| d.arity());
+    let mut want: Vec<String> = arities.iter().map(|d| d.describe_arity()).collect();
+    let last = want.pop().unwrap_or_default();
+    let want = if want.is_empty() {
+        last
+    } else {
+        format!("{} or {last}", want.join(", "))
+    };
+    Err(Message::error(
+        ErrorCode::GenericTypeError,
+        format!("macro `{}!` takes {want} argument(s), found {argc}", p.name),
+        p.range.clone(),
+    ))
+}
+
 /// A function-style macro's input: each `Expr` parameter's argument, then
 /// the rest (count, items) for a last `Vec<Expr>` parameter.
 fn encode_call(ast: &Output<'_>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
@@ -957,17 +984,12 @@ fn encode_call(ast: &Output<'_>, source: &str, p: &PendingMacro, decl: &MacroDec
             bad.0.into_range(),
         ));
     }
-    let variadic = decl.params.last().is_some_and(|(_, t)| t.starts_with("Vec<"));
-    let fixed = decl.params.len() - usize::from(variadic);
-    if args.len() < fixed || (!variadic && args.len() > fixed) {
-        let want = if variadic {
-            format!("at least {fixed}")
-        } else {
-            fixed.to_string()
-        };
+    let (fixed, variadic) = decl.arity();
+    if !decl.accepts(args.len()) {
         return Err(err(format!(
-            "macro `{}!` takes {want} argument(s), found {}",
+            "macro `{}!` takes {} argument(s), found {}",
             p.name,
+            decl.describe_arity(),
             args.len()
         )));
     }
