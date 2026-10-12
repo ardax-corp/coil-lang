@@ -956,6 +956,16 @@ impl Compiler {
                 Self::boxed_payloads(checker, &t, variant)
             }),
             enum_drop: Box::new(move |name: &str| checker.enum_has_drop(name)),
+            pair_variants: Box::new(move |t: &Ty| {
+                use crate::typechecking::return_layout as rl;
+                let t = apply_ty_prune(checker.subst(), t);
+                let kind = rl::two_word_return_enum(checker, &t)?;
+                if rl::is_two_word_product_kind(&kind) || rl::is_range_kind(&kind) {
+                    return None;
+                }
+                let variants = checker.enum_variants(&kind)?.into_iter().map(|(_, tag, payload)| (tag, payload.len() as u32)).collect();
+                Some((kind, variants))
+            }),
             boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
                 if crate::typechecking::value_layout::value_layout(checker, &t) != ValueLayout::Boxed {

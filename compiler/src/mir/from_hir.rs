@@ -136,6 +136,9 @@ pub struct HirMirInput<'a> {
     /// A user enum whose variants carry a drop hook (`TagEnumType` after
     /// `MakeEnum`), by name.
     pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
+    /// The enum a two-word enum type pairs (not a tuple or range) and its
+    /// variants' tags and payload word counts, in declaration order.
+    pub pair_variants: Box<dyn Fn(&Ty) -> Option<(String, HostVariants)> + 'a>,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -1453,12 +1456,22 @@ impl Lower<'_> {
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
-            if !pair && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
+            // A two-word type not passed as a pair goes boxed.
+            let boxed = !pair && self.expr_ty(arg).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some());
+            if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
+                (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
                 (Val::V(v), false) => words.push(v),
+                (Val::Pair(lo, tag), false) if boxed => {
+                    let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
+                    match self.box_pair(&ty, lo, tag)? {
+                        Val::V(v) => words.push(v),
+                        _ => return Ok(Val::Never),
+                    }
+                }
                 (Val::Pair(lo, hi), true) => words.extend([lo, hi]),
                 _ => return Err("call argument".into()),
             }
@@ -1687,6 +1700,42 @@ impl Lower<'_> {
         words.reverse();
         let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+    }
+
+    /// A two-word enum value boxed to one word, as HIR emission's
+    /// `emit_box_slots_to_enum`: the tag tested against each variant's but
+    /// the last, then that variant made from the payload word.
+    fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
+        let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;
+        if (self.inp.enum_drop)(&name) {
+            return Err("box drop enum".into());
+        }
+        let Some((&(last_tag, last_arity), rest)) = variants.split_last() else {
+            return Err("box pair variants".into());
+        };
+        let make = |this: &mut Self, t: u32, arity: u32| -> Result<ValueId, Refusal> {
+            let words = match arity {
+                0 => Vec::new(),
+                1 => vec![lo],
+                _ => return Err("box pair arity".into()),
+            };
+            let obj = this.b.ins_alloc(MirAllocKind::Enum { tag: t }, words).map_err(mir)?;
+            this.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
+        };
+        let mut out = Vec::with_capacity(variants.len());
+        for &(t, arity) in rest {
+            let c = self.b.ins_const(MirConst::I64(i64::from(t))).map_err(mir)?;
+            let hit = self.b.ins_cmp(MirCmpOp::Eq, tag, c).map_err(mir)?;
+            let (take, next) = (self.b.create_block(), self.b.create_block());
+            self.b.branch(hit, take, next).map_err(mir)?;
+            self.switch(take);
+            let obj = make(self, t, arity)?;
+            out.push((self.cur, Val::V(obj)));
+            self.switch(next);
+        }
+        let obj = make(self, last_tag, last_arity)?;
+        out.push((self.cur, Val::V(obj)));
+        self.join_arms(out)
     }
 
     /// `v.push(x)` on a heap `Vec` of int/float: the Vec, then the value,
