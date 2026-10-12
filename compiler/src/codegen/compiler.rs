@@ -9002,6 +9002,17 @@ impl Compiler {
             self.bytecode.as_slice(),
             &entries,
         );
+        // A draft whose sites do not match the body's alloc opcodes binds to
+        // nothing; the census reports it apart from a bound map.
+        let unbound: Vec<&str> = lowered
+            .stack_map_drafts
+            .iter()
+            .filter(|d| {
+                !entries.iter().any(|(n, pc)| *n == d.name && self.stack_maps.iter().any(|m| m.entry_pc == *pc))
+            })
+            .map(|d| d.name.as_str())
+            .collect();
+        crate::il::opt::note_unbound_maps(&unbound);
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,

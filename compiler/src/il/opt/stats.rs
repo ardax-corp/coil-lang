@@ -340,6 +340,22 @@ pub(crate) fn note_body_tier(record: BodyTier) {
     with_stats(|s| s.body_tiers.push(record));
 }
 
+/// Mark the stack maps of `names` as drafted but not bound to bytecode.
+pub(crate) fn note_unbound_maps(names: &[&str]) {
+    if names.is_empty() {
+        return;
+    }
+    with_stats(|s| {
+        for b in &mut s.body_tiers {
+            if names.contains(&b.name.as_str())
+                && let Some(map) = &mut b.map
+            {
+                map.push_str(" unbound");
+            }
+        }
+    });
+}
+
 /// Record which tier each function body ended in (MIR keep-rate census).
 pub(crate) fn note_body_tiers(dense: usize, lir: usize, fuse: usize) {
     with_stats(|s| {

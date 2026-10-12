@@ -12,7 +12,8 @@ lines (`name: dense|lir|fuse (dense: why; lir: why; hir: why)`).
     scripts/tier_census.py compare old.json new.json
 
 Each body also reports where its GC stack map came from (`mir`, `il`,
-`il snapshot`, or `-` for none); `compare` lists bodies that lose a map.
+`il snapshot`, or `-` for none; `unbound` when its sites did not match the
+body's alloc opcodes); `compare` lists bodies that lose a bound map.
 
 Environment variables set for `run` (for example `COIL_HIR_MIR=0`) reach the
 compiler, so one binary can be compared against itself under a switch.
@@ -73,6 +74,12 @@ def map_source(why):
         if key == "map":
             return text
     return "-"
+
+
+def bound(body):
+    """Whether the body has a stack map that bound to its bytecode."""
+    source = body.get("map", "-")
+    return source != "-" and not source.endswith(" unbound")
 
 
 def reasons(why):
@@ -140,7 +147,7 @@ def compare(args):
                 up.append(row)
             elif step < 0:
                 down.append(row)
-            if body.get("map", "-") != "-" and other.get("map", "-") == "-":
+            if bound(body) and not bound(other):
                 unmapped.append((path, name, body["map"], "-", other["why"]))
     print(f"{len(up)} bodies up a tier, {len(down)} down, {len(unmapped)} lost a stack map, {gone} not found in the new run")
     for label, rows in (("down", down), ("unmapped", unmapped), ("up", up)):
