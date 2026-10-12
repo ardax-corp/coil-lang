@@ -5366,16 +5366,18 @@ fn match_depth_3_nested_records_bind_correctly() {
         "enum W { W { v: int } } \
  enum Baz { Qux { a: W } } \
  enum Foo { Bar(Baz), Other } \
- fn main() { \
- match Foo::Bar(Baz::Qux { a: W::W { v: 99 } }) { \
+ fn pick(Foo f) -> int { \
+ return match f { \
  Foo::Other => 0, \
  Foo::Bar(Baz::Qux { a: W::W { v } }) => v, \
  }; \
- }",
+ } \
+ fn main() { let _ = pick(Foo::Bar(Baz::Qux { a: W::W { v: 99 } })); }",
     );
 
     // Innermost Binding `v` needs no STORE; require nested unpack
-    // so the depth-3 walk still reaches the record fields.
+    // so the depth-3 walk still reaches the record fields. The match is
+    // on a parameter: a constant scrutinee folds away.
     let unpack_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::Unpack | Instruction::UnpackAt))
