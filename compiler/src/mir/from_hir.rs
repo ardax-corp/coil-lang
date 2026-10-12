@@ -679,6 +679,15 @@ impl Lower<'_> {
         }
     }
 
+    /// `return` of a one-word function with no value: `0`, as HIR
+    /// emission's `CONST 0; RETURN`.
+    fn ret_zero(&mut self) -> Result<(), Refusal> {
+        let ty = self.b.func().ret_ty.ok_or("return value")?;
+        let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let z = self.fit(z, ty)?;
+        self.b.ret(Some(z)).map_err(mir)
+    }
+
     /// Word types of pair local `local`, with its second slot.
     fn pair_local(&self, local: HirLocal) -> Option<(LocalId, LocalId, MirTy, MirTy)> {
         let &(hi, lo_ty, hi_ty) = self.inp.pair_locals.get(&local.0)?;
@@ -1228,6 +1237,15 @@ impl Lower<'_> {
                         }
                         self.ret_unit()?;
                     }
+                    // A `()`-typed value (`return check(x)?`, a unit
+                    // `match`) or a bare `return` in a one-word `Result<(),
+                    // E>` function: the value for its effect, then `0`.
+                    Some(v) if self.inp.ret_pair.is_none() && (lower::is_unit_make(self.hir, *v) || self.expr_ty(*v).is_some_and(is_unit)) => {
+                        if !self.effect(*v)? {
+                            return Ok(Val::Never);
+                        }
+                        self.ret_zero()?;
+                    }
                     Some(v) => {
                         self.ret_tail = true;
                         match self.value(*v)? {
@@ -1235,6 +1253,7 @@ impl Lower<'_> {
                             val => self.ret(val)?,
                         }
                     }
+                    None if self.inp.ret_pair.is_none() => self.ret_zero()?,
                     None => return Err("return value".into()),
                 }
                 Ok(Val::Never)
@@ -2193,6 +2212,13 @@ impl Lower<'_> {
             MakeKind::Variant { tag: Some(tag), .. } => {
                 let lo = match args {
                     [] => self.zero(lo_ty)?,
+                    // A `()` payload: `0`, after a `()`-typed value's effect.
+                    [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+                        if !self.effect(*arg)? {
+                            return Ok(Val::Never);
+                        }
+                        self.zero(lo_ty)?
+                    }
                     [arg] => match self.word(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
                         Some(v) if lo_ty == MirTy::I64 && self.b.value_ty(v).is_heap_word() => self.fit(v, lo_ty)?,
@@ -2477,7 +2503,11 @@ impl Lower<'_> {
         };
         let arg = match args {
             [] => return zero(self),
-            [arg] if lower::is_unit_make(self.hir, *arg) => {
+            // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then `Ok(())`.
+            [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+                if !self.effect(*arg)? {
+                    return Ok(Val::Never);
+                }
                 if niche == MirTy::NicheRes {
                     // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
                     let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
