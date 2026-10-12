@@ -55,7 +55,7 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
             }
         }
     }
-    rewrite_exact_recip_consts(func, &mut consts);
+    hits += exact_recip_divs(func, &mut consts);
 
     let finite = known_finite(func, &consts);
     let nonzero = known_nonzero(&consts);
@@ -264,9 +264,6 @@ fn fold_bin(args: FoldBinArgs<'_>) -> Fold {
     if strength_mul_neg1(op, ty, lhs, rhs, lc, rc, inst) {
         return Fold::Rewrite;
     }
-    if strength_exact_recip(op, ty, rc, inst) {
-        return Fold::Rewrite;
-    }
     Fold::None
 }
 
@@ -338,28 +335,6 @@ fn strength_mul_neg1(
     true
 }
 
-fn strength_exact_recip(
-    op: MirBinOp,
-    ty: MirTy,
-    rc: Option<MirConst>,
-    inst: &mut MirInst,
-) -> bool {
-    if op != MirBinOp::Div || !ty.is_float() {
-        return false;
-    }
-    let Some(c) = rc else {
-        return false;
-    };
-    if exact_recip(c).is_none() {
-        return false;
-    }
-    if let MirInst::Bin { op, .. } = inst {
-        *op = MirBinOp::Mul;
-        return true;
-    }
-    false
-}
-
 fn is_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
     match (ty, c) {
         (MirTy::F64, Some(MirConst::F64(b))) => b == (-1.0_f64).to_bits(),
@@ -403,61 +378,46 @@ fn exact_recip(c: MirConst) -> Option<MirConst> {
     }
 }
 
-/// Rewrite a power-of-two divisor const to its exact reciprocal when every
-/// use is `fdiv x, c`. The same `ValueId` then becomes the `fmul` factor.
-fn rewrite_exact_recip_consts(
-    func: &mut MirFunc,
-    consts: &mut HashMap<ValueId, MirConst>,
-) {
-    let mut uses: HashMap<ValueId, (usize, bool)> = HashMap::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            for (i, o) in inst.operands().into_iter().enumerate() {
-                if !consts.contains_key(&o) {
-                    continue;
-                }
-                let e = uses.entry(o).or_insert((0, true));
-                e.0 += 1;
-                let div_rhs = matches!(
-                    inst,
-                    MirInst::Bin {
-                        op: MirBinOp::Div,
-                        ty,
-                        rhs,
-                        ..
-                    } if ty.is_float() && *rhs == o && i == 1
-                );
-                if !div_rhs {
-                    e.1 = false;
-                }
+/// `x / c` → `x * (1/c)` when `c` is a power of two, so `1/c` is exact.
+/// Each division gets its own reciprocal const: `c` itself may also be
+/// returned, read elsewhere, or held in a debug or deopt slot.
+fn exact_recip_divs(func: &mut MirFunc, consts: &mut HashMap<ValueId, MirConst>) -> usize {
+    let mut hits = 0;
+    for bi in 0..func.blocks.len() {
+        let mut i = 0;
+        while i < func.blocks[bi].insts.len() {
+            let MirInst::Bin {
+                op: MirBinOp::Div,
+                ty,
+                rhs,
+                ..
+            } = func.blocks[bi].insts[i]
+            else {
+                i += 1;
+                continue;
+            };
+            let Some(r) = ty
+                .is_float()
+                .then(|| consts.get(&rhs).copied().and_then(exact_recip))
+                .flatten()
+            else {
+                i += 1;
+                continue;
+            };
+            let dest = ValueId(func.types.len() as u32);
+            func.types.push(ty);
+            consts.insert(dest, r);
+            let block = &mut func.blocks[bi];
+            if let MirInst::Bin { op, rhs, .. } = &mut block.insts[i] {
+                *op = MirBinOp::Mul;
+                *rhs = dest;
             }
+            block.insts.insert(i, MirInst::Const { dest, c: r });
+            hits += 1;
+            i += 2;
         }
     }
-    let mut rewrite = HashSet::new();
-    for (&v, &(n, only_div_rhs)) in &uses {
-        if n == 0 || !only_div_rhs {
-            continue;
-        }
-        let Some(c) = consts.get(&v).copied() else {
-            continue;
-        };
-        if exact_recip(c).is_some() {
-            rewrite.insert(v);
-        }
-    }
-    if rewrite.is_empty() {
-        return;
-    }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            if let MirInst::Const { dest, c } = inst
-                && rewrite.contains(dest)
-                    && let Some(r) = exact_recip(*c) {
-                        *c = r;
-                        consts.insert(*dest, r);
-                    }
-        }
-    }
+    hits
 }
 
 fn known_finite(func: &MirFunc, consts: &HashMap<ValueId, MirConst>) -> HashSet<ValueId> {
@@ -998,6 +958,60 @@ mod tests {
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 0);
         assert_eq!(count_bin(&f, MirBinOp::Mul), 1);
+    }
+
+    #[test]
+    fn exact_recip_keeps_a_shared_divisor() {
+        // `x / s + s`: the divisor is read again, so it must keep its value.
+        let mut b = MirBuilder::new("rcp_shared");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let eight = b.ins_const(MirConst::f64(8.0)).unwrap();
+        let q = b.ins_binop(MirBinOp::Div, x, eight).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, q, eight).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(s)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+        let consts: HashMap<ValueId, MirConst> = f
+            .blocks
+            .iter()
+            .flat_map(|bl| &bl.insts)
+            .filter_map(|i| match *i {
+                MirInst::Const { dest, c } => Some((dest, c)),
+                _ => None,
+            })
+            .collect();
+        for inst in f.blocks.iter().flat_map(|bl| &bl.insts) {
+            match *inst {
+                MirInst::Bin { op: MirBinOp::Mul, rhs, .. } => assert_eq!(consts[&rhs], MirConst::f64(0.125)),
+                MirInst::Bin { op: MirBinOp::Add, rhs, .. } => assert_eq!(consts[&rhs], MirConst::f64(8.0)),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn exact_recip_keeps_a_returned_divisor() {
+        // `x / s` kept for its effect while `s` is returned.
+        let mut b = MirBuilder::new("rcp_ret");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let eight = b.ins_const(MirConst::f64(8.0)).unwrap();
+        let _q = b.ins_binop(MirBinOp::Div, x, eight).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(eight)).unwrap();
+        let mut f = b.finish().unwrap();
+        instcombine(&mut f);
+        f.verify().unwrap();
+        let ret = f.blocks.iter().find_map(|bl| match bl.term {
+            Some(Terminator::Return { lo: Some(v), .. }) => Some(v),
+            _ => None,
+        });
+        let c = f.blocks.iter().flat_map(|bl| &bl.insts).find_map(|i| match *i {
+            MirInst::Const { dest, c } if Some(dest) == ret => Some(c),
+            _ => None,
+        });
+        assert_eq!(c, Some(MirConst::f64(8.0)));
     }
 
     #[test]
