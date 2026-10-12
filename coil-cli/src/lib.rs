@@ -178,25 +178,6 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
 }
 
 /// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
-/// Whether the running executable ends in a package trailer. Reads only the
-/// last [`common::PACKAGE_TRAILER_SIZE`] bytes, so a plain `coil` start stays
-/// cheap.
-pub fn current_exe_is_packaged() -> bool {
-    use std::io::{Seek, SeekFrom};
-
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    let Ok(mut f) = std::fs::File::open(exe) else {
-        return false;
-    };
-    let mut tail = [0u8; common::PACKAGE_TRAILER_SIZE];
-    if f.seek(SeekFrom::End(-(tail.len() as i64))).is_err() || f.read_exact(&mut tail).is_err() {
-        return false;
-    }
-    common::PackageTrailer::decode(&tail).is_some()
-}
-
 pub fn try_run_embedded() -> Option<bool> {
     use machine::packaged_app_ffi_startup_check;
 

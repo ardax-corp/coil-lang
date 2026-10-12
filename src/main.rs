@@ -419,13 +419,6 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNa
 }
 
 fn main() {
-    // `coil package` uses `coil` itself as the runner when no `coil-embed`
-    // sits beside it.
-    if coil_cli::current_exe_is_packaged()
-        && let Some(panicked) = coil_cli::try_run_embedded()
-    {
-        exit(if panicked { 1 } else { 0 });
-    }
     comptime::install();
     let raw_args: Vec<String> = std::env::args().collect();
     let cli = match parse_args(&raw_args) {
