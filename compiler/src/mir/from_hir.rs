@@ -72,7 +72,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -86,6 +86,13 @@ impl HirMirInput<'_> {
             || matches!(strip_readonly(elem), Ty::Tuple(items) if !items.is_empty())
             || (self.boxed_view)(elem, None).is_some();
         heap.then_some(MirTy::HeapRef)
+    }
+
+    /// A heap word stored in a tuple or array slot as the value itself:
+    /// not a niche word (stored boxed).
+    fn plain_heap(&self, ty: &Ty) -> bool {
+        (self.word(ty) == Some(MirTy::HeapRef) && (self.niche)(ty).is_none())
+            || matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty())
     }
 
     /// The word type of an array's elements that direct MIR reads and
@@ -184,6 +191,12 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// Field reads and writes on records (dicts): the key's string table
+    /// index and the field's word type.
+    pub record_fields: HashMap<u32, (u32, MirTy)>,
+    /// Record literals whose every field holds the word its type says:
+    /// each field's key index and word type, in literal order.
+    pub records: HashMap<u32, Vec<(u32, MirTy)>>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
     /// Host native calls whose arguments and result are plain (boxed
@@ -282,6 +295,21 @@ fn unit_fields(fields: &HirPatFields) -> bool {
 /// An `io` stream: a heap object the GC traces like any other.
 fn is_string(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+}
+
+/// What a counted array loop walks.
+#[derive(Clone, Copy)]
+enum Items {
+    Array,
+    /// A dict's `(key, value)` entries.
+    Dict,
+    /// A tuple's items, gathered into an array.
+    Tuple(usize),
+}
+
+/// A record (dict) value: one heap word.
+fn is_record(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Record { .. })
 }
 
 /// A coroutine handle type, `coroutine<Y, R>`: one heap word.
@@ -1060,6 +1088,50 @@ impl Lower<'_> {
                 self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
                 Ok(Val::Unit)
             }
+            // A record's field by key: the object, then the key, as HIR
+            // emission's `GetField`.
+            HirKind::Field { base, .. } if let Some(&(key, ty)) = self.inp.record_fields.get(&id.0) => {
+                let Some(obj) = self.word(*base)? else {
+                    return Ok(Val::Never);
+                };
+                let key = self.b.ins_string(key).map_err(mir)?;
+                Ok(Val::V(self.b.ins_heap_field_load(obj, Some(key), 0, ty).map_err(mir)?))
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
+                    && let Some(&(key, ty)) = self.inp.record_fields.get(&place.0) =>
+            {
+                // The value, the object, then the key, as `SetField`.
+                let Some(v) = self.word(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != ty {
+                    return Err("field type".into());
+                }
+                let Some(obj) = self.word(base)? else {
+                    return Ok(Val::Never);
+                };
+                let key = self.b.ins_string(key).map_err(mir)?;
+                self.b.ins_heap_field_store(obj, v, Some(key), None).map_err(mir)?;
+                Ok(Val::Unit)
+            }
+            HirKind::Make { kind: MakeKind::Record(_), args } if let Some(words) = self.inp.records.get(&id.0) => {
+                // Each value then its key, then `MakeDict`.
+                let words = words.clone();
+                let mut elems = Vec::with_capacity(2 * args.len());
+                for (&arg, (key, ty)) in args.iter().zip(words) {
+                    let Some(v) = self.word(arg)? else {
+                        return Ok(Val::Never);
+                    };
+                    if self.b.value_ty(v) != ty {
+                        return Err("record field type".into());
+                    }
+                    elems.push(v);
+                    elems.push(self.b.ins_string(key).map_err(mir)?);
+                }
+                let obj = self.b.ins_alloc(MirAllocKind::Dict, elems).map_err(mir)?;
+                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+            }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
                 let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
@@ -1143,11 +1215,23 @@ impl Lower<'_> {
             // A boxed tuple's field: the same `Index`.
             HirKind::Index { base, index, kind: IndexKind::Tuple } => self.heap_index(id, *base, *index),
             HirKind::ForIn {
-                pat: HirPat::Bind(local),
+                pat,
                 iterable,
                 body,
                 kind: Some(ForInKind::Array),
-            } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body, None),
+            } if self.heap_array(*iterable) => self.for_array(id, pat, *iterable, *body, None, Items::Array),
+            HirKind::ForIn {
+                pat,
+                iterable,
+                body,
+                kind: Some(ForInKind::Dict),
+            } => self.for_array(id, pat, *iterable, *body, None, Items::Dict),
+            HirKind::ForIn {
+                pat,
+                iterable,
+                body,
+                kind: Some(ForInKind::Tuple { arity }),
+            } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity as usize)),
             HirKind::ForIn {
                 pat: HirPat::Bind(local),
                 iterable,
@@ -1266,7 +1350,7 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Custom { counted: Some(counted), .. }),
             } if let Some(&target) = self.inp.into_iters.get(&id.0) => match *counted {
                 ForInCounted::Range { inclusive, float } => self.for_range(*local, *iterable, *body, inclusive, float, Some(target)),
-                ForInCounted::Array => self.for_array(id, *local, *iterable, *body, Some(target)),
+                ForInCounted::Array => self.for_array(id, &HirPat::Bind(*local), *iterable, *body, Some(target), Items::Array),
                 _ => Err("for in counted custom".into()),
             },
             HirKind::Return(value) => {
@@ -1873,6 +1957,12 @@ impl Lower<'_> {
     }
 
     /// Whether `id` is a heap array this phase lowers (its type is one word).
+    /// The word a boxed tuple's field of type `ty` holds: a scalar or a
+    /// plain heap word.
+    fn tuple_item(&self, ty: &Ty) -> Option<MirTy> {
+        scalar(ty).or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))
+    }
+
     fn heap_array(&self, id: HirId) -> bool {
         self.expr_ty(id).is_some_and(|t| self.inp.word(t) == Some(MirTy::HeapRef) && self.inp.elem_word(t).is_some())
     }
@@ -1882,7 +1972,7 @@ impl Lower<'_> {
     fn heap_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
         let ty = match self.expr_ty(base) {
             // A tuple's field: a scalar.
-            Some(t) if matches!(strip_readonly(t), Ty::Tuple(_)) => self.expr_ty(id).and_then(scalar),
+            Some(t) if matches!(strip_readonly(t), Ty::Tuple(_)) => self.expr_ty(id).and_then(|t| self.tuple_item(t)),
             Some(t) => self.inp.elem_word(t),
             None => None,
         }
@@ -2171,31 +2261,86 @@ impl Lower<'_> {
 
     /// `for x in xs` over a heap array, as HIR emission lowers it: the
     /// length is read once, and the index steps after the body (or at a
-    /// `continue`).
-    fn for_array(&mut self, id: HirId, local: HirLocal, iterable: HirId, body: HirId, into_iter: Option<Label>) -> Result<Val, Refusal> {
-        let ty = self.local_ty(local)?;
+    /// `continue`). A dict loops over its `(key, value)` entries array, a
+    /// tuple over an array of its items. A tuple pattern binds each part
+    /// from the item.
+    fn for_array(&mut self, id: HirId, pat: &HirPat, iterable: HirId, body: HirId, into_iter: Option<Label>, items: Items) -> Result<Val, Refusal> {
+        let it_ty = self.expr_ty(iterable).cloned();
         // A user `into_iter`'s array holds the loop's items.
-        let elem = match into_iter {
-            Some(_) => scalar(self.hir.local(local).ty.as_ref().ok_or("local type")?),
-            None => self.expr_ty(iterable).and_then(array_elem).and_then(scalar),
-        };
-        if elem != Some(ty) || !matches!(ty, MirTy::I64 | MirTy::F64) {
-            return Err("for in element type".into());
+        let elem = match (into_iter, items, &it_ty) {
+            (Some(_), _, _) => match pat {
+                HirPat::Bind(local) => scalar(self.hir.local(*local).ty.as_ref().ok_or("local type")?),
+                _ => None,
+            },
+            (None, Items::Array, Some(t)) => self.inp.elem_word(t),
+            (None, Items::Dict, _) => Some(MirTy::HeapRef),
+            (None, Items::Tuple(_), Some(t)) => match strip_readonly(t) {
+                Ty::Tuple(tys) => {
+                    let words = tys.iter().map(|t| self.tuple_item(t)).collect::<Option<Vec<_>>>();
+                    match words.as_deref() {
+                        Some([w, rest @ ..]) if rest.iter().all(|r| r == w) => Some(*w),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
         }
-        let x = self.slot(local)?;
-        let Some(arr) = self.word(iterable)? else {
+        .ok_or("for in element type")?;
+        // Where the item goes: the bound local, or a temp the pattern's
+        // parts read.
+        let parts: Option<Vec<(HirLocal, MirTy)>> = match pat {
+            HirPat::Bind(local) => {
+                if self.local_ty(*local)? != elem {
+                    return Err("for in element type".into());
+                }
+                None
+            }
+            HirPat::Tuple(pats) if elem == MirTy::HeapRef => {
+                let mut out = Vec::new();
+                for p in pats {
+                    match p {
+                        HirPat::Wild => {}
+                        HirPat::Bind(l) => {
+                            let ty = self.hir.local(*l).ty.as_ref().and_then(|t| self.tuple_item(t)).ok_or("for in pattern type")?;
+                            if self.local_ty(*l)? != ty {
+                                return Err("for in pattern type".into());
+                            }
+                            out.push((*l, ty));
+                        }
+                        _ => return Err("for in pattern".into()),
+                    }
+                }
+                Some(out)
+            }
+            _ => return Err("for in pattern".into()),
+        };
+        let Some(src) = self.word(iterable)? else {
             return Ok(Val::Never);
         };
-        let arr = match into_iter {
-            Some(target) => {
+        let arr = match (into_iter, items) {
+            (Some(target), _) => {
                 let abi = DenseAbi {
-                    params: vec![self.b.value_ty(arr)],
+                    params: vec![self.b.value_ty(src)],
                     ret: MirTy::HeapRef,
                     ret_hi: None,
                 };
-                self.b.ins_call(target, vec![arr], &abi).map_err(mir)?.0
+                self.b.ins_call(target, vec![src], &abi).map_err(mir)?.0
             }
-            None => arr,
+            (None, Items::Array) => src,
+            (None, Items::Dict) => {
+                let obj = self.b.ins_alloc(MirAllocKind::DictEntries, vec![src]).map_err(mir)?;
+                self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
+            }
+            (None, Items::Tuple(arity)) => {
+                let mut words = Vec::with_capacity(arity);
+                for k in 0..arity {
+                    let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
+                    words.push(self.b.ins_index(src, c, elem, false).map_err(mir)?);
+                }
+                let obj = self.b.ins_alloc(MirAllocKind::Array, words).map_err(mir)?;
+                self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
+            }
         };
         let len = self.b.ins_array_len(arr).map_err(mir)?;
         let i = self.temp();
@@ -2211,8 +2356,27 @@ impl Lower<'_> {
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
         let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
-        let item = self.b.ins_index(arr, cur, ty, self.inp.pinned_for.contains(&id.0)).map_err(mir)?;
-        self.b.def_local(x, item).map_err(mir)?;
+        let pinned = matches!(items, Items::Array) && self.inp.pinned_for.contains(&id.0);
+        let item = self.b.ins_index(arr, cur, elem, pinned).map_err(mir)?;
+        match (pat, parts) {
+            (HirPat::Bind(local), _) => {
+                let x = self.slot(*local)?;
+                self.b.def_local(x, item).map_err(mir)?;
+            }
+            (HirPat::Tuple(pats), Some(parts)) => {
+                let mut parts = parts.into_iter();
+                for (k, p) in pats.iter().enumerate() {
+                    if let HirPat::Bind(_) = p {
+                        let (l, ty) = parts.next().ok_or("for in pattern")?;
+                        let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
+                        let v = self.b.ins_index(item, c, ty, false).map_err(mir)?;
+                        let slot = self.slot(l)?;
+                        self.b.def_local(slot, v).map_err(mir)?;
+                    }
+                }
+            }
+            _ => return Err("for in pattern".into()),
+        }
         self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1))
     }
 

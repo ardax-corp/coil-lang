@@ -863,6 +863,45 @@ impl Compiler {
                 heap_fields.insert(i as u32, (idx, w));
             }
         }
+        // Record (dict) fields by key, and record literals, whose words are
+        // the ones their types name. Emission interned every key.
+        let key = |n: &str| self.string_indices.get(n).copied();
+        let mut record_fields = HashMap::new();
+        let mut records = HashMap::new();
+        for (i, e) in hir.exprs.iter().enumerate() {
+            match &e.kind {
+                HirKind::Field { base, name }
+                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
+                        && let Some(w) = field_word(&fty)
+                        && e.ty.as_ref().and_then(field_word) == Some(w)
+                        && let Some(k) = key(name) =>
+                {
+                    record_fields.insert(i as u32, (k, w));
+                }
+                HirKind::Make {
+                    kind: MakeKind::Record(names),
+                    args,
+                } => {
+                    let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
+                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+                        continue;
+                    };
+                    let words = names
+                        .iter()
+                        .zip(args)
+                        .map(|(n, &arg)| {
+                            let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                            let w = field_word(fty)?;
+                            (Self::hir_ty(hir, arg).and_then(field_word) == Some(w)).then_some((key(n)?, w))
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(words) = words {
+                        records.insert(i as u32, words);
+                    }
+                }
+                _ => {}
+            }
+        }
         // `new C(..)` of a class whose every field holds the word its type
         // names: the type id and each field's word type.
         let mut news = HashMap::new();
@@ -998,6 +1037,8 @@ impl Compiler {
                 _ => None,
             }),
             heap_fields,
+            record_fields,
+            records,
             news,
             pushes,
             hosts,
