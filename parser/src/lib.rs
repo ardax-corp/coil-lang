@@ -3539,7 +3539,10 @@ impl<'pratt> Pratt<'pratt> {
                     .padded_by(trivia())
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
-                text::int(10)
+                // A negative literal is one pattern (`-1 =>`, #897).
+                just('-')
+                    .or_not()
+                    .then(text::int(10))
                     .to_slice()
                     .from_str()
                     .validate(|v: Result<i64, ParseIntError>, e, emitter| match v {
