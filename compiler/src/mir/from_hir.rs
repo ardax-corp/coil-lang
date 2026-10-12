@@ -691,7 +691,7 @@ impl Lower<'_> {
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
         // A host's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it.
-        self.raw_host = self.host_pair(id);
+        self.raw_host = self.host_pair(id) || self.boxed_call(id);
         let out = self.value(id);
         self.raw_host = false;
         Ok(!matches!(out?, Val::Never))
@@ -702,6 +702,11 @@ impl Lower<'_> {
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
             && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
             && self.inp.pair_tys.contains_key(&id.0)
+    }
+
+    /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk).
+    fn boxed_call(&self, id: HirId) -> bool {
+        self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) && self.inp.pair_tys.contains_key(&id.0)
     }
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
@@ -808,7 +813,7 @@ impl Lower<'_> {
                 // `write(..)`): its result stays raw.
                 if let Some(t) = *tail
                     && self.expr_ty(id).is_some_and(is_unit)
-                    && self.host_pair(t)
+                    && (self.host_pair(t) || self.boxed_call(t))
                 {
                     self.raw_host = true;
                 }
@@ -970,6 +975,10 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Array),
             } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
+            // `let _ = e`: nothing can read `_`.
+            HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" => {
+                Ok(if self.effect(*init)? { Val::Unit } else { Val::Never })
+            }
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
                 self.refuse_array_copy(init)?;
@@ -1422,6 +1431,8 @@ impl Lower<'_> {
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        // A boxed two-word result kept as it comes back.
+        let raw = std::mem::take(&mut self.raw_host);
         let Some(site) = self.inp.calls.get(&id.0) else {
             return Err(match &self.hir.expr(id).kind {
                 HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, .. } => format!("call `{name}`"),
@@ -1435,6 +1446,7 @@ impl Lower<'_> {
         let unit = is_unit(ty);
         let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
+            Some(_) if raw => (MirTy::HeapRef, None),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
@@ -1984,9 +1996,7 @@ impl Lower<'_> {
             return self.match_scalar(scrutinee, arms, &consts, tail);
         }
         let boxed_local = matches!(self.hir.expr(scrutinee).kind, HirKind::Local(l) if self.boxed_local(l));
-        let boxed_host = matches!(self.hir.expr(scrutinee).kind, HirKind::Call { .. })
-            && self.inp.hosts.get(&scrutinee.0).is_some_and(|h| h.2.is_some())
-            && self.inp.pair_tys.contains_key(&scrutinee.0);
+        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }
@@ -2053,9 +2063,7 @@ impl Lower<'_> {
     fn match_boxed(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
         let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
         // A host's boxed enum result is matched as it comes back.
-        self.raw_host = matches!(self.hir.expr(scrutinee).kind, HirKind::Call { .. })
-            && self.inp.hosts.get(&scrutinee.0).is_some_and(|h| h.2.is_some())
-            && self.inp.pair_tys.contains_key(&scrutinee.0);
+        self.raw_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
         let obj = self.word(scrutinee);
         self.raw_host = false;
         let Some(obj) = obj? else {
