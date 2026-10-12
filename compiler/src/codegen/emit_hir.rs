@@ -1091,6 +1091,7 @@ impl Compiler {
             cold_ok: emit.plan.cold_ok,
             file,
             entry_words,
+            opaque_vars: hir.is_generic,
         })
     }
 

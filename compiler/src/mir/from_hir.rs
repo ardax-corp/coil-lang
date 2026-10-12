@@ -77,6 +77,8 @@ impl HirMirInput<'_> {
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
             .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e)).map(|_| MirTy::HeapRef))
+            .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
+            .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
     }
 
     /// An array element type held as a heap word: a string, class, array,
@@ -219,6 +221,9 @@ pub struct HirMirInput<'a> {
     /// Frame words at entry when trailing dictionary parameters follow
     /// the body's own (a shared generic instance): each is one heap word.
     pub entry_words: Option<u32>,
+    /// A generic body's type parameter values are opaque words it only
+    /// moves (a raw scalar or a box, as the caller passed it).
+    pub opaque_vars: bool,
 }
 
 struct Loop {
@@ -365,6 +370,50 @@ fn ty_kind(ty: &Ty) -> &'static str {
     }
 }
 
+fn is_var(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Var(_))
+}
+
+/// A generic body moves its type parameter values but never reads them:
+/// no operator, field, index, call or constructor takes one (any of them
+/// could read a box as its payload), and nothing that can collect runs
+/// while one is live in a word the frame maps don't trace.
+fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
+    let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
+    let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+    if !any {
+        return Ok(());
+    }
+    for e in &hir.exprs {
+        let read = match &e.kind {
+            HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
+            HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
+            HirKind::Index { base, index, .. } => var(base) || var(index),
+            HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
+            HirKind::Append { base, value } => var(base) || var(value),
+            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
+            HirKind::If { cond, .. } => var(cond),
+            HirKind::Match { scrutinee, .. } => var(scrutinee),
+            HirKind::LetPat { init, .. } => var(init),
+            _ => false,
+        };
+        if read {
+            return Err("type variable read".into());
+        }
+    }
+    let collects = func.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        !matches!(
+            i,
+            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. }
+        )
+    });
+    if collects {
+        return Err("type variable across a call".into());
+    }
+    Ok(())
+}
+
 fn is_unit(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Con(n) => n == crate::typechecking::ty::UNIT,
@@ -384,7 +433,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     if hir.is_coro {
         return Err("body kind coroutine".into());
     }
-    if hir.is_generic {
+    if hir.is_generic && !inp.opaque_vars {
         return Err("body kind generic".into());
     }
     if !hir.captures.is_empty() {
@@ -468,6 +517,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let mut func = lower.b.finish().map_err(mir)?;
     prune(&mut func, &spec);
     tidy(&mut func, &order);
+    if inp.opaque_vars {
+        opaque_moves_only(hir, &func)?;
+    }
     Ok(func)
 }
 
@@ -2621,7 +2673,8 @@ impl Lower<'_> {
             return Ok(Val::V(self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?));
         }
         // `ArrayLen` reads a string's byte length too.
-        if !self.heap_array(arg) && !self.expr_ty(arg).is_some_and(is_string) {
+        let opaque = self.inp.opaque_vars && self.expr_ty(arg).and_then(array_elem).is_some_and(is_var);
+        if !self.heap_array(arg) && !opaque && !self.expr_ty(arg).is_some_and(is_string) {
             return Err("len operand".into());
         }
         let Some(arr) = self.word(arg)? else {
