@@ -518,6 +518,11 @@ pub struct Machine<const S: usize> {
     nested_return: Option<Value>,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
+    /// Arguments of the native FFI calls in flight (nested when a callback
+    /// re-enters the VM and calls out again). `FfiInvoke` pops them off the
+    /// operand stack, so they are rooted here until the call returns:
+    /// `ConstBytes` lends a string's bytes to C for the whole call.
+    ffi_arg_roots: Vec<Value>,
     /// Set when `await_*` parks until fd readiness (CPU help-steals meanwhile).
     pending_io: Option<PendingIoWait>,
     /// Set when a language-level `panic` aborts the VM.
@@ -647,6 +652,7 @@ impl<const S: usize> Machine<S> {
             nested_frame_depths: Vec::new(),
             nested_return: None,
             pending_ffi: None,
+            ffi_arg_roots: Vec::new(),
             pending_io: None,
             panicked: false,
             panic_without_location: false,
@@ -1844,6 +1850,10 @@ impl<const S: usize> Machine<S> {
         // Keyed by address, so they must not move.
         for &addr in self.userland_libraries.keys() {
             visit(addr, crate::memory::RootKind::Pinned);
+        }
+        // In-flight FFI arguments: C may hold pointers into them.
+        for &v in &self.ffi_arg_roots {
+            word(v, crate::memory::RootKind::Pinned, visit);
         }
         self.for_each_mapped_slot_index(|idx| {
             if idx < self.stack.capacity() {
@@ -3238,14 +3248,18 @@ impl<const S: usize> Machine<S> {
                         &self.struct_layouts,
                     );
                     let mut closure_ptrs = Vec::new();
-                    crate::ffi::invoke_via_libffi(
+                    let roots_len = self.ffi_arg_roots.len();
+                    self.ffi_arg_roots.extend_from_slice(&args);
+                    let result = crate::ffi::invoke_via_libffi(
                         &registered.prepared,
                         ffi_sig,
                         &args,
                         pending.arg_types.as_deref(),
                         &mut ctx,
                         &mut closure_ptrs,
-                    )
+                    );
+                    self.ffi_arg_roots.truncate(roots_len);
+                    result
                 } else {
                     Err(crate::ffi::FfiError::InvalidHandle(
                         "function id out of range".into(),

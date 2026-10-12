@@ -50,6 +50,22 @@ int64_t apply_cb(int64_fn_int64 cb, int64_t x) {
     return cb(x);
 }
 
+/// Sum `n` bytes from a read-only buffer (for `ffi::types::ConstBytes` tests).
+int64_t sum_bytes(const uint8_t *buf, int64_t n) {
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += buf[i];
+    }
+    return total;
+}
+
+/// Run `cb(n)`, then sum the bytes: the callback runs (and may collect)
+/// while C still holds `buf`.
+int64_t sum_bytes_after_cb(const uint8_t *buf, int64_t n, int64_fn_int64 cb) {
+    cb(n);
+    return sum_bytes(buf, n);
+}
+
 typedef struct {
     int32_t x;
     int32_t y;

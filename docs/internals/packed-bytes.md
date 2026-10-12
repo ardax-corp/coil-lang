@@ -50,7 +50,10 @@ Runtimes that predate `WORD_BYTE` ignore the stamp, so no archive bump.
 with one copy; writes, `from_bytes` and FFI `Bytes` (tag 15) take
 `to_byte_vec` (one copy when packed). FFI `Bytes` still copies into a
 separate buffer and back: handing C the array's own buffer is unsafe if a
-callback grows the array. Packed arrays cross threads and channels as
+callback grows the array. FFI `ConstBytes` (tag 16) is the read-only form: a
+`Vec<byte>` is copied in once and never back, and a `string` is lent in
+place (its bytes never move or change; the VM roots in-flight FFI
+arguments until the call returns). Packed arrays cross threads and channels as
 `PortableValue::Bytes`.
 
 ## Measurements
@@ -64,3 +67,5 @@ Release build, `COIL_AUTO_PAR=0`, 4-core cloud box (run-to-run spread about
 | Compiler stamp (#939) | deflate 1 MiB round trip (`perf-checkup/benches/stdlib/b_defl.hy`), max RSS | 55 MB | 26 MB |
 | Compiler stamp (#939) | same, compress / inflate / zlib inflate | 6.3 / 1.8 / 1.5 s | 6.1 / 1.5 / 1.3 s |
 | Byte paths | same | — | RSS 26 MB, times within noise of the stamp row (compute bound) |
+| FFI `ConstBytes` (coil-regex lends the subject, `PCRE2_NO_UTF_CHECK`) | `perf-checkup/benches/stdlib/b_rx.hy` (228 KB, 3,000 matches) find_all / split / replace_all, median of 5 | 1147 / 1114 / 1163 ms | 22 / 22 / 28 ms |
+| same | captures_all `([a-z]+)@([a-z]+)\.com`, 144 KB, 3,000 rows | 420 ms | 35 ms |
