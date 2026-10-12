@@ -126,6 +126,10 @@ pub struct HirBody {
     pub locals: Vec<HirLocal>,
     pub exprs: Vec<HirExpr>,
     pub root: Option<HirId>,
+    /// `Global` reads of a generic function whose `let` local is only ever
+    /// called: those calls were rewritten to call the function by name
+    /// (`let g = wrap; g(2.5)`, #916), so the value itself is never used.
+    pub aliased_fn_values: Vec<HirId>,
 }
 
 impl HirBody {

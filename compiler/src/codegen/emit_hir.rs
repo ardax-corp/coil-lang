@@ -457,6 +457,12 @@ impl Compiler {
     /// it uses a construct outside what the compiler can emit.
     pub(super) fn report_unlowered(&mut self, span: &SimpleSpan, name: &str) {
         let reason = self.hir_refusal.take().unwrap_or("no-hir-body");
+        if let Some((value, at)) = self.generic_fn_value_refusal.take()
+            && matches!(reason, "generic-fn-value" | "callee-value" | "global")
+        {
+            self.report_generic_fn_value(&value, at);
+            return;
+        }
         // After a real error (a missing module, a type error) the body is
         // usually unlowerable because of it; this internal error is noise.
         if self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR) {
@@ -506,6 +512,17 @@ impl Compiler {
             .map(|inst| self.hir_mono_enum_params(&module.bodies[index], inst))
             .unwrap_or_default();
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
+        // A generic fn with a nested type parameter read as a value that the
+        // HIR could not alias: if the body is refused, that read is why (#916).
+        *self.generic_fn_value_refusal.borrow_mut() = hir.exprs.iter().enumerate().find_map(|(i, e)| match &e.kind {
+            HirKind::Global { name, .. }
+                if !hir.aliased_fn_values.contains(&HirId(i as u32))
+                    && self.checker.generic_fn_value_nested(&self.resolve_free_fn(name)) =>
+            {
+                Some((name.clone(), e.span))
+            }
+            _ => None,
+        });
         let shapes = self.hir_call_shapes(hir);
         let hir = match &shapes {
             Ok(Some(shaped)) => shaped,
@@ -1820,6 +1837,7 @@ impl Compiler {
                 .collect(),
             exprs,
             root: body.root,
+            aliased_fn_values: body.aliased_fn_values.clone(),
         }
     }
 
@@ -4418,6 +4436,22 @@ impl Compiler {
         let entry = *self.functions.get(&resolved)?;
         let (arity, rest) = self.fn_arities.get(&resolved).copied()?;
         Some((entry, arity, rest))
+    }
+
+    /// E0127: a generic function with a type parameter nested in its
+    /// signature, read as a value where no mono clone can stand in for it
+    /// (its type stays open, or the value is copied on): its shared body
+    /// would box `T` inside the `Option` / `Vec` / tuple it returns.
+    fn report_generic_fn_value(&mut self, name: &str, span: (usize, usize)) {
+        let mut msg = Message::error(
+            ErrorCode::UnsupportedGenericFnValue,
+            format!("generic function `{name}` cannot be used as a value here: a type parameter is nested in its signature"),
+            span.0..span.1,
+        );
+        msg.with_help(format!(
+            "use it where its type is known (`let g = {name}; g(x)`, or pass it to a parameter of a concrete function type), or wrap it in a lambda (`fn (int x) => {name}(x)`)"
+        ));
+        self.messages.push(msg);
     }
 
     /// A generic function already emitted, read where a `PolyFn` is
