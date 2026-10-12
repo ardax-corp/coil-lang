@@ -22,3 +22,11 @@ COIL_MAX_WORKER_THREADS = { value = "1", force = false }
 # sections (COI-376 G3). rust-lld otherwise folds `.text.*` into `.text`.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-Wl,-z,keep-text-section-prefix"]
+
+# Align loop headers to 64 bytes so the VM dispatch loop's indirect jump sits
+# at the same offset in its cache line in every binary. Without it, `coil` and
+# `coil-embed` (same code, different layout under fat LTO) differed by up to
+# 1.4x on fib on Zen 4 (front-end stalls, identical instruction counts).
+# See docs/internals/dispatch-alignment.md.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "llvm-args=-align-loops=64"]
