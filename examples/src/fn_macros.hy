@@ -1,6 +1,6 @@
 // Function-style macros used by `tests/positive/function_macro.hy` and
 // `examples/macro_fn.hy`.
-use macro::{Expr, Code, lit, raw};
+use macro::{Expr, Code, lit, lit_int, raw};
 
 /// `square!(e)`: `e * e`, with `e` kept whole (`square!(1 + 2)` is 9).
 macro square(Expr e) -> Code {
@@ -61,4 +61,31 @@ macro swap(Expr a, Expr b) -> Code {
         ${a} = ${b};
         ${b} = tmp;
     };
+}
+
+/// `ensure!(cond)` / `ensure!(cond, msg)`: overloads by arity. `Ok(())` when
+/// `cond` holds, else `Err` with `msg` or the condition as written.
+macro ensure(Expr cond) -> Code {
+    return quote expr { ensure_result(${cond}, ${lit("ensure failed: " + cond.str())}) };
+}
+
+macro ensure(Expr cond, Expr msg) -> Code {
+    return quote expr { ensure_result(${cond}, ${msg}) };
+}
+
+pub fn ensure_result(bool cond, string msg) -> Result<(), string> {
+    if cond {
+        return Result::Ok(());
+    }
+    return Result::Err(msg);
+}
+
+/// `count!()` is `0`; `count!(a, …)` overloads it with a rest: the number
+/// of arguments.
+macro count() -> Code {
+    return raw("0");
+}
+
+macro count(Expr first, Vec<Expr> rest) -> Code {
+    return lit_int(1 + len(rest));
 }
