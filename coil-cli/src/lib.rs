@@ -344,6 +344,9 @@ fn signal_name(status: &std::process::ExitStatus) -> String {
 }
 
 /// Resolve the default package runner template (`coil-embed` beside this binary).
+///
+/// The full `coil` binary never runs an embedded archive, so there is no fallback:
+/// a missing `coil-embed` is an error.
 pub fn resolve_default_runner() -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe().map_err(|e| format!("cannot resolve current executable: {e}"))?;
@@ -351,12 +354,11 @@ pub fn resolve_default_runner() -> Result<PathBuf, String> {
     if embed.is_file() {
         return Ok(embed);
     }
-    eprintln!(
-        "warning: `coil-embed` not found next to {}; packaging with full `coil` as runner \
-         (install `coil-embed` for a smaller packaged binary)",
+    Err(format!(
+        "`coil-embed` not found next to {}; `coil package` needs it as the runner \
+         (build it with `cargo build --release -p coil-embed`, or pass `--runner <coil-embed>`)",
         exe.display()
-    );
-    Ok(exe)
+    ))
 }
 
 /// Stdout/stderr writer selection for SARIF / LSP / pretty reports.

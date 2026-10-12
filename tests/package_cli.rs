@@ -159,6 +159,44 @@ fn package_fib_embedded_run_prints_55() {
 }
 
 #[test]
+fn package_rejects_full_coil_as_runner() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let entry = manifest.join("examples/fib.hy");
+    let out = std::env::temp_dir().join(format!(
+        "coil_fib_pack_full_{}{}",
+        std::process::id(),
+        std::env::consts::EXE_SUFFIX
+    ));
+    let _ = std::fs::remove_file(&out);
+
+    let mut package = Command::new(&bin);
+    package.args(["package"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        package.arg("--root").arg(root);
+    }
+    package.args([
+        entry.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--runner",
+        &bin,
+    ]);
+    let output = package.output().expect("spawn coil package");
+    assert!(
+        !output.status.success(),
+        "packaging with `coil` as runner must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("never runs an embedded archive"),
+        "expected the coil-embed error, stderr={stderr}"
+    );
+    assert!(!out.exists(), "no packaged binary should be written");
+}
+
+#[test]
 fn package_ffi_without_native_inventory_fails() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");

@@ -61,6 +61,6 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | `reporting` | Diagnostics rendering (ariadne) |
 | `coil-embed` | Packaged-app runner: a small bin that calls `coil_cli::try_run_embedded`. **Not** an embed-the-VM library. |
 
-`coil package` concatenates a `.hyc` onto a runner (`coil-embed` when present, otherwise the full `coil` binary). There is no supported embed-the-VM library API yet (that needs host-catalog + archive C-layout work, later).
+`coil package` concatenates a `.hyc` onto the `coil-embed` runner (beside `coil`, or `--runner`); packaging fails without it, since the full `coil` binary never runs an embedded archive. There is no supported embed-the-VM library API yet (that needs host-catalog + archive C-layout work, later).
 
 Contributor invariants: [AGENTS.md](../../AGENTS.md).

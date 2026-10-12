@@ -197,7 +197,7 @@ enum RawCommand {
         /// Packaged binary path (default: entry file stem)
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
-        /// Runner template (default: `coil-embed` beside this binary)
+        /// `coil-embed` runner template (default: `coil-embed` beside this binary; required)
         #[arg(long, value_name = "PATH")]
         runner: Option<PathBuf>,
         /// Native library to embed in the native lock (repeatable):

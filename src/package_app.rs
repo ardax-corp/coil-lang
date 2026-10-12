@@ -58,8 +58,35 @@ fn compile_program_archive_bytes(
 
 fn resolve_runner_path(runner: Option<&Path>) -> Result<PathBuf, String> {
     match runner {
-        Some(p) => Ok(p.to_path_buf()),
+        Some(p) => {
+            if is_current_exe(p) {
+                return Err(format!(
+                    "runner `{}` is the `coil` CLI, which never runs an embedded archive; \
+                     pass a `coil-embed` binary",
+                    p.display()
+                ));
+            }
+            Ok(p.to_path_buf())
+        }
         None => resolve_default_runner(),
+    }
+}
+
+/// Whether `path` is this `coil` binary (same file, or a byte-identical copy).
+fn is_current_exe(path: &Path) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    if let (Ok(a), Ok(b)) = (fs::canonicalize(path), fs::canonicalize(&exe))
+        && a == b
+    {
+        return true;
+    }
+    match (fs::metadata(path), fs::metadata(&exe)) {
+        (Ok(a), Ok(b)) if a.len() == b.len() => {
+            matches!((fs::read(path), fs::read(&exe)), (Ok(x), Ok(y)) if x == y)
+        }
+        _ => false,
     }
 }
 
@@ -263,6 +290,10 @@ pub fn cmd_package(
     check_native: bool,
     strip_debug: bool,
 ) {
+    let runner_path = match resolve_runner_path(runner) {
+        Ok(p) => p,
+        Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
+    };
     let archive_bytes = match compile_program_archive_bytes(pipeline, filename, strip_debug) {
         Ok(b) => b,
         Err(()) => {
@@ -330,10 +361,6 @@ pub fn cmd_package(
         }
     }
 
-    let runner_path = match resolve_runner_path(runner) {
-        Ok(p) => p,
-        Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
-    };
     let runner_bytes = match fs::read(&runner_path) {
         Ok(b) => b,
         Err(e) => fail_and_exit(
@@ -349,7 +376,7 @@ pub fn cmd_package(
             ErrorCode::IoError,
             format!(
                 "runner `{}` is already a packaged executable; use an unpackaged `coil-embed` \
-                 (or `coil`) binary as the template",
+                 binary as the template",
                 runner_path.display()
             ),
         );
