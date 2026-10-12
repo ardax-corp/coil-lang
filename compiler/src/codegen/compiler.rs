@@ -1119,6 +1119,53 @@ impl Compiler {
         }
     }
 
+    /// Give the last emitted op its own expression's span, so a panic there
+    /// reports the expression's line rather than the line of the statement
+    /// it was forwarded or inlined into (#841, #885). `fill_statement_locs`
+    /// leaves an op that already has a location alone.
+    pub(crate) fn mark_last_op_loc(&mut self, span: (usize, usize)) {
+        let loc = self.loc_from_span(SimpleSpan::from(span.0..span.1));
+        if !loc.is_known() {
+            return;
+        }
+        if let Some(op) = self.bytecode.il_mut().ops_slice_mut().last_mut()
+            && !op.loc().is_known()
+            && !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_))
+        {
+            op.set_loc(loc);
+        }
+    }
+
+    /// As [`Self::mark_last_op_loc`], for each call emitted since `il_start`
+    /// (a callee's contract check or panic reports its caller's line).
+    pub(crate) fn mark_call_locs(&mut self, il_start: usize, span: (usize, usize)) {
+        let loc = self.loc_from_span(SimpleSpan::from(span.0..span.1));
+        if !loc.is_known() {
+            return;
+        }
+        let ops = self.bytecode.il_mut().ops_slice_mut();
+        for op in ops.iter_mut().skip(il_start) {
+            let call = match op {
+                IlOp::Entry { kind, .. } => matches!(kind, EntryKind::Call | EntryKind::TailCall),
+                IlOp::HostInvoke { .. } => true,
+                IlOp::Byte { byte, .. } => matches!(
+                    byte.bytecode(),
+                    Instruction::CALL
+                        | Instruction::TailCall
+                        | Instruction::CallIndirect
+                        | Instruction::NATIVE
+                        | Instruction::FfiInvoke
+                        | Instruction::HostInvoke
+                        | Instruction::HostInvokeNiche
+                ),
+                _ => false,
+            };
+            if call && !op.loc().is_known() {
+                op.set_loc(loc);
+            }
+        }
+    }
+
     /// Lift `arity` TOS args above every cached `[T; N]` / Q2 class box so a
     /// dense callee whose frame base is `tell - arity` cannot Seek/write the
     /// identity slot.
