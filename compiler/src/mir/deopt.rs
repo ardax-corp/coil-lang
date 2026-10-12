@@ -2,8 +2,7 @@
 //!
 //! The VM debugger steps reconstructed bytecode (fuse-IL, LIR, or dense).
 //! This sidecar names where a later native tier must pause or leave, and
-//! records live IL slots at those edges. Production specialize does not set
-//! [`crate::mir::LowerHints::allow_deopt`]. Explicit `Deopt` insts are
+//! records live IL slots at those edges. Explicit `Deopt` insts are
 //! skipped at emit (not encoded). Maps stay compiler-internal — no archive
 //! bump, no P5 resume.
 
@@ -11,11 +10,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use common::DebugLoc;
 
-use crate::il::IlOp;
-
 use super::effects::host_is_pure;
 use super::func::{DeoptSite, MirFunc};
-use super::gc::is_alloc_inst;
 use super::inst::{LocalId, MirDeoptKind, MirInst, Terminator, ValueId};
 
 impl MirInst {
@@ -34,30 +30,6 @@ impl MirInst {
             }
             _ => None,
         }
-    }
-}
-
-/// IL ops that become an explicit [`MirInst::Deopt`] when `allow_deopt`.
-pub fn boundary_for_op(op: &IlOp) -> Option<MirDeoptKind> {
-    match op {
-        IlOp::HostInvoke { .. }
-        | IlOp::Entry { .. }
-        | IlOp::MakeArray { .. }
-        | IlOp::MakeTuple { .. }
-        | IlOp::MakeEnum { .. }
-        | IlOp::Print { .. } => Some(MirDeoptKind::Deopt),
-        IlOp::Byte { byte, .. }
-            if is_alloc_inst(*byte.bytecode())
-                || matches!(
-                    *byte.bytecode(),
-                    common::Instruction::FORMAT | common::Instruction::STRINGIFY
-                ) =>
-        {
-            Some(MirDeoptKind::Deopt)
-        }
-        IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. } => Some(MirDeoptKind::Stop),
-        IlOp::StorePop { loc, .. } if loc.is_known() => Some(MirDeoptKind::Stop),
-        _ => None,
     }
 }
 
@@ -241,20 +213,6 @@ mod tests {
         };
         assert!(stop.is_deopt_edge());
         assert_eq!(stop.deopt_kind(), Some(MirDeoptKind::Stop));
-        assert!(
-            boundary_for_op(&IlOp::Return {
-                loc: loc(),
-                ret_words: 1
-            })
-            .is_some()
-        );
-        assert!(
-            boundary_for_op(&IlOp::Const {
-                imm: 1,
-                loc: loc()
-            })
-            .is_none()
-        );
     }
 
     #[test]
