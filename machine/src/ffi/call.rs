@@ -45,7 +45,11 @@ fn ffi_type_to_libffi(ty: FfiType, layouts: &[CStructLayout]) -> Result<Type, Ff
     match ty {
         FfiType::Int => Ok(Type::i64()),
         FfiType::Float => Ok(Type::f64()),
-        FfiType::String | FfiType::Ptr | FfiType::Bytes | FfiType::Callback(_) => {
+        FfiType::String
+        | FfiType::Ptr
+        | FfiType::Bytes
+        | FfiType::ConstBytes
+        | FfiType::Callback(_) => {
             Ok(Type::pointer())
         }
         FfiType::Void => Ok(Type::void()),
@@ -404,6 +408,48 @@ fn byte_buffer_from_value(
     Ok((ptr, copy_back.then_some(addr)))
 }
 
+/// Backing for an empty [`FfiType::ConstBytes`] view, so C never gets a
+/// dangling pointer.
+static EMPTY_CONST_BYTES: [u8; 1] = [0];
+
+/// A `string` or `Vec<byte>` (or byte tuple) as a read-only `const uint8_t *`
+/// with no NUL terminator; the callee takes the length separately.
+///
+/// A string is lent in place: its bytes never move or change while the string
+/// lives (`memory::strbuf`), and the VM roots the call's arguments until it
+/// returns. An array is copied once and never copied back: lending its own
+/// buffer is unsafe if a callback grows or unpacks it.
+fn const_byte_view_from_value(
+    heap: &Heap,
+    value: &Value,
+    bufs: &mut Vec<Vec<u8>>,
+) -> Result<*mut c_void, FfiError> {
+    let addr = value.raw() as u64;
+    if addr == 0 {
+        return Ok(EMPTY_CONST_BYTES.as_ptr() as *mut c_void);
+    }
+    let mut buf = match heap.find_object_by_addr(addr) {
+        Some(Object::String(gc)) => {
+            let bytes = gc.as_ref().data.as_bytes();
+            if bytes.is_empty() {
+                return Ok(EMPTY_CONST_BYTES.as_ptr() as *mut c_void);
+            }
+            return Ok(bytes.as_ptr() as *mut c_void);
+        }
+        Some(Object::Array(gc)) => gc.as_ref().to_byte_vec(),
+        Some(Object::Tuple(gc)) => gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(),
+        _ => {
+            return Err(FfiError::Unsupported(
+                "ConstBytes argument must be a string or Vec<byte>".into(),
+            ));
+        }
+    };
+    buf.reserve(1);
+    let ptr = buf.as_mut_ptr() as *mut c_void;
+    bufs.push(buf);
+    Ok(ptr)
+}
+
 fn copy_byte_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<u8>]) {
     for &(addr, buf_idx) in targets {
         let Some(buf) = bufs.get(buf_idx) else {
@@ -598,6 +644,11 @@ pub fn invoke_via_libffi(
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(ptr);
             }
+            FfiType::ConstBytes => {
+                let ptr = const_byte_view_from_value(ctx.heap(), value, &mut byte_buffers)?;
+                slots.push(ArgSlot::Ptr(ptr_storage.len()));
+                ptr_storage.push(ptr);
+            }
             FfiType::Callback(_) => {
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(value.raw() as *mut c_void);
@@ -638,8 +689,8 @@ pub fn invoke_via_libffi(
         .collect();
 
     match sig.ret {
-        FfiType::Bytes => Err(FfiError::Unsupported(
-            "Bytes is an argument type; return a Ptr instead".into(),
+        FfiType::Bytes | FfiType::ConstBytes => Err(FfiError::Unsupported(
+            "Bytes and ConstBytes are argument types; return a Ptr instead".into(),
         )),
         FfiType::Void => {
             unsafe {
@@ -842,6 +893,77 @@ mod tests {
         let mut prepared = prepare_cif(&sig, &[]).unwrap();
         prepared.addr = CodePtr::from_ptr(add_two as *mut c_void);
         let mut heap = Heap::default();
+        let mut ctx = InvokeContext::new(&mut heap, &[]);
+        let mut closures = Vec::new();
+        let err = invoke_via_libffi(&prepared, &sig, &[], None, &mut ctx, &mut closures);
+        assert!(matches!(err, Err(FfiError::Unsupported(_))));
+    }
+
+    /// Sums `n` bytes at `buf` and records the pointer it was handed.
+    static CONST_BYTES_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    extern "C" fn sum_const_bytes(buf: *const u8, n: i64) -> i64 {
+        CONST_BYTES_SEEN.store(buf as usize, std::sync::atomic::Ordering::SeqCst);
+        let bytes = unsafe { std::slice::from_raw_parts(buf, n as usize) };
+        bytes.iter().map(|&b| i64::from(b)).sum()
+    }
+
+    fn const_bytes_call(heap: &mut Heap, arg: Value, n: i64) -> Result<Option<Value>, FfiError> {
+        let sig = FfiSignature::from_parts(
+            "sum_const_bytes",
+            vec![FfiType::ConstBytes, FfiType::Int],
+            FfiType::Int,
+        )
+        .unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(sum_const_bytes as *mut c_void);
+        let mut ctx = InvokeContext::new(heap, &[]);
+        let mut closures = Vec::new();
+        invoke_via_libffi(&prepared, &sig, &[arg, Value::from(n)], None, &mut ctx, &mut closures)
+    }
+
+    #[test]
+    fn invoke_const_bytes_lends_a_string_in_place() {
+        use crate::memory::ObjString;
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(ObjString::from("AB\u{e9}"), Object::String);
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 4).unwrap().unwrap();
+        assert_eq!(ret.as_int(), 65 + 66 + 0xc3 + 0xa9);
+        let data = gc.as_ref().data.as_bytes().as_ptr() as usize;
+        assert_eq!(CONST_BYTES_SEEN.load(std::sync::atomic::Ordering::SeqCst), data);
+    }
+
+    #[test]
+    fn invoke_const_bytes_copies_a_vec_and_leaves_it_alone() {
+        use crate::memory::ObjArray;
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64), Value::from(255_i64)]),
+            Object::Array,
+        );
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 3).unwrap().unwrap();
+        assert_eq!(ret.as_int(), 258);
+        let after: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
+        assert_eq!(after, vec![1, 2, 255]);
+    }
+
+    #[test]
+    fn invoke_const_bytes_empty_string_is_not_null() {
+        use crate::memory::ObjString;
+        let mut heap = Heap::default();
+        let (obj, _gc) = heap.alloc(ObjString::from(""), Object::String);
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 0).unwrap().unwrap();
+        assert_eq!(ret.as_int(), 0);
+        assert_ne!(CONST_BYTES_SEEN.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn invoke_const_bytes_rejects_other_values_and_returns() {
+        let mut heap = Heap::default();
+        let err = const_bytes_call(&mut heap, Value::from(5_i64), 0);
+        assert!(matches!(err, Err(FfiError::Unsupported(_))));
+        let sig = FfiSignature::from_parts("f", vec![], FfiType::ConstBytes).unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(add_two as *mut c_void);
         let mut ctx = InvokeContext::new(&mut heap, &[]);
         let mut closures = Vec::new();
         let err = invoke_via_libffi(&prepared, &sig, &[], None, &mut ctx, &mut closures);

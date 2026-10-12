@@ -3209,6 +3209,8 @@ pub enum FfiType {
     Struct(u32),
     /// `Vec<byte>` buffer, passed as `uint8_t *` and copied back.
     Bytes,
+    /// Read-only `string` / `Vec<byte>` view, passed as `const uint8_t *`.
+    ConstBytes,
 }
 
 impl FfiType {
@@ -3230,6 +3232,7 @@ impl FfiType {
             x if x == t::CALLBACK => Self::Callback(aux),
             x if x == t::STRUCT => Self::Struct(aux),
             x if x == t::BYTES => Self::Bytes,
+            x if x == t::CONST_BYTES => Self::ConstBytes,
             _ => Self::Int,
         }
     }
@@ -3253,6 +3256,7 @@ impl FfiType {
             Self::Callback(_) => t::CALLBACK,
             Self::Struct(_) => t::STRUCT,
             Self::Bytes => t::BYTES,
+            Self::ConstBytes => t::CONST_BYTES,
         }
     }
 
