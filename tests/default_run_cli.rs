@@ -299,3 +299,66 @@ fn test_failure_reports_assert_message() {
     );
     cleanup(&cwd);
 }
+
+/// A file without `main` has nothing to run. The prologue (and, with a
+/// static, the setup region) used to fall into the file's first function,
+/// called with no arguments: a macro provider crashed with SIGSEGV, and a
+/// plain function ran unasked.
+#[test]
+fn file_without_main_runs_nothing() {
+    let bin = coil_bin();
+    let cwd = temp_cwd("no_main");
+    let shout = r#"use io::{stdout};
+use io::sync::{write_all};
+use string::{to_bytes};
+
+fn shout() {
+    write_all(stdout(), to_bytes("ran without main"))?;
+}
+"#;
+    let cases = [
+        ("macros.hy", "use macro::{Code, Expr};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n".to_string()),
+        ("plain.hy", shout.to_string()),
+        ("with_static.hy", format!("{shout}\nstatic let k: int = 4;\n")),
+    ];
+    for (name, src) in cases {
+        let entry = cwd.join(name);
+        std::fs::write(&entry, src).expect("write entry");
+        let out = coil_on_entry(&bin, &cwd, &entry).output().expect("spawn coil");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.is_empty(),
+            "{name}: status={:?} stdout={stdout} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    cleanup(&cwd);
+}
+
+/// `coil test` over a directory holding a macro provider (no cases, no
+/// `main`) compiles it and passes, instead of crashing the harness.
+#[test]
+fn coil_test_passes_macro_provider_file() {
+    ensure_coil_test();
+    let bin = coil_bin();
+    let cwd = temp_cwd("test_macro_provider");
+    std::fs::write(
+        cwd.join("macros.hy"),
+        "use macro::{Code, Expr};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cwd.join("uses.hy"),
+        "use macros::{twice};\n\ntest(\"twice\") {\n    assert(twice!(3) == 6)?;\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(&bin)
+        .current_dir(&cwd)
+        .args(["test", "--root", ".", "-j", "1", "."])
+        .output()
+        .expect("spawn coil test");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout={} stderr={stderr}", String::from_utf8_lossy(&out.stdout));
+    cleanup(&cwd);
+}
