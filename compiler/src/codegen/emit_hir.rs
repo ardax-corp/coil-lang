@@ -291,6 +291,10 @@ struct HirEmit {
     /// Each `assert` call: the string table index of its default message,
     /// or `None` when it passes its own.
     asserts: HashMap<u32, Option<u32>>,
+    /// User operators emitted as their instance method's plain `CALL`.
+    op_calls: HashMap<u32, crate::mir::HirOpCall>,
+    /// User operators emitted as a raw opcode on the operands.
+    op_prims: HashSet<u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1054,6 +1058,8 @@ impl Compiler {
             consts: &emit.plan.consts,
             formats: &emit.format_strs,
             asserts: &emit.asserts,
+            op_calls: &emit.op_calls,
+            op_prims: &emit.op_prims,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -2013,6 +2019,8 @@ impl Compiler {
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
             asserts: HashMap::new(),
+            op_calls: HashMap::new(),
+            op_prims: HashSet::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6259,6 +6267,7 @@ impl Compiler {
                     let instr = *instr;
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
                     self.bytecode.push(Byte::new(instr));
+                    emit.op_prims.insert(id.0);
                 }
                 &HirOp::Bound { dict, method } => {
                     for (i, operand) in [*lhs, *rhs].into_iter().enumerate() {
@@ -6305,6 +6314,32 @@ impl Compiler {
                     }
                     self.emit_direct_fn_call(&mut call, &fqn, arity);
                     self.bytecode.append(&mut call);
+                    // No dictionary and a one-word result: direct MIR boxes
+                    // the operands and calls the same entry.
+                    if arity == 2
+                        && let Some(tag) = Self::ty_to_value_tag(&lookup)
+                        && let Some(&IlOp::Entry {
+                            kind: crate::il::EntryKind::Call,
+                            target,
+                            arity: 2,
+                            ret_words: 1,
+                            ..
+                        }) = self.bytecode.il_mut().ops_slice_mut().last()
+                    {
+                        emit.op_calls.insert(
+                            id.0,
+                            crate::mir::HirOpCall {
+                                site: crate::mir::HirCallSite {
+                                    target,
+                                    pair_args: vec![false; 2],
+                                    pair_ret: false,
+                                    coro: false,
+                                },
+                                tag: tag as u32,
+                                shift,
+                            },
+                        );
+                    }
                 }
             },
             HirKind::Bin { op, lhs, rhs } => {

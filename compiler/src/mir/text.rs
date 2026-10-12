@@ -260,6 +260,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 }
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
+                MirAllocKind::Boxed { tag } => write!(f, " {tag}")?,
                 MirAllocKind::Array
                 | MirAllocKind::Tuple
                 | MirAllocKind::Dict
@@ -831,6 +832,9 @@ impl<'a> Parser<'a> {
                 "dictentries" => MirAllocKind::DictEntries,
                 "coro" => MirAllocKind::Coro {
                     target: crate::il::Label(self.uint()? as u32),
+                },
+                "boxed" => MirAllocKind::Boxed {
+                    tag: self.uint()? as u32,
                 },
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
             };

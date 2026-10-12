@@ -221,6 +221,23 @@ offers "Expand macros in this file" on attribute lines and `name!(…)` lines.
 last `Vec<Expr>` parameter takes the remaining arguments. The arity is checked
 at the call ("macro `square!` takes 1 argument(s), found 2").
 
+A module may declare one macro name several times with different arities,
+the way functions overload, e.g. an optional trailing argument:
+
+```coil
+macro ensure(Expr cond) -> Code { … }            // ensure!(x > 0)
+macro ensure(Expr cond, Expr msg) -> Code { … }  // ensure!(x > 0, "x")
+```
+
+The call's argument count picks the overload during resolution; with none
+matching, the error lists every arity ("macro `ensure!` takes 1 or 2
+argument(s), found 3"). As for functions, no two overloads may accept the
+same count: equal fixed arities, two rest overloads, or a fixed arity at or
+above a rest overload's fixed prefix are `E0121`. Every parameter is an
+`Expr`, so arity is the only thing that tells overloads apart. The first
+declaration lowers to `__macro_name`, later ones to `__macro_name__1`,
+`__macro_name__2`, …. Derives and attribute macros do not overload.
+
 `name!(args)` is an expression atom (`Expression::MacroCall`); `!` must be
 directly followed by `(`, so `a != b` and `!x` are unaffected. Each argument
 parses as an ordinary expression, so there is no custom grammar; named

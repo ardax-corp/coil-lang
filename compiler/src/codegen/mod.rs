@@ -248,6 +248,10 @@ struct Context {
 /// fresh compile (safe to clear the shared constant pool).
 pub const PROLOGUE_BYTECODE_LEN: usize = 3;
 
+/// The prologue's `HALT`: where a program without `main` goes once its
+/// setup (if any) has run, instead of falling into its first function.
+pub const PROLOGUE_HALT_OFFSET: usize = 2;
+
 /// How one expression should represent the enum value it builds or loads,
 /// when its consumer needs something other than the value's own layout.
 ///

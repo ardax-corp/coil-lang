@@ -304,7 +304,7 @@ pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
             // the helper printed nothing about it, so say so here.
             let what = signal_name(&s);
             eprintln!("coil: `{helper_name}` was terminated by {what}");
-            if helper_name == "coil-test" {
+            if helper_name == "coil-test" && !single_job(&args) {
                 eprintln!(
                     "  note: tests run on several workers at once; a native library that is not \
                      thread-safe can crash this way (try `-j 1`)"
@@ -318,6 +318,22 @@ pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
             exit(1);
         }
     }
+}
+
+/// Whether `coil test` args already ask for one worker (`-j 1`, `-j1`,
+/// `--jobs 1`, `--jobs=1`), so suggesting `-j 1` would not help.
+fn single_job(args: &[String]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let value = match a.as_str() {
+            "-j" | "--jobs" => it.next().map(String::as_str),
+            _ => a.strip_prefix("--jobs=").or_else(|| a.strip_prefix("-j")),
+        };
+        if value.map(str::trim) == Some("1") {
+            return true;
+        }
+    }
+    false
 }
 
 /// `signal 11 (SIGSEGV)` for an exit status a signal ended.
@@ -391,6 +407,17 @@ mod tests {
             helper.file_name().and_then(|n| n.to_str()),
             Some(expected.as_str())
         );
+    }
+
+    #[test]
+    fn single_job_spots_every_spelling() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for one in [&["-j", "1"][..], &["-j1"], &["--jobs", "1"], &["--jobs=1"], &["tests", "-j", "1"]] {
+            assert!(single_job(&args(one)), "{one:?}");
+        }
+        for many in [&[][..], &["-j", "4"], &["--jobs=12"], &["tests"]] {
+            assert!(!single_job(&args(many)), "{many:?}");
+        }
     }
 
     #[test]

@@ -448,7 +448,9 @@ pub enum MirInst {
     },
     /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
-    /// [`MirTy::HeapRef`] words. Strings are immutable, so it is pure.
+    /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
+    /// instance, which the VM compares structurally: that reads mutable
+    /// objects, so it is never CSE'd or hoisted (it is not, as above).
     StrEq {
         dest: ValueId,
         lhs: ValueId,
@@ -479,6 +481,11 @@ pub enum MirAllocKind {
     Coro {
         target: crate::il::Label,
     },
+    /// `BoxValue` (`tag`): one word into a boxed carrier, as an operator
+    /// instance method takes its operands.
+    Boxed {
+        tag: u32,
+    },
 }
 
 impl MirAllocKind {
@@ -491,6 +498,7 @@ impl MirAllocKind {
             Self::Dict => "dict",
             Self::DictEntries => "dictentries",
             Self::Coro { .. } => "coro",
+            Self::Boxed { .. } => "boxed",
         }
     }
 }

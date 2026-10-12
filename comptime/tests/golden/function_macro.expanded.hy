@@ -1,4 +1,4 @@
-use fn_macros::{square, check, sum, quad, describe, counter, swap};
+use fn_macros::{square, check, sum, quad, describe, counter, swap, ensure, count};
 
 class Clicks {
     pub n: int,
@@ -77,4 +77,16 @@ test("item position: the output is declarations") {
     let c = new Clicks(0);
     c.bump();
     assert(c.bump() == 2)?;
+}
+
+test("a macro overloads by arity") {
+    assert(fn_macros::ensure_result(1 + 1 == 2, "ensure failed: 1 + 1 == 2") == Result::Ok(()))?;
+    assert(
+        fn_macros::ensure_result(1 > 2, "ensure failed: 1 > 2") ==
+        Result::Err("ensure failed: 1 > 2"),
+    )?;
+    assert(fn_macros::ensure_result(1 > 2, "custom") == Result::Err("custom"))?;
+    assert(0 == 0)?;
+    assert(1 == 1)?;
+    assert(3 == 3)?;
 }

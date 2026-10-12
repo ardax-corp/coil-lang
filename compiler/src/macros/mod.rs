@@ -138,6 +138,15 @@ pub fn macro_fn_name(name: &str) -> String {
     format!("__macro_{name}")
 }
 
+/// Function the `k`-th overload of `macro name` is lowered to: the first
+/// keeps [`macro_fn_name`], later ones get a suffix.
+pub fn macro_overload_fn_name(name: &str, k: usize) -> String {
+    match k {
+        0 => macro_fn_name(name),
+        k => format!("__macro_{name}__{k}"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacroKind {
     Derive,
@@ -194,6 +203,31 @@ pub struct MacroDecl {
     /// Extra parameters of an attribute macro, or every parameter of a
     /// function-style macro: `(name, type as written)`.
     pub params: Vec<(String, String)>,
+}
+
+impl MacroDecl {
+    /// A function-style macro's arity: the fixed `Expr` parameters, and
+    /// whether a last `Vec<Expr>` takes the rest.
+    pub fn arity(&self) -> (usize, bool) {
+        let rest = self.params.last().is_some_and(|(_, t)| t.starts_with("Vec<"));
+        (self.params.len() - usize::from(rest), rest)
+    }
+
+    /// Whether a call with `argc` arguments fits this macro's arity.
+    pub fn accepts(&self, argc: usize) -> bool {
+        match self.arity() {
+            (fixed, true) => argc >= fixed,
+            (fixed, false) => argc == fixed,
+        }
+    }
+
+    /// The arity as an error message words it: `2`, `at least 1`.
+    pub fn describe_arity(&self) -> String {
+        match self.arity() {
+            (fixed, true) => format!("at least {fixed}"),
+            (fixed, false) => fixed.to_string(),
+        }
+    }
 }
 
 /// An attribute argument as written: `key = value`, or positional (`key` empty).

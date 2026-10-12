@@ -366,7 +366,8 @@ impl Compiler {
     }
 
     /// Prologue `JMP` target: static initializers and/or `extern` setup
-    /// run at `setup_entry_offset`; otherwise jump straight to `main`.
+    /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
+    /// with no `main`, to the prologue's `HALT` (there is nothing to run).
     pub fn prologue_jmp_target(&self) -> u32 {
         if self.static_slot_count() > 0
             || self.has_extern_block()
@@ -377,7 +378,7 @@ impl Compiler {
             self.functions
                 .get("main")
                 .copied()
-                .unwrap_or(self.program_start_offset as usize) as u32
+                .unwrap_or(PROLOGUE_HALT_OFFSET) as u32
         }
     }
 
@@ -8762,11 +8763,14 @@ impl Compiler {
             None
         };
 
-        // After setup region, insert JMP → main.
+        // After setup region, insert JMP → main (or, with no `main`, → the
+        // prologue HALT rather than falling into the first function).
         let main_off = self.functions.get("main").copied();
-        if let (Some((pos, init_len)), Some(main_off)) = (static_init_region, main_off) {
+        if let Some((pos, init_len)) = static_init_region {
             let jmp_pos = pos + init_len;
-            let target_label = self.bytecode.entry_label_at(main_off);
+            let target_label = self
+                .bytecode
+                .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET));
             self.bytecode.insert_jump_at(jmp_pos, target_label);
             self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
             self.bytecode.bump_func_spans(jmp_pos, 1);
