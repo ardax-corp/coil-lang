@@ -709,6 +709,18 @@ impl Lower<'_> {
         self.b.ret(Some(zero)).map_err(mir)
     }
 
+    /// `v` as the function returns it: a two-word value the function
+    /// returns boxed is built boxed.
+    fn ret_value(&mut self, v: HirId) -> Result<Val, Refusal> {
+        if self.inp.ret_pair.is_none() && self.b.func().ret_ty == Some(MirTy::HeapRef) && self.inp.pair_tys.contains_key(&v.0) {
+            return Ok(match self.boxed_word(v)? {
+                Some(w) => Val::V(w),
+                None => Val::Never,
+            });
+        }
+        self.value(v)
+    }
+
     /// Return `val`, which must fit the function's result.
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
         match (val, self.inp.ret_pair) {
@@ -819,6 +831,19 @@ impl Lower<'_> {
     /// `id`'s word, a two-word value boxed to one, as HIR emission's
     /// conversion of a pair to a boxed local or return.
     fn boxed_word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
+        // A two-word variant made boxed: one `MakeEnum`, as HIR emission's
+        // `hir_make`, not the pair then its box.
+        if let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. }, args } = &self.hir.expr(id).kind
+            && self.inp.pair_tys.contains_key(&id.0)
+            && let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant)))
+        {
+            let (enum_name, tag, args) = (enum_name.clone(), *tag, args.clone());
+            return match self.make_boxed(&enum_name, tag, &tys, &args)? {
+                Val::V(v) => Ok(Some(v)),
+                Val::Never => Ok(None),
+                _ => Err("make boxed".into()),
+            };
+        }
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
@@ -1691,7 +1716,7 @@ impl Lower<'_> {
                     }
                     Some(v) => {
                         self.ret_tail = true;
-                        match self.value(*v)? {
+                        match self.ret_value(*v)? {
                             Val::Never => return Ok(Val::Never),
                             val => self.ret(val)?,
                         }
@@ -2400,6 +2425,12 @@ impl Lower<'_> {
         }
         let mut words = Vec::with_capacity(args.len());
         for (&arg, t) in args.iter().zip(tys) {
+            // A `()` payload is the empty tuple object.
+            if lower::is_unit_make(self.hir, arg) {
+                let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+                words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?);
+                continue;
+            }
             let want = self
                 .inp
                 .word(t)
@@ -3589,7 +3620,8 @@ impl Lower<'_> {
     /// The value of an arm body; with `tail`, returned from the arm.
     fn arm_value(&mut self, body: HirId, tail: bool) -> Result<Val, Refusal> {
         self.ret_tail = tail;
-        match self.value(body)? {
+        let val = if tail { self.ret_value(body)? } else { self.value(body)? };
+        match val {
             Val::Never => Ok(Val::Never),
             val if tail => {
                 self.ret(val)?;
