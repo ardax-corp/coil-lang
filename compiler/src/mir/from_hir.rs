@@ -284,7 +284,12 @@ fn ty_kind(ty: &Ty) -> &'static str {
 }
 
 fn is_unit(ty: &Ty) -> bool {
-    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::UNIT)
+    match strip_readonly(ty) {
+        Ty::Con(n) => n == crate::typechecking::ty::UNIT,
+        // A function declared with no return type.
+        Ty::Tuple(items) => items.is_empty(),
+        _ => false,
+    }
 }
 
 fn mir(e: MirError) -> Refusal {
@@ -937,6 +942,7 @@ impl Lower<'_> {
                 }
                 Ok(Val::Unit)
             }
+            _ if lower::is_unit_make(self.hir, id) => Ok(Val::Unit),
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
