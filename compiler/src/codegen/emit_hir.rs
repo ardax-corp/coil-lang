@@ -991,6 +991,15 @@ impl Compiler {
             .collect();
         let ret_pair = match &emit.plan.ret {
             Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
+            // A body that returns a niche-layout value boxed (a test body's
+            // `Result`) builds the box, which direct MIR does not.
+            Rep::Word(ValueLayout::Boxed)
+                if hir.ret.as_ref().is_some_and(|t| {
+                    matches!(self.value_layout(t), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
+                }) =>
+            {
+                return Err("boxed niche return".into());
+            }
             Rep::Word(_) => None,
         };
         Ok(crate::mir::HirMirInput {

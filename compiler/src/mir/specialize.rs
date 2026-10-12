@@ -748,7 +748,9 @@ fn lir_tail(ops: &[IlOp], name: &str, pool: &mut Vec<u64>, has_alloc: bool, dire
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),
     };
-    if has_alloc {
+    // Direct MIR maps its own allocations: one it proved dead is gone from
+    // the maps too.
+    if has_alloc && !direct {
         let before = ops.iter().filter(|o| refuses_alloc(o)).count();
         let after = out.iter().filter(|o| refuses_alloc(o)).count();
         if after < before {
