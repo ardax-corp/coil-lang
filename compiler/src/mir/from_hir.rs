@@ -2352,7 +2352,8 @@ impl Lower<'_> {
         let (type_id, tys) = (*type_id, tys.clone());
         let mut words = Vec::with_capacity(args.len());
         for (&arg, ty) in args.iter().zip(tys) {
-            let Some(v) = self.word(arg)? else {
+            let v = if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
             };
             if self.b.value_ty(v) != ty {
@@ -3580,9 +3581,17 @@ impl Lower<'_> {
             HirKind::Un { op: UnOp::Not, operand } => (operand, true),
             _ => (cond, false),
         };
-        let Some(c) = self.word(cond)? else {
+        let Some(mut c) = self.word(cond)? else {
             return Ok(Val::Never);
         };
+        // An int condition branches as the VM's `JMPF` reads a word: true
+        // when its low byte is `1`.
+        if self.b.value_ty(c) == MirTy::I64 {
+            let mask = self.b.ins_const(MirConst::I64(0xff)).map_err(mir)?;
+            let low = self.b.ins_binop(MirBinOp::BitAnd, c, mask).map_err(mir)?;
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            c = self.b.ins_cmp(MirCmpOp::Eq, low, one).map_err(mir)?;
+        }
         if self.b.value_ty(c) != MirTy::Bool {
             return Err("if condition".into());
         }

@@ -923,7 +923,17 @@ impl Compiler {
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && !checker.class_has_drop(&class)
-                && let Some(words) = tys.iter().map(word).collect::<Option<Vec<_>>>()
+                && let Some(words) = tys
+                    .iter()
+                    .map(|t| {
+                        // A two-word field value is stored boxed.
+                        word(t).or_else(|| {
+                            (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
+                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                .then_some(crate::mir::MirTy::HeapRef)
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
             {
                 news.insert(i, (checker.class_type_id(&class), words));
             }
