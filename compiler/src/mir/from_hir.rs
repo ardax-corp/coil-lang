@@ -430,7 +430,8 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    if hir.is_coro {
+    // A `gen fn` that never yields runs to its return like a function.
+    if hir.is_coro && hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Yield { .. })) {
         return Err("body kind coroutine".into());
     }
     if hir.is_generic && !inp.opaque_vars {
@@ -441,6 +442,14 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     let root = hir.root.ok_or("no root")?;
     let ret = hir.ret.as_ref().ok_or("return type")?;
+    // A `gen fn` returns its final value as its coroutine's last resume.
+    let ret = match strip_readonly(ret) {
+        Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
+        _ => ret,
+    };
+    if hir.is_coro && !is_unit(ret) && scalar(ret).is_none() {
+        return Err("body kind coroutine".into());
+    }
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
