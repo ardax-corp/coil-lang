@@ -27,6 +27,7 @@ use common::DebugLoc;
 use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
+use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
 
 use super::abi::DenseAbi;
@@ -226,6 +227,9 @@ pub struct HirMirInput<'a> {
     /// A generic body's type parameter values are opaque words it only
     /// moves (a raw scalar or a box, as the caller passed it).
     pub opaque_vars: bool,
+    /// The niche layout of a result the body returns boxed (a test body's
+    /// `Result`): each return builds the `ObjEnum`.
+    pub ret_boxed_niche: Option<ValueLayout>,
 }
 
 struct Loop {
@@ -467,6 +471,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
+        None if inp.ret_boxed_niche.is_some() => MirTy::HeapRef,
         Some((lo, _)) => lo,
         // A tuple not returned as a pair comes back boxed.
         None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
@@ -810,6 +815,18 @@ impl Lower<'_> {
 
     /// Return `val`, which must fit the function's result.
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
+        if let Some(layout) = self.inp.ret_boxed_niche {
+            let boxed = match val {
+                // `Ok(())` boxed: `CONST 0; MakeEnum 0 1`, as HIR emission.
+                Val::Unit if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                    let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                    self.make_enum(0, Some(zero))?
+                }
+                Val::V(v) => self.box_niche(layout, v)?,
+                _ => return Err("return value".into()),
+            };
+            return self.b.ret(Some(boxed)).map_err(mir);
+        }
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
             // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
@@ -853,9 +870,65 @@ impl Lower<'_> {
         }
     }
 
+    /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
+    /// emission's `emit_niche_option_to_boxed` and siblings.
+    fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
+        if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
+            return Err("boxed niche return".into());
+        }
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        // Whether `w` is the second variant: `Some` (non-zero), or `Err`
+        // (non-zero, or the low bit of a niche `Result`).
+        let second = match layout {
+            ValueLayout::NicheResult => {
+                let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                let bit = self.b.ins_binop(MirBinOp::BitAnd, w, one).map_err(mir)?;
+                self.b.ins_cmp(MirCmpOp::Ne, bit, zero).map_err(mir)?
+            }
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => self.b.ins_cmp(MirCmpOp::Ne, w, zero).map_err(mir)?,
+            ValueLayout::Boxed => return Err("boxed niche layout".into()),
+        };
+        let (hit, fall) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(second, hit, fall).map_err(mir)?;
+        let mut out = Vec::with_capacity(2);
+        self.switch(fall);
+        let first = match layout {
+            ValueLayout::NicheOption => self.make_enum(0, None)?,
+            ValueLayout::NicheUnitResult => self.make_enum(0, Some(zero))?,
+            _ => {
+                let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, w).map_err(mir)?;
+                self.make_enum(0, Some(p))?
+            }
+        };
+        out.push((self.cur, Val::V(first)));
+        self.switch(hit);
+        let payload = if layout == ValueLayout::NicheResult {
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            self.b.ins_binop(MirBinOp::Xor, w, one).map_err(mir)?
+        } else {
+            w
+        };
+        let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, payload).map_err(mir)?;
+        let second = self.make_enum(1, Some(p))?;
+        out.push((self.cur, Val::V(second)));
+        match self.join_arms(out)? {
+            Val::V(v) => Ok(v),
+            _ => Err("boxed niche return".into()),
+        }
+    }
+
+    /// `MakeEnum tag` of at most one payload word.
+    fn make_enum(&mut self, tag: u32, payload: Option<ValueId>) -> Result<ValueId, Refusal> {
+        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, payload.into_iter().collect()).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
+    }
+
     /// `return` of a one-word function with no value: `0`, as HIR
     /// emission's `CONST 0; RETURN`.
     fn ret_zero(&mut self) -> Result<(), Refusal> {
+        if self.inp.ret_boxed_niche.is_some() {
+            return self.ret(Val::Unit);
+        }
         let ty = self.b.func().ret_ty.ok_or("return value")?;
         let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         let z = self.fit(z, ty)?;
