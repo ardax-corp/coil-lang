@@ -27,6 +27,7 @@ use common::DebugLoc;
 use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
+use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
 
 use super::abi::DenseAbi;
@@ -226,6 +227,9 @@ pub struct HirMirInput<'a> {
     /// A generic body's type parameter values are opaque words it only
     /// moves (a raw scalar or a box, as the caller passed it).
     pub opaque_vars: bool,
+    /// The niche layout of a result the body returns boxed (a test body's
+    /// `Result`): each return builds the `ObjEnum`.
+    pub ret_boxed_niche: Option<ValueLayout>,
 }
 
 struct Loop {
@@ -273,6 +277,9 @@ struct Lower<'a> {
     word_src: HashMap<ValueId, ValueId>,
     /// The next host call leaves its boxed enum result boxed (a `match`
     /// dispatches on it directly).
+    /// Niche words made from a known variant: whether it is the second
+    /// (`Some` / `Err`) and its payload word.
+    known_niche: HashMap<ValueId, (bool, Option<ValueId>)>,
     raw_host: bool,
 }
 
@@ -377,7 +384,7 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index, call or constructor takes one (any of them
+/// no operator, field, index or call takes one (any of them
 /// could read a box as its payload), and nothing that can collect runs
 /// while one is live in a word the frame maps don't trace.
 fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
@@ -391,7 +398,10 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
             HirKind::Index { base, index, .. } => var(base) || var(index),
-            HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            // A made object holds the word as HIR emission's does (the body
+            // makes them without word kinds).
+            HirKind::Make { .. } => false,
+            HirKind::Call { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
             HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
@@ -404,14 +414,22 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
             return Err("type variable read".into());
         }
     }
-    let collects = func.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-        !matches!(
-            i,
-            MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. }
-        )
-    });
-    if collects {
-        return Err("type variable across a call".into());
+    // A type variable's word is an `i64` the collector does not trace: no
+    // `i64` may stay live past an instruction that can collect (a word one
+    // consumes, such as an object's field, is fine). Parameters are the
+    // exception: the frame map lists every parameter slot.
+    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
+    let live = super::gc::liveness_after(func);
+    for (b, block) in func.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            let moves = matches!(
+                inst,
+                MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
+            );
+            if !moves && live[b][i].iter().any(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)) {
+                return Err("type variable across a call".into());
+            }
+        }
     }
     Ok(())
 }
@@ -467,6 +485,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
+        None if inp.ret_boxed_niche.is_some() => MirTy::HeapRef,
         Some((lo, _)) => lo,
         // A tuple not returned as a pair comes back boxed.
         None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
@@ -529,6 +548,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         unniche: HashMap::new(),
         spec: HashSet::new(),
         word_src: HashMap::new(),
+        known_niche: HashMap::new(),
         raw_host: false,
     };
     match lower.value(root)? {
@@ -542,6 +562,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     tidy(&mut func, &order);
     if inp.opaque_vars {
         opaque_moves_only(hir, &func)?;
+        func.opaque_words = true;
     }
     Ok(func)
 }
@@ -810,6 +831,18 @@ impl Lower<'_> {
 
     /// Return `val`, which must fit the function's result.
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
+        if let Some(layout) = self.inp.ret_boxed_niche {
+            let boxed = match val {
+                // `Ok(())` boxed: `CONST 0; MakeEnum 0 1`, as HIR emission.
+                Val::Unit if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                    let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                    self.make_enum(0, Some(zero))?
+                }
+                Val::V(v) => self.box_niche(layout, v)?,
+                _ => return Err("return value".into()),
+            };
+            return self.b.ret(Some(boxed)).map_err(mir);
+        }
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
             // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
@@ -853,9 +886,74 @@ impl Lower<'_> {
         }
     }
 
+    /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
+    /// emission's `emit_niche_option_to_boxed` and siblings.
+    fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
+        if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
+            return Err("boxed niche return".into());
+        }
+        // A word made from a known variant boxes as that variant.
+        if let Some(&(second, payload)) = self.known_niche.get(&w) {
+            let payload = match payload {
+                Some(p) => Some(self.fit(p, MirTy::HeapRef)?),
+                None if layout == ValueLayout::NicheUnitResult && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
+                None => None,
+            };
+            return self.make_enum(u32::from(second), payload);
+        }
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        // Whether `w` is the second variant: `Some` (non-zero), or `Err`
+        // (non-zero, or the low bit of a niche `Result`).
+        let second = match layout {
+            ValueLayout::NicheResult => {
+                let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                let bit = self.b.ins_binop(MirBinOp::BitAnd, w, one).map_err(mir)?;
+                self.b.ins_cmp(MirCmpOp::Ne, bit, zero).map_err(mir)?
+            }
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => self.b.ins_cmp(MirCmpOp::Ne, w, zero).map_err(mir)?,
+            ValueLayout::Boxed => return Err("boxed niche layout".into()),
+        };
+        let (hit, fall) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(second, hit, fall).map_err(mir)?;
+        let mut out = Vec::with_capacity(2);
+        self.switch(fall);
+        let first = match layout {
+            ValueLayout::NicheOption => self.make_enum(0, None)?,
+            ValueLayout::NicheUnitResult => self.make_enum(0, Some(zero))?,
+            _ => {
+                let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, w).map_err(mir)?;
+                self.make_enum(0, Some(p))?
+            }
+        };
+        out.push((self.cur, Val::V(first)));
+        self.switch(hit);
+        let payload = if layout == ValueLayout::NicheResult {
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            self.b.ins_binop(MirBinOp::Xor, w, one).map_err(mir)?
+        } else {
+            w
+        };
+        let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, payload).map_err(mir)?;
+        let second = self.make_enum(1, Some(p))?;
+        out.push((self.cur, Val::V(second)));
+        match self.join_arms(out)? {
+            Val::V(v) => Ok(v),
+            _ => Err("boxed niche return".into()),
+        }
+    }
+
+    /// `MakeEnum tag` of at most one payload word.
+    fn make_enum(&mut self, tag: u32, payload: Option<ValueId>) -> Result<ValueId, Refusal> {
+        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, payload.into_iter().collect()).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
+    }
+
     /// `return` of a one-word function with no value: `0`, as HIR
     /// emission's `CONST 0; RETURN`.
     fn ret_zero(&mut self) -> Result<(), Refusal> {
+        if self.inp.ret_boxed_niche.is_some() {
+            return self.ret(Val::Unit);
+        }
         let ty = self.b.func().ret_ty.ok_or("return value")?;
         let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         let z = self.fit(z, ty)?;
@@ -1640,6 +1738,14 @@ impl Lower<'_> {
             } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_enum)(t, Some(variant))) => {
                 self.make_boxed(enum_name, *tag, &tys, args)
             }
+            // An `Option` / `Result` neither niche nor a pair (its payload
+            // open in a generic class's shared method) is boxed too.
+            HirKind::Make {
+                kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
+                args,
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant))) => {
+                self.make_boxed(enum_name, *tag, &tys, args)
+            }
             // A scalar enum's variant is its backing constant.
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
@@ -2027,6 +2133,10 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let lt = self.b.value_ty(l);
+        let strings = [lhs, rhs].iter().all(|&e| self.expr_ty(e).is_some_and(is_string));
+        if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
+        }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
             return Err("operator operand type".into());
@@ -3499,7 +3609,9 @@ impl Lower<'_> {
     fn make_niche(&mut self, variant: &str, args: &[HirId], niche: MirTy) -> Result<Val, Refusal> {
         let zero = |this: &mut Self| -> Result<Val, Refusal> {
             let z = this.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-            Ok(Val::V(this.b.ins_cast(MirCastKind::Word, niche, z).map_err(mir)?))
+            let w = this.b.ins_cast(MirCastKind::Word, niche, z).map_err(mir)?;
+            this.known_niche.insert(w, (false, None));
+            Ok(Val::V(w))
         };
         let arg = match args {
             [] => return zero(self),
@@ -3512,7 +3624,9 @@ impl Lower<'_> {
                     // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
                     let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
                     let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-                    return Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?));
+                    let w = self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?;
+                    self.known_niche.insert(w, (false, Some(obj)));
+                    return Ok(Val::V(w));
                 }
                 return zero(self);
             }
@@ -3526,18 +3640,26 @@ impl Lower<'_> {
             return Err("niche payload type".into());
         }
         let err = niche == MirTy::NicheRes && variant == "Err";
-        // `Err(e) => return Err(e)`: the matched word as it was.
+        // `Err(e) => return Err(e)`: the matched word as it was (a body
+        // returning it boxed makes the known variant instead).
         if let Some(&(w, untagged)) = self.unniche.get(&v)
             && untagged == err
             && self.b.value_ty(w) == niche
+            && self.inp.ret_boxed_niche.is_none()
         {
             return Ok(Val::V(w));
         }
-        if err {
+        let w = if err {
             let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            return Ok(Val::V(self.b.ins_binop(MirBinOp::BitOr, v, one).map_err(mir)?));
-        }
-        Ok(Val::V(self.b.ins_cast(MirCastKind::Word, niche, v).map_err(mir)?))
+            self.b.ins_binop(MirBinOp::BitOr, v, one).map_err(mir)?
+        } else {
+            self.b.ins_cast(MirCastKind::Word, niche, v).map_err(mir)?
+        };
+        // `Ok` of a niche `Result` is its first variant; `Some` and `Err`
+        // of a zero niche the second.
+        let second = !(niche == MirTy::NicheRes && variant == "Ok");
+        self.known_niche.insert(w, (second, Some(v)));
+        Ok(Val::V(w))
     }
 
     /// A boxed enum variant pattern's payload word types and the local each

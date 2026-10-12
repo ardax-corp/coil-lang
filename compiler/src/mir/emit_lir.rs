@@ -6,6 +6,8 @@
 //! Single-use values (return words, cmp immediates) stay on the stack instead
 //! of `STORE`+`LOAD`. That is the quality gap vs naive SSA slot reconstruct.
 
+use std::collections::HashMap;
+
 use common::{Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
@@ -272,6 +274,8 @@ impl EmitPlan {
             }
         }
 
+        keep_memory_order(func, &mut tree, &fused);
+
         let mut need_slot = vec![false; n];
         for p in &func.params {
             need_slot[p.index()] = true;
@@ -375,6 +379,81 @@ fn mark_tree(args: MarkTreeArgs<'_>) -> bool {
     }
     tree[i] = true;
     true
+}
+
+/// A write or call: emitted where it stands, never as an inline operand.
+fn writes_memory(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::HeapFieldStore { .. }
+            | MirInst::FieldStore { .. }
+            | MirInst::StoreIndex { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::Call { .. }
+            | MirInst::HostInvoke { .. }
+            | MirInst::ResumeCoro { .. }
+            | MirInst::Print { .. }
+    )
+}
+
+fn reads_memory(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. }
+    )
+}
+
+/// An inline operand is emitted where its user is, which may reorder it
+/// past a memory op between: a read past a write (`let s = o.f; o.f = x;
+/// return s;`) or a write past either. Such an operand keeps its slot.
+fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
+    for block in &func.blocks {
+        let insts = &block.insts;
+        let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        loop {
+            let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
+            // Instruction indices in the order emission reaches them.
+            let mut order = Vec::with_capacity(insts.len());
+            fn visit(v: ValueId, at: &HashMap<ValueId, usize>, insts: &[MirInst], inline: &dyn Fn(ValueId) -> bool, order: &mut Vec<usize>) {
+                let Some(&k) = at.get(&v) else { return };
+                if !inline(v) {
+                    return;
+                }
+                for op in insts[k].operands() {
+                    visit(op, at, insts, inline, order);
+                }
+                order.push(k);
+            }
+            let is_inline = |v: ValueId| inline(v, tree);
+            for (k, inst) in insts.iter().enumerate() {
+                if inst.is_phi() || is_inline(inst.dest()) {
+                    continue;
+                }
+                for op in inst.operands() {
+                    visit(op, &at, insts, &is_inline, &mut order);
+                }
+                order.push(k);
+            }
+            if let Some(term) = &block.term {
+                for v in term_values(term) {
+                    visit(v, &at, insts, &is_inline, &mut order);
+                }
+            }
+            let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
+            // A later-defined op emitted first means an earlier one was
+            // delayed past it.
+            let late = mem.iter().enumerate().find_map(|(i, &a)| {
+                mem[i + 1..]
+                    .iter()
+                    .find(|&&b| b < a && (writes_memory(&insts[a]) || writes_memory(&insts[b])))
+                    .map(|&b| insts[b].dest())
+            });
+            match late {
+                Some(v) if tree[v.index()] => tree[v.index()] = false,
+                _ => break,
+            }
+        }
+    }
 }
 
 fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
@@ -945,6 +1024,18 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::StrEq { dest, lhs, rhs, ne } => {
+            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
+            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Bin {
+                op: str_eq_op(*ne),
+                loc,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
     }
     Ok(())
 }
@@ -1476,6 +1567,24 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
             Ok(())
         }
+        MirInst::StrEq { lhs, rhs, ne, .. } => {
+            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
+            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Bin {
+                op: str_eq_op(*ne),
+                loc,
+            });
+            Ok(())
+        }
+    }
+}
+
+/// VM `EQ` / `NEQ`: strings compare by content.
+fn str_eq_op(ne: bool) -> Instruction {
+    if ne {
+        Instruction::NEQ
+    } else {
+        Instruction::EQ
     }
 }
 

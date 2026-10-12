@@ -935,6 +935,22 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// String `==` / `!=` by content ([`MirInst::StrEq`]).
+    pub fn ins_str_eq(&mut self, lhs: ValueId, rhs: ValueId, ne: bool) -> Result<ValueId, MirError> {
+        let (lt, rt) = (self.resolve_ty(lhs), self.resolve_ty(rhs));
+        if lt != MirTy::HeapRef || rt != MirTy::HeapRef {
+            return Err(MirError::msg(format!("StrEq types {lt} vs {rt}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::StrEq {
+            dest,
+            lhs: self.resolve(lhs),
+            rhs: self.resolve(rhs),
+            ne,
+        })?;
+        Ok(dest)
+    }
+
     pub fn branch(
         &mut self,
         cond: ValueId,

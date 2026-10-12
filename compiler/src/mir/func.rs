@@ -64,6 +64,9 @@ pub struct MirFunc {
     pub debug_slots: HashMap<LocalId, ValueId>,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
     pub deopt_sites: Vec<DeoptSite>,
+    /// An `i64` may be a type variable's word, a raw scalar or a box: the
+    /// objects this body makes carry no word kinds.
+    pub opaque_words: bool,
 }
 
 impl MirFunc {
@@ -84,6 +87,7 @@ impl MirFunc {
             term_locs: HashMap::new(),
             debug_slots: HashMap::new(),
             deopt_sites: Vec::new(),
+            opaque_words: false,
         }
     }
 
@@ -639,6 +643,14 @@ impl MirFunc {
                 }
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
+                }
+            }
+            MirInst::StrEq { dest, lhs, rhs, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} StrEq dest is not bool"));
+                }
+                if self.ty(*lhs) != MirTy::HeapRef || self.ty(*rhs) != MirTy::HeapRef {
+                    return Err(format!("{dest} StrEq operand type"));
                 }
             }
             MirInst::Phi { dest, ty, args } => {

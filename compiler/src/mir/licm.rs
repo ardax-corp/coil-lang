@@ -289,7 +289,8 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::Deopt { .. }
         | MirInst::Print { .. }
         | MirInst::Format { .. }
-        | MirInst::Stringify { .. } => false,
+        | MirInst::Stringify { .. }
+        | MirInst::StrEq { .. } => false,
         MirInst::String { .. } => true,
     }
 }

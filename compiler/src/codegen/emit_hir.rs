@@ -829,6 +829,11 @@ impl Compiler {
             ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
             ValueLayout::Boxed => None,
         };
+        // A generic body's type variable values are opaque words it only
+        // moves; a generic class's shared method sees its class's
+        // parameters as type variables too.
+        let is_var = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
+        let opaque_vars = hir.is_generic || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var));
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -836,6 +841,17 @@ impl Compiler {
                     (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
                 })
                 .or_else(|| niche(t))
+                .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
+                // An `Option` / `Result` open in a type variable is a boxed
+                // enum object.
+                .or_else(|| {
+                    let t = apply_ty_prune(checker.subst(), t);
+                    (opaque_vars
+                        && (crate::typechecking::ty::is_option_ty(&t) || crate::typechecking::ty::is_result_ty(&t))
+                        && crate::typechecking::value_layout::value_layout(checker, &t) == ValueLayout::Boxed
+                        && crate::hir::layout::of_resolved(checker, &t) == crate::hir::layout::Layout::Word)
+                        .then_some(crate::mir::MirTy::HeapRef)
+                })
         };
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
@@ -991,16 +1007,13 @@ impl Compiler {
             .collect();
         let ret_pair = match &emit.plan.ret {
             Rep::Pair(_) => Some(hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?),
-            // A body that returns a niche-layout value boxed (a test body's
-            // `Result`) builds the box, which direct MIR does not.
-            Rep::Word(ValueLayout::Boxed)
-                if hir.ret.as_ref().is_some_and(|t| {
-                    matches!(self.value_layout(t), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
-                }) =>
-            {
-                return Err("boxed niche return".into());
-            }
             Rep::Word(_) => None,
+        };
+        // A body that returns a niche-layout value boxed (a test body's
+        // `Result`) builds the box at each return.
+        let ret_boxed_niche = match (&emit.plan.ret, hir.ret.as_ref().map(|t| self.value_layout(t))) {
+            (Rep::Word(ValueLayout::Boxed), Some(l @ (ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult))) => Some(l),
+            _ => None,
         };
         Ok(crate::mir::HirMirInput {
             slots: &emit.slots,
@@ -1100,7 +1113,8 @@ impl Compiler {
             cold_ok: emit.plan.cold_ok,
             file,
             entry_words,
-            opaque_vars: hir.is_generic,
+            opaque_vars,
+            ret_boxed_niche,
         })
     }
 
