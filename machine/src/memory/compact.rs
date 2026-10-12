@@ -285,7 +285,12 @@ impl Heap {
                     if m != n {
                         continue;
                     }
-                    free_left -= slots - n;
+                    // Its own free slots stop being destinations; earlier
+                    // moves may already have spent them.
+                    let Some(left) = free_left.checked_sub(slots - n) else {
+                        break;
+                    };
+                    free_left = left;
                     if m > free_left {
                         break;
                     }
