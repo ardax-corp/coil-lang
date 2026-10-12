@@ -669,6 +669,11 @@ impl Lower<'_> {
             .ok_or_else(|| format!("local type {}", ty_kind(ty)))
     }
 
+    /// A local of type `()`: nothing to bind or read.
+    fn unit_local(&self, local: HirLocal) -> bool {
+        self.hir.local(local).ty.as_ref().is_some_and(is_unit)
+    }
+
     /// A local of a two-word type that HIR emission keeps boxed in one slot.
     fn boxed_local(&self, local: HirLocal) -> bool {
         !self.inp.pair_locals.contains_key(&local.0)
@@ -1232,6 +1237,8 @@ impl Lower<'_> {
             HirKind::Local(local) if let Some(&slot) = self.boxes.get(&local.0) => {
                 Ok(Val::V(self.b.use_local(slot, MirTy::HeapRef).map_err(mir)?))
             }
+            // A `()` local (a `?` on `Result<(), E>`) holds nothing to read.
+            HirKind::Local(local) if self.unit_local(*local) => Ok(Val::Unit),
             HirKind::Local(local) => {
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
@@ -3497,6 +3504,9 @@ impl Lower<'_> {
                 _ => return Err("payload pattern".into()),
             },
         };
+        if self.unit_local(bound) {
+            return Ok(());
+        }
         // A heap payload rides the pair as an opaque `i64`.
         let ty = self.local_ty(bound)?;
         let payload = if self.b.value_ty(payload) == MirTy::I64 && ty.is_heap_word() {
