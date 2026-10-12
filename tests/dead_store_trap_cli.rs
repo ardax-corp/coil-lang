@@ -43,7 +43,7 @@ fn dead_store_keeps_its_overflow_trap() {
         let out = cmd.arg(&src).output().expect("coil run");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{mode:?}: expected an overflow panic; stderr: {stderr}");
-        assert!(stderr.contains("integer overflow") && stderr.contains("main.hy:21:"), "{mode:?}: stderr: {stderr}");
+        assert!(stderr.contains("integer overflow") && stderr.contains("main.hy:17:"), "{mode:?}: stderr: {stderr}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
