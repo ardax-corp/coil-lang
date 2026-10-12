@@ -401,13 +401,11 @@ fn infer_walk(
                 apply_set_field(&mut stack, &mut slot_ty, &mut pool_ty, *index)?;
             }
             IlOp::Entry {
-                kind,
+                kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
-                target,
                 ret_words,
                 ..
-            } if matches!(kind, EntryKind::Call | EntryKind::TailCall) =>
-            {
+            } => {
                 apply_call(&mut stack, *arity, *ret_words)?;
             }
             IlOp::Entry {
