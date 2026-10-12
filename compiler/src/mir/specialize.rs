@@ -20,8 +20,8 @@ pub struct BodySidecar {
     /// Allocating dense body: its registers may sit past the cursor, so its
     /// frame needs a decoded extent (see `precise_frames`).
     pub needs_frame_extent: bool,
-    /// GC map of a LIR body built from MIR lowered from HIR (no stack IL
-    /// lift to draw it from).
+    /// GC map of a dense or LIR body, built from its MIR (lowered from HIR)
+    /// in the frame registers emission assigns.
     pub stack_map: Option<super::stackmap::DraftFrameMap>,
 }
 
@@ -203,9 +203,13 @@ fn specialize_side(
     });
     let label_hi = crate::il::opt::max_code_label(ops)
         .max(official_entry.map(|Label(id)| id).unwrap_or(0));
-    let (remap, deopt) = super::emit::dense_sidecars(&func, entry);
+    let (remap, deopt, stack_map) = super::emit::dense_sidecars(&func, entry);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
+    side.stack_map = stack_map.map(|mut map| {
+        map.name = name.to_string();
+        map
+    });
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }

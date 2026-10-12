@@ -247,19 +247,23 @@ pub fn emit_dense(
     Ok(out)
 }
 
-/// Named-let remap + deopt draft after the same register assign as emit.
-pub(super) fn dense_sidecars(
-    func: &MirFunc,
-    entry_label: Option<Label>,
-) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
+/// Named-let remap, deopt draft and (for a body with GC edges) the stack
+/// map, after the same register assign as emit.
+pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> super::emit_lir::LirSidecars {
     let mut func = func.clone();
     sink_phi_incomings(&mut func);
     let plan = ConvoyPlan::new(&func, entry_label);
     let (regs, _) = assign_regs(&func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
+    let stack_map = if func.has_gc_edge() && !regs.is_empty() {
+        super::stackmap::encode_draft_regs(&func, &regs, &plan.need_slot)
+    } else {
+        None
+    };
     (
         super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot),
         super::deopt::encode_draft(&func, &regs, &plan.need_slot),
+        stack_map,
     )
 }
 

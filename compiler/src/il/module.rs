@@ -347,28 +347,11 @@ impl IlModule {
             drop_jumps_to_next_label(&mut body.ops);
         }
 
-        // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
-        // I8: leftovers then try MIR→LIR (MIR lowered from HIR); fuse-IL if
-        // a LIR reconstruct wall (`lir_refuse_direct`) hits.
-        // S2d: snapshot maps from stack-IL before dense replace (dense residuals
-        // cannot re-infer). Re-lift after LIR / fuse-IL when that succeeds.
+        // Leftovers then try MIR→LIR (MIR lowered from HIR); fuse-IL if a
+        // LIR reconstruct wall (`lir_refuse_direct`) hits.
         self.stack_map_drafts.clear();
         self.needs_frame_extent.clear();
-        let mut pre_maps = std::collections::HashMap::<String, crate::mir::DraftFrameMap>::new();
-        if opts.mir_specialize {
-            for body in &self.funcs {
-                if let Some(draft) = crate::mir::try_build_draft(
-                    &body.ops,
-                    &body.meta.name,
-                    body.meta.entry_sp,
-                    pool,
-                    &body.meta.unboxed_fields,
-                ) {
-                    pre_maps.insert(body.meta.name.clone(), draft);
-                }
-            }
-        }
         let mut dense_calls = crate::mir::DenseCallMap::new();
         // Pinned bodies stay fuse-IL as emitted.
         let mut pending: Vec<usize> = (0..self.funcs.len())
@@ -379,6 +362,8 @@ impl IlModule {
         let mut tier: Vec<&'static str> = vec!["fuse"; self.funcs.len()];
         let mut side_remaps = HashMap::<String, HashMap<u32, u32>>::new();
         let mut side_deopts = Vec::new();
+        // Maps of dense and LIR bodies, built from their MIR.
+        let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
         while !pending.is_empty() && opts.mir_specialize {
             let mut next = Vec::new();
             let mut progressed = false;
@@ -411,6 +396,9 @@ impl IlModule {
                     if side.needs_frame_extent {
                         self.needs_frame_extent.insert(body.meta.name.clone());
                     }
+                    if let Some(map) = side.stack_map {
+                        mir_maps.insert(body.meta.name.clone(), map);
+                    }
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());
                     }
@@ -433,7 +421,6 @@ impl IlModule {
         let pinned = self.funcs.iter().filter(|b| b.meta.pinned).count();
         let dense_kept = self.funcs.len() - pending.len() - pinned;
         let mut lir_kept = 0usize;
-        let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
         for i in pending.iter().copied() {
             if !opts.mir_specialize {
                 break;
@@ -476,28 +463,26 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
-        // S2b: prefer a draft from the final body (fuse-IL / LIR). Dense
-        // keep the pre-MIR snapshot so looping Make* still bind. Drafts see
-        // bodies before the loop cursor raises (added just below).
+        // Dense and LIR bodies carry maps built from their MIR; a fuse-IL
+        // body's map is lifted from its stack IL. Drafts see bodies before
+        // the loop cursor raises (added just below).
         let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
         if opts.mir_specialize {
             for (i, body) in self.funcs.iter().enumerate() {
-                // A LIR body from MIR lowered from HIR carries its own map.
                 if let Some(draft) = mir_maps.remove(&body.meta.name) {
                     self.stack_map_drafts.push(draft);
                     map_from[i] = "mir";
-                } else if let Some(draft) = crate::mir::try_build_draft(
-                    &body.ops,
-                    &body.meta.name,
-                    body.meta.entry_sp,
-                    pool,
-                    &body.meta.unboxed_fields,
-                ) {
+                } else if tier[i] == "fuse"
+                    && let Some(draft) = crate::mir::try_build_draft(
+                        &body.ops,
+                        &body.meta.name,
+                        body.meta.entry_sp,
+                        pool,
+                        &body.meta.unboxed_fields,
+                    )
+                {
                     self.stack_map_drafts.push(draft);
                     map_from[i] = "il";
-                } else if let Some(draft) = pre_maps.remove(&body.meta.name) {
-                    self.stack_map_drafts.push(draft);
-                    map_from[i] = "il snapshot";
                 }
             }
         }
