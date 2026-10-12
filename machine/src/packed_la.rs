@@ -73,7 +73,7 @@ fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
 
 fn elements_of(obj: &Object) -> Option<&[Value]> {
     match obj {
-        Object::Array(gc) => Some(gc.as_ref().elements().as_slice()),
+        Object::Array(gc) => gc.as_ref().words(),
         Object::Tuple(gc) => Some(gc.as_ref().elements()),
         _ => None,
     }

@@ -201,6 +201,59 @@
         assert_eq!(vm.pop().as_int(), 3);
     }
 
+    /// A `WORD_BYTE` stamp packs the array; the VM's index, store, push and
+    /// len ops see the same words, and a store that does not fit a byte
+    /// unpacks it.
+    #[test]
+    fn byte_stamped_array_reads_and_writes_like_words() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(1),
+            const_int(250),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            Byte::new(Instruction::TagArrayKind).with_operand_u32(common::WORD_BYTE as u32),
+            Byte::new(Instruction::DUPLICATE),
+            const_int(7),
+            Byte::new(Instruction::ArrayPush),
+            Byte::new(Instruction::HALT),
+        ]);
+        let arr = *vm.stack.top();
+        let packed = |vm: &Machine<8>| match vm.heap().find_object_by_addr(arr.raw() as u64) {
+            Some(Object::Array(gc)) => gc.as_ref().is_packed(),
+            _ => panic!("not an array"),
+        };
+        assert!(packed(&vm));
+        vm.run(&[
+            Byte::new(Instruction::DUPLICATE),
+            const_int(1),
+            Byte::new(Instruction::Index),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 250);
+        vm.run(&[
+            Byte::new(Instruction::DUPLICATE),
+            Byte::new(Instruction::ArrayLen),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 3);
+        // StoreIndex pops value, index, array.
+        vm.run(&[
+            Byte::new(Instruction::DUPLICATE),
+            const_int(0),
+            const_int(1000),
+            Byte::new(Instruction::StoreIndex),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(!packed(&vm), "a word that does not fit unpacks");
+        vm.run(&[
+            Byte::new(Instruction::DUPLICATE),
+            const_int(0),
+            Byte::new(Instruction::Index),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 1000);
+    }
+
     /// The aggregate builders read their operand window in place instead of
     /// popping, so element order and stack discipline are what can break.
     #[test]
@@ -225,7 +278,7 @@
                     gc.as_ref().elements().iter().map(Value::as_int).collect()
                 }
                 Some(Object::Array(gc)) => {
-                    gc.as_ref().elements().iter().map(Value::as_int).collect()
+                    gc.as_ref().iter().map(|v| v.as_int()).collect()
                 }
                 _ => panic!("{name} did not allocate an aggregate"),
             };
@@ -2889,7 +2942,7 @@
                         if let Some(Object::Array(arr)) =
                             vm.heap().find_object_by_addr(buf.raw() as u64)
                         {
-                            for v in arr.as_ref().elements().iter().take(n) {
+                            for v in arr.as_ref().iter().take(n) {
                                 got.push(v.as_int() as u8);
                             }
                         }

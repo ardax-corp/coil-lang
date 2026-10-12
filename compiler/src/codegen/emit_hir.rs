@@ -763,7 +763,7 @@ impl Compiler {
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
     fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
-        if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
+        if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
@@ -774,6 +774,10 @@ impl Compiler {
             Err("lambda".to_string())
         } else if emit.par_loop {
             Err("parallel loop".to_string())
+        } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
+            // The debugger reads split class / array locals from their
+            // frame slots; direct MIR keeps them in registers or folds them.
+            Err("split local under a debugger".to_string())
         } else {
             self.hir_mir_input(hir, emit, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
@@ -3830,17 +3834,6 @@ impl Compiler {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
-        }
-        // An unbounded shared body keeps `T` boxed, so a boxed `T` inside
-        // the result it builds (`Option<T>`) stays boxed: only a mono clone
-        // returns it at the ground type (#915). A bounded body keeps raw
-        // words (#802).
-        let nested_ret = receivers == 0
-            && scheme.constraints.is_empty()
-            && !matches!(cur, Ty::Var(_))
-            && crate::typechecking::subst::ftv(cur).iter().any(|v| scheme.bounds.contains(v));
-        if nested_ret && boxed.iter().any(Option::is_some) {
-            return Err("callee-generic");
         }
         // Every constraint needs a ground instance (the AST would emit fewer
         // dictionaries than the body unpacks otherwise).
@@ -7025,6 +7018,10 @@ impl Compiler {
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
                 let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
+                // Temps only at depth 0, as the method path: under pending
+                // operands (`u.label() + ":"`) a temp slot sits at the
+                // call's own depth, so the result would land above it.
+                let stage = stage && depth == 0;
                 let mut temps = Vec::with_capacity(args.len());
                 for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
                     let at = if stage { depth } else { depth + i as u32 };

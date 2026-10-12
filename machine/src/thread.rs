@@ -876,9 +876,9 @@ fn encode_value(
     match obj {
         Object::String(gc) => Ok(PortableValue::String(gc.as_ref().data.to_string())),
         Object::Array(gc) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
-            for e in gc.as_ref().elements() {
-                out.push(encode_value(heap, *e, visited)?);
+            let mut out = Vec::with_capacity(gc.as_ref().len());
+            for e in gc.as_ref().iter() {
+                out.push(encode_value(heap, e, visited)?);
             }
             Ok(PortableValue::Array(out))
         }
@@ -1873,8 +1873,8 @@ mod tests {
         let Object::Array(gc) = heap.find_object_by_addr(back.raw() as u64).unwrap() else {
             panic!("expected array");
         };
-        assert_eq!(gc.as_ref().elements()[0].as_int(), 1);
-        assert_eq!(gc.as_ref().elements()[1].as_int(), 2);
+        assert_eq!(gc.as_ref().get(0).unwrap().as_int(), 1);
+        assert_eq!(gc.as_ref().get(1).unwrap().as_int(), 2);
     }
 
     #[test]

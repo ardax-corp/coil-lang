@@ -1282,19 +1282,6 @@ fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerEr
     Ok(())
 }
 
-/// Int arithmetic or negation (overflow, a zero divisor) or a checked
-/// index: an op that can panic.
-fn tree_may_trap(func: &MirFunc, inst: &MirInst) -> bool {
-    match inst {
-        MirInst::Bin { op, ty, .. } => {
-            *ty == MirTy::I64 && matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem)
-        }
-        MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
-        MirInst::Index { unchecked, .. } => !unchecked,
-        _ => false,
-    }
-}
-
 fn emit_stack(
     out: &mut Vec<IlOp>,
     v: ValueId,
@@ -1318,7 +1305,7 @@ fn emit_stack(
     // A forwarded op that can panic keeps its own line, not its
     // consumer's (#885).
     let own = func.op_loc(v);
-    let loc = if own.is_known() && tree_may_trap(func, inst) { own } else { loc };
+    let loc = if own.is_known() && inst.may_trap(func) { own } else { loc };
     match inst {
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {

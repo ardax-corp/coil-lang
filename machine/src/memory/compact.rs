@@ -172,7 +172,7 @@ impl Object {
             Self::Array(a) => {
                 let a = a.payload_mut();
                 if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
-                    a.elements_mut_no_new_values().iter_mut().for_each(fix);
+                    a.gc_words_mut().unwrap_or_default().iter_mut().for_each(fix);
                 }
             }
             Self::Coroutine(c) => {
@@ -519,7 +519,7 @@ mod tests {
         let Some(Object::Array(a)) = heap.find_object_by_addr(arr.addr()) else {
             panic!("array is a pinned root");
         };
-        for (v, w) in a.as_ref().elements().iter().enumerate() {
+        for (v, w) in a.as_ref().iter().enumerate() {
             assert_eq!(w.raw() as u64 & 1, (v % 2) as u64, "tag bit kept");
             assert!(!moved.contains_key(&w.heap_addr()));
             let Some(Object::Enum(e)) = heap.find_object_by_addr(w.heap_addr()) else {

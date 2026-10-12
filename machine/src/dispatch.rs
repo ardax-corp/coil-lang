@@ -521,9 +521,7 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
         arr as u32,
         addr,
     ) {
-        Some(Object::Array(gc)) => {
-            super::Machine::<8>::read_indexed(gc.as_ref().elements(), index, unchecked)
-        }
+        Some(Object::Array(gc)) => gc.as_ref().read_indexed(index, unchecked),
         Some(Object::Tuple(gc)) => {
             super::Machine::<8>::read_indexed(gc.as_ref().elements(), index, unchecked)
         }
@@ -600,7 +598,7 @@ pub(super) fn dense_array_len(
     promise!(sp + arr < stack_cap);
     let addr = stack[sp + arr].raw() as u64;
     let len = match heap.find_object_by_addr(addr) {
-        Some(Object::Array(gc)) => gc.as_ref().elements().len(),
+        Some(Object::Array(gc)) => gc.as_ref().len(),
         Some(Object::Tuple(gc)) => gc.as_ref().elements().len(),
         Some(Object::String(gc)) => gc.as_ref().data.len(),
         Some(Object::Instance(gc)) => gc

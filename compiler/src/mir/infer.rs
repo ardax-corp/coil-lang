@@ -30,19 +30,10 @@ use common::Instruction;
 
 use crate::il::{EntryKind, IlOp, Label};
 
-use super::abi::DenseCallMap;
-use super::host_allow::{dense_host_ok, host_edge_spec};
 use super::lower::LowerError;
 use super::gc::refuse_reason as alloc_refuse_reason;
 use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
-
-/// Bin / slot-bin plus residual INC/DEC/NEG/NEGF/`CastIntToFloat`/`CastFloatToInt`.
-/// Load / Store / Const / control do not count. Size metric only;
-/// keep/refuse for straight-line dense is [`super::specialize`] cost vs fuse.
-pub fn numeric_work_ops(ops: &[IlOp]) -> usize {
-    ops.iter().filter(|op| is_numeric_work_op(op)).count()
-}
 
 #[derive(Clone, Copy)]
 enum Origin {
@@ -63,99 +54,6 @@ struct Cell {
 pub struct Inferred {
     pub slot_ty: HashMap<u32, MirTy>,
     pub pool_ty: Vec<Option<MirTy>>,
-    pub has_i32: bool,
-    /// Float `+` / `-` / `*` / `/` (or float `INC`/`DEC`). Compare-only is false.
-    pub has_float_arith: bool,
-    /// Integer `+` / `-` / `*` / `/` / `%` (or int `INC`/`DEC`). Compare-only is false.
-    pub has_i64_arith: bool,
-}
-
-pub fn infer_numeric(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-) -> Result<Inferred, LowerError> {
-    infer_numeric_with(ops, pool_len, param_count, &DenseCallMap::new())
-}
-
-/// Like [`infer_numeric`], but one-word `CALL` to a mapped dense callee is ok.
-pub fn infer_numeric_with(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-    calls: &DenseCallMap,
-) -> Result<Inferred, LowerError> {
-    infer_walk(
-        ops,
-        pool_len,
-        param_count,
-        InferMode::Dense,
-        calls,
-        &HashMap::new(),
-        false,
-    )
-}
-
-/// Dense infer that accepts `Make*` / `InitTyped` / format ops (S2c).
-/// `recycle_operands` types consumed operand slots by their last use (like
-/// LIR) instead of refusing a slot reused for another type.
-pub fn infer_numeric_across_alloc(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-    calls: &DenseCallMap,
-    recycle_operands: bool,
-) -> Result<Inferred, LowerError> {
-    let _recycle = WalkRecycle::enter(recycle_operands);
-    infer_walk(
-        ops,
-        pool_len,
-        param_count,
-        InferMode::Dense,
-        calls,
-        &HashMap::new(),
-        true,
-    )
-}
-
-/// Slot types for MIR→LIR (two-slot / niche leafs). No loop required.
-pub fn infer_lir(ops: &[IlOp], pool_len: usize, param_count: u32) -> Result<Inferred, LowerError> {
-    infer_lir_with_seed(ops, pool_len, param_count, &HashMap::new())
-}
-
-/// Like [`infer_lir`], with known heap/niche (or numeric) slot seeds (I1).
-pub fn infer_lir_with_seed(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-    seed: &HashMap<u32, MirTy>,
-) -> Result<Inferred, LowerError> {
-    infer_walk(
-        ops,
-        pool_len,
-        param_count,
-        InferMode::Lir,
-        &DenseCallMap::new(),
-        seed,
-        false,
-    )
-}
-
-/// LIR infer that accepts `Make*` / `InitTyped` when S2b maps exist (S2c).
-pub fn infer_lir_across_alloc(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-) -> Result<Inferred, LowerError> {
-    infer_walk(
-        ops,
-        pool_len,
-        param_count,
-        InferMode::Lir,
-        &DenseCallMap::new(),
-        &HashMap::new(),
-        true,
-    )
 }
 
 /// Slot types for S2b stack-map lift: LIR rules plus Make* / InitTyped.
@@ -165,58 +63,18 @@ pub fn infer_stack_map(
     param_count: u32,
     seed: &HashMap<u32, MirTy>,
 ) -> Result<Inferred, LowerError> {
-    infer_walk(
-        ops,
-        pool_len,
-        param_count,
-        InferMode::Map,
-        &DenseCallMap::new(),
-        seed,
-        true,
-    )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum InferMode {
-    Dense,
-    Lir,
-    /// S2b sidecar: alloc / grow ops are `HeapRef`. One-word `CALL`
-    /// (Q7) and multi-word `CALL` (B3 / C1) type so CALL+alloc drafts bind.
-    /// Heap GetField/SetField/LoadField type so InitTyped+field drafts bind (D1).
-    Map,
-}
-
-impl InferMode {
-    fn allows_alloc(self, across: bool) -> bool {
-        matches!(self, Self::Map) || across
-    }
-
-    /// Q9 R1 / R3: leftover LIR / map lift may type string / format IL.
-    fn allows_string(self) -> bool {
-        matches!(self, Self::Lir | Self::Map)
-    }
-
-    /// D1/D2: map and dense lifts type heap GetField / SetField / LoadField.
-    fn allows_heap_fields(self) -> bool {
-        matches!(self, Self::Map | Self::Dense)
-    }
+    infer_walk(ops, pool_len, param_count, seed)
 }
 
 fn infer_walk(
     ops: &[IlOp],
     pool_len: usize,
     param_count: u32,
-    mode: InferMode,
-    calls: &DenseCallMap,
     seed: &HashMap<u32, MirTy>,
-    allow_alloc: bool,
 ) -> Result<Inferred, LowerError> {
     let mut slot_ty: HashMap<u32, MirTy> = seed.clone();
     let mut pool_ty = vec![None; pool_len];
     let mut stack: Vec<Cell> = Vec::new();
-    let mut has_i32 = false;
-    let mut has_float_arith = false;
-    let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
     // Map drafts always last-write recycled temps. Dense needs the same
     // when the body boxes (InitTyped / Make*) or has heap fields — ctor
@@ -225,16 +83,7 @@ fn infer_walk(
     // disjoint live ranges (call args, then a FORMAT string). Lowering reads
     // each slot's current SSA def, and SSA verify refuses a φ whose inputs
     // disagree, so last-write typing cannot mistype a reconstruct.
-    let reuse = mode == InferMode::Map
-        || mode == InferMode::Lir
-        || (mode == InferMode::Dense
-            && (allow_alloc || ops.iter().any(is_heap_field_op)));
-    // Operand painting stays strict for map drafts and a first dense try;
-    // LIR recycles like set_slot_reuse, and so does a dense retry that asked
-    // for it. SSA verify still refuses a φ whose inputs disagree.
-    let recycle = mode == InferMode::Lir
-        || (mode == InferMode::Dense && allow_alloc && DENSE_RECYCLE.with(std::cell::Cell::get));
-    let _reuse_guard = WalkReuseGuard::enter(recycle);
+    let reuse = true;
 
     for op in ops {
         match op {
@@ -247,11 +96,11 @@ fn infer_walk(
                 });
             }
             IlOp::MakeArray { arity, .. } | IlOp::MakeTuple { arity, .. }
-                if mode.allows_alloc(allow_alloc) =>
+                =>
             {
                 push_map_alloc(&mut stack, *arity as usize)?;
             }
-            IlOp::MakeEnum { arity, .. } if mode.allows_alloc(allow_alloc) => {
+            IlOp::MakeEnum { arity, .. } => {
                 push_map_alloc(&mut stack, *arity as usize)?;
             }
             IlOp::StorePop { slot, .. } => {
@@ -320,24 +169,12 @@ fn infer_walk(
                     slot_ty: &mut slot_ty,
                     pool_ty: &mut pool_ty,
                     inst: *inst,
-                    has_i32: &mut has_i32,
-                    has_float_arith: &mut has_float_arith,
-                    has_i64_arith: &mut has_i64_arith,
                     reuse,
                 })?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
                 let inst = Instruction::from(*op);
                 let ty = operand_ty(inst);
-                if ty == MirTy::I32 {
-                    has_i32 = true;
-                }
-                if is_float_arith(inst) {
-                    has_float_arith = true;
-                }
-                if is_int_arith(inst) {
-                    has_i64_arith = true;
-                }
                 set_slot_reuse(&mut slot_ty, u32::from(*slot), ty, reuse)?;
                 stack.push(Cell {
                     origin: Origin::Tmp,
@@ -348,15 +185,6 @@ fn infer_walk(
             IlOp::BinSlotSlot { op, a, b, .. } => {
                 let inst = Instruction::from(*op);
                 let ty = operand_ty(inst);
-                if ty == MirTy::I32 {
-                    has_i32 = true;
-                }
-                if is_float_arith(inst) {
-                    has_float_arith = true;
-                }
-                if is_int_arith(inst) {
-                    has_i64_arith = true;
-                }
                 set_slot_reuse(&mut slot_ty, u32::from(*a), ty, reuse)?;
                 set_slot_reuse(&mut slot_ty, u32::from(*b), ty, reuse)?;
                 stack.push(Cell {
@@ -459,10 +287,10 @@ fn infer_walk(
                 Instruction::StoreIndex | Instruction::StoreIndexUnchecked => {
                     apply_store_index(&mut stack, &mut slot_ty, &mut pool_ty, false)?;
                 }
-                Instruction::ArrayPush if mode.allows_alloc(allow_alloc) => {
+                Instruction::ArrayPush => {
                     apply_array_push(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
-                Instruction::DictEntries if mode.allows_alloc(allow_alloc) => {
+                Instruction::DictEntries => {
                     apply_dict_entries(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
                 Instruction::ResumeCoro => {
@@ -476,62 +304,46 @@ fn infer_walk(
                 Instruction::DoneCoro => {
                     apply_done_coro(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
-                Instruction::MakeDict if mode.allows_alloc(allow_alloc) => {
+                Instruction::MakeDict => {
                     push_map_alloc(&mut stack, (byte.operand_u32() as usize).saturating_mul(2))?;
                 }
-                Instruction::DenseArrayPush if mode.allows_alloc(allow_alloc) => {}
+                Instruction::DenseArrayPush => {}
                 Instruction::DenseFieldLoad | Instruction::DenseFieldStore => {}
-                Instruction::DenseMakeObject if mode.allows_alloc(allow_alloc) => {}
+                Instruction::DenseMakeObject => {}
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
-                    if is_float {
-                        has_float_arith = true;
-                    } else {
-                        has_i64_arith = true;
-                    }
                     set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
-                Instruction::STRING
-                    if mode.allows_string()
-                        || mode.allows_heap_fields()
-                        || mode.allows_alloc(allow_alloc) =>
-                {
+                Instruction::STRING => {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
                         imm: None,
                     });
                 }
-                Instruction::PRINT if mode.allows_string() || mode.allows_alloc(allow_alloc) => {
+                Instruction::PRINT => {
                     stack
                         .pop()
                         .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
                 }
-                // Dense takes table format ops only across alloc (they are
-                // safepoints: S2b maps or a frame extent root the registers).
-                other if is_format_inst(other)
-                    && (mode.allows_string() || mode.allows_alloc(allow_alloc)) =>
-                {
+                other if is_format_inst(other) => {
                     apply_format(&mut stack, byte.operand_u32(), other)?;
                 }
-                other if is_format_inst(other) => {
-                    return Err(LowerError::Refused("format".into()));
-                }
-                other if mode.allows_alloc(allow_alloc) && super::gc::is_alloc_inst(other) => {
+                other if super::gc::is_alloc_inst(other) => {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
                         imm: None,
                     });
                 }
-                Instruction::GetField if mode.allows_heap_fields() => {
+                Instruction::GetField => {
                     apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
-                Instruction::LoadField if mode.allows_heap_fields() => {
+                Instruction::LoadField => {
                     apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
-                Instruction::SetField if mode.allows_heap_fields() => {
+                Instruction::SetField => {
                     apply_set_field(
                         &mut stack,
                         &mut slot_ty,
@@ -564,64 +376,43 @@ fn infer_walk(
                     "RETURN ret_words {ret_words}"
                 )));
             }
-            IlOp::String { .. } if mode.allows_string() || mode.allows_heap_fields() => {
+            IlOp::String { .. } => {
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(MirTy::HeapRef),
                     imm: None,
                 });
             }
-            IlOp::Print { .. } if mode.allows_string() => {
+            IlOp::Print { .. } => {
                 stack
                     .pop()
                     .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
             }
             IlOp::HostInvoke { arity, layout, .. } => {
-                if mode == InferMode::Map {
-                    apply_host_map(&mut stack, *arity, *layout)?;
-                } else {
-                    apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
-                }
+                apply_host_map(&mut stack, *arity, *layout)?;
             }
-            IlOp::GetField { .. } if mode.allows_heap_fields() => {
+            IlOp::GetField { .. } => {
                 apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
             }
-            IlOp::LoadField { .. } if mode.allows_heap_fields() => {
+            IlOp::LoadField { .. } => {
                 apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
             }
-            IlOp::SetField { index, .. } if mode.allows_heap_fields() => {
+            IlOp::SetField { index, .. } => {
                 apply_set_field(&mut stack, &mut slot_ty, &mut pool_ty, *index)?;
             }
             IlOp::Entry {
-                kind,
+                kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
-                target,
                 ret_words,
                 ..
-            } if matches!(kind, EntryKind::Call | EntryKind::TailCall)
-                && (mode == InferMode::Dense
-                    || mode == InferMode::Map
-                    || (mode == InferMode::Lir
-                        && super::abi::is_multi_word_ret(*ret_words)
-                        && super::abi::ret_words_ok(*ret_words)
-                        && matches!(kind, EntryKind::Call))) =>
-            {
-                apply_call(ApplyCallArgs {
-                    stack: &mut stack,
-                    slot_ty: &mut slot_ty,
-                    pool_ty: &mut pool_ty,
-                    arity: *arity,
-                    ret_words: *ret_words,
-                    target: target.0,
-                    calls,
-                    reuse,
-                })?;
+            } => {
+                apply_call(&mut stack, *arity, *ret_words)?;
             }
             IlOp::Entry {
                 kind: EntryKind::MakeCoro,
                 arity,
                 ..
-            } if mode.allows_alloc(allow_alloc) => {
+            } => {
                 apply_make_coro(&mut stack, *arity)?;
             }
             // Convoy fused returns (Q7): same stack/types as Load/Const/Bin + RETURN.
@@ -645,9 +436,6 @@ fn infer_walk(
                     slot_ty: &mut slot_ty,
                     pool_ty: &mut pool_ty,
                     inst: *op,
-                    has_i32: &mut has_i32,
-                    has_float_arith: &mut has_float_arith,
-                    has_i64_arith: &mut has_i64_arith,
                     reuse,
                 })?;
             }
@@ -702,7 +490,7 @@ fn infer_walk(
                 }
             }
             IlOp::MakeArray { arity, .. } | IlOp::MakeTuple { arity, .. }
-                if mode.allows_alloc(allow_alloc) =>
+                =>
             {
                 for _ in 0..*arity {
                     let _ = stack.pop();
@@ -713,7 +501,7 @@ fn infer_walk(
                     imm: None,
                 });
             }
-            IlOp::MakeEnum { arity, .. } if mode.allows_alloc(allow_alloc) => {
+            IlOp::MakeEnum { arity, .. } => {
                 for _ in 0..*arity {
                     let _ = stack.pop();
                 }
@@ -979,34 +767,10 @@ fn infer_walk(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
-    if mode == InferMode::Dense && !has_float_arith && !has_i32 && !has_i64_arith {
-        return Err(LowerError::Refused(
-            "need float + - * / , i64 + - * / % , or i32 (compare-only stays on fuse-IL)".into(),
-        ));
-    }
     Ok(Inferred {
         slot_ty,
         pool_ty,
-        has_i32,
-        has_float_arith,
-        has_i64_arith,
     })
-}
-
-fn is_numeric_work_op(op: &IlOp) -> bool {
-    match op {
-        IlOp::Bin { .. } | IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => true,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
-            Instruction::CastIntToFloat
-                | Instruction::CastFloatToInt
-                | Instruction::NEGF
-                | Instruction::NEG
-                | Instruction::INC
-                | Instruction::DEC
-        ),
-        _ => false,
-    }
 }
 
 /// True when a jump targets an earlier label (counted / while loops).
@@ -1055,22 +819,6 @@ pub(crate) fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
         .iter()
         .any(|op| effects(op).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
     any && !tail_works
-}
-
-/// Heap GetField / SetField / LoadField (fuse-IL or residual dense).
-fn is_heap_field_op(op: &IlOp) -> bool {
-    match op {
-        IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => true,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
-            Instruction::GetField
-                | Instruction::SetField
-                | Instruction::LoadField
-                | Instruction::DenseFieldLoad
-                | Instruction::DenseFieldStore
-        ),
-        _ => false,
-    }
 }
 
 fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
@@ -1352,24 +1100,6 @@ fn is_float_inst(inst: Instruction) -> bool {
     )
 }
 
-fn is_float_arith(inst: Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::ADDF | Instruction::SUBF | Instruction::MULF | Instruction::DIVF
-    )
-}
-
-fn is_int_arith(inst: Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::ADD
-            | Instruction::SUB
-            | Instruction::MUL
-            | Instruction::DIV
-            | Instruction::MOD
-    )
-}
-
 /// Coarse first-op kind for the infer catch-all (W0 inventory).
 fn refuse_il_kind(op: &IlOp) -> &'static str {
     if let Some(reason) = refuse_reason(op) {
@@ -1422,9 +1152,6 @@ struct ApplyBinArgs<'args> {
     slot_ty: &'args mut HashMap<u32, MirTy>,
     pool_ty: &'args mut [Option<MirTy>],
     inst: Instruction,
-    has_i32: &'args mut bool,
-    has_float_arith: &'args mut bool,
-    has_i64_arith: &'args mut bool,
     reuse: bool,
 }
 
@@ -1434,9 +1161,6 @@ fn apply_bin(args: ApplyBinArgs<'_>) -> Result<(), LowerError> {
         slot_ty,
         pool_ty,
         inst,
-        has_i32,
-        has_float_arith,
-        has_i64_arith,
         reuse,
     } = args;
 
@@ -1493,15 +1217,6 @@ fn apply_bin(args: ApplyBinArgs<'_>) -> Result<(), LowerError> {
             return Ok(());
         }
     let ty = operand_ty(inst);
-    if ty == MirTy::I32 {
-        *has_i32 = true;
-    }
-    if is_float_arith(inst) {
-        *has_float_arith = true;
-    }
-    if is_int_arith(inst) {
-        *has_i64_arith = true;
-    }
     paint_slots(slot_ty, pool_ty, lhs, ty, reuse)?;
     paint_slots(slot_ty, pool_ty, rhs, ty, reuse)?;
     stack.push(Cell {
@@ -1593,29 +1308,8 @@ fn apply_store_index(
     Ok(())
 }
 
-struct ApplyCallArgs<'args> {
-    stack: &'args mut Vec<Cell>,
-    slot_ty: &'args mut HashMap<u32, MirTy>,
-    pool_ty: &'args mut [Option<MirTy>],
-    arity: u32,
-    ret_words: u32,
-    target: u32,
-    calls: &'args DenseCallMap,
-    reuse: bool,
-}
-
-fn apply_call(args: ApplyCallArgs<'_>) -> Result<(), LowerError> {
-    let ApplyCallArgs {
-        stack,
-        slot_ty,
-        pool_ty,
-        arity,
-        ret_words,
-        target,
-        calls,
-        reuse,
-    } = args;
-
+/// One-word or multi-word `CALL`: results are typed from later use.
+fn apply_call(stack: &mut Vec<Cell>, arity: u32, ret_words: u32) -> Result<(), LowerError> {
     if !super::abi::ret_words_ok(ret_words) {
         return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
     }
@@ -1623,39 +1317,7 @@ fn apply_call(args: ApplyCallArgs<'_>) -> Result<(), LowerError> {
     if stack.len() < n {
         return Err(LowerError::Refused("CALL stack".into()));
     }
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(stack.pop().expect("arity checked"));
-    }
-    args.reverse();
-    if let Some(abi) = calls.get(&target) {
-        if abi.params.len() != n {
-            return Err(LowerError::Refused("CALL arity".into()));
-        }
-        for (cell, ty) in args.iter().zip(abi.params.iter()) {
-            paint_slots(slot_ty, pool_ty, *cell, *ty, reuse)?;
-        }
-        stack.push(Cell {
-            origin: Origin::Tmp,
-            ty: Some(abi.ret),
-            imm: None,
-        });
-        if super::abi::is_multi_word_ret(ret_words) {
-            stack.push(Cell {
-                origin: Origin::Tmp,
-                ty: abi.ret_hi,
-                imm: None,
-            });
-            for _ in 2..ret_words {
-                stack.push(Cell {
-                    origin: Origin::Tmp,
-                    ty: None,
-                    imm: None,
-                });
-            }
-        }
-        return Ok(());
-    }
+    stack.truncate(stack.len() - n);
     // S3 / B3 / C1: open CALL — result typed from later use.
     stack.push(Cell {
         origin: Origin::Tmp,
@@ -1691,106 +1353,14 @@ fn apply_host_map(stack: &mut Vec<Cell>, arity: u32, layout: u8) -> Result<(), L
     Ok(())
 }
 
-fn apply_host(
-    stack: &mut Vec<Cell>,
-    slot_ty: &mut HashMap<u32, MirTy>,
-    pool_ty: &mut [Option<MirTy>],
-    arity: u32,
-    layout: u8,
-) -> Result<(), LowerError> {
-    if !super::host_allow::dense_host_layout_ok(layout) {
-        return Err(LowerError::Refused("HostInvoke".into()));
-    }
-    let n = arity as usize;
-    if stack.len() < n + 1 {
-        return Err(LowerError::Refused("HostInvoke stack".into()));
-    }
-    let fn_cell = stack[stack.len() - n - 1];
-    let Some(id) = fn_cell.imm.and_then(|v| u16::try_from(v).ok()) else {
-        return Err(LowerError::Refused("HostInvoke".into()));
-    };
-    if !dense_host_ok(id) {
-        return Err(LowerError::Refused("HostInvoke".into()));
-    }
-    let Some(spec) = host_edge_spec(id) else {
-        return Err(LowerError::Refused("HostInvoke".into()));
-    };
-    if spec.args.len() != n {
-        return Err(LowerError::Refused(format!(
-            "HostInvoke {} arity",
-            spec.name
-        )));
-    }
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(stack.pop().expect("arity checked"));
-    }
-    args.reverse();
-    let _fn = stack.pop().expect("fn id checked");
-    let generic = super::host_allow::host_spec(id).is_none();
-    for (cell, ty) in args.iter().zip(spec.args.iter()) {
-        // A generic word edge takes a heap pointer as is (`host_arg_ok`).
-        if generic && cell.ty.is_some_and(MirTy::is_heap_word) {
-            continue;
-        }
-        paint(slot_ty, pool_ty, *cell, *ty)?;
-    }
-    stack.push(Cell {
-        origin: Origin::Tmp,
-        ty: Some(spec.ret),
-        imm: None,
-    });
-    Ok(())
-}
-
-thread_local! {
-    /// Whether the current [`infer_walk`] recycles painted operand types (LIR).
-    static WALK_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-thread_local! {
-    /// Set by [`infer_numeric_across_alloc`] for one dense walk.
-    static DENSE_RECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Scopes [`DENSE_RECYCLE`] to one [`infer_numeric_across_alloc`] call.
-struct WalkRecycle(bool);
-
-impl WalkRecycle {
-    fn enter(on: bool) -> Self {
-        Self(DENSE_RECYCLE.with(|c| c.replace(on)))
-    }
-}
-
-impl Drop for WalkRecycle {
-    fn drop(&mut self) {
-        DENSE_RECYCLE.with(|c| c.set(self.0));
-    }
-}
-
-/// Restores the enclosing walk's reuse mode (walks can nest via callees).
-struct WalkReuseGuard(bool);
-
-impl WalkReuseGuard {
-    fn enter(reuse: bool) -> Self {
-        Self(WALK_REUSE.with(|c| c.replace(reuse)))
-    }
-}
-
-impl Drop for WalkReuseGuard {
-    fn drop(&mut self) {
-        WALK_REUSE.with(|c| c.set(self.0));
-    }
-}
-
-/// Type the slot a consumed operand came from, under the walk's reuse mode.
+/// Type the slot a consumed operand came from (strict: no recycled slots).
 fn paint(
     slot_ty: &mut HashMap<u32, MirTy>,
     pool_ty: &mut [Option<MirTy>],
     cell: Cell,
     ty: MirTy,
 ) -> Result<(), LowerError> {
-    paint_slots(slot_ty, pool_ty, cell, ty, WALK_REUSE.with(std::cell::Cell::get))
+    paint_slots(slot_ty, pool_ty, cell, ty, false)
 }
 
 fn paint_slots(
