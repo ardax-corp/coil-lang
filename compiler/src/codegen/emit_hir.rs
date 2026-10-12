@@ -2961,8 +2961,8 @@ impl Compiler {
     }
 
     /// `Vec::new()` / `Vec::with_capacity(n)` / `Vec::from(a)`: the thunk, or its
-    /// pointer-element twin when the elements are ground heap words (as
-    /// `pointer_vec_ctor`).
+    /// stamped twin when the elements are ground heap words or bytes / bools
+    /// (as `stamped_vec_ctor_name`).
     fn resolve_hir_vec_ctor(&self, hir: &HirBody, call: HirId, key: &str, argc: usize) -> Result<HirCall, &'static str> {
         let name = key.strip_prefix(common::BUILTIN_VEC_TYPE).and_then(|k| k.strip_prefix("::"));
         if !matches!((name, argc), (Some("new"), 0) | (Some("with_capacity" | "from"), 1)) {
@@ -2971,13 +2971,11 @@ impl Compiler {
         let ty = Self::hir_ty(hir, call).ok_or("vec-ctor")?;
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let elem = crate::typechecking::value_layout::vec_elem_ty(&self.checker, &ty).ok_or("vec-ctor")?;
-        let ptr = Self::pointer_vec_ctor_name(name.unwrap_or_default());
-        let key = if crate::typechecking::value_layout::word_kind(&self.checker, &elem) == common::WORD_POINTER
-            && self.functions.contains_key(&ptr)
-        {
-            ptr
-        } else {
-            key.to_string()
+        let stamp = crate::typechecking::value_layout::array_elem_stamp(&self.checker, &elem);
+        let twin = Self::stamped_vec_ctor_name(name.unwrap_or_default(), stamp);
+        let key = match twin {
+            Some(twin) if self.functions.contains_key(&twin) => twin,
+            _ => key.to_string(),
         };
         if !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key)) {
             return Err("vec-ctor");
@@ -6643,10 +6641,9 @@ impl Compiler {
                         Ty::Array { element, .. } => Some(element.as_ref().clone()),
                         other => vec_elem_ty(&self.checker, other),
                     });
-                    let kind = match elem.map(|e| word_kind(&self.checker, &e)) {
-                        Some(common::WORD_POINTER) => common::WORD_POINTER,
-                        _ => common::WORD_UNKNOWN,
-                    };
+                    let kind = elem.map_or(common::WORD_UNKNOWN, |e| {
+                        crate::typechecking::value_layout::array_elem_stamp(&self.checker, &e)
+                    });
                     self.bytecode.push_make_array_kind(args.len() as u32, kind);
                 }
             }

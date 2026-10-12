@@ -71,10 +71,14 @@ fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
     heap.find_object_by_addr(addr)
 }
 
-fn elements_of(obj: &Object) -> Option<&[Value]> {
+/// Elements as words; a packed byte array is widened into a copy.
+fn elements_of(obj: &Object) -> Option<std::borrow::Cow<'_, [Value]>> {
     match obj {
-        Object::Array(gc) => gc.as_ref().words(),
-        Object::Tuple(gc) => Some(gc.as_ref().elements()),
+        Object::Array(gc) => Some(match gc.as_ref().words() {
+            Some(w) => std::borrow::Cow::Borrowed(w),
+            None => std::borrow::Cow::Owned(gc.as_ref().to_vec()),
+        }),
+        Object::Tuple(gc) => Some(std::borrow::Cow::Borrowed(gc.as_ref().elements())),
         _ => None,
     }
 }

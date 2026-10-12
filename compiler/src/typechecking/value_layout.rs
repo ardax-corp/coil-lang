@@ -96,6 +96,23 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     common::WORD_UNKNOWN
 }
 
+/// Element kind an array of `elem` is stamped with at construction
+/// (`TagArrayKind` / `MakeArrayK`): `WORD_POINTER` for ground heap words,
+/// `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
+/// element), else `WORD_UNKNOWN` (no stamp).
+pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
+    let ty = apply_ty_prune(checker.subst(), elem);
+    if let Ty::Con(name) = strip_readonly(&ty)
+        && matches!(name.as_str(), super::ty::BOOL | super::ty::BYTE)
+    {
+        return common::WORD_BYTE;
+    }
+    match word_kind(checker, &ty) {
+        common::WORD_POINTER => common::WORD_POINTER,
+        _ => common::WORD_UNKNOWN,
+    }
+}
+
 /// `Some(elem)` when `ty` is `Vec<elem>` / `[elem]`.
 pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
     let ty = apply_ty_prune(checker.subst(), ty);
@@ -150,6 +167,19 @@ mod tests {
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
         // Arrays are objects whatever their element type.
         assert_eq!(kind(Ty::List(Box::new(Ty::Var(crate::typechecking::ty::TyVarId(0))))), common::WORD_POINTER);
+    }
+
+    #[test]
+    fn array_stamps_pack_bytes_and_bools_only() {
+        let c = Checker::new();
+        let stamp = |ty: Ty| array_elem_stamp(&c, &ty);
+        assert_eq!(stamp(Ty::Con("byte".into())), common::WORD_BYTE);
+        assert_eq!(stamp(Ty::Con("bool".into())), common::WORD_BYTE);
+        assert_eq!(stamp(int()), common::WORD_UNKNOWN);
+        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(string()), common::WORD_POINTER);
+        assert_eq!(stamp(option_ty(int())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(Ty::Con("T".into())), common::WORD_UNKNOWN);
     }
 
     #[test]
