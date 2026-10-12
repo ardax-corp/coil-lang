@@ -422,7 +422,7 @@ pub fn stream_write_from(
                 return Err(IoErrorTag::InvalidInput);
             }
             if let Some(b) = arr.bytes() {
-                return stream_write_bytes(heap, stream, &b[start..].to_vec());
+                return stream_write_bytes(heap, stream, &b[start..]);
             }
             arr.iter()
                 .skip(start)
