@@ -349,7 +349,18 @@ pub fn cmd_package(
             ErrorCode::IoError,
             format!(
                 "runner `{}` is already a packaged executable; use an unpackaged `coil-embed` \
-                 (or `coil`) binary as the template",
+                 binary as the template",
+                runner_path.display()
+            ),
+        );
+    }
+
+    if !coil_cli::is_coil_embed_runner(&runner_bytes) {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!(
+                "runner `{}` is not a `coil-embed` binary; only `coil-embed` runs packaged programs",
                 runner_path.display()
             ),
         );
