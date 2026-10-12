@@ -840,14 +840,25 @@ impl Compiler {
         }
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
+        // A string field, or a two-word enum's, holds its boxed heap word.
+        let field_word = |t: &Ty| {
+            word(t).or_else(|| {
+                let boxed = match lower::classify(checker, t)? {
+                    ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
+                    ValueClass::Enum => true,
+                    _ => false,
+                };
+                boxed.then_some(crate::mir::MirTy::HeapRef)
+            })
+        };
         let mut heap_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
                 && Self::hir_ty(hir, *base).is_some_and(is_class)
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = word(&fty)
-                && e.ty.as_ref().and_then(word) == Some(w)
+                && let Some(w) = field_word(&fty)
+                && e.ty.as_ref().and_then(field_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
             }

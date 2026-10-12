@@ -2238,7 +2238,12 @@ impl Lower<'_> {
         if let Some(consts) = self.scalar_arms(scrutinee, arms) {
             return self.match_scalar(scrutinee, arms, &consts, tail);
         }
-        let boxed_local = matches!(self.hir.expr(scrutinee).kind, HirKind::Local(l) if self.boxed_local(l));
+        let boxed_local = match self.hir.expr(scrutinee).kind {
+            HirKind::Local(l) => self.boxed_local(l),
+            // A class field holds a two-word enum boxed.
+            HirKind::Field { .. } => self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef),
+            _ => false,
+        };
         let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
