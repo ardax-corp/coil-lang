@@ -534,51 +534,6 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    /// Identity copy of an unboxed field slot (I3). `object` is the current
-    /// SSA value of `base + index`.
-    pub fn ins_field_load(
-        &mut self,
-        object: ValueId,
-        base: u32,
-        index: u32,
-    ) -> Result<ValueId, MirError> {
-        let ty = self.resolve_ty(object);
-        if !ty.is_specialized() {
-            return Err(MirError::msg(format!("FieldLoad type {ty}")));
-        }
-        let dest = self.alloc(ty);
-        self.push(MirInst::FieldLoad {
-            dest,
-            object: self.resolve(object),
-            base,
-            index,
-        })?;
-        Ok(dest)
-    }
-
-    /// Write `src` into unboxed field slot `base + index` (I3 ctor / rebind).
-    pub fn ins_field_store(
-        &mut self,
-        src: ValueId,
-        base: u32,
-        index: u32,
-    ) -> Result<ValueId, MirError> {
-        let ty = self.resolve_ty(src);
-        if !ty.is_specialized() {
-            return Err(MirError::msg(format!("FieldStore type {ty}")));
-        }
-        let dest = self.alloc(ty);
-        let src = self.resolve(src);
-        self.def_local(LocalId(base + index), src)?;
-        self.push(MirInst::FieldStore {
-            dest,
-            src,
-            base,
-            index,
-        })?;
-        Ok(dest)
-    }
-
     /// Heap GetField / LoadField. `object` is heapref; dest is the field word.
     pub fn ins_heap_field_load(
         &mut self,
@@ -836,20 +791,6 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    /// `PRINT` (I4 / Q9 R1). Dest is an unused `bool` token.
-    pub fn ins_print(&mut self, src: ValueId) -> Result<ValueId, MirError> {
-        if !self.resolve_ty(src).is_specialized() {
-            return Err(MirError::msg(format!("Print src is {}", self.resolve_ty(src))));
-        }
-        let dest = self.alloc(MirTy::Bool);
-        self.push(MirInst::Print {
-            dest,
-            src: self.resolve(src),
-        })?;
-        self.snapshot_slots(dest);
-        Ok(dest)
-    }
-
     /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
     pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
         let ft = self.resolve_ty(fmt);
@@ -870,23 +811,6 @@ impl MirBuilder {
             dest,
             fmt: self.resolve(fmt),
             args,
-        })?;
-        self.snapshot_slots(dest);
-        Ok(dest)
-    }
-
-    /// `STRINGIFY` (I4 / Q9 R1).
-    pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
-        if !self.resolve_ty(src).is_specialized() {
-            return Err(MirError::msg(format!(
-                "Stringify src is {}",
-                self.resolve_ty(src)
-            )));
-        }
-        let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::Stringify {
-            dest,
-            src: self.resolve(src),
         })?;
         self.snapshot_slots(dest);
         Ok(dest)

@@ -628,65 +628,6 @@ fn fused_eq_jmp(byte: &common::Byte) -> bool {
     }
 }
 
-#[cfg(test)]
-mod cost_gate_tests {
-    use common::{Byte, DebugLoc, Instruction};
-
-    use crate::il::IlOp;
-
-    use super::{emit_cost, residual_heap_box};
-
-    fn loc() -> DebugLoc {
-        DebugLoc::unknown()
-    }
-
-    #[test]
-    fn residual_make_counts_as_boxed() {
-        let ops = [IlOp::MakeArray { elem_kind: 0, arity: 2, loc: loc() }];
-        assert!(residual_heap_box(&ops));
-        let native = [IlOp::byte(
-            Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 2, 3),
-        )];
-        assert!(!residual_heap_box(&native));
-    }
-
-    #[test]
-    fn emit_cost_weights_load_store_above_dense() {
-        let boxed = [
-            IlOp::Load { slot: 0, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Index { loc: loc() },
-            IlOp::StorePop { slot: 2, loc: loc() },
-        ];
-        let native = [IlOp::byte(
-            Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
-        )];
-        assert!(emit_cost(&native) < emit_cost(&boxed));
-        assert!(emit_cost(&native) <= emit_cost(&boxed));
-    }
-
-    #[test]
-    fn emit_cost_weights_seek_by_frame_size() {
-        let small = [IlOp::byte(
-            Byte::new(Instruction::Seek).with_operand_u32(8),
-        )];
-        let large = [IlOp::byte(
-            Byte::new(Instruction::Seek).with_operand_u32(80),
-        )];
-        assert!(emit_cost(&large) > emit_cost(&small));
-    }
-
-    /// COI-385: packed dense ops cost 1 — same as any non-Seek/LOAD Byte.
-    #[test]
-    fn emit_cost_does_not_tax_packed_dense_ops() {
-        let dense = [
-            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
-            IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
-        ];
-        assert_eq!(emit_cost(&dense), 2);
-    }
-}
-
 /// True when a jump targets an earlier label (counted / while loops).
 fn has_back_edge(ops: &[IlOp]) -> bool {
     !loop_ranges(ops).is_empty()
@@ -753,4 +694,63 @@ fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
                 }
     }
     ranges
+}
+
+#[cfg(test)]
+mod cost_gate_tests {
+    use common::{Byte, DebugLoc, Instruction};
+
+    use crate::il::IlOp;
+
+    use super::{emit_cost, residual_heap_box};
+
+    fn loc() -> DebugLoc {
+        DebugLoc::unknown()
+    }
+
+    #[test]
+    fn residual_make_counts_as_boxed() {
+        let ops = [IlOp::MakeArray { elem_kind: 0, arity: 2, loc: loc() }];
+        assert!(residual_heap_box(&ops));
+        let native = [IlOp::byte(
+            Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 2, 3),
+        )];
+        assert!(!residual_heap_box(&native));
+    }
+
+    #[test]
+    fn emit_cost_weights_load_store_above_dense() {
+        let boxed = [
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+        ];
+        let native = [IlOp::byte(
+            Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
+        )];
+        assert!(emit_cost(&native) < emit_cost(&boxed));
+        assert!(emit_cost(&native) <= emit_cost(&boxed));
+    }
+
+    #[test]
+    fn emit_cost_weights_seek_by_frame_size() {
+        let small = [IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(8),
+        )];
+        let large = [IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(80),
+        )];
+        assert!(emit_cost(&large) > emit_cost(&small));
+    }
+
+    /// COI-385: packed dense ops cost 1 — same as any non-Seek/LOAD Byte.
+    #[test]
+    fn emit_cost_does_not_tax_packed_dense_ops() {
+        let dense = [
+            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
+            IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
+        ];
+        assert_eq!(emit_cost(&dense), 2);
+    }
 }
