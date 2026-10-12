@@ -1,6 +1,8 @@
 // #915 follow-ups: a mono clone calls a ground trait method under a pending
 // operand (`u.label() + ":"`), and a shared body (a function argument keeps
 // it unspecialized) returns its type parameter inside an `Option`.
+use tests::assert;
+
 trait Label<T> {
     fn label(T x) -> string {}
 }
@@ -42,9 +44,9 @@ fn make_float() -> float {
 }
 
 test("a clone's ground trait call under a pending operand") {
-    assert(tag(new Crate(1)) == "crate:")?;
-    assert(tag(4) == "int:")?;
-    assert(tag_after(4, new Crate(1)) == "crate:")?;
+    assert!(tag(new Crate(1)) == "crate:");
+    assert!(tag(4) == "int:");
+    assert!(tag_after(4, new Crate(1)) == "crate:");
 }
 
 test("a shared body returns its type parameter inside an Option") {
@@ -52,10 +54,10 @@ test("a shared body returns its type parameter inside an Option") {
         Option::Some(v) => v.kg,
         Option::None => -1,
     };
-    assert(c == 9)?;
+    assert!(c == 9);
     let f = match wrap_result(make_float) {
         Option::Some(v) => v,
         Option::None => -1.0,
     };
-    assert(f == 2.5)?;
+    assert!(f == 2.5);
 }

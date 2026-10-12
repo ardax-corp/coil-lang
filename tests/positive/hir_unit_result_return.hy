@@ -1,6 +1,8 @@
 // A `()`-typed value returned from a niche unit `Result` function
 // (`return check(x)?`, a unit `match`) lowers from HIR: the value runs for
 // its effect, then the function returns `Ok(())`.
+use tests::assert;
+
 class Counter {
     pub n: int,
 }
@@ -41,14 +43,14 @@ fn err_of(Result<(), string> r) -> string {
 }
 
 test("unit value returned as Ok") {
-    assert(err_of(pass_through(1)) == "ok")?;
-    assert(err_of(pass_through(-1)) == "negative")?;
-    assert(err_of(via_match(2)) == "ok")?;
-    assert(err_of(via_match(-2)) == "negative")?;
+    assert!(err_of(pass_through(1)) == "ok");
+    assert!(err_of(pass_through(-1)) == "negative");
+    assert!(err_of(via_match(2)) == "ok");
+    assert!(err_of(via_match(-2)) == "negative");
 }
 
 test("unit call returned from a unit function") {
     let c = new Counter(0);
     bump_twice(c);
-    assert(c.n == 2)?;
+    assert!(c.n == 2);
 }

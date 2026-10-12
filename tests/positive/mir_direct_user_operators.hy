@@ -1,6 +1,7 @@
 // User operators lower to direct MIR: a trait instance method's call with
 // each operand boxed, structural `==` / `!=` with no `Eq` instance, and a
 // number-backed scalar enum's raw opcode on its backing word.
+use tests::assert;
 
 class V2 {
     pub x: int,
@@ -71,20 +72,20 @@ fn levels(Level a, Level b) -> bool {
 
 test("instance operator calls box their operands") {
     let v = walk(5);
-    assert(v.x == 10)?;
-    assert(v.y == 5)?;
-    assert(count_same(new V2(3, 3), 6) == 1)?;
-    assert(new V2(1, 2) != new V2(2, 1))?;
+    assert!(v.x == 10);
+    assert!(v.y == 5);
+    assert!(count_same(new V2(3, 3), 6) == 1);
+    assert!(new V2(1, 2) != new V2(2, 1));
 }
 
 test("derived and structural equality") {
-    assert(!tags_differ(new Tag("a", 1), new Tag("a", 1)))?;
-    assert(tags_differ(new Tag("a", 1), new Tag("b", 1)))?;
+    assert!(!tags_differ(new Tag("a", 1), new Tag("a", 1)));
+    assert!(tags_differ(new Tag("a", 1), new Tag("b", 1)));
     let p = new Plain(4);
-    assert(plain_same(p, p))?;
+    assert!(plain_same(p, p));
 }
 
 test("scalar enum equality on the backing word") {
-    assert(levels(Level::Low, Level::Low))?;
-    assert(!levels(Level::Low, Level::High))?;
+    assert!(levels(Level::Low, Level::Low));
+    assert!(!levels(Level::Low, Level::High));
 }

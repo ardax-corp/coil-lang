@@ -1,5 +1,6 @@
 // `FnDecl` carries `requires` / `ensures` as written, and `with_name`
 // keeps them.
+use tests::assert;
 use derive_macros::contracted;
 
 #[contracted]
@@ -16,11 +17,11 @@ fn plain() -> int {
 }
 
 test("the macro model sees contract clauses") {
-    assert(half_contracts() == " requires n >= 0, \"negative input\" ensures result * 2 <= n")?;
-    assert(plain_contracts() == "")?;
+    assert!(half_contracts() == " requires n >= 0, \"negative input\" ensures result * 2 <= n");
+    assert!(plain_contracts() == "");
 }
 
 test("with_name keeps the contracts and the body") {
-    assert(half_kept(9) == 4)?;
-    assert(plain_kept() == 7)?;
+    assert!(half_kept(9) == 4);
+    assert!(plain_kept() == 7);
 }

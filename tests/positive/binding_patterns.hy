@@ -1,4 +1,5 @@
 // for patterns, if let, while let (COI-371).
+use tests::assert;
 
 test("for tuple pattern on dict") {
     let sum = 0;
@@ -6,7 +7,7 @@ test("for tuple pattern on dict") {
     for (k, v) in d {
         sum = sum + v;
     }
-    assert(sum == 6)?;
+    assert!(sum == 6);
 }
 
 test("for wildcard") {
@@ -14,7 +15,7 @@ test("for wildcard") {
     for _ in [1, 2, 3] {
         n = n + 1;
     }
-    assert(n == 3)?;
+    assert!(n == 3);
 }
 
 test("if let some") {
@@ -23,7 +24,7 @@ test("if let some") {
     if let Option::Some(x) = o {
         got = x;
     }
-    assert(got == 7)?;
+    assert!(got == 7);
 }
 
 test("if let none else") {
@@ -34,7 +35,7 @@ test("if let none else") {
     } else {
         got = -1;
     }
-    assert(got == -1)?;
+    assert!(got == -1);
 }
 
 test("else if let") {
@@ -48,7 +49,7 @@ test("else if let") {
     } else {
         got = -1;
     }
-    assert(got == 9)?;
+    assert!(got == 9);
 }
 
 test("while let some") {
@@ -62,5 +63,5 @@ test("while let some") {
             cur = Option::Some(n - 1);
         }
     }
-    assert(acc == 6)?;
+    assert!(acc == 6);
 }

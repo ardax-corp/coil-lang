@@ -2,6 +2,7 @@
 // An operand whose code STOREs (an inlined call's parameter temp, a match, a
 // constructor) must be staged first: locals and the operand stack share
 // memory, so the store would overwrite the format string.
+use tests::assert;
 use string::format;
 
 fn get(int k) -> string {
@@ -25,9 +26,9 @@ impl P {
 test("inlined call operand next to an indirect call") {
     let g = mk(3);
     let s = get(1) + g(2);
-    assert(s == "ac")?;
+    assert!(s == "ac");
     let p = new P(1);
-    assert(p.tag(1) + g(2) == "pc")?;
+    assert!(p.tag(1) + g(2) == "pc");
 }
 
 test("compound assign with a call rhs") {
@@ -35,10 +36,10 @@ test("compound assign with a call rhs") {
     let s = g(2);
     s += get(1);
     s += get(2) + g(1);
-    assert(s == "caac")?;
+    assert!(s == "caac");
 }
 
 test("format with call args") {
     let g = mk(3);
-    assert(format("%s-%s", get(1), g(2)) == "a-c")?;
+    assert!(format("%s-%s", get(1), g(2)) == "a-c");
 }

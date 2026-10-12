@@ -1,4 +1,5 @@
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
+use tests::assert;
 use io::{wait_readable, wait_writable, close, read};
 use task::{scope, Scope};
 use io::write;
@@ -78,7 +79,7 @@ test("wait_readable match Ok after WouldBlock park") {
         Result::Ok(n) => n,
         Result::Err(_) => -1,
     };
-    assert(n > 0)?;
+    assert!(n > 0);
     close(c)?;
     close(s)?;
     close(listener)?;

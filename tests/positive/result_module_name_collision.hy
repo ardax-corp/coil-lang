@@ -1,5 +1,6 @@
 // COI-404: Result<string, string> from a real module that shares short
 // names with a sibling (`to_lower`). Tiny same-file copies already passed.
+use tests::assert;
 use coi404_textmod::{to_lower, replace_mark};
 
 test("module to_lower match keeps Ok payload") {
@@ -7,9 +8,9 @@ test("module to_lower match keeps Ok payload") {
         Result::Ok(s) => s,
         Result::Err(_) => panic "lower",
     };
-    assert(low == "abc")?;
+    assert!(low == "abc");
 }
 
 test("module replace-like question keeps Ok payload") {
-    assert(replace_mark("AbC")? == "AbCx")?;
+    assert!(replace_mark("AbC")? == "AbCx");
 }

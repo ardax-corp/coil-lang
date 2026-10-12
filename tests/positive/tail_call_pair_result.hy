@@ -1,5 +1,7 @@
 // A tail call whose callee returns a two-word value (an `Option<int>`)
 // hands that pair straight back; its result is never a boxed word.
+use tests::assert;
+
 #[max_depth(64)]
 fn find_from(int n, int acc) -> Option<int> {
     let i = 0;
@@ -21,6 +23,6 @@ fn unwrap_or(Option<int> o, int d) -> int {
 }
 
 test("tail call returns the callee's pair") {
-    assert(unwrap_or(find_from(4, 1), 0) == 16)?;
-    assert(unwrap_or(find_from(0, 0), -1) == 3)?;
+    assert!(unwrap_or(find_from(4, 1), 0) == 16);
+    assert!(unwrap_or(find_from(0, 0), -1) == 3);
 }

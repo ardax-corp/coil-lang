@@ -1,5 +1,6 @@
 // Range values under HIR: `[start, end]` params, locals and results, boxed
 // fields, and the `to_vec` thunk.
+use tests::assert;
 
 fn total(Range<int> r) -> int {
     let acc = 0;
@@ -52,10 +53,10 @@ fn span_total(Span s) -> int {
 }
 
 test("range params and copies") {
-    assert(total(0..5) == 10)?;
-    assert(total_inc(0..=4) == 10)?;
-    assert(pass(2..5) == 9)?;
-    assert(shifted(0..4, 10) == 16)?;
+    assert!(total(0..5) == 10);
+    assert!(total_inc(0..=4) == 10);
+    assert!(pass(2..5) == 9);
+    assert!(shifted(0..4, 10) == 16);
 }
 
 test("returned ranges") {
@@ -63,17 +64,17 @@ test("returned ranges") {
     for x in upto(5) {
         acc = acc + x;
     }
-    assert(acc == 10)?;
+    assert!(acc == 10);
     let r = upto(4);
-    assert(total(r) == 6)?;
-    assert(total_inc(through(4)) == 10)?;
+    assert!(total(r) == 6);
+    assert!(total_inc(through(4)) == 10);
 }
 
 test("boxed range fields") {
     let s = new Span(1..4);
-    assert(span_total(s) == 6)?;
+    assert!(span_total(s) == 6);
     reset(s, 10);
-    assert(span_total(s) == 45)?;
+    assert!(span_total(s) == 45);
 }
 
 test("range locals") {
@@ -82,29 +83,29 @@ test("range locals") {
     for x in r {
         acc = acc + x;
     }
-    assert(acc == 12)?;
+    assert!(acc == 12);
     let w = 0..2;
     w = 0..3;
     let n = 0;
     for x in w {
         n = n + 1 + x;
     }
-    assert(n == 6)?;
+    assert!(n == 6);
 }
 
 test("to_vec") {
     let v = (2..5).to_vec();
-    assert(v.len() == 3)?;
-    assert(v[0] == 2)?;
+    assert!(v.len() == 3);
+    assert!(v[0] == 2);
     let r = 0..=3;
     let w = r.to_vec();
-    assert(w.len() == 4)?;
-    assert(w[3] == 3)?;
+    assert!(w.len() == 4);
+    assert!(w[3] == 3);
     let f = (1.0..3.0).to_vec();
-    assert(f.len() == 2)?;
-    assert(f[1] == 2.0)?;
+    assert!(f.len() == 2);
+    assert!(f[1] == 2.0);
     let u = upto(3).to_vec();
-    assert(u.len() == 3)?;
+    assert!(u.len() == 3);
 }
 
 test("float range values") {
@@ -113,5 +114,5 @@ test("float range values") {
     for x in r {
         acc = acc + x;
     }
-    assert(acc == 4.5)?;
+    assert!(acc == 4.5);
 }

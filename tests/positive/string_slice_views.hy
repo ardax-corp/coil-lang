@@ -1,5 +1,6 @@
 // `slice_bytes` of a long string shares its buffer instead of copying.
 // These check that views read, compare, hash and grow like copies.
+use tests::assert;
 use string::{slice_bytes, byte_at};
 
 fn cut(string s, int a, int b) -> string {
@@ -27,16 +28,16 @@ test("suffix views read the right bytes") {
         rest = cut(rest, 2, len(rest));
         n = n + 1;
     }
-    assert(n == 200)?;
-    assert(rest == "END")?;
+    assert!(n == 200);
+    assert!(rest == "END");
 }
 
 test("a view compares by content") {
     let s = long_text();
     let v = cut(s, 100, 400);
     let copy = long_text();
-    assert(v == cut(copy, 100, 400))?;
-    assert(len(v) == 300)?;
+    assert!(v == cut(copy, 100, 400));
+    assert!(len(v) == 300);
 }
 
 test("appending to a view leaves the source alone") {
@@ -45,12 +46,12 @@ test("appending to a view leaves the source alone") {
     let grown = tail + "!";
     let head = cut(s, 0, 100);
     let other = head + "?";
-    assert(len(s) == 400)?;
-    assert(byte_at(s, 399) == 98)?;
-    assert(len(grown) == 101)?;
-    assert(byte_at(grown, 100) == 33)?;
-    assert(byte_at(other, 100) == 63)?;
-    assert(cut(s, 100, 101) == "a")?;
+    assert!(len(s) == 400);
+    assert!(byte_at(s, 399) == 98);
+    assert!(len(grown) == 101);
+    assert!(byte_at(grown, 100) == 33);
+    assert!(byte_at(other, 100) == 63);
+    assert!(cut(s, 100, 101) == "a");
 }
 
 test("views keep UTF-8 boundaries") {
@@ -60,6 +61,6 @@ test("views keep UTF-8 boundaries") {
         s = s + "é";
         i = i + 1;
     }
-    assert(cut(s, 1, 150) == "<err>")?;
-    assert(len(cut(s, 2, 200)) == 198)?;
+    assert!(cut(s, 1, 150) == "<err>");
+    assert!(len(cut(s, 2, 200)) == 198);
 }

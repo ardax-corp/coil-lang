@@ -1,10 +1,12 @@
 // if / else / else-if control flow.
+use tests::assert;
+
 test("single branch if true") {
     let x = 0;
     if true {
         x = 1;
     }
-    assert(x == 1)?;
+    assert!(x == 1);
 }
 
 test("single branch if false skips body") {
@@ -12,7 +14,7 @@ test("single branch if false skips body") {
     if false {
         x = 1;
     }
-    assert(x == 0)?;
+    assert!(x == 0);
 }
 
 test("if else both arms") {
@@ -22,7 +24,7 @@ test("if else both arms") {
     } else {
         a = 2;
     }
-    assert(a == 1)?;
+    assert!(a == 1);
 
     let b = 0;
     if false {
@@ -30,7 +32,7 @@ test("if else both arms") {
     } else {
         b = 2;
     }
-    assert(b == 2)?;
+    assert!(b == 2);
 }
 
 test("else if chain") {
@@ -45,7 +47,7 @@ test("else if chain") {
     } else {
         r = 40;
     }
-    assert(r == 30)?;
+    assert!(r == 30);
 }
 
 test("nested if") {
@@ -58,7 +60,7 @@ test("nested if") {
             y = 2;
         }
     }
-    assert(y == 1)?;
+    assert!(y == 1);
 }
 
 test("if expression via assignment") {
@@ -69,5 +71,5 @@ test("if expression via assignment") {
     } else {
         v = -1;
     }
-    assert(v == 42)?;
+    assert!(v == 42);
 }

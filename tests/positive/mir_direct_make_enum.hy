@@ -1,5 +1,7 @@
 // Boxed user enum variants built in bodies lowered straight from HIR to
 // MIR: payload words pushed last field first, then `MakeEnum`.
+use tests::assert;
+
 enum Tree {
     Leaf,
     Node(Tree, Tree),
@@ -45,8 +47,8 @@ fn score(Shape s) -> int {
 }
 
 test("boxed enum variants in direct MIR") {
-    assert(count(build(4)) == 31)?;
-    assert(score(shape(0, "a")) == 0)?;
-    assert(score(shape(1, "a")) == 10)?;
-    assert(score(shape(3, "abc")) == 7)?;
+    assert!(count(build(4)) == 31);
+    assert!(score(shape(0, "a")) == 0);
+    assert!(score(shape(1, "a")) == 10);
+    assert!(score(shape(3, "abc")) == 7);
 }

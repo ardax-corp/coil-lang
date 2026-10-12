@@ -1,5 +1,6 @@
 // Calls to functions and methods declared later in the file lower from HIR
 // (arity from the signature); ones returning an enum stay on the AST.
+use tests::assert;
 
 fn is_even(int n) -> bool {
     if n == 0 {
@@ -53,14 +54,14 @@ impl Acc {
 }
 
 test("forward calls lower") {
-    assert(is_even(10))?;
-    assert(is_odd(7))?;
-    assert(!is_even(3))?;
-    assert(label(4) == "n=big")?;
-    assert(label(1) == "n=small")?;
-    assert((first_word(3) ?? 0) == 3)?;
-    assert((first_word(0) ?? -1) == -1)?;
+    assert!(is_even(10));
+    assert!(is_odd(7));
+    assert!(!is_even(3));
+    assert!(label(4) == "n=big");
+    assert!(label(1) == "n=small");
+    assert!((first_word(3) ?? 0) == 3);
+    assert!((first_word(0) ?? -1) == -1);
     let a = new Acc(1);
     a.add_twice(5);
-    assert(a.total == 11)?;
+    assert!(a.total == 11);
 }

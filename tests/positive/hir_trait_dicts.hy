@@ -1,6 +1,7 @@
 // Calls to bounded generics from HIR-lowered bodies: bare type-parameter
 // arguments are boxed, one dictionary per constraint follows the
 // arguments, and a bare type-parameter result is unboxed.
+use tests::assert;
 
 trait Weigh<T> {
     fn weight(T x) -> int {}
@@ -71,9 +72,9 @@ fn fill(Bag<string> bag) -> int {
 }
 
 test("bounded generic calls lower with dictionaries") {
-    assert(pick(3, 5) == 21)?;
-    assert(longest("ab", "abc") == "abc!")?;
+    assert!(pick(3, 5) == 21);
+    assert!(longest("ab", "abc") == "abc!");
     let items: Vec<string> = [];
     let bag = new Bag(items);
-    assert(fill(bag) == 6)?;
+    assert!(fill(bag) == 6);
 }

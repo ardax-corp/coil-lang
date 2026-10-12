@@ -1,6 +1,7 @@
 // `Option<int>`, `Result<int, E>` and small payload enums passed straight
 // to a function travel as two words; fn values, partial application, deep
 // tail recursion and calls above live operands still see the same values.
+use tests::assert;
 use string::format;
 
 enum Phase {
@@ -82,57 +83,57 @@ fn reads_back(Option<int> o) -> int {
 }
 
 test("option param") {
-    assert(score_opt(Option::Some(5)) == 5)?;
-    assert(score_opt(Option::None) == -1)?;
+    assert!(score_opt(Option::Some(5)) == 5);
+    assert!(score_opt(Option::None) == -1);
     let o = Option::Some(9);
-    assert(score_opt(o) == 9)?;
+    assert!(score_opt(o) == 9);
 }
 
 test("result param") {
-    assert(score_res(Result::Ok(4)) == 4)?;
-    assert(score_res(Result::Err("abc")) == -3)?;
+    assert!(score_res(Result::Ok(4)) == 4);
+    assert!(score_res(Result::Err("abc")) == -3);
 }
 
 test("enum param") {
-    assert(score_phase(Phase::Low(1)) == 1)?;
-    assert(score_phase(Phase::Mid(1)) == 101)?;
-    assert(score_phase(Phase::High(1)) == 201)?;
+    assert!(score_phase(Phase::Low(1)) == 1);
+    assert!(score_phase(Phase::Mid(1)) == 101);
+    assert!(score_phase(Phase::High(1)) == 201);
 }
 
 test("mixed params keep their order") {
-    assert(mix(1, Option::Some(2), Result::Ok(3), 4) == 1234)?;
-    assert(mix(1, Option::None, Result::Err("x"), 4) == 1000 - 100 - 10 + 4)?;
+    assert!(mix(1, Option::Some(2), Result::Ok(3), 4) == 1234);
+    assert!(mix(1, Option::None, Result::Err("x"), 4) == 1000 - 100 - 10 + 4);
 }
 
 test("param forwarded, returned and stored") {
-    assert(forward(Option::Some(3)) == 3)?;
-    assert(score_opt(keep(Option::Some(6))) == 6)?;
-    assert(score_opt(keep(Option::None)) == -1)?;
+    assert!(forward(Option::Some(3)) == 3);
+    assert!(score_opt(keep(Option::Some(6))) == 6);
+    assert!(score_opt(keep(Option::None)) == -1);
     let xs = store_it(Option::Some(8));
-    assert(xs.len() == 2)?;
-    assert(score_opt(xs[1]) == 8)?;
-    assert(reads_back(Option::Some(4)) == 8)?;
+    assert!(xs.len() == 2);
+    assert!(score_opt(xs[1]) == 8);
+    assert!(reads_back(Option::Some(4)) == 8);
 }
 
 test("deep tail recursion with an option param") {
-    assert(count_down(Option::None, 300000) == 1)?;
+    assert!(count_down(Option::None, 300000) == 1);
 }
 
 test("call from a function with a stack array") {
-    assert(with_array(Option::Some(10), 5) == 19)?;
+    assert!(with_array(Option::Some(10), 5) == 19);
 }
 
 test("partial application and fn values") {
     let f = add_opt(10);
-    assert(f(Option::Some(1)) == 11)?;
-    assert(f(Option::None) == 9)?;
-    assert(apply(score_opt, Option::Some(7)) == 7)?;
+    assert!(f(Option::Some(1)) == 11);
+    assert!(f(Option::None) == 9);
+    assert!(apply(score_opt, Option::Some(7)) == 7);
 }
 
 test("params passed above live operands") {
     let p = (3, 4);
     let opts = [Option::Some(2), Option::None];
     let s = format("%i %i %i", sum_point(p), score_opt(opts[0]), score_opt(opts[1]));
-    assert(s == "7 2 -1")?;
-    assert(10 + score_phase(Phase::Mid(1)) * 2 == 212)?;
+    assert!(s == "7 2 -1");
+    assert!(10 + score_phase(Phase::Mid(1)) * 2 == 212);
 }

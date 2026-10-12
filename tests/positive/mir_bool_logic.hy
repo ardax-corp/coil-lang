@@ -1,4 +1,6 @@
 // Strict `&&` / `||` over pure compares lower to bool BitAnd / BitOr in MIR.
+use tests::assert;
+
 fn fizz(int n) -> int {
     let c = 0;
     let i = 0;
@@ -15,6 +17,6 @@ fn fizz(int n) -> int {
 }
 
 test("bool or / and in a counted loop") {
-    assert(fizz(100) == 947)?;
-    assert(fizz(0) == 0)?;
+    assert!(fizz(100) == 947);
+    assert!(fizz(0) == 0);
 }

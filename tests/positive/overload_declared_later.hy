@@ -1,5 +1,6 @@
 // A call resolves against every overload of a name, including the ones
 // declared further down the file (#848).
+use tests::assert;
 
 fn f(int x) -> int {
     return x;
@@ -18,6 +19,6 @@ fn f(string s) -> int {
 }
 
 test("overload declared after its caller") {
-    assert(g("ab") == 2)?;
-    assert(h(4) == 7)?;
+    assert!(g("ab") == 2);
+    assert!(h(4) == 7);
 }

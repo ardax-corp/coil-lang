@@ -2,6 +2,8 @@
 // bodies too: a literal argument calls the worker directly, a computed one
 // branches on the site's cutoff. A `while` reduce stays a parallel loop.
 // Results must match the sequential run.
+use tests::assert;
+
 fn fib(int n) -> int {
     if n < 2 {
         return n;
@@ -21,11 +23,11 @@ fn fib_of(int n) -> int {
 }
 
 test("literal and computed fork-site calls") {
-    assert(fib(25) == 75025)?;
+    assert!(fib(25) == 75025);
     let n = 24;
-    assert(fib(n) == 46368)?;
-    assert(fib(n - 20) == 3)?;
-    assert(fib_of(23) == 28657)?;
+    assert!(fib(n) == 46368);
+    assert!(fib(n - 20) == 3);
+    assert!(fib_of(23) == 28657);
 }
 
 test("while reduce over a pure call") {
@@ -44,5 +46,5 @@ test("while reduce over a pure call") {
         }
         j = j + 1;
     }
-    assert(acc == seq)?;
+    assert!(acc == seq);
 }

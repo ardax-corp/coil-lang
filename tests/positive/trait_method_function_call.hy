@@ -1,5 +1,6 @@
 // Function-style trait calls `method(x, …)` at a ground type select the
 // instance like `x.method(…)`; a free fn of the same name still wins (#522).
+use tests::assert;
 
 class Node {
     pub i: int,
@@ -36,15 +37,15 @@ impl Two for Config {
 }
 
 test("ground ufcs, int, one param") {
-    assert(one(41) == 42)?;
+    assert!(one(41) == 42);
 }
 
 test("ground ufcs, class, one param") {
-    assert(one(new Config(41)) == 42)?;
+    assert!(one(new Config(41)) == 42);
 }
 
 test("ground ufcs, class, two params") {
-    assert(two(new Config(1), new Node(4)) == 5)?;
+    assert!(two(new Config(1), new Node(4)) == 5);
 }
 
 // Free fn declared before the trait and impl that reuse its name.
@@ -73,13 +74,13 @@ fn late(int n) -> int {
 }
 
 test("free fn declared before wins over the trait method") {
-    assert(early(5) == 10)?;
-    assert(new Config(1).early() == 101)?;
+    assert!(early(5) == 10);
+    assert!(new Config(1).early() == 101);
 }
 
 test("free fn declared after wins over the trait method") {
-    assert(late(5) == 15)?;
-    assert(new Config(1).late() == 201)?;
+    assert!(late(5) == 15);
+    assert!(new Config(1).late() == 201);
 }
 
 trait Mk<T> {
@@ -100,5 +101,5 @@ fn mk_if_let() -> int {
 }
 
 test("function-style call with new operands in if let") {
-    assert(mk_if_let() == 1007)?;
+    assert!(mk_if_let() == 1007);
 }

@@ -1,5 +1,7 @@
 // Assigning a fixed array local to another copies its elements, as a
 // stack array's slots are copied: the two never share elements.
+use tests::assert;
+
 fn first([int; 33] a) -> int {
     return a[0];
 }
@@ -15,8 +17,8 @@ test("a long array copy") {
     ];
     let b = a;
     b[0] = 99;
-    assert(first(a) == 0, "a unchanged")?;
-    assert(first(b) == 99, "b changed")?;
+    assert!(first(a) == 0, "a unchanged");
+    assert!(first(b) == 99, "b changed");
 }
 
 test("a reassigned copy") {
@@ -24,6 +26,6 @@ test("a reassigned copy") {
     let b = [0, 0, 0];
     b = a;
     b[1] = 20;
-    assert(sum3(a) == 6, "a unchanged")?;
-    assert(sum3(b) == 24, "b changed")?;
+    assert!(sum3(a) == 6, "a unchanged");
+    assert!(sum3(b) == 24, "b changed");
 }

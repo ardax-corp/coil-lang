@@ -1,4 +1,5 @@
 // `len` of a class with a `Length` instance calls the instance's method.
+use tests::assert;
 
 class Bag {
     pub items: Vec<int>,
@@ -12,13 +13,13 @@ impl Length for Bag {
 }
 
 test("len of a new object") {
-    assert(len(new Bag(Vec::from([1, 2, 3]), 1)) == 4)?;
+    assert!(len(new Bag(Vec::from([1, 2, 3]), 1)) == 4);
 }
 
 test("len of a local") {
     let b = new Bag(Vec::from([5]), 0);
     let n = len(b) * 10 + len("ab");
-    assert(n == 12)?;
+    assert!(n == 12);
 }
 
 test("len in a loop bound") {
@@ -27,5 +28,5 @@ test("len in a loop bound") {
     for i in 0..len(b) {
         s = s + i;
     }
-    assert(s == 6)?;
+    assert!(s == 6);
 }

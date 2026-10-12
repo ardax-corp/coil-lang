@@ -1,12 +1,13 @@
 // Regression: entry `use` order must not compile before `io::sync`.
 // Discovery used to LIFO-compile the entry before sync when another
 // userland module appeared first in the import list.
+use tests::assert;
 use path::Path;
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;
 
 test("a userland module imported before io::sync") {
-    assert(Path::from("a/b").as_str() == "a/b")?;
+    assert!(Path::from("a/b").as_str() == "a/b");
     write_all(stdout(), to_bytes(""))?;
 }

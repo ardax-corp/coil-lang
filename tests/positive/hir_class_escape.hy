@@ -1,6 +1,8 @@
 // A class local whose fields are written before it escapes keeps them in
 // frame slots and is boxed once, at the statement (or block tail) where it
 // first escapes, as the AST's unboxed class local.
+use tests::assert;
+
 class Pair {
     pub a: int,
     pub b: int,
@@ -38,13 +40,13 @@ fn shared() -> int {
 test("fields written before an escape in the tail") {
     let p = new Pair(1, 2);
     p.a = 5;
-    assert(sum(p) == 7)?;
+    assert!(sum(p) == 7);
 }
 
 test("writes after the escape go through the box") {
-    assert(shared() == 117)?;
+    assert!(shared() == 117);
 }
 
 test("escape in a loop") {
-    assert(chain(4) == 18)?;
+    assert!(chain(4) == 18);
 }

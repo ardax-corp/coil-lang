@@ -1,6 +1,8 @@
 // Boxed user enums in bodies lowered straight from HIR to MIR: an enum
 // parameter is a heap word, and `match` tests it with one `JumpIfMatch`
 // per arm but the last, reading the payload words of the arm it takes.
+use tests::assert;
+
 enum Shape {
     Dot,
     Line(int),
@@ -42,12 +44,12 @@ fn count(Shape s, int k) -> int {
 }
 
 test("boxed enums in direct MIR") {
-    assert(area(Shape::Dot) == 0)?;
-    assert(area(Shape::Line(7)) == 7)?;
-    assert(area(Shape::Rect(3, 4)) == 12)?;
-    assert(area(Shape::Box(1.5, 2.0, 4.0)) == 12)?;
-    assert(height(Shape::Rect(3, 9)) == 9)?;
-    assert(height(Shape::Box(1.0, 1.0, 1.0)) == 3)?;
-    assert(count(Shape::Rect(5, 1), 4) == 20)?;
-    assert(count(Shape::Line(2), 3) == 9)?;
+    assert!(area(Shape::Dot) == 0);
+    assert!(area(Shape::Line(7)) == 7);
+    assert!(area(Shape::Rect(3, 4)) == 12);
+    assert!(area(Shape::Box(1.5, 2.0, 4.0)) == 12);
+    assert!(height(Shape::Rect(3, 9)) == 9);
+    assert!(height(Shape::Box(1.0, 1.0, 1.0)) == 3);
+    assert!(count(Shape::Rect(5, 1), 4) == 20);
+    assert!(count(Shape::Line(2), 3) == 9);
 }

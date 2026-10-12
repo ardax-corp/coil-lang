@@ -1,5 +1,7 @@
 // A record variant built with its fields named out of declaration order
 // keeps each value in its declared payload slot.
+use tests::assert;
+
 enum E {
     Foo { x: int, y: string, z: int },
 }
@@ -19,7 +21,7 @@ fn parts(E e) -> int {
 }
 
 test("shuffled record variant fields") {
-    assert(parts(E::Foo { z: 1, x: 2, y: "s" }) == 211)?;
-    assert(parts(E::Foo { y: "t", z: 3, x: two() }) == 213)?;
-    assert(parts(mk(4)) == 514)?;
+    assert!(parts(E::Foo { z: 1, x: 2, y: "s" }) == 211);
+    assert!(parts(E::Foo { y: "t", z: 3, x: two() }) == 213);
+    assert!(parts(mk(4)) == 514);
 }

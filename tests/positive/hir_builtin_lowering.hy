@@ -2,6 +2,8 @@
 // its `Result<(), string>` boxed, `assert` yields the niche word, and a
 // host call pushes its native id under the arguments. The language
 // harness also runs under `--hir`, so each case pins both codegens.
+use tests::assert;
+
 fn check(int x) -> string {
     return match assert(x > 0, "not positive") {
         Result::Ok(_) => "ok",
@@ -32,24 +34,24 @@ fn label(int base, Result<int, string> r) -> int {
 }
 
 test("assert as a value") {
-    assert(check(3) == "ok")?;
-    assert(check(0) == "not positive")?;
+    assert!(check(3) == "ok");
+    assert!(check(0) == "not positive");
 }
 
 test("host calls nest and sit above operands") {
-    assert(hyp(3.0, 4.0) == 5.0)?;
-    assert(spread(2.5) == 5.0)?;
-    assert((ord("a")? as int) + 1 == (ord("b")? as int))?;
+    assert!(hyp(3.0, 4.0) == 5.0);
+    assert!(spread(2.5) == 5.0);
+    assert!((ord("a")? as int) + 1 == (ord("b")? as int));
 }
 
 test("early return from a test") {
     if hyp(6.0, 8.0) == 10.0 {
         return;
     }
-    assert(false, "unreachable")?;
+    assert!(false, "unreachable");
 }
 
 test("a pair result boxes above a live operand") {
-    assert(label(100, parse(4)) == 108)?;
-    assert(label(100, parse(0 - 4)) == 99)?;
+    assert!(label(100, parse(4)) == 108);
+    assert!(label(100, parse(0 - 4)) == 99);
 }

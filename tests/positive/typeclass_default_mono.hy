@@ -1,5 +1,7 @@
 // A default trait method reached from a monomorphized generic still gets the
 // instance dictionary it uses to call its sibling (`base`).
+use tests::assert;
+
 trait Tiny<T> {
     fn base(T x) -> int {}
 
@@ -19,5 +21,5 @@ fn get<T: Tiny>(T x) -> int {
 }
 
 test("default method via generic call") {
-    assert(get(41) == 42)?;
+    assert!(get(41) == 42);
 }

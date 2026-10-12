@@ -1,5 +1,7 @@
 // Vectorized `i as float` on the IV must convert `i` before the f64 splat,
 // not reuse its integer bits.
+use tests::assert;
+
 fn scaled_sum(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -12,5 +14,5 @@ fn scaled_sum(float scale, int n) -> float {
 }
 
 test("int-to-float IV in a vector reduction") {
-    assert(scaled_sum(1.5, 2000) == 374812.5)?;
+    assert!(scaled_sum(1.5, 2000) == 374812.5);
 }

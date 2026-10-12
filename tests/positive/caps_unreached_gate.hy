@@ -1,5 +1,6 @@
 // E4: a gated call nothing reaches needs no grant, so a module can keep a
 // helper that runs a program without every importer passing `--allow-exec`.
+use tests::assert;
 use env::exec;
 
 fn shell() {
@@ -12,5 +13,5 @@ fn add(int a, int b) -> int {
 }
 
 test("unreached gated helpers need no grant") {
-    assert(add(1, 2) == 3)?;
+    assert!(add(1, 2) == 3);
 }

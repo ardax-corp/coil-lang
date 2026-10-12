@@ -1,4 +1,6 @@
 // `x++` / `--x` used as values lower from HIR: one INC / DEC on the slot.
+use tests::assert;
+
 fn bump(int n) -> int {
     let k = n;
     let a = k++;
@@ -7,9 +9,9 @@ fn bump(int n) -> int {
 }
 
 test("adjust values inside expressions") {
-    assert(bump(3) == 305)?;
+    assert!(bump(3) == 305);
     let i = 10;
     let s = i-- + --i;
-    assert(s == 18)?;
-    assert(i == 8)?;
+    assert!(s == 18);
+    assert!(i == 8);
 }

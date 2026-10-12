@@ -1,6 +1,8 @@
 // Q1 / Q2 box-once: a first escape inside a loop body or `if` arm must box
 // where the local is bound. Boxing inside the loop re-boxed the stale slots
 // every pass, and code after the loop / `if` read the slot, not the box.
+use tests::assert;
+
 class Tally {
     pub hits: int,
 }
@@ -17,7 +19,7 @@ test("escape inside a loop body") {
         bump(t);
         r = r + 1;
     }
-    assert(t.hits == 3)?;
+    assert!(t.hits == 3);
 }
 
 test("escape inside one if arm") {
@@ -26,7 +28,7 @@ test("escape inside one if arm") {
     if r > 0 {
         bump(t);
     }
-    assert(t.hits == 1)?;
+    assert!(t.hits == 1);
 }
 
 test("escape inside the untaken if arm") {
@@ -36,7 +38,7 @@ test("escape inside the untaken if arm") {
         bump(t);
     }
     t.hits = t.hits + 1;
-    assert(t.hits == 6)?;
+    assert!(t.hits == 6);
 }
 
 test("escape in a nested loop") {
@@ -50,14 +52,14 @@ test("escape in a nested loop") {
         }
         a = a + 1;
     }
-    assert(t.hits == 4)?;
+    assert!(t.hits == 4);
 }
 
 test("straight-line escape") {
     let t = new Tally(0);
     bump(t);
     bump(t);
-    assert(t.hits == 2)?;
+    assert!(t.hits == 2);
 }
 
 fn set0([int; 3] xs, int v) -> int {
@@ -72,7 +74,7 @@ test("stack array escapes inside a loop body") {
         set0(a, a[0] + 1);
         r = r + 1;
     }
-    assert(a[0] == 4)?;
+    assert!(a[0] == 4);
 }
 
 test("stack array escapes inside one if arm") {
@@ -81,5 +83,5 @@ test("stack array escapes inside one if arm") {
     if r > 0 {
         set0(a, 1);
     }
-    assert(a[0] == 1)?;
+    assert!(a[0] == 1);
 }

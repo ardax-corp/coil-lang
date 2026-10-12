@@ -1,6 +1,8 @@
 // A call to a `gen fn` emitted before the `gen fn` itself still makes a
 // coroutine: the checker types it as one and codegen lowers it to
 // `MakeCoro` (#787). A generic caller used to reorder the bodies.
+use tests::assert;
+
 class Holder<R> {
     pub value: Option<R>,
 }
@@ -42,10 +44,10 @@ fn unused<T>(int ms, unit -> T body) -> int {
 }
 
 test("free gen fn declared after its caller") {
-    assert(caller() == 5)?;
+    assert!(caller() == 5);
 }
 
 test("generic gen fn called from a generic method") {
     let m = new Maker(3);
-    assert(m.make(fn () => 2) == 7)?;
+    assert!(m.make(fn () => 2) == 7);
 }

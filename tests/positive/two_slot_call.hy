@@ -7,6 +7,7 @@
 // EQ/JMPF lowering as a frame-local match (#278) — no allocation. `?`
 // and `let r = f()` stay on the pair; box only at escape. Niched
 // heap `Option<T>` / heap-heap `Result<T,E>` stay one word (unaffected).
+use tests::assert;
 
 enum HttpError {
     NotFound,
@@ -76,39 +77,39 @@ fn bind_then_try(int a, int b) -> Result<int, int> {
 }
 
 test("result int int direct match") {
-    assert(
+    assert!(
         match checked_div(10, 2) {
             Result::Ok(q) => q == 5,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match checked_div(1, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }
 
 test("option int direct match") {
-    assert(match maybe(3) {
+    assert!(match maybe(3) {
         Option::Some(v) => v == 3,
         Option::None => false,
-    })?;
-    assert(match maybe(-1) {
+    });
+    assert!(match maybe(-1) {
         Option::Some(_) => false,
         Option::None => true,
-    })?;
+    });
 }
 
 test("result int heap unit-enum error direct match") {
-    assert(
+    assert!(
         match fetch(200) {
             Result::Ok(code) => code == 200,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match fetch(404) {
             Result::Ok(_) => false,
             Result::Err(e) => match e {
@@ -116,8 +117,8 @@ test("result int heap unit-enum error direct match") {
                 HttpError::Timeout(_) => false,
             },
         },
-    )?;
-    assert(
+    );
+    assert!(
         match fetch(408) {
             Result::Ok(_) => false,
             Result::Err(e) => match e {
@@ -125,49 +126,49 @@ test("result int heap unit-enum error direct match") {
                 HttpError::Timeout(msg) => msg == "slow",
             },
         },
-    )?;
+    );
 }
 
 test("payload enum arity 1 direct match, either variant order") {
-    assert(match cell(4) {
+    assert!(match cell(4) {
         Cell::Num(v) => v == 4,
         Cell::Empty => false,
-    })?;
-    assert(match cell(-2) {
+    });
+    assert!(match cell(-2) {
         Cell::Num(_) => false,
         Cell::Empty => true,
-    })?;
-    assert(
+    });
+    assert!(
         match cell_rev(4) {
             CellRev::Num(v) => v == 4,
             CellRev::Empty => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match cell_rev(-2) {
             CellRev::Num(_) => false,
             CellRev::Empty => true,
         },
-    )?;
+    );
 }
 
 test("bind site keeps two-slot local (match / ? without boxing)") {
     let x = maybe(2);
-    assert(match x {
+    assert!(match x {
         Option::Some(v) => v == 2,
         Option::None => false,
-    })?;
+    });
     let r = checked_div(9, 3);
-    assert(match r {
+    assert!(match r {
         Result::Ok(v) => v == 3,
         Result::Err(_) => false,
-    })?;
-    assert(
+    });
+    assert!(
         match bind_then_try(8, 2) {
             Result::Ok(v) => v == 4,
             Result::Err(_) => false,
         },
-    )?;
+    );
 }
 
 fn forward_try(int a, int b) -> Result<int, int> {
@@ -212,109 +213,109 @@ fn step_mod_chain(int i) -> Result<int, int> {
 }
 
 test("two-word Result Try propagates through raise/?") {
-    assert(
+    assert!(
         match chained(9, 3) {
             Result::Ok(v) => v == 4,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match chained(1, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }
 
 test("return e? / Ok(e?) forwards the same two-slot pair") {
-    assert(
+    assert!(
         match forward_try(8, 2) {
             Result::Ok(v) => v == 4,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match forward_try(1, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match wrap_try(9, 3) {
             Result::Ok(v) => v == 3,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match wrap_try(2, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }
 
 test("HTTP-shaped Result ? chain keeps payloads and err path") {
-    assert(
+    assert!(
         match http_chain(20, 2, 2) {
             Result::Ok(v) => v == 6,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match http_chain(5, 0, 1) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match http_chain(10, 2, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }
 
 test("step-shaped Result ? chain binds both oks and first err") {
-    assert(
+    assert!(
         match step_chain(4) {
             Result::Ok(v) => v == 11,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match step_chain(-2) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -2,
         },
-    )?;
+    );
     // First `?` ok, second `?` err — same shape as result_try_churn.
-    assert(
+    assert!(
         match step_mod_chain(2) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match step_mod_chain(1) {
             Result::Ok(v) => v == 7,
             Result::Err(_) => false,
         },
-    )?;
+    );
 }
 
 test("niched heap Option/Result stay one word (unaffected)") {
     let some_text = Option::Some("ok");
-    assert(
+    assert!(
         match some_text {
             Option::Some(s) => s == "ok",
             Option::None => false,
         },
-    )?;
+    );
     let ok_pair: Result<string, string> = Result::Ok("fine");
-    assert(
+    assert!(
         match ok_pair {
             Result::Ok(s) => s == "fine",
             Result::Err(_) => false,
         },
-    )?;
+    );
 }

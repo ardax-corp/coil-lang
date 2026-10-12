@@ -1,5 +1,6 @@
 // COI-400: heap-heap niche Result match / newly built buffers
 // (coil-stdlib path join + text replace/to_lower).
+use tests::assert;
 use io::IoError;
 use string::{from_bytes, to_bytes};
 
@@ -86,7 +87,7 @@ test("result path join matches Ok") {
         Result::Ok(p) => p,
         Result::Err(_) => panic "join",
     };
-    assert(j.as_str() == "a/b")?;
+    assert!(j.as_str() == "a/b");
 }
 
 test("result string string from newly built buffer") {
@@ -94,18 +95,18 @@ test("result string string from newly built buffer") {
         Result::Ok(s) => s,
         Result::Err(_) => panic "lower",
     };
-    assert(low == "AbCx")?;
+    assert!(low == "AbCx");
 }
 
 test("result string string question on new buffer") {
-    assert(replace_two("one two two")? == "one 2 2")?;
+    assert!(replace_two("one two two")? == "one 2 2");
 }
 
 test("host from_bytes of new buffer still Ok") {
     let b = to_bytes("hi");
     match from_bytes(b) {
         Result::Ok(s) => {
-            assert(s == "hi")?;
+            assert!(s == "hi");
         },
         Result::Err(_) => {
             panic "from_bytes";

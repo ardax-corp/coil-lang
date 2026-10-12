@@ -1,5 +1,6 @@
 // `arbitrary`: seeded random values for property tests, and
 // `#[derive(Arbitrary)]` for classes and enums (contracts step C3).
+use tests::assert;
 use arbitrary::{Arbitrary, Gen, any};
 
 #[derive(Arbitrary)]
@@ -50,7 +51,7 @@ test("the same seed gives the same values") {
     while i < 50 {
         let a: Point = any(g1);
         let b: Point = any(g2);
-        assert(a.x == b.x && a.y == b.y)?;
+        assert!(a.x == b.x && a.y == b.y);
         i += 1;
     }
 }
@@ -61,7 +62,7 @@ test("ints stay within the size") {
     let i = 0;
     while i < 200 {
         let n: int = any(g);
-        assert(n >= -5 && n <= 5, string::format("%i", n))?;
+        assert!(n >= -5 && n <= 5, string::format("%i", n));
         i += 1;
     }
 }
@@ -70,19 +71,19 @@ test("collections grow with the size") {
     let g = Gen::new(11);
     g.resize(0);
     let empty: Vec<int> = any(g);
-    assert(len(empty) == 0)?;
+    assert!(len(empty) == 0);
     g.resize(30);
     let longest = 0;
     let i = 0;
     while i < 50 {
         let b: Bag = any(g);
-        assert(len(b.names) <= 30)?;
+        assert!(len(b.names) <= 30);
         if len(b.names) > longest {
             longest = len(b.names);
         }
         i += 1;
     }
-    assert(longest > 5, string::format("%i", longest))?;
+    assert!(longest > 5, string::format("%i", longest));
 }
 
 test("recursive enums end") {
@@ -91,10 +92,10 @@ test("recursive enums end") {
     let i = 0;
     while i < 100 {
         let l: List = any(g);
-        assert(length(l) <= 5, string::format("%i", length(l)))?;
+        assert!(length(l) <= 5, string::format("%i", length(l)));
         i += 1;
     }
-    assert(g.depth() == 0)?;
+    assert!(g.depth() == 0);
 }
 
 test("every variant shows up") {
@@ -112,7 +113,7 @@ test("every variant shows up") {
         }
         i += 1;
     }
-    assert(circles > 0 && squares > 0 && dots > 0)?;
+    assert!(circles > 0 && squares > 0 && dots > 0);
 }
 
 test("generic classes take their parameters' instances") {
@@ -126,7 +127,7 @@ test("generic classes take their parameters' instances") {
         }
         i += 1;
     }
-    assert(trues > 0 && trues < 40)?;
+    assert!(trues > 0 && trues < 40);
 }
 
 test("strings are valid text") {
@@ -136,7 +137,7 @@ test("strings are valid text") {
     while i < 50 {
         let s: string = any(g);
         let b: byte = any(g);
-        assert(len(s) <= 40)?;
+        assert!(len(s) <= 40);
         i += 1;
     }
 }

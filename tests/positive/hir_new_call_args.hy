@@ -1,5 +1,7 @@
 // A `new` object as a later call argument: every argument stages through
 // a temp, so the earlier ones survive the constructor's own temp.
+use tests::assert;
+
 class Point {
     pub x: int,
 }
@@ -21,9 +23,9 @@ fn nested() -> int {
 }
 
 test("new objects as call arguments") {
-    assert(pick(1, new Point(2), new Val(3)) == 321)?;
+    assert!(pick(1, new Point(2), new Val(3)) == 321);
     let n = 4;
-    assert(pick(n, new Point(n + 1), new Val(n * 2)) == 854)?;
-    assert(nested() == 6)?;
-    assert(sum_xs(new Point(7), new Point(8)) + 1 == 16)?;
+    assert!(pick(n, new Point(n + 1), new Val(n * 2)) == 854);
+    assert!(nested() == 6);
+    assert!(sum_xs(new Point(7), new Point(8)) + 1 == 16);
 }

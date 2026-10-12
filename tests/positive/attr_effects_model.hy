@@ -1,4 +1,5 @@
 // `FnDecl` carries `pure fn` and `uses {…}`, and `with_name` keeps them.
+use tests::assert;
 use derive_macros::declared;
 
 #[declared]
@@ -17,13 +18,13 @@ fn plain() -> int {
 }
 
 test("the macro model sees declared effects") {
-    assert(add_effects() == "pure")?;
-    assert(shout_effects() == "uses {read, mutate}")?;
-    assert(plain_effects() == "none")?;
+    assert!(add_effects() == "pure");
+    assert!(shout_effects() == "uses {read, mutate}");
+    assert!(plain_effects() == "none");
 }
 
 test("with_name keeps the declaration and the body") {
-    assert(add_kept(2, 3) == 5)?;
-    assert(shout_kept("hi") == "hi!")?;
-    assert(plain_kept() == 7)?;
+    assert!(add_kept(2, 3) == 5);
+    assert!(shout_kept("hi") == "hi!");
+    assert!(plain_kept() == 7);
 }

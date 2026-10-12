@@ -1,5 +1,7 @@
 // Typed inlining (on by default): small callees spliced into their
 // callers must keep argument order, receiver mutation and side effects.
+use tests::assert;
+
 class Counter {
     pub n: int,
 }
@@ -58,25 +60,25 @@ fn order() -> int {
 }
 
 test("receiver methods and branches inline") {
-    assert(sum_loop(4) == (2 + 0) + (4 - 2) + (6 + 4) + (8 - 6))?;
+    assert!(sum_loop(4) == (2 + 0) + (4 - 2) + (6 + 4) + (8 - 6));
 }
 
 test("calls keep their order") {
-    assert(order() == 7)?;
-    assert(trace == 123)?;
+    assert!(order() == 7);
+    assert!(trace == 123);
 }
 
 test("a rebound parameter does not write the argument") {
     let x = 4;
-    assert(shadow(x) == 15)?;
-    assert(x == 4)?;
+    assert!(shadow(x) == 15);
+    assert!(x == 4);
 }
 
 test("a receiver mutated by the callee is the caller's object") {
     let c = new Counter(5);
     let a = c.next();
     let b = c.next() + c.get();
-    assert(a == 6)?;
-    assert(b == 14)?;
-    assert(c.n == 7)?;
+    assert!(a == 6);
+    assert!(b == 14);
+    assert!(c.n == 7);
 }
