@@ -381,7 +381,7 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index, call or constructor but `new` takes one (any of them
+/// no operator, field, index or call takes one (any of them
 /// could read a box as its payload), and nothing that can collect runs
 /// while one is live in a word the frame maps don't trace.
 fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
@@ -395,11 +395,10 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
             HirKind::Index { base, index, .. } => var(base) || var(index),
-            // An object's fields carry no word kinds: it holds the word as
-            // HIR emission's object does. A variant or tuple would mark it
-            // a scalar.
-            HirKind::Make { kind: MakeKind::Class(_), .. } => false,
-            HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            // A made object holds the word as HIR emission's does (the body
+            // makes them without word kinds).
+            HirKind::Make { .. } => false,
+            HirKind::Call { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
             HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
@@ -559,6 +558,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     tidy(&mut func, &order);
     if inp.opaque_vars {
         opaque_moves_only(hir, &func)?;
+        func.opaque_words = true;
     }
     Ok(func)
 }

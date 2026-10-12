@@ -1152,6 +1152,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 let base = gather_base(out, &slots, scratch, loc)?;
                 // Declaration-order word kinds from the element types.
                 let kinds = match kind {
+                    _ if func.opaque_words => 0,
                     MirAllocKind::Enum { .. } => common::pack_word_kinds(
                         elems.iter().rev().map(|e| mir_word_kind(func.ty(*e))),
                     ),
