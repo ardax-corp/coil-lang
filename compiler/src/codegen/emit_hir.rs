@@ -280,6 +280,9 @@ struct HirEmit {
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
     call_targets: HashMap<u32, crate::mir::HirCallSite>,
+    /// Entry label of the user `into_iter` a counted `for` loop calls, by
+    /// loop.
+    into_iters: HashMap<u32, crate::il::Label>,
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
     /// String table index of the format string of each `format` call
@@ -913,6 +916,7 @@ impl Compiler {
             sroa,
             fields,
             calls: &emit.call_targets,
+            into_iters: &emit.into_iters,
             strings: &emit.string_lits,
             formats: &emit.format_strs,
             lens: &emit.plan.lens,
@@ -945,6 +949,27 @@ impl Compiler {
                 Self::boxed_payloads(checker, &t, variant)
             }),
             enum_drop: Box::new(move |name: &str| checker.enum_has_drop(name)),
+            pair_variants: Box::new(move |t: &Ty| {
+                use crate::typechecking::return_layout as rl;
+                let t = apply_ty_prune(checker.subst(), t);
+                let kind = rl::two_word_return_enum(checker, &t)?;
+                if rl::is_two_word_product_kind(&kind) || rl::is_range_kind(&kind) {
+                    return None;
+                }
+                let mut variants = Vec::new();
+                for (name, tag, _) in checker.enum_variants(&kind)? {
+                    let payload = Self::payload_tys_of(checker, &t, &name)?;
+                    let word = match payload.as_slice() {
+                        [] => None,
+                        [p] if crate::hir::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
+                        [p] if !crate::hir::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
+                        [p] => Some(crate::mir::scalar_mir_ty(p)?),
+                        _ => return None,
+                    };
+                    variants.push((tag, word));
+                }
+                Some((kind, variants))
+            }),
             boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
                 if crate::typechecking::value_layout::value_layout(checker, &t) != ValueLayout::Boxed {
@@ -1826,6 +1851,7 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             call_targets: HashMap::new(),
+            into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
         };
@@ -6834,7 +6860,7 @@ impl Compiler {
                 if depth == 0 {
                     // Receiver and arguments through temps, as the AST does.
                     let mut temps = Vec::with_capacity(args.len());
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                         if let Some(ty) = boxed(i) {
                             Self::emit_box_if_needed(&mut self.bytecode, &ty);
@@ -6848,7 +6874,7 @@ impl Compiler {
                         self.bytecode.push_load(tmp);
                     }
                 } else {
-                    for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                    for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                         self.hir_value(hir, emit, arg, &Rep::Word(param), depth + i as u32);
                         if let Some(ty) = boxed(i) {
                             Self::emit_box_if_needed(&mut self.bytecode, &ty);
@@ -6871,6 +6897,30 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
+                // A plain one-word ABI call, each argument in its own layout:
+                // direct MIR calls the same entry.
+                if dicts == 0
+                    && generic.is_none()
+                    && (0..args.len()).all(|i| boxed(i).is_none())
+                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(&IlOp::Entry {
+                        kind: crate::il::EntryKind::Call,
+                        target,
+                        arity,
+                        ret_words: ret_words @ (1 | 2),
+                        ..
+                    }) = self.bytecode.il_mut().ops_slice_mut().last()
+                    && arity == args.len() as u32
+                {
+                    emit.call_targets.insert(
+                        id.0,
+                        crate::mir::HirCallSite {
+                            target,
+                            pair_args: vec![false; args.len()],
+                            pair_ret: ret_words == 2,
+                        },
+                    );
+                }
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
@@ -9087,6 +9137,7 @@ impl Compiler {
                         self.bytecode.push_store_pop(end);
                     } else if let Some(fqn) = &custom {
                         into_iter(self, emit, fqn);
+                        self.hir_note_into_iter(emit, id);
                         self.expr_depth = 0;
                         self.bytecode.push_store_pop(end);
                         self.bytecode.push_store_pop(cur);
@@ -9130,7 +9181,10 @@ impl Compiler {
                 let arr = self.alloc_temp_slot();
                 let idx = self.alloc_temp_slot();
                 match &custom {
-                    Some(fqn) => into_iter(self, emit, fqn),
+                    Some(fqn) => {
+                        into_iter(self, emit, fqn);
+                        self.hir_note_into_iter(emit, id);
+                    }
                     None => self.hir_value(hir, emit, iterable, &BOXED, 0),
                 }
                 if dict {
@@ -9214,6 +9268,19 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
+    }
+
+    /// The `into_iter` entry a counted `for` loop `id` just called.
+    fn hir_note_into_iter(&mut self, emit: &mut HirEmit, id: HirId) {
+        if let Some(&IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            target,
+            arity: 1,
+            ..
+        }) = self.bytecode.il_mut().ops_slice_mut().last()
+        {
+            emit.into_iters.insert(id.0, target);
+        }
     }
 
     /// A call to a function with an auto-par fork site, as the AST's

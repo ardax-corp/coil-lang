@@ -143,7 +143,17 @@ pub fn try_specialize_body_side(
             return Some(out);
         }
     }
+    if no_lift() {
+        return None;
+    }
     specialize_side(ops, name, entry_sp, pool, calls, official_entry, None, side)
+}
+
+/// `COIL_NO_LIFT=1`: MIR tiers take only MIR lowered from HIR, never a lift
+/// of the IL (the census of what deleting the lift would cost).
+fn no_lift() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("COIL_NO_LIFT").as_deref(), Ok("1" | "true" | "on" | "yes")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -663,6 +673,7 @@ pub fn try_lower_abi_body_side(
     }
     let mut func = match direct {
         Some(func) => func.clone(),
+        None if no_lift() => return refuse("no lift"),
         None => lift_lir(ops, name, entry_sp, pool, unboxed_fields, has_alloc)?,
     };
     if has_alloc {
