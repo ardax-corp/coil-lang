@@ -31,6 +31,8 @@ static let acc: Acc = new Acc(0);
 
 static let items: Vec<int> = Vec::new();
 
+static let last: Option<int> = Option::None;
+
 fn bump(int n) -> int {
     let i = 0;
     while i < n {
@@ -133,6 +135,37 @@ test("heap statics: a class object and a Vec") {
     assert(fill(4) == 18)?;
     assert(fill(1) == 18)?;
     assert(len(items) == 5)?;
+}
+
+fn remember(int n) -> int {
+    let i = 0;
+    let seen = 0;
+    while i < n {
+        match last {
+            Option::Some(v) => {
+                seen = seen + v;
+            },
+            Option::None => {},
+        }
+        last = Option::Some(i);
+        i = i + 1;
+    }
+    return seen;
+}
+
+fn last_or(int d) -> int {
+    return match last {
+        Option::Some(v) => v,
+        Option::None => d,
+    };
+}
+
+test("a two-word Option static") {
+    assert(last_or(-1) == -1)?;
+    assert(remember(4) == 3)?;
+    assert(last_or(-1) == 3)?;
+    last = Option::None;
+    assert(last_or(9) == 9)?;
 }
 
 test("const reads and a string static") {

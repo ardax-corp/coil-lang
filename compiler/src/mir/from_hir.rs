@@ -1048,6 +1048,13 @@ impl Lower<'_> {
                 _ => Err("make boxed".into()),
             };
         }
+        // A two-word static is its box already.
+        if let HirKind::Global { .. } = self.hir.expr(id).kind
+            && let Some(&slot) = self.inp.statics.get(&id.0)
+            && self.inp.pair_tys.contains_key(&id.0)
+        {
+            return Ok(Some(self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?));
+        }
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
@@ -2584,10 +2591,10 @@ impl Lower<'_> {
     }
 
     /// The word type of a static `id` names: as a local of its type. A
-    /// two-word static is one boxed word; its pair is not this phase's.
+    /// two-word static is one boxed word.
     fn static_ty(&self, id: HirId) -> Result<MirTy, Refusal> {
         if self.inp.pair_tys.contains_key(&id.0) {
-            return Err("pair static".into());
+            return Ok(MirTy::HeapRef);
         }
         let ty = self.expr_ty(id).ok_or("static type")?;
         self.inp
@@ -2603,7 +2610,13 @@ impl Lower<'_> {
         use crate::const_fold::ConstValue;
         if let Some(&slot) = self.inp.statics.get(&id.0) {
             let ty = self.static_ty(id)?;
-            return Ok(Val::V(self.b.ins_load_static(slot, ty).map_err(mir)?));
+            let v = self.b.ins_load_static(slot, ty).map_err(mir)?;
+            // A two-word static read as its pair, as HIR emission unboxes it.
+            if let Some(&(lo_ty, hi_ty)) = self.inp.pair_tys.get(&id.0) {
+                let ty = self.expr_ty(id).ok_or("static type")?.clone();
+                return self.unbox_word(&ty, v, lo_ty, hi_ty);
+            }
+            return Ok(Val::V(v));
         }
         let c = match self.inp.consts.get(&id.0) {
             Some(ConstValue::Int(n)) => MirConst::I64(*n),
