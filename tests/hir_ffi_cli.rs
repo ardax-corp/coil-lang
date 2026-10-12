@@ -178,5 +178,39 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &arrays);
+
+    // A `static const` or `static let` in an `invoke` tuple is a value, not a
+    // callback (#868).
+    let globals = tmp.join("globals.hy");
+    std::fs::write(
+        &globals,
+        r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::Int;
+
+static const FORTY = 40;
+static let two: int = 2;
+
+fn main() {
+    let lib = match dload("sum") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let n = match invoke(lib, sum_id, (FORTY, two)) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if n != 42 {
+        panic "global arguments failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &globals);
     let _ = std::fs::remove_dir_all(&tmp);
 }

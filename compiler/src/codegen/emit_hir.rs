@@ -1959,7 +1959,10 @@ impl Compiler {
                         lower::tuple_items(hir, args[2])
                             .unwrap_or(&[])
                             .iter()
-                            .filter(|t| matches!(hir.expr(**t).kind, HirKind::Global { .. }))
+                            .filter(|t| match &hir.expr(**t).kind {
+                                HirKind::Global { name, .. } => !self.hir_global_is_value(hir, **t, name),
+                                _ => false,
+                            })
                             .map(|t| t.0)
                             .collect(),
                     ),
@@ -3424,14 +3427,23 @@ impl Compiler {
     }
 
     /// An `invoke` argument naming a function: `Some(Some(offset))` for its
-    /// `CodePtr`, `Some(None)` when the name is not a compiled function.
+    /// `CodePtr`, `Some(None)` when the name is not a compiled function. A
+    /// const or static is a value, not a callback (#868).
     fn hir_ffi_callback(&self, hir: &HirBody, builtin: HirBuiltin, arg: HirId) -> Option<Option<u32>> {
         match (&hir.expr(arg).kind, builtin) {
-            (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke)) => {
+            (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke))
+                if !self.hir_global_is_value(hir, arg, name) =>
+            {
                 Some(self.functions.get(name.as_str()).map(|&offset| offset as u32))
             }
             _ => None,
         }
+    }
+
+    /// A global read that names a `const` / `static const` or a `static`
+    /// slot, so it moves as a value rather than as a function.
+    fn hir_global_is_value(&self, hir: &HirBody, id: HirId, name: &str) -> bool {
+        self.hir_global_static(hir, id, name).is_some() || self.hir_global_const(hir, id, name).is_some()
     }
 
     fn hir_builtin_abi(&self, hir: &HirBody, call: HirId, builtin: HirBuiltin) -> Result<HirCall, &'static str> {
