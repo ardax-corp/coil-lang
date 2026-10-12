@@ -479,7 +479,6 @@ impl Compiler {
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
         self.hir_refusal = None;
-        let entry_sp = self.hir_entry_sp.take();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -683,23 +682,14 @@ impl Compiler {
                         }
                     }
                 }
-                let body_ops = self.bytecode.ops().len();
                 if let Some(root) = hir.root {
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_effect(hir, &mut emit, root);
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
                 self.hir_mir_why = None;
-                // A shared generic body with no open parameter takes its
-                // dictionaries as trailing parameters it never reads.
-                let shared = self.hir_shared_generic();
-                let open = hir.params.iter().any(|&p| self.hir_open_ty(hir.local(p).ty.as_ref()));
-                self.hir_mir = if entry_convs.is_empty() && !shared {
-                    self.hir_lower_mir(hir, &emit, None)
-                } else if entry_convs.is_empty() && !open && let Some(entry) = entry_sp
-                    && !self.hir_reads_dicts(body_ops)
-                {
-                    self.hir_lower_mir(hir, &emit, Some(entry))
+                self.hir_mir = if entry_convs.is_empty() && !self.hir_shared_generic() {
+                    self.hir_lower_mir(hir, &emit)
                 } else {
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
@@ -745,7 +735,7 @@ impl Compiler {
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
-    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
+    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit) -> Option<crate::mir::MirFunc> {
         if !self.hir_mir_on || !self.opt_options.mir_specialize || self.debugger_attached {
             return None;
         }
@@ -758,7 +748,7 @@ impl Compiler {
         } else if emit.par_loop {
             Err("parallel loop".to_string())
         } else {
-            self.hir_mir_input(hir, emit, file, entry_words)
+            self.hir_mir_input(hir, emit, file)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
         };
         match why {
@@ -784,7 +774,6 @@ impl Compiler {
         hir: &HirBody,
         emit: &'a HirEmit,
         file: Option<u32>,
-        entry_words: Option<u32>,
     ) -> Result<crate::mir::HirMirInput<'a>, String> {
         let mut pair_locals = HashMap::new();
         for &local in emit.plan.pair_locals.keys() {
@@ -1000,7 +989,6 @@ impl Compiler {
             pinned_for,
             cold_ok: emit.plan.cold_ok,
             file,
-            entry_words,
         })
     }
 
@@ -5859,14 +5847,6 @@ impl Compiler {
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
         !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
-    }
-
-    /// Whether the ops from `start` on read a dictionary slot.
-    fn hir_reads_dicts(&self, start: usize) -> bool {
-        let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
-        self.bytecode.ops()[start..].iter().filter_map(IlOp::as_encode_byte).any(|b| {
-            *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
-        })
     }
 
     /// Whether `ty` is a bare type variable.

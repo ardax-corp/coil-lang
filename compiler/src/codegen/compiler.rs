@@ -5578,7 +5578,6 @@ impl Compiler {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
         let entry_sp = self.context.variables.len() as u32;
-        self.hir_entry_sp = Some(entry_sp);
         // Bounded generic instance method: `__dict0` is the instance's own
         // dictionary, whose tail holds the context dictionaries.
         if let Some((base, n)) = self.pending_instance_ctx.take()
@@ -7607,7 +7606,6 @@ impl Compiler {
 
             // Args + self + dicts occupy the shared stack at body entry.
             let entry_sp = self.context.variables.len() as u32;
-            self.hir_entry_sp = Some(entry_sp);
 
             self.bytecode.append(&mut a);
 

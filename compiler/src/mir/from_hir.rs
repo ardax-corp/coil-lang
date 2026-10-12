@@ -190,9 +190,6 @@ pub struct HirMirInput<'a> {
     pub cold_ok: bool,
     /// Source file of the body, for statement locations.
     pub file: Option<u32>,
-    /// Frame words at entry when trailing dictionary parameters follow
-    /// the body's own (a shared generic instance): each is one heap word.
-    pub entry_words: Option<u32>,
 }
 
 struct Loop {
@@ -370,15 +367,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             let v = b.add_param(ty).map_err(mir)?;
             b.def_local(LocalId(next), v).map_err(mir)?;
             next += 1;
-        }
-    }
-    if let Some(entry) = inp.entry_words {
-        if entry < next {
-            return Err("param slot".into());
-        }
-        // Dictionaries: never read by a body this lowering takes.
-        for _ in next..entry {
-            b.add_param(MirTy::HeapRef).map_err(mir)?;
         }
     }
     let cur = b.entry();
