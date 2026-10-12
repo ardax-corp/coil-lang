@@ -179,6 +179,70 @@ fn main() {
     .unwrap();
     check(&bin, &tmp, &arrays);
 
+    // `ConstBytes` lends a string's bytes in place and copies a `Vec<byte>`
+    // without writing it back. The argument string is a temporary, so only
+    // the VM's in-flight argument roots keep it alive while the callback
+    // allocates enough to collect.
+    let const_bytes = tmp.join("const_bytes.hy");
+    std::fs::write(
+        &const_bytes,
+        r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::{Callback, ConstBytes, Int};
+use string::{format, to_bytes};
+
+fn churn(int n) -> int {
+    let i = 0;
+    let keep = "";
+    while i < 20000 {
+        keep = format("%i-%i", i, n);
+        i = i + 1;
+    }
+    return len(keep);
+}
+
+fn main() {
+    let lib = match dload("sum") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    let id = match declare(lib, "sum_bytes", (ConstBytes, Int), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let s = format("%s%s", "AB", "C");
+    let n = match invoke(lib, id, (s, 3)) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if n != 65 + 66 + 67 {
+        panic "string view failed";
+    }
+    let v: Vec<byte> = to_bytes("ab");
+    let m = match invoke(lib, id, (v, 2)) {
+        Result::Ok(x) => x,
+        Result::Err(e) => panic e.message,
+    };
+    if m != 97 + 98 || v[0] != (97 as byte) {
+        panic "Vec<byte> view failed";
+    }
+    let cb_id = match declare(lib, "sum_bytes_after_cb", (ConstBytes, Int, Callback), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let k = match invoke(lib, cb_id, (format("%s%s", "xy", "z"), 3, churn)) {
+        Result::Ok(x) => x,
+        Result::Err(e) => panic e.message,
+    };
+    if k != 120 + 121 + 122 {
+        panic "view did not survive the callback";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &const_bytes);
+
     // A `static const` or `static let` in an `invoke` tuple is a value, not a
     // callback (#868).
     let globals = tmp.join("globals.hy");
