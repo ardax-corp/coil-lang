@@ -416,8 +416,8 @@ mod tests {
         assert_eq!(got, Some(2));
         match heap.find_object_by_addr(buf.raw() as u64) {
             Some(Object::Array(arr)) => {
-                assert_eq!(arr.as_ref().elements()[0].as_int(), b'h' as i64);
-                assert_eq!(arr.as_ref().elements()[1].as_int(), b'i' as i64);
+                assert_eq!(arr.as_ref().get(0).unwrap().as_int(), b'h' as i64);
+                assert_eq!(arr.as_ref().get(1).unwrap().as_int(), b'i' as i64);
             }
             _ => panic!("buf"),
         }

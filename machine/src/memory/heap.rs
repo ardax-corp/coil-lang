@@ -799,6 +799,14 @@ impl Heap {
         self.gc_next_threshold = bytes;
     }
 
+    /// Count an array's storage change (see [`ObjArray::take_resize`]).
+    #[inline]
+    pub fn account_array(&mut self, arr: &mut ObjArray) {
+        if let Some((old, new)) = arr.take_resize() {
+            self.account_resize(old, new);
+        }
+    }
+
     /// Adjust tracked heap bytes after an in-place grow/shrink of a managed
     /// object's internal Rust allocation (for example `ObjArray.elements`).
     pub fn account_resize(&mut self, old_size: usize, new_size: usize) {
@@ -1155,11 +1163,7 @@ impl Heap {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
             return;
         };
-        let n = gc.as_ref().elements().len().min(values.len());
-        let arr = gc.as_mut();
-        for (i, &v) in values.iter().take(n).enumerate() {
-            arr.elements[i] = Value::from(v);
-        }
+        gc.as_mut().overwrite_prefix(values.iter().map(|&v| Value::from(v)));
     }
 
     /// Write `bytes` back into the array at `addr`, one byte per element
@@ -1168,10 +1172,7 @@ impl Heap {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
             return;
         };
-        let arr = gc.as_mut();
-        for (slot, &b) in arr.elements.iter_mut().zip(bytes) {
-            *slot = Value::from(i64::from(b));
-        }
+        gc.as_mut().overwrite_prefix(bytes.iter().map(|&b| Value::from(i64::from(b))));
     }
 
     /// True if `addr` is a live heap object.
@@ -1439,7 +1440,7 @@ impl Object {
                 if a.as_ref().may_hold_refs() {
                     let pointers = a.as_ref().elem_kind() == common::WORD_POINTER;
                     let mut any = false;
-                    for v in a.as_ref().elements() {
+                    for v in a.as_ref().words().unwrap_or_default() {
                         #[cfg(feature = "gc-stress")]
                         if pointers {
                             heap.verify_kinded_word("a pointer-kind array", 0, common::WORD_POINTER, *v);
@@ -1553,7 +1554,7 @@ impl Object {
                 let a = a.as_ref();
                 if a.may_hold_refs() {
                     let precise = a.elem_kind() == common::WORD_POINTER;
-                    a.elements().iter().for_each(|v| word(*v, precise, visit));
+                    a.words().unwrap_or_default().iter().for_each(|v| word(*v, precise, visit));
                 }
             }
             Self::Coroutine(c) => {
@@ -2337,23 +2338,89 @@ impl ObjTuple {
     }
 }
 
+/// Element storage of an [`ObjArray`].
+///
+/// `Bytes` holds one byte per element and is lossless: it only ever holds
+/// words whose raw value is `0..=255` (a `byte`, a `bool`, or a small int),
+/// and a read widens the byte back to that same word. A store that does not
+/// fit (a larger int, a boxed value from a shared generic body, any heap
+/// reference) unpacks the array to `Words` first, so the packing is a pure
+/// space optimisation and never depends on the static element type.
+enum ArrayData {
+    Words(Vec<Value>),
+    Bytes(Vec<u8>),
+}
+
+/// The word stored as one byte, when it fits.
+#[inline(always)]
+fn byte_of(v: Value) -> Option<u8> {
+    let raw = v.raw() as usize;
+    if raw <= u8::MAX as usize { Some(raw as u8) } else { None }
+}
+
+#[inline(always)]
+fn word_of(b: u8) -> Value {
+    Value::from(i64::from(b))
+}
+
+/// Element iterator of an [`ObjArray`] (bytes widen to words).
+pub enum ArrayIter<'a> {
+    Words(std::iter::Copied<std::slice::Iter<'a, Value>>),
+    Bytes(std::slice::Iter<'a, u8>),
+}
+
+impl Iterator for ArrayIter<'_> {
+    type Item = Value;
+
+    #[inline]
+    fn next(&mut self) -> Option<Value> {
+        match self {
+            Self::Words(it) => it.next(),
+            Self::Bytes(it) => it.next().map(|b| word_of(*b)),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Words(it) => it.size_hint(),
+            Self::Bytes(it) => it.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for ArrayIter<'_> {}
+
 /// A `Vec` / array object.
+///
+/// Elements are words, or packed bytes (see [`ArrayData`]) once the array is
+/// stamped [`common::WORD_BYTE`] (`Vec<byte>` / `Vec<bool>`) or built with
+/// [`Self::from_bytes`]. Everything outside this type goes through the
+/// width-aware API below; only [`Self::words`] / [`Self::bytes`] expose the
+/// storage, for fast paths that handle both.
 ///
 /// `may_hold_refs` is false only when the last mark scanned every element,
 /// found none that could be a heap reference, and nothing was written since.
 /// Marking skips such an array (a live `Vec<int>` of millions of words is
-/// scanned once, then costs nothing per collection). Every write goes
+/// scanned once, then costs nothing per collection). Every word write goes
 /// through [`Self::push`] / [`Self::set`] / [`Self::store_indexed`] /
-/// [`Self::elements_mut`], which set the flag with one byte store — no
+/// [`Self::words_mut`], which set the flag with one byte store — no
 /// compare on the hot path. Not type-based, so boxed values from a generic
-/// shared body are covered too.
+/// shared body are covered too. Packed bytes never hold references, so the
+/// flag stays false for them.
 pub struct ObjArray {
-    elements: Vec<Value>,
+    data: ArrayData,
     may_hold_refs: bool,
     /// Element word kind (`common::WORD_*`) stamped by a typed constructor
-    /// (`TagArrayKind`). Only `WORD_POINTER` is ever set: each element is `0`
-    /// or an object address, so marking treats them as precise references.
+    /// (`TagArrayKind`). Only `WORD_POINTER` is ever kept: each element is
+    /// `0` or an object address, so marking treats them as precise
+    /// references. `WORD_BYTE` packs the storage instead of being kept.
     elem_kind: u8,
+    /// Storage bytes the heap has counted for this array (see
+    /// [`Self::take_resize`]). [`GcSized::size`] reports this, not the live
+    /// storage, so a grow or a pack / unpack the heap was not told about
+    /// can never make the heap's byte count underflow at sweep.
+    accounted: usize,
 }
 
 impl ObjArray {
@@ -2361,7 +2428,8 @@ impl ObjArray {
     pub fn new(elements: Vec<Value>) -> Self {
         let may_hold_refs = !elements.is_empty();
         Self {
-            elements,
+            accounted: elements.capacity() * mem::size_of::<Value>(),
+            data: ArrayData::Words(elements),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
         }
@@ -2371,7 +2439,8 @@ impl ObjArray {
     pub fn from_values(elements: Vec<Value>, heap: &Heap) -> Self {
         let may_hold_refs = elements.iter().any(|v| heap.may_be_ref(*v));
         Self {
-            elements,
+            accounted: elements.capacity() * mem::size_of::<Value>(),
+            data: ArrayData::Words(elements),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
         }
@@ -2379,7 +2448,18 @@ impl ObjArray {
 
     pub fn with_capacity(n: usize) -> Self {
         Self {
-            elements: Vec::with_capacity(n),
+            accounted: n * mem::size_of::<Value>(),
+            data: ArrayData::Words(Vec::with_capacity(n)),
+            may_hold_refs: false,
+            elem_kind: common::WORD_UNKNOWN,
+        }
+    }
+
+    /// A packed byte array (one byte per element).
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            accounted: bytes.capacity(),
+            data: ArrayData::Bytes(bytes),
             may_hold_refs: false,
             elem_kind: common::WORD_UNKNOWN,
         }
@@ -2391,28 +2471,183 @@ impl ObjArray {
         self.elem_kind
     }
 
-    /// Stamp the static element kind. Only a pointer kind is kept: a scalar
-    /// stamp would be unsound for generic bodies that box values.
+    /// Stamp the static element kind. A pointer kind is kept; a byte kind
+    /// packs the elements when they all fit. Other scalar stamps are dropped:
+    /// they would be unsound for generic bodies that box values.
     #[inline]
     pub fn set_elem_kind(&mut self, kind: u8) {
         if kind == common::WORD_POINTER {
             self.elem_kind = kind;
+        } else if kind == common::WORD_BYTE {
+            self.pack();
+        }
+    }
+
+    /// True when elements are stored one byte each.
+    #[inline]
+    pub fn is_packed(&self) -> bool {
+        matches!(self.data, ArrayData::Bytes(_))
+    }
+
+    /// Switch to byte storage when every element fits; otherwise no-op.
+    pub fn pack(&mut self) {
+        let ArrayData::Words(words) = &self.data else {
+            return;
+        };
+        let mut bytes = Vec::with_capacity(words.capacity());
+        for v in words {
+            match byte_of(*v) {
+                Some(b) => bytes.push(b),
+                None => return,
+            }
+        }
+        self.data = ArrayData::Bytes(bytes);
+        self.may_hold_refs = false;
+    }
+
+    /// Switch to word storage (a store that does not fit in a byte).
+    #[cold]
+    #[inline(never)]
+    fn unpack(&mut self) {
+        if let ArrayData::Bytes(bytes) = &self.data {
+            let mut words = Vec::with_capacity(bytes.capacity());
+            words.extend(bytes.iter().map(|b| word_of(*b)));
+            self.data = ArrayData::Words(words);
+        }
+    }
+
+    /// Word storage, unpacking first when needed.
+    #[inline]
+    fn words_vec(&mut self) -> &mut Vec<Value> {
+        if let ArrayData::Bytes(_) = self.data {
+            self.unpack();
+        }
+        match &mut self.data {
+            ArrayData::Words(w) => w,
+            ArrayData::Bytes(_) => unreachable!(),
+        }
+    }
+
+    /// The elements as words, when not packed.
+    #[inline]
+    pub fn words(&self) -> Option<&[Value]> {
+        match &self.data {
+            ArrayData::Words(w) => Some(w),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
+    /// The elements as bytes, when packed.
+    #[inline]
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match &self.data {
+            ArrayData::Words(_) => None,
+            ArrayData::Bytes(b) => Some(b),
+        }
+    }
+
+    /// Packed bytes for in-place byte writes (no unpack, no new references).
+    #[inline]
+    pub fn bytes_mut(&mut self) -> Option<&mut Vec<u8>> {
+        match &mut self.data {
+            ArrayData::Words(_) => None,
+            ArrayData::Bytes(b) => Some(b),
+        }
+    }
+
+    /// Iterate the elements as words.
+    #[inline]
+    pub fn iter(&self) -> ArrayIter<'_> {
+        match &self.data {
+            ArrayData::Words(w) => ArrayIter::Words(w.iter().copied()),
+            ArrayData::Bytes(b) => ArrayIter::Bytes(b.iter()),
+        }
+    }
+
+    /// A fresh array with a copy of these elements in the same storage.
+    pub fn copy(&self) -> Self {
+        match &self.data {
+            ArrayData::Words(w) => Self::new(w.clone()),
+            ArrayData::Bytes(b) => Self::from_bytes(b.clone()),
+        }
+    }
+
+    /// Copy of the elements as words.
+    pub fn to_vec(&self) -> Vec<Value> {
+        match &self.data {
+            ArrayData::Words(w) => w.clone(),
+            ArrayData::Bytes(b) => b.iter().map(|b| word_of(*b)).collect(),
+        }
+    }
+
+    /// Copy of elements `start..end` as words (caller checks bounds).
+    pub fn slice_to_vec(&self, start: usize, end: usize) -> Vec<Value> {
+        match &self.data {
+            ArrayData::Words(w) => w[start..end].to_vec(),
+            ArrayData::Bytes(b) => b[start..end].iter().map(|b| word_of(*b)).collect(),
+        }
+    }
+
+    /// Element `i` as a word.
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<Value> {
+        match &self.data {
+            ArrayData::Words(w) => w.get(i).copied(),
+            ArrayData::Bytes(b) => b.get(i).map(|b| word_of(*b)),
+        }
+    }
+
+    /// `elements[index]` with the VM's bounds rules: `unchecked` is a proven
+    /// index; otherwise out of range returns `None`.
+    #[inline(always)]
+    pub fn read_indexed(&self, index: i64, unchecked: bool) -> Option<Value> {
+        match &self.data {
+            ArrayData::Words(w) => read_indexed_in(w, index, unchecked),
+            ArrayData::Bytes(b) => read_indexed_in(b, index, unchecked).map(word_of),
         }
     }
 
     #[inline]
-    pub fn elements(&self) -> &Vec<Value> {
-        &self.elements
-    }
-
-    #[inline]
     pub fn len(&self) -> usize {
-        self.elements.len()
+        match &self.data {
+            ArrayData::Words(w) => w.len(),
+            ArrayData::Bytes(b) => b.len(),
+        }
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.elements.is_empty()
+        self.len() == 0
+    }
+
+    /// Element capacity.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        match &self.data {
+            ArrayData::Words(w) => w.capacity(),
+            ArrayData::Bytes(b) => b.capacity(),
+        }
+    }
+
+    /// Bytes of element storage (capacity × element width), for heap
+    /// accounting.
+    #[inline]
+    pub fn storage_bytes(&self) -> usize {
+        match &self.data {
+            ArrayData::Words(w) => w.capacity() * mem::size_of::<Value>(),
+            ArrayData::Bytes(b) => b.capacity(),
+        }
+    }
+
+    /// Bring the counted storage size up to date: `(old, new)` for
+    /// [`Heap::account_resize`] when it changed (a grow, a pack, an unpack).
+    #[inline]
+    pub fn take_resize(&mut self) -> Option<(usize, usize)> {
+        let now = self.storage_bytes();
+        if now == self.accounted {
+            return None;
+        }
+        Some((mem::replace(&mut self.accounted, now), now))
     }
 
     /// False when no element can be a heap reference (marking skips them).
@@ -2437,20 +2672,38 @@ impl ObjArray {
     /// `i` must be in bounds and `v` must not be a heap reference.
     #[inline(always)]
     pub unsafe fn set_numeric_unchecked(&mut self, i: usize, v: Value) {
-        unsafe { *self.elements.get_unchecked_mut(i) = v };
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            unsafe { *b.get_unchecked_mut(i) = byte };
+            return;
+        }
+        unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
     #[inline]
     pub fn push(&mut self, v: Value) {
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            b.push(byte);
+            return;
+        }
         self.note();
-        self.elements.push(v);
+        self.words_vec().push(v);
     }
 
     /// Overwrite element `i` (caller checks bounds).
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            b[i] = byte;
+            return;
+        }
         self.note();
-        self.elements[i] = v;
+        self.words_vec()[i] = v;
     }
 
     /// Unchecked [`Self::set`]; `i < len` is the caller's proof.
@@ -2459,47 +2712,131 @@ impl ObjArray {
     /// `i` must be in bounds.
     #[inline]
     pub unsafe fn set_unchecked(&mut self, i: usize, v: Value) {
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            unsafe { *b.get_unchecked_mut(i) = byte };
+            return;
+        }
         self.note();
-        unsafe { *self.elements.get_unchecked_mut(i) = v };
+        unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
     /// `elements[index] = value` with the VM's bounds rules: `unchecked` is a
     /// proven index; otherwise out of range returns `false`.
     #[inline(always)]
     pub fn store_indexed(&mut self, index: i64, value: Value, unchecked: bool) -> bool {
-        let elements: &mut [Value] = &mut self.elements;
-        let len = elements.len();
+        let len = self.len();
+        let idx = index as usize;
         if unchecked {
-            let idx = index as usize;
             promise!(index >= 0);
             promise!(idx < len);
-            unsafe {
-                *elements.get_unchecked_mut(idx) = value;
-            }
-        } else if index >= 0 && (index as usize) < len {
-            unsafe {
-                *elements.get_unchecked_mut(index as usize) = value;
-            }
-        } else {
+        } else if index < 0 || idx >= len {
             return false;
         }
-        self.note();
+        match &mut self.data {
+            ArrayData::Words(elements) => {
+                unsafe {
+                    *elements.get_unchecked_mut(idx) = value;
+                }
+                self.note();
+            }
+            ArrayData::Bytes(b) => match byte_of(value) {
+                Some(byte) => unsafe { *b.get_unchecked_mut(idx) = byte },
+                None => {
+                    self.note();
+                    unsafe { *self.words_vec().get_unchecked_mut(idx) = value };
+                }
+            },
+        }
         true
     }
 
-    /// Raw element access for writes the classifier does not see. Marks the
-    /// array as possibly holding references (always safe).
+    /// Remove and return the last element.
     #[inline]
-    pub fn elements_mut(&mut self) -> &mut Vec<Value> {
-        self.may_hold_refs = true;
-        &mut self.elements
+    pub fn pop(&mut self) -> Option<Value> {
+        match &mut self.data {
+            ArrayData::Words(w) => w.pop(),
+            ArrayData::Bytes(b) => b.pop().map(word_of),
+        }
     }
 
-    /// Element access for writes that add no new values (pop, remove,
-    /// truncate, clear, reorder): the flag stays as is.
+    /// Insert `v` at `i` (caller checks `i <= len`).
+    pub fn insert(&mut self, i: usize, v: Value) {
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            b.insert(i, byte);
+            return;
+        }
+        self.note();
+        self.words_vec().insert(i, v);
+    }
+
+    /// Remove element `i` (caller checks `i < len`).
+    pub fn remove(&mut self, i: usize) -> Value {
+        match &mut self.data {
+            ArrayData::Words(w) => w.remove(i),
+            ArrayData::Bytes(b) => word_of(b.remove(i)),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        match &mut self.data {
+            ArrayData::Words(w) => w.clear(),
+            ArrayData::Bytes(b) => b.clear(),
+        }
+    }
+
+    pub fn reserve(&mut self, extra: usize) {
+        match &mut self.data {
+            ArrayData::Words(w) => w.reserve(extra),
+            ArrayData::Bytes(b) => b.reserve(extra),
+        }
+    }
+
+    /// Overwrite elements from the start with `values` (extra values are
+    /// dropped).
+    pub fn overwrite_prefix(&mut self, values: impl IntoIterator<Item = Value>) {
+        let len = self.len();
+        for (i, v) in values.into_iter().take(len).enumerate() {
+            self.set(i, v);
+        }
+    }
+
+    /// Raw word access for writes the classifier does not see. Unpacks a
+    /// byte array and marks the array as possibly holding references
+    /// (always safe).
     #[inline]
-    pub fn elements_mut_no_new_values(&mut self) -> &mut Vec<Value> {
-        &mut self.elements
+    pub fn words_mut(&mut self) -> &mut Vec<Value> {
+        self.may_hold_refs = true;
+        self.words_vec()
+    }
+
+    /// Word elements for the collector's in-place fixups (compaction); no
+    /// flag change, `None` for packed bytes (never references).
+    #[inline]
+    pub(crate) fn gc_words_mut(&mut self) -> Option<&mut [Value]> {
+        match &mut self.data {
+            ArrayData::Words(w) => Some(w),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+}
+
+/// Shared bounds rule of [`ObjArray::read_indexed`].
+#[inline(always)]
+fn read_indexed_in<T: Copy>(elements: &[T], index: i64, unchecked: bool) -> Option<T> {
+    let len = elements.len();
+    if unchecked {
+        let idx = index as usize;
+        promise!(index >= 0);
+        promise!(idx < len);
+        Some(unsafe { *elements.get_unchecked(idx) })
+    } else if index >= 0 && (index as usize) < len {
+        Some(unsafe { *elements.get_unchecked(index as usize) })
+    } else {
+        None
     }
 }
 
@@ -2700,7 +3037,7 @@ impl GcSized for ObjTuple {
 
 impl GcSized for ObjArray {
     fn size(&self) -> usize {
-        mem::size_of::<Self>() + self.elements.capacity() * mem::size_of::<Value>()
+        mem::size_of::<Self>() + self.accounted
     }
 }
 
@@ -2762,8 +3099,7 @@ impl fmt::Display for ObjArray {
         write!(
             f,
             "[{}]",
-            self.elements
-                .iter()
+            self.iter()
                 .map(|v| format!("{}", v.as_int()))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -4115,9 +4451,9 @@ mod tests {
         );
         let addr = obj.addr();
         heap.update_array_elements(addr, &[10, 20, 30]);
-        assert_eq!(gc.as_ref().elements()[0].as_int(), 10);
-        assert_eq!(gc.as_ref().elements()[1].as_int(), 20);
-        assert_eq!(gc.as_ref().elements().len(), 2);
+        assert_eq!(gc.as_ref().get(0).unwrap().as_int(), 10);
+        assert_eq!(gc.as_ref().get(1).unwrap().as_int(), 20);
+        assert_eq!(gc.as_ref().len(), 2);
     }
 
     #[test]
@@ -4416,5 +4752,125 @@ mod tests {
         assert!((&heap).into_iter().any(|o| o.addr() == keep.addr()));
         assert_eq!((&heap).into_iter().count(), 2);
     }
-}
 
+    fn words(vals: &[i64]) -> Vec<Value> {
+        vals.iter().map(|&v| Value::from(v)).collect()
+    }
+
+    fn ints(a: &ObjArray) -> Vec<i64> {
+        a.iter().map(|v| v.as_int()).collect()
+    }
+
+    #[test]
+    fn byte_stamp_packs_and_reads_back_the_same_words() {
+        let mut a = ObjArray::new(words(&[0, 1, 200, 255]));
+        a.set_elem_kind(common::WORD_BYTE);
+        assert!(a.is_packed());
+        assert_eq!(a.bytes(), Some(&[0u8, 1, 200, 255][..]));
+        assert_eq!(ints(&a), vec![0, 1, 200, 255]);
+        assert_eq!(a.read_indexed(2, false).map(|v| v.as_int()), Some(200));
+        assert_eq!(a.read_indexed(4, false), None);
+        assert_eq!(a.read_indexed(-1, false), None);
+        assert!(!a.may_hold_refs(), "packed bytes never hold references");
+        // The stamp is not kept as an element kind.
+        assert_eq!(a.elem_kind(), common::WORD_UNKNOWN);
+    }
+
+    #[test]
+    fn byte_stamp_keeps_words_when_an_element_does_not_fit() {
+        let mut a = ObjArray::new(words(&[1, 256]));
+        a.set_elem_kind(common::WORD_BYTE);
+        assert!(!a.is_packed());
+        assert_eq!(ints(&a), vec![1, 256]);
+    }
+
+    #[test]
+    fn packed_stores_that_fit_stay_bytes() {
+        let mut a = ObjArray::from_bytes(vec![0; 3]);
+        a.set(0, Value::from(7i64));
+        assert!(a.store_indexed(1, Value::from(true), false));
+        assert!(!a.store_indexed(3, Value::from(1i64), false));
+        unsafe { a.set_unchecked(2, Value::from(255i64)) };
+        a.push(Value::from(9i64));
+        a.insert(0, Value::from(4i64));
+        assert!(a.is_packed());
+        assert_eq!(ints(&a), vec![4, 7, 1, 255, 9]);
+        assert_eq!(a.remove(0).as_int(), 4);
+        assert_eq!(a.pop().map(|v| v.as_int()), Some(9));
+        assert_eq!(ints(&a), vec![7, 1, 255]);
+        assert!(a.get(1).unwrap().as_bool());
+        assert!(!a.may_hold_refs());
+    }
+
+    #[test]
+    fn packed_store_that_does_not_fit_unpacks_losslessly() {
+        // A shared generic body may store a boxed word (a heap address):
+        // the array falls back to words instead of truncating it.
+        for store in 0..4 {
+            let mut a = ObjArray::from_bytes(vec![1, 2, 3]);
+            let big = Value::from(0x1_0000i64);
+            match store {
+                0 => a.set(1, big),
+                1 => assert!(a.store_indexed(1, big, false)),
+                2 => unsafe { a.set_unchecked(1, big) },
+                _ => {
+                    a.remove(1);
+                    a.insert(1, big);
+                }
+            }
+            assert!(!a.is_packed(), "store {store}");
+            assert!(a.may_hold_refs(), "store {store}: the next mark rescans");
+            assert_eq!(ints(&a), vec![1, 0x1_0000, 3], "store {store}");
+        }
+        let mut a = ObjArray::from_bytes(vec![1]);
+        a.push(Value::from(-1i64));
+        assert!(!a.is_packed());
+        assert_eq!(ints(&a), vec![1, -1]);
+    }
+
+    #[test]
+    fn packed_storage_accounts_one_byte_per_element() {
+        let w = ObjArray::new(Vec::with_capacity(64));
+        let b = ObjArray::from_bytes(Vec::with_capacity(64));
+        assert_eq!(w.storage_bytes(), 64 * mem::size_of::<Value>());
+        assert_eq!(b.storage_bytes(), 64);
+        assert_eq!(b.capacity(), 64);
+        assert!(b.size() < w.size());
+    }
+
+    #[test]
+    fn storage_changes_are_counted_once_through_take_resize() {
+        let mut a = ObjArray::new(words(&[1, 2]));
+        assert_eq!(a.take_resize(), None);
+        let before = a.size();
+        a.set_elem_kind(common::WORD_BYTE);
+        // Not counted until the heap is told: size stays what was counted.
+        assert_eq!(a.size(), before);
+        assert_eq!(a.take_resize(), Some((16, 2)));
+        assert_eq!(a.take_resize(), None);
+        a.set(0, Value::from(1000i64));
+        assert_eq!(a.take_resize(), Some((2, 16)));
+    }
+
+    #[test]
+    fn packed_copy_stays_packed() {
+        let a = ObjArray::from_bytes(vec![5, 6]);
+        let c = a.copy();
+        assert!(c.is_packed());
+        assert_eq!(ints(&c), vec![5, 6]);
+        assert_eq!(a.to_vec(), words(&[5, 6]));
+        assert_eq!(a.slice_to_vec(1, 2), words(&[6]));
+    }
+
+    #[test]
+    fn packed_array_survives_collection() {
+        let mut heap = Heap::default();
+        let (arr, gc) = heap.alloc(ObjArray::from_bytes(vec![1, 2, 3]), Object::Array);
+        heap.gc_roots.push(arr.addr());
+        heap.begin_mark(&[arr.addr()]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        assert!(gc.as_ref().is_packed());
+        assert_eq!(ints(gc.as_ref()), vec![1, 2, 3]);
+    }
+}

@@ -172,6 +172,10 @@ pub const WORD_UNKNOWN: u8 = 0;
 pub const WORD_SCALAR: u8 = 1;
 /// `0` or a heap object address, possibly with bit 0 set (`Result` niche).
 pub const WORD_POINTER: u8 = 2;
+/// Array element kind only (`TagArrayKind` / `MakeArrayK`): every element is
+/// a `byte` or `bool`, so the runtime may store the array one byte per
+/// element. Runtimes that predate it ignore the stamp (elements stay words).
+pub const WORD_BYTE: u8 = 3;
 
 /// Words whose kinds a packed `u8` records (2 bits each). Later words of a
 /// wider payload are unknown.

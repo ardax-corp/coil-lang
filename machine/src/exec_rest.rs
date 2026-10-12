@@ -842,6 +842,9 @@ impl<const S: usize> Machine<S> {
                         let mut arr = ObjArray::from_values(values, &self.heap);
                         if matches!(opcode.bytecode(), Instruction::MakeArrayK) {
                             arr.set_elem_kind((opcode.operand_u32() >> 16) as u8 & 0x3);
+                            // Not allocated yet: the allocation counts the
+                            // packed size.
+                            let _ = arr.take_resize();
                         }
                         let (object, _) = self.heap.alloc(arr, Object::Array);
                         object.addr()
@@ -867,7 +870,7 @@ impl<const S: usize> Machine<S> {
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
-                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
+                            gc.as_ref().read_indexed(index, unchecked)
                         }
                         Some(crate::memory::Object::Tuple(gc)) => {
                             Self::read_indexed(gc.as_ref().elements(), index, unchecked)
@@ -886,9 +889,7 @@ impl<const S: usize> Machine<S> {
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
                     let result = match self.pinned_object(slot) {
-                        Some(Object::Array(gc)) => {
-                            Self::read_indexed(gc.as_ref().elements(), index, unchecked)
-                        }
+                        Some(Object::Array(gc)) => gc.as_ref().read_indexed(index, unchecked),
                         Some(Object::Tuple(gc)) => {
                             Self::read_indexed(gc.as_ref().elements(), index, unchecked)
                         }
@@ -1164,7 +1165,7 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack.pop();
                     let target_addr = target_val.raw() as u64;
                     let len = match Self::find_object_by_addr(&self.heap, target_addr) {
-                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements().len(),
+                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
                         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
                         Some(crate::memory::Object::Instance(gc)) => gc
@@ -1741,7 +1742,9 @@ impl<const S: usize> Machine<S> {
                 Instruction::TagArrayKind => {
                     let v = *self.stack.top();
                     if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, v.raw() as u64) {
-                        gc.payload_mut().set_elem_kind(opcode.operand_u32() as u8);
+                        let arr = gc.payload_mut();
+                        arr.set_elem_kind(opcode.operand_u32() as u8);
+                        self.heap.account_array(arr);
                     }
                 }
                 Instruction::UnboxValue => {

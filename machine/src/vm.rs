@@ -966,7 +966,7 @@ impl<const S: usize> Machine<S> {
                     None => DebugObject::Other("dict"),
                 }
             }
-            Object::Array(gc) => DebugObject::Array(gc.as_ref().elements().clone()),
+            Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
             Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
             Object::Enum(gc) => {
                 let e = gc.as_ref();
@@ -1329,13 +1329,19 @@ impl<const S: usize> Machine<S> {
         let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) else {
             return false;
         };
-        let elems = &gc.as_ref().elements();
-        if index < 0 || (index as usize).saturating_add(n) > elems.len() {
+        let arr = gc.as_ref();
+        if index < 0 || (index as usize).saturating_add(n) > arr.len() {
             return false;
         }
         let base = index as usize;
-        for i in 0..n {
-            self.vregs[vdest][i] = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+        if let Some(elems) = arr.words() {
+            for i in 0..n {
+                self.vregs[vdest][i] = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+            }
+        } else {
+            for (i, v) in arr.iter().skip(base).take(n).enumerate() {
+                self.vregs[vdest][i] = v.raw() as u64;
+            }
         }
         true
     }
@@ -2169,12 +2175,8 @@ impl<const S: usize> Machine<S> {
         else {
             return false;
         };
-        let old_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
         gc.as_mut().push(value);
-        let new_bytes = gc.as_ref().elements().capacity() * std::mem::size_of::<Value>();
-        if old_bytes != new_bytes {
-            self.heap.account_resize(old_bytes, new_bytes);
-        }
+        self.heap.account_array(gc.as_mut());
         true
     }
 
