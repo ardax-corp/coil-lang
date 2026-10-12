@@ -1364,7 +1364,8 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
-                let Some(obj) = self.word(*base)? else {
+                // A two-word enum is boxed for the read, as HIR emission's.
+                let Some(obj) = self.boxed_word(*base)? else {
                     return Ok(Val::Never);
                 };
                 Ok(Val::V(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?))

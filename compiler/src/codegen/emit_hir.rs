@@ -855,7 +855,14 @@ impl Compiler {
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
-                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && Self::hir_ty(hir, *base).is_some_and(|t| {
+                    is_class(t) || {
+                        // A record variant's field: its payload slot of the
+                        // boxed enum (a pair boxed first).
+                        let t = apply_ty_prune(checker.subst(), t);
+                        self.hir_variant_field(&t, name).is_some()
+                    }
+                })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
                 && let Some(w) = field_word(&fty)
                 && e.ty.as_ref().and_then(field_word) == Some(w)
