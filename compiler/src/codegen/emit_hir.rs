@@ -280,6 +280,9 @@ struct HirEmit {
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
     call_targets: HashMap<u32, crate::mir::HirCallSite>,
+    /// Entry label of the user `into_iter` a counted `for` loop calls, by
+    /// loop.
+    into_iters: HashMap<u32, crate::il::Label>,
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
     /// String table index of the format string of each `format` call
@@ -924,6 +927,7 @@ impl Compiler {
             sroa,
             fields,
             calls: &emit.call_targets,
+            into_iters: &emit.into_iters,
             strings: &emit.string_lits,
             formats: &emit.format_strs,
             lens: &emit.plan.lens,
@@ -1859,6 +1863,7 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             call_targets: HashMap::new(),
+            into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
         };
@@ -9152,6 +9157,7 @@ impl Compiler {
                         self.bytecode.push_store_pop(end);
                     } else if let Some(fqn) = &custom {
                         into_iter(self, emit, fqn);
+                        self.hir_note_into_iter(emit, id);
                         self.expr_depth = 0;
                         self.bytecode.push_store_pop(end);
                         self.bytecode.push_store_pop(cur);
@@ -9195,7 +9201,10 @@ impl Compiler {
                 let arr = self.alloc_temp_slot();
                 let idx = self.alloc_temp_slot();
                 match &custom {
-                    Some(fqn) => into_iter(self, emit, fqn),
+                    Some(fqn) => {
+                        into_iter(self, emit, fqn);
+                        self.hir_note_into_iter(emit, id);
+                    }
                     None => self.hir_value(hir, emit, iterable, &BOXED, 0),
                 }
                 if dict {
@@ -9279,6 +9288,19 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
+    }
+
+    /// The `into_iter` entry a counted `for` loop `id` just called.
+    fn hir_note_into_iter(&mut self, emit: &mut HirEmit, id: HirId) {
+        if let Some(&IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            target,
+            arity: 1,
+            ..
+        }) = self.bytecode.il_mut().ops_slice_mut().last()
+        {
+            emit.into_iters.insert(id.0, target);
+        }
     }
 
     /// A call to a function with an auto-par fork site, as the AST's

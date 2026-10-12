@@ -26,7 +26,7 @@ use common::DebugLoc;
 
 use crate::hir::{lower, BinOp, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
-use crate::typechecking::infer::ForInKind;
+use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
 
 use super::abi::DenseAbi;
@@ -135,6 +135,8 @@ pub struct HirMirInput<'a> {
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
+    /// The user `into_iter` entry each counted `for` loop calls.
+    pub into_iters: &'a HashMap<u32, Label>,
     /// String table index of each `string` literal.
     pub strings: &'a HashMap<u32, u32>,
     /// `format` calls with only word arguments, and string `+` (as
@@ -1104,7 +1106,7 @@ impl Lower<'_> {
                 iterable,
                 body,
                 kind: Some(ForInKind::Array),
-            } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body),
+            } if self.heap_array(*iterable) => self.for_array(id, *local, *iterable, *body, None),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
             // `let _ = e`: nothing can read `_`.
             HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" => {
@@ -1207,8 +1209,19 @@ impl Lower<'_> {
                 let HirPat::Bind(local) = *pat else {
                     return Err("for in pattern".into());
                 };
-                self.for_range(local, *iterable, *body, *inclusive, *float)
+                self.for_range(local, *iterable, *body, *inclusive, *float, None)
             }
+            // A user `into_iter` returning a range or array runs its loop.
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(ForInKind::Custom { counted: Some(counted), .. }),
+            } if let Some(&target) = self.inp.into_iters.get(&id.0) => match *counted {
+                ForInCounted::Range { inclusive, float } => self.for_range(*local, *iterable, *body, inclusive, float, Some(target)),
+                ForInCounted::Array => self.for_array(id, *local, *iterable, *body, Some(target)),
+                _ => Err("for in counted custom".into()),
+            },
             HirKind::Return(value) => {
                 match value {
                     None if self.unit_ret => self.ret_unit()?,
@@ -1236,7 +1249,7 @@ impl Lower<'_> {
     /// `for x in lo..hi`, as HIR lowering emits it: `x` is the counter
     /// when the body never assigns it, `hi` is read once, and the step
     /// adds one after the body (or at a `continue`).
-    fn for_range(&mut self, local: HirLocal, iterable: HirId, body: HirId, inclusive: bool, float: bool) -> Result<Val, Refusal> {
+    fn for_range(&mut self, local: HirLocal, iterable: HirId, body: HirId, inclusive: bool, float: bool, into_iter: Option<Label>) -> Result<Val, Refusal> {
         let bounds = lower::range_bounds(self.hir, iterable);
         let ty = self.local_ty(local)?;
         if ty != if float { MirTy::F64 } else { MirTy::I64 } {
@@ -1259,6 +1272,20 @@ impl Lower<'_> {
         }
         // `a..b` written in place, or a range pair (a local or a call).
         let (start, end) = match bounds {
+            _ if let Some(target) = into_iter => {
+                let Some(obj) = self.word(iterable)? else {
+                    return Ok(Val::Never);
+                };
+                let abi = DenseAbi {
+                    params: vec![self.b.value_ty(obj)],
+                    ret: ty,
+                    ret_hi: Some(ty),
+                };
+                match self.b.ins_call(target, vec![obj], &abi).map_err(mir)? {
+                    (start, Some(end)) => (start, end),
+                    _ => return Err("into_iter result".into()),
+                }
+            }
             Some([lo, hi]) => {
                 let Some(start) = self.word(lo)? else {
                     return Ok(Val::Never);
@@ -2024,15 +2051,30 @@ impl Lower<'_> {
     /// `for x in xs` over a heap array, as HIR emission lowers it: the
     /// length is read once, and the index steps after the body (or at a
     /// `continue`).
-    fn for_array(&mut self, id: HirId, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+    fn for_array(&mut self, id: HirId, local: HirLocal, iterable: HirId, body: HirId, into_iter: Option<Label>) -> Result<Val, Refusal> {
         let ty = self.local_ty(local)?;
-        let elem = self.expr_ty(iterable).and_then(array_elem).and_then(scalar);
-        if elem != Some(ty) {
+        // A user `into_iter`'s array holds the loop's items.
+        let elem = match into_iter {
+            Some(_) => scalar(self.hir.local(local).ty.as_ref().ok_or("local type")?),
+            None => self.expr_ty(iterable).and_then(array_elem).and_then(scalar),
+        };
+        if elem != Some(ty) || !matches!(ty, MirTy::I64 | MirTy::F64) {
             return Err("for in element type".into());
         }
         let x = self.slot(local)?;
         let Some(arr) = self.word(iterable)? else {
             return Ok(Val::Never);
+        };
+        let arr = match into_iter {
+            Some(target) => {
+                let abi = DenseAbi {
+                    params: vec![self.b.value_ty(arr)],
+                    ret: MirTy::HeapRef,
+                    ret_hi: None,
+                };
+                self.b.ins_call(target, vec![arr], &abi).map_err(mir)?.0
+            }
+            None => arr,
         };
         let len = self.b.ins_array_len(arr).map_err(mir)?;
         let i = self.temp();
