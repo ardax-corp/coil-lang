@@ -1070,6 +1070,51 @@ mod tests {
         );
     }
 
+    /// Per-body opts mint label ids after emission, so a body can bind an id
+    /// its trailing glue (default `Show` / `String` impls) also binds. The
+    /// body's branch must still land in the body.
+    #[test]
+    fn to_flat_keeps_body_jumps_off_glue_labels_with_the_same_id() {
+        let loc = loc();
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("f", Some(Label(1)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(1)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(3),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+                IlOp::Label(Label(3)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.glue.push(vec![IlOp::Label(Label(3)), IlOp::Return { loc, ret_words: 1 }]);
+        let (flat, _, _) = m.to_flat();
+        let labels: Vec<(usize, u32)> = flat
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| match op {
+                IlOp::Label(Label(id)) => Some((i, *id)),
+                _ => None,
+            })
+            .collect();
+        let ids: HashSet<u32> = labels.iter().map(|(_, id)| *id).collect();
+        assert_eq!(ids.len(), labels.len(), "flat IL binds a label twice: {labels:?}");
+        let target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Jump { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .unwrap();
+        let (at, _) = labels.iter().find(|(_, id)| *id == target).unwrap();
+        assert_eq!(*at, 3, "the body's branch left the body: {labels:?} -> {target}");
+    }
+
     #[test]
     fn to_flat_remaps_cross_function_entry_call_targets() {
         let loc = loc();
