@@ -129,8 +129,12 @@ impl IlModule {
         let mut prior_labels = HashMap::new();
         let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
-        // Old label ids bound in each body+glue chunk (before remap).
-        let mut chunk_bound: Vec<std::collections::HashSet<u32>> = Vec::new();
+        // Old label ids bound in each body and in its glue (before remap),
+        // and each glue's own remap (it differs from the body's on an id
+        // both bind).
+        let mut body_bound: Vec<HashSet<u32>> = Vec::new();
+        let mut glue_bound: Vec<HashSet<u32>> = Vec::new();
+        let mut glue_label_maps: Vec<HashMap<u32, u32>> = Vec::new();
         let mut segment_ranges: Vec<(usize, usize)> = Vec::new();
         if !self.prologue.is_empty() {
             let start = out.len();
@@ -144,16 +148,30 @@ impl IlModule {
                 chunk.extend(g.iter().cloned());
             }
             let old_entry = body.meta.entry.map(|Label(id)| id);
-            chunk_bound.push(
-                chunk
-                    .iter()
-                    .filter_map(|op| match op {
-                        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-                        _ => None,
-                    })
-                    .collect(),
-            );
-            let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
+            let body_len = body.ops.len();
+            body_bound.push(bound_label_ids(&chunk[..body_len]));
+            glue_bound.push(bound_label_ids(&chunk[body_len..]));
+            let (mut chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
+            // Per-body opts mint ids after emission, so the body may bind an
+            // id its glue (default impls, adapter thunks) binds too. One map
+            // would merge the two labels and send the body's branches into
+            // the glue: give the glue's copy its own id.
+            let mut glue_map = map.clone();
+            for old in body_bound[i].intersection(&glue_bound[i]) {
+                let shared = map[old];
+                let fresh = next_label;
+                next_label = next_label.saturating_add(1);
+                glue_map.insert(*old, fresh);
+                for op in &mut chunk[body_len..] {
+                    match op {
+                        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) if *id == shared => *id = fresh,
+                        IlOp::Jump { target, .. } | IlOp::Entry { target, .. } if target.0 == shared => {
+                            target.0 = fresh;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // Prefer the remapped emit-time entry. If opts dropped that id
             // (preheader / relabel), CALL still has to land on this body.
             let new_entry = old_entry
@@ -169,7 +187,7 @@ impl IlModule {
             if let Some(g) = module.glue.get(i) {
                 for op in g {
                     if let IlOp::Label(Label(old)) = op
-                        && let Some(&new) = map.get(old)
+                        && let Some(&new) = glue_map.get(old)
                     {
                         entry_labels.entry(*old).or_insert(new);
                     }
@@ -177,6 +195,7 @@ impl IlModule {
             }
             func_label_maps.push(map.clone());
             merge_remap_labels(&mut prior_labels, map);
+            glue_label_maps.push(glue_map);
             out.extend(chunk);
             segment_ranges.push((start, out.len()));
         }
@@ -194,14 +213,19 @@ impl IlModule {
             let Some(Label(old)) = body.meta.entry else {
                 continue;
             };
-            let owner = if chunk_bound[k].contains(&old) {
-                Some(k)
-            } else if k > 0 && chunk_bound[k - 1].contains(&old) {
-                Some(k - 1)
-            } else {
-                None
-            };
-            if let Some(new) = owner.and_then(|i| func_label_maps[i].get(&old).copied()) {
+            let owner = [k, k.wrapping_sub(1)]
+                .into_iter()
+                .filter(|&i| i < module.funcs.len())
+                .find_map(|i| {
+                    if body_bound[i].contains(&old) {
+                        Some(&func_label_maps[i])
+                    } else if glue_bound[i].contains(&old) {
+                        Some(&glue_label_maps[i])
+                    } else {
+                        None
+                    }
+                });
+            if let Some(new) = owner.and_then(|m| m.get(&old).copied()) {
                 jump_entries.insert(old, new);
             }
         }
@@ -478,6 +502,7 @@ impl IlModule {
                     map_from[i] = "mir";
                 } else if tier[i] == "fuse"
                     && body.ops.iter().any(crate::mir::refuses_alloc)
+                    && !has_inner_code(&body.ops)
                     && let Some(func) = body.meta.hir_mir.as_deref()
                 {
                     let mut draft = crate::mir::encode_draft_slots(func);
@@ -656,6 +681,22 @@ fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
 }
 
 /// `new` still jumps to or calls a label `old` bound, but no longer binds it.
+/// Whether `ops` hold the code of a function value they build (a lambda's
+/// body, bound inside the body). Its frame is not this body's, so a map of
+/// this body's slots over every PC would cover it too.
+fn has_inner_code(ops: &[IlOp]) -> bool {
+    let bound: std::collections::HashSet<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            _ => None,
+        })
+        .collect();
+    ops.iter().any(|op| {
+        matches!(op, IlOp::Entry { kind: crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn, target, .. } if bound.contains(&target.0))
+    })
+}
+
 fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
     let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
         ops.iter()
@@ -781,6 +822,15 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
     for (old, new) in local {
         prior.entry(old).or_insert(new);
     }
+}
+
+fn bound_label_ids(ops: &[IlOp]) -> HashSet<u32> {
+    ops.iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 fn first_label_id(ops: &[IlOp]) -> Option<u32> {
@@ -1068,6 +1118,51 @@ mod tests {
                 .len(),
             "flat IL must not reuse label ids across functions: {label_ids:?}"
         );
+    }
+
+    /// Per-body opts mint label ids after emission, so a body can bind an id
+    /// its trailing glue (default `Show` / `String` impls) also binds. The
+    /// body's branch must still land in the body.
+    #[test]
+    fn to_flat_keeps_body_jumps_off_glue_labels_with_the_same_id() {
+        let loc = loc();
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("f", Some(Label(1)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(1)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(3),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+                IlOp::Label(Label(3)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.glue.push(vec![IlOp::Label(Label(3)), IlOp::Return { loc, ret_words: 1 }]);
+        let (flat, _, _) = m.to_flat();
+        let labels: Vec<(usize, u32)> = flat
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| match op {
+                IlOp::Label(Label(id)) => Some((i, *id)),
+                _ => None,
+            })
+            .collect();
+        let ids: HashSet<u32> = labels.iter().map(|(_, id)| *id).collect();
+        assert_eq!(ids.len(), labels.len(), "flat IL binds a label twice: {labels:?}");
+        let target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Jump { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .unwrap();
+        let (at, _) = labels.iter().find(|(_, id)| *id == target).unwrap();
+        assert_eq!(*at, 3, "the body's branch left the body: {labels:?} -> {target}");
     }
 
     #[test]

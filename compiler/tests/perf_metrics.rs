@@ -1266,9 +1266,9 @@ fn perf_phase0_numeric_shape_inventory() {
     //
     // Auto-par IPA outlines the `while` body into `__coil_par_loop_1`, so the
     // loop shape is inventoried there. `2000` becomes a worker parameter, which
-    // turns the loop compare from `BinSlotImmJmpf` into `BinSlotSlotJmpf`; the
-    // span also carries `main`'s fork-join prologue, hence the wider budgets.
-    // The outlined symbol also spans `main`'s fork-join tail; inventory the loop.
+    // turns the loop compare from `BinSlotImmJmpf` into `BinSlotSlotJmpf`.
+    // The fork-join is its own function (`__coil_par_loop_fork_0`), and the
+    // worker lowers to MIR and runs dense; inventory its loop.
     let (bc, _, _, _, pipeline) = compile("examples/perf/numeric.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "__coil_par_loop_1", bc.len());
@@ -1282,9 +1282,11 @@ fn perf_phase0_numeric_shape_inventory() {
         h.fused_jmpf_total() >= 1,
         "loop compare should stay a fused *Jmpf: {h:?}"
     );
+    // The worker is its own body with MIR, so it runs dense: the adds are
+    // `DenseBin`s on its registers.
     assert!(
-        h.bin_slot_imm_store + h.bin_slot_imm >= 1,
-        "i+=1 / acc+=i should use BinSlotImm*: {h:?}"
+        h.bin_slot_imm_store + h.bin_slot_imm + h.dense_bin >= 1,
+        "i+=1 / acc+=i should use BinSlotImm* or DenseBin: {h:?}"
     );
 
     assert_eq!(g.jmpt, 0, "numeric loop uses *Jmpf not JMPT: {g:?}");

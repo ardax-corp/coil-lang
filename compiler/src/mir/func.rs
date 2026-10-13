@@ -415,6 +415,17 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
+            MirInst::CallIndirect { dest, callee, args } => {
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} CallIndirect dest is not a word lane"));
+                }
+                if self.ty(*callee) != MirTy::HeapRef {
+                    return Err(format!("{dest} CallIndirect callee is not heapref"));
+                }
+                if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
+                    return Err(format!("{dest} CallIndirect arg is not a word lane"));
+                }
+            }
             MirInst::Call {
                 dest,
                 dest_hi,
