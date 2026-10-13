@@ -181,6 +181,26 @@ impl Compiler {
         }
     }
 
+    /// The entry label a `CALL` of `name` reaches, as
+    /// [`Self::emit_named_entry_ret`] (or, `on_module`,
+    /// [`Self::emit_named_entry_on_module_ret`]) emits it, with that
+    /// call's side effects but without emitting it: `None` when the `CALL`
+    /// would not be an entry op (no such function, or a body whose offset
+    /// has no label). Takes [`Self::raw_instance_call`] as they do.
+    pub(super) fn named_entry_target(&mut self, name: &str, on_module: bool) -> Option<crate::il::Label> {
+        let adapter = self.raw_instance_redirect(name);
+        let name = adapter.as_deref().unwrap_or(name);
+        if let Some(&offset) = self.functions.get(name) {
+            self.bytecode.entry_label_for_offset(offset)
+        } else {
+            let label = self.fn_entry_labels.get(name).copied()?;
+            if on_module && self.builtin_show_thunks.iter().any(|(fqn, _, _)| fqn == name) {
+                self.builtin_show_used.insert(name.to_string());
+            }
+            Some(label)
+        }
+    }
+
     /// The adapter an entry of raw instance method `name` goes through
     /// unless the call site said it passes raw arguments
     /// ([`Self::raw_instance_call`], taken here).

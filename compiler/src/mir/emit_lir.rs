@@ -2141,7 +2141,7 @@ fn stack_bin(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
         (MirBinOp::Shl, _) => Instruction::SHL,
         (MirBinOp::Shr, _) => Instruction::SHR,
         (MirBinOp::Pow, true) => Instruction::PowF,
-        (MirBinOp::Pow, false) => return Err(LowerError::Refused("int pow".into())),
+        (MirBinOp::Pow, false) => Instruction::Pow,
     })
 }
 

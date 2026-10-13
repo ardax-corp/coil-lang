@@ -124,6 +124,13 @@ pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         || (host_spec(id).is_none() && expected == MirTy::I64 && actual.is_heap_word())
 }
 
+/// Whether a HostInvoke typed `expected` may produce `actual`: as
+/// [`host_arg_ok`], and a generic word edge's result may be a `bool`
+/// (`match_at`), the `Value` word the native returns.
+pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
+    host_arg_ok(id, expected, actual) || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
+}
+
 /// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).
 pub fn is_i4_bytes_host(id: u16) -> bool {
     matches!(
