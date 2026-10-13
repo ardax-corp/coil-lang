@@ -936,6 +936,7 @@ impl Compiler {
         // A finalizer class stays out: its object's lifetime follows the
         // frame slots emission clears, not MIR values.
         let checker = &self.checker;
+        let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
             checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
@@ -1185,7 +1186,12 @@ impl Compiler {
                     Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
                     _ => return None,
                 };
-                checker.scalar_value_ty(&name).as_ref().and_then(crate::mir::word_mir_ty).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64))
+                // A `#[repr(string)]` value is its backing string's heap word.
+                let backing = checker.scalar_value_ty(&name)?;
+                if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+                    return Some(crate::mir::MirTy::HeapRef);
+                }
+                crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
             }),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
@@ -1231,10 +1237,17 @@ impl Compiler {
                 }
                 Self::boxed_payloads(checker, &t, variant)
             }),
-            scalar_variant: Box::new(move |enum_name: &str, variant: &str| match checker.scalar_for(enum_name, variant)? {
-                crate::typechecking::ty::ScalarBacking::Int(n) => Some(crate::mir::MirConst::I64(*n)),
-                crate::typechecking::ty::ScalarBacking::Float(bits) => Some(crate::mir::MirConst::F64(*bits)),
-                _ => None,
+            scalar_variant: Box::new(move |enum_name: &str, variant: &str| {
+                use crate::mir::{MirConst, ScalarLit};
+                use crate::typechecking::ty::ScalarBacking;
+                match checker.scalar_for(enum_name, variant)? {
+                    ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(*n))),
+                    ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(*bits))),
+                    ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(*b))),
+                    // Emission interned the string where it pushed it; a
+                    // string this body never pushed is not one to read.
+                    ScalarBacking::String(s) => string_indices.get(unescape_coil_string(s).as_str()).copied().map(ScalarLit::Str),
+                }
             }),
             heap_fields,
             record_fields,
