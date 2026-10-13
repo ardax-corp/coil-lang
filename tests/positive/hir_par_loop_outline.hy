@@ -1,8 +1,8 @@
 // An auto-parallel loop moves into its own fork-join function: the
 // enclosing body calls it with the accumulator, live captures and bounds,
 // and the chunk worker is a body of its own. A const `while` range leaves
-// its index at the last value; a dynamic range whose index is read after
-// the loop stays inline.
+// its index at the last value; a dynamic one at the larger of its start
+// and end.
 use tests::assert;
 
 fn sq(int x) -> int {
