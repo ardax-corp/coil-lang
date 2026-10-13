@@ -604,6 +604,29 @@ fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), Lower
     super::emit::assign_regs_prefer_payloads(func, &plan.need_slot)
 }
 
+/// `v` is `x & 1`: its word is 0 or 1.
+fn is_low_bit(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> bool {
+    let Some((bid, idx)) = plan.def[v.index()] else {
+        return false;
+    };
+    match &func.block(bid).insts[idx] {
+        MirInst::Bin {
+            op: MirBinOp::BitAnd,
+            lhs,
+            rhs,
+            ..
+        } => [*lhs, *rhs].into_iter().any(|m| {
+            plan.def[m.index()].is_some_and(|(b, i)| {
+                matches!(
+                    &func.block(b).insts[i],
+                    MirInst::Const { c: MirConst::I64(1) | MirConst::I32(1), .. }
+                )
+            })
+        }),
+        _ => false,
+    }
+}
+
 fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
     if !plan.tree[v.index()] {
         return None;
@@ -1853,9 +1876,14 @@ fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
-        // `x != 0` on an int word: the jump already tests for non-zero, so
-        // branch on `x` itself (keeps `BinSlotImmJmp*` fusion on `i & 1`).
-        if *op == MirCmpOp::Ne && ty.is_int() && tree_i16(func, plan, *rhs) == Some(0) {
+        // `x != 0` on a 0-or-1 int word (`i & 1`): branch on `x` itself,
+        // keeping `BinSlotImmJmp*` fusion. The jump tests a bool word, so
+        // any other `x` (2 is not true) keeps the compare.
+        if *op == MirCmpOp::Ne
+            && ty.is_int()
+            && tree_i16(func, plan, *rhs) == Some(0)
+            && is_low_bit(func, plan, *lhs)
+        {
             return emit_stack(out, *lhs, func, plan, regs, pool, loc);
         }
         return emit_bin(EmitBinArgs {
