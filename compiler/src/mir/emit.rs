@@ -2711,7 +2711,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             }
             Ok(Some(packed as u8))
         }
-        MirAllocKind::Object { .. } => Ok(None),
+        MirAllocKind::Object { .. } | MirAllocKind::DropEnum { .. } => Ok(None),
         MirAllocKind::Dict
         | MirAllocKind::DictEntries
         | MirAllocKind::Coro { .. }
@@ -2802,6 +2802,11 @@ pub(super) fn il_for_alloc(
             },
             IlOp::from_plain_byte(Byte::new(Instruction::MakeFn).with_operand_u32(operand), loc),
         ]),
+        // `TagEnumType` keeps the value on the stack and stamps its type.
+        MirAllocKind::DropEnum { tag, type_id } => Ok(vec![
+            il_for_alloc_op(MirAllocKind::Enum { tag }, arity, loc)?,
+            IlOp::from_plain_byte(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id), loc),
+        ]),
         MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
             kind: crate::il::EntryKind::MakePolyFn,
             arity: 0,
@@ -2823,6 +2828,7 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, loc: DebugLoc) -> Result<IlOp
                 u16::try_from(arity).map_err(|_| LowerError::Refused("enum arity".into()))?;
             Ok(IlOp::MakeEnum { kinds: 0, tag, arity, loc })
         }
+        MirAllocKind::DropEnum { .. } => Err(LowerError::Refused("drop enum op".into())),
         MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(
             Byte::new(Instruction::InitTyped)
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),

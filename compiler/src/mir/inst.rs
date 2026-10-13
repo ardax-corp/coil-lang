@@ -510,6 +510,12 @@ pub enum MirAllocKind {
     Enum {
         tag: u32,
     },
+    /// A payload variant of an enum with `fn drop()`: `MakeEnum` (`tag`)
+    /// then `TagEnumType` (`type_id`), so the collector runs its finalizer.
+    DropEnum {
+        tag: u32,
+        type_id: u32,
+    },
     /// `MakeDict` — elems are interleaved value/name words (2 per field).
     Dict,
     /// `DictEntries`: dict heapref → array of `(string, V)` pairs (C2b).
@@ -543,6 +549,7 @@ impl MirAllocKind {
             Self::Tuple => "tuple",
             Self::Object { .. } => "object",
             Self::Enum { .. } => "enum",
+            Self::DropEnum { .. } => "dropenum",
             Self::Dict => "dict",
             Self::DictEntries => "dictentries",
             Self::Coro { .. } => "coro",

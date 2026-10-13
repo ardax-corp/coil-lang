@@ -247,8 +247,8 @@ pub struct HirMirInput<'a> {
     /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
     pub boxed_enum: BoxedEnumFn<'a>,
     /// A user enum whose variants carry a drop hook (`TagEnumType` after
-    /// `MakeEnum`), by name.
-    pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
+    /// `MakeEnum`), by name: its finalizer type id.
+    pub enum_drop: Box<dyn Fn(&str) -> Option<u32> + 'a>,
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
@@ -3368,9 +3368,8 @@ impl Lower<'_> {
     /// last field first (it pops field 0 first), as HIR emission's
     /// `hir_make`.
     fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
-        if !args.is_empty() && (self.inp.enum_drop)(enum_name) {
-            return Err("make drop enum".into());
-        }
+        // A unit variant is a shared immortal: only payload variants drop.
+        let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, t) in args.iter().zip(tys) {
             // A `()` payload is the empty tuple object.
@@ -3396,7 +3395,11 @@ impl Lower<'_> {
             words.push(v);
         }
         words.reverse();
-        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, words).map_err(mir)?;
+        let kind = match drop_type {
+            Some(type_id) => MirAllocKind::DropEnum { tag, type_id },
+            None => MirAllocKind::Enum { tag },
+        };
+        let obj = self.b.ins_alloc(kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
@@ -3405,7 +3408,7 @@ impl Lower<'_> {
     /// the last, then that variant made from the payload word.
     fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
         let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;
-        if (self.inp.enum_drop)(&name) {
+        if (self.inp.enum_drop)(&name).is_some() {
             return Err("box drop enum".into());
         }
         let Some((&(last_tag, last_word), rest)) = variants.split_last() else {
