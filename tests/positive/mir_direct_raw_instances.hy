@@ -3,6 +3,7 @@
 // the method lowers to direct MIR. Calls through a dictionary (a shared
 // generic body, a default body) box the arguments and reach the method
 // through its `$dict` adapter, which unboxes them first.
+use tests::assert;
 
 trait Weigh<T> {
     fn weight(T x) -> int {}
@@ -118,21 +119,21 @@ fn kept(int k) -> int {
 
 test("operators on raw instances") {
     let v = walk(4);
-    assert(v.x == -6)?;
-    assert(v.y == -4)?;
-    assert(top(Rank::Low, Rank::High) == 1)?;
-    assert(top(Rank::Mid, Rank::Mid) == 10)?;
-    assert(top(Rank::High, Rank::Low) == 0)?;
+    assert!(v.x == -6);
+    assert!(v.y == -4);
+    assert!(top(Rank::Low, Rank::High) == 1);
+    assert!(top(Rank::Mid, Rank::Mid) == 10);
+    assert!(top(Rank::High, Rank::Low) == 0);
 }
 
 test("method and function-style calls pass raw words") {
-    assert(direct(5) == 15 + 6 + 15 + 5)?;
-    assert(kept(4) == 5 + 4 + 4)?;
+    assert!(direct(5) == 15 + 6 + 15 + 5);
+    assert!(kept(4) == 5 + 4 + 4);
 }
 
 test("dictionary calls go through the adapter") {
-    assert(weigh_all(2, 7) == 6 + 21 + 21)?;
-    assert(weigh_all(new Crate(3), new Crate(1)) == 4 + 2 + 4)?;
-    assert(7.double() == 42)?;
-    assert(new Crate(2).double() == 6)?;
+    assert!(weigh_all(2, 7) == 6 + 21 + 21);
+    assert!(weigh_all(new Crate(3), new Crate(1)) == 4 + 2 + 4);
+    assert!(7.double() == 42);
+    assert!(new Crate(2).double() == 6);
 }

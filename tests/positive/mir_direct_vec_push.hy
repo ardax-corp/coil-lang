@@ -1,6 +1,7 @@
 // `Vec::push` in bodies lowered straight from HIR to MIR: the Vec, then
 // the value, then the push (a safepoint that may grow the storage); reads
 // after it see the new length and element.
+use tests::assert;
 
 fn fill(int n) -> Vec<int> {
     let v: Vec<int> = Vec::with_capacity(1);
@@ -33,14 +34,14 @@ fn both(Vec<int> a, Vec<int> b) -> int {
 
 test("Vec push in direct MIR") {
     let v = fill(1000);
-    assert(len(v) == 1000)?;
-    assert(v[999] == 998001)?;
+    assert!(len(v) == 1000);
+    assert!(v[999] == 998001);
     let f: Vec<float> = Vec::new();
     f.push(64.0);
-    assert(grow(f, 6) == 1.0)?;
-    assert(len(f) == 7)?;
+    assert!(grow(f, 6) == 1.0);
+    assert!(len(f) == 7);
     let a: Vec<int> = Vec::new();
     let b: Vec<int> = Vec::new();
     b.push(7);
-    assert(both(a, b) == 506)?;
+    assert!(both(a, b) == 506);
 }

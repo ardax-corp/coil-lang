@@ -1,4 +1,5 @@
 // Attribute macros from `examples/src/derive_macros.hy` on a class and a method.
+use tests::assert;
 use derive_macros::{with_describe, twice, add_after};
 
 #[with_describe(prefix = "shape")]
@@ -20,14 +21,14 @@ impl Counter {
 
 test("attribute macro on a class keeps it and adds methods") {
     let p = new Point(1, 2);
-    assert(p.x + p.y == 3)?;
-    assert(p.describe() == "shape:Point")?;
+    assert!(p.x + p.y == 3);
+    assert!(p.describe() == "shape:Point");
 }
 
 test("attribute macro on a method") {
     let c = new Counter(21);
-    assert(c.get() == 21)?;
-    assert(c.get_twice() == 42)?;
+    assert!(c.get() == 21);
+    assert!(c.get_twice() == 42);
 }
 
 // Stacked attribute macros apply outermost first; arguments bind by name or
@@ -39,7 +40,7 @@ fn triple(int x) -> int {
 }
 
 test("stacked attribute macros") {
-    assert(triple(2) == 17)?;
+    assert!(triple(2) == 17);
 }
 
 #[derive(Eq)]
@@ -49,6 +50,6 @@ class Tagged {
 }
 
 test("an attribute macro runs before the type's derives") {
-    assert(new Tagged(1) == new Tagged(1))?;
-    assert(new Tagged(1).describe() == "kept:Tagged")?;
+    assert!(new Tagged(1) == new Tagged(1));
+    assert!(new Tagged(1).describe() == "kept:Tagged");
 }

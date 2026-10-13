@@ -1,4 +1,6 @@
 // while / for / break / continue.
+use tests::assert;
+
 test("while counts up") {
     let i = 0;
     let sum = 0;
@@ -6,8 +8,8 @@ test("while counts up") {
         sum = sum + i;
         i = i + 1;
     }
-    assert(sum == 10)?;
-    assert(i == 5)?;
+    assert!(sum == 10);
+    assert!(i == 5);
 }
 
 test("while never enters") {
@@ -15,7 +17,7 @@ test("while never enters") {
     while false {
         x = 1;
     }
-    assert(x == 0)?;
+    assert!(x == 0);
 }
 
 test("while sum") {
@@ -25,7 +27,7 @@ test("while sum") {
         sum = sum + i;
         i = i + 1;
     }
-    assert(sum == 10)?;
+    assert!(sum == 10);
 }
 
 test("while continue skips") {
@@ -39,7 +41,7 @@ test("while continue skips") {
         sum = sum + i;
         i = i + 1;
     }
-    assert(sum == 12)?; // 0+1+2+4+5
+    assert!(sum == 12); // 0+1+2+4+5
 }
 
 test("while break exits early") {
@@ -52,7 +54,7 @@ test("while break exits early") {
         sum = sum + i;
         i = i + 1;
     }
-    assert(sum == 6)?; // 0+1+2+3
+    assert!(sum == 6); // 0+1+2+3
 }
 
 test("while continue and break together") {
@@ -69,7 +71,7 @@ test("while continue and break together") {
         sum = sum + i;
         i = i + 1;
     }
-    assert(sum == 18)?; // 0+1+2+4+5+6
+    assert!(sum == 18); // 0+1+2+4+5+6
 }
 
 test("postfix increment in loop") {
@@ -79,7 +81,7 @@ test("postfix increment in loop") {
         y = y + 1;
         n = n + 1;
     }
-    assert(y == 3)?;
+    assert!(y == 3);
 }
 
 test("nested loops") {
@@ -93,5 +95,5 @@ test("nested loops") {
         }
         i = i + 1;
     }
-    assert(total == 9)?;
+    assert!(total == 9);
 }

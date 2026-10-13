@@ -1,5 +1,7 @@
 // `match` on an `int` with literal arms: compare-and-branch per arm, the
 // last one untested, a binding storing the scrutinee.
+use tests::assert;
+
 fn grade(int score) -> int {
     return match score {
         100 => 4,
@@ -55,24 +57,24 @@ fn only_default(int n) -> int {
 }
 
 test("int literal arms and default") {
-    assert(grade(100) == 4)?;
-    assert(grade(90) == 3)?;
-    assert(grade(0) == -10)?;
-    assert(grade(55) == 0)?;
+    assert!(grade(100) == 4);
+    assert!(grade(90) == 3);
+    assert!(grade(0) == -10);
+    assert!(grade(55) == 0);
 }
 
 test("binding catch-all and statement match") {
-    assert(shifted(0) == 1)?;
-    assert(shifted(3) == 8)?;
-    assert(count_sevens([7, 1, 7, 7, 2]) == 3)?;
+    assert!(shifted(0) == 1);
+    assert!(shifted(3) == 8);
+    assert!(count_sevens([7, 1, 7, 7, 2]) == 3);
 }
 
 test("literals outside i32 and a match as an operand") {
-    assert(huge(5000000000) == 1)?;
-    assert(huge(6000000000) == 2)?;
-    assert(huge(5) == 0)?;
-    assert(huge(-5000000000) == 0)?;
-    assert(operand(2, 1) == 27)?;
-    assert(operand(2, 4) == 24)?;
-    assert(only_default(21) == 42)?;
+    assert!(huge(5000000000) == 1);
+    assert!(huge(6000000000) == 2);
+    assert!(huge(5) == 0);
+    assert!(huge(-5000000000) == 0);
+    assert!(operand(2, 1) == 27);
+    assert!(operand(2, 4) == 24);
+    assert!(only_default(21) == 42);
 }

@@ -1,6 +1,8 @@
 // Pointer-niche `Option` / `Result` words in bodies lowered straight from
 // HIR to MIR: `None` and `Ok(())` are the zero word, `Some` / `Ok` the
 // pointer, and a heap `Result`'s `Err` the pointer with its low bit set.
+use tests::assert;
+
 class Node {
     pub v: int,
     pub next: Option<Node>,
@@ -91,14 +93,14 @@ fn pick(Result<Node, string> r) -> int {
 
 test("niche words in direct MIR") {
     let list = build(5);
-    assert(sum(list) == 10)?;
-    assert(sum(Option::None) == 0)?;
+    assert!(sum(list) == 10);
+    assert!(sum(Option::None) == 0);
     let b = new Node(2, Option::None);
     let a = new Node(1, Option::Some(b));
-    assert(val(second(a)) == 2)?;
-    assert(val(Option::None) == 0)?;
-    assert(check(Result::Ok(())) == 1)?;
-    assert(check(Result::Err("no")) == 0)?;
-    assert(pick(find(list, 3)) == 3)?;
-    assert(pick(find(list, 9)) == -7)?;
+    assert!(val(second(a)) == 2);
+    assert!(val(Option::None) == 0);
+    assert!(check(Result::Ok(())) == 1);
+    assert!(check(Result::Err("no")) == 0);
+    assert!(pick(find(list, 3)) == 3);
+    assert!(pick(find(list, 9)) == -7);
 }

@@ -1,6 +1,7 @@
 // A trait method on a bare-class existential (`Show x`): a local pack
 // loads per use at any depth; another pack stages through a temp.
 
+use tests::assert;
 use string::format;
 
 fn described(Show x) -> string {
@@ -16,14 +17,14 @@ fn packed(int n) -> Show {
 }
 
 test("existential argument") {
-    assert(described(42) == "<42>")?;
-    assert(described("hi") == "<hi>")?;
+    assert!(described(42) == "<42>");
+    assert!(described("hi") == "<hi>");
 }
 
 test("existential used twice") {
-    assert(twice(7) == "77")?;
+    assert!(twice(7) == "77");
 }
 
 test("existential from a call") {
-    assert(show(packed(5)) == "5")?;
+    assert!(show(packed(5)) == "5");
 }

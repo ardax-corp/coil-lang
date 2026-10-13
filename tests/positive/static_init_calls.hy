@@ -2,6 +2,8 @@
 // (packed call targets resolved when the setup region is spliced),
 // inlined / self-recursive callees (their peeled bodies stay in the
 // initializer), and functions declared after the static.
+use tests::assert;
+
 fn id<T>(T x) -> T {
     return x;
 }
@@ -38,18 +40,18 @@ fn later(int n) -> int {
 }
 
 test("static initializers with calls") {
-    assert(k == 7)?;
-    assert(f == 610)?;
-    assert(fwd == 6)?;
-    assert(base == 3)?;
+    assert!(k == 7);
+    assert!(f == 610);
+    assert!(fwd == 6);
+    assert!(base == 3);
     xs.push(f);
     seeded.push(k);
-    assert(len(xs) == 1)?;
-    assert(xs[0] == 610)?;
-    assert(seeded[0] == 7)?;
+    assert!(len(xs) == 1);
+    assert!(xs[0] == 610);
+    assert!(seeded[0] == 7);
     let m = match names {
         Option::Some(v) => len(v),
         Option::None => -1,
     };
-    assert(m == 0)?;
+    assert!(m == 0);
 }

@@ -18,6 +18,7 @@ fn positive_corpus_builds_hir_without_problems() {
     let mut built = 0;
     let mut problems = Vec::new();
     for file in &files {
+        comptime::install();
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
         pipeline.set_include_tests(true);

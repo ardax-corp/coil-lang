@@ -1,5 +1,7 @@
 // Local tuples read with constant indices become slots (no allocation);
 // escaping ones are rebuilt once. Semantics must not change either way.
+use tests::assert;
+
 fn pair_sum(int n) -> int {
     let total = 0;
     let i = 0;
@@ -28,30 +30,30 @@ fn snapshot() -> int {
 }
 
 test("private tuple in a loop") {
-    assert(pair_sum(10) == 10)?;
+    assert!(pair_sum(10) == 10);
 }
 
 test("tuple escapes by return") {
     let p = make(4);
-    assert(p[0] == 4)?;
-    assert(p[1] == 8)?;
+    assert!(p[0] == 4);
+    assert!(p[1] == 8);
 }
 
 test("tuple escapes to a call after local reads") {
     let t = (7, 9);
     let s = t[0] + t[1];
-    assert(s == 16)?;
-    assert(first(t) == 7)?;
+    assert!(s == 16);
+    assert!(first(t) == 7);
 }
 
 test("tuple keeps its values when the source slot changes") {
-    assert(snapshot() == 103)?;
+    assert!(snapshot() == 103);
 }
 
 test("destructuring still works") {
     let (a, b) = make(3);
-    assert(a == 3)?;
-    assert(b == 6)?;
+    assert!(a == 3);
+    assert!(b == 6);
 }
 
 fn id(int x) -> int {
@@ -69,6 +71,6 @@ fn wide_strings() -> string {
 }
 
 test("five-element tuples keep element order") {
-    assert(wide_tuple(1) == 12345)?;
-    assert(wide_strings() == "abcde")?;
+    assert!(wide_tuple(1) == 12345);
+    assert!(wide_strings() == "abcde");
 }

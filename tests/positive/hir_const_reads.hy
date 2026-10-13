@@ -1,4 +1,5 @@
 // `const` reads lower from HIR as the folded value, as the AST emits them.
+use tests::assert;
 
 const LIMIT = 10;
 
@@ -33,9 +34,9 @@ fn tagged(string s) -> string {
 }
 
 test("const reads lower") {
-    assert(scaled(3) == 23)?;
-    assert(big_plus(1) == 5000000001)?;
-    assert(rate_of(2.0) == 5.0)?;
-    assert(flag())?;
-    assert(tagged("x") == "cfg:x")?;
+    assert!(scaled(3) == 23);
+    assert!(big_plus(1) == 5000000001);
+    assert!(rate_of(2.0) == 5.0);
+    assert!(flag());
+    assert!(tagged("x") == "cfg:x");
 }

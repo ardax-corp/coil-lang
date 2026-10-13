@@ -1,4 +1,5 @@
 // Sibling / self tail-call elim: even↔odd and a two-word bounce.
+use tests::assert;
 
 fn even(int n) -> int {
     if n == 0 {
@@ -26,10 +27,10 @@ fn bounce_b(Option<int> o) -> Option<int> {
 }
 
 test("sibling tail even/odd") {
-    assert(even(10) == 1)?;
-    assert(odd(10) == 0)?;
-    assert(even(1) == 0)?;
-    assert(odd(1) == 1)?;
+    assert!(even(10) == 1);
+    assert!(odd(10) == 0);
+    assert!(even(1) == 0);
+    assert!(odd(1) == 1);
 }
 
 test("two-word sibling tail") {
@@ -38,5 +39,5 @@ test("two-word sibling tail") {
         Option::Some(v) => v == 1,
         Option::None => false,
     };
-    assert(ok)?;
+    assert!(ok);
 }

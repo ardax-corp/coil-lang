@@ -1,3 +1,5 @@
+use tests::assert;
+
 class TextCounter {
     pub cur: int,
     pub end: int,
@@ -30,8 +32,8 @@ test("iterator yielding Option<string> (pointer niche)") {
         joined = joined + text;
         n = n + 1;
     }
-    assert(n == 3)?;
-    assert(joined == "ababab")?;
+    assert!(n == 3);
+    assert!(joined == "ababab");
 }
 
 test("empty niche iterator") {
@@ -39,5 +41,5 @@ test("empty niche iterator") {
     for text in new TextCounter(2, 2, "x") {
         n = n + 1;
     }
-    assert(n == 0)?;
+    assert!(n == 0);
 }

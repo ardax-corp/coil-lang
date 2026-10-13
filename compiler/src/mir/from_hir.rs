@@ -407,6 +407,12 @@ enum Items {
     Tuple(usize),
 }
 
+/// A non-empty tuple type, whose value is a heap tuple when it is not
+/// kept as a pair.
+fn is_heap_tuple(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty())
+}
+
 /// A record (dict) value: one heap word.
 fn is_record(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Record { .. })
@@ -2573,12 +2579,14 @@ impl Lower<'_> {
             Some(_) if raw || (!site.pair_ret && (self.inp.boxed_view)(ty, None).is_some()) => (MirTy::HeapRef, None),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
+            // A tuple not returned as a pair comes back boxed.
+            _ if is_heap_tuple(ty) => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
             // A two-word type not passed as a pair goes boxed.
-            let boxed = !pair && self.expr_ty(arg).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some());
+            let boxed = !pair && self.expr_ty(arg).is_some_and(|t| self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)));
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }

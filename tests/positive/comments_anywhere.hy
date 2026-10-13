@@ -1,5 +1,6 @@
 // Comments are trivia: `//` and `/* */` (nestable) may sit between any
 // two tokens, not only in statement position.
+use tests::assert;
 
 /* A block comment
    spanning lines /* with a nested one */ still closes here. */
@@ -47,8 +48,8 @@ test("comments between list and record items") {
         a: 1, /* between */
         b: 2,
     };
-    assert(xs[0] + xs[1] + xs[2] == 6)?;
-    assert(d.a + d.b == 3)?;
+    assert!(xs[0] + xs[1] + xs[2] == 6);
+    assert!(d.a + d.b == 3);
 }
 
 test("comments inside calls, classes and matches") {
@@ -57,17 +58,17 @@ test("comments inside calls, classes and matches") {
         2, // then b
         3,
     );
-    assert(p.sum() == 5)?;
-    assert(
+    assert!(p.sum() == 5);
+    assert!(
         measure(
             Shape::Line(7),
             /* n */
         ) == 7,
-    )?;
-    assert(measure(Shape::Dot) == 0)?;
+    );
+    assert!(measure(Shape::Dot) == 0);
 }
 
 test("comment-like text in strings stays text") {
     let s = "http://example.com /* not a comment */";
-    assert(s.len() == 38)?;
+    assert!(s.len() == 38);
 }

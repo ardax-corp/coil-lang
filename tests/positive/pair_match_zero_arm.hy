@@ -1,6 +1,8 @@
 // A two-slot match whose arms are "the payload" and "`0`" folds to the
 // payload only when the `0` arm is a unit variant (`None`). `Ok(_)` still
 // carries a payload, so `Ok(_) => 0` must not read it.
+use tests::assert;
+
 fn f(int x) -> Result<int, int> {
     if x < 0 {
         raise 3;
@@ -24,8 +26,8 @@ test("Ok(_) => 0 ignores the Ok payload") {
         Result::Ok(v) => v,
         Result::Err(_) => 0,
     };
-    assert(a == 0)?;
-    assert(b == 0)?;
+    assert!(a == 0);
+    assert!(b == 0);
 }
 
 test("Some(x) => x, None => 0 still reads the payload") {
@@ -37,6 +39,6 @@ test("Some(x) => x, None => 0 still reads the payload") {
         Option::None => 0,
         Option::Some(x) => x,
     };
-    assert(a == 5)?;
-    assert(b == 0)?;
+    assert!(a == 5);
+    assert!(b == 0);
 }

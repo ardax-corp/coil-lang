@@ -1,4 +1,5 @@
 // B3: two-slot CALL + match must stay unboxed and checksum.
+use tests::assert;
 
 fn lookup(int i, int n) -> Option<int> {
     if i < 0 || i >= n {
@@ -41,10 +42,10 @@ fn hot_res(int iters) -> int {
 }
 
 test("option match+call checksum") {
-    assert(hot_opt(7, 40) == 168)?;
+    assert!(hot_opt(7, 40) == 168);
 }
 
 test("result match+call checksum") {
     // period-10 of checked_div((i%10)+1, i%5): 19 * 4 periods = 76
-    assert(hot_res(40) == 76)?;
+    assert!(hot_res(40) == 76);
 }

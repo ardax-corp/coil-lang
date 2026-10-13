@@ -1,5 +1,6 @@
 // Counted for/range IPA (COI-362 E4). Trip count > DEFAULT_LOOP_GRAIN.
 // Checksums must match sequential AUTO_PAR=0.
+use tests::assert;
 
 fn sq(int i) -> int {
     return i * i;
@@ -10,7 +11,7 @@ test("literal for-range reduce") {
     for x in 0..40 {
         acc = acc + sq(x);
     }
-    assert(acc == 20540)?;
+    assert!(acc == 20540);
 }
 
 test("inclusive for-range reduce") {
@@ -18,7 +19,7 @@ test("inclusive for-range reduce") {
     for x in 1..=40 {
         acc = acc + x;
     }
-    assert(acc == 820)?;
+    assert!(acc == 820);
 }
 
 test("const range local reduce") {
@@ -27,5 +28,5 @@ test("const range local reduce") {
     for x in r {
         acc = acc + x;
     }
-    assert(acc == 780)?;
+    assert!(acc == 780);
 }

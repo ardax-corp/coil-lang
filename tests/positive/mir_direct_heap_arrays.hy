@@ -2,6 +2,7 @@
 // HIR to MIR: parameters and results, `for x in xs` (with `continue`),
 // index reads (with the Euclidean fix-up for `i % m`) and writes, and
 // `len`. A fixed-size array bound to another local is a copy.
+use tests::assert;
 
 fn total(Vec<int> v) -> int {
     let t = 0;
@@ -60,18 +61,18 @@ test("heap arrays and Vecs in direct MIR") {
         v.push(i);
         i = i + 1;
     }
-    assert(total(v) == 570)?;
-    assert(odd_sum([1, 2, 3, 4, 5, 6, 7]) == 16)?;
+    assert!(total(v) == 570);
+    assert!(odd_sum([1, 2, 3, 4, 5, 6, 7]) == 16);
     let f: Vec<float> = Vec::new();
     f.push(1.0);
     f.push(2.5);
     scale(f, 2.0);
-    assert(f[0] == 3.0)?;
-    assert(f[1] == 6.0)?;
-    assert(mean(f) == 4.5)?;
-    assert(ring([4, 5, 6], 4) == 54)?;
-    assert(ring([4, 5, 6], 1) == 54)?;
+    assert!(f[0] == 3.0);
+    assert!(f[1] == 6.0);
+    assert!(mean(f) == 4.5);
+    assert!(ring([4, 5, 6], 4) == 54);
+    assert!(ring([4, 5, 6], 1) == 54);
     let b = bump([1, 2, 3], 2, 40);
-    assert(b[2] == 43)?;
-    assert(copy_then_write([1, 2, 3]) == 1104)?;
+    assert!(b[2] == 43);
+    assert!(copy_then_write([1, 2, 3]) == 1104);
 }

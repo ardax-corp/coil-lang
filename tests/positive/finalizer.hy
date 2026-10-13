@@ -1,3 +1,4 @@
+use tests::assert;
 use gc::{collect, get, root, weak, upgrade, Root, Weak};
 
 class Handle {
@@ -119,7 +120,7 @@ test("drop runs on collect") {
     drops = 0;
     ephemeral();
     collect();
-    assert(drops == 1)?;
+    assert!(drops == 1);
 }
 
 test("explicit drop counts once") {
@@ -128,7 +129,7 @@ test("explicit drop counts once") {
     h.drop();
     h.drop();
     collect();
-    assert(drops == 1)?;
+    assert!(drops == 1);
 }
 
 test("live Root is not finalized") {
@@ -136,7 +137,7 @@ test("live Root is not finalized") {
     let h = new Handle(3);
     let r = root(h);
     collect();
-    assert(drops == 0)?;
+    assert!(drops == 0);
 }
 
 test("weak stays live during drop and is None after sweep") {
@@ -144,7 +145,7 @@ test("weak stays live during drop and is None after sweep") {
     during = 0;
     with_weak();
     collect();
-    assert(during == 1)?;
+    assert!(during == 1);
     let after = match held {
         Option::Some(w) => match upgrade(w) {
             Option::Some(_) => 1,
@@ -152,7 +153,7 @@ test("weak stays live during drop and is None after sweep") {
         },
         Option::None => -1,
     };
-    assert(after == 0)?;
+    assert!(after == 0);
 }
 
 fn stash_self() {
@@ -175,11 +176,11 @@ test("storing self from drop resurrects once") {
     kept = Option::None;
     stash_self();
     collect();
-    assert(resurrect_drops == 1)?;
-    assert(resurrected_fd() == 42)?;
+    assert!(resurrect_drops == 1);
+    assert!(resurrected_fd() == 42);
     clear_kept();
     collect();
-    assert(resurrect_drops == 1)?;
+    assert!(resurrect_drops == 1);
 }
 
 fn explicit_stash() {
@@ -192,10 +193,10 @@ test("explicit drop storing self stays once") {
     kept = Option::None;
     explicit_stash();
     collect();
-    assert(resurrect_drops == 1)?;
+    assert!(resurrect_drops == 1);
     clear_kept();
     collect();
-    assert(resurrect_drops == 1)?;
+    assert!(resurrect_drops == 1);
 }
 
 fn stash_into_root() {
@@ -207,7 +208,7 @@ test("storing self into Root from drop resurrects") {
     kept_root = Option::None;
     stash_into_root();
     collect();
-    assert(root_drops == 1)?;
+    assert!(root_drops == 1);
     let fd = match kept_root {
         Option::Some(r) => match get(r) {
             Option::Some(h) => h.fd,
@@ -215,9 +216,9 @@ test("storing self into Root from drop resurrects") {
         },
         Option::None => -1,
     };
-    assert(fd == 42)?;
+    assert!(fd == 42);
     collect();
-    assert(root_drops == 1)?;
+    assert!(root_drops == 1);
     let fd2 = match kept_root {
         Option::Some(r) => match get(r) {
             Option::Some(h) => h.fd,
@@ -225,7 +226,7 @@ test("storing self into Root from drop resurrects") {
         },
         Option::None => -1,
     };
-    assert(fd2 == 42)?;
+    assert!(fd2 == 42);
 }
 
 fn setup_bag() {
@@ -249,10 +250,10 @@ test("storing self into reachable field resurrects") {
     setup_bag();
     stash_into_field();
     collect();
-    assert(field_drops == 1)?;
-    assert(field_slot_fd() == 9)?;
+    assert!(field_drops == 1);
+    assert!(field_slot_fd() == 9);
     collect();
-    assert(field_drops == 1)?;
+    assert!(field_drops == 1);
 }
 
 fn stash_with_weak() {
@@ -266,7 +267,7 @@ test("resurrection keeps weak upgradable") {
     held_weak = Option::None;
     stash_with_weak();
     collect();
-    assert(weak_drops == 1)?;
+    assert!(weak_drops == 1);
     let after = match held_weak {
         Option::Some(w) => match upgrade(w) {
             Option::Some(h) => h.fd,
@@ -274,5 +275,5 @@ test("resurrection keeps weak upgradable") {
         },
         Option::None => -2,
     };
-    assert(after == 3)?;
+    assert!(after == 3);
 }

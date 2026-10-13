@@ -1,5 +1,6 @@
 // `len` of a call, field or index lowers from HIR: an aggregate is
 // measured with `ArrayLen`, a fixed-size value is evaluated and dropped.
+use tests::assert;
 
 class Bag {
     pub items: Vec<int>,
@@ -28,10 +29,10 @@ fn made(int n) -> int {
 
 test("len of calls, fields and indexes lowers") {
     let b = new Bag(make(3), (1, 2));
-    assert(count(b) == 5)?;
+    assert!(count(b) == 5);
     let grid: Vec<Vec<int>> = [];
     grid.push(make(2));
     grid.push(make(4));
-    assert(rows(grid, 1) == 4)?;
-    assert(made(2) == 5)?;
+    assert!(rows(grid, 1) == 4);
+    assert!(made(2) == 5);
 }

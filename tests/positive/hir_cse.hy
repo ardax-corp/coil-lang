@@ -1,5 +1,7 @@
 // A repeated pure expression reads the local that holds its first value,
 // but only while nothing it reads has changed.
+use tests::assert;
+
 class Box {
     pub v: int,
 }
@@ -43,23 +45,23 @@ fn holder_changes(int a) -> int {
 }
 
 test("same expression, operands either way round") {
-    assert(reuse(2, 3) == 18)?;
+    assert!(reuse(2, 3) == 18);
 }
 
 test("a write to an operand ends the reuse") {
-    assert(after_write(1) == 13)?;
+    assert!(after_write(1) == 13);
 }
 
 test("element and field writes end the reuse") {
-    assert(elements([1, 2, 3], 1) == 102)?;
-    assert(fields(new Box(5)) == 11)?;
+    assert!(elements([1, 2, 3], 1) == 102);
+    assert!(fields(new Box(5)) == 11);
 }
 
 test("a branch that writes an operand") {
-    assert(branches(2, true) == 6)?;
-    assert(branches(2, false) == 12)?;
+    assert!(branches(2, true) == 6);
+    assert!(branches(2, false) == 12);
 }
 
 test("the holding local changes") {
-    assert(holder_changes(4) == 8)?;
+    assert!(holder_changes(4) == 8);
 }

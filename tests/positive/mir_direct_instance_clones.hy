@@ -4,6 +4,7 @@
 // ground type reach the clone, whose bound calls are ground instance calls.
 // Uses through an open type still go to the shared body.
 
+use tests::assert;
 use string::format;
 
 class Duo<T> {
@@ -71,32 +72,32 @@ fn sum_duos(int n) -> Duo<int> {
 
 test("operators reach the per-type clone") {
     let d = sum_duos(4);
-    assert(d.a == 6)?;
-    assert(d.b == 4)?;
+    assert!(d.a == 6);
+    assert!(d.b == 4);
     let f = new Duo(1.5, 2.0) + new Duo(0.5, 1.0);
-    assert(f.a == 2.0)?;
-    assert(f.b == 3.0)?;
+    assert!(f.a == 2.0);
+    assert!(f.b == 3.0);
 }
 
 test("method, function-style and show calls on clones") {
     let d = new Duo(3, 4);
-    assert(d.size() == 7)?;
-    assert(size(new Duo("ab", "c")) == 3)?;
-    assert(new Duo(new Duo(1, 2), new Duo(3, 4)).size() == 10)?;
-    assert(format("%v", d) == "<3|4>")?;
-    assert(format("%v", new Duo("x", "y")) == "<x|y>")?;
+    assert!(d.size() == 7);
+    assert!(size(new Duo("ab", "c")) == 3);
+    assert!(new Duo(new Duo(1, 2), new Duo(3, 4)).size() == 10);
+    assert!(format("%v", d) == "<3|4>");
+    assert!(format("%v", new Duo("x", "y")) == "<x|y>");
 }
 
 test("default bodies are cloned per instance") {
-    assert(5.twice() == 10)?;
-    assert("abc".twice() == 6)?;
-    assert(new Duo(1, 2).twice() == 6)?;
-    assert(9.bigger(2))?;
-    assert(!"a".bigger("bc"))?;
+    assert!(5.twice() == 10);
+    assert!("abc".twice() == 6);
+    assert!(new Duo(1, 2).twice() == 6);
+    assert!(9.bigger(2));
+    assert!(!"a".bigger("bc"));
 }
 
 test("dictionaries of a ground type name the clones") {
-    assert(total(2, 3) == 8)?;
-    assert(total("a", "bb") == 5)?;
-    assert(total(new Duo(1, 1), new Duo(2, 3)) == 12)?;
+    assert!(total(2, 3) == 8);
+    assert!(total("a", "bb") == 5);
+    assert!(total(new Duo(1, 1), new Duo(2, 3)) == 12);
 }

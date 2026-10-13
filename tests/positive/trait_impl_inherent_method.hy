@@ -1,4 +1,5 @@
 // Trait-instance methods may call inherent methods on the same type (COI-115).
+use tests::assert;
 
 class ItemBox {
     pub v: int,
@@ -40,6 +41,6 @@ test("trait instance method calls an inherent method") {
         n = n + 1;
         total = total + x;
     }
-    assert(n == 1)?;
-    assert(total == 1)?;
+    assert!(n == 1);
+    assert!(total == 1);
 }

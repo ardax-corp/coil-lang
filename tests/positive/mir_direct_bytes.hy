@@ -1,6 +1,7 @@
 // Bytes in bodies lowered straight from HIR to MIR: a byte is its value as
 // an int word, one-byte literals are constants, and `as byte` / `as int`
 // keep the low eight bits as the VM's casts do.
+use tests::assert;
 
 fn upper(Vec<byte> buf) -> Vec<byte> {
     let out: Vec<byte> = Vec::new();
@@ -41,11 +42,11 @@ fn digits(Vec<byte> buf) -> int {
 
 test("bytes in direct MIR") {
     let u = upper("hello, World" as Vec<byte>);
-    assert(u[0] == "H")?;
-    assert(u[5] == ",")?;
-    assert(u[7] == "W")?;
-    assert(len(u) == 12)?;
-    assert(wrap(300) == 44045)?;
-    assert(wrap(-1) == 255000)?;
-    assert(digits("a1b2c3" as Vec<byte>) == 123)?;
+    assert!(u[0] == "H");
+    assert!(u[5] == ",");
+    assert!(u[7] == "W");
+    assert!(len(u) == 12);
+    assert!(wrap(300) == 44045);
+    assert!(wrap(-1) == 255000);
+    assert!(digits("a1b2c3" as Vec<byte>) == 123);
 }

@@ -3,6 +3,7 @@
 // so a collection right after frees the callee's objects (and runs the
 // finalizer of what they hold).
 
+use tests::assert;
 use gc::collect;
 
 class Handle {
@@ -68,11 +69,11 @@ fn kept_by_result() -> int {
 }
 
 test("a spliced heap local dies at its clear") {
-    assert(closed_after_splice(4) == 406)?;
+    assert!(closed_after_splice(4) == 406);
 }
 
 test("a cleared value another local holds stays live") {
-    assert(kept_by_result() == 3)?;
+    assert!(kept_by_result() == 3);
 }
 
 fn pick() -> Result<string, string> {
@@ -95,5 +96,5 @@ test("an inline use is not moved past its value's clear") {
         Result::Ok(s) => s,
         Result::Err(e) => e,
     };
-    assert(got == "a/coil")?;
+    assert!(got == "a/coil");
 }

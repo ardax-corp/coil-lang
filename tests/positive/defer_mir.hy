@@ -1,6 +1,8 @@
 // `defer` bodies with direct MIR: each exit runs the armed defers lowered
 // before it, last first, captures read at the exit; a defer armed in a
 // loop runs once.
+use tests::assert;
+
 class Log {
     pub n: int,
 }
@@ -48,11 +50,11 @@ fn missing(Log log, Option<int> o) -> Option<int> {
 
 test("a defer armed in a loop runs once, with the capture at the exit") {
     let log = new Log(0);
-    assert(in_loop(log, 2) == 2)?;
-    assert(log.n == 3)?;
+    assert!(in_loop(log, 2) == 2);
+    assert!(log.n == 3);
     let log2 = new Log(0);
-    assert(in_loop(log2, 9) == -1)?;
-    assert(log2.n == 6)?;
+    assert!(in_loop(log2, 9) == -1);
+    assert!(log2.n == 6);
 }
 
 test("defers run last first on a fall-through and a ? exit") {
@@ -61,20 +63,20 @@ test("defers run last first on a fall-through and a ? exit") {
         Option::Some(v) => v,
         Option::None => -1,
     };
-    assert(got == 3)?;
-    assert(log.n == 132)?;
+    assert!(got == 3);
+    assert!(log.n == 132);
     let log2 = new Log(0);
     let miss = match missing(log2, Option::None) {
         Option::Some(v) => v,
         Option::None => -1,
     };
-    assert(miss == -1)?;
-    assert(log2.n == 5)?;
+    assert!(miss == -1);
+    assert!(log2.n == 5);
     let log3 = new Log(0);
     let hit = match missing(log3, Option::Some(4)) {
         Option::Some(v) => v,
         Option::None => -1,
     };
-    assert(hit == 8)?;
-    assert(log3.n == 45)?;
+    assert!(hit == 8);
+    assert!(log3.n == 45);
 }

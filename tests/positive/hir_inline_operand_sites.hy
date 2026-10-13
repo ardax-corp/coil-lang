@@ -2,6 +2,7 @@
 // of `||` / `&&` runs its callee in place, only when the left side lets
 // it. Calls inside an inlined body inline in the next round, and test
 // bodies inline like functions.
+use tests::assert;
 
 static let calls = 0;
 
@@ -43,24 +44,24 @@ fn classify(int s, Vec<int> t) -> int {
 }
 
 test("a call on the right of || runs only when needed") {
-    assert(alnum(95))?;
-    assert(alnum(55))?;
-    assert(!alnum(65))?;
+    assert!(alnum(95));
+    assert!(alnum(55));
+    assert!(!alnum(65));
 }
 
 test("a call on the right of && keeps its effect conditional") {
     calls = 0;
-    assert(!guarded(0))?;
-    assert(calls == 0)?;
-    assert(guarded(9))?;
-    assert(!guarded(2))?;
-    assert(calls == 2)?;
+    assert!(!guarded(0));
+    assert!(calls == 0);
+    assert!(guarded(9));
+    assert!(!guarded(2));
+    assert!(calls == 2);
 }
 
 test("calls inside an inlined callee inline too") {
-    assert(classify(3, [1, 2]) == 1)?;
-    assert(classify(0, [50, 2]) == 2)?;
-    assert(classify(1, [50, 120]) == -1)?;
+    assert!(classify(3, [1, 2]) == 1);
+    assert!(classify(0, [50, 2]) == 2);
+    assert!(classify(1, [50, 120]) == -1);
 }
 
 test("a negated call") {
@@ -72,5 +73,5 @@ test("a negated call") {
         }
         i = i + 1;
     }
-    assert(n == 20)?;
+    assert!(n == 20);
 }

@@ -1,3 +1,5 @@
+use tests::assert;
+
 fn ok_ninety_nine() -> Result<int, string> {
     return Result::Ok(99);
 }
@@ -12,7 +14,7 @@ test("explicit Result::Ok return in result-mode fn") {
         Result::Ok(v) => v,
         Result::Err(_) => -1,
     };
-    assert(n == 99)?;
+    assert!(n == 99);
 }
 
 test("explicit Result::Err return in result-mode fn") {
@@ -21,5 +23,5 @@ test("explicit Result::Err return in result-mode fn") {
         Result::Ok(_) => false,
         Result::Err(e) => e == "boom",
     };
-    assert(ok)?;
+    assert!(ok);
 }

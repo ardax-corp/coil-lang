@@ -1,3 +1,5 @@
+use tests::assert;
+
 class Holder {
     pub start: int,
     pub end: int,
@@ -20,7 +22,7 @@ fn total(Holder h) -> int {
 }
 
 test("IntoIterator returning a Range") {
-    assert(total(new Holder(0, 4)) == 6)?;
-    assert(total(new Holder(3, 6)) == 12)?;
-    assert(total(new Holder(5, 5)) == 0)?;
+    assert!(total(new Holder(0, 4)) == 6);
+    assert!(total(new Holder(3, 6)) == 12);
+    assert!(total(new Holder(5, 5)) == 0);
 }

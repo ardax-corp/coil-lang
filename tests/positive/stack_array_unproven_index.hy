@@ -1,5 +1,7 @@
 // A stack array read at an index the checker cannot prove in range: each
 // in-range index reads its slot (out of range boxes the array and panics).
+use tests::assert;
+
 fn below(int n, int seed) -> int {
     return (seed * 7 + 3) % n;
 }
@@ -26,16 +28,16 @@ test("ints at every slot") {
         total = total + pick_int(seed, 9);
         seed = seed + 1;
     }
-    assert(pick_int(0, 9) == 9)?;
-    assert(pick_int(1, 9) == 0)?;
-    assert(pick_int(2, 9) == -1)?;
-    assert(total == 0)?;
+    assert!(pick_int(0, 9) == 9);
+    assert!(pick_int(1, 9) == 0);
+    assert!(pick_int(2, 9) == -1);
+    assert!(total == 0);
 }
 
 test("floats and strings") {
-    assert(pick_float(0) == 0.5)?;
-    assert(pick_float(1) == 1.5)?;
-    assert(pick_float(2) == 2.5)?;
-    assert(pick_name(0) == "dddd")?;
-    assert(pick_name(1) == "ccc")?;
+    assert!(pick_float(0) == 0.5);
+    assert!(pick_float(1) == 1.5);
+    assert!(pick_float(2) == 2.5);
+    assert!(pick_name(0) == "dddd");
+    assert!(pick_name(1) == "ccc");
 }

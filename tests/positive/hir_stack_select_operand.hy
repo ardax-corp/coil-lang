@@ -1,6 +1,7 @@
 // A field read through a dynamic index into a small array literal selects
 // over its frame slots; under a binary operator the left operand stages
 // through a temp first, as the AST does.
+use tests::assert;
 
 class N {
     pub v: int,
@@ -14,12 +15,12 @@ test("field of a selected element") {
         total = total + nodes[i].v;
         i = i + 1;
     }
-    assert(total == 6)?;
+    assert!(total == 6);
 }
 
 test("select in a comparison") {
     let nodes = [new N(4), new N(9)];
     let i = 1;
-    assert(5 < nodes[i].v)?;
-    assert(nodes[0].v * 2 + nodes[i].v == 17)?;
+    assert!(5 < nodes[i].v);
+    assert!(nodes[0].v * 2 + nodes[i].v == 17);
 }

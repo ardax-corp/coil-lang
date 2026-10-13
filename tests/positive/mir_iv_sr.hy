@@ -1,4 +1,6 @@
 // COI-283: `(i as float) * 7.0` → add induction on dense SSA.
+use tests::assert;
+
 fn hot(int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -12,5 +14,5 @@ fn hot(int n) -> float {
 
 test("iv sr cast times const") {
     // sum_{i=0..3} (7i)^2 = 49 * (0+1+4+9) = 686
-    assert(hot(4) == 686.0)?;
+    assert!(hot(4) == 686.0);
 }

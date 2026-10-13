@@ -1,5 +1,7 @@
 // A parameter or `let` named like a module `const` reads the local, not
 // the const, for the rest of its scope.
+use tests::assert;
+
 const LIMIT = 10;
 
 fn shadowed(int LIMIT) -> int {
@@ -26,21 +28,21 @@ fn lambda_param() -> int {
 }
 
 test("parameter shadows const") {
-    assert(shadowed(41) == 42)?;
+    assert!(shadowed(41) == 42);
 }
 
 test("let shadows const") {
-    assert(local_shadow() == 6)?;
+    assert!(local_shadow() == 6);
 }
 
 test("const read") {
-    assert(plain() == 10)?;
+    assert!(plain() == 10);
 }
 
 test("inner const") {
-    assert(inner_const() == 14)?;
+    assert!(inner_const() == 14);
 }
 
 test("lambda parameter does not leak") {
-    assert(lambda_param() == 25)?;
+    assert!(lambda_param() == 25);
 }

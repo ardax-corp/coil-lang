@@ -1,5 +1,7 @@
 // Overloaded inherent methods by arity, including calls from one
 // overload to another inside the impl.
+use tests::assert;
+
 class Tally {
     pub n: int,
     pub log: string,
@@ -32,13 +34,13 @@ impl Tally {
 
 test("overloads by arity") {
     let t = new Tally(0, "");
-    assert(t.add() == 1)?;
-    assert(t.add(4) == 5)?;
-    assert(t.add(2, 3) == 11)?;
+    assert!(t.add() == 1);
+    assert!(t.add(4) == 5);
+    assert!(t.add(2, 3) == 11);
 }
 
 test("string overloads") {
     let t = new Tally(0, "");
-    assert(t.note("a") == "a")?;
-    assert(t.note("b", "c") == "abc")?;
+    assert!(t.note("a") == "a");
+    assert!(t.note("b", "c") == "abc");
 }

@@ -1,4 +1,6 @@
 // Record-shaped enum variants + field access / chained access.
+use tests::assert;
+
 enum Inner {
     Inner { v: int },
 }
@@ -26,14 +28,14 @@ fn read_xv(Outer o) -> int {
 
 test("field access on record variant") {
     let p = Point::Point { x: 5, y: 12 };
-    assert(x_of(p) == 5)?;
-    assert(y_of(p) == 12)?;
+    assert!(x_of(p) == 5);
+    assert!(y_of(p) == 12);
 }
 
 test("chained field access") {
     let o = Outer::Outer { x: Inner::Inner { v: 42 }, y: 7 };
-    assert(read_xv(o) == 42)?;
-    assert(o.y == 7)?;
+    assert!(read_xv(o) == 42);
+    assert!(o.y == 7);
 }
 
 test("pattern destructure record") {
@@ -42,5 +44,5 @@ test("pattern destructure record") {
         Point::Origin => 0,
         Point::Point { x, y } => x * x + y * y,
     };
-    assert(d == 25)?;
+    assert!(d == 25);
 }

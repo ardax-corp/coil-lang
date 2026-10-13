@@ -1,4 +1,5 @@
 // Enum fn drop() (COI-26): payload variants finalize once; unit variants never.
+use tests::assert;
 use gc::collect;
 
 static let drops: int = 0;
@@ -36,18 +37,18 @@ test("payload variant drops once when collected") {
     drops = 0;
     open_and_forget(7);
     collect();
-    assert(drops == 1)?;
-    assert(last == 7)?;
+    assert!(drops == 1);
+    assert!(last == 7);
     collect();
-    assert(drops == 1)?;
+    assert!(drops == 1);
 }
 
 test("discarded construction still drops") {
     drops = 0;
     discard(9);
     collect();
-    assert(drops == 1)?;
-    assert(last == 9)?;
+    assert!(drops == 1);
+    assert!(last == 9);
 }
 
 test("unit variants never drop") {
@@ -55,7 +56,7 @@ test("unit variants never drop") {
     let c = Conn::Closed;
     let d = Conn::Closed;
     collect();
-    assert(drops == 0)?;
+    assert!(drops == 0);
 }
 
 test("many values in a loop each drop") {
@@ -66,16 +67,16 @@ test("many values in a loop each drop") {
         i = i + 1;
     }
     collect();
-    assert(drops == 50)?;
+    assert!(drops == 50);
 }
 
 test("explicit drop runs once") {
     drops = 0;
     let c = Conn::Open(3);
     c.drop();
-    assert(drops == 1)?;
+    assert!(drops == 1);
     c.drop();
-    assert(drops == 1)?;
+    assert!(drops == 1);
 }
 
 enum Shape {
@@ -101,9 +102,9 @@ fn area() -> int {
 
 test("record payload variant drops") {
     shape_drops = 0;
-    assert(area() == 12)?;
+    assert!(area() == 12);
     collect();
-    assert(shape_drops == 1)?;
+    assert!(shape_drops == 1);
 }
 
 enum Slot<T> {
@@ -129,9 +130,9 @@ fn fill_slot() -> int {
 
 test("generic enum drops") {
     slot_drops = 0;
-    assert(fill_slot() == 5)?;
+    assert!(fill_slot() == 5);
     collect();
-    assert(slot_drops == 1)?;
+    assert!(slot_drops == 1);
 }
 
 fn make(int fd) -> Conn {
@@ -146,10 +147,10 @@ test("escaping value drops once, after it dies") {
     drops = 0;
     let kept = pass_through(make(4));
     collect();
-    assert(drops == 0)?;
+    assert!(drops == 0);
     let fd = match kept {
         Conn::Open(x) => x,
         Conn::Closed => 0,
     };
-    assert(fd == 4)?;
+    assert!(fd == 4);
 }

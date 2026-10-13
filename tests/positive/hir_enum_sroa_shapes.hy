@@ -1,6 +1,8 @@
 // Local enums split into tag and field locals: string payloads, record
 // variants, builtin enums, arms of variants no build makes, and a local
 // built once whose match is decided at compile time.
+use tests::assert;
+
 enum Msg {
     Text(string),
     Code(int),
@@ -78,22 +80,22 @@ fn looped(int n) -> int {
 }
 
 test("string payloads and unbuilt arms") {
-    assert(text(1) == "code")?;
-    assert(text(5) == "big")?;
+    assert!(text(1) == "code");
+    assert!(text(5) == "big");
 }
 
 test("record variants in any field order") {
-    assert(record(3) == 27)?;
-    assert(record(0) == 7)?;
-    assert(shuffled(2) == 18)?;
+    assert!(record(3) == 27);
+    assert!(record(0) == 7);
+    assert!(shuffled(2) == 18);
 }
 
 test("a local built once") {
-    assert(fixed(2) == 14)?;
+    assert!(fixed(2) == 14);
 }
 
 test("builtin enums") {
-    assert(maybe(4) == 12)?;
-    assert(maybe(3) == -1)?;
-    assert(looped(6) == 20)?;
+    assert!(maybe(4) == 12);
+    assert!(maybe(3) == -1);
+    assert!(looped(6) == 20);
 }

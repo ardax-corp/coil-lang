@@ -1,6 +1,7 @@
 // #579: an enum variant nested in a constructor pattern
 // (`Result::Err(Color::Red)`, `Pair::Two(Color::Red, _)`) must be tested; it
 // used to match any value with the same outer tag, taking the first arm.
+use tests::assert;
 use io::open;
 
 enum Color {
@@ -71,24 +72,24 @@ fn io_kind(Result<int, IoError> r) -> string {
 }
 
 test("nested unit variants pick their own arm") {
-    assert(color_of(Result::Err(Color::Red)) == "red", "red")?;
-    assert(color_of(Result::Err(Color::Green)) == "green", "green")?;
-    assert(color_of(Result::Err(Color::Blue)) == "other", "blue falls to `_`")?;
-    assert(color_of(Result::Ok(1)) == "ok", "ok")?;
+    assert!(color_of(Result::Err(Color::Red)) == "red", "red");
+    assert!(color_of(Result::Err(Color::Green)) == "green", "green");
+    assert!(color_of(Result::Err(Color::Blue)) == "other", "blue falls to `_`");
+    assert!(color_of(Result::Ok(1)) == "ok", "ok");
 }
 
 test("nested unit variants in Option") {
-    assert(optional(Option::Some(Color::Blue)) == 3, "blue")?;
-    assert(optional(Option::Some(Color::Green)) == 2, "green")?;
-    assert(optional(Option::Some(Color::Red)) == 1, "red falls to `_`")?;
-    assert(optional(Option::None) == 0, "none")?;
+    assert!(optional(Option::Some(Color::Blue)) == 3, "blue");
+    assert!(optional(Option::Some(Color::Green)) == 2, "green");
+    assert!(optional(Option::Some(Color::Red)) == 1, "red falls to `_`");
+    assert!(optional(Option::None) == 0, "none");
 }
 
 test("nested unit variants beside bindings in a tuple payload") {
-    assert(describe(Shape::Dot(Color::Red)) == 1, "dot red")?;
-    assert(describe(Shape::Dot(Color::Blue)) == 2, "dot blue")?;
-    assert(describe(Shape::Line(Color::Green, 5)) == 15, "line green")?;
-    assert(describe(Shape::Line(Color::Red, 5)) == 25, "line red")?;
+    assert!(describe(Shape::Dot(Color::Red)) == 1, "dot red");
+    assert!(describe(Shape::Dot(Color::Blue)) == 2, "dot blue");
+    assert!(describe(Shape::Line(Color::Green, 5)) == 15, "line green");
+    assert!(describe(Shape::Line(Color::Red, 5)) == 25, "line red");
 }
 
 test("builtin IoError variants nested in Result::Err") {
@@ -96,7 +97,7 @@ test("builtin IoError variants nested in Result::Err") {
         Result::Ok(_) => Result::Ok(1),
         Result::Err(e) => Result::Err(e),
     };
-    assert(io_kind(r) == "NotFound", "missing file is NotFound, not the first arm")?;
+    assert!(io_kind(r) == "NotFound", "missing file is NotFound, not the first arm");
 }
 
 fn pair(Pair p) -> int {
@@ -118,23 +119,23 @@ fn slot(Slot s) -> int {
 }
 
 test("two nested variants in one arm") {
-    assert(pair(Pair::Two(Color::Red, Color::Red)) == 1, "red red")?;
-    assert(pair(Pair::Two(Color::Red, Color::Green)) == 2, "red green")?;
-    assert(pair(Pair::Two(Color::Green, Color::Blue)) == 3, "green blue")?;
-    assert(pair(Pair::Two(Color::Green, Color::Green)) == 4, "green green")?;
+    assert!(pair(Pair::Two(Color::Red, Color::Red)) == 1, "red red");
+    assert!(pair(Pair::Two(Color::Red, Color::Green)) == 2, "red green");
+    assert!(pair(Pair::Two(Color::Green, Color::Blue)) == 3, "green blue");
+    assert!(pair(Pair::Two(Color::Green, Color::Green)) == 4, "green green");
 }
 
 test("record payload with a nested variant") {
-    assert(pair(Pair::Tagged { color: Color::Green, n: 5 }) == 105, "green")?;
-    assert(pair(Pair::Tagged { color: Color::Blue, n: 5 }) == 205, "blue")?;
+    assert!(pair(Pair::Tagged { color: Color::Green, n: 5 }) == 105, "green");
+    assert!(pair(Pair::Tagged { color: Color::Blue, n: 5 }) == 205, "blue");
 }
 
 test("Option::None nested in a multi-field payload") {
-    assert(slot(Slot::Pos(Option::None, 7)) == 7, "none")?;
-    assert(slot(Slot::Pos(Option::Some(1), 7)) == -7, "some")?;
+    assert!(slot(Slot::Pos(Option::None, 7)) == 7, "none");
+    assert!(slot(Slot::Pos(Option::Some(1), 7)) == -7, "some");
 }
 
 test("Option tags nested in a single-field payload") {
-    assert(wrapped(Wrap::A(Option::None)) == 1, "none")?;
-    assert(wrapped(Wrap::A(Option::Some(5))) == 2, "some")?;
+    assert!(wrapped(Wrap::A(Option::None)) == 1, "none");
+    assert!(wrapped(Wrap::A(Option::Some(5))) == 2, "some");
 }

@@ -1,5 +1,7 @@
 // Ground trait calls whose arguments or result are user enums: the enum
 // word passes boxed, as the instance entry takes it.
+use tests::assert;
+
 enum Shape {
     Dot,
     Circle(int),
@@ -40,11 +42,11 @@ fn measured(int n) -> int {
 }
 
 test("static trait method returning an enum") {
-    assert(area(built(0)) == 0)?;
-    assert(area(built(2)) == 12)?;
+    assert!(area(built(0)) == 0);
+    assert!(area(built(2)) == 12);
 }
 
 test("function-style trait call on an enum") {
-    assert(measured(1) == 3)?;
-    assert(measured(0) == 0)?;
+    assert!(measured(1) == 3);
+    assert!(measured(0) == 0);
 }

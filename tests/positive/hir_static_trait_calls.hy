@@ -1,6 +1,8 @@
 // Static trait methods: `Owner::m(..)` at a concrete owner calls the
 // instance directly; `T::m(..)` under a bound goes through the dictionary
 // or, in a mono clone, the concrete instance.
+use tests::assert;
+
 trait Make<S> {
     static fn make(int n) -> S {}
     static fn tag() -> int {}
@@ -35,9 +37,9 @@ fn tags<T: Make>(T x) -> int {
 }
 
 test("static trait methods") {
-    assert(Coin::make(4).v == 8)?;
-    assert(Coin::tag() + int::tag() == 10)?;
-    assert(int::make(5) == 6)?;
-    assert(tags(new Coin(1)) == 70)?;
-    assert(tags(2) == 30)?;
+    assert!(Coin::make(4).v == 8);
+    assert!(Coin::tag() + int::tag() == 10);
+    assert!(int::make(5) == 6);
+    assert!(tags(new Coin(1)) == 70);
+    assert!(tags(2) == 30);
 }

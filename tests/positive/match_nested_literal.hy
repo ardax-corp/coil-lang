@@ -1,6 +1,7 @@
 // #595: a literal or constructor nested in a constructor pattern is a test,
 // not a wildcard. `Some(200)` matches only 200, and a miss falls through to
 // the next arm, even one with another outer tag (`default`, a binding).
+use tests::assert;
 
 enum Color {
     Red,
@@ -122,51 +123,51 @@ fn first_three(Vec<Option<int>> items) -> int {
 }
 
 test("nested integer literal is a test, not a wildcard") {
-    assert(status(Option::Some(500)) == "not 200")?;
-    assert(status(Option::Some(200)) == "200")?;
-    assert(status(Option::None) == "not 200")?;
-    assert(code(Option::Some(200)) == "two hundred")?;
-    assert(code(Option::Some(404)) == "four oh four")?;
-    assert(code(Option::Some(7)) == "other")?;
-    assert(code(Option::None) == "none")?;
+    assert!(status(Option::Some(500)) == "not 200");
+    assert!(status(Option::Some(200)) == "200");
+    assert!(status(Option::None) == "not 200");
+    assert!(code(Option::Some(200)) == "two hundred");
+    assert!(code(Option::Some(404)) == "four oh four");
+    assert!(code(Option::Some(7)) == "other");
+    assert!(code(Option::None) == "none");
 }
 
 test("nested variant miss falls through to a later arm") {
-    assert(red_or_rest(Option::Some(Color::Red)) == "red")?;
-    assert(red_or_rest(Option::Some(Color::Green)) == "rest")?;
-    assert(red_or_rest(Option::None) == "rest")?;
-    assert(level(Option::Some(Level::High)) == 2)?;
-    assert(level(Option::Some(Level::Low)) == 1)?;
-    assert(level(Option::None) == 0)?;
+    assert!(red_or_rest(Option::Some(Color::Red)) == "red");
+    assert!(red_or_rest(Option::Some(Color::Green)) == "rest");
+    assert!(red_or_rest(Option::None) == "rest");
+    assert!(level(Option::Some(Level::High)) == 2);
+    assert!(level(Option::Some(Level::Low)) == 1);
+    assert!(level(Option::None) == 0);
 }
 
 test("literals in tuple and record payloads") {
-    assert(moves(Msg::Move(0, 0)) == 0)?;
-    assert(moves(Msg::Move(0, 5)) == 5)?;
-    assert(moves(Msg::Move(4, 0)) == 40)?;
-    assert(moves(Msg::Move(4, 5)) == 405)?;
-    assert(moves(Msg::Paint { color: Color::Red, times: 3 }) == 300)?;
-    assert(moves(Msg::Paint { color: Color::Red, times: 4 }) == 4)?;
-    assert(moves(Msg::Paint { color: Color::Green, times: 3 }) == 3)?;
-    assert(second(Msg::Move(3, 4)) == 4)?;
-    assert(second(Msg::Paint { color: Color::Red, times: 6 }) == 6)?;
+    assert!(moves(Msg::Move(0, 0)) == 0);
+    assert!(moves(Msg::Move(0, 5)) == 5);
+    assert!(moves(Msg::Move(4, 0)) == 40);
+    assert!(moves(Msg::Move(4, 5)) == 405);
+    assert!(moves(Msg::Paint { color: Color::Red, times: 3 }) == 300);
+    assert!(moves(Msg::Paint { color: Color::Red, times: 4 }) == 4);
+    assert!(moves(Msg::Paint { color: Color::Green, times: 3 }) == 3);
+    assert!(second(Msg::Move(3, 4)) == 4);
+    assert!(second(Msg::Paint { color: Color::Red, times: 6 }) == 6);
 }
 
 test("doubly nested patterns") {
-    assert(deep(Option::Some(Option::Some(1))) == 1)?;
-    assert(deep(Option::Some(Option::Some(5))) == 105)?;
-    assert(deep(Option::Some(Option::None)) == -1)?;
-    assert(deep(Option::None) == -2)?;
+    assert!(deep(Option::Some(Option::Some(1))) == 1);
+    assert!(deep(Option::Some(Option::Some(5))) == 105);
+    assert!(deep(Option::Some(Option::None)) == -1);
+    assert!(deep(Option::None) == -2);
 }
 
 test("niche-encoded payloads") {
-    assert(niche(Result::Ok(Option::Some("s"))) == "s")?;
-    assert(niche(Result::Ok(Option::None)) == "none")?;
-    assert(niche(Result::Err(7)) == "seven")?;
-    assert(niche(Result::Err(8)) == "err")?;
-    assert(niche_err(Result::Err(Option::Some("bad"))) == "bad")?;
-    assert(niche_err(Result::Err(Option::None)) == "no error text")?;
-    assert(niche_err(Result::Ok("fine")) == "fine")?;
+    assert!(niche(Result::Ok(Option::Some("s"))) == "s");
+    assert!(niche(Result::Ok(Option::None)) == "none");
+    assert!(niche(Result::Err(7)) == "seven");
+    assert!(niche(Result::Err(8)) == "err");
+    assert!(niche_err(Result::Err(Option::Some("bad"))) == "bad");
+    assert!(niche_err(Result::Err(Option::None)) == "no error text");
+    assert!(niche_err(Result::Ok("fine")) == "fine");
 }
 
 test("statement match in a loop, if let and while let") {
@@ -175,12 +176,12 @@ test("statement match in a loop, if let and while let") {
     items.push(Option::Some(2));
     items.push(Option::None);
     items.push(Option::Some(1));
-    assert(count_hits(items) == 102)?;
+    assert!(count_hits(items) == 102);
     let threes: Vec<Option<int>> = Vec::new();
     threes.push(Option::Some(3));
     threes.push(Option::Some(3));
     threes.push(Option::Some(4));
-    assert(first_three(threes) == 2)?;
+    assert!(first_three(threes) == 2);
     let hit = 0;
     if let Option::Some(42) = Option::Some(42) {
         hit = 1;
@@ -188,5 +189,5 @@ test("statement match in a loop, if let and while let") {
     if let Option::Some(42) = Option::Some(41) {
         hit = 10;
     }
-    assert(hit == 1)?;
+    assert!(hit == 1);
 }

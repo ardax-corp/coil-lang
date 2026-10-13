@@ -1,5 +1,6 @@
 // A `for` over a small array literal boxes its frame slots once, right
 // before the statement that holds the loop.
+use tests::assert;
 
 test("for over a literal") {
     let xs = [3, 4, 5];
@@ -7,7 +8,7 @@ test("for over a literal") {
     for x in xs {
         s = s + x;
     }
-    assert(s == 12)?;
+    assert!(s == 12);
 }
 
 test("indexed first, then iterated twice") {
@@ -20,7 +21,7 @@ test("indexed first, then iterated twice") {
     for x in xs {
         s = s + x;
     }
-    assert(s == 30)?;
+    assert!(s == 30);
 }
 
 test("for inside a branch") {
@@ -31,14 +32,14 @@ test("for inside a branch") {
             s = s + x;
         }
     }
-    assert(s == 6)?;
+    assert!(s == 6);
 }
 
 test("writes after the loop reach the boxed array") {
     let xs = [1, 1];
     for x in xs {
-        assert(x == 1)?;
+        assert!(x == 1);
     }
     xs[1] = 7;
-    assert(xs[0] + xs[1] == 8)?;
+    assert!(xs[0] + xs[1] == 8);
 }

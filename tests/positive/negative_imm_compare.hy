@@ -1,5 +1,6 @@
 // A compare-and-branch or op-and-store fused against a small negative
 // literal (`n >= -32`, `m = n + -3`) keeps the literal's sign.
+use tests::assert;
 
 fn bucket(int n) -> int {
     if n >= 0 {
@@ -31,15 +32,15 @@ fn shift(int n) -> int {
 }
 
 test("negative immediates keep their sign") {
-    assert(bucket(5) == 1)?;
-    assert(bucket(500) == 2)?;
-    assert(bucket(-5) == 3)?;
-    assert(bucket(-32) == 3)?;
-    assert(bucket(-100) == 4)?;
-    assert(bucket(-1000) == 5)?;
-    assert(below(-2))?;
-    assert(!below(-1))?;
-    assert(!below(3))?;
-    assert(shift(10) == -14)?;
-    assert(shift(-1) == 8)?;
+    assert!(bucket(5) == 1);
+    assert!(bucket(500) == 2);
+    assert!(bucket(-5) == 3);
+    assert!(bucket(-32) == 3);
+    assert!(bucket(-100) == 4);
+    assert!(bucket(-1000) == 5);
+    assert!(below(-2));
+    assert!(!below(-1));
+    assert!(!below(3));
+    assert!(shift(10) == -14);
+    assert!(shift(-1) == 8);
 }

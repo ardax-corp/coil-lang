@@ -2,6 +2,8 @@
 // heap `E`, a one-field enum with a class variant) in bodies lowered
 // straight from HIR to MIR: the payload is an opaque word that only moves,
 // and arms that bind it as a heap value stay with HIR emission.
+use tests::assert;
+
 class Fault {
     pub code: int,
 }
@@ -59,13 +61,17 @@ fn ok_or(int n, int fallback) -> int {
 }
 
 test("heap payload pairs in direct MIR") {
-    assert(ok_or(6, -1) == 30)?;
-    assert(ok_or(7, -1) == -1)?;
+    assert!(ok_or(6, -1) == 30);
+    assert!(ok_or(7, -1) == -1);
     match pass(20) {
-        Result::Ok(_) => assert(false)?,
-        Result::Err(f) => assert(f.code == 6)?,
+        Result::Ok(_) => {
+            assert!(false);
+        },
+        Result::Err(f) => {
+            assert!(f.code == 6);
+        },
     }
-    assert(area(5) == 25)?;
-    assert(area(-3) == -3)?;
-    assert(area(0) == 0)?;
+    assert!(area(5) == 25);
+    assert!(area(-3) == -3);
+    assert!(area(0) == 0);
 }

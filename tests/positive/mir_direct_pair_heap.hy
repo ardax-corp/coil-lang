@@ -1,5 +1,7 @@
 // Heap payloads in two-word results, and enum values kept boxed in one
 // local, in bodies lowered straight from HIR to MIR.
+use tests::assert;
+
 class Fault {
     pub code: int,
 }
@@ -48,8 +50,8 @@ fn apply(Shape -> int f, Shape s) -> int {
 }
 
 test("heap payloads in pairs in direct MIR") {
-    assert(code_of(twice(9, 3)) == 6)?;
-    assert(code_of(twice(7, 0)) == -7)?;
-    assert(apply(side, Shape::Square(4)) == 4)?;
-    assert(apply(side, Shape::Dot) == 0)?;
+    assert!(code_of(twice(9, 3)) == 6);
+    assert!(code_of(twice(7, 0)) == -7);
+    assert!(apply(side, Shape::Square(4)) == 4);
+    assert!(apply(side, Shape::Dot) == 0);
 }

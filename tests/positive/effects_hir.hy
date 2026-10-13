@@ -2,6 +2,7 @@
 // higher-order function is pure, so the counted loops below may split
 // across tasks; one whose lambda writes a static stays sequential. Both
 // must fold to the sequential sum.
+use tests::assert;
 use collections::vec::map;
 
 static let HITS: int = 0;
@@ -28,7 +29,7 @@ test("a loop over a function that maps a pure lambda") {
     for i in 0..100000 {
         acc = acc + score(i);
     }
-    assert(acc == 20000000000)?;
+    assert!(acc == 20000000000);
 }
 
 test("a loop over a function that maps an impure lambda") {
@@ -36,6 +37,6 @@ test("a loop over a function that maps an impure lambda") {
     for i in 0..1000 {
         acc = acc + score_counted(i);
     }
-    assert(acc == 2000000)?;
-    assert(HITS == 2000)?;
+    assert!(acc == 2000000);
+    assert!(HITS == 2000);
 }

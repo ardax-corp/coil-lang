@@ -1,4 +1,5 @@
 // LICM + integer SR (#315): nested invariant chains and i*c stay exact.
+use tests::assert;
 
 fn nested_chains(int n) -> int {
     let s = 0;
@@ -27,15 +28,15 @@ fn iv_mul(int n, int c) -> int {
 
 test("nested invariant chains") {
     // Each inner step adds (n*3+1) + (n*5+2) = 8n+3, n^2 times.
-    assert(nested_chains(3) == 243)?;
-    assert(nested_chains(1) == 11)?;
-    assert(nested_chains(0) == 0)?;
+    assert!(nested_chains(3) == 243);
+    assert!(nested_chains(1) == 11);
+    assert!(nested_chains(0) == 0);
 }
 
 test("integer iv times const") {
-    assert(iv_mul(10, 3) == 135)?;
-    assert(iv_mul(1, 9) == 0)?;
-    assert(iv_mul(0, 4) == 0)?;
+    assert!(iv_mul(10, 3) == 135);
+    assert!(iv_mul(1, 9) == 0);
+    assert!(iv_mul(0, 4) == 0);
 }
 
 fn id(int n) -> int {
@@ -53,6 +54,6 @@ fn sum_id(int n, int k) -> int {
 }
 
 test("invariant pure call") {
-    assert(sum_id(10, 3) == 30)?;
-    assert(sum_id(0, 9) == 0)?;
+    assert!(sum_id(10, 3) == 30);
+    assert!(sum_id(0, 9) == 0);
 }

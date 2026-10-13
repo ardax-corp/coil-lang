@@ -1,5 +1,6 @@
 // A call through a function value whose result is a one-word enum gets
 // that word back, as a direct call does.
+use tests::assert;
 
 fn check(int x) -> Result<(), string> {
     if x < 0 {
@@ -21,17 +22,17 @@ fn run(int -> Result<(), string> f, int x) -> string {
 
 test("closure over a unit result") {
     let f = fn (int x) => check(x);
-    assert(err_of(f(-5)) == "neg")?;
-    assert(err_of(f(5)) == "")?;
+    assert!(err_of(f(-5)) == "neg");
+    assert!(err_of(f(5)) == "");
 }
 
 test("function value parameter") {
-    assert(run(check, -1) == "neg")?;
-    assert(run(fn (int x) => check(x + 10), -3) == "")?;
+    assert!(run(check, -1) == "neg");
+    assert!(run(fn (int x) => check(x + 10), -3) == "");
 }
 
 test("result of a closure with ?") {
     let f = fn (int x) => check(x);
     f(1)?;
-    assert(err_of(f(-2)) == "neg")?;
+    assert!(err_of(f(-2)) == "neg");
 }

@@ -1,3 +1,4 @@
+use tests::assert;
 use fn_macros::{square, check, sum, quad, describe, counter, swap, ensure, count};
 
 class Clicks {
@@ -28,29 +29,57 @@ fn id(int x) -> int {
 }
 
 test("expression position keeps each argument whole") {
-    assert(3 * 3 == 9)?;
-    assert((1 + 2) * (1 + 2) == 9)?;
-    assert(id(4) * id(4) - 1 == 15)?;
+    if !(3 * 3 == 9) {
+        raise "Assertion: 'square!(3) == 9' failed";
+    }
+    if !((1 + 2) * (1 + 2) == 9) {
+        raise "Assertion: 'square!(1 + 2) == 9' failed";
+    }
+    if !(id(4) * id(4) - 1 == 15) {
+        raise "Assertion: 'square!(id(4)) - 1 == 15' failed";
+    }
 }
 
 test("a last Vec<Expr> parameter takes the rest") {
-    assert(0 == 0)?;
-    assert(7 == 7)?;
-    assert(1 + 2 + (3 * 4) == 15)?;
+    if !(0 == 0) {
+        raise "Assertion: 'sum!() == 0' failed";
+    }
+    if !(7 == 7) {
+        raise "Assertion: 'sum!(7) == 7' failed";
+    }
+    if !(1 + 2 + (3 * 4) == 15) {
+        raise "Assertion: 'sum!(1, 2, 3 * 4) == 15' failed";
+    }
 }
 
 test("macros in a macro's output expand next round") {
-    assert((2 * 2) * (2 * 2) == 16)?;
-    assert((3 * 3) * (3 * 3) == 81)?;
+    if !((2 * 2) * (2 * 2) == 16) {
+        raise "Assertion: 'quad!(2) == 16' failed";
+    }
+    if !((3 * 3) * (3 * 3) == 81) {
+        raise "Assertion: 'square!(square!(3)) == 81' failed";
+    }
 }
 
 test("arguments arrive with their source text and kind") {
-    assert("call: id(1)" == "call: id(1)")?;
-    assert("ident: x" == "ident: x")?;
-    assert("path: a.b" == "path: a.b")?;
-    assert("other: 1 + 2" == "other: 1 + 2")?;
-    assert("literal: \"hi\"" == "literal: \"hi\"")?;
-    assert("literal: -3" == "literal: -3")?;
+    if !("call: id(1)" == "call: id(1)") {
+        raise "Assertion: 'describe!(id(1)) == \"call: id(1)\"' failed";
+    }
+    if !("ident: x" == "ident: x") {
+        raise "Assertion: 'describe!(x) == \"ident: x\"' failed";
+    }
+    if !("path: a.b" == "path: a.b") {
+        raise "Assertion: 'describe!(a.b) == \"path: a.b\"' failed";
+    }
+    if !("other: 1 + 2" == "other: 1 + 2") {
+        raise "Assertion: 'describe!(1 + 2) == \"other: 1 + 2\"' failed";
+    }
+    if !("literal: \"hi\"" == "literal: \"hi\"") {
+        raise "Assertion: 'describe!(\"hi\") == \"literal: \\\"hi\\\"\"' failed";
+    }
+    if !("literal: -3" == "literal: -3") {
+        raise "Assertion: 'describe!(-3) == \"literal: -3\"' failed";
+    }
 }
 
 test("statement position: the output is statements") {
@@ -62,7 +91,9 @@ test("statement position: the output is statements") {
     let tmp__m = a;
     a = b;
     b = tmp__m;
-    assert(a == 2 && b == 1)?;
+    if !(a == 2 && b == 1) {
+        raise "Assertion: 'a == 2 && b == 1' failed";
+    }
     let tmp = 100;
     let tmp__m = a;
     a = b;
@@ -70,23 +101,37 @@ test("statement position: the output is statements") {
     let tmp__m = a;
     a = b;
     b = tmp__m;
-    assert(a == 2 && b == 1 && tmp == 100)?;
+    if !(a == 2 && b == 1 && tmp == 100) {
+        raise "Assertion: 'a == 2 && b == 1 && tmp == 100' failed";
+    }
 }
 
 test("item position: the output is declarations") {
     let c = new Clicks(0);
     c.bump();
-    assert(c.bump() == 2)?;
+    if !(c.bump() == 2) {
+        raise "Assertion: 'c.bump() == 2' failed";
+    }
 }
 
 test("a macro overloads by arity") {
-    assert(fn_macros::ensure_result(1 + 1 == 2, "ensure failed: 1 + 1 == 2") == Result::Ok(()))?;
-    assert(
-        fn_macros::ensure_result(1 > 2, "ensure failed: 1 > 2") ==
-        Result::Err("ensure failed: 1 > 2"),
-    )?;
-    assert(fn_macros::ensure_result(1 > 2, "custom") == Result::Err("custom"))?;
-    assert(0 == 0)?;
-    assert(1 == 1)?;
-    assert(3 == 3)?;
+    if !(fn_macros::ensure_result(1 + 1 == 2, "ensure failed: 1 + 1 == 2") == Result::Ok(())) {
+        raise "Assertion: 'ensure!(1 + 1 == 2) == Result::Ok(())' failed";
+    }
+    if !(fn_macros::ensure_result(1 > 2, "ensure failed: 1 > 2") ==
+         Result::Err("ensure failed: 1 > 2")) {
+        raise "Assertion: 'ensure!(1 > 2) == Result::Err(\"ensure failed: 1 > 2\")' failed";
+    }
+    if !(fn_macros::ensure_result(1 > 2, "custom") == Result::Err("custom")) {
+        raise "Assertion: 'ensure!(1 > 2, \"custom\") == Result::Err(\"custom\")' failed";
+    }
+    if !(0 == 0) {
+        raise "Assertion: 'count!() == 0' failed";
+    }
+    if !(1 == 1) {
+        raise "Assertion: 'count!(a) == 1' failed";
+    }
+    if !(3 == 3) {
+        raise "Assertion: 'count!(a, b + c, d) == 3' failed";
+    }
 }

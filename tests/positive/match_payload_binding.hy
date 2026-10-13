@@ -1,6 +1,8 @@
 // Match payloads land where the scrutinee sat, whatever the arm reads first.
 // Inlined helpers let slot promotion drop the binding copies, so an arm may
 // start with a constant or with its second field.
+use tests::assert;
+
 enum Shape {
     Circle(int),
     Rect(int, int),
@@ -41,22 +43,22 @@ test("dense-built payload keeps declaration order") {
         Shape::Circle(r) => r,
         Shape::Rect(a, b) => a * 1000 + b,
     };
-    assert(w == 3031)?;
+    assert!(w == 3031);
 }
 
 test("arm opening with a constant still binds its payload") {
-    assert(measure(1, pick(2)) == 1 + 17 + 1000)?;
-    assert(measure(1, Shape::Circle(41)) == 1042)?;
+    assert!(measure(1, pick(2)) == 1 + 17 + 1000);
+    assert!(measure(1, Shape::Circle(41)) == 1042);
 }
 
 test("last arm reading its second field first") {
-    assert(measure(1, pick(4)) == 1 + 400 + 41)?;
-    assert(measure(2, Shape::Rect(6, 9)) == 2 + 609)?;
+    assert!(measure(1, pick(4)) == 1 + 400 + 41);
+    assert!(measure(2, Shape::Rect(6, 9)) == 2 + 609);
 }
 
 test("payloads above scalarized tuple slots") {
-    assert(measure_after_tuple(1, pick(1)) == 1 + 11 + 21 + 20)?;
-    assert(measure_after_tuple(3, pick(3)) == 3 + 13 + 23 + 28)?;
+    assert!(measure_after_tuple(1, pick(1)) == 1 + 11 + 21 + 20);
+    assert!(measure_after_tuple(3, pick(3)) == 3 + 13 + 23 + 28);
 }
 
 enum Quad {
@@ -82,6 +84,6 @@ fn named(int i) -> int {
 }
 
 test("payload args with inlined calls keep their order") {
-    assert(quad(1) == 1234)?;
-    assert(named(1) == 123)?;
+    assert!(quad(1) == 1234);
+    assert!(named(1) == 123);
 }

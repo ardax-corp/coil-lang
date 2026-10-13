@@ -1,5 +1,7 @@
 // One frame holding 400 pushed elements before `MakeArray`: wider than the
 // default operand stack, with no recursion for the depth analysis to see.
+use tests::assert;
+
 fn wide_sum() -> int {
     let a = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -32,5 +34,5 @@ fn wide_sum() -> int {
 }
 
 test("frame wider than the default stack") {
-    assert(wide_sum() == 79800)?;
+    assert!(wide_sum() == 79800);
 }

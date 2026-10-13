@@ -1,5 +1,6 @@
 // A word popped above the cursor and exposed again by a cursor-raising
 // store is not a must-pointer: a collection in between left it stale (#775).
+use tests::assert;
 use string::format;
 
 fn word(int idx) -> string {
@@ -24,5 +25,5 @@ fn count_hits(int n) -> int {
 }
 
 test("string == on call results in a loop") {
-    assert(count_hits(3) == 3)?;
+    assert!(count_hits(3) == 3);
 }
