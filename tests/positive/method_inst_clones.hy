@@ -4,6 +4,7 @@
 // shared body stays for the other calls. Arguments and results that do not
 // fit a clone (pairs, open types) still reach the shared body.
 use string::format;
+use tests::assert;
 
 class Node<T> {
     pub value: T,
@@ -100,12 +101,12 @@ fn sum_ints(int n) -> int {
 }
 
 test("generic class methods at int") {
-    assert(sum_ints(100) == 4950)?;
+    assert!(sum_ints(100) == 4950);
     let s: Stack<int> = Stack::empty();
     s.push(7);
     s.push(9);
-    assert(s.top() == 9 && s.size == 2)?;
-    assert(s.both(1) == (1, 9))?;
+    assert!(s.top() == 9 && s.size == 2);
+    assert!(s.both(1) == (1, 9));
 }
 
 test("generic class methods at string survive allocation") {
@@ -115,26 +116,26 @@ test("generic class methods at string survive allocation") {
         s.push(format("s%v", i));
         i = i + 1;
     }
-    assert(s.top() == "s299")?;
-    assert((s.pop() ?? "") == "s299")?;
-    assert(s.size == 299)?;
+    assert!(s.top() == "s299");
+    assert!((s.pop() ?? "") == "s299");
+    assert!(s.size == 299);
 }
 
 test("generic class methods at float and bool") {
     let f: Stack<float> = Stack::empty();
     f.push(1.5);
-    assert(f.top() == 1.5)?;
+    assert!(f.top() == 1.5);
     let b: Stack<bool> = Stack::empty();
-    assert(b.pop() == Option::None)?;
+    assert!(b.pop() == Option::None);
     b.push(true);
-    assert(b.pop() == Option::Some(true))?;
+    assert!(b.pop() == Option::Some(true));
 }
 
 test("generic methods of a plain class") {
     let sc = new Scale(1);
-    assert(sc.read(4) == 9)?;
-    assert(sc.read("abc") == 4)?;
-    assert(Scale::of(5) == 10)?;
-    assert(sc.pick(false, "a", "b") == "b")?;
-    assert(sc.pick(true, 3, 4) == 3)?;
+    assert!(sc.read(4) == 9);
+    assert!(sc.read("abc") == 4);
+    assert!(Scale::of(5) == 10);
+    assert!(sc.pick(false, "a", "b") == "b");
+    assert!(sc.pick(true, 3, 4) == 3);
 }
