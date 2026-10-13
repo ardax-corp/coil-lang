@@ -1363,7 +1363,7 @@ impl Lower<'_> {
             AggregateOp::Div => Some(MirBinOp::Div),
             AggregateOp::Mod => Some(MirBinOp::Rem),
             AggregateOp::Neg => None,
-            AggregateOp::Pow => return Err("aggregate pow".into()),
+            AggregateOp::Pow => Some(MirBinOp::Pow),
         };
         let float = match info.kind {
             K::ZipTuple { elem_is_float, .. }
@@ -1822,16 +1822,27 @@ impl Lower<'_> {
             // location, as HIR emission. A failed `requires` (a second
             // argument) blames the caller through `contract_fail`.
             HirKind::Builtin { op: Builtin::Panic, args } => {
-                let [msg] = args.as_slice() else {
-                    return Err("panic blame".into());
+                let (msg, blame) = match args.as_slice() {
+                    [msg] => (*msg, false),
+                    [msg, _] => (*msg, true),
+                    _ => return Err("panic arguments".into()),
                 };
                 self.at_expr(id, |l| {
-                    let Some(m) = l.word(*msg)? else {
+                    let Some(m) = l.word(msg)? else {
                         return Ok(Val::Never);
                     };
                     if l.b.value_ty(m) != MirTy::HeapRef {
                         return Err("panic message".into());
                     }
+                    // `contract_fail` reads the caller's frame, so it runs
+                    // here in this body's own frame, as HIR emission's.
+                    let m = if blame {
+                        let native = super::host_allow::host_edge_spec_by_name(common::CONTRACT_FAIL_NATIVE).ok_or("panic blame native")?.id;
+                        let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+                        l.b.ins_host_invoke_as(native, vec![m], layout, Some(MirTy::HeapRef)).map_err(mir)?
+                    } else {
+                        m
+                    };
                     l.b.panic(m).map_err(mir)?;
                     Ok(Val::Never)
                 })
@@ -2553,7 +2564,7 @@ impl Lower<'_> {
             BinOp::BitAnd => Some(MirBinOp::BitAnd),
             BinOp::BitOr => Some(MirBinOp::BitOr),
             BinOp::BitXor => Some(MirBinOp::Xor),
-            BinOp::FloatPow => Some(MirBinOp::Pow),
+            BinOp::IntPow | BinOp::FloatPow => Some(MirBinOp::Pow),
             _ => None,
         };
         let cmp = match op {
