@@ -817,6 +817,10 @@ impl<'a> Parser<'a> {
                     self.expect(',')?;
                     args.push(self.value()?);
                 }
+                // A thread spawn's own arguments follow its function.
+                while super::host_allow::host_variadic(spec.id) && self.eat(',') {
+                    args.push(self.value()?);
+                }
             }
             ensure_ty(types, dest, spec.ret);
             return Ok(MirInst::HostInvoke {

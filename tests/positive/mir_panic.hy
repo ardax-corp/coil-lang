@@ -4,6 +4,7 @@
 // carries the message.
 use tests::assert;
 use task::{scope, Scope, TaskError};
+use tests::assert;
 
 fn checked(int n) -> int {
     if n < 0 {

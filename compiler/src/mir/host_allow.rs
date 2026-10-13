@@ -107,6 +107,15 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
     })
 }
 
+/// A native taking more arguments than its declared arity: a thread spawn
+/// passes the function's own arguments after it.
+pub fn host_variadic(id: u16) -> bool {
+    matches!(
+        HOST_NATIVES.get(id as usize).map(|n| n.name),
+        Some("thread_spawn" | "thread_spawn_shared")
+    )
+}
+
 /// Whether `actual` may feed a HostInvoke argument typed `expected`.
 /// Generic word edges (no precise [`host_spec`]) take any Value word, and a
 /// heap pointer is one; precise math / packed specs stay exact.
