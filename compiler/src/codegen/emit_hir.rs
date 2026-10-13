@@ -970,7 +970,9 @@ impl Compiler {
         // moves; a generic class's shared method sees its class's
         // parameters as type variables too.
         let is_var = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
-        let opaque_vars = hir.is_generic || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var));
+        let opaque_vars = hir.is_generic
+            || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var))
+            || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -1049,10 +1051,14 @@ impl Compiler {
         // ground type with a niche layout of its own it converts there.
         let open_niche = |fty: &Ty, at: &Ty| {
             let at_layout = crate::typechecking::value_layout::value_layout(checker, at);
+            // A bare parameter (`item: T`) holds a niche value as its
+            // boxed enum object too.
+            let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
             (Self::ty_has_var(fty)
-                && field_word(fty) == Some(crate::mir::MirTy::HeapRef)
-                && crate::typechecking::value_layout::value_layout(checker, fty) == ValueLayout::Boxed
-                && crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::hir::layout::Layout::Word
+                && (bare
+                    || (field_word(fty) == Some(crate::mir::MirTy::HeapRef)
+                        && crate::typechecking::value_layout::value_layout(checker, fty) == ValueLayout::Boxed
+                        && crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::hir::layout::Layout::Word))
                 && at_layout != ValueLayout::Boxed)
                 .then_some(at_layout)
         };
@@ -1074,7 +1080,10 @@ impl Compiler {
                     // A generic class's field (`item: T`) at a ground
                     // receiver (`Box<int>`): its slot holds the boxed-layout
                     // word of the field's type there.
-                    let at = self.hir_class_ty_args_at(Self::hir_ty(hir, *base)?, &fty)?;
+                    let base_ty = Self::hir_ty(hir, *base)?;
+                    let at = self
+                        .hir_class_ty_args_at(base_ty, &fty)
+                        .or_else(|| self.hir_clone_self_field_at(base_ty, &fty, e.ty.as_ref()?))?;
                     field_word(&at)
                 })
                 && e.ty.as_ref().and_then(field_word) == Some(w)
@@ -2891,7 +2900,8 @@ impl Compiler {
         for &arg in args {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-generic")?;
             let ty = apply_ty_prune(self.checker.subst(), ty);
-            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+            // A ground closure argument is one word the clone calls as is.
+            if !(crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty)) {
                 return Err("callee-generic");
             }
             arg_tys.push(ty);
@@ -5540,6 +5550,23 @@ impl Compiler {
                 .map(|(name, ty)| (name, open_params(&ty, params)))
                 .collect(),
         )
+    }
+
+    /// A generic class's field read through `self` in an instance clone
+    /// (`Holder::get$inst$int`): `self` is typed as the bare class, so its
+    /// arguments come from the field expression's own type, which the clone
+    /// grounds. As [`Self::hir_class_ty_args_at`], the slot holds the
+    /// boxed-layout word of the field's type there.
+    fn hir_clone_self_field_at(&self, ty: &Ty, fty: &Ty, at: &Ty) -> Option<Ty> {
+        if !self.compiling_mono_clone || !Self::ty_has_var(fty) {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        if !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Con(_)) {
+            return None;
+        }
+        let at = apply_ty_prune(self.checker.subst(), at);
+        (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
     }
 
     /// Declared field type `fty` of a generic class (its parameters opened
