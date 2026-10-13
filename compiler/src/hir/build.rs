@@ -1003,12 +1003,21 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         if !layout::is_unit(&ok) {
             return;
         }
-        let HirKind::Block { stmts, tail: None } = &b.body.exprs[root.0 as usize].kind else {
+        let unit_body = b.body.exprs[root.0 as usize].ty.as_ref().is_some_and(layout::is_unit);
+        let HirKind::Block { stmts, tail } = &mut b.body.exprs[root.0 as usize].kind else {
             return;
         };
-        let diverges = stmts.last().is_some_and(|last| {
-            matches!(b.body.exprs[last.0 as usize].ty.as_ref(), Some(Ty::Never))
-        });
+        // A unit body whose last expression's value it drops (`f()?;`) is
+        // that expression as a statement, then the fall-off.
+        if let Some(t) = *tail {
+            if !unit_body {
+                return;
+            }
+            stmts.push(t);
+            *tail = None;
+        }
+        let last = stmts.last().copied();
+        let diverges = last.is_some_and(|last| matches!(b.body.exprs[last.0 as usize].ty.as_ref(), Some(Ty::Never)));
         if diverges {
             return;
         }
