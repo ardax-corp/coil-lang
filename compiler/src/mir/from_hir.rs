@@ -1775,9 +1775,9 @@ impl Lower<'_> {
             {
                 self.fill_slots(local, *value)
             }
-            // `a[i]++` used for its value reads the old or new element.
-            HirKind::Assign { .. } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
-                Err("adjust value".into())
+            // `x++` used for its value reads the old or new `x`.
+            HirKind::Assign { place, value } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
+                self.adjust_value(id, *place, *value)
             }
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
                 self.stack_store(*place, base, index, *value)
@@ -2002,10 +2002,6 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Assign { place, value } => {
-                // `x++` used for its value reads the old or new `x`.
-                if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) {
-                    return Err("adjust value".into());
-                }
                 if let HirKind::Global { .. } = self.hir.expr(*place).kind {
                     return self.store_static(*place, *value);
                 }
@@ -3061,6 +3057,41 @@ impl Lower<'_> {
             return Err("const type".into());
         }
         Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
+    }
+
+    /// `x++` / `--x` on a local or static used for its value: the old
+    /// word, then `x ± 1` stored, the value the old (postfix) or new
+    /// (prefix) word, as HIR emission's `INC` / `DEC` on the slot.
+    fn adjust_value(&mut self, id: HirId, place: HirId, value: HirId) -> Result<Val, Refusal> {
+        let prefix = self.hir.expr(id).flags.contains(HirFlags::PREFIX);
+        let Some(old) = self.word(place)? else {
+            return Ok(Val::Never);
+        };
+        let Some(new) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        let ty = self.b.value_ty(old);
+        if !matches!(ty, MirTy::I64 | MirTy::F64) || self.b.value_ty(new) != ty {
+            return Err("adjust type".into());
+        }
+        match self.hir.expr(place).kind {
+            HirKind::Global { .. } => {
+                let slot = *self.inp.statics.get(&place.0).ok_or("adjust place")?;
+                if self.static_ty(place)? != ty {
+                    return Err("adjust type".into());
+                }
+                self.b.ins_store_static(slot, new).map_err(mir)?;
+            }
+            HirKind::Local(local) if self.pair_local(local).is_none() => {
+                if self.local_ty(local)? != ty {
+                    return Err("adjust type".into());
+                }
+                let slot = self.slot(local)?;
+                self.b.def_local(slot, new).map_err(mir)?;
+            }
+            _ => return Err("adjust place".into()),
+        }
+        Ok(Val::V(if prefix { new } else { old }))
     }
 
     /// `STATIC = v`: the value, then `StoreStatic`, as HIR emission. The
