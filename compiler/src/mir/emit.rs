@@ -1303,10 +1303,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
                 out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
-                out.push(IlOp::StorePop {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
+                if dead_drop_alloc(func, *kind, *dest) {
+                    out.push(IlOp::Pop { loc });
+                } else {
+                    out.push(IlOp::StorePop {
+                        slot: u32::from(regs[dest.index()]),
+                        loc,
+                    });
+                }
             }
         }
         MirInst::GcBarrier { dest, .. } => {
@@ -2783,6 +2787,26 @@ fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), Lower
 
 /// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
 /// the ops after the elements are pushed.
+/// A finalized enum made for its effect alone (`Conn::Open(fd);`): popped
+/// as HIR emission pops it, not kept in a slot where it would stay
+/// reachable, and its `drop` wait, until the slot is reused.
+pub(super) fn dead_drop_alloc(func: &MirFunc, kind: MirAllocKind, dest: ValueId) -> bool {
+    if !matches!(kind, MirAllocKind::DropEnum { .. }) {
+        return false;
+    }
+    let mut used = false;
+    for block in &func.blocks {
+        used |= block.insts.iter().any(|i| i.operands().contains(&dest));
+        if let Some(term) = &block.term {
+            term.clone().rewrite_values(|v| {
+                used |= v == dest;
+                v
+            });
+        }
+    }
+    !used
+}
+
 pub(super) fn il_for_alloc(
     kind: MirAllocKind,
     arity: u32,
