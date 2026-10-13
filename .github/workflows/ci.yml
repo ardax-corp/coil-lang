@@ -278,6 +278,14 @@ jobs:
           # result with it off.
           COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
+      - name: Language harness with stack IL from MIR (`COIL_MIR_FUSE=1 coil test`)
+        if: runner.os == 'Linux'
+        run: |
+          # M5g: every body with MIR takes its stack IL from that MIR
+          # (`emit_lir`) instead of the HIR stack lowering, at both levels.
+          COIL_MIR_FUSE=1 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          COIL_MIR_FUSE=1 ./target/debug/coil test -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+
       - name: Leak smoke (`coil test` under ulimit -v)
         if: runner.os == 'Linux'
         run: |
