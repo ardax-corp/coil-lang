@@ -415,10 +415,29 @@ pub(super) fn dce(func: &mut MirFunc) {
             }
         }
     }
-    for block in &mut func.blocks {
-        block
-            .insts
-            .retain(|i| i.is_phi() || i.is_effect_barrier() || traps.contains(&i.dest()) || live.contains(&i.dest()));
+    // A last match arm unpacks every payload word of its variant at once
+    // (`Unpack` takes the variant's arity), so a live payload read keeps
+    // the other reads of the same scrutinee in its block.
+    let live_ref = &live;
+    let unpacked: HashSet<(usize, ValueId)> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(b, block)| {
+            block.insts.iter().filter_map(move |i| match i {
+                MirInst::MatchPayload { dest, scrutinee, .. } if live_ref.contains(dest) => Some((b, *scrutinee)),
+                _ => None,
+            })
+        })
+        .collect();
+    for (b, block) in func.blocks.iter_mut().enumerate() {
+        block.insts.retain(|i| {
+            i.is_phi()
+                || i.is_effect_barrier()
+                || traps.contains(&i.dest())
+                || live.contains(&i.dest())
+                || matches!(i, MirInst::MatchPayload { scrutinee, .. } if unpacked.contains(&(b, *scrutinee)))
+        });
     }
 }
 
@@ -476,6 +495,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
         | MirInst::Call { .. }
+        | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
@@ -485,9 +505,11 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::StoreIndex { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
+        | MirInst::Yield { .. }
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
+        | MirInst::ClearWord { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }

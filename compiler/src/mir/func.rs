@@ -415,6 +415,17 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
+            MirInst::CallIndirect { dest, callee, args } => {
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} CallIndirect dest is not a word lane"));
+                }
+                if self.ty(*callee) != MirTy::HeapRef {
+                    return Err(format!("{dest} CallIndirect callee is not heapref"));
+                }
+                if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
+                    return Err(format!("{dest} CallIndirect arg is not a word lane"));
+                }
+            }
             MirInst::Call {
                 dest,
                 dest_hi,
@@ -487,6 +498,14 @@ impl MirFunc {
                         return Err(format!("{dest} ResumeCoro send type"));
                     }
             }
+            MirInst::Yield { dest, value, from, receive } => {
+                if !self.ty(*value).is_word_lane() || (*from && self.ty(*value) != MirTy::HeapRef) {
+                    return Err(format!("{dest} Yield value type"));
+                }
+                if (*from && *receive) || (!*receive && self.ty(*dest) != MirTy::Bool) || !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} Yield dest type"));
+                }
+            }
             MirInst::DoneCoro { dest, handle } => {
                 if self.ty(*handle) != MirTy::HeapRef {
                     return Err(format!("{dest} DoneCoro handle is not heapref"));
@@ -506,6 +525,14 @@ impl MirFunc {
                 }
                 if !self.ty(*value).is_word_lane() {
                     return Err(format!("{dest} StoreStatic value type"));
+                }
+            }
+            MirInst::ClearWord { dest, value } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} ClearWord dest is not bool"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} ClearWord value type"));
                 }
             }
             MirInst::ArrayPush {

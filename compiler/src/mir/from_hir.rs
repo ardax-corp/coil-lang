@@ -66,6 +66,17 @@ pub struct HirCallSite {
     pub pair_ret: bool,
     /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
+    /// The result is a niche `Option` / `Result` the callee returns boxed.
+    pub boxed_ret: bool,
+}
+
+/// A function value HIR emission built: `MakeFn` of a lambda's or a named
+/// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
+/// local), or `MakePolyFn` of a generic function's.
+#[derive(Clone, Debug)]
+pub struct HirFnValue {
+    pub kind: MirAllocKind,
+    pub captures: Vec<HirLocal>,
 }
 
 /// A user operator HIR emission lowered to its trait instance method's
@@ -79,12 +90,28 @@ pub struct HirOpCall {
     pub shift: bool,
 }
 
+/// A parallel loop HIR emission moved into its own fork-join function
+/// (`hir_par_loop`): the loop is a plain `CALL` of it, which takes the
+/// accumulator, the live captures and the runtime bounds and returns the
+/// new accumulator.
+#[derive(Clone, Debug)]
+pub struct HirParLoop {
+    pub target: Label,
+    /// The `int` locals passed, in order.
+    pub args: Vec<HirLocal>,
+    /// The accumulator the result is stored to.
+    pub acc: HirLocal,
+    /// The loop's index local and its value after the loop, when the loop
+    /// leaves it set.
+    pub index: Option<(HirLocal, i64)>,
+}
+
 impl HirMirInput<'_> {
     /// The MIR type of a one-word value: [`word`], a class object or a
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -183,9 +210,17 @@ pub struct HirMirInput<'a> {
     pub asserts: &'a HashMap<u32, Option<u32>>,
     /// User operators that call their trait instance method.
     pub op_calls: &'a HashMap<u32, HirOpCall>,
+    /// Parallel loops emitted as a call of their fork-join function, by
+    /// loop.
+    pub par_loops: &'a HashMap<u32, HirParLoop>,
     /// User operators with no instance: the raw opcode on the operands'
     /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
     pub op_prims: &'a HashSet<u32>,
+    /// Lambdas and functions read as values, as HIR emission built them.
+    pub fn_values: &'a HashMap<u32, HirFnValue>,
+    /// Calls through a function value HIR emission made a plain
+    /// `CallIndirect` (not a `PolyFn` call with dictionaries).
+    pub value_calls: &'a HashSet<u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -274,6 +309,9 @@ struct Lower<'a> {
     loops: Vec<Loop>,
     /// The function returns `()`: a `return` gives the VM's unit word.
     unit_ret: bool,
+    /// The type a `return` gives: a `gen fn`'s yielded type (its final
+    /// resume's word), else the declared one.
+    ret_hir: Ty,
     /// Blocks in the order lowering started filling them: source order,
     /// which is how they are laid out.
     order: Vec<BlockId>,
@@ -305,6 +343,15 @@ struct Lower<'a> {
     /// (`Some` / `Err`) and its payload word.
     known_niche: HashMap<ValueId, (bool, Option<ValueId>)>,
     raw_host: bool,
+    /// Each `defer`'s armed flag local, by its node; cleared at entry.
+    defer_flags: HashMap<u32, LocalId>,
+    /// The `defer`s lowered so far, in source order: flag and body. A
+    /// `return` runs these (HIR emission registers its thunks as it meets
+    /// them, so an earlier `return` runs none of the later ones).
+    defers: Vec<(LocalId, HirId)>,
+    /// `let`s in a `defer` body, which HIR emission slots in the thunk's
+    /// own frame: a temp each.
+    defer_locals: HashMap<u32, LocalId>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -403,6 +450,15 @@ fn ty_kind(ty: &Ty) -> &'static str {
     }
 }
 
+/// A function type: its values are `ObjFn` / `PolyFn` heap words.
+fn is_fn(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Fun(..) => true,
+        Ty::Forall { body, .. } => matches!(strip_readonly(body), Ty::Fun(..)),
+        _ => false,
+    }
+}
+
 fn is_var(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Var(_))
 }
@@ -486,10 +542,6 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    // A `gen fn` that never yields runs to its return like a function.
-    if hir.is_coro && hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Yield { .. })) {
-        return Err("body kind coroutine".into());
-    }
     if hir.is_generic && !inp.opaque_vars {
         return Err("body kind generic".into());
     }
@@ -503,9 +555,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
         _ => ret,
     };
-    if hir.is_coro && !is_unit(ret) && scalar(ret).is_none() {
-        return Err("body kind coroutine".into());
-    }
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
@@ -563,6 +612,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cur,
         loops: Vec::new(),
         unit_ret,
+        ret_hir: ret.clone(),
         order: vec![cur],
         cold: Vec::new(),
         aliases: HashMap::new(),
@@ -574,14 +624,61 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         word_src: HashMap::new(),
         known_niche: HashMap::new(),
         raw_host: false,
+        defer_flags: HashMap::new(),
+        defers: Vec::new(),
+        defer_locals: HashMap::new(),
     };
-    match lower.value(root)? {
-        Val::Never => {}
-        val => lower.ret(val)?,
+    for (i, e) in hir.exprs.iter().enumerate() {
+        if let HirKind::Defer { captures, body } = &e.kind {
+            // The thunk's frame holds copies of its captures: one that
+            // assigns a local would not write the function's.
+            let mut assigns = false;
+            lower::visit(hir, *body, &mut |x| {
+                assigns |= matches!(x.kind, HirKind::Assign { place, .. } if matches!(hir.expr(place).kind, HirKind::Local(l) if captures.contains(&Some(l))));
+            });
+            if assigns {
+                return Err("defer assigns a capture".into());
+            }
+            let mut lets = Vec::new();
+            lower::visit(hir, *body, &mut |x| {
+                if let HirKind::Let { local, .. } = x.kind
+                    && inp.slots.get(local.0 as usize).copied().flatten().is_none()
+                {
+                    lets.push(local.0);
+                }
+            });
+            for l in lets {
+                let t = lower.temp();
+                lower.defer_locals.insert(l, t);
+            }
+            let flag = lower.temp();
+            let off = lower.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+            lower.b.def_local(flag, off).map_err(mir)?;
+            lower.defer_flags.insert(i as u32, flag);
+        }
+    }
+    let params = lower.b.func().params.len();
+    if hir.is_coro {
+        // A `gen fn` runs its body for effect (a tail `yield` receives
+        // nothing) and falling off its end returns `0` as its last
+        // resume's word, as HIR emission's epilogue.
+        if lower.effect(root)? {
+            lower.ret_zero()?;
+        }
+    } else {
+        match lower.value(root)? {
+            Val::Never => {}
+            val => lower.ret(val)?,
+        }
     }
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
     let mut func = lower.b.finish().map_err(mir)?;
+    // A capture read at a `return` some path reaches without passing its
+    // `let` would be a live-in word.
+    if func.params.len() != params {
+        return Err("defer capture unbound on a path".into());
+    }
     prune(&mut func, &spec);
     tidy(&mut func, &order);
     if inp.opaque_vars {
@@ -783,6 +880,7 @@ impl Lower<'_> {
             .copied()
             .flatten()
             .map(LocalId)
+            .or_else(|| self.defer_locals.get(&local.0).copied())
             .ok_or_else(|| "local slot".into())
     }
 
@@ -836,9 +934,42 @@ impl Lower<'_> {
         self.b.jump(to).map_err(mir)
     }
 
+    /// `RETURN` of `v`, after the `defer`s lowered so far, last first, as
+    /// HIR emission's `emit_run_defers` before each `return`.
+    fn ret_word(&mut self, v: ValueId) -> Result<(), Refusal> {
+        self.run_defers()?;
+        self.b.ret(Some(v)).map_err(mir)
+    }
+
+    /// Two-word `RETURN`, after the `defer`s as [`Self::ret_word`].
+    fn ret_two(&mut self, lo: ValueId, hi: ValueId) -> Result<(), Refusal> {
+        self.run_defers()?;
+        self.b.ret_pair(lo, hi).map_err(mir)
+    }
+
+    /// Each armed `defer` lowered so far, last first: disarm it and run
+    /// its body inline, its captures read as they are now (as the thunk's
+    /// frame copies them at the return).
+    fn run_defers(&mut self) -> Result<(), Refusal> {
+        for k in (0..self.defers.len()).rev() {
+            let (flag, body) = self.defers[k];
+            let armed = self.b.use_local(flag, MirTy::Bool).map_err(mir)?;
+            let (run, skip) = (self.b.create_block(), self.b.create_block());
+            self.b.branch(armed, run, skip).map_err(mir)?;
+            self.switch(run);
+            let off = self.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+            self.b.def_local(flag, off).map_err(mir)?;
+            if self.stmt(body)? {
+                self.jump(skip)?;
+            }
+            self.switch(skip);
+        }
+        Ok(())
+    }
+
     fn ret_unit(&mut self) -> Result<(), Refusal> {
         let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        self.b.ret(Some(zero)).map_err(mir)
+        self.ret_word(zero)
     }
 
     /// `v` as the function returns it: a two-word value the function
@@ -858,44 +989,44 @@ impl Lower<'_> {
         if let Some(layout) = self.inp.ret_boxed_niche {
             let boxed = match val {
                 // `Ok(())` boxed: `CONST 0; MakeEnum 0 1`, as HIR emission.
-                Val::Unit if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                Val::Unit if unit_result(&self.ret_hir) => {
                     let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                     self.make_enum(0, Some(zero))?
                 }
                 Val::V(v) => self.box_niche(layout, v)?,
                 _ => return Err("return value".into()),
             };
-            return self.b.ret(Some(boxed)).map_err(mir);
+            return self.ret_word(boxed);
         }
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
             // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
             // emission's `CONST 0; RETURN`.
-            (Val::Unit, None) if self.hir.ret.as_ref().is_some_and(unit_result) => {
+            (Val::Unit, None) if unit_result(&self.ret_hir) => {
                 // `Ok(())` is the zero word of a `NicheOpt` result.
                 if self.b.func().ret_ty != Some(MirTy::NicheOpt) {
                     return Err("return value".into());
                 }
                 let ok = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                 let ok = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, ok).map_err(mir)?;
-                self.b.ret(Some(ok)).map_err(mir)
+                self.ret_word(ok)
             }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
-            (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
+            (Val::V(v), None) if !self.unit_ret => self.ret_word(v),
             // A two-word value the function returns boxed.
             (Val::Pair(lo, hi), None) if self.b.func().ret_ty == Some(MirTy::HeapRef) => {
-                let ty = self.hir.ret.clone().ok_or("return type")?;
+                let ty = self.ret_hir.clone();
                 match self.box_pair_val(&ty, lo, hi)? {
-                    Val::V(v) => self.b.ret(Some(v)).map_err(mir),
+                    Val::V(v) => self.ret_word(v),
                     _ => Err("return value".into()),
                 }
             }
             // A boxed value the function returns as a pair.
             (Val::V(v), Some((lo_ty, hi_ty))) if self.b.value_ty(v) == MirTy::HeapRef => {
-                let ty = self.hir.ret.clone().ok_or("return type")?;
+                let ty = self.ret_hir.clone();
                 match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
-                    Val::Pair(lo, hi) => self.b.ret_pair(lo, hi).map_err(mir),
+                    Val::Pair(lo, hi) => self.ret_two(lo, hi),
                     _ => Err("return value".into()),
                 }
             }
@@ -903,7 +1034,7 @@ impl Lower<'_> {
                 if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
                     return Err("return pair type".into());
                 }
-                self.b.ret_pair(lo, hi).map_err(mir)
+                self.ret_two(lo, hi)
             }
             // A unit body whose tail is a value, or a valued body ending in `()`.
             _ => Err("return value".into()),
@@ -981,7 +1112,7 @@ impl Lower<'_> {
         let ty = self.b.func().ret_ty.ok_or("return value")?;
         let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         let z = self.fit(z, ty)?;
-        self.b.ret(Some(z)).map_err(mir)
+        self.ret_word(z)
     }
 
     /// Word types of pair local `local`, with its second slot.
@@ -1445,6 +1576,11 @@ impl Lower<'_> {
 
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
+        // A statement `yield` leaves nothing: a send lands only where a
+        // receiving `yield` takes it.
+        if let HirKind::Yield { value, from } = self.hir.expr(id).kind {
+            return Ok(!matches!(self.yield_(id, value, from, false)?, Val::Never));
+        }
         // A host's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it.
         self.raw_host = self.host_pair(id) || self.boxed_call(id);
@@ -1460,14 +1596,18 @@ impl Lower<'_> {
             && self.inp.pair_tys.contains_key(&id.0)
     }
 
-    /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk).
+    /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
+    /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
-        self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) && self.inp.pair_tys.contains_key(&id.0)
+        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
     }
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
+        if let Some(par) = self.inp.par_loops.get(&id.0) {
+            return self.par_loop(id, par);
+        }
         match &e.kind {
             HirKind::Lit(lit) => {
                 let c = match lit {
@@ -1508,11 +1648,15 @@ impl Lower<'_> {
                 let slot = self.slot(*local)?;
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
+            HirKind::Global { .. } | HirKind::Lambda { .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.fn_value(id, &f.clone()),
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
+            // An operator on an instance taking its operands raw: a plain call.
+            HirKind::Bin { lhs, rhs, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*lhs, *rhs]),
+            HirKind::Un { operand, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*operand]),
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
@@ -1521,8 +1665,18 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if let Some(&default) = self.inp.asserts.get(&id.0) => self.assert(id, args, default),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
+            HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
+            HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
+            // Arm the flag; each later `return` runs the body if armed.
+            HirKind::Defer { body, .. } => {
+                let flag = *self.defer_flags.get(&id.0).ok_or("defer")?;
+                let on = self.b.ins_const(MirConst::Bool(true)).map_err(mir)?;
+                self.b.def_local(flag, on).map_err(mir)?;
+                self.defers.push((flag, *body));
+                Ok(Val::Unit)
+            }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);
@@ -1904,17 +2058,10 @@ impl Lower<'_> {
                 self.jump(exit)?;
                 Ok(Val::Never)
             }
-            // A scalar's word roots nothing. A heap local's must be zeroed
-            // (its register is scanned until overwritten), which direct MIR
-            // cannot say: such a body keeps HIR emission's clearing stores.
-            HirKind::Clear(locals)
-                if locals.iter().all(|&l| {
-                    !self.inp.stacks.contains_key(&l.0)
-                        && !self.inp.sroa.contains_key(&l.0)
-                        && !self.inp.pair_locals.contains_key(&l.0)
-                        && self.local_ty(l).is_ok_and(|t| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool))
-                }) =>
-            {
+            HirKind::Clear(locals) => {
+                for &local in locals {
+                    self.clear(local)?;
+                }
                 Ok(Val::Unit)
             }
             HirKind::Continue => {
@@ -2193,6 +2340,15 @@ impl Lower<'_> {
                     self.b.ins_binop(arith, l, r)
                 }
             }
+            // `bool`s compare as their `0` / `1` words.
+            (None, Some(cmp)) if lt == MirTy::Bool => {
+                if self.b.value_ty(r) != MirTy::Bool {
+                    return Err("operator operand type".into());
+                }
+                let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;
+                let r = self.b.ins_cast(MirCastKind::Word, MirTy::I64, r).map_err(mir)?;
+                self.b.ins_cmp(cmp, l, r)
+            }
             (None, Some(cmp)) => self.b.ins_cmp(cmp, l, r),
             (None, None) => unreachable!("refused above"),
         };
@@ -2397,7 +2553,9 @@ impl Lower<'_> {
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        let niche = if site.boxed_ret { Some(self.inp.word(ty).ok_or("call type")?) } else { None };
         let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
+            _ if site.boxed_ret => (MirTy::HeapRef, None),
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             // A callee returning the two-word value boxed (a depth-checked
             // body): the word, unboxed where a pair is read.
@@ -2450,11 +2608,113 @@ impl Lower<'_> {
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        if let Some(want) = niche {
+            return self.unbox_niche(dest, want);
+        }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// A parallel loop as HIR emission left it: its fork-join function
+    /// called on the accumulator, the live captures and the bounds, the
+    /// result the new accumulator.
+    fn par_loop(&mut self, id: HirId, par: &HirParLoop) -> Result<Val, Refusal> {
+        let mut words = Vec::with_capacity(par.args.len());
+        for &local in &par.args {
+            if self.local_ty(local)? != MirTy::I64 {
+                return Err("parallel loop word".into());
+            }
+            let slot = self.slot(local)?;
+            words.push(self.b.use_local(slot, MirTy::I64).map_err(mir)?);
+        }
+        let abi = DenseAbi {
+            params: vec![MirTy::I64; words.len()],
+            ret: MirTy::I64,
+            ret_hi: None,
+        };
+        let (dest, _) = self.at_expr(id, |l| l.b.ins_call(par.target, words, &abi).map_err(mir))?;
+        if self.local_ty(par.acc)? != MirTy::I64 {
+            return Err("parallel loop word".into());
+        }
+        let acc = self.slot(par.acc)?;
+        self.b.def_local(acc, dest).map_err(mir)?;
+        if let Some((index, after)) = par.index {
+            if self.local_ty(index)? != MirTy::I64 {
+                return Err("parallel loop word".into());
+            }
+            let slot = self.slot(index)?;
+            let v = self.b.ins_const(MirConst::I64(after)).map_err(mir)?;
+            self.b.def_local(slot, v).map_err(mir)?;
+        }
+        Ok(Val::Unit)
+    }
+
+    /// A function value, as HIR emission builds it: each capture's word,
+    /// then `MakeFn` of the code (or `MakePolyFn`).
+    fn fn_value(&mut self, id: HirId, f: &HirFnValue) -> Result<Val, Refusal> {
+        if self.expr_ty(id).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Err("function value type".into());
+        }
+        let mut words = Vec::with_capacity(f.captures.len());
+        for &local in &f.captures {
+            words.push(self.local_word(local)?);
+        }
+        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+    }
+
+    /// The word a plain one-word local holds, as a `Local` read.
+    fn local_word(&mut self, local: HirLocal) -> Result<ValueId, Refusal> {
+        if self.pair_local(local).is_some() {
+            return Err("capture pair".into());
+        }
+        if let Some(&v) = self.aliases.get(&local.0) {
+            return Ok(v);
+        }
+        if let Some(&slot) = self.boxes.get(&local.0) {
+            return self.b.use_local(slot, MirTy::HeapRef).map_err(mir);
+        }
+        if self.unit_local(local) {
+            return Err("capture unit".into());
+        }
+        let ty = self.local_ty(local)?;
+        let slot = self.slot(local)?;
+        self.b.use_local(slot, ty).map_err(mir)
+    }
+
+    /// `f(args)` through a function value: each argument's one word (a
+    /// two-word value boxed), then `f`, then `CallIndirect`, as HIR
+    /// emission. A two-word result comes back boxed.
+    fn call_value(&mut self, id: HirId, f: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        // The result is one word either way.
+        self.raw_host = false;
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if self.inp.pair_tys.contains_key(&id.0) {
+            MirTy::HeapRef
+        } else if unit {
+            MirTy::I64
+        } else {
+            self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
+        };
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let Some(callee) = self.word(f)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(callee) != MirTy::HeapRef {
+            return Err("call value callee".into());
+        }
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
     /// `lhs op rhs` through the operand type's instance method: each
@@ -2577,11 +2837,17 @@ impl Lower<'_> {
     /// `resume h` / `resume h with v`: the coroutine runs to its next
     /// `yield`, whose word is the value.
     fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).ok_or("resume type")?;
-        let unit = is_unit(ty);
-        let dest_ty = if unit { MirTy::I64 } else { self.inp.word(ty).ok_or("resume type")? };
+        let ty = self.expr_ty(id).ok_or("resume type")?.clone();
+        let unit = is_unit(&ty);
+        // A two-word value moves through the coroutine boxed.
+        let pair = self.inp.pair_tys.get(&id.0).copied();
+        let dest_ty = match pair {
+            _ if unit => MirTy::I64,
+            Some(_) => MirTy::HeapRef,
+            None => self.inp.word(&ty).ok_or("resume type")?,
+        };
         let send = match value {
-            Some(v) => match self.word(v)? {
+            Some(v) => match self.word_or_boxed(v)? {
                 Some(w) => Some(w),
                 None => return Ok(Val::Never),
             },
@@ -2591,7 +2857,72 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
-        Ok(if unit { Val::Unit } else { Val::V(out) })
+        match pair {
+            _ if unit => Ok(Val::Unit),
+            Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
+            None => Ok(Val::V(out)),
+        }
+    }
+
+    /// `yield v` / `yield from h`: one instruction, as HIR emission's
+    /// `hir_yield` (the VM saves the frame and resumes after it). The word
+    /// moves boxed. A receiving yield's value is the word the next
+    /// `resume .. with` sends.
+    fn yield_(&mut self, id: HirId, value: HirId, from: bool, receive: bool) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("yield type")?.clone();
+        let receive = receive && !from && !is_unit(&ty);
+        let recv_ty = if !receive {
+            None
+        } else if self.inp.pair_tys.contains_key(&id.0) {
+            Some(MirTy::HeapRef)
+        } else {
+            Some(self.inp.word(&ty).ok_or("yield type")?)
+        };
+        let Some(v) = self.word_or_boxed(value)? else {
+            return Ok(Val::Never);
+        };
+        let out = self.b.ins_yield(v, from, recv_ty).map_err(mir)?;
+        if !receive {
+            return Ok(Val::Unit);
+        }
+        match self.inp.pair_tys.get(&id.0) {
+            Some(&(lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
+            None => Ok(Val::V(out)),
+        }
+    }
+
+    /// HIR `Clear` of `local` past its last use, as HIR emission's zero
+    /// stores: each of its words that may hold a heap object is zeroed
+    /// (`ClearWord`), so the frame no longer roots it. A scalar's word
+    /// roots nothing. A local some path here never bound has nothing to
+    /// clear on that path, and is left as it is.
+    fn clear(&mut self, local: HirLocal) -> Result<(), Refusal> {
+        // Every word the local was bound to: a boxed stack array's object,
+        // else its element or field slots, a pair's payload word, or its
+        // own slot.
+        let words: Vec<(LocalId, MirTy)> = if let Some(&slot) = self.boxes.get(&local.0) {
+            vec![(slot, MirTy::HeapRef)]
+        } else if let Some(&(base, n, ty)) = self.inp.stacks.get(&local.0) {
+            (0..n as u32).map(|i| (LocalId(base + i), ty)).collect()
+        } else if let Some(tys) = self.inp.sroa.get(&local.0) {
+            let base = self.slot(local)?.0;
+            tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
+        } else if let Some((lo, _, lo_ty, _)) = self.pair_local(local) {
+            // A heap payload moves through a pair as an opaque word.
+            vec![(lo, if lo_ty == MirTy::I64 { MirTy::HeapRef } else { lo_ty })]
+        } else if self.inp.pair_locals.contains_key(&local.0) {
+            return Err("clear pair local".into());
+        } else {
+            vec![(self.slot(local)?, self.local_ty(local)?)]
+        };
+        for (slot, ty) in words {
+            if !ty.is_heap_word() || !self.b.local_defined(slot) {
+                continue;
+            }
+            let v = self.b.use_local(slot, ty).map_err(mir)?;
+            self.b.ins_clear_word(v).map_err(mir)?;
+        }
+        Ok(())
     }
 
     /// Fill the slots of stack array or class local `local` from `init`:
@@ -3037,6 +3368,42 @@ impl Lower<'_> {
         };
         let tag = self.b.ins_const(MirConst::I64(i64::from(last_tag))).map_err(mir)?;
         out.push((self.cur, Val::Pair(p, tag)));
+        self.join_arms(out)
+    }
+
+    /// A boxed `Option` / `Result` word to its niche word, as HIR
+    /// emission's boxed-to-niche conversion: `None` is 0 and `Some(p)` is
+    /// `p`; `Ok(p)` is `p` and `Err(p)` is `p | 1`.
+    fn unbox_niche(&mut self, obj: ValueId, want: MirTy) -> Result<Val, Refusal> {
+        let (hit, miss) = (self.b.create_block(), self.b.create_block());
+        let p = self.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
+        let mut out = Vec::with_capacity(2);
+        match want {
+            MirTy::NicheOpt => {
+                self.b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(mir)?;
+                self.switch(hit);
+                let w = self.b.ins_cast(MirCastKind::Word, want, p).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+                self.switch(miss);
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, zero).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+            }
+            MirTy::NicheRes => {
+                self.b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(mir)?;
+                self.switch(hit);
+                let word = self.b.ins_cast(MirCastKind::Word, MirTy::I64, p).map_err(mir)?;
+                let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                let tagged = self.b.ins_binop(MirBinOp::BitOr, word, one).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, tagged).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+                self.switch(miss);
+                let ok = self.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, ok).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+            }
+            _ => return Err("boxed call result".into()),
+        }
         self.join_arms(out)
     }
 

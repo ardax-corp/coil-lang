@@ -301,6 +301,15 @@ pub enum MirInst {
         target: crate::il::Label,
         args: Vec<ValueId>,
     },
+    /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
+    /// `PolyFn` heap word) with `args`, pushed in order under it. Dest is
+    /// the one word it returns. Opaque: any effect, a GC safepoint in the
+    /// callee; never CSE'd or hoisted.
+    CallIndirect {
+        dest: ValueId,
+        callee: ValueId,
+        args: Vec<ValueId>,
+    },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
     MatchPayload {
@@ -371,6 +380,19 @@ pub enum MirInst {
         handle: ValueId,
         send: Option<ValueId>,
     },
+    /// `YieldCoro` (or `YieldFromCoro` when `from`): suspend the running
+    /// coroutine with `value` (a sub-coroutine handle for `from`). The VM
+    /// saves the frame as it stands and resumes at the next instruction,
+    /// so this is one instruction, and a GC safepoint as a call is: every
+    /// live heap word stays in the frame. With `receive`, dest is the word
+    /// the next `resume .. with` sends (stored right after the yield);
+    /// otherwise a `bool` unit token.
+    Yield {
+        dest: ValueId,
+        value: ValueId,
+        from: bool,
+        receive: bool,
+    },
     /// `DoneCoro` (C2b). Dest is [`MirTy::Bool`].
     DoneCoro {
         dest: ValueId,
@@ -388,6 +410,14 @@ pub enum MirInst {
     StoreStatic {
         dest: ValueId,
         slot: u32,
+        value: ValueId,
+    },
+    /// Zero the frame word holding `value` (a spliced heap local past its
+    /// last use, HIR `Clear`), so the frame no longer roots its object.
+    /// Dest is a `bool` unit token. A side effect; emission writes the zero
+    /// only when no value sharing that word is live after it.
+    ClearWord {
+        dest: ValueId,
         value: ValueId,
     },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
@@ -486,6 +516,17 @@ pub enum MirAllocKind {
     Boxed {
         tag: u32,
     },
+    /// `MakeFn`: a function value of the code at `target`, elems its
+    /// captures (`Const 0` fill mask and `CodePtr` pushed after them).
+    /// `operand` is the packed `MakeFn` operand.
+    Fn {
+        target: crate::il::Label,
+        operand: u32,
+    },
+    /// `MakePolyFn`: a generic function's value with no dictionaries.
+    PolyFn {
+        target: crate::il::Label,
+    },
 }
 
 impl MirAllocKind {
@@ -499,6 +540,8 @@ impl MirAllocKind {
             Self::DictEntries => "dictentries",
             Self::Coro { .. } => "coro",
             Self::Boxed { .. } => "boxed",
+            Self::Fn { .. } => "fn",
+            Self::PolyFn { .. } => "polyfn",
         }
     }
 }
@@ -564,6 +607,7 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
             | Self::FieldLoad { dest, .. }
             | Self::FieldStore { dest, .. }
@@ -573,9 +617,11 @@ impl MirInst {
             | Self::StoreIndex { dest, .. }
             | Self::ArrayLen { dest, .. }
             | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
             | Self::DoneCoro { dest, .. }
             | Self::LoadStatic { dest, .. }
             | Self::StoreStatic { dest, .. }
+            | Self::ClearWord { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -627,6 +673,7 @@ impl MirInst {
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
             Self::FieldStore { src, .. } => vec![*src],
@@ -666,9 +713,10 @@ impl MirInst {
                 }
                 v
             }
+            Self::Yield { value, .. } => vec![*value],
             Self::DoneCoro { handle, .. } => vec![*handle],
             Self::LoadStatic { .. } => Vec::new(),
-            Self::StoreStatic { value, .. } => vec![*value],
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -699,6 +747,12 @@ impl MirInst {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }
+            }
+            Self::CallIndirect { callee, args, .. } => {
+                for v in args.iter_mut() {
+                    *v = map(*v);
+                }
+                *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::FieldLoad { object, .. } => *object = map(*object),
@@ -744,9 +798,10 @@ impl MirInst {
                     *s = map(*s);
                 }
             }
+            Self::Yield { value, .. } => *value = map(*value),
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
             Self::LoadStatic { .. } => {}
-            Self::StoreStatic { value, .. } => *value = map(*value),
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => *value = map(*value),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);

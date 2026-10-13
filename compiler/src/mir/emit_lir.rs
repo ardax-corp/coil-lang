@@ -55,6 +55,7 @@ pub fn emit_lir_with_aliases(
     let plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
     let max_reg = plan
         .need_slot
         .iter()
@@ -116,6 +117,12 @@ pub fn emit_lir_with_aliases(
                         pool,
                         loc,
                     })?;
+                }
+                continue;
+            }
+            if let MirInst::ClearWord { dest, value } = inst {
+                if cleared.contains(dest) {
+                    super::emit::push_clear_word(&mut out, regs[value.index()]);
                 }
                 continue;
             }
@@ -203,6 +210,11 @@ impl EmitPlan {
                         phi_in[v.index()] = true;
                     }
                 }
+                // A clear reads no word: a value it alone follows can
+                // still be an inline operand (then it has no register).
+                if matches!(inst, MirInst::ClearWord { .. }) {
+                    continue;
+                }
                 for v in inst.operands() {
                     uses[v.index()] += 1;
                 }
@@ -286,7 +298,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -306,9 +318,10 @@ impl EmitPlan {
                     tree[dest.index()] = false;
                     tree[hi.index()] = false;
                 }
-                // Host calls have effects: emit them in program order and
-                // keep the result in a slot, never as an inline operand.
-                if let MirInst::HostInvoke { dest, .. } = inst {
+                // Host calls and yields have effects: emit them in program
+                // order and keep the result in a slot, never as an inline
+                // operand (a yield's sent word arrives only for a store).
+                if let MirInst::HostInvoke { dest, .. } | MirInst::CallIndirect { dest, .. } | MirInst::Yield { dest, .. } = inst {
                     need_slot[dest.index()] = true;
                     tree[dest.index()] = false;
                 }
@@ -390,9 +403,12 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::StoreIndex { .. }
             | MirInst::ArrayPush { .. }
             | MirInst::Call { .. }
+            | MirInst::CallIndirect { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::ResumeCoro { .. }
+            | MirInst::Yield { .. }
             | MirInst::StoreStatic { .. }
+            | MirInst::ClearWord { .. }
             | MirInst::Print { .. }
     )
 }
@@ -439,6 +455,25 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 for v in term_values(term) {
                     visit(v, &at, insts, &is_inline, &mut order);
                 }
+            }
+            // A clear zeroes its value's slot where it stands, so an
+            // inline user from before the clear must not be emitted after
+            // it (`let j = join(s); clear s; return j` would read the
+            // zeroed slot): that user keeps its slot.
+            let stale = order.iter().enumerate().find_map(|(i, &c)| {
+                let MirInst::ClearWord { value, .. } = &insts[c] else {
+                    return None;
+                };
+                order[i + 1..]
+                    .iter()
+                    .find(|&&k| k < c && insts[k].operands().contains(value))
+                    .map(|&k| insts[k].dest())
+            });
+            if let Some(v) = stale
+                && tree[v.index()]
+            {
+                tree[v.index()] = false;
+                continue;
             }
             let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
             // A later-defined op emitted first means an earlier one was
@@ -602,6 +637,29 @@ fn emit_last_arm_unpack(args: EmitLastArmUnpackArgs<'_>) -> Result<(), LowerErro
 
 fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
     super::emit::assign_regs_prefer_payloads(func, &plan.need_slot)
+}
+
+/// `v` is `x & 1`: its word is 0 or 1.
+fn is_low_bit(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> bool {
+    let Some((bid, idx)) = plan.def[v.index()] else {
+        return false;
+    };
+    match &func.block(bid).insts[idx] {
+        MirInst::Bin {
+            op: MirBinOp::BitAnd,
+            lhs,
+            rhs,
+            ..
+        } => [*lhs, *rhs].into_iter().any(|m| {
+            plan.def[m.index()].is_some_and(|(b, i)| {
+                matches!(
+                    &func.block(b).insts[i],
+                    MirInst::Const { c: MirConst::I64(1) | MirConst::I32(1), .. }
+                )
+            })
+        }),
+        _ => false,
+    }
 }
 
 fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
@@ -896,6 +954,23 @@ fn emit_stored(
                 always_store: true,
             })?;
         }
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
@@ -915,6 +990,8 @@ fn emit_stored(
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
+        // Emitted where it stands (`cleared_words`).
+        MirInst::ClearWord { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -947,6 +1024,17 @@ fn emit_stored(
                 layout: *layout,
                 loc,
             });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::CallIndirect { dest, callee, args } => {
+            // The arguments, then the function value on top.
+            for a in args.iter().chain([callee]) {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -1130,7 +1218,7 @@ fn emit_alloc_stack(args: EmitAllocStackArgs<'_>) -> Result<(), LowerError> {
     for e in elems {
         emit_stack(out, *e, func, plan, regs, pool, loc)?;
     }
-    out.push(il_for_alloc(kind, elems.len() as u32, loc)?);
+    out.extend(il_for_alloc(kind, elems.len() as u32, loc)?);
     Ok(())
 }
 
@@ -1437,6 +1525,24 @@ fn emit_stack(
             loc,
             always_store: false,
         }),
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
@@ -1465,6 +1571,7 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
             Ok(())
         }
+        MirInst::ClearWord { .. } => Ok(()),
         MirInst::ArrayPush {
             dest,
             array,
@@ -1482,7 +1589,7 @@ fn emit_stack(
             }
             Ok(())
         }
-        MirInst::HostInvoke { .. } | MirInst::Call { .. } => Err(LowerError::Refused(
+        MirInst::HostInvoke { .. } | MirInst::Call { .. } | MirInst::CallIndirect { .. } => Err(LowerError::Refused(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
         MirInst::MatchPayload { dest, .. } => {
@@ -1853,9 +1960,14 @@ fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
-        // `x != 0` on an int word: the jump already tests for non-zero, so
-        // branch on `x` itself (keeps `BinSlotImmJmp*` fusion on `i & 1`).
-        if *op == MirCmpOp::Ne && ty.is_int() && tree_i16(func, plan, *rhs) == Some(0) {
+        // `x != 0` on a 0-or-1 int word (`i & 1`): branch on `x` itself,
+        // keeping `BinSlotImmJmp*` fusion. The jump tests a bool word, so
+        // any other `x` (2 is not true) keeps the compare.
+        if *op == MirCmpOp::Ne
+            && ty.is_int()
+            && tree_i16(func, plan, *rhs) == Some(0)
+            && is_low_bit(func, plan, *lhs)
+        {
             return emit_stack(out, *lhs, func, plan, regs, pool, loc);
         }
         return emit_bin(EmitBinArgs {

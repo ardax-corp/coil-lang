@@ -49,6 +49,11 @@ pub fn take_mir_capture() -> CapturedMir {
     MIR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
 }
 
+/// A pinned (`defer`) body's MIR from HIR, which no tier emits yet.
+pub fn capture_pinned_mir(name: &str, func: &crate::mir::MirFunc) {
+    capture_mir(name, "pinned", func);
+}
+
 fn capture_mir(name: &str, form: &'static str, func: &crate::mir::MirFunc) {
     MIR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
@@ -85,6 +90,23 @@ fn refuse_dense<T>(why: impl std::fmt::Display) -> Option<T> {
 
 fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
     note_refusal(&LIR_REFUSAL, why)
+}
+
+/// `COIL_MIR_FUSE=1` (M5g, measuring): every body with MIR from HIR takes
+/// its stack IL from that MIR (`emit_lir`), past the LIR walls and cost gate.
+/// `COIL_MIR_FUSE_ONLY=a,b` limits the flag to bodies whose names contain
+/// one of the parts (bisecting); `COIL_MIR_FUSE_LOG=1` lists the bodies taken.
+pub fn mir_fuse_takes(name: &str) -> bool {
+    let take = std::env::var("COIL_MIR_FUSE_ONLY").map_or(true, |only| only.split(',').any(|p| name.contains(p)));
+    if take && std::env::var_os("COIL_MIR_FUSE_LOG").is_some() {
+        eprintln!("mir fuse: {name}");
+    }
+    take
+}
+
+pub fn mir_fuse_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
@@ -442,7 +464,7 @@ pub fn try_lower_abi_body_side(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && has_post_loop_alloc_return(ops) {
+    if has_alloc && has_post_loop_alloc_return(ops) && !mir_fuse_on() {
         return refuse("post-loop alloc return");
     }
     // MIR lowered from HIR maps its own allocations (`lir_tail` builds the
@@ -453,7 +475,9 @@ pub fn try_lower_abi_body_side(
     if has_alloc && !super::stackmap::mir_maps_ok(direct) {
         return refuse("no MIR maps");
     }
-    if let Some(wall) = super::entry::lir_refuse_direct(ops, has_alloc) {
+    if let Some(wall) = super::entry::lir_refuse_direct(ops, has_alloc)
+        && !(mir_fuse_on() && wall == super::entry::LirRefuse::Call)
+    {
         return refuse(format!("lir wall {wall:?}"));
     }
     let mut func = direct.clone();

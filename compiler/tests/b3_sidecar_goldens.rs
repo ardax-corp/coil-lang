@@ -56,14 +56,18 @@ const CORPUS: &[&str] = &[
 /// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
 /// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
 /// fuse to dense (`option_pair.hy` grows by three).
+/// Ground instance methods taking their arguments raw drop their entry
+/// `UnboxValue` prologues (`option_pair.hy`'s derived `Show` / `String` of
+/// `Holder`); `user_trait_dispatch.hy` also gains the `$dict` adapters its
+/// dictionaries name.
 /// The corpus asserting with the stdlib `assert!` macro (`if !c { raise … }`)
 /// instead of the builtin `assert(c)?` shortens all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "6b2ada4bb2d1a472_978"),
-    ("functions.hy", "c6438231a0f10a79_175"),
-    ("loops.hy", "69835fb542e68f64_171"),
-    ("option_pair.hy", "dd1515d1ca9f7eb7_296"),
-    ("user_trait_dispatch.hy", "82163b05e1ec6078_103"),
+    ("arithmetic.hy", "cc932e3a25941f21_863"),
+    ("functions.hy", "b608853f86069095_173"),
+    ("loops.hy", "e35f127fe0897f4c_169"),
+    ("option_pair.hy", "1ad98429475c9600_288"),
+    ("user_trait_dispatch.hy", "02faa5a3f53813e3_93"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

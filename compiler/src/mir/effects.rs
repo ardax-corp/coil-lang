@@ -54,7 +54,9 @@ impl MirInst {
         match self {
             Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
             Self::Call { .. }
+            | Self::CallIndirect { .. }
             | Self::ResumeCoro { .. }
+            | Self::Yield { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
@@ -62,6 +64,7 @@ impl MirInst {
             | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
             | Self::StoreStatic { .. }
+            | Self::ClearWord { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::Format { .. }

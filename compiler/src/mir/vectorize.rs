@@ -1882,6 +1882,7 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                 || matches!(
                     inst,
                     MirInst::Call { .. }
+                        | MirInst::CallIndirect { .. }
                         | MirInst::HostInvoke { .. }
                         | MirInst::MatchPayload { .. }
                         | MirInst::FieldLoad { .. }
@@ -1891,6 +1892,7 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::String { .. }
                         | MirInst::LoadStatic { .. }
                         | MirInst::StoreStatic { .. }
+                        | MirInst::ClearWord { .. }
                         | MirInst::Print { .. }
                         | MirInst::Format { .. }
                         | MirInst::Stringify { .. }
@@ -2175,9 +2177,11 @@ fn is_invariant(
     match defined_in(func, v) {
         None => true,
         Some(b) if !loop_blocks.contains(&b) => true,
-        // `len(v) - 1` is often left in the header. It does not depend on `i`.
+        // `len(v) - 1` is often left in the header. It does not depend on
+        // `i` when `v` does not (`len(xs[i])` does, #973).
         Some(_) => match def(func, v) {
-            Some(MirInst::Const { .. } | MirInst::ArrayLen { .. }) => true,
+            Some(MirInst::Const { .. }) => true,
+            Some(MirInst::ArrayLen { array, .. }) => is_invariant(func, *array, loop_blocks),
             Some(MirInst::Bin { lhs, rhs, .. }) => {
                 is_invariant(func, *lhs, loop_blocks) && is_invariant(func, *rhs, loop_blocks)
             }

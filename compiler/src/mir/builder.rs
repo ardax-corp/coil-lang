@@ -470,6 +470,31 @@ impl MirBuilder {
         Ok((dest, dest_hi))
     }
 
+    /// `CallIndirect`: call the function value `callee` with `args`, its
+    /// one-word result typed `ret`.
+    pub fn ins_call_indirect(&mut self, callee: ValueId, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
+        if self.resolve_ty(callee) != MirTy::HeapRef {
+            return Err(MirError::msg(format!("CallIndirect callee is {}", self.resolve_ty(callee))));
+        }
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_word_lane() {
+                return Err(MirError::msg(format!("CallIndirect arg {i} is {}", self.resolve_ty(a))));
+            }
+        }
+        if !ret.is_word_lane() {
+            return Err(MirError::msg(format!("CallIndirect dest is {ret}")));
+        }
+        let dest = self.alloc(ret);
+        self.push(MirInst::CallIndirect {
+            dest,
+            callee: self.resolve(callee),
+            args,
+        })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
     pub fn ins_stack_phi(&mut self, args: Vec<(BlockId, ValueId)>) -> Result<ValueId, MirError> {
         if args.is_empty() {
@@ -702,6 +727,35 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `YieldCoro` / `YieldFromCoro` of `value`. With `receive`, dest is
+    /// the sent word typed `recv_ty`; otherwise a `bool` token.
+    pub fn ins_yield(
+        &mut self,
+        value: ValueId,
+        from: bool,
+        receive: Option<MirTy>,
+    ) -> Result<ValueId, MirError> {
+        let vt = self.resolve_ty(value);
+        if !vt.is_word_lane() || (from && vt != MirTy::HeapRef) {
+            return Err(MirError::msg(format!("Yield value is {vt}")));
+        }
+        if from && receive.is_some() {
+            return Err(MirError::msg("YieldFrom receives nothing"));
+        }
+        let dest_ty = receive.unwrap_or(MirTy::Bool);
+        if !dest_ty.is_word_lane() {
+            return Err(MirError::msg(format!("Yield dest is {dest_ty}")));
+        }
+        let dest = self.alloc(dest_ty);
+        self.push(MirInst::Yield {
+            dest,
+            value: self.resolve(value),
+            from,
+            receive: receive.is_some(),
+        })?;
+        Ok(dest)
+    }
+
     /// `DoneCoro` (C2b). Dest is `bool`.
     pub fn ins_done_coro(&mut self, handle: ValueId) -> Result<ValueId, MirError> {
         let ht = self.resolve_ty(handle);
@@ -739,6 +793,36 @@ impl MirBuilder {
             value: self.resolve(value),
         })?;
         Ok(dest)
+    }
+
+    /// Zero the frame word holding `value`. Dest is a `bool` unit token.
+    pub fn ins_clear_word(&mut self, value: ValueId) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::ClearWord {
+            dest,
+            value: self.resolve(value),
+        })?;
+        Ok(dest)
+    }
+
+    /// Whether every path from the entry to the current block defines
+    /// `local` (a known predecessor that does not leads to one that does).
+    pub fn local_defined(&self, local: LocalId) -> bool {
+        let Ok(start) = self.cur() else {
+            return false;
+        };
+        let mut seen = vec![false; self.func.blocks.len()];
+        let mut todo = vec![start];
+        while let Some(b) = todo.pop() {
+            if std::mem::replace(&mut seen[b.index()], true) || self.current_def[b.index()].contains_key(&local) {
+                continue;
+            }
+            if self.preds[b.index()].is_empty() {
+                return false;
+            }
+            todo.extend(self.preds[b.index()].iter().copied());
+        }
+        true
     }
 
     /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].

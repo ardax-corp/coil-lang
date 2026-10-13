@@ -14,13 +14,15 @@ fn literal_string<'a>(node: &'a Output<'a>) -> Option<&'a str> {
 
 /// Synthetic function name prefix for a static initializer body.
 const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
+/// Most generic-head instance / default-body clones in one compilation.
+const INST_CLONE_MAX_TOTAL: usize = 256;
 
 #[path = "capabilities.rs"]
 mod capabilities;
 #[path = "emit_call.rs"]
 mod emit_call;
 #[path = "emit_hir.rs"]
-mod emit_hir;
+pub(super) mod emit_hir;
 #[path = "emit_match.rs"]
 mod emit_match;
 
@@ -44,20 +46,6 @@ fn apply_debug_slot_remaps(
             }
         }
     }
-}
-
-/// Lowered form of a [`ParCombine`](crate::typechecking::ParCombine): how to
-/// fold joined arm results once they are on the stack.
-enum ParCombinePlan {
-    /// `ADD` / `SUB` / `MUL` / `XOR`. Two arms: one op. N>2: `n-1` ops of an
-    /// associative combine (right-associated on the stack, same `int` result).
-    Bin { ins: Instruction, n: usize },
-    /// Rebuild a call with the arm results as arguments.
-    Call { entry: u32, arity: u32 },
-    /// `(arm0, …)` tuple pack.
-    Tuple { arity: u32 },
-    /// `MakeEnum` with the variant's tag and payload arity.
-    Enum { tag: u16, arity: u16 },
 }
 
 /// Where an open dictionary goal comes from (see
@@ -789,6 +777,15 @@ impl Compiler {
         }
     }
 
+    /// The `Function` node of an `impl` method, bare or wrapped.
+    fn impl_method_fn<'a, 'b>(method: &'b Output<'a>) -> Option<&'b Output<'a>> {
+        match method.1.as_ref() {
+            Expression::Function { .. } => Some(method),
+            Expression::Method(_, body) => matches!(body.1.as_ref(), Expression::Function { .. }).then_some(body),
+            _ => None,
+        }
+    }
+
     /// A `gen fn` with a body, bare or wrapped in an `impl` method.
     fn is_coro_with_body(method: &Output) -> bool {
         match method.1.as_ref() {
@@ -808,7 +805,6 @@ impl Compiler {
                 Expression::Function {
                     name,
                     type_params,
-                    args,
                     body,
                     ..
                 } => {
@@ -823,7 +819,7 @@ impl Compiler {
                     let key = self.overload_entry_key(name, &qualified, child);
                     self.reserve_function_entry(key);
                     if body.is_some() {
-                        self.reserve_mono_entries(&qualified, type_params, args, name);
+                        self.reserve_mono_entries(&qualified, type_params, name);
                     }
                 }
                 Expression::Implementation { owner, methods, .. } => {
@@ -847,6 +843,16 @@ impl Compiler {
                         }
                     }
                 }
+                // A default body is cloned per instance, as a generic head.
+                Expression::TypeClass { name, methods, .. } => {
+                    for method in methods {
+                        if let Expression::Function { name: method_name, body: Some(body), is_coro: false, .. } = method.1.as_ref()
+                            && !matches!(body.1.as_ref(), Expression::Block(items) if items.is_empty())
+                        {
+                            self.note_default_clone_src(name, method_name, (method.0.start, method.0.end));
+                        }
+                    }
+                }
                 Expression::TypeClassImpl {
                     class,
                     args,
@@ -865,10 +871,13 @@ impl Compiler {
                         .join("_");
                     for method in methods {
                         if let Some(method_name) = Self::impl_method_name(method) {
-                            self.reserve_function_entry(format!(
-                                "{}__{}__{}",
-                                class, ty_part, method_name
-                            ));
+                            let fqn = format!("{}__{}__{}", class, ty_part, method_name);
+                            let is_coro = Self::is_coro_with_body(method);
+                            self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            if !is_coro && let Some(f) = Self::impl_method_fn(method) {
+                                self.note_inst_clone_src(class, method_name, &fqn, (f.0.start, f.0.end));
+                            }
+                            self.reserve_function_entry(fqn);
                         }
                     }
                 }
@@ -1947,33 +1956,385 @@ impl Compiler {
         format!("{fqn}$dict")
     }
 
+    /// Whether instance method `fqn` takes its bare class type-parameter
+    /// arguments raw: a ground instance with no context, not a default body
+    /// and not a coroutine. Its call sites pass the instance's own words, so
+    /// the body lowers to direct MIR; dictionary callers, which box those
+    /// arguments, reach it through its `$dict` adapter.
+    fn instance_method_raw(&self, class: &str, method: &str, inst_args: &[Ty], fqn: &str, is_coro: bool) -> bool {
+        !is_coro
+            && class != "Iterator"
+            && class != "IntoIterator"
+            && !inst_args.iter().any(Self::ty_has_var)
+            // The checker's head, whose parameters are variables (the AST
+            // spelling names them as constructors).
+            && self
+                .checker
+                .generics()
+                .instances
+                .iter()
+                .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+                .is_some_and(|inst| !inst.args.iter().any(Self::ty_has_var))
+            && !self.instance_call_takes_dict(class, method, fqn)
+            && self
+                .instance_method_unbox_tys(class, method, inst_args)
+                .iter()
+                .any(|t| t.as_ref().and_then(Self::ty_to_value_tag).is_some())
+    }
+
+    /// Mark instance method `fqn` raw ([`Self::instance_method_raw`]) and
+    /// reserve its adapter, so a dictionary built before the method is
+    /// emitted already points at the adapter.
+    fn note_raw_instance_method(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str, is_coro: bool) -> bool {
+        if !self.instance_method_raw(class, method, inst_args, fqn, is_coro) {
+            return false;
+        }
+        if self.raw_instance_methods.insert(fqn.to_string()) {
+            self.reserve_function_entry(Self::dict_adapter_name(fqn));
+        }
+        true
+    }
+
+    /// Record generic-head instance method `fqn` as a clone source.
+    fn note_inst_clone_src(&mut self, class: &str, method: &str, fqn: &str, span: (usize, usize)) {
+        let Some(instance) = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+        else {
+            return;
+        };
+        if !instance.args.iter().any(Self::ty_has_var) {
+            return;
+        }
+        let head = instance.args.clone();
+        self.inst_clone_srcs.insert(
+            fqn.to_string(),
+            InstCloneSrc {
+                class: class.to_string(),
+                method: method.to_string(),
+                span,
+                head,
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: None,
+            },
+        );
+    }
+
+    /// Record default body `class::method` as a clone source: generic over
+    /// the trait's parameters.
+    fn note_default_clone_src(&mut self, class: &str, method: &str, span: (usize, usize)) {
+        let Some(params) = self.checker.generics().typeclass(class).map(|c| c.type_params.clone()) else {
+            return;
+        };
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            return;
+        };
+        if scheme.bounds.len() < params.len() {
+            return;
+        }
+        let head = scheme.bounds[..params.len()].iter().map(|&v| Ty::Var(v)).collect();
+        let fqn = crate::typechecking::generics::Generics::default_method_fqn(class, method);
+        self.inst_clone_srcs.insert(
+            fqn,
+            InstCloneSrc {
+                class: class.to_string(),
+                method: method.to_string(),
+                span,
+                head,
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: Some(params),
+            },
+        );
+    }
+
+    /// The emit cursor a clone of `fqn` replays, taken as its shared body
+    /// is compiled.
+    fn note_inst_clone_compiled(&mut self, fqn: &str) {
+        let (idx, seq) = (self.emit_idx, self.program_seq);
+        if let Some(src) = self.inst_clone_srcs.get_mut(fqn)
+            && src.program == seq
+        {
+            src.emit_idx = Some(idx);
+        }
+    }
+
+    /// The clone of generic-head instance method `fqn` at ground instance
+    /// types `lookup`, named (and queued) on first use: it takes the
+    /// instance's own words and no dictionary, as a raw instance method.
+    /// `None` when `fqn` has no clone there.
+    pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
+        const MAX_PER_METHOD: usize = 8;
+        let src = self.inst_clone_srcs.get(fqn)?;
+        if lookup.len() != src.head.len() || lookup.iter().any(Self::ty_has_var) {
+            return None;
+        }
+        let key = (fqn.to_string(), lookup.to_vec());
+        if let Some(name) = self.inst_clones.get(&key) {
+            return Some(name.clone());
+        }
+        // Instance types may grow without end (`Show<Tree<Box<T>>>` from
+        // `Show<Tree<T>>`): a bounded number of clones, then the shared body.
+        if self.inst_clones.len() >= INST_CLONE_MAX_TOTAL || self.inst_clones.keys().filter(|(f, _)| f == fqn).count() >= MAX_PER_METHOD {
+            return None;
+        }
+        let (class, method) = (src.class.clone(), src.method.clone());
+        let vars = self.inst_clone_vars(&src.head, lookup)?;
+        let _ = vars;
+        // `Option` / `Result` over a class parameter: the clone's ground
+        // layout and the shared entry's boxed one differ; keep the shared
+        // entry there.
+        if self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
+            || self.checker.typeclass_method_scheme(&class, &method).is_none()
+        {
+            return None;
+        }
+        let tys = lookup.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("_");
+        let name = format!("{fqn}$inst${tys}");
+        // Entry labels from the program-start pool: a label minted while a
+        // body is being emitted shares that body's label range, and the
+        // module layout's per-body relabeling takes it for a local one.
+        if self.inst_clone_labels.len() < 2 {
+            return None;
+        }
+        for entry in [name.clone(), Self::dict_adapter_name(&name)] {
+            let label = self.inst_clone_labels.pop()?;
+            self.fn_entry_labels.entry(entry).or_insert(label);
+        }
+        self.raw_instance_methods.insert(name.clone());
+        self.inst_clones.insert(key, name.clone());
+        self.inst_clone_queue.push_back(InstClone {
+            src: fqn.to_string(),
+            lookup: lookup.to_vec(),
+            name: name.clone(),
+        });
+        Some(name)
+    }
+
+    /// Mint, before this program's bodies, the entry labels the clones it
+    /// requests take (two per clone: the clone and its `$dict` adapter), as
+    /// [`Self::reserve_program_callable_entries`] does for its callables.
+    fn reserve_inst_clone_labels(&mut self) {
+        if self.inst_clone_srcs.is_empty() {
+            return;
+        }
+        let want = 2 * INST_CLONE_MAX_TOTAL.saturating_sub(self.inst_clones.len());
+        while self.inst_clone_labels.len() < want {
+            let label = self.bytecode.fresh_label();
+            self.inst_clone_labels.push(label);
+        }
+    }
+
+    /// The instance head's type variables bound to `lookup` (with their
+    /// representatives), when it binds every one.
+    fn inst_clone_vars(&self, head: &[Ty], lookup: &[Ty]) -> Option<HashMap<crate::typechecking::ty::TyVarId, Ty>> {
+        let mut vars = HashMap::new();
+        for (have, want) in head.iter().zip(lookup) {
+            Self::bind_scheme_vars(have, want, &mut vars);
+        }
+        let free: HashSet<_> = head.iter().flat_map(crate::typechecking::subst::ftv).collect();
+        if free.iter().any(|v| !vars.contains_key(v)) {
+            return None;
+        }
+        let subst = self.checker.subst();
+        for (var, ty) in vars.clone() {
+            if let Ty::Var(rep) = crate::typechecking::subst::apply_ty_prune(subst, &Ty::Var(var)) {
+                vars.entry(rep).or_insert(ty);
+            }
+        }
+        Some(vars)
+    }
+
+    /// Emit the queued instance clones of this program: each from its
+    /// method's HIR at the instance's types, or, where that is not ground
+    /// or the method is in another program, a thunk calling the shared
+    /// entry; then its `$dict` adapter.
+    fn emit_instance_clones(&mut self, children: &[Output<'_>]) {
+        while let Some(req) = self.inst_clone_queue.pop_front() {
+            let src = self.inst_clone_srcs[&req.src].clone();
+            let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
+            let method = (src.program == self.program_seq)
+                .then(|| src.emit_idx.zip(self.find_impl_method_fn(children, &req.src)))
+                .flatten()
+                .filter(|_| self.inst_clone_ground(src.span, &vars));
+            match method {
+                Some((idx, (method, head_args))) => {
+                    // The instance's type parameter names (`T::m(..)`).
+                    let mut names = HashMap::new();
+                    for ((arg, have), want) in head_args.iter().zip(&src.head).zip(&req.lookup) {
+                        Self::bind_head_names(&self.codegen_instance_head_ty(arg), have, want, &mut names);
+                    }
+                    for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
+                        names.insert(name.clone(), want.clone());
+                    }
+                    let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
+                    let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
+                    let prev_ctx = self.pending_instance_ctx.take();
+                    self.mono_codegen_var_types.push(HashMap::new());
+                    self.mono_type_param_tys.push(names);
+                    self.mono_var_tys.push(vars);
+                    self.inst_clone_fallback = Some((src.clone(), req.clone()));
+                    self.compile_function_output_with_name(method, req.name.clone(), &[], 0, Some(&req.src));
+                    self.inst_clone_fallback = None;
+                    self.mono_var_tys.pop();
+                    self.mono_type_param_tys.pop();
+                    self.mono_codegen_var_types.pop();
+                    self.pending_instance_ctx = prev_ctx;
+                    self.compiling_mono_clone = prev_mono;
+                    self.emit_idx = prev_idx;
+                }
+                None => self.emit_instance_clone_thunk(&src, &req),
+            }
+            self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
+        }
+    }
+
+    /// Whether the HIR of the method declared at `span`, at `vars`, has
+    /// ground parameter, local and return types.
+    fn inst_clone_ground(&self, span: (usize, usize), vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+        let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
+            return false;
+        };
+        let body = self.hir_instance(&module.bodies[index], vars);
+        body.ret.as_ref().is_some_and(|t| !Self::ty_has_var(t))
+            && body.locals.iter().all(|l| l.ty.as_ref().is_some_and(|t| !Self::ty_has_var(t)))
+    }
+
+    /// The `Function` node of the `impl` method of this program whose
+    /// fqn is `fqn`.
+    fn find_impl_method_fn<'a, 'b>(&self, children: &'b [Output<'a>], fqn: &str) -> Option<(&'b Output<'a>, &'b [Output<'a>])> {
+        children.iter().find_map(|child| {
+            if let Expression::TypeClass { name, methods, .. } = child.1.as_ref() {
+                return methods.iter().find_map(|m| match m.1.as_ref() {
+                    Expression::Function { name: method, .. }
+                        if crate::typechecking::generics::Generics::default_method_fqn(name, method) == fqn =>
+                    {
+                        Some((m, &[][..]))
+                    }
+                    _ => None,
+                });
+            }
+            let Expression::TypeClassImpl { class, args, methods, .. } = child.1.as_ref() else {
+                return None;
+            };
+            let class = self.checker.impl_trait_key(class);
+            let ty_part = args
+                .iter()
+                .map(|arg| self.codegen_instance_head_ty(arg).to_string())
+                .collect::<Vec<_>>()
+                .join("_");
+            methods.iter().find_map(|m| {
+                let name = Self::impl_method_name(m)?;
+                (format!("{class}__{ty_part}__{name}") == fqn)
+                    .then(|| Self::impl_method_fn(m))
+                    .flatten()
+                    .map(|f| (f, args.as_slice()))
+            })
+        })
+    }
+
+    /// `name ↦ type` for each type parameter the AST head spells (`T` in
+    /// `Box<T>`) where the checker's head has a variable.
+    fn bind_head_names(ast: &Ty, have: &Ty, want: &Ty, out: &mut HashMap<String, Ty>) {
+        match (ast, have, want) {
+            (Ty::Con(name), Ty::Var(_), want) => {
+                out.entry(name.clone()).or_insert_with(|| want.clone());
+            }
+            (Ty::App(ah, aa), Ty::App(hh, ha), Ty::App(wh, wa)) if aa.len() == ha.len() && ha.len() == wa.len() => {
+                Self::bind_head_names(ah, hh, wh, out);
+                for ((a, h), w) in aa.iter().zip(ha).zip(wa) {
+                    Self::bind_head_names(a, h, w, out);
+                }
+            }
+            (Ty::Tuple(aa), Ty::Tuple(ha), Ty::Tuple(wa)) if aa.len() == ha.len() && ha.len() == wa.len() => {
+                for ((a, h), w) in aa.iter().zip(ha).zip(wa) {
+                    Self::bind_head_names(a, h, w, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A clone that is not compiled from its method: the arguments as they
+    /// came, the instance's dictionary, then the shared entry.
+    fn emit_instance_clone_thunk(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        self.bind_function_entry(req.name.clone());
+        self.emit_instance_clone_call_shared(src, req);
+    }
+
+    /// The body of [`Self::emit_instance_clone_thunk`] after its entry.
+    fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len() as u32;
+        for slot in 0..n {
+            self.bytecode.push_load(slot);
+        }
+        let mut arity = n;
+        if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
+            let mut dict = CodeBuf::new();
+            if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
+                arity += 1;
+            }
+            self.bytecode.append(&mut dict);
+        }
+        if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
+            self.missing_call_target(&req.src, 0..0);
+        }
+        self.bytecode.push_return();
+    }
+
     /// Dictionary entry for a concrete instance method whose trait signature
     /// has `Option` / `Result` params or return over a class type parameter:
     /// callers through a dictionary (shared generic bodies, existentials)
     /// pass and expect the boxed enum, while the method uses its instance
     /// types' layout (possibly a niche). Converts on the way in and out; the
     /// method's own prologue still unboxes bare `T` params.
+    ///
+    /// A method that takes its arguments raw ([`Self::instance_method_raw`])
+    /// always has one: it also unboxes the bare type-parameter arguments
+    /// (every caller but a raw call site reaches the method through it).
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
-        let Some(sig) = self.trait_method_boundary_sig(class, method, inst_args, false) else {
+        let raw = self.raw_instance_methods.contains(fqn);
+        let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
+        if sig.is_none() && !raw {
             return;
-        };
+        }
         let adapter = Self::dict_adapter_name(fqn);
         if self.functions.contains_key(&adapter) {
             return;
         }
         self.bind_function_entry(adapter);
-        let nparams = sig.params.len() as u32;
-        for (slot, target) in sig.params.iter().enumerate() {
+        let unbox = if raw {
+            self.instance_method_unbox_tys(class, method, inst_args)
+        } else {
+            Vec::new()
+        };
+        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len()) as u32;
+        for slot in 0..nparams as usize {
             self.bytecode.push_load(slot as u32);
-            if let Some(target) = target {
-                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, *target);
+            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()) {
+                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, target);
+            }
+            if let Some(ty) = unbox.get(slot).cloned().flatten() {
+                Self::emit_unbox_if_needed(&mut self.bytecode, &ty);
             }
         }
-        self.bytecode.push_load(nparams); // trailing dictionary
-        if !self.emit_named_entry_on_module(fqn, nparams + 1, crate::il::EntryKind::Call) {
+        // A raw method has no context and is no default body: it never
+        // reads its dictionary, and a redirected direct call passes none.
+        let arity = if raw {
+            nparams
+        } else {
+            self.bytecode.push_load(nparams); // trailing dictionary
+            nparams + 1
+        };
+        self.raw_instance_call = raw;
+        if !self.emit_named_entry_on_module(fqn, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(fqn, 0..0);
         }
-        if let Some(from) = sig.ret {
+        if let Some(from) = sig.and_then(|s| s.ret) {
             Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
         }
         self.bytecode.push_return();
@@ -2718,8 +3079,15 @@ impl Compiler {
                     && (self.functions.contains_key(&fqn)
                         || self.fn_entry_labels.contains_key(&fqn))
                 {
-                    Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
+                    // A raw `show` takes the value unboxed; a generic-head
+                    // instance's clone is raw.
+                    let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
+                    let raw = self.raw_instance_methods.contains(&fqn);
+                    if !raw {
+                        Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
+                    }
                     let arity = 1 + self.emit_show_instance_dict(&fqn, &lookup_ty, 0..0);
+                    self.raw_instance_call = raw;
                     let _ = self.emit_named_entry_on_module(&fqn, arity, crate::il::EntryKind::Call);
                 } else {
                     self.bytecode.push(Byte::new(Instruction::STRINGIFY));
@@ -2808,7 +3176,7 @@ impl Compiler {
     ///
     /// Used by [`emit_call_site_dicts`] so `F<A>` against `Option<int>` records
     /// both `F = Option` and `A = int` (Phase 5).
-    pub(super) fn bind_scheme_vars(
+    pub(crate) fn bind_scheme_vars(
         pattern: &Ty,
         concrete: &Ty,
         map: &mut HashMap<crate::typechecking::ty::TyVarId, Ty>,
@@ -2988,7 +3356,7 @@ impl Compiler {
                 }
                 // Dictionary calls use the generic signature's layouts.
                 let adapter = Self::dict_adapter_name(&name);
-                if self.functions.contains_key(&adapter) {
+                if self.functions.contains_key(&adapter) || self.raw_instance_methods.contains(&name) {
                     fqns.push(adapter);
                 } else {
                     fqns.push(name);
@@ -3018,6 +3386,17 @@ impl Compiler {
             (fqns, (instance.range.clone(), context))
         };
         let (diag_range, context) = diag_range;
+        // A ground goal of a generic-head instance: its clones' adapters.
+        let fqns: Vec<String> = if open {
+            fqns
+        } else {
+            fqns.into_iter()
+                .map(|name| match self.instance_clone(&name, lookup) {
+                    Some(clone) => Self::dict_adapter_name(&clone),
+                    None => name,
+                })
+                .collect()
+        };
         for name in &fqns {
             if !self.emit_named_entry(bytecode, name, 0, crate::il::EntryKind::CodePtr) {
                 self.missing_call_target(name, diag_range.clone());
@@ -3447,14 +3826,10 @@ impl Compiler {
         let Some(site) = self.par_shapes.get(bare_name).cloned() else {
             return;
         };
-        let Some(&orig_offset) = self
-            .functions
-            .get(table_key)
-            .or_else(|| self.functions.get(bare_name))
-        else {
+        if !self.functions.contains_key(table_key) && !self.functions.contains_key(bare_name) {
             return;
-        };
-        self.emit_one_par_worker(&site, orig_offset as u32);
+        }
+        self.emit_one_par_worker(&site, table_key);
     }
 
     /// Parameterized AlwaysPar worker (COI-366 F1 / C2): live args + hop.
@@ -3463,8 +3838,9 @@ impl Compiler {
     /// guards are depth/reachability — not a grain skip-threshold. Arm 0 is
     /// `thread_spawn_shared`; remaining arms run inline; join + combine.
     /// Self-arms with hop > 1 re-enter this worker; hop 0 / missed guards
-    /// CALL the sequential original.
-    fn emit_one_par_worker(&mut self, site: &crate::typechecking::ParForkSite, orig_offset: u32) {
+    /// call the sequential original. Built as HIR ([`crate::hir::synth`])
+    /// and lowered like any other body; no worker when it does not plan.
+    fn emit_one_par_worker(&mut self, site: &crate::typechecking::ParForkSite, table_key: &str) {
         if site.arms.len() < 2 {
             return;
         }
@@ -3485,281 +3861,325 @@ impl Compiler {
         if self_arm0 && arm0_args.len() + 1 > common::MAX_THREAD_SPAWN_ARGS {
             return;
         }
-        let Some(seq_entries) = site
+        if site
             .arms
             .iter()
-            .map(|arm| {
-                self.resolve_par_fn_entry(crate::typechecking::arm_callee(arm))
-                    .map(|e| e as u32)
-            })
-            .collect::<Option<Vec<u32>>>()
-        else {
+            .any(|arm| self.resolve_par_fn_entry(crate::typechecking::arm_callee(arm)).is_none())
+        {
             return;
-        };
-        let Some((plan, push_order)) = self.par_combine_plan(site, orig_offset) else {
-            return;
-        };
-        let (Some(spawn_id), Some(join_id)) = (
-            self.native_id("thread_spawn_shared")
-                .or_else(|| self.native_id("thread_spawn")),
-            self.native_id("thread_join"),
+        }
+        let (Some(spawn), Some(join)) = (
+            ["thread_spawn_shared", "thread_spawn"].into_iter().find(|n| self.native_id(n).is_some()),
+            self.native_id("thread_join").map(|_| "thread_join"),
         ) else {
             return;
         };
-
         let worker_name = crate::typechecking::par_worker_name(&site.fn_name);
         if self.functions.contains_key(&worker_name) {
             return;
         }
-        let n = site.param_count;
-        let hop_slot = n as u32;
-        let (worker_entry, _) = self.bind_function_entry(worker_name.clone());
-        let worker_entry = worker_entry as u32;
-        self.fn_arities
-            .insert(worker_name.clone(), (n as u32 + 1, false));
-
-        let prev_fn_vars = std::mem::take(&mut self.context.variables);
-        let prev_fn_table_key = self.current_function_table_key.take();
-        self.current_function_table_key = Some(worker_name.clone());
-        self.context.variables = Interner::default();
-        for i in 0..n {
-            self.context.variables.intern(format!("__coil_par_p{i}"));
-        }
-        self.context.variables.intern("__coil_par_hop".to_string());
-        let entry_sp = 0u32;
-        let body_start = self.bytecode.len();
-
-        let mut bb = BlockBuilder::new();
-        let seq_orig = bb.fresh_label(self.bytecode.il_mut());
-        let have_handle = bb.fresh_label(self.bytecode.il_mut());
-        let seq = bb.fresh_label(self.bytecode.il_mut());
-        let done = bb.fresh_label(self.bytecode.il_mut());
-
-        for g in &site.guards {
-            let crate::typechecking::par_profit::ParGuard::Cmp {
-                lhs,
-                op,
-                rhs,
-                expect,
-            } = g
-            else {
-                continue;
-            };
-            self.emit_par_arg_form(lhs);
-            self.emit_par_arg_form(rhs);
-            self.bytecode
-                .push(Byte::new(Self::par_cmp_instruction(*op)));
-            let kind = if *expect {
-                BbJumpKind::JumpIfFalse
-            } else {
-                BbJumpKind::JumpIfTrue
-            };
-            bb.emit_jump_to(seq_orig, kind, self.bytecode.il_mut());
-        }
-        self.bytecode.push_load(hop_slot);
-        self.bytecode.push_const(0);
-        self.bytecode.push(Byte::new(Instruction::LEQ));
-        bb.emit_jump_to(seq_orig, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-
-        let spawn_go = bb.fresh_label(self.bytecode.il_mut());
-        let spawn_nest = if self_arm0 {
-            let lab = bb.fresh_label(self.bytecode.il_mut());
-            self.bytecode.push_load(hop_slot);
-            self.bytecode.push_const(1);
-            self.bytecode.push(Byte::new(Instruction::GT));
-            bb.emit_jump_to(lab, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-            Some(lab)
-        } else {
-            None
+        let Some(hir) = self.par_worker_hir(site, table_key, &worker_name, spawn, join) else {
+            return;
         };
-        self.emit_par_make_fn(seq_entries[0], arm0_args.len() as u32);
-        let fn_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(fn_tmp);
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
-        self.bytecode.push_load(fn_tmp);
-        for form in arm0_args {
-            self.emit_par_arg_form(form);
-        }
-        self.bytecode.push_host_invoke(1 + arm0_args.len() as u32);
-        bb.emit_jump_to(spawn_go, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        let n = site.param_count;
 
-        if let Some(spawn_nest) = spawn_nest {
-            bb.bind_label(spawn_nest, self.bytecode.il_mut());
-            self.emit_par_make_fn(worker_entry, n as u32 + 1);
-            self.bytecode.push_store_pop(fn_tmp);
+        // The worker's own entry (its `MakeFn` and nested calls) while it
+        // plans; bound once it does.
+        self.functions.insert(worker_name.clone(), self.bytecode.len());
+        self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
+        let prev_fn_vars = std::mem::take(&mut self.context.variables);
+        let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
+        let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
+        let body_start = self.bytecode.len();
+        let bind = worker_name.clone();
+        let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
+            c.bind_function_entry(bind);
+        });
+        if lowered {
+            self.flush_hir_cold();
+            let body_end = self.bytecode.len();
+            self.record_fn_span(worker_name.clone(), body_start, body_end);
+            let entry = self.fn_entry_labels.get(&worker_name).copied();
             self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
-            self.bytecode.push_load(fn_tmp);
-            for form in arm0_args {
-                self.emit_par_arg_form(form);
-            }
-            self.bytecode.push_load(hop_slot);
-            self.bytecode.push_const(1);
-            self.bytecode.push(Byte::new(Instruction::SUB));
-            self.bytecode.push_host_invoke(2 + arm0_args.len() as u32);
+                .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
+            self.attach_hir_mir();
+            self.record_unboxed_class_fields();
+            self.flush_hir_par_tail();
+        } else {
+            self.functions.remove(&worker_name);
+            self.fn_arities.remove(&worker_name);
         }
-        bb.bind_label(spawn_go, self.bytecode.il_mut());
-
-        bb.emit_jump_to(
-            have_handle,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            self.bytecode.il_mut(),
-        );
-        self.bytecode.push_pop();
-        bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-
-        bb.bind_label(have_handle, self.bytecode.il_mut());
-        let handle_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(handle_tmp);
-
-        let mut arm_tmps = vec![0u32; site.arms.len()];
-        for i in 1..site.arms.len() {
-            self.emit_par_arm_invoke(
-                &site.arms[i],
-                seq_entries[i],
-                worker_entry,
-                hop_slot,
-                &site.fn_name,
-                &mut bb,
-            );
-            let slot = self.alloc_temp_slot();
-            self.bytecode.push_store_pop(slot);
-            arm_tmps[i] = slot;
-        }
-
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
-        self.bytecode.push_load(handle_tmp);
-        self.bytecode.push_host_invoke(1);
-        let joined = bb.fresh_label(self.bytecode.il_mut());
-        bb.emit_jump_to(
-            joined,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            self.bytecode.il_mut(),
-        );
-        self.bytecode.push_pop();
-        bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(joined, self.bytecode.il_mut());
-        arm_tmps[0] = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(arm_tmps[0]);
-
-        for &idx in &push_order {
-            self.bytecode.push_load(arm_tmps[idx]);
-        }
-        self.emit_par_combine(&plan);
-        bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
-
-        bb.bind_label(seq, self.bytecode.il_mut());
-        for &idx in &push_order {
-            self.emit_par_seq_arm(&site.arms[idx], seq_entries[idx]);
-        }
-        self.emit_par_combine(&plan);
-
-        bb.bind_label(done, self.bytecode.il_mut());
-        self.bytecode.push_return();
-
-        bb.bind_label(seq_orig, self.bytecode.il_mut());
-        for i in 0..n {
-            self.bytecode.push_load(i as u32);
-        }
-        self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(n as u32, orig_offset));
-        self.bytecode.push_return();
-
-        let body_end = self.bytecode.len();
-        self.record_fn_span(worker_name.clone(), body_start, body_end);
-        let entry = self.fn_entry_labels.get(&worker_name).copied();
-        self.bytecode
-            .record_func_with_sp(worker_name, entry, body_start, body_end, entry_sp);
-        self.record_unboxed_class_fields();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_fn_vars;
     }
 
-    fn par_cmp_instruction(op: crate::typechecking::par_profit::CmpOp) -> Instruction {
-        use crate::typechecking::par_profit::CmpOp;
-        match op {
-            CmpOp::Lt => Instruction::LE,
-            CmpOp::Leq => Instruction::LEQ,
-            CmpOp::Gt => Instruction::GT,
-            CmpOp::Geq => Instruction::GEQ,
-            CmpOp::Eq => Instruction::EQ,
-            CmpOp::Neq => Instruction::NEQ,
+    /// The worker body of `site` as HIR, when every value it moves is one
+    /// boxed word and its argument forms are `int`s.
+    fn par_worker_hir(
+        &self,
+        site: &crate::typechecking::ParForkSite,
+        table_key: &str,
+        worker: &str,
+        spawn: &str,
+        join: &str,
+    ) -> Option<crate::hir::HirBody> {
+        use crate::hir::synth::Synth;
+        use crate::hir::{BinOp, HirId, HirKind, HirPat, LocalKind, MakeKind};
+        use crate::typechecking::par_profit::{CmpOp, ParGuard};
+        use crate::typechecking::ty::{self as coil_ty, strip_readonly};
+        use crate::typechecking::{ArgForm, ParArm, ParBinOp, ParCombine};
+        let int = coil_ty::int();
+        let is_con = |t: &Ty, name: &str| matches!(strip_readonly(t), Ty::Con(n) if n == name);
+        let word = |t: &Ty| {
+            crate::hir::lower::classify(&self.checker, t).is_some_and(crate::hir::lower::is_word)
+                && self.value_layout(t) == ValueLayout::Boxed
+                && !Self::ty_has_var(t)
+        };
+        let sig = |name: &str| -> Option<(Vec<Ty>, Ty)> {
+            let key = self.resolve_free_fn(name);
+            let params = self.checker.fn_param_tys(&key).or_else(|| self.checker.fn_param_tys(name))?;
+            let ret = self.checker.fn_return_ty(&key).or_else(|| self.checker.fn_return_ty(name))?;
+            (self.two_word_return_kind(&key).is_none() && params.iter().all(word) && word(&ret)).then_some((params, ret))
+        };
+        let (param_tys, ret) = sig(table_key).or_else(|| sig(&site.fn_name))?;
+        if param_tys.len() != site.param_count {
+            return None;
         }
-    }
+        let form_ty = |f: &ArgForm| match f {
+            ArgForm::Param(i) => param_tys.get(*i).cloned(),
+            ArgForm::Const(_) => Some(int.clone()),
+            ArgForm::ParamMinus { param, .. } | ArgForm::ParamPlus { param, .. } => {
+                param_tys.get(*param).filter(|t| is_con(t, "int")).map(|_| int.clone())
+            }
+        };
+        // Each arm's forms fit its callee's parameters.
+        let mut arm_rets = Vec::with_capacity(site.arms.len());
+        for arm in &site.arms {
+            let ParArm::Call { callee, args } = arm;
+            let (tys, r) = sig(callee)?;
+            if tys.len() != args.len() || args.iter().zip(&tys).any(|(f, t)| form_ty(f).as_ref() != Some(t)) {
+                return None;
+            }
+            arm_rets.push(r);
+        }
+        for g in &site.guards {
+            let ParGuard::Cmp { lhs, rhs, .. } = g else { return None };
+            if !form_ty(lhs).is_some_and(|t| is_con(&t, "int")) || !form_ty(rhs).is_some_and(|t| is_con(&t, "int")) {
+                return None;
+            }
+        }
+        let combined = match &site.combine {
+            ParCombine::BinOp(op) => {
+                if !arm_rets.iter().all(|t| *t == ret) || (*op == ParBinOp::Sub && site.arms.len() != 2) {
+                    return None;
+                }
+                ret.clone()
+            }
+            ParCombine::SelfCall => {
+                if arm_rets != param_tys {
+                    return None;
+                }
+                ret.clone()
+            }
+            ParCombine::ApplyCall { fn_name } => {
+                let (tys, r) = sig(fn_name)?;
+                if tys != arm_rets {
+                    return None;
+                }
+                r
+            }
+            ParCombine::Tuple => coil_ty::tuple(arm_rets.clone()),
+            ParCombine::EnumCtor { enum_name, variant_name } => {
+                // The combine builds the value without the finalizer tag.
+                if self.checker.enum_has_drop(enum_name)
+                    || self.checker.arity_for(enum_name, variant_name) != Some(site.arms.len())
+                {
+                    return None;
+                }
+                self.checker.tag_for(enum_name, variant_name)?;
+                ret.clone()
+            }
+        };
+        if combined != ret {
+            return None;
+        }
+        let bin = match &site.combine {
+            ParCombine::BinOp(op) => Some(match (op, is_con(&ret, "int"), is_con(&ret, "float")) {
+                (ParBinOp::Add, true, _) => BinOp::IntAdd,
+                (ParBinOp::Sub, true, _) => BinOp::IntSub,
+                (ParBinOp::Mul, true, _) => BinOp::IntMul,
+                (ParBinOp::Xor, true, _) => BinOp::BitXor,
+                (ParBinOp::Add, _, true) => BinOp::FloatAdd,
+                (ParBinOp::Sub, _, true) => BinOp::FloatSub,
+                (ParBinOp::Mul, _, true) => BinOp::FloatMul,
+                _ => return None,
+            }),
+            _ => None,
+        };
 
-    fn emit_par_arg_form(&mut self, form: &crate::typechecking::ArgForm) {
-        use crate::typechecking::ArgForm;
-        match form {
-            ArgForm::Const(k) => self.push_int_const(*k),
-            ArgForm::Param(i) => self.bytecode.push_load(*i as u32),
+        let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
+        let fn_ty = |params: &[Ty], r: &Ty| {
+            let params = if params.is_empty() { vec![coil_ty::unit()] } else { params.to_vec() };
+            params.iter().rev().fold(r.clone(), |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
+        };
+        let mut b = Synth::new(&self.checker, worker, ret.clone());
+        let params: Vec<_> = param_tys
+            .iter()
+            .enumerate()
+            .map(|(i, t)| b.local(&format!("__coil_par_p{i}"), t.clone(), LocalKind::Param))
+            .collect();
+        let hop = b.local("__coil_par_hop", int.clone(), LocalKind::Param);
+        let form = |b: &mut Synth, f: &ArgForm| match *f {
+            ArgForm::Const(k) => b.int(k),
+            ArgForm::Param(i) => b.read(params[i]),
             ArgForm::ParamMinus { param, sub } => {
-                self.bytecode.push_load(*param as u32);
-                self.push_int_const(*sub);
-                self.bytecode.push(Byte::new(Instruction::SUB));
+                let p = b.read(params[param]);
+                let k = b.int(sub);
+                b.bin(BinOp::IntSub, p, k, coil_ty::int())
             }
             ArgForm::ParamPlus { param, add } => {
-                self.bytecode.push_load(*param as u32);
-                self.push_int_const(*add);
-                self.bytecode.push(Byte::new(Instruction::ADD));
+                let p = b.read(params[param]);
+                let k = b.int(add);
+                b.bin(BinOp::IntAdd, p, k, coil_ty::int())
             }
-        }
-    }
+        };
+        let hop_less = |b: &mut Synth| {
+            let h = b.read(hop);
+            let one = b.int(1);
+            b.bin(BinOp::IntSub, h, one, coil_ty::int())
+        };
+        let hop_over_one = |b: &mut Synth| {
+            let h = b.read(hop);
+            let one = b.int(1);
+            b.bin(BinOp::Gt, h, one, coil_ty::boolean())
+        };
+        // An arm on this thread: its sequential callee.
+        let seq_arm = |b: &mut Synth, i: usize| {
+            let ParArm::Call { callee, args } = &site.arms[i];
+            let args = args.iter().map(|f| form(b, f)).collect();
+            b.call(callee, args, arm_rets[i].clone())
+        };
+        // Or, with `hop > 1`, a self arm re-entering this worker.
+        let local_arm = |b: &mut Synth, i: usize| {
+            let ParArm::Call { callee, args } = &site.arms[i];
+            if *callee != site.fn_name {
+                return seq_arm(b, i);
+            }
+            let cond = hop_over_one(b);
+            let mut nested: Vec<_> = args.iter().map(|f| form(b, f)).collect();
+            nested.push(hop_less(b));
+            let nested = b.call(worker, nested, arm_rets[i].clone());
+            let seq = seq_arm(b, i);
+            b.if_(cond, nested, Some(seq), arm_rets[i].clone())
+        };
+        let combine = |b: &mut Synth, vals: Vec<HirId>| match &site.combine {
+            // Right-associated, as the arms' words fold on the stack.
+            ParCombine::BinOp(_) => {
+                let op = bin.expect("planned binary combine");
+                let mut vals = vals.into_iter().rev();
+                let last = vals.next().expect("two or more arms");
+                vals.fold(last, |acc, v| b.bin(op, v, acc, ret.clone()))
+            }
+            ParCombine::SelfCall => b.call(&site.fn_name, vals, ret.clone()),
+            ParCombine::ApplyCall { fn_name } => b.call(fn_name, vals, ret.clone()),
+            ParCombine::Tuple => b.push(HirKind::Make { kind: MakeKind::Tuple, args: vals }, ret.clone()),
+            ParCombine::EnumCtor { enum_name, variant_name } => b.push(
+                HirKind::Make {
+                    kind: MakeKind::Variant {
+                        enum_name: enum_name.clone(),
+                        variant: variant_name.clone(),
+                        tag: self.checker.tag_for(enum_name, variant_name),
+                        fields: None,
+                    },
+                    args: vals,
+                },
+                ret.clone(),
+            ),
+        };
+        // Every arm sequentially, combined and returned.
+        let seq_return = |b: &mut Synth| {
+            let vals = (0..site.arms.len()).map(|i| seq_arm(b, i)).collect();
+            let value = combine(b, vals);
+            b.ret(value)
+        };
+        let mut stmts = Vec::new();
 
-    fn emit_par_make_fn(&mut self, entry: u32, arity: u32) {
-        self.bytecode.push_const(0);
-        self.bytecode
-            .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
-        self.bytecode.push(
-            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, false)),
-        );
-    }
+        // A missed guard or no hops left: the sequential original.
+        let mut fallback = {
+            let h = b.read(hop);
+            let zero = b.int(0);
+            b.bin(BinOp::Le, h, zero, coil_ty::boolean())
+        };
+        for g in site.guards.iter().rev() {
+            let ParGuard::Cmp { lhs, op, rhs, expect } = g else { unreachable!("an opaque guard has no worker") };
+            let missed = match (op, expect) {
+                (CmpOp::Lt, true) | (CmpOp::Geq, false) => BinOp::Ge,
+                (CmpOp::Leq, true) | (CmpOp::Gt, false) => BinOp::Gt,
+                (CmpOp::Gt, true) | (CmpOp::Leq, false) => BinOp::Le,
+                (CmpOp::Geq, true) | (CmpOp::Lt, false) => BinOp::Lt,
+                (CmpOp::Eq, true) | (CmpOp::Neq, false) => BinOp::Ne,
+                (CmpOp::Neq, true) | (CmpOp::Eq, false) => BinOp::Eq,
+            };
+            let (l, r) = (form(&mut b, lhs), form(&mut b, rhs));
+            let missed = b.bin(missed, l, r, coil_ty::boolean());
+            fallback = b.push(HirKind::Logic { and: false, lhs: missed, rhs: fallback }, coil_ty::boolean());
+        }
+        let args = params.iter().map(|&p| b.read(p)).collect();
+        let orig = b.call(&site.fn_name, args, ret.clone());
+        let orig = b.ret(orig);
+        let orig = b.block(vec![orig], None, coil_ty::never());
+        stmts.push(b.if_(fallback, orig, None, coil_ty::unit()));
 
-    fn emit_par_seq_arm(&mut self, arm: &crate::typechecking::ParArm, entry: u32) {
-        let crate::typechecking::ParArm::Call { args, .. } = arm;
-        for form in args {
-            self.emit_par_arg_form(form);
-        }
-        self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(args.len() as u32, entry));
-    }
+        // Spawn arm 0: its sequential callee, or this worker one hop down.
+        let ParArm::Call { callee: callee0, args: args0 } = &site.arms[0];
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let spawn_seq = {
+            let tys: Vec<Ty> = args0.iter().filter_map(&form_ty).collect();
+            let f = b.push(HirKind::Global { name: callee0.clone(), def: None }, fn_ty(&tys, &arm_rets[0]));
+            let mut args = vec![f];
+            args.extend(args0.iter().map(|a| form(&mut b, a)));
+            b.call(spawn, args, spawned_ty.clone())
+        };
+        let spawned = if *callee0 == site.fn_name {
+            let mut tys = param_tys.clone();
+            tys.push(int.clone());
+            let cond = hop_over_one(&mut b);
+            let f = b.push(HirKind::Global { name: worker.to_string(), def: None }, fn_ty(&tys, &ret));
+            let mut args = vec![f];
+            args.extend(args0.iter().map(|a| form(&mut b, a)));
+            args.push(hop_less(&mut b));
+            let nested = b.call(spawn, args, spawned_ty.clone());
+            b.if_(cond, nested, Some(spawn_seq), spawned_ty.clone())
+        } else {
+            spawn_seq
+        };
 
-    /// Self-arm with hop > 1 re-enters the worker; otherwise sequential callee.
-    fn emit_par_arm_invoke(
-        &mut self,
-        arm: &crate::typechecking::ParArm,
-        seq_entry: u32,
-        worker_entry: u32,
-        hop_slot: u32,
-        site_fn: &str,
-        bb: &mut BlockBuilder,
-    ) {
-        let is_self = crate::typechecking::arm_callee(arm) == site_fn;
-        if !is_self {
-            self.emit_par_seq_arm(arm, seq_entry);
-            return;
+        // With a handle: the other arms here, then join arm 0 and combine.
+        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(), LocalKind::Pattern);
+        let joined = b.local("__coil_par_arm0", arm_rets[0].clone(), LocalKind::Pattern);
+        let mut on_handle = Vec::new();
+        let mut held = vec![joined];
+        for (i, r) in arm_rets.iter().enumerate().skip(1) {
+            let t = b.local(&format!("__coil_par_arm{i}"), r.clone(), LocalKind::Temp);
+            let value = local_arm(&mut b, i);
+            on_handle.push(b.let_(t, value));
+            held.push(t);
         }
-        let nest = bb.fresh_label(self.bytecode.il_mut());
-        let after = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode.push_load(hop_slot);
-        self.bytecode.push_const(1);
-        self.bytecode.push(Byte::new(Instruction::GT));
-        bb.emit_jump_to(nest, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-        self.emit_par_seq_arm(arm, seq_entry);
-        bb.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(nest, self.bytecode.il_mut());
-        let crate::typechecking::ParArm::Call { args, .. } = arm;
-        for form in args {
-            self.emit_par_arg_form(form);
-        }
-        self.bytecode.push_load(hop_slot);
-        self.bytecode.push_const(1);
-        self.bytecode.push(Byte::new(Instruction::SUB));
-        self.bytecode.push(
-            Byte::new(Instruction::CALL).with_call_packed(args.len() as u32 + 1, worker_entry),
-        );
-        bb.bind_label(after, self.bytecode.il_mut());
+        let h = b.read(handle);
+        let joining = b.call(join, vec![h], coil_ty::result_ty(arm_rets[0].clone(), thread_err.clone()));
+        let reads = held.iter().map(|&t| b.read(t)).collect();
+        let value = combine(&mut b, reads);
+        let ok = b.ret(value);
+        let err = seq_return(&mut b);
+        let (ok_pat, err_pat) = (b.result_pat(true, HirPat::Bind(joined)), b.result_pat(false, HirPat::Wild));
+        on_handle.push(b.match_(joining, vec![(ok_pat, ok), (err_pat, err)], coil_ty::never()));
+        let on_handle = b.block(on_handle, None, coil_ty::never());
+        // A failed spawn or join: every arm sequentially.
+        let err = seq_return(&mut b);
+        let (ok_pat, err_pat) = (b.result_pat(true, HirPat::Bind(handle)), b.result_pat(false, HirPat::Wild));
+        stmts.push(b.match_(spawned, vec![(ok_pat, on_handle), (err_pat, err)], coil_ty::never()));
+        let root = b.block(stmts, None, coil_ty::never());
+        Some(b.finish(root))
     }
 
     fn push_int_const_into(&mut self, n: i64, bytecode: &mut CodeBuf) {
@@ -3769,96 +4189,6 @@ impl Compiler {
             let bits = Value::from(n).raw() as u64;
             let idx = self.intern_constant(bits);
             bytecode.push_const_pool(idx);
-        }
-    }
-
-    /// Lower `site.combine` to a fold instruction plus the arm push order it
-    /// expects on the stack. `None` when the combine cannot be lowered here.
-    fn par_combine_plan(
-        &self,
-        site: &crate::typechecking::ParForkSite,
-        orig_offset: u32,
-    ) -> Option<(ParCombinePlan, Vec<usize>)> {
-        use crate::typechecking::{ParBinOp, ParCombine};
-        let arms = site.arms.len();
-        match &site.combine {
-            ParCombine::BinOp(op) => {
-                if arms < 2 {
-                    return None;
-                }
-                let ins = match op {
-                    ParBinOp::Add => Instruction::ADD,
-                    ParBinOp::Sub => Instruction::SUB,
-                    ParBinOp::Mul => Instruction::MUL,
-                    ParBinOp::Xor => Instruction::XOR,
-                };
-                if matches!(op, ParBinOp::Sub) && arms != 2 {
-                    return None;
-                }
-                Some((ParCombinePlan::Bin { ins, n: arms }, (0..arms).collect()))
-            }
-            ParCombine::SelfCall => {
-                if arms != site.param_count {
-                    return None;
-                }
-                Some((
-                    ParCombinePlan::Call {
-                        entry: orig_offset,
-                        arity: arms as u32,
-                    },
-                    (0..arms).collect(),
-                ))
-            }
-            ParCombine::ApplyCall { fn_name } => {
-                let entry = self.resolve_par_fn_entry(fn_name)? as u32;
-                Some((
-                    ParCombinePlan::Call {
-                        entry,
-                        arity: arms as u32,
-                    },
-                    (0..arms).collect(),
-                ))
-            }
-            ParCombine::Tuple => Some((
-                ParCombinePlan::Tuple { arity: arms as u32 },
-                (0..arms).collect(),
-            )),
-            ParCombine::EnumCtor {
-                enum_name,
-                variant_name,
-            } => {
-                // The combine builds the value without the finalizer tag.
-                if self.checker.enum_has_drop(enum_name) {
-                    return None;
-                }
-                let tag = self.checker.tag_for(enum_name, variant_name)?;
-                if self.checker.arity_for(enum_name, variant_name) != Some(arms) {
-                    return None;
-                }
-                // `MakeEnum` pops into declaration order, so arm 0 goes last.
-                Some((
-                    ParCombinePlan::Enum {
-                        tag: u16::try_from(tag).ok()?,
-                        arity: u16::try_from(arms).ok()?,
-                    },
-                    (0..arms).rev().collect(),
-                ))
-            }
-        }
-    }
-
-    fn emit_par_combine(&mut self, plan: &ParCombinePlan) {
-        match plan {
-            ParCombinePlan::Bin { ins, n } => {
-                for _ in 1..*n {
-                    self.bytecode.push(Byte::new(*ins));
-                }
-            }
-            ParCombinePlan::Call { entry, arity } => self
-                .bytecode
-                .push(Byte::new(Instruction::CALL).with_call_packed(*arity, *entry)),
-            ParCombinePlan::Tuple { arity } => self.bytecode.push_make_tuple(*arity),
-            ParCombinePlan::Enum { tag, arity } => self.bytecode.push_make_enum(*tag, *arity),
         }
     }
 
@@ -4324,14 +4654,7 @@ impl Compiler {
         let arity = 3 + site.live_captures.len() as u32;
         self.fn_arities.insert(name, (arity, false));
 
-        // A fresh frame, with the module's class, method and symbol tables
-        // (inlined code in the body may build an object).
-        let mut prev_ctx = std::mem::take(&mut self.context);
-        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
-        self.context.classes = std::mem::take(&mut prev_ctx.classes);
-        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
-        self.context.methods = std::mem::take(&mut prev_ctx.methods);
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
+        let (prev_ctx, prev_depth) = self.par_frame_enter();
         self.context.variables.intern(site.index.clone());
         self.context.variables.intern("__coil_par_hi".to_string());
         self.context.variables.intern(site.acc.clone());
@@ -4377,13 +4700,32 @@ impl Compiler {
         self.bytecode.push_load(ACC_SLOT);
         self.bytecode.push_return();
 
-        let worker_ctx = std::mem::replace(&mut self.context, prev_ctx);
-        self.context.symbols = worker_ctx.symbols;
-        self.context.classes = worker_ctx.classes;
-        self.context.impementations = worker_ctx.impementations;
-        self.context.methods = worker_ctx.methods;
-        self.expr_depth = prev_depth;
+        self.par_frame_exit((prev_ctx, prev_depth));
         entry
+    }
+
+    /// A fresh frame for a function emitted inside another, with the
+    /// module's class, method and symbol tables (inlined code in it may
+    /// build an object). The enclosing frame and expression depth, for
+    /// [`Self::par_frame_exit`].
+    pub(super) fn par_frame_enter(&mut self) -> (Context, u32) {
+        let mut prev_ctx = std::mem::take(&mut self.context);
+        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
+        self.context.classes = std::mem::take(&mut prev_ctx.classes);
+        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
+        self.context.methods = std::mem::take(&mut prev_ctx.methods);
+        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
+        (prev_ctx, prev_depth)
+    }
+
+    /// Back to the frame [`Self::par_frame_enter`] set aside.
+    pub(super) fn par_frame_exit(&mut self, (prev_ctx, prev_depth): (Context, u32)) {
+        let inner = std::mem::replace(&mut self.context, prev_ctx);
+        self.context.symbols = inner.symbols;
+        self.context.classes = inner.classes;
+        self.context.impementations = inner.impementations;
+        self.context.methods = inner.methods;
+        self.expr_depth = prev_depth;
     }
 
     /// Push an `int` constant onto [`Self::bytecode`]; inline `CONST` cannot
@@ -5576,6 +5918,7 @@ impl Compiler {
         qualified: String,
         argument_unbox_tys: &[Option<Ty>],
         dict_arity: usize,
+        source: Option<&str>,
     ) {
         let _method_id = self.next_emit_id();
         let Expression::Function {
@@ -5620,16 +5963,19 @@ impl Compiler {
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
         // Instance methods are recorded under their FQN; the bare name may
         // belong to a free fn (or another instance).
-        let mode_key = if self.checker.fn_return_ty(&qualified).is_some() {
-            qualified.as_str()
-        } else {
-            name
+        // A clone (`source`) is checked under the method it clones.
+        let mode_key = match source {
+            Some(source) => source,
+            None if self.checker.fn_return_ty(&qualified).is_some() => qualified.as_str(),
+            None => name,
         };
         self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
         self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
+            None
+        } else if source.is_some() {
             None
         } else {
             self.two_word_return_kind(&qualified)
@@ -5672,7 +6018,15 @@ impl Compiler {
         let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
-            self.report_unlowered(&method.0, &qualified);
+            // A clone its method's HIR does not lower at its types calls
+            // the shared entry instead.
+            match self.inst_clone_fallback.take() {
+                Some((src, req)) => {
+                    self.hir_refusal = None;
+                    self.emit_instance_clone_call_shared(&src, &req);
+                }
+                None => self.report_unlowered(&method.0, &qualified),
+            }
         }
 
         let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
@@ -5692,6 +6046,7 @@ impl Compiler {
             self.bytecode.set_last_func_pinned();
         }
         self.record_unboxed_class_fields();
+        self.flush_hir_par_tail();
 
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
@@ -5939,11 +6294,10 @@ impl Compiler {
         &mut self,
         qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
-        args: &Output<'compiler>,
         source_name: &str,
     ) {
         for spec in self.planned_mono_specializations(qualified, type_params, source_name) {
-            if self.mono_names.contains_key(&spec.key) || self.mono_overrides_for_args(type_params, args, &spec.key).is_empty() {
+            if self.mono_names.contains_key(&spec.key) || !self.mono_clone_emits(type_params, &spec.key) {
                 continue;
             }
             let name = Self::mono_clone_name(qualified, &spec.key);
@@ -5974,11 +6328,11 @@ impl Compiler {
                 continue;
             }
 
-            let overrides = self.mono_overrides_for_args(type_params, args, &specialization.key);
-            if overrides.is_empty() {
+            if !self.mono_clone_emits(type_params, &specialization.key) {
                 continue;
             }
             let type_param_tys = self.mono_type_param_tys_for(type_params, &specialization.key);
+            let overrides = self.mono_overrides_for_args(source_name, qualified, type_params, args, &specialization.key);
 
             let mono_name = Self::mono_clone_name(qualified, &specialization.key);
             let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
@@ -6046,6 +6400,7 @@ impl Compiler {
             if pinned {
                 self.bytecode.set_last_func_pinned();
             }
+            self.flush_hir_par_tail();
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
@@ -6089,16 +6444,42 @@ impl Compiler {
             .find_map(|frame| frame.get(name).cloned())
     }
 
+    /// Whether a planned clone at `key` is emitted: every type parameter
+    /// has its type (a parameter only inside `Vec<T>`, or only in the
+    /// result, included).
+    fn mono_clone_emits(&self, type_params: &[parser::ast::TypeParam<'_>], key: &MonoKey) -> bool {
+        !type_params.is_empty() && self.mono_type_param_tys_for(type_params, key).len() == type_params.len()
+    }
+
+    /// The clone's parameter types at `key`, by name: a bare type
+    /// parameter's concrete type (a rest formal's packed array), and a
+    /// formal that mentions one (`Vec<T>`, `Option<T>`) at the clone's types.
     fn mono_overrides_for_args<'compiler>(
         &self,
+        source_name: &str,
+        qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
         args: &Output<'compiler>,
         key: &MonoKey,
     ) -> HashMap<String, Ty> {
         let type_param_tys = self.mono_type_param_tys_for(type_params, key);
+        let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
+        let param_tys = self.checker.fn_param_tys(source_name).unwrap_or_default();
 
         let mut overrides = HashMap::new();
         if let Expression::Fragment(children) = args.1.as_ref() {
+            let formals = children.iter().filter(|c| matches!(c.1.as_ref(), Expression::Argument { .. }));
+            for (child, param) in formals.zip(param_tys.iter().map(Some).chain(std::iter::repeat(None))) {
+                if let Expression::Argument { name, is_rest: false, .. } = child.1.as_ref()
+                    && let Some(param) = param
+                    && Self::ty_has_var(param)
+                {
+                    let ty = Self::apply_ty_var_map(param, &var_tys);
+                    if !Self::ty_has_var(&ty) {
+                        overrides.insert(name.to_string(), ty);
+                    }
+                }
+            }
             for child in children {
                 if let Expression::Argument {
                     ty, name, is_rest, ..
@@ -6604,6 +6985,8 @@ impl Compiler {
         let entry = self.fn_entry_labels.get(&name).copied();
         self.bytecode
             .record_func_with_sp(name, entry, body_start, body_end, 0);
+        self.attach_hir_mir();
+        self.flush_hir_par_tail();
 
         self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;
@@ -7354,92 +7737,71 @@ impl Compiler {
         Some((native_id, meta))
     }
 
-    /// Emit a synthetic `main` that runs every harness test case in one VM
-    /// (standalone `cargo run -- tests/foo.hy`). Prints
-    /// `> Test "<name>" failed` on soft failures and panics with
-    /// `"tests failed"` if any case failed.
+    /// The `main` of a test file with none (standalone `coil tests/foo.hy`):
+    /// runs every test case in one VM, printing `> Test "<name>" failed` for
+    /// each case that returns `Err`, then panics with `"tests failed"` if
+    /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any
+    /// other body.
     fn emit_virtual_test_main(&mut self) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{BinOp, Builtin, HirPat, LocalKind};
+        use crate::typechecking::ty as coil_ty;
         let cases: Vec<(String, u32)> = self.test_cases.clone();
         if cases.is_empty() {
             return;
         }
-
-        self.bind_function_entry("main".to_string());
-        let body_start = self.bytecode.len();
-
-        let prev_vars = std::mem::take(&mut self.context.variables);
-        self.context.variables = Interner::default();
-        // slot 0 = failed count
-        let failed_slot = self.context.variables.intern("failed".to_string()) as u32;
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push_store_pop(failed_slot);
-
-        let mut bb = BlockBuilder::new();
-        for (desc, offset) in &cases {
-            if let Some(label) = self.bytecode.entry_label_for_offset(*offset as usize) {
-                self.bytecode.emit_entry(EntryKind::Call, 0, label);
-            } else {
-                // Fallback for cases without a bound entry label (should be rare
-                // after `bind_function_entry`); packed CALL(0, pc) keeps harness green.
-                self.bytecode
-                    .push(Byte::new(Instruction::CALL).with_call_packed(0, *offset));
-            }
-            // Jump if Result::Err (tag 1), on match, payload (message) is pushed.
-            let fail = bb.fresh_label(self.bytecode.il_mut());
-            let done = bb.fresh_label(self.bytecode.il_mut());
-            bb.emit_jump_to(
-                fail,
-                BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-                self.bytecode.il_mut(),
-            );
-            // Ok path: discard whole Result enum.
-            self.bytecode.push_pop();
-            bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
-            bb.bind_label(fail, self.bytecode.il_mut());
-            // Discard Err message payload.
-            self.bytecode.push_pop();
-            let msg = format!("> Test \"{desc}\" failed\n");
-            self.emit_string_literal(&msg);
-            self.bytecode.push_print();
-            // failed += 1
-            self.bytecode.push_load(failed_slot);
-            self.bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(1i64).raw() as _,
-            ));
-            self.bytecode.push(Byte::new(Instruction::ADD));
-            self.bytecode.push_store_pop(failed_slot);
-            bb.bind_label(done, self.bytecode.il_mut());
+        let names: Vec<String> = (0..cases.len()).map(crate::typechecking::Checker::test_case_fn_name).collect();
+        let result = coil_ty::result_ty(coil_ty::unit(), coil_ty::string());
+        let mut b = Synth::new(&self.checker, "main", coil_ty::unit());
+        let failed = b.local("failed", coil_ty::int(), LocalKind::Let);
+        let zero = b.int(0);
+        let mut stmts = vec![b.let_(failed, zero)];
+        for ((desc, _), name) in cases.iter().zip(&names) {
+            let call = b.call(name, Vec::new(), result.clone());
+            let msg = b.str(&format!("> Test \"{desc}\" failed\n"));
+            let print = b.builtin(Builtin::Print, vec![msg], coil_ty::unit());
+            let count = b.read(failed);
+            let one = b.int(1);
+            let more = b.bin(BinOp::IntAdd, count, one, coil_ty::int());
+            let bump = b.assign(failed, more);
+            let on_err = b.block(vec![print, bump], None, coil_ty::unit());
+            let on_ok = b.block(Vec::new(), None, coil_ty::unit());
+            let err = b.result_pat(false, HirPat::Wild);
+            stmts.push(b.match_(call, vec![(err, on_err), (HirPat::Wild, on_ok)], coil_ty::unit()));
         }
+        let count = b.read(failed);
+        let zero = b.int(0);
+        let any = b.bin(BinOp::Ne, count, zero, coil_ty::boolean());
+        let msg = b.str("tests failed");
+        let panic = b.builtin(Builtin::Panic, vec![msg], coil_ty::never());
+        let then = b.block(vec![panic], None, coil_ty::never());
+        stmts.push(b.if_(any, then, None, coil_ty::unit()));
+        let unit = b.unit();
+        stmts.push(b.ret(unit));
+        let root = b.block(stmts, None, coil_ty::never());
+        let hir = b.finish(root);
 
-        // if failed != 0 { panic "tests failed" }
-        let panic_lbl = bb.fresh_label(self.bytecode.il_mut());
-        let end_lbl = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode.push_load(failed_slot);
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push(Byte::new(Instruction::EQ));
-        // failed == 0 → EQ true → fall through JMPF; else JMPF → panic.
-        bb.emit_jump_to(panic_lbl, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-        bb.emit_jump_to(end_lbl, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(panic_lbl, self.bytecode.il_mut());
-        self.emit_string_literal("tests failed");
-        self.bytecode.push(Byte::new(Instruction::Panic));
-        bb.bind_label(end_lbl, self.bytecode.il_mut());
-        self.bytecode.push_const(0);
-        self.bytecode.push_return();
-
+        let body_start = self.bytecode.len();
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
+        // A case returns its `Result<(), string>` boxed.
+        let calls = names.iter().map(|n| (n.clone(), (Vec::new(), ValueLayout::Boxed))).collect();
+        if !self.lower_synth_hir(&hir, calls, |c: &mut Self| {
+            c.bind_function_entry("main".to_string());
+        }) {
+            self.report_unlowered(&SimpleSpan::from(0..0), "main");
+            self.bind_function_entry("main".to_string());
+        }
+        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.attach_hir_mir();
         self.record_unboxed_class_fields();
+        self.flush_hir_par_tail();
+        self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
 
@@ -7775,6 +8137,7 @@ impl Compiler {
                 self.bytecode.set_last_func_pinned();
             }
             self.record_unboxed_class_fields();
+            self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
             self.context.stack_array_box = prev_stack_boxes;
@@ -7824,7 +8187,9 @@ impl Compiler {
             // `mod foo;`, pipeline loads the file; no bytecode.
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
+                self.program_seq += 1;
                 self.reserve_program_callable_entries(children);
+                self.reserve_inst_clone_labels();
                 if Self::program_needs_phased_emit(children) {
                     // COI-109: free fns that call user impl methods follow those impls (source order); reserve entries.
                     self.reserve_phased_free_fn_entries(children);
@@ -7847,6 +8212,7 @@ impl Compiler {
                         bytecode.append(&mut self.do_compile(child));
                     }
                 }
+                self.emit_instance_clones(children);
                 if !self.test_cases.is_empty() && !self.user_main_defined {
                     self.emit_virtual_test_main();
                 }
@@ -8056,7 +8422,8 @@ impl Compiler {
                                         name,
                                         method_name,
                                     );
-                                self.compile_function_output_with_name(method, fqn, &[], 1);
+                                self.note_inst_clone_compiled(&fqn);
+                                self.compile_function_output_with_name(method, fqn, &[], 1, None);
                             } else {
                                 self.consume_function_signature_output(method);
                             }
@@ -8096,11 +8463,18 @@ impl Compiler {
                             ..
                         } => {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
-                            let unbox_tys =
-                                self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                            let is_coro = Self::is_coro_with_body(method);
+                            // A raw method takes neither boxed arguments nor a dictionary.
+                            let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            let unbox_tys = if raw {
+                                Vec::new()
+                            } else {
+                                self.instance_method_unbox_tys(class, method_name, &arg_tys)
+                            };
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
-                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, 1);
+                            self.note_inst_clone_compiled(&fqn);
+                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw), None);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
@@ -8113,8 +8487,13 @@ impl Compiler {
                             } = body.1.as_ref()
                             {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
-                                let unbox_tys =
-                                    self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                                let is_coro = Self::is_coro_with_body(body);
+                                let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                                let unbox_tys = if raw {
+                                    Vec::new()
+                                } else {
+                                    self.instance_method_unbox_tys(class, method_name, &arg_tys)
+                                };
                                 self.pin_trait_method_pair_return(
                                     class,
                                     method_name,
@@ -8122,11 +8501,13 @@ impl Compiler {
                                     &fqn,
                                 );
                                 self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
+                                self.note_inst_clone_compiled(&fqn);
                                 self.compile_function_output_with_name(
                                     body,
                                     fqn.clone(),
                                     &unbox_tys,
-                                    1,
+                                    usize::from(!raw),
+                                    None,
                                 );
                                 self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                             } else {
@@ -8365,6 +8746,7 @@ impl Compiler {
                     self.bytecode.set_last_func_pinned();
                 }
                 self.record_unboxed_class_fields();
+                self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
@@ -8922,6 +9304,7 @@ impl Compiler {
             let flat_id = flat_label(idx, emit_id);
             lowered.label_pcs.get(&flat_id).copied()
         };
+        let first_body = funcs.iter().map(|f| f.code_start).min().unwrap_or(usize::MAX);
         let resolve_entry = |pre: usize| -> usize {
             if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
                 if let Some(idx) = func_idx_for_pre(pre) {
@@ -8929,6 +9312,14 @@ impl Compiler {
                     if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
                         return pc;
                     }
+                }
+                // The prologue (static / extern setup) keeps its emit-time
+                // ids when flattened; a body's private label space may reuse
+                // one, so `label_remap` would land inside that body.
+                if pre < first_body
+                    && let Some(&pc) = lowered.label_pcs.get(&label.0)
+                {
+                    return pc;
                 }
                 let global_flat = lowered
                     .label_remap

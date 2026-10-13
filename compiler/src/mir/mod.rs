@@ -70,14 +70,14 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit_lir::emit_lir;
 pub use entry::LirRefuse;
-pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirMirInput, HirOpCall};
+pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirFnValue, HirMirInput, HirOpCall, HirParLoop};
 pub use func::{MirBlock, MirFunc};
-pub use specialize::{start_mir_capture, take_mir_capture};
+pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use gc::refuses_alloc;
 pub use stackmap::{bind_drafts, encode_draft_slots, is_alloc_opcode, DraftFrameMap};
 pub use inst::{
-    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst,
+    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 pub use instcombine::instcombine;
@@ -85,7 +85,7 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use error::LowerError;
 pub use specialize::{
-    take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
+    mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
     try_specialize_body_side, BodySidecar,
 };
 pub use sroa::sroa;

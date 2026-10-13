@@ -49,6 +49,7 @@ pub fn emit_dense(
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let cleared = cleared_words(func, &regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -106,6 +107,12 @@ pub fn emit_dense(
             }
             starts.push((out.len(), inst.dest()));
             let loc = func.loc_of(inst.dest());
+            if let MirInst::ClearWord { dest, value } = inst {
+                if cleared.contains(dest) {
+                    push_clear_word(&mut out, regs[value.index()]);
+                }
+                continue;
+            }
             if let MirInst::Call {
                 dest,
                 dest_hi,
@@ -276,7 +283,7 @@ pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> Has
         .filter_map(|inst| match inst {
             MirInst::Call { target, .. }
             | MirInst::Alloc {
-                kind: MirAllocKind::Coro { target },
+                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target },
                 ..
             } if Some(*target) != entry_label => Some(target.0),
             _ => None,
@@ -295,6 +302,50 @@ pub(super) fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
 
 pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
     entry.map(|Label(id)| id.saturating_add(1)).unwrap_or(1)
+}
+
+/// The `ClearWord`s whose register may be zeroed: their word has one, and
+/// no value in that register is live after them (another local holding
+/// the same value, or a value coalesced into it).
+pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashSet<ValueId> {
+    let mut out = HashSet::new();
+    if !func.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, MirInst::ClearWord { .. }))) {
+        return out;
+    }
+    let live = super::gc::liveness_after(func);
+    for (b, block) in func.blocks.iter().enumerate() {
+        // A compare fused into the branch is emitted at the terminator,
+        // after any clear in the block: keep the words it reads.
+        let fused_reads: Vec<ValueId> = term_cmp_dest(func, block)
+            .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
+            .map(|i| i.operands())
+            .unwrap_or_default();
+        for (k, inst) in block.insts.iter().enumerate() {
+            let MirInst::ClearWord { dest, value } = inst else {
+                continue;
+            };
+            let slot = |v: &ValueId| need_slot.get(v.index()).copied().unwrap_or(false);
+            if slot(value)
+                && !fused_reads.contains(value)
+                && !func.params.contains(value)
+                && !live[b][k].iter().any(|v| slot(v) && regs[v.index()] == regs[value.index()])
+            {
+                out.insert(*dest);
+            }
+        }
+    }
+    out
+}
+
+/// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so
+/// dead-store elimination keeps it (the register is never read again,
+/// but the collector scans it).
+pub(super) fn push_clear_word(out: &mut Vec<IlOp>, reg: u8) {
+    out.push(IlOp::Const { imm: 0, loc: DebugLoc::unknown() });
+    out.push(IlOp::Byte {
+        byte: Byte::new(Instruction::STORE).with_load_store_slot(u32::from(reg)),
+        loc: DebugLoc::unknown(),
+    });
 }
 
 pub(super) fn assign_regs(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {
@@ -963,6 +1014,16 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::CallIndirect { dest, callee, args } => {
+            // The arguments, then the function value on top.
+            let words: Vec<ValueId> = args.iter().copied().chain([*callee]).collect();
+            emit_dense_push(out, &words, regs, scratch, loc)?;
+            out.push(byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::Call {
             dest,
             dest_hi,
@@ -1058,6 +1119,26 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[value.index()]),
+                loc,
+            });
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(byte(Byte::new(op)));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::DoneCoro { dest, handle } => {
             out.push(IlOp::Load {
                 slot: u32::from(regs[handle.index()]),
@@ -1083,6 +1164,8 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             });
             out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
         }
+        // Emitted where it stands (`cleared_words`).
+        MirInst::ClearWord { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -1211,7 +1294,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                     }
                 } else {
                     emit_dense_push(out, elems, regs, scratch, loc)?;
-                    out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                    out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
                     out.push(IlOp::StorePop {
                         slot: u32::from(live),
                         loc,
@@ -1219,7 +1302,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 }
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
-                out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
                     loc,
@@ -2073,6 +2156,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
             let w = match inst {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
+                MirInst::CallIndirect { args, .. } => args.len() + 1,
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
@@ -2624,7 +2708,12 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } => Ok(None),
-        MirAllocKind::Dict | MirAllocKind::DictEntries | MirAllocKind::Coro { .. } | MirAllocKind::Boxed { .. } => Ok(None),
+        MirAllocKind::Dict
+        | MirAllocKind::DictEntries
+        | MirAllocKind::Coro { .. }
+        | MirAllocKind::Boxed { .. }
+        | MirAllocKind::Fn { .. }
+        | MirAllocKind::PolyFn { .. } => Ok(None),
     }
 }
 
@@ -2688,12 +2777,39 @@ fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), Lower
     Ok((0, c))
 }
 
-/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`).
+/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
+/// the ops after the elements are pushed.
 pub(super) fn il_for_alloc(
     kind: MirAllocKind,
     arity: u32,
     loc: DebugLoc,
-) -> Result<IlOp, LowerError> {
+) -> Result<Vec<IlOp>, LowerError> {
+    match kind {
+        // The captures, then `Const 0` (no filled parameters), `CodePtr`
+        // and `MakeFn`, as HIR emission builds a function value.
+        MirAllocKind::Fn { target, operand } => Ok(vec![
+            IlOp::Const { imm: 0, loc },
+            IlOp::Entry {
+                kind: crate::il::EntryKind::CodePtr,
+                arity: 0,
+                target,
+                loc,
+                ret_words: 1,
+            },
+            IlOp::from_plain_byte(Byte::new(Instruction::MakeFn).with_operand_u32(operand), loc),
+        ]),
+        MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
+            kind: crate::il::EntryKind::MakePolyFn,
+            arity: 0,
+            target,
+            loc,
+            ret_words: 1,
+        }]),
+        _ => il_for_alloc_op(kind, arity, loc).map(|op| vec![op]),
+    }
+}
+
+fn il_for_alloc_op(kind: MirAllocKind, arity: u32, loc: DebugLoc) -> Result<IlOp, LowerError> {
     match kind {
         MirAllocKind::Array => Ok(IlOp::MakeArray { elem_kind: 0, arity, loc }),
         MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds: 0, arity, loc }),
@@ -2722,6 +2838,7 @@ pub(super) fn il_for_alloc(
             ret_words: 1,
         }),
         MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
+        MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } => Err(LowerError::Refused("function value alloc".into())),
     }
 }
 

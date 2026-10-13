@@ -2946,8 +2946,9 @@ fn access_field_emits_correct_field_index_for_each_field() {
     use common::Instruction;
     // Two functions, each accessing a different field. The
     // x_coord access emits LoadField(0); the y_coord access
-    // emits LoadField(1).
-    let (bc, _pool) = compile_src(
+    // emits LoadField(1). Not inlined: an inlined accessor is unreferenced
+    // and the tree shake drops its body.
+    let (bc, _pool) = compile_src_no_inline(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn x_coord(Point p) -> int { return p.x; } \
  fn y_coord(Point p) -> int { return p.y; } \
@@ -9131,12 +9132,13 @@ fn main() {
 fn hir_inline_splices_ground_trait_instance_methods() {
     let (off, _) = compile_src_tuned(HIR_INLINE_INSTANCES, |c| c.set_hir_inline(false));
     let (on, _) = compile_src_tuned(HIR_INLINE_INSTANCES, |c| c.set_hir_inline(true));
-    // `i.size(3)` and `p.size(i)` splice their instance bodies into `hot`;
-    // the default `twice` is one body shared by every instance and stays.
+    // `i.size(3)` and `p.size(i)` splice their instance bodies into `hot`,
+    // and so does `i.twice(2)`: the default body's clone at `int` is a
+    // ground body too.
     assert_eq!(
-        call_count(&on) + 2,
+        call_count(&on) + 3,
         call_count(&off),
-        "ground instance methods inline, the default method does not; off={} on={}",
+        "ground instance methods and default-body clones inline; off={} on={}",
         call_count(&off),
         call_count(&on)
     );
