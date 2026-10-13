@@ -1148,6 +1148,50 @@ mod tests {
         assert_eq!(*at, 3, "the body's branch left the body: {labels:?} -> {target}");
     }
 
+    /// The prologue (static-init setup region) is copied verbatim, so its
+    /// labels keep their ids. A body's opts may mint the same id; the global
+    /// remap must still resolve the prologue's label to itself, or the
+    /// prologue `JMP` to the setup region lands in that body (#960).
+    #[test]
+    fn to_flat_keeps_prologue_labels_when_a_body_binds_the_same_id() {
+        let loc = loc();
+        let mut m = IlModule {
+            prologue: vec![
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: Label(5),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Halt { loc },
+                IlOp::Label(Label(5)),
+                IlOp::Halt { loc },
+            ],
+            ..Default::default()
+        };
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("f", Some(Label(1)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(1)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(5),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+                IlOp::Label(Label(5)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        let (flat, remap, _) = m.to_flat();
+        assert_eq!(remap.get(&5).copied().unwrap_or(5), 5, "prologue label 5 remapped into the body: {remap:?}");
+        assert!(
+            matches!(flat[0], IlOp::Jump { target: Label(5), .. }),
+            "prologue jump must keep its own label"
+        );
+    }
+
     #[test]
     fn to_flat_remaps_cross_function_entry_call_targets() {
         let loc = loc();
