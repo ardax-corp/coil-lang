@@ -873,6 +873,17 @@ impl MirBuilder {
         kind: super::inst::MirAllocKind,
         elems: Vec<ValueId>,
     ) -> Result<ValueId, MirError> {
+        self.ins_alloc_kinds(kind, elems, 0)
+    }
+
+    /// [`Self::ins_alloc`] with construction word kinds (see
+    /// [`MirInst::Alloc`]'s `kinds`).
+    pub fn ins_alloc_kinds(
+        &mut self,
+        kind: super::inst::MirAllocKind,
+        elems: Vec<ValueId>,
+        kinds: u8,
+    ) -> Result<ValueId, MirError> {
         let elems: Vec<ValueId> = elems.into_iter().map(|v| self.resolve(v)).collect();
         for (i, &e) in elems.iter().enumerate() {
             if !self.resolve_ty(e).is_specialized() {
@@ -883,7 +894,7 @@ impl MirBuilder {
             }
         }
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::Alloc { dest, kind, elems })?;
+        self.push(MirInst::Alloc { dest, kind, elems, kinds })?;
         self.snapshot_slots(dest);
         Ok(dest)
     }
