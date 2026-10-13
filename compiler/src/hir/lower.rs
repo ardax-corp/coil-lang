@@ -2586,6 +2586,17 @@ impl Walk<'_> {
                 };
                 self.value(*inner, depth)
             }
+            // `UnboxValue` of a dictionary-entry word: the word, then the op.
+            HirKind::Builtin {
+                op: Builtin::Unbox { .. },
+                args,
+            } => {
+                let [inner] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(id)?;
+                self.value(*inner, depth)
+            }
             // `typeof e`: a string constant; `e` is not evaluated.
             HirKind::Builtin {
                 op: Builtin::TypeOf,
@@ -3065,7 +3076,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf,
+                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. },
                 ..
             } => self.value(id, depth),
             other => Err(kind_name(other)),

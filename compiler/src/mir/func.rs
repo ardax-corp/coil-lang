@@ -708,6 +708,11 @@ impl MirFunc {
                     return Err(format!("{dest} Stringify src type"));
                 }
             }
+            MirInst::Unbox { dest, src, .. } => {
+                if !self.ty(*dest).is_specialized() || !self.ty(*src).is_specialized() {
+                    return Err(format!("{dest} Unbox type"));
+                }
+            }
             MirInst::StrEq { dest, lhs, rhs, .. } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} StrEq dest is not bool"));
