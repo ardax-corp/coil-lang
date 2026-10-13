@@ -9648,13 +9648,16 @@ impl Compiler {
         // loops of its own: they join the list.
         while !emit.par_tail.is_empty() {
             for par in std::mem::take(&mut emit.par_tail) {
-                let entry = match Self::hir_par_worker_body(&hir, &par)
+                let (entry, worker) = match Self::hir_par_worker_body(&hir, &par)
                     .and_then(|w| self.hir_par_worker_fn(&w))
                 {
                     Some(entry) => entry,
                     None => self.hir_par_worker_inline(&hir, &mut emit, &par),
                 };
                 let HirParSite { site, driver, natives, begin, end, .. } = par;
+                if self.hir_par_driver_fn(&site, &driver, &worker, natives, (begin, end)) {
+                    continue;
+                }
 
                 // The fork-join: slot 0 the accumulator, then the live
                 // captures and the bounds, as the call passes them.
@@ -9684,6 +9687,227 @@ impl Compiler {
                 self.bytecode.record_func_with_sp(driver, label, start, self.bytecode.len(), words);
             }
         }
+    }
+
+    /// The fork-join function `driver` of `site` over chunk worker `worker`
+    /// built as HIR ([`Self::hir_par_driver_body`]) and lowered like any
+    /// other body, so it gets direct MIR. `false`, with nothing emitted,
+    /// when it does not plan: the caller writes its stack IL instead.
+    fn hir_par_driver_fn(
+        &mut self,
+        site: &crate::typechecking::LoopParSite,
+        driver: &str,
+        worker: &str,
+        (spawn_id, join_id): (usize, usize),
+        (begin, end): (bool, bool),
+    ) -> bool {
+        let name_of = |id: usize| ["thread_spawn_shared", "thread_spawn", "thread_join"].into_iter().find(|n| self.native_id(n) == Some(id));
+        let (Some(spawn), Some(join)) = (name_of(spawn_id), name_of(join_id)) else {
+            return false;
+        };
+        let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
+        let words = hir.params.len() as u32;
+        let arity = 3 + site.live_captures.len();
+        let start = self.bytecode.len();
+        let frame = self.par_frame_enter();
+        self.fn_arities.insert(driver.to_string(), (words, false));
+        let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
+        let bind = driver.to_string();
+        let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
+            c.bind_function_entry(bind);
+        });
+        if lowered {
+            self.flush_hir_cold();
+            let label = self.fn_entry_labels.get(driver).copied();
+            self.bytecode.record_func_with_sp(driver.to_string(), label, start, self.bytecode.len(), words);
+            self.attach_hir_mir();
+        }
+        self.par_frame_exit(frame);
+        lowered
+    }
+
+    /// The fork-join of `site` as HIR, `(acc, …live captures, [begin],
+    /// [end]) -> acc`, as `emit_par_loop_chunks` writes it: spawn every
+    /// chunk on `worker`, join each in order and fold its partial onto the
+    /// accumulator. A failed spawn or join joins the handles still out and
+    /// runs the whole range on this thread. A dynamic range splits in two
+    /// when it has more trips than the grain, and otherwise runs here.
+    fn hir_par_driver_body(
+        &self,
+        site: &crate::typechecking::LoopParSite,
+        driver: &str,
+        worker: &str,
+        (spawn, join): (&str, &str),
+        (has_begin, has_end): (bool, bool),
+    ) -> HirBody {
+        use crate::hir::synth::Synth;
+        use crate::hir::LocalKind;
+        use crate::typechecking::ty as coil_ty;
+        use crate::typechecking::LoopReduceOp;
+
+        #[derive(Clone, Copy)]
+        enum Bound {
+            Const(i64),
+            Local(LocalId),
+        }
+        let int = coil_ty::int();
+        let mut b = Synth::new(&self.checker, driver, int.clone());
+        let mut arg = 0usize;
+        let mut param = |b: &mut Synth| {
+            arg += 1;
+            b.local(&format!("__coil_par_arg{}", arg - 1), coil_ty::int(), LocalKind::Param)
+        };
+        let acc = param(&mut b);
+        let live: Vec<LocalId> = site.live_captures.iter().map(|_| param(&mut b)).collect();
+        let begin = has_begin.then(|| param(&mut b));
+        let end = has_end.then(|| param(&mut b));
+
+        let arity = 3 + live.len();
+        let worker_ty = (0..arity).fold(int.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
+        let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let joined_ty = coil_ty::result_ty(int.clone(), thread_err);
+        let fold_op = match site.op {
+            LoopReduceOp::Add => BinOp::IntAdd,
+            LoopReduceOp::Mul => BinOp::IntMul,
+            LoopReduceOp::Xor => BinOp::BitXor,
+        };
+
+        let mut stmts = Vec::new();
+        let f = b.local("__coil_par_fn", worker_ty.clone(), LocalKind::Temp);
+        let global = b.push(HirKind::Global { name: worker.to_string(), def: None }, worker_ty);
+        stmts.push(b.let_(f, global));
+
+        let read = |b: &mut Synth, x: Bound| match x {
+            Bound::Const(n) => b.int(n),
+            Bound::Local(l) => b.read(l),
+        };
+        // The whole range on this thread.
+        let seq = |b: &mut Synth, lo: Bound, hi: Bound| {
+            let mut args = vec![read(b, lo), read(b, hi), b.read(acc)];
+            args.extend(live.iter().map(|&l| b.read(l)));
+            let call = b.call(worker, args, coil_ty::int());
+            b.ret(call)
+        };
+        // Join each handle still out, dropping its result.
+        let discard = |b: &mut Synth, handles: &[LocalId], stmts: &mut Vec<HirId>| {
+            for &h in handles {
+                let h = b.read(h);
+                stmts.push(b.call(join, vec![h], joined_ty.clone()));
+            }
+        };
+
+        // A range of one or more chunks: spawn each, then join and fold.
+        let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
+            let handles: Vec<LocalId> =
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(), LocalKind::Pattern)).collect();
+            let partials: Vec<LocalId> =
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
+            // Innermost first: the fold, then each join, then each spawn.
+            let mut value = b.read(acc);
+            for &p in &partials {
+                let p = b.read(p);
+                value = b.bin(fold_op, value, p, coil_ty::int());
+            }
+            let mut tail = b.ret(value);
+            for j in (0..chunks.len()).rev() {
+                let mut failed = Vec::new();
+                discard(b, &handles[j + 1..], &mut failed);
+                failed.push(seq(b, whole.0, whole.1));
+                let failed = b.block(failed, None, coil_ty::never());
+                let h = b.read(handles[j]);
+                let joining = b.call(join, vec![h], joined_ty.clone());
+                let (ok, err) = (b.result_pat(true, HirPat::Bind(partials[j])), b.result_pat(false, HirPat::Wild));
+                tail = b.match_(joining, vec![(ok, tail), (err, failed)], coil_ty::never());
+            }
+            for i in (0..chunks.len()).rev() {
+                let mut failed = Vec::new();
+                discard(b, &handles[..i], &mut failed);
+                failed.push(seq(b, whole.0, whole.1));
+                let failed = b.block(failed, None, coil_ty::never());
+                let (lo, hi) = chunks[i];
+                let mut args = vec![b.read(f), read(b, lo), read(b, hi), b.int(site.op.identity())];
+                args.extend(live.iter().map(|&l| b.read(l)));
+                let spawning = b.call(spawn, args, spawned_ty.clone());
+                let (ok, err) = (b.result_pat(true, HirPat::Bind(handles[i])), b.result_pat(false, HirPat::Wild));
+                tail = b.match_(spawning, vec![(ok, tail), (err, failed)], coil_ty::never());
+            }
+            tail
+        };
+
+        if !site.is_dynamic() {
+            let bounds = site
+                .chunk_bounds(crate::typechecking::DEFAULT_LOOP_GRAIN)
+                .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
+            let chunks: Vec<_> = bounds.windows(2).map(|w| (Bound::Const(w[0]), Bound::Const(w[1]))).collect();
+            let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
+            stmts.push(fork(&mut b, &chunks, whole));
+        } else {
+            // `[lo, hi)` and its trip count, as `emit_dynamic_par_chunks`.
+            let bound = |b: &mut Synth, local: Option<LocalId>, konst: i64, bias: i64| {
+                let v = match local {
+                    Some(l) => b.read(l),
+                    None => b.int(konst),
+                };
+                if bias == 0 {
+                    return v;
+                }
+                let k = b.int(bias);
+                b.bin(BinOp::IntAdd, v, k, coil_ty::int())
+            };
+            let lo = b.local("__coil_par_lo", int.clone(), LocalKind::Temp);
+            let hi = b.local("__coil_par_hi", int.clone(), LocalKind::Temp);
+            let trip = b.local("__coil_par_trip", int.clone(), LocalKind::Temp);
+            let mid = b.local("__coil_par_mid", int.clone(), LocalKind::Temp);
+            let v = bound(&mut b, begin, site.begin, 0);
+            stmts.push(b.let_(lo, v));
+            let v = bound(&mut b, end, site.end, site.end_bias);
+            stmts.push(b.let_(hi, v));
+            let diff = {
+                let (h, l) = (b.read(hi), b.read(lo));
+                b.bin(BinOp::IntSub, h, l, coil_ty::int())
+            };
+            let positive = {
+                let (h, l) = (b.read(hi), b.read(lo));
+                let d = b.bin(BinOp::IntSub, h, l, coil_ty::int());
+                let zero = b.int(0);
+                b.bin(BinOp::Gt, d, zero, coil_ty::boolean())
+            };
+            let trips = if site.stride > 1 {
+                let k = b.int(site.stride - 1);
+                let up = b.bin(BinOp::IntAdd, diff, k, coil_ty::int());
+                let s = b.int(site.stride);
+                b.bin(BinOp::IntDiv, up, s, coil_ty::int())
+            } else {
+                diff
+            };
+            let none = b.int(0);
+            let trips = b.if_(positive, trips, Some(none), coil_ty::int());
+            stmts.push(b.let_(trip, trips));
+            // Up to the grain: on this thread.
+            let small = {
+                let t = b.read(trip);
+                let g = b.int(crate::typechecking::DEFAULT_LOOP_GRAIN.max(1));
+                b.bin(BinOp::Le, t, g, coil_ty::boolean())
+            };
+            let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
+            let here = b.block(vec![here], None, coil_ty::never());
+            stmts.push(b.if_(small, here, None, coil_ty::unit()));
+            let half = {
+                let t = b.read(trip);
+                let two = b.int(2);
+                let h = b.bin(BinOp::IntDiv, t, two, coil_ty::int());
+                let s = b.int(site.stride);
+                let span = b.bin(BinOp::IntMul, h, s, coil_ty::int());
+                let l = b.read(lo);
+                b.bin(BinOp::IntAdd, span, l, coil_ty::int())
+            };
+            stmts.push(b.let_(mid, half));
+            let chunks = [(Bound::Local(lo), Bound::Local(mid)), (Bound::Local(mid), Bound::Local(hi))];
+            stmts.push(fork(&mut b, &chunks, (Bound::Local(lo), Bound::Local(hi))));
+        }
+        let root = b.block(stmts, None, coil_ty::never());
+        b.finish(root)
     }
 
     /// The chunk worker of `par` as its own HIR body, `(index, hi, acc,
@@ -9778,7 +10002,7 @@ impl Compiler {
     /// Emit the chunk worker body `w` as its own function, the way a
     /// declared function is: planned, emitted and lowered to MIR. Its
     /// entry, or `None` with nothing emitted when it does not plan.
-    fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<u32> {
+    fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<(u32, String)> {
         if lower::refusal(w, &self.checker).is_some() {
             return None;
         }
@@ -9800,7 +10024,7 @@ impl Compiler {
         self.hir_cold = std::mem::take(&mut emit.cold);
         self.flush_hir_cold();
         self.hir_mir = self.hir_lower_mir(w, &emit, None);
-        self.bytecode.record_func_with_sp(name, Some(label), entry, self.bytecode.len(), arity);
+        self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
         self.par_frame_exit(frame);
@@ -9809,12 +10033,12 @@ impl Compiler {
             self.hir_par_tail = Some(Box::new(HirParTail { hir: w.clone(), emit }));
             self.flush_hir_par_tail();
         }
-        Some(entry as u32)
+        Some((entry as u32, name))
     }
 
     /// The chunk worker of `par` emitted from the enclosing body's plan in
     /// a fresh frame, when it does not plan as its own body. Its entry.
-    fn hir_par_worker_inline(&mut self, hir: &HirBody, emit: &mut HirEmit, par: &HirParSite) -> u32 {
+    fn hir_par_worker_inline(&mut self, hir: &HirBody, emit: &mut HirEmit, par: &HirParSite) -> (u32, String) {
         // The worker's frame holds the site's names; the body's own
         // locals bind in it as they are reached.
         let saved = emit.slots.clone();
@@ -9835,8 +10059,8 @@ impl Compiler {
         emit.slots = saved;
         let label = self.fn_entry_labels.get(&name).copied();
         let arity = 3 + par.site.live_captures.len() as u32;
-        self.bytecode.record_func_with_sp(name, label, start, self.bytecode.len(), arity);
-        entry
+        self.bytecode.record_func_with_sp(name.clone(), label, start, self.bytecode.len(), arity);
+        (entry, name)
     }
 
     /// `for x in a..b` / `for x in arr`, in the AST's counted-loop shapes
