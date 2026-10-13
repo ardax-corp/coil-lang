@@ -6095,6 +6095,7 @@ impl Compiler {
                     pair_args: vec![false; arity as usize],
                     pair_ret: false,
                     coro: false,
+                    boxed_ret: false,
                 },
             );
         }
@@ -7216,6 +7217,7 @@ impl Compiler {
                         ..
                     }) = self.bytecode.ops().last()
                     && called == arity
+                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 {
                     emit.call_targets.insert(
                         id.0,
@@ -7224,6 +7226,7 @@ impl Compiler {
                             pair_args: vec![false; args.len()],
                             pair_ret: ret_words == 2,
                             coro: false,
+                            boxed_ret,
                         },
                     );
                 }
