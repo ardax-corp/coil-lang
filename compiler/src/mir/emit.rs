@@ -1362,10 +1362,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::Print { loc });
         }
-        MirInst::Panic { src, .. } => {
-            emit_dense_push(out, &[*src], regs, scratch, loc)?;
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
-        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             // `DenseCmp` compares words; VM `EQ` compares strings by content.
             emit_dense_push(out, &[*lhs, *rhs], regs, scratch, loc)?;
@@ -1395,12 +1391,6 @@ struct EmitTermArgs<'args> {
     reserved: &'args HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-}
-
-/// Whether the ops so far end in a `Panic` (a block ending in
-/// [`MirInst::Panic`]).
-pub(super) fn ends_in_panic(out: &[IlOp]) -> bool {
-    out.last().and_then(IlOp::as_encode_byte).is_some_and(|b| *b.bytecode() == Instruction::Panic)
 }
 
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
@@ -1555,8 +1545,6 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 ret_words: super::abi::ret_words_from_hi(*hi),
             });
         }
-        // A `Panic` never returns: nothing follows it.
-        Terminator::Unreachable if ends_in_panic(out) => {}
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
         }
@@ -2172,7 +2160,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
-                MirInst::Stringify { .. } | MirInst::Print { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Print { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };

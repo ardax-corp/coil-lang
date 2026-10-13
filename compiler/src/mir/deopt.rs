@@ -24,7 +24,6 @@ impl MirInst {
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Print { .. }
-            | Self::Panic { .. }
             | Self::Format { .. }
             | Self::Stringify { .. } => Some(MirDeoptKind::Deopt),
             Self::HostInvoke { native_id, .. } if !host_is_pure(*native_id) => {

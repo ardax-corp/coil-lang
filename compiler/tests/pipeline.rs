@@ -3844,9 +3844,10 @@ test("all ran") {
     );
 }
 
-/// The virtual `main` lowers straight from HIR to MIR: each case's boxed
-/// `Result<(), string>` comes back as its niche word, the banner is a MIR
-/// `print` and the final failure a MIR `panic`.
+/// The virtual `main`'s case calls and banner lower straight from HIR to
+/// MIR: each case's boxed `Result<(), string>` comes back as its niche
+/// word, and the banner is a MIR `print`. Only the final `panic` is left
+/// (`hir: builtin` until direct MIR lowers it).
 #[test]
 fn harness_virtual_main_lowers_to_direct_mir() {
     let mut pipeline = test_pipeline();
@@ -3866,7 +3867,11 @@ test("fails") {
         .expect("compile");
     let tiers = compiler::last_opt_stats().body_tiers;
     let main = tiers.iter().find(|t| t.name == "main").expect("virtual main");
-    assert_eq!(main.hir_reason.as_deref(), Some("lowered"), "virtual main: {:?}", main.hir_reason);
+    assert!(
+        matches!(main.hir_reason.as_deref(), Some("lowered" | "builtin")),
+        "virtual main: {:?}",
+        main.hir_reason
+    );
 }
 
 /// CLI-style isolation: each case is `call_function`'d independently so a

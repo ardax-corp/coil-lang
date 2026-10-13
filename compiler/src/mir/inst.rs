@@ -462,12 +462,6 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
-    /// `Panic` of the message string `src`: never returns (the block ends
-    /// in [`Terminator::Unreachable`]). Dest is a `bool` unit token.
-    Panic {
-        dest: ValueId,
-        src: ValueId,
-    },
     /// `FORMAT n` (I4 / Q9 R1). Dest / `fmt` are [`MirTy::HeapRef`].
     /// Reconstructs the shipped opcode — not a second Format lowering.
     /// Allocating safepoint (R3); pair with [`Self::GcBarrier`].
@@ -634,7 +628,6 @@ impl MirInst {
             | Self::Deopt { dest, .. }
             | Self::String { dest, .. }
             | Self::Print { dest, .. }
-            | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::StrEq { dest, .. } => dest,
@@ -728,7 +721,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Panic { src, .. } | Self::Stringify { src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::Stringify { src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -824,7 +817,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } => {}
-            Self::Print { src, .. } | Self::Panic { src, .. } | Self::Stringify { src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::Stringify { src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

@@ -908,15 +908,6 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    /// `Panic` with the message string `msg`, ending the block: it never
-    /// returns.
-    pub fn panic(&mut self, msg: ValueId) -> Result<(), MirError> {
-        let src = self.resolve(msg);
-        let dest = self.alloc(MirTy::Bool);
-        self.push(MirInst::Panic { dest, src })?;
-        self.set_term(Terminator::Unreachable)
-    }
-
     /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
     pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
         let ft = self.resolve_ty(fmt);

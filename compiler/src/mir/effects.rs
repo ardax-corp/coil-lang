@@ -67,7 +67,6 @@ impl MirInst {
             | Self::ClearWord { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
-            | Self::Panic { .. }
             | Self::Format { .. }
             | Self::Stringify { .. } => true,
             _ => false,

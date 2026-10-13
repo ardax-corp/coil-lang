@@ -1894,7 +1894,6 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::StoreStatic { .. }
                         | MirInst::ClearWord { .. }
                         | MirInst::Print { .. }
-                        | MirInst::Panic { .. }
                         | MirInst::Format { .. }
                         | MirInst::Stringify { .. }
                 )
