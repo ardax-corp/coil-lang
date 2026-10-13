@@ -4656,3 +4656,24 @@ bb2:
         .expect("Unpack");
     assert!(!matches!(lir[unpack + 1], IlOp::StorePop { .. }), "the payload stays on the stack");
 }
+
+/// A function value (`MakeFn`) is the only allocation: no allocation the
+/// stack maps describe (`refuses_alloc`), so MIR→LIR emits the body with
+/// no map, as its fuse IL runs (an auto-par fork that spawns a closure).
+#[test]
+fn lir_emits_fn_value_alloc_without_maps() {
+    let text = "func @fork(v0: i64) -> i64 {
+bb0:
+    v1 = alloc.fn 7, 65537, v0
+    v2 = call.i64 9 v1, v0
+    v3 = call.i64 7 v0
+    return v3
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits a MakeFn body");
+    assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeFn)));
+    let (_, _, map) = super::emit_lir::lir_sidecars(&f);
+    assert!(map.is_none(), "no mapped allocation, no map");
+}
