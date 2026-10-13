@@ -539,6 +539,12 @@ pub struct Compiler {
     inst_clone_fallback: Option<(InstCloneSrc, InstClone)>,
     /// Entry labels minted at program start for the clones' entries.
     inst_clone_labels: Vec<IlLabel>,
+    /// Inherent method clones the body being planned calls, not yet
+    /// requested: they hold their room under the clone caps.
+    planned_method_clones: std::cell::RefCell<HashSet<(String, Vec<Ty>)>>,
+    /// Each planned inherent method clone, by name: its source, types and
+    /// the shared call it stands for (its thunk, when it does not lower).
+    method_clone_plans: std::cell::RefCell<HashMap<String, compiler::emit_hir::MethodClonePlan>>,
     /// Checker type variable → concrete type, per mono clone being compiled
     /// (the source function's type parameters), for open dictionary goals.
     mono_var_tys: Vec<HashMap<crate::typechecking::ty::TyVarId, Ty>>,
@@ -777,6 +783,8 @@ impl Default for Compiler {
             program_seq: 0,
             inst_clone_fallback: None,
             inst_clone_labels: Vec::new(),
+            planned_method_clones: Default::default(),
+            method_clone_plans: Default::default(),
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),
@@ -893,6 +901,17 @@ pub(crate) struct InstCloneSrc {
     program: usize,
     /// A default body's trait parameter names (its head is theirs).
     trait_params: Option<Vec<String>>,
+    /// An inherent method of a generic class, or one with its own type
+    /// parameters: cloned per call site's ground type arguments.
+    method_of: Option<MethodCloneSrc>,
+}
+
+/// What an inherent method clone source adds to [`InstCloneSrc`].
+#[derive(Clone)]
+pub(crate) struct MethodCloneSrc {
+    is_static: bool,
+    /// The type parameter names the head's variables stand for, in order.
+    names: Vec<String>,
 }
 
 /// A clone of [`InstCloneSrc`] `src` at ground instance types `lookup`.

@@ -220,6 +220,9 @@ pub struct HirMirInput<'a> {
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
+    /// Per argument of such a `format` call: the raw `show` entry a `%v`
+    /// argument is first passed through (its string then formats as `%s`).
+    pub format_shows: &'a HashMap<u32, Vec<Option<Label>>>,
     /// `assert` calls: the default message's string table index, `None`
     /// when the call passes its own.
     pub asserts: &'a HashMap<u32, Option<u32>>,
@@ -270,6 +273,11 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// Heap fields and `new` arguments whose slot holds a boxed enum
+    /// object (a generic class's field open in a parameter) for a value
+    /// whose own word is this niche layout: boxed on the way in, unboxed
+    /// on the way out.
+    pub boxed_niches: HashMap<u32, ValueLayout>,
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -558,6 +566,15 @@ fn is_unit(ty: &Ty) -> bool {
         // A function declared with no return type.
         Ty::Tuple(items) => items.is_empty(),
         _ => false,
+    }
+}
+
+/// The word type of a niche layout.
+fn niche_word(layout: ValueLayout) -> Result<MirTy, Refusal> {
+    match layout {
+        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Ok(MirTy::NicheOpt),
+        ValueLayout::NicheResult => Ok(MirTy::NicheRes),
+        ValueLayout::Boxed => Err("boxed niche layout".into()),
     }
 }
 
@@ -1135,6 +1152,25 @@ impl Lower<'_> {
         }
     }
 
+    /// Niche-layout value `id` as the boxed enum object a generic class's
+    /// open field holds: a read of another such field moves its object
+    /// as is, any other value boxes.
+    fn boxed_niche_word(&mut self, id: HirId, layout: ValueLayout) -> Result<Option<ValueId>, Refusal> {
+        if let HirKind::Field { base, .. } = self.hir.expr(id).kind
+            && self.inp.boxed_niches.get(&id.0) == Some(&layout)
+            && let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0)
+        {
+            let Some(obj) = self.boxed_word(base)? else {
+                return Ok(None);
+            };
+            return Ok(Some(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?));
+        }
+        let Some(v) = self.word(id)? else {
+            return Ok(None);
+        };
+        self.box_niche(layout, v).map(Some)
+    }
+
     /// `MakeEnum tag` of at most one payload word.
     fn make_enum(&mut self, tag: u32, payload: Option<ValueId>) -> Result<ValueId, Refusal> {
         let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, payload.into_iter().collect()).map_err(mir)?;
@@ -1707,7 +1743,7 @@ impl Lower<'_> {
             HirKind::Global { .. } | HirKind::Lambda { .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.fn_value(id, &f.clone()),
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
-            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
+            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // An operator on an instance taking its operands raw: a plain call.
@@ -1718,7 +1754,7 @@ impl Lower<'_> {
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
-            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
+            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if let Some(&default) = self.inp.asserts.get(&id.0) => self.assert(id, args, default),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
@@ -1731,6 +1767,17 @@ impl Lower<'_> {
                 let on = self.b.ins_const(MirConst::Bool(true)).map_err(mir)?;
                 self.b.def_local(flag, on).map_err(mir)?;
                 self.defers.push((flag, *body));
+                Ok(Val::Unit)
+            }
+            // `PRINT` of a string (the test-runner `main`'s failure line).
+            HirKind::Builtin { op: Builtin::Print, args } if let [msg] = args.as_slice() => {
+                let Some(s) = self.word(*msg)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(s) != MirTy::HeapRef {
+                    return Err("print operand".into());
+                }
+                self.at_expr(id, |l| l.b.ins_print(s).map_err(mir))?;
                 Ok(Val::Unit)
             }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
@@ -1892,14 +1939,24 @@ impl Lower<'_> {
                 let Some(obj) = self.boxed_word(*base)? else {
                     return Ok(Val::Never);
                 };
-                Ok(Val::V(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?))
+                let w = self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?;
+                match self.inp.boxed_niches.get(&id.0) {
+                    Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
+                    None => Ok(Val::V(w)),
+                }
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
                     && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
             {
                 // The value, then the object, as HIR emission's `SetField`.
-                let Some(v) = self.word(*value)? else {
+                let v = match self.inp.boxed_niches.get(&place.0) {
+                    Some(&layout) => self.boxed_niche_word(*value, layout)?,
+                    // A two-word value is stored boxed, as `new`'s.
+                    None if ty == MirTy::HeapRef => self.boxed_word(*value)?,
+                    None => self.word(*value)?,
+                };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -3349,7 +3406,11 @@ impl Lower<'_> {
         let (type_id, tys) = (*type_id, tys.clone());
         let mut words = Vec::with_capacity(args.len());
         for (&arg, ty) in args.iter().zip(tys) {
-            let v = if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let v = match self.inp.boxed_niches.get(&arg.0) {
+                Some(&layout) => self.boxed_niche_word(arg, layout)?,
+                None if ty == MirTy::HeapRef => self.boxed_word(arg)?,
+                None => self.word(arg)?,
+            };
             let Some(v) = v else {
                 return Ok(Val::Never);
             };
@@ -3470,14 +3531,27 @@ impl Lower<'_> {
 
     /// `format(fmt, args)` with word arguments: `FORMAT` of the format string
     /// and each argument, a heap string the collector may see at once.
-    fn format(&mut self, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
+    fn format(&mut self, id: HirId, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
         // The string first, as emission loads it, so the arguments land in
         // the registers after it.
         let fmt = self.b.ins_string(fmt).map_err(mir)?;
+        let shows = self.inp.format_shows.get(&id.0);
         let mut words = Vec::with_capacity(args.len());
-        for &arg in args {
+        for (i, &arg) in args.iter().enumerate() {
             let Some(v) = self.word(arg)? else {
                 return Ok(Val::Never);
+            };
+            // `%v`: the value's `show`, a plain call of its raw entry.
+            let v = match shows.and_then(|s| s.get(i).copied().flatten()) {
+                Some(target) => {
+                    let abi = DenseAbi {
+                        params: vec![self.b.value_ty(v)],
+                        ret: MirTy::HeapRef,
+                        ret_hi: None,
+                    };
+                    self.at_expr(id, |l| l.b.ins_call(target, vec![v], &abi).map_err(mir))?.0
+                }
+                None => v,
             };
             words.push(v);
         }
@@ -3934,7 +4008,10 @@ impl Lower<'_> {
         let boxed_local = match self.hir.expr(scrutinee).kind {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
-            HirKind::Field { .. } => self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef),
+            HirKind::Field { .. } => {
+                self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
+                    && !self.inp.boxed_niches.contains_key(&scrutinee.0)
+            }
             // So does an array element.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {
                 self.heap_array(base)
