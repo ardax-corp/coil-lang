@@ -56,12 +56,16 @@ const CORPUS: &[&str] = &[
 /// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
 /// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
 /// fuse to dense (`option_pair.hy` grows by three).
+/// Ground instance methods taking their arguments raw drop their entry
+/// `UnboxValue` prologues (`option_pair.hy`'s derived `Show` / `String` of
+/// `Holder`); `user_trait_dispatch.hy` also gains the `$dict` adapters its
+/// dictionaries name.
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "863c7be5f1f2864d_1287"),
     ("functions.hy", "9d79ba2750678788_278"),
     ("loops.hy", "78d97e79a4a64057_235"),
-    ("option_pair.hy", "4ca4f142229f9372_341"),
-    ("user_trait_dispatch.hy", "e6abfd3b808ab036_121"),
+    ("option_pair.hy", "15713395cabac428_335"),
+    ("user_trait_dispatch.hy", "a964036816e40f05_113"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

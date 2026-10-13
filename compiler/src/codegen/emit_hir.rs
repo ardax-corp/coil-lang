@@ -295,6 +295,11 @@ struct HirEmit {
     op_calls: HashMap<u32, crate::mir::HirOpCall>,
     /// User operators emitted as a raw opcode on the operands.
     op_prims: HashSet<u32>,
+    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
+    /// named functions read as values), by expression.
+    fn_values: HashMap<u32, crate::mir::HirFnValue>,
+    /// Calls through a function value emitted as a plain `CallIndirect`.
+    value_calls: HashSet<u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -827,9 +832,7 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.lambdas.is_empty() {
-            Err("lambda".to_string())
-        } else if emit.par_loop {
+        let why = if emit.par_loop {
             Err("parallel loop".to_string())
         } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
             // The debugger reads split class / array locals from their
@@ -1110,6 +1113,8 @@ impl Compiler {
             asserts: &emit.asserts,
             op_calls: &emit.op_calls,
             op_prims: &emit.op_prims,
+            fn_values: &emit.fn_values,
+            value_calls: &emit.value_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -1988,6 +1993,19 @@ impl Compiler {
         Ok(())
     }
 
+    /// Record the function value `id` builds for direct MIR, once its
+    /// `CodePtr` (with `operand`, `MakeFn` follows it) or `MakePolyFn` is
+    /// the last op: an entry label, not an absolute offset.
+    fn hir_note_fn_value(&mut self, emit: &mut HirEmit, id: HirId, operand: Option<u32>, captures: Vec<LocalId>) {
+        use crate::il::EntryKind;
+        let kind = match (self.bytecode.il_mut().ops_slice_mut().last(), operand) {
+            (Some(&IlOp::Entry { kind: EntryKind::CodePtr, target, .. }), Some(operand)) => crate::mir::MirAllocKind::Fn { target, operand },
+            (Some(&IlOp::Entry { kind: EntryKind::MakePolyFn, target, .. }), None) => crate::mir::MirAllocKind::PolyFn { target },
+            _ => return,
+        };
+        emit.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures });
+    }
+
     /// A lambda's frame: each capture's name, then each parameter's.
     fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody) -> Vec<u32> {
         let names = lam.captures.iter().map(|&(_, inner)| inner).chain(lam.params.iter().copied());
@@ -2071,6 +2089,8 @@ impl Compiler {
             asserts: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
+            fn_values: HashMap::new(),
+            value_calls: HashSet::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6115,6 +6135,41 @@ impl Compiler {
         }
     }
 
+    /// Operator call `id` on a raw instance method, just emitted as one
+    /// `CALL` of `arity` boxed-layout operands: direct MIR makes it a plain
+    /// call of the same entry.
+    fn hir_note_op_call_target(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, arity: u32) {
+        let operands = match &hir.expr(id).kind {
+            HirKind::Bin { lhs, rhs, .. } => vec![*lhs, *rhs],
+            HirKind::Un { operand, .. } => vec![*operand],
+            _ => return,
+        };
+        // Each operand's MIR word is the boxed-layout word the stack passes.
+        let boxed = |o: HirId| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
+        if operands.len() as u32 != arity || !operands.iter().all(|&o| boxed(o)) {
+            return;
+        }
+        if let Some(&IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            target,
+            arity: called,
+            ret_words: 1,
+            ..
+        }) = self.bytecode.ops().last()
+            && called == arity
+        {
+            emit.call_targets.insert(
+                id.0,
+                crate::mir::HirCallSite {
+                    target,
+                    pair_args: vec![false; arity as usize],
+                    pair_ret: false,
+                    coro: false,
+                },
+            );
+        }
+    }
+
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
@@ -6234,8 +6289,9 @@ impl Compiler {
                 self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
                 let arity = lam.body.params.len() as u32;
                 let captures = lam.body.captures.len() as u32;
-                self.bytecode
-                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(captures, 0, arity, false)));
+                let operand = make_fn_operand(captures, 0, arity, false);
+                self.hir_note_fn_value(emit, id, Some(operand), lam.body.captures.iter().map(|&(outer, _)| outer).collect());
+                self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
                 emit.plan.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
@@ -6250,13 +6306,17 @@ impl Compiler {
                     bc.push(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(dict_arity as u32));
                 }
                 self.bytecode = bc;
+                if dict_arity == 0 {
+                    self.hir_note_fn_value(emit, id, None, Vec::new());
+                }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry as u32));
-                self.bytecode
-                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, rest)));
+                let operand = make_fn_operand(0, 0, arity, rest);
+                self.hir_note_fn_value(emit, id, Some(operand), Vec::new());
+                self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
             }
             HirKind::Global { .. } => {
                 let value = emit.plan.consts[&id.0].clone();
@@ -6358,16 +6418,18 @@ impl Compiler {
                     method,
                 } => {
                     // As `emit_concrete_operator_call`: each operand boxed
-                    // for the instance and stashed in a temp, then the call.
+                    // for the instance (unless it takes them raw) and
+                    // stashed in a temp, then the call.
                     debug_assert_eq!(depth, 0);
                     let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                    let raw = self.raw_instance_methods.contains(&fqn);
                     // A shift count is a plain `int` parameter, not the
                     // instance's type, so it is not boxed for it (#883).
                     let shift = matches!(class, "Shl" | "Shr");
                     let mut temps = [0u32; 2];
                     for (i, (temp, operand)) in temps.iter_mut().zip([*lhs, *rhs]).enumerate() {
                         self.hir_value(hir, emit, operand, &BOXED, 0);
-                        if !(shift && i == 1) {
+                        if !raw && !(shift && i == 1) {
                             Self::emit_box_if_needed(&mut self.bytecode, &lookup);
                         }
                         self.expr_depth = 0;
@@ -6382,11 +6444,15 @@ impl Compiler {
                     if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
                         arity += 1;
                     }
+                    self.raw_instance_call = raw;
                     self.emit_direct_fn_call(&mut call, &fqn, arity);
                     self.bytecode.append(&mut call);
-                    // No dictionary and a one-word result: direct MIR boxes
-                    // the operands and calls the same entry.
-                    if arity == 2
+                    // Raw operands: direct MIR makes a plain call. Else, no
+                    // dictionary and a one-word result: direct MIR boxes the
+                    // operands and calls the same entry.
+                    if raw {
+                        self.hir_note_op_call_target(hir, emit, id, 2);
+                    } else if arity == 2
                         && let Some(tag) = Self::ty_to_value_tag(&lookup)
                         && let Some(&IlOp::Entry {
                             kind: crate::il::EntryKind::Call,
@@ -6508,11 +6574,15 @@ impl Compiler {
                 }) = emit.plan.ops.get(&id.0) =>
             {
                 // As the binary instance call: the operand boxed for the
-                // instance and stashed in a temp, then the call.
+                // instance (unless it takes it raw) and stashed in a temp,
+                // then the call.
                 debug_assert_eq!(depth, 0);
                 let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                let raw = self.raw_instance_methods.contains(&fqn);
                 self.hir_value(hir, emit, *operand, &BOXED, 0);
-                Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                if !raw {
+                    Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                }
                 self.expr_depth = 0;
                 let temp = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(temp);
@@ -6523,8 +6593,12 @@ impl Compiler {
                 if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
                     arity += 1;
                 }
+                self.raw_instance_call = raw;
                 self.emit_direct_fn_call(&mut call, &fqn, arity);
                 self.bytecode.append(&mut call);
+                if raw {
+                    self.hir_note_op_call_target(hir, emit, id, 1);
+                }
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
@@ -6563,6 +6637,7 @@ impl Compiler {
                 }
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
+                emit.value_calls.insert(id.0);
             }
             HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, depth),
             HirKind::Resume { handle, value } => {
@@ -7141,13 +7216,17 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
-                let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
+                let HirGround { method, mut boxed, stage } = inst.ground.clone().expect("ground call");
+                // A raw instance method takes the instance's own words.
+                if self.raw_instance_methods.contains(&key) {
+                    boxed.clear();
+                }
                 // Temps only at depth 0, as the method path: under pending
                 // operands (`u.label() + ":"`) a temp slot sits at the
                 // call's own depth, so the result would land above it.
                 let stage = stage && depth == 0;
                 let mut temps = Vec::with_capacity(args.len());
-                for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                     let at = if stage { depth } else { depth + i as u32 };
                     self.hir_value(hir, emit, arg, &Rep::Word(param), at);
                     if let Some(Some(ty)) = boxed.get(i) {
@@ -7170,8 +7249,33 @@ impl Compiler {
                     arity += 1;
                 }
                 self.bytecode.append(&mut bc);
+                let raw = self.raw_instance_methods.contains(&key);
+                self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
                 debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
+                // Raw words and no dictionary: direct MIR calls the same entry.
+                if raw
+                    && arity == args.len() as u32
+                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(&IlOp::Entry {
+                        kind: crate::il::EntryKind::Call,
+                        target,
+                        arity: called,
+                        ret_words: ret_words @ (1 | 2),
+                        ..
+                    }) = self.bytecode.ops().last()
+                    && called == arity
+                {
+                    emit.call_targets.insert(
+                        id.0,
+                        crate::mir::HirCallSite {
+                            target,
+                            pair_args: vec![false; args.len()],
+                            pair_ret: ret_words == 2,
+                            coro: false,
+                        },
+                    );
+                }
                 self.expr_depth = depth;
                 self.hir_convert(&natural, want, depth);
                 return;
@@ -7182,7 +7286,10 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let generic = call.generic.clone();
-                let instance = call.instance.clone();
+                // A raw instance method takes its receiver unboxed and no
+                // dictionary.
+                let raw = self.raw_instance_methods.contains(&key);
+                let instance = call.instance.clone().filter(|_| !raw);
                 let boxed = |i: usize| {
                     generic.as_ref().and_then(|g| g.boxed[i].clone()).or_else(|| {
                         instance.as_ref().filter(|_| i == 0).and_then(|inst| inst.recv_box.clone())
@@ -7226,6 +7333,7 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
+                self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
                 // A plain one-word ABI call, each argument in its own layout:

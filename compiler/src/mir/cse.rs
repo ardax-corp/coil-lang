@@ -476,6 +476,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
         | MirInst::Call { .. }
+        | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
@@ -485,6 +486,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::StoreIndex { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
+        | MirInst::Yield { .. }
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
