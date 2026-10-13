@@ -5949,7 +5949,7 @@ impl Compiler {
             }
             HirKind::Break | HirKind::Continue => Ok(()),
             HirKind::Builtin {
-                op: Builtin::Panic,
+                op: Builtin::Panic | Builtin::Print,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED),
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
@@ -9001,6 +9001,13 @@ impl Compiler {
             HirKind::Continue => {
                 let target = emit.loops.last().expect("continue inside a loop").cont;
                 self.hir_jump(IlJumpKind::Unconditional, target);
+            }
+            HirKind::Builtin {
+                op: Builtin::Print,
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, 0);
+                self.bytecode.push_print();
             }
             HirKind::Builtin {
                 op: Builtin::Panic,

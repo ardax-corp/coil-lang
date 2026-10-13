@@ -7291,92 +7291,70 @@ impl Compiler {
         Some((native_id, meta))
     }
 
-    /// Emit a synthetic `main` that runs every harness test case in one VM
-    /// (standalone `cargo run -- tests/foo.hy`). Prints
-    /// `> Test "<name>" failed` on soft failures and panics with
-    /// `"tests failed"` if any case failed.
+    /// The `main` of a test file with none (standalone `coil tests/foo.hy`):
+    /// runs every test case in one VM, printing `> Test "<name>" failed` for
+    /// each case that returns `Err`, then panics with `"tests failed"` if
+    /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any
+    /// other body.
     fn emit_virtual_test_main(&mut self) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{BinOp, Builtin, HirPat, LocalKind};
+        use crate::typechecking::ty as coil_ty;
         let cases: Vec<(String, u32)> = self.test_cases.clone();
         if cases.is_empty() {
             return;
         }
-
-        self.bind_function_entry("main".to_string());
-        let body_start = self.bytecode.len();
-
-        let prev_vars = std::mem::take(&mut self.context.variables);
-        self.context.variables = Interner::default();
-        // slot 0 = failed count
-        let failed_slot = self.context.variables.intern("failed".to_string()) as u32;
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push_store_pop(failed_slot);
-
-        let mut bb = BlockBuilder::new();
-        for (desc, offset) in &cases {
-            if let Some(label) = self.bytecode.entry_label_for_offset(*offset as usize) {
-                self.bytecode.emit_entry(EntryKind::Call, 0, label);
-            } else {
-                // Fallback for cases without a bound entry label (should be rare
-                // after `bind_function_entry`); packed CALL(0, pc) keeps harness green.
-                self.bytecode
-                    .push(Byte::new(Instruction::CALL).with_call_packed(0, *offset));
-            }
-            // Jump if Result::Err (tag 1), on match, payload (message) is pushed.
-            let fail = bb.fresh_label(self.bytecode.il_mut());
-            let done = bb.fresh_label(self.bytecode.il_mut());
-            bb.emit_jump_to(
-                fail,
-                BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-                self.bytecode.il_mut(),
-            );
-            // Ok path: discard whole Result enum.
-            self.bytecode.push_pop();
-            bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
-            bb.bind_label(fail, self.bytecode.il_mut());
-            // Discard Err message payload.
-            self.bytecode.push_pop();
-            let msg = format!("> Test \"{desc}\" failed\n");
-            self.emit_string_literal(&msg);
-            self.bytecode.push_print();
-            // failed += 1
-            self.bytecode.push_load(failed_slot);
-            self.bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(1i64).raw() as _,
-            ));
-            self.bytecode.push(Byte::new(Instruction::ADD));
-            self.bytecode.push_store_pop(failed_slot);
-            bb.bind_label(done, self.bytecode.il_mut());
+        let names: Vec<String> = (0..cases.len()).map(crate::typechecking::Checker::test_case_fn_name).collect();
+        let result = coil_ty::result_ty(coil_ty::unit(), coil_ty::string());
+        let mut b = Synth::new(&self.checker, "main", coil_ty::unit());
+        let failed = b.local("failed", coil_ty::int(), LocalKind::Let);
+        let zero = b.int(0);
+        let mut stmts = vec![b.let_(failed, zero)];
+        for ((desc, _), name) in cases.iter().zip(&names) {
+            let call = b.call(name, Vec::new(), result.clone());
+            let msg = b.str(&format!("> Test \"{desc}\" failed\n"));
+            let print = b.builtin(Builtin::Print, vec![msg], coil_ty::unit());
+            let count = b.read(failed);
+            let one = b.int(1);
+            let more = b.bin(BinOp::IntAdd, count, one, coil_ty::int());
+            let bump = b.assign(failed, more);
+            let on_err = b.block(vec![print, bump], None, coil_ty::unit());
+            let on_ok = b.block(Vec::new(), None, coil_ty::unit());
+            let err = b.result_pat(false, HirPat::Wild);
+            stmts.push(b.match_(call, vec![(err, on_err), (HirPat::Wild, on_ok)], coil_ty::unit()));
         }
+        let count = b.read(failed);
+        let zero = b.int(0);
+        let any = b.bin(BinOp::Ne, count, zero, coil_ty::boolean());
+        let msg = b.str("tests failed");
+        let panic = b.builtin(Builtin::Panic, vec![msg], coil_ty::never());
+        let then = b.block(vec![panic], None, coil_ty::never());
+        stmts.push(b.if_(any, then, None, coil_ty::unit()));
+        let unit = b.unit();
+        stmts.push(b.ret(unit));
+        let root = b.block(stmts, None, coil_ty::never());
+        let hir = b.finish(root);
 
-        // if failed != 0 { panic "tests failed" }
-        let panic_lbl = bb.fresh_label(self.bytecode.il_mut());
-        let end_lbl = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode.push_load(failed_slot);
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push(Byte::new(Instruction::EQ));
-        // failed == 0 → EQ true → fall through JMPF; else JMPF → panic.
-        bb.emit_jump_to(panic_lbl, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-        bb.emit_jump_to(end_lbl, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(panic_lbl, self.bytecode.il_mut());
-        self.emit_string_literal("tests failed");
-        self.bytecode.push(Byte::new(Instruction::Panic));
-        bb.bind_label(end_lbl, self.bytecode.il_mut());
-        self.bytecode.push_const(0);
-        self.bytecode.push_return();
-
+        let body_start = self.bytecode.len();
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
+        // A case returns its `Result<(), string>` boxed.
+        let calls = names.iter().map(|n| (n.clone(), (Vec::new(), ValueLayout::Boxed))).collect();
+        if !self.lower_synth_hir(&hir, calls, |c: &mut Self| {
+            c.bind_function_entry("main".to_string());
+        }) {
+            self.report_unlowered(&SimpleSpan::from(0..0), "main");
+            self.bind_function_entry("main".to_string());
+        }
+        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.attach_hir_mir();
         self.record_unboxed_class_fields();
+        self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
 
