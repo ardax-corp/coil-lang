@@ -420,9 +420,8 @@ impl IlModule {
                         next.push(i);
                         continue;
                     }
-                    if !side.debug_slot_remap.is_empty() {
-                        side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
-                    }
+                    // Even empty: a local it leaves out has no register.
+                    side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     if let Some(deopt) = side.deopt {
                         side_deopts.push(deopt);
                     }
@@ -477,9 +476,8 @@ impl IlModule {
                 if drops_bound_label(&body.ops, &lir) {
                     lir_why[i] = Some("drops a called inner label".to_string());
                 } else if (crate::mir::mir_fuse_on() && crate::mir::mir_fuse_takes(&body.meta.name)) || lir_keeps(&body.ops, &lir) {
-                    if !side.debug_slot_remap.is_empty() {
-                        side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
-                    }
+                    // Even empty: a local it leaves out has no register.
+                    side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     if let Some(deopt) = side.deopt {
                         side_deopts.push(deopt);
                     }
