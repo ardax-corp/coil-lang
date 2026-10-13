@@ -63,7 +63,7 @@ const CORPUS: &[&str] = &[
 /// The corpus asserting with the stdlib `assert!` macro (`if !c { raise … }`)
 /// instead of the builtin `assert(c)?` shortens all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "cc932e3a25941f21_863"),
+    ("arithmetic.hy", "8d47a68904a206ec_856"),
     ("functions.hy", "b608853f86069095_173"),
     ("loops.hy", "e35f127fe0897f4c_169"),
     ("option_pair.hy", "1ad98429475c9600_288"),

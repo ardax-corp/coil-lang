@@ -91,6 +91,23 @@ struct HirCall {
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
 }
 
+/// A call of an inherent method's clone at ground type arguments
+/// ([`Compiler::hir_method_clone`]), with the shared call it replaces: the
+/// clone's thunk, when its body does not lower, makes that call.
+#[derive(Clone)]
+pub(crate) struct MethodClonePlan {
+    src: String,
+    lookup: Vec<Ty>,
+    /// The clone's parameter and result layouts.
+    params: Vec<ValueLayout>,
+    ret: ValueLayout,
+    /// The shared body's entry and ABI.
+    shared: String,
+    shared_params: Vec<ValueLayout>,
+    shared_ret: ValueLayout,
+    generic: Option<HirGeneric>,
+}
+
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
 /// over a discharged instance: the receiver boxed for the instance, then a
 /// trailing dictionary when the instance has one.
@@ -313,8 +330,11 @@ struct HirEmit {
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
     /// String table index of the format string of each `format` call
-    /// whose arguments all print as words (no `%v`), by call.
+    /// whose arguments all print as words, by call (`%v` as `%s`).
     format_strs: HashMap<u32, u32>,
+    /// Per argument of such a `format` call (after the format string): the
+    /// raw `show` entry a `%v` argument goes through, `None` for a word.
+    format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
     /// User operators emitted as their instance method's plain `CALL`.
     op_calls: HashMap<u32, crate::mir::HirOpCall>,
     /// User operators emitted as a raw opcode on the operands.
@@ -521,6 +541,8 @@ impl Compiler {
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
         self.hir_refusal = None;
+        // Clones an earlier body planned but never called give back their room.
+        self.planned_method_clones.borrow_mut().clear();
         let entry_sp = self.hir_entry_sp.take();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
@@ -842,8 +864,10 @@ impl Compiler {
         if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
+        // A compiler-made body has no source: its ops carry no location,
+        // as its stack lowering clears them.
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
-            .filter(|loc| loc.is_known())
+            .filter(|loc| loc.is_known() && self.hir_synth_calls.is_none())
             .map(|loc| loc.file);
         let plan = &emit.plan;
         let why = if emit.par_loop {
@@ -988,10 +1012,24 @@ impl Compiler {
                 && emit.plan.sroa.contains_key(&local.0)
                 && !outlined.contains(&local.0)
             {
-                let slot = self.hir_sroa_slot(hir, emit, *base, name).ok_or("scalar-replaced field")?;
-                fields.insert(i as u32, slot);
+                // The field's slot whether or not the local is boxed by
+                // the end: direct MIR goes through the box only after it.
+                let Some((FieldAt::Slot(idx), _)) = self.hir_field(hir, *base, name) else {
+                    return Err("scalar-replaced field".into());
+                };
+                fields.insert(i as u32, Self::hir_slot(emit, local) + idx);
             }
         }
+        // A frame-slot class local that escapes is boxed into an object of
+        // its class: the type id and field count.
+        let sroa_classes = sroa
+            .keys()
+            .filter_map(|l| {
+                let class = emit.plan.sroa.get(l)?;
+                let n = self.checker.class_fields(class).map_or(0, |f| f.len());
+                Some((*l, (self.checker.class_type_id(class), n as u32)))
+            })
+            .collect();
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
@@ -1005,6 +1043,19 @@ impl Compiler {
                 boxed.then_some(crate::mir::MirTy::HeapRef)
             })
         };
+        // A generic class's field open in a parameter (`head:
+        // Option<Node<T>>`) holds its boxed word; read or written at a
+        // ground type with a niche layout of its own it converts there.
+        let open_niche = |fty: &Ty, at: &Ty| {
+            let at_layout = crate::typechecking::value_layout::value_layout(checker, at);
+            (Self::ty_has_var(fty)
+                && field_word(fty) == Some(crate::mir::MirTy::HeapRef)
+                && crate::typechecking::value_layout::value_layout(checker, fty) == ValueLayout::Boxed
+                && crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::hir::layout::Layout::Word
+                && at_layout != ValueLayout::Boxed)
+                .then_some(at_layout)
+        };
+        let mut boxed_niches = HashMap::new();
         let mut heap_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
@@ -1028,6 +1079,14 @@ impl Compiler {
                 && e.ty.as_ref().and_then(field_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
+            } else if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(layout) = e.ty.as_ref().and_then(|t| open_niche(&fty, t))
+            {
+                heap_fields.insert(i as u32, (idx, crate::mir::MirTy::HeapRef));
+                boxed_niches.insert(i as u32, layout);
             }
         }
         // Record (dict) fields by key, and record literals, whose words are
@@ -1075,9 +1134,17 @@ impl Compiler {
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && !checker.class_has_drop(&class)
+                && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
                 && let Some(words) = tys
                     .iter()
-                    .map(|t| {
+                    .zip(args)
+                    .map(|(t, &arg)| {
+                        // A field open in a class parameter holds a niche
+                        // argument boxed.
+                        if let Some(layout) = Self::hir_ty(hir, arg).and_then(|at| open_niche(t, at)) {
+                            boxed_niches.insert(arg.0, layout);
+                            return Some(crate::mir::MirTy::HeapRef);
+                        }
                         // A two-word field value is stored boxed.
                         let stored = |t: &Ty| {
                             word(t).or_else(|| {
@@ -1152,6 +1219,7 @@ impl Compiler {
             ret_pair,
             stacks,
             sroa,
+            sroa_classes,
             fields,
             calls: &emit.call_targets,
             into_iters: &emit.into_iters,
@@ -1159,6 +1227,7 @@ impl Compiler {
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
             formats: &emit.format_strs,
+            format_shows: &emit.format_shows,
             op_calls: &emit.op_calls,
             par_loops: &emit.par_calls,
             op_prims: &emit.op_prims,
@@ -1244,6 +1313,7 @@ impl Compiler {
                 }
             }),
             heap_fields,
+            boxed_niches,
             record_fields,
             records,
             aggregates: emit
@@ -2085,6 +2155,16 @@ impl Compiler {
                 if let (true, Some(declared)) = (bare, declared) {
                     return Ok(Rep::Word(declared));
                 }
+                // An inherent method clone returns in the layout its
+                // callers planned ([`Self::hir_method_clone`]).
+                if let Some(declared) = declared
+                    && self.compiling_mono_clone
+                    && let Some((src, req)) = self.inst_clone_fallback.as_ref()
+                    && src.method_of.is_some()
+                    && self.method_clone_plans.borrow().get(&req.name).is_some_and(|p| p.ret == declared)
+                {
+                    return Ok(Rep::Word(declared));
+                }
                 if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
@@ -2127,6 +2207,7 @@ impl Compiler {
             into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
+            format_shows: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
             fn_values: HashMap::new(),
@@ -2513,12 +2594,20 @@ impl Compiler {
             .rsplit_once("::")
             .is_some_and(|(owner, _)| self.checker.is_class(owner) && lower::is_generic_class(&self.checker, owner));
         let generic = self.checker.is_generic_fn(&lookup);
+        let clone_key = key.clone();
         let mut abi = self.hir_call_abi(key, &lookup, argc, None, shared || generic)?;
         if generic {
             let HirKind::Call { args, .. } = &hir.expr(call).kind else {
                 return Err("callee");
             };
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
+        }
+        // `C::f(..)` at ground type arguments: the static method's clone.
+        if (shared || generic)
+            && !forwards
+            && let Some(clone) = self.hir_method_clone(hir, call, &clone_key, &lookup, &abi)
+        {
+            return Ok(clone);
         }
         Ok(abi)
     }
@@ -2878,6 +2967,158 @@ impl Compiler {
         })
     }
 
+    /// `call` of inherent method `key` sent to its clone at the call's
+    /// ground type arguments ([`Compiler::instance_clone`]) instead of the
+    /// shared body `shared` stands for: each argument in its own layout,
+    /// no boxing and no dictionaries. `None` when a type argument is open
+    /// or two words, a parameter or the result is two words, or the clone
+    /// caps are reached.
+    fn hir_method_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str, shared: &HirCall) -> Option<HirCall> {
+        let src = self.inst_clone_srcs.get(key).filter(|s| s.method_of.is_some())?;
+        if shared.pair.is_some()
+            || shared.instance.is_some()
+            || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty() || g.adapt.iter().any(Option::is_some))
+            || self.coroutine_fns.contains(key)
+        {
+            return None;
+        }
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return None;
+        };
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+                return None;
+            }
+            arg_tys.push(ty);
+        }
+        let param_tys = self.hir_mono_param_tys(lookup, args.len())?;
+        if param_tys.len() != args.len() || param_tys.len() != shared.params.len() {
+            return None;
+        }
+        let ret_ty = self.checker.fn_return_ty(lookup)?;
+        let mut map = HashMap::new();
+        for (param, arg) in param_tys.iter().zip(&arg_tys) {
+            Self::bind_scheme_vars(param, arg, &mut map);
+        }
+        let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
+        Self::bind_scheme_vars(&ret_ty, &call_ty, &mut map);
+        // Each type argument one word in its own layout (no pair).
+        let word = |ty: &Ty| {
+            crate::hir::layout::ty_is_closed(ty)
+                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && crate::hir::layout::of_resolved(&self.checker, ty) == crate::hir::layout::Layout::Word
+        };
+        let lookup_tys = src
+            .head
+            .iter()
+            .map(|v| match v {
+                Ty::Var(v) => map.get(v).filter(|t| word(t)).cloned(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
+        // A parameter or result one word, in a layout the thunk converts
+        // from the shared one's.
+        let one = |ty: &Ty| {
+            crate::hir::layout::ty_is_closed(ty)
+                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && !matches!(crate::hir::layout::of_resolved(&self.checker, ty), crate::hir::layout::Layout::Pair(_))
+        };
+        let mut params = Vec::with_capacity(param_tys.len());
+        for param in &param_tys {
+            let ty = at(param);
+            if !one(&ty) {
+                return None;
+            }
+            params.push(self.value_layout(&ty));
+        }
+        let ret = at(&ret_ty);
+        // A generic `Option` / `Result` result is returned in its own
+        // layout when it is one word (`Option<string>` a niche word: no
+        // box made for the caller to take apart); a two-word one stays in
+        // the open type's layout, as a mono clone's (`resolve_hir_mono`).
+        let boundary = !matches!(ret_ty, Ty::Var(_))
+            && !one(&ret)
+            && !crate::hir::layout::ty_is_closed(&ret_ty)
+            && crate::hir::layout::ty_is_closed(&ret)
+            && lower::classify(&self.checker, &ret) == Some(ValueClass::Enum);
+        let unit = matches!(&ret, Ty::Con(n) if n == crate::typechecking::ty::UNIT);
+        let ret_layout = if boundary {
+            self.generic_enum_layout(&ret_ty)?
+        } else if one(&ret) || unit {
+            self.value_layout(&ret)
+        } else {
+            return None;
+        };
+        if !self.method_clone_room(key, &lookup_tys) {
+            return None;
+        }
+        let name = Self::inst_clone_name(key, &lookup_tys);
+        self.method_clone_plans.borrow_mut().entry(name.clone()).or_insert_with(|| MethodClonePlan {
+            src: key.to_string(),
+            lookup: lookup_tys,
+            params: params.clone(),
+            ret: ret_layout,
+            shared: shared.key.clone(),
+            shared_params: shared.params.clone(),
+            shared_ret: shared.ret,
+            generic: shared.generic.as_deref().cloned(),
+        });
+        Some(HirCall {
+            key: name,
+            pair: None,
+            params,
+            ret: ret_layout,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+            mono_of: None,
+        })
+    }
+
+    /// The call of an inherent method clone planned as `key`: the clone
+    /// made now ([`Compiler::instance_clone`]), its entry ready to call.
+    fn hir_request_method_clone(&mut self, key: &str) {
+        let Some(plan) = self.method_clone_plans.borrow().get(key).cloned() else {
+            return;
+        };
+        let made = self.instance_clone(&plan.src, &plan.lookup);
+        debug_assert_eq!(made.as_deref(), Some(key), "planned method clone `{key}`");
+    }
+
+    /// The body of an inherent method clone that does not lower: its
+    /// arguments in the shared body's layouts (a bare type parameter
+    /// boxed), the call site's dictionaries, the shared call, and its result
+    /// back in the clone's layout.
+    pub(super) fn emit_method_clone_call_shared(&mut self, name: &str) {
+        let plan = self.method_clone_plans.borrow().get(name).cloned().expect("a planned method clone");
+        for (slot, (&own, &shared)) in plan.params.iter().zip(&plan.shared_params).enumerate() {
+            self.bytecode.push_load(slot as u32);
+            if own != shared {
+                Self::emit_layout_convert(&mut self.bytecode, own, shared);
+            }
+            if let Some(Some(ty)) = plan.generic.as_ref().and_then(|g| g.boxed.get(slot)) {
+                Self::emit_box_if_needed(&mut self.bytecode, ty);
+            }
+        }
+        let dicts = plan.generic.as_ref().map_or(0, |g| self.hir_push_dicts(g));
+        if !self.emit_named_entry_on_module(&plan.shared, plan.params.len() as u32 + dicts, crate::il::EntryKind::Call) {
+            self.missing_call_target(&plan.shared, 0..0);
+        }
+        if let Some(ty) = plan.generic.as_ref().and_then(|g| g.unbox.as_ref()) {
+            Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+        }
+        if plan.shared_ret != plan.ret {
+            Self::emit_layout_convert(&mut self.bytecode, plan.shared_ret, plan.ret);
+        }
+        self.bytecode.push_return();
+    }
+
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
     /// receiver), when it is a plain `CALL` to an inherent method of a user
     /// class; checked in `compile_call_expr`'s order.
@@ -3000,6 +3241,13 @@ impl Compiler {
         let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
+        }
+        // At ground type arguments, the method's clone there.
+        if (shared || generic)
+            && !forwards
+            && let Some(clone) = self.hir_method_clone(hir, call, &lookup, &lookup, &abi)
+        {
+            return Ok(clone);
         }
         let mut call = abi;
         call.method = true;
@@ -4142,6 +4390,28 @@ impl Compiler {
     }
 
     /// `Show` the value on top of the stack, leaving its string.
+    /// [`Self::hir_show`], and the entry it called when that is one plain
+    /// `CALL` of a raw `show` on the value's own word (a heap or immediate
+    /// word, no dictionary): direct MIR makes it the same call.
+    fn hir_show_target(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::il::Label> {
+        let start = self.bytecode.il_mut().raw_len();
+        self.hir_show(hir, arg);
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+        if self.value_layout(&ty) != ValueLayout::Boxed {
+            return None;
+        }
+        match self.bytecode.il_mut().ops_slice_mut()[start..] {
+            [IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                target,
+                arity: 1,
+                ret_words: 1,
+                ..
+            }] => Some(target),
+            _ => None,
+        }
+    }
+
     fn hir_show(&mut self, hir: &HirBody, arg: HirId) {
         if let Some((dict, method)) = self.hir_bound_show(hir, arg) {
             self.bytecode.push_load(dict);
@@ -4457,6 +4727,7 @@ impl Compiler {
                 op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
+            HirKind::Field { .. } if let Some(rep) = self.hir_field_rep(hir, id) => Some(rep),
             HirKind::Index { .. }
             | HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array | MakeKind::Record(_),
@@ -4479,6 +4750,27 @@ impl Compiler {
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
             _ => None,
         }
+    }
+
+    /// Field read `id` of a generic class's slot whose declared type is
+    /// open (`head: Option<Node<T>>`): the word comes in the open type's
+    /// layout (boxed), not the read's ground one (a niche `Option`). `None`
+    /// for any other field, which reads in its own type's layout.
+    fn hir_field_rep(&self, hir: &HirBody, id: HirId) -> Option<Rep> {
+        let HirKind::Field { base, name } = &hir.expr(id).kind else {
+            return None;
+        };
+        if self.hir_field_of_variant(hir, *base, name).is_some()
+            || self.hir_field_of_new(hir, *base, name).is_some()
+        {
+            return None;
+        }
+        let (FieldAt::Slot(_), fty) = self.hir_field(hir, *base, name)? else {
+            return None;
+        };
+        let own = self.value_layout(Self::hir_ty(hir, id)?);
+        let stored = self.value_layout(&fty);
+        (Self::ty_has_var(&fty) && stored != own).then_some(Rep::Word(stored))
     }
 
     /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
@@ -5590,7 +5882,13 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
                 let layout = Self::hir_ty(hir, id).map(|ty| self.value_layout(ty));
-                if layout != Some(self.value_layout(&fty)) {
+                // A slot of a generic class's field holds the open type's
+                // layout (an `Option<T>` boxed); read at a ground receiver
+                // it converts to the ground one ([`Self::hir_field_rep`]).
+                let stored = self.hir_field_rep(hir, id);
+                if layout != Some(self.value_layout(&fty))
+                    && !stored.as_ref().zip(layout).is_some_and(|(s, l)| Self::hir_convertible(s, &Rep::Word(l)))
+                {
                     return Err("field-layout");
                 }
                 let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
@@ -6307,7 +6605,7 @@ impl Compiler {
         if *natural == Rep::Word(own) {
             return Some(false);
         }
-        (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheResult)).then_some(true)
+        (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheUnitResult | ValueLayout::NicheResult)).then_some(true)
     }
 
     /// Whether `ty` is a bare type variable.
@@ -6843,9 +7141,10 @@ impl Compiler {
                 self.bytecode.push_const(0);
                 self.bytecode.push(Byte::new(Instruction::GEQ));
                 bb.emit_jump_to(ok, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-                let mut msg = CodeBuf::new();
-                self.emit_raw_string_literal(&mut msg, "index out of bounds");
-                self.bytecode.append(&mut msg);
+                // Direct MIR reads the message's index.
+                let idx = self.intern_string("index out of bounds");
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
                 self.bytecode.push(Byte::new(Instruction::Panic));
                 bb.bind_label(ok, self.bytecode.il_mut());
             }
@@ -7069,12 +7368,19 @@ impl Compiler {
                         let staged = lower::shows_through_temps(hir, &self.checker, hir.expr(id))
                             || self.hir_stages_args(hir, emit, args, depth);
                         let mut temps = Vec::new();
+                        // Each `%v` argument's raw `show` entry, for direct MIR.
+                        let mut shows = Vec::with_capacity(args.len().saturating_sub(1));
+                        let mut shows_ok = true;
                         if staged {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
                                 self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                                 if specs.get(i - 1) == Some(&'v') {
                                     self.expr_depth = 0;
-                                    self.hir_show(hir, arg);
+                                    let show = self.hir_show_target(hir, arg);
+                                    shows_ok &= show.is_some();
+                                    shows.push(show);
+                                } else {
+                                    shows.push(None);
                                 }
                                 self.expr_depth = 0;
                                 let tmp = self.alloc_temp_slot();
@@ -7083,10 +7389,6 @@ impl Compiler {
                             }
                         }
                         self.emit_string_literal(&fmt);
-                        if !specs.contains(&'v') {
-                            let idx = self.intern_string(unescape_coil_string(&fmt));
-                            emit.format_strs.insert(id.0, idx);
-                        }
                         for &tmp in &temps {
                             self.bytecode.push_load(tmp);
                         }
@@ -7096,7 +7398,18 @@ impl Compiler {
                                 // `Show::show` on the value: a call, so it
                                 // keeps the operands below it.
                                 self.expr_depth = depth + i as u32;
-                                self.hir_show(hir, arg);
+                                let show = self.hir_show_target(hir, arg);
+                                shows_ok &= show.is_some();
+                                shows.push(show);
+                            } else {
+                                shows.push(None);
+                            }
+                        }
+                        if shows_ok {
+                            let idx = self.intern_string(unescape_coil_string(&fmt));
+                            emit.format_strs.insert(id.0, idx);
+                            if specs.contains(&'v') {
+                                emit.format_shows.insert(id.0, shows);
                             }
                         }
                         self.bytecode
@@ -7451,6 +7764,7 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
+                self.hir_request_method_clone(&key);
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
@@ -9627,13 +9941,16 @@ impl Compiler {
         // loops of its own: they join the list.
         while !emit.par_tail.is_empty() {
             for par in std::mem::take(&mut emit.par_tail) {
-                let entry = match Self::hir_par_worker_body(&hir, &par)
+                let (entry, worker) = match Self::hir_par_worker_body(&hir, &par)
                     .and_then(|w| self.hir_par_worker_fn(&w))
                 {
                     Some(entry) => entry,
                     None => self.hir_par_worker_inline(&hir, &mut emit, &par),
                 };
                 let HirParSite { site, driver, natives, begin, end, .. } = par;
+                if self.hir_par_driver_fn(&site, &driver, &worker, natives, (begin, end)) {
+                    continue;
+                }
 
                 // The fork-join: slot 0 the accumulator, then the live
                 // captures and the bounds, as the call passes them.
@@ -9663,6 +9980,227 @@ impl Compiler {
                 self.bytecode.record_func_with_sp(driver, label, start, self.bytecode.len(), words);
             }
         }
+    }
+
+    /// The fork-join function `driver` of `site` over chunk worker `worker`
+    /// built as HIR ([`Self::hir_par_driver_body`]) and lowered like any
+    /// other body, so it gets direct MIR. `false`, with nothing emitted,
+    /// when it does not plan: the caller writes its stack IL instead.
+    fn hir_par_driver_fn(
+        &mut self,
+        site: &crate::typechecking::LoopParSite,
+        driver: &str,
+        worker: &str,
+        (spawn_id, join_id): (usize, usize),
+        (begin, end): (bool, bool),
+    ) -> bool {
+        let name_of = |id: usize| ["thread_spawn_shared", "thread_spawn", "thread_join"].into_iter().find(|n| self.native_id(n) == Some(id));
+        let (Some(spawn), Some(join)) = (name_of(spawn_id), name_of(join_id)) else {
+            return false;
+        };
+        let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
+        let words = hir.params.len() as u32;
+        let arity = 3 + site.live_captures.len();
+        let start = self.bytecode.len();
+        let frame = self.par_frame_enter();
+        self.fn_arities.insert(driver.to_string(), (words, false));
+        let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
+        let bind = driver.to_string();
+        let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
+            c.bind_function_entry(bind);
+        });
+        if lowered {
+            self.flush_hir_cold();
+            let label = self.fn_entry_labels.get(driver).copied();
+            self.bytecode.record_func_with_sp(driver.to_string(), label, start, self.bytecode.len(), words);
+            self.attach_hir_mir();
+        }
+        self.par_frame_exit(frame);
+        lowered
+    }
+
+    /// The fork-join of `site` as HIR, `(acc, …live captures, [begin],
+    /// [end]) -> acc`, as `emit_par_loop_chunks` writes it: spawn every
+    /// chunk on `worker`, join each in order and fold its partial onto the
+    /// accumulator. A failed spawn or join joins the handles still out and
+    /// runs the whole range on this thread. A dynamic range splits in two
+    /// when it has more trips than the grain, and otherwise runs here.
+    fn hir_par_driver_body(
+        &self,
+        site: &crate::typechecking::LoopParSite,
+        driver: &str,
+        worker: &str,
+        (spawn, join): (&str, &str),
+        (has_begin, has_end): (bool, bool),
+    ) -> HirBody {
+        use crate::hir::synth::Synth;
+        use crate::hir::LocalKind;
+        use crate::typechecking::ty as coil_ty;
+        use crate::typechecking::LoopReduceOp;
+
+        #[derive(Clone, Copy)]
+        enum Bound {
+            Const(i64),
+            Local(LocalId),
+        }
+        let int = coil_ty::int();
+        let mut b = Synth::new(&self.checker, driver, int.clone());
+        let mut arg = 0usize;
+        let mut param = |b: &mut Synth| {
+            arg += 1;
+            b.local(&format!("__coil_par_arg{}", arg - 1), coil_ty::int(), LocalKind::Param)
+        };
+        let acc = param(&mut b);
+        let live: Vec<LocalId> = site.live_captures.iter().map(|_| param(&mut b)).collect();
+        let begin = has_begin.then(|| param(&mut b));
+        let end = has_end.then(|| param(&mut b));
+
+        let arity = 3 + live.len();
+        let worker_ty = (0..arity).fold(int.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
+        let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let joined_ty = coil_ty::result_ty(int.clone(), thread_err);
+        let fold_op = match site.op {
+            LoopReduceOp::Add => BinOp::IntAdd,
+            LoopReduceOp::Mul => BinOp::IntMul,
+            LoopReduceOp::Xor => BinOp::BitXor,
+        };
+
+        let mut stmts = Vec::new();
+        let f = b.local("__coil_par_fn", worker_ty.clone(), LocalKind::Temp);
+        let global = b.push(HirKind::Global { name: worker.to_string(), def: None }, worker_ty);
+        stmts.push(b.let_(f, global));
+
+        let read = |b: &mut Synth, x: Bound| match x {
+            Bound::Const(n) => b.int(n),
+            Bound::Local(l) => b.read(l),
+        };
+        // The whole range on this thread.
+        let seq = |b: &mut Synth, lo: Bound, hi: Bound| {
+            let mut args = vec![read(b, lo), read(b, hi), b.read(acc)];
+            args.extend(live.iter().map(|&l| b.read(l)));
+            let call = b.call(worker, args, coil_ty::int());
+            b.ret(call)
+        };
+        // Join each handle still out, dropping its result.
+        let discard = |b: &mut Synth, handles: &[LocalId], stmts: &mut Vec<HirId>| {
+            for &h in handles {
+                let h = b.read(h);
+                stmts.push(b.call(join, vec![h], joined_ty.clone()));
+            }
+        };
+
+        // A range of one or more chunks: spawn each, then join and fold.
+        let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
+            let handles: Vec<LocalId> =
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(), LocalKind::Pattern)).collect();
+            let partials: Vec<LocalId> =
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
+            // Innermost first: the fold, then each join, then each spawn.
+            let mut value = b.read(acc);
+            for &p in &partials {
+                let p = b.read(p);
+                value = b.bin(fold_op, value, p, coil_ty::int());
+            }
+            let mut tail = b.ret(value);
+            for j in (0..chunks.len()).rev() {
+                let mut failed = Vec::new();
+                discard(b, &handles[j + 1..], &mut failed);
+                failed.push(seq(b, whole.0, whole.1));
+                let failed = b.block(failed, None, coil_ty::never());
+                let h = b.read(handles[j]);
+                let joining = b.call(join, vec![h], joined_ty.clone());
+                let (ok, err) = (b.result_pat(true, HirPat::Bind(partials[j])), b.result_pat(false, HirPat::Wild));
+                tail = b.match_(joining, vec![(ok, tail), (err, failed)], coil_ty::never());
+            }
+            for i in (0..chunks.len()).rev() {
+                let mut failed = Vec::new();
+                discard(b, &handles[..i], &mut failed);
+                failed.push(seq(b, whole.0, whole.1));
+                let failed = b.block(failed, None, coil_ty::never());
+                let (lo, hi) = chunks[i];
+                let mut args = vec![b.read(f), read(b, lo), read(b, hi), b.int(site.op.identity())];
+                args.extend(live.iter().map(|&l| b.read(l)));
+                let spawning = b.call(spawn, args, spawned_ty.clone());
+                let (ok, err) = (b.result_pat(true, HirPat::Bind(handles[i])), b.result_pat(false, HirPat::Wild));
+                tail = b.match_(spawning, vec![(ok, tail), (err, failed)], coil_ty::never());
+            }
+            tail
+        };
+
+        if !site.is_dynamic() {
+            let bounds = site
+                .chunk_bounds(crate::typechecking::DEFAULT_LOOP_GRAIN)
+                .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
+            let chunks: Vec<_> = bounds.windows(2).map(|w| (Bound::Const(w[0]), Bound::Const(w[1]))).collect();
+            let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
+            stmts.push(fork(&mut b, &chunks, whole));
+        } else {
+            // `[lo, hi)` and its trip count, as `emit_dynamic_par_chunks`.
+            let bound = |b: &mut Synth, local: Option<LocalId>, konst: i64, bias: i64| {
+                let v = match local {
+                    Some(l) => b.read(l),
+                    None => b.int(konst),
+                };
+                if bias == 0 {
+                    return v;
+                }
+                let k = b.int(bias);
+                b.bin(BinOp::IntAdd, v, k, coil_ty::int())
+            };
+            let lo = b.local("__coil_par_lo", int.clone(), LocalKind::Temp);
+            let hi = b.local("__coil_par_hi", int.clone(), LocalKind::Temp);
+            let trip = b.local("__coil_par_trip", int.clone(), LocalKind::Temp);
+            let mid = b.local("__coil_par_mid", int.clone(), LocalKind::Temp);
+            let v = bound(&mut b, begin, site.begin, 0);
+            stmts.push(b.let_(lo, v));
+            let v = bound(&mut b, end, site.end, site.end_bias);
+            stmts.push(b.let_(hi, v));
+            let diff = {
+                let (h, l) = (b.read(hi), b.read(lo));
+                b.bin(BinOp::IntSub, h, l, coil_ty::int())
+            };
+            let positive = {
+                let (h, l) = (b.read(hi), b.read(lo));
+                let d = b.bin(BinOp::IntSub, h, l, coil_ty::int());
+                let zero = b.int(0);
+                b.bin(BinOp::Gt, d, zero, coil_ty::boolean())
+            };
+            let trips = if site.stride > 1 {
+                let k = b.int(site.stride - 1);
+                let up = b.bin(BinOp::IntAdd, diff, k, coil_ty::int());
+                let s = b.int(site.stride);
+                b.bin(BinOp::IntDiv, up, s, coil_ty::int())
+            } else {
+                diff
+            };
+            let none = b.int(0);
+            let trips = b.if_(positive, trips, Some(none), coil_ty::int());
+            stmts.push(b.let_(trip, trips));
+            // Up to the grain: on this thread.
+            let small = {
+                let t = b.read(trip);
+                let g = b.int(crate::typechecking::DEFAULT_LOOP_GRAIN.max(1));
+                b.bin(BinOp::Le, t, g, coil_ty::boolean())
+            };
+            let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
+            let here = b.block(vec![here], None, coil_ty::never());
+            stmts.push(b.if_(small, here, None, coil_ty::unit()));
+            let half = {
+                let t = b.read(trip);
+                let two = b.int(2);
+                let h = b.bin(BinOp::IntDiv, t, two, coil_ty::int());
+                let s = b.int(site.stride);
+                let span = b.bin(BinOp::IntMul, h, s, coil_ty::int());
+                let l = b.read(lo);
+                b.bin(BinOp::IntAdd, span, l, coil_ty::int())
+            };
+            stmts.push(b.let_(mid, half));
+            let chunks = [(Bound::Local(lo), Bound::Local(mid)), (Bound::Local(mid), Bound::Local(hi))];
+            stmts.push(fork(&mut b, &chunks, (Bound::Local(lo), Bound::Local(hi))));
+        }
+        let root = b.block(stmts, None, coil_ty::never());
+        b.finish(root)
     }
 
     /// The chunk worker of `par` as its own HIR body, `(index, hi, acc,
@@ -9757,7 +10295,7 @@ impl Compiler {
     /// Emit the chunk worker body `w` as its own function, the way a
     /// declared function is: planned, emitted and lowered to MIR. Its
     /// entry, or `None` with nothing emitted when it does not plan.
-    fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<u32> {
+    fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<(u32, String)> {
         if lower::refusal(w, &self.checker).is_some() {
             return None;
         }
@@ -9779,7 +10317,7 @@ impl Compiler {
         self.hir_cold = std::mem::take(&mut emit.cold);
         self.flush_hir_cold();
         self.hir_mir = self.hir_lower_mir(w, &emit, None);
-        self.bytecode.record_func_with_sp(name, Some(label), entry, self.bytecode.len(), arity);
+        self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
         self.par_frame_exit(frame);
@@ -9788,12 +10326,12 @@ impl Compiler {
             self.hir_par_tail = Some(Box::new(HirParTail { hir: w.clone(), emit }));
             self.flush_hir_par_tail();
         }
-        Some(entry as u32)
+        Some((entry as u32, name))
     }
 
     /// The chunk worker of `par` emitted from the enclosing body's plan in
     /// a fresh frame, when it does not plan as its own body. Its entry.
-    fn hir_par_worker_inline(&mut self, hir: &HirBody, emit: &mut HirEmit, par: &HirParSite) -> u32 {
+    fn hir_par_worker_inline(&mut self, hir: &HirBody, emit: &mut HirEmit, par: &HirParSite) -> (u32, String) {
         // The worker's frame holds the site's names; the body's own
         // locals bind in it as they are reached.
         let saved = emit.slots.clone();
@@ -9814,8 +10352,8 @@ impl Compiler {
         emit.slots = saved;
         let label = self.fn_entry_labels.get(&name).copied();
         let arity = 3 + par.site.live_captures.len() as u32;
-        self.bytecode.record_func_with_sp(name, label, start, self.bytecode.len(), arity);
-        entry
+        self.bytecode.record_func_with_sp(name.clone(), label, start, self.bytecode.len(), arity);
+        (entry, name)
     }
 
     /// `for x in a..b` / `for x in arr`, in the AST's counted-loop shapes
