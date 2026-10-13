@@ -65,6 +65,7 @@ impl MirInst {
             | Self::StoreIndex { .. }
             | Self::StoreStatic { .. }
             | Self::ClearWord { .. }
+            | Self::KeepAlive { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::Panic { .. }
