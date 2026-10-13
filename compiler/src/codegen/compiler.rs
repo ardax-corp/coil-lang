@@ -5476,63 +5476,41 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
-    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies.
+    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies:
+    /// each returns its host native's result on the stream and `int`
+    /// arguments. Built as HIR ([`crate::hir::synth`]); the native's result
+    /// layout (the `Result<Stream, IoError>` heap niche, the
+    /// `Result<(), IoError>` unit niche, the boxed `Result<int, IoError>`)
+    /// follows from the call's type, as for any host call.
     fn emit_stream_method_thunks(&mut self) {
-        let owner = crate::typechecking::ty::STREAM;
-        let methods = self.context.methods.entry(owner.to_string()).or_default();
-        methods.insert("attach".to_string(), format!("{owner}::attach"));
-        methods.insert("park".to_string(), format!("{owner}::park"));
-        methods.insert("fd".to_string(), format!("{owner}::fd"));
+        use crate::hir::synth::Synth;
+        use crate::hir::LocalKind;
+        use crate::typechecking::ty::{self as coil_ty, STREAM};
+        let methods = self.context.methods.entry(STREAM.to_string()).or_default();
+        methods.insert("attach".to_string(), format!("{STREAM}::attach"));
+        methods.insert("park".to_string(), format!("{STREAM}::park"));
+        methods.insert("fd".to_string(), format!("{STREAM}::fd"));
 
-        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32], layout: u32| {
-            if compiler.functions.contains_key(&fqn) {
-                return;
+        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        for (method, native, ints, ok) in [
+            ("attach", common::STREAM_ATTACH_NATIVE, 5, coil_ty::stream_ty()),
+            ("park", common::STREAM_PARK_NATIVE, 0, coil_ty::unit()),
+            ("fd", common::STREAM_FD_NATIVE, 0, coil_ty::int()),
+        ] {
+            let fqn = format!("{STREAM}::{method}");
+            if self.functions.contains_key(&fqn) || self.native_id(native).is_none() {
+                continue;
             }
-            let Some(native_id) = compiler.native_id(native) else {
-                return;
-            };
-            compiler.bind_function_entry(fqn);
-            compiler
-                .bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-            for &slot in slots {
-                compiler.bytecode.push_load(slot);
-            }
-            // `Result<Stream, E>` is heap-heap niche; `Result<(), E>` is
-            // unit/option niche. Boxed HostInvoke made `match` take Err.
-            if matches!(
-                layout,
-                common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
-            ) {
-                compiler
-                    .bytecode
-                    .push_host_invoke_layout(slots.len() as u32, layout);
-            } else {
-                compiler.bytecode.push_host_invoke(slots.len() as u32);
-            }
-            compiler.bytecode.push_return();
-        };
-        emit_host(
-            self,
-            format!("{owner}::attach"),
-            common::STREAM_ATTACH_NATIVE,
-            &[0, 1, 2, 3, 4, 5],
-            common::HOST_ENUM_LAYOUT_RESULT_NICHE,
-        );
-        emit_host(
-            self,
-            format!("{owner}::park"),
-            common::STREAM_PARK_NATIVE,
-            &[0],
-            common::HOST_ENUM_LAYOUT_OPTION_NICHE,
-        );
-        emit_host(
-            self,
-            format!("{owner}::fd"),
-            common::STREAM_FD_NATIVE,
-            &[0],
-            common::HOST_ENUM_LAYOUT_BOXED,
-        );
+            let ret = coil_ty::result_app_ty(ok, io_err.clone());
+            let mut b = Synth::new(&self.checker, &fqn, ret.clone());
+            let mut params = vec![b.local("self", coil_ty::stream_ty(), LocalKind::Param)];
+            params.extend((0..ints).map(|i| b.local(&format!("arg{i}"), coil_ty::int(), LocalKind::Param)));
+            let args = params.iter().map(|&p| b.read(p)).collect();
+            let call = b.call(native, args, ret);
+            let root = b.ret(call);
+            let hir = b.finish(root);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
+        }
     }
 
     fn emit_range_to_vec_thunk(&mut self, fqn: String, inclusive: bool, float: bool) {
