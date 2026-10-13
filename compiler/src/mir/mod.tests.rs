@@ -4665,7 +4665,8 @@ fn lir_emits_fn_value_alloc_without_maps() {
     let text = "func @fork(v0: i64) -> i64 {
 bb0:
     v1 = alloc.fn 7, 65537, v0
-    v2 = call.i64 9 v1, v0
+    v4 = gcbarrier.safepoint v1
+    v2 = call.i64 9 v4, v0
     v3 = call.i64 7 v0
     return v3
 }";
