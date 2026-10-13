@@ -147,6 +147,19 @@ impl MirFunc {
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
     }
 
+    /// A GC edge the S2b stack maps describe: any but a function value
+    /// (`MakeFn` / `MakePolyFn`), which the maps leave to the body's
+    /// precise frame map or the conservative scan, as for its fuse IL
+    /// ([`super::gates::refuses_alloc`]).
+    pub fn has_mapped_gc_edge(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                i.is_gc_edge()
+                    && !matches!(i, MirInst::Alloc { kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. }, .. })
+            })
+        })
+    }
+
     /// True when any inst is an explicit I7 deopt / stop edge.
     pub fn has_deopt_edge(&self) -> bool {
         self.blocks
