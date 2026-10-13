@@ -1024,9 +1024,21 @@ impl Lower<'_> {
         self.b.ret_pair(lo, hi).map_err(mir)
     }
 
-    /// Find the pinned locals and give each that is not a parameter a zero
-    /// word at entry, so every path to an exit or a rebinding reads one.
+    /// Find the pinned locals. One bound inside a nested block (a branch
+    /// or loop) starts as a zero word, so the word it is bound to is still
+    /// read at an exit or rebinding past the block's join.
     fn pin_locals(&mut self) -> Result<(), Refusal> {
+        // Locals the body's own statements bind: they dominate what follows.
+        let top: HashSet<u32> = match self.hir.root.map(|r| &self.hir.expr(r).kind) {
+            Some(HirKind::Block { stmts, .. }) => stmts
+                .iter()
+                .filter_map(|&st| match self.hir.expr(st).kind {
+                    HirKind::Let { local, .. } => Some(local.0),
+                    _ => None,
+                })
+                .collect(),
+            _ => HashSet::new(),
+        };
         for (i, local) in self.hir.locals.iter().enumerate() {
             let id = HirLocal(i as u32);
             if !local.ty.as_ref().is_some_and(|t| (self.inp.pinned)(t))
@@ -1042,7 +1054,7 @@ impl Lower<'_> {
                 continue;
             }
             let slot = self.slot(id)?;
-            if !self.hir.params.contains(&id) {
+            if !self.hir.params.contains(&id) && !top.contains(&id.0) {
                 let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                 let zero = self.fit(zero, ty)?;
                 self.b.def_local(slot, zero).map_err(mir)?;
@@ -1052,11 +1064,15 @@ impl Lower<'_> {
         Ok(())
     }
 
-    /// Keep the word pinned local `local` holds now live to here.
+    /// Keep the word pinned local `local` holds now live to here (none
+    /// before its first binding).
     fn keep_pin(&mut self, local: HirLocal) -> Result<(), Refusal> {
         let Some(&(slot, ty)) = self.pins.get(&local.0) else {
             return Ok(());
         };
+        if !self.b.local_defined(slot) {
+            return Ok(());
+        }
         let v = self.b.use_local(slot, ty).map_err(mir)?;
         self.b.ins_keep_alive(v).map_err(mir)?;
         Ok(())
