@@ -62,12 +62,14 @@ const CORPUS: &[&str] = &[
 /// dictionaries name.
 /// The corpus asserting with the stdlib `assert!` macro (`if !c { raise … }`)
 /// instead of the builtin `assert(c)?` shortens all five.
+/// `Range::to_vec` built as HIR no longer interns the `start` / `end`
+/// field names, which moves every string index (same lengths).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "8d47a68904a206ec_856"),
-    ("functions.hy", "b608853f86069095_173"),
-    ("loops.hy", "e35f127fe0897f4c_169"),
-    ("option_pair.hy", "4a7e21dbaafff9d0_288"),
-    ("user_trait_dispatch.hy", "02faa5a3f53813e3_93"),
+    ("arithmetic.hy", "d040edffa88728ee_856"),
+    ("functions.hy", "c57ccf2e82fa310b_173"),
+    ("loops.hy", "d37bd589d7fdeab8_169"),
+    ("option_pair.hy", "877910cfd67cb148_288"),
+    ("user_trait_dispatch.hy", "18fa73c397a09fe3_93"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
