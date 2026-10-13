@@ -2954,7 +2954,12 @@ impl Lower<'_> {
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &pair) in args.iter().zip(&site.pair_args) {
             // A two-word type not passed as a pair goes boxed.
-            let boxed = !pair && self.expr_ty(arg).is_some_and(|t| self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)));
+            let boxed = !pair
+                && self.expr_ty(arg).is_some_and(|t| {
+                    // A numeric range's word is its typed object.
+                    crate::typechecking::return_layout::two_word_range_kind(t).is_some()
+                        || (self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)))
+                });
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
