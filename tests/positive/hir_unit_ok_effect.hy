@@ -1,5 +1,6 @@
 // A `()`-valued expression returned as `Ok` from a `Result<(), E>` runs for
 // its effect.
+use tests::assert;
 
 static let seen: int = 0;
 
@@ -20,12 +21,12 @@ test("unit expression as the Ok payload") {
         Result::Ok(_) => 1,
         Result::Err(_) => 0,
     };
-    assert(ok == 1)?;
-    assert(seen == 1)?;
+    assert!(ok == 1);
+    assert!(seen == 1);
     let err = match step(4) {
         Result::Ok(_) => 0,
         Result::Err(e) => e,
     };
-    assert(err == 4)?;
-    assert(seen == 1)?;
+    assert!(err == 4);
+    assert!(seen == 1);
 }

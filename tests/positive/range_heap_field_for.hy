@@ -1,4 +1,5 @@
 // C2b rung 1: heap-field and array-held Range counted for-in.
+use tests::assert;
 
 class Holder {
     pub r: Range<int>,
@@ -33,13 +34,13 @@ fn sum_inc_field(HolderInc h) -> int {
 }
 
 test("heap-field range for-in") {
-    assert(sum_field(new Holder(0..5)) == 10)?;
+    assert!(sum_field(new Holder(0..5)) == 10);
 }
 
 test("array-held range for-in") {
-    assert(sum_array([0..5]) == 10)?;
+    assert!(sum_array([0..5]) == 10);
 }
 
 test("heap-field inclusive range for-in") {
-    assert(sum_inc_field(new HolderInc(0..=4)) == 10)?;
+    assert!(sum_inc_field(new HolderInc(0..=4)) == 10);
 }

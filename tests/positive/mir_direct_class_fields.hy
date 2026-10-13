@@ -1,6 +1,8 @@
 // Class objects in bodies lowered straight from HIR to MIR: class params,
 // returns and locals are heap references, and field reads and writes on
 // them load and store the object's slot.
+use tests::assert;
+
 class Acc {
     pub n: int,
     pub total: float,
@@ -69,21 +71,21 @@ fn unbox(Box<int> b) -> int {
 test("class fields in direct MIR") {
     let a = new Acc(0, 0.0, 0);
     feed(a, 10);
-    assert(a.n == 10)?;
-    assert(a.total == 5.0)?;
-    assert(a.last == 90)?;
+    assert!(a.n == 10);
+    assert!(a.total == 5.0);
+    assert!(a.last == 90);
     let b = new Acc(7, 1.0, 0);
     let p = pick(a, b, false);
     p.n = p.n + 1;
-    assert(b.n == 8)?;
-    assert(pick(a, b, true).n == 10)?;
+    assert!(b.n == 8);
+    assert!(pick(a, b, true).n == 10);
     let x = new Node(4, b);
-    assert(relink(x, a) == 8)?;
-    assert(a.n == 14)?;
-    assert(b.n == 8)?;
-    assert(unbox(new Box(5)) == 16)?;
+    assert!(relink(x, a) == 8);
+    assert!(a.n == 14);
+    assert!(b.n == 8);
+    assert!(unbox(new Box(5)) == 16);
 }
 
 test("objects allocated in direct MIR") {
-    assert(chain(100) == 166650)?;
+    assert!(chain(100) == 166650);
 }

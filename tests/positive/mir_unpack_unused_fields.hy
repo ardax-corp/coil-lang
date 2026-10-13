@@ -1,5 +1,7 @@
 // A last match arm that binds only some payload fields still unpacks the
 // whole variant: the unused fields' payload reads must not be dropped.
+use tests::assert;
+
 enum Trio {
     Three(string, string, string),
 }
@@ -13,7 +15,7 @@ test("an unused middle field keeps the last field in place") {
     let got = match t {
         Trio::Three(x, y, z) => x + z,
     };
-    assert(got == "ac")?;
+    assert!(got == "ac");
 }
 
 test("unused trailing fields still unpack") {
@@ -27,5 +29,5 @@ test("unused trailing fields still unpack") {
             e,
         ) => a,
     };
-    assert(first == 1)?;
+    assert!(first == 1);
 }

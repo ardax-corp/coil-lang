@@ -1,4 +1,6 @@
 // COI-282: same-value join after InstCombine; DestProp forwards t → a.
+use tests::assert;
+
 fn hot(float a, float b, int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -17,5 +19,5 @@ fn hot(float a, float b, int n) -> float {
 }
 
 test("destprop alias join") {
-    assert(hot(1.0, 2.0, 4) == 28.0)?;
+    assert!(hot(1.0, 2.0, 4) == 28.0);
 }

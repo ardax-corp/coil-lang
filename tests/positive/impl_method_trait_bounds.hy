@@ -1,6 +1,7 @@
 // Method-level type parameters with trait bounds on inherent `impl`
 // methods: the bound is in scope in the body and dispatched from the call
 // site, for instance, static, multi-parameter, and `where` forms (#523).
+use tests::assert;
 
 class Val {
     pub i: int,
@@ -68,30 +69,30 @@ fn via_generic<T: FromVal>(Codec c, T proto, int k) -> T {
 
 test("method-level bound on an inherent method") {
     let c = new Codec(0);
-    assert(c.decode(new Point(0), new Val(5)).x == 5)?;
+    assert!(c.decode(new Point(0), new Val(5)).x == 5);
 }
 
 test("method-level bound with a primitive instance") {
-    assert(new Codec(0).decode(10, new Val(5)) == 15)?;
+    assert!(new Codec(0).decode(10, new Val(5)) == 15);
 }
 
 test("method body uses self alongside the bound") {
-    assert(new Codec(3).decode_plus(new Point(0), new Val(5)).x == 8)?;
+    assert!(new Codec(3).decode_plus(new Point(0), new Val(5)).x == 8);
 }
 
 test("static method with a bound") {
-    assert(Codec::make(new Point(0), 7).x == 7)?;
+    assert!(Codec::make(new Point(0), 7).x == 7);
 }
 
 test("two method type params with bounds") {
-    assert(new Codec(0).both(new Point(0), new Point(0), new Val(4)) == 104)?;
+    assert!(new Codec(0).both(new Point(0), new Point(0), new Val(4)) == 104);
 }
 
 test("where clause on a method") {
-    assert(new Codec(0).tagged(new Point(1)) == 100)?;
+    assert!(new Codec(0).tagged(new Point(1)) == 100);
 }
 
 test("generic method called from a generic fn") {
-    assert(via_generic(new Codec(0), new Point(0), 6).x == 6)?;
-    assert(via_generic(new Codec(0), 1, 6) == 7)?;
+    assert!(via_generic(new Codec(0), new Point(0), 6).x == 6);
+    assert!(via_generic(new Codec(0), 1, 6) == 7);
 }

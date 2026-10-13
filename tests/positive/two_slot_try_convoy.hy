@@ -1,5 +1,6 @@
 // Two-slot `?` flatten (#307) next to arity-2 product ABI (#302):
 // fail tags must not steal later args; products must not leak into Result tags.
+use tests::assert;
 
 fn step(int n) -> Result<int, int> {
     if n < 0 {
@@ -57,58 +58,58 @@ fn request(int code) -> Result<int, int> {
 }
 
 test("try then product then try keeps both ABIs") {
-    assert(
+    assert!(
         match httpish(4) {
             Result::Ok(v) => v == 9,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match httpish(-2) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -2,
         },
-    )?;
+    );
 }
 
 test("option question chain flatten") {
-    assert(
+    assert!(
         match option_pipe(3) {
             Option::Some(v) => v == 2,
             Option::None => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match option_pipe(1) {
             Option::Some(_) => false,
             Option::None => true,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match option_pipe(0) {
             Option::Some(_) => false,
             Option::None => true,
         },
-    )?;
+    );
 }
 
 test("http-shaped three-step result chain") {
-    assert(
+    assert!(
         match request(200) {
             Result::Ok(v) => v == 101,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match request(404) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -404,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match request(0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }

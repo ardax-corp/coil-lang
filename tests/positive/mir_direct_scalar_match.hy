@@ -1,6 +1,7 @@
 // `match` on an `int` or a scalar enum in bodies lowered straight from HIR
 // to MIR: a test per arm, or a binary search over many literals, with the
 // catch-all bound to the scrutinee.
+use tests::assert;
 
 #[repr(int)]
 enum Level {
@@ -84,32 +85,32 @@ fn tally(int limit) -> int {
 }
 
 test("int match with a binding catch-all") {
-    assert(few(0) == 10)?;
-    assert(few(1) == 20)?;
-    assert(few(7) == 14)?;
+    assert!(few(0) == 10);
+    assert!(few(1) == 20);
+    assert!(few(7) == 14);
 }
 
 test("binary search finds every literal and the catch-all") {
-    assert(many(1) == 1)?;
-    assert(many(0) == 2)?;
-    assert(many(3) == 3)?;
-    assert(many(8) == 4)?;
-    assert(many(13) == 5)?;
-    assert(many(21) == 6)?;
-    assert(many(34) == 7)?;
-    assert(many(55) == 8)?;
-    assert(many(4000000000) == 9)?;
-    assert(many(4) == 1004)?;
-    assert(many(-6) == 994)?;
-    assert(many(56) == 1056)?;
+    assert!(many(1) == 1);
+    assert!(many(0) == 2);
+    assert!(many(3) == 3);
+    assert!(many(8) == 4);
+    assert!(many(13) == 5);
+    assert!(many(21) == 6);
+    assert!(many(34) == 7);
+    assert!(many(55) == 8);
+    assert!(many(4000000000) == 9);
+    assert!(many(4) == 1004);
+    assert!(many(-6) == 994);
+    assert!(many(56) == 1056);
 }
 
 test("scalar enums are their backing words") {
-    assert(weight(pick(0)) + weight(pick(5)) + weight(pick(9)) == 600)?;
-    assert(scaled(Scale::Half, 8.0) == 4.0)?;
-    assert(scaled(Scale::Double, 8.0) == 16.0)?;
+    assert!(weight(pick(0)) + weight(pick(5)) + weight(pick(9)) == 600);
+    assert!(scaled(Scale::Half, 8.0) == 4.0);
+    assert!(scaled(Scale::Double, 8.0) == 16.0);
 }
 
 test("statement match in a loop") {
-    assert(tally(8) == 422)?;
+    assert!(tally(8) == 422);
 }

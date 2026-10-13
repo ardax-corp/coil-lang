@@ -1,6 +1,7 @@
 // A call whose `Option` comes back boxed (`Vec::pop`'s thunk) in bodies
 // lowered straight from HIR to MIR: dropped as it comes back, or matched
 // boxed with a `JumpIfMatch`.
+use tests::assert;
 use string::format;
 
 fn drop_all(int n) -> int {
@@ -38,10 +39,10 @@ fn drain(int n) -> int {
 }
 
 test("boxed Option results in direct MIR") {
-    assert(drop_all(5) == 3)?;
-    assert(drop_all(1) == 0)?;
-    assert(drain(4) == 12)?;
-    assert(drain(0) == 0)?;
+    assert!(drop_all(5) == 3);
+    assert!(drop_all(1) == 0);
+    assert!(drain(4) == 12);
+    assert!(drain(0) == 0);
 }
 
 enum Tok {
@@ -71,5 +72,5 @@ fn widths(int n) -> int {
 }
 
 test("a heap payload pair boxed for a call") {
-    assert(widths(7) == 311)?;
+    assert!(widths(7) == 311);
 }

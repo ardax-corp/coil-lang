@@ -1,4 +1,5 @@
 // COI-106: method Option/Result returns must box before local bind + match.
+use tests::assert;
 
 class Svc {}
 
@@ -30,7 +31,7 @@ test("method result bind then match") {
         Result::Ok(_) => true,
         Result::Err(_) => false,
     };
-    assert(ok)?;
+    assert!(ok);
 }
 
 test("method result bind preserves nested Ok payload") {
@@ -42,7 +43,7 @@ test("method result bind preserves nested Ok payload") {
         },
         Result::Err(_) => -1,
     };
-    assert(v == 42)?;
+    assert!(v == 42);
 }
 
 test("method result Err bind then match") {
@@ -52,7 +53,7 @@ test("method result Err bind then match") {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
-    assert(msg == "boom")?;
+    assert!(msg == "boom");
 }
 
 test("method option Some bind then match") {
@@ -62,7 +63,7 @@ test("method option Some bind then match") {
         Option::Some(v) => v,
         Option::None => -1,
     };
-    assert(v == 7)?;
+    assert!(v == 7);
 }
 
 test("method option None bind then match") {
@@ -72,5 +73,5 @@ test("method option None bind then match") {
         Option::Some(_) => false,
         Option::None => true,
     };
-    assert(is_none)?;
+    assert!(is_none);
 }

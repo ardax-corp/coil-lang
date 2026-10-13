@@ -1,6 +1,8 @@
 // Short literal ranges unroll: the body runs once per value with the
 // binding set to it. Longer ranges, and bodies with their own `break` or
 // `continue`, keep the counted loop.
+use tests::assert;
+
 fn short() -> int {
     let s = 0;
     for i in 0..4 {
@@ -59,13 +61,13 @@ fn nested_break() -> int {
 }
 
 test("short literal ranges unroll") {
-    assert(short() == 14)?;
-    assert(inclusive() == 123)?;
-    assert(empty() == 7)?;
+    assert!(short() == 14);
+    assert!(inclusive() == 123);
+    assert!(empty() == 7);
 }
 
 test("long ranges and own jumps keep the loop") {
-    assert(long() == 36)?;
-    assert(early() == 2)?;
-    assert(nested_break() == 6)?;
+    assert!(long() == 36);
+    assert!(early() == 2);
+    assert!(nested_break() == 6);
 }

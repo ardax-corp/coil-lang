@@ -2,6 +2,7 @@
 // arrays read and written at literal and proven indices (`i % m`, with the
 // Euclidean fix-up for a negative dividend), copied, and refilled, and
 // class locals kept one slot per field.
+use tests::assert;
 
 class Vec2 {
     pub x: int,
@@ -52,11 +53,11 @@ fn walk(int n) -> float {
 }
 
 test("stack arrays from direct MIR") {
-    assert(rotate(5) == 36)?;
-    assert(copies(6) == 17018)?;
-    assert(floats(5) == 4.0)?;
+    assert!(rotate(5) == 36);
+    assert!(copies(6) == 17018);
+    assert!(floats(5) == 4.0);
 }
 
 test("class fields from direct MIR") {
-    assert(walk(4) == 22.0)?;
+    assert!(walk(4) == 22.0);
 }

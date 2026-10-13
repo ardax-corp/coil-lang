@@ -1,5 +1,7 @@
 // Strings in bodies lowered straight from HIR to MIR: a string is a heap
 // word, and a literal loads from the string table.
+use tests::assert;
+
 fn label(int code) -> string {
     if code == 200 {
         return "ok";
@@ -31,9 +33,9 @@ fn count_ok(int n) -> int {
 }
 
 test("strings in direct MIR") {
-    assert(label(200) == "ok")?;
-    assert(label(404) == "missing")?;
-    assert(label(500) == "error")?;
-    assert(pick("a", "b", false) == "b")?;
-    assert(count_ok(9) == 3)?;
+    assert!(label(200) == "ok");
+    assert!(label(404) == "missing");
+    assert!(label(500) == "error");
+    assert!(pick("a", "b", false) == "b");
+    assert!(count_ok(9) == 3);
 }

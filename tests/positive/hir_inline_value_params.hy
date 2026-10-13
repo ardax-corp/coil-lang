@@ -2,6 +2,7 @@
 // only read from, and callees returning a pointer-niche Option. A callee
 // that writes through its array parameter keeps its call, so the caller
 // still sees the write.
+use tests::assert;
 
 fn take([int; 2] xs) -> int {
     return xs[0] + xs[1];
@@ -60,15 +61,15 @@ fn hits(int n) -> int {
 }
 
 test("read-only value parameters inline") {
-    assert(pack(10) == 100)?;
-    assert(first((7, 8)) == 7)?;
-    assert(read_after_copy() == 107)?;
+    assert!(pack(10) == 100);
+    assert!(first((7, 8)) == 7);
+    assert!(read_after_copy() == 107);
 }
 
 test("a write through an array parameter reaches the caller") {
-    assert(shared_write() == 22)?;
+    assert!(shared_write() == 22);
 }
 
 test("pointer-niche option returns inline") {
-    assert(hits(10) == 4)?;
+    assert!(hits(10) == 4);
 }

@@ -1,5 +1,7 @@
 // `for x in coroutine`: resume into `x`, stop once the handle is done;
 // the completion value is never bound.
+use tests::assert;
+
 gen fn upto(int n) {
     let i = 0;
     while i < n {
@@ -32,11 +34,11 @@ fn odd_until(int n, int stop) -> int {
 }
 
 test("sum of yields skips the completion value") {
-    assert(total(5) == 10)?;
-    assert(total(0) == 0)?;
+    assert!(total(5) == 10);
+    assert!(total(0) == 0);
 }
 
 test("continue and break") {
-    assert(odd_until(10, 5) == 9)?;
-    assert(odd_until(10, 100) == 25)?;
+    assert!(odd_until(10, 5) == 9);
+    assert!(odd_until(10, 100) == 25);
 }

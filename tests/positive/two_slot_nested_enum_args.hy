@@ -2,6 +2,7 @@
 // when the enclosing expression is lowered in a special representation:
 // a two-slot `[payload, tag]` pair (two-word return, match scrutinee,
 // unboxed bind, `?`) or a pointer niche (niche match scrutinee, `??`).
+use tests::assert;
 
 class Taker {
     pub bias: int,
@@ -247,60 +248,60 @@ fn unwrap(Result<int, string> r) -> int {
 }
 
 test("return Ok(call(Err(..)))") {
-    assert(unwrap(ret_ok_of_call_result_arg()) == 1004)?;
+    assert!(unwrap(ret_ok_of_call_result_arg()) == 1004);
 }
 
 test("return Ok(call(Some(..)))") {
-    assert(unwrap(ret_ok_of_call_option_arg()) == 42)?;
+    assert!(unwrap(ret_ok_of_call_option_arg()) == 42);
 }
 
 test("return Ok(call(two-word call))") {
-    assert(unwrap(ret_ok_of_call_two_word_call_arg()) == 7)?;
+    assert!(unwrap(ret_ok_of_call_two_word_call_arg()) == 7);
 }
 
 test("return Ok(method(Err(..)))") {
-    assert(unwrap(ret_ok_of_method_arg()) == 1009)?;
+    assert!(unwrap(ret_ok_of_method_arg()) == 1009);
 }
 
 test("return Ok(n + call(Err(..)))") {
-    assert(unwrap(ret_ok_of_binop_call_arg()) == 1005)?;
+    assert!(unwrap(ret_ok_of_binop_call_arg()) == 1005);
 }
 
 test("return Err(call(Err(..)))") {
-    assert(err_text(ret_err_of_call_arg()) == "inner")?;
+    assert!(err_text(ret_err_of_call_arg()) == "inner");
 }
 
 test("return Some(call(Some(call(Some(..)))))") {
-    assert(oget(ret_some_nested()) == 2)?;
+    assert!(oget(ret_some_nested()) == 2);
 }
 
 test("return Some(call(local))") {
-    assert(oget(ret_some_of_call_local_arg()) == 5)?;
+    assert!(oget(ret_some_of_call_local_arg()) == 5);
 }
 
 test("return call(Some(..))") {
-    assert(oget(ret_call_option_arg()) == 4)?;
+    assert!(oget(ret_call_option_arg()) == 4);
 }
 
 test("return call(call(Some(..)))") {
-    assert(oget(ret_call_two_word_call_arg()) == 5)?;
+    assert!(oget(ret_call_two_word_call_arg()) == 5);
 }
 
 test("return call(user enum ctor)") {
-    assert(pick_num(ret_call_user_enum_arg()) == 6)?;
+    assert!(pick_num(ret_call_user_enum_arg()) == 6);
 }
 
 test("return product call(Some(..))") {
     let (a, b) = ret_product_call_arg();
-    assert(a == 4 && b == 1)?;
+    assert!(a == 4 && b == 1);
 }
 
 test("match call(Err(..))") {
-    assert(scrutinee_call_arg() == 1004)?;
+    assert!(scrutinee_call_arg() == 1004);
 }
 
 test("match call(Err(..)) in Result fn") {
-    assert(unwrap(scrutinee_call_arg_in_result_fn()) == 1004)?;
+    assert!(unwrap(scrutinee_call_arg_in_result_fn()) == 1004);
 }
 
 test("match call(Err(..)) in test body") {
@@ -308,55 +309,55 @@ test("match call(Err(..)) in test body") {
         Result::Ok(v) => v,
         Result::Err(_) => -1,
     };
-    assert(n == 1004)?;
+    assert!(n == 1004);
 }
 
 test("let x = Some(call(Some(..)))") {
-    assert(bind_construct_of_call() == 3)?;
+    assert!(bind_construct_of_call() == 3);
 }
 
 test("let x = call(Err(..))") {
-    assert(bind_two_word_call() == 1004)?;
+    assert!(bind_two_word_call() == 1004);
 }
 
 test("let x = match { _ => Some(call(Some(..))) }") {
-    assert(bind_match_arm_call(0) == 9)?;
+    assert!(bind_match_arm_call(0) == 9);
 }
 
 test("let x = match { _ => { stmts; Some(..) } }") {
-    assert(bind_match_arm_block(0) == 21)?;
+    assert!(bind_match_arm_block(0) == 21);
 }
 
 test("x = Some(call(Some(..)))") {
-    assert(rebind_construct_of_call() == 11)?;
+    assert!(rebind_construct_of_call() == 11);
 }
 
 test("call(Err(..))?") {
-    assert(unwrap(try_call_arg()) == 1004)?;
+    assert!(unwrap(try_call_arg()) == 1004);
 }
 
 test("return Ok(call(Err(..))?)") {
-    assert(unwrap(try_return_call_arg()) == 1004)?;
+    assert!(unwrap(try_return_call_arg()) == 1004);
 }
 
 test("match niche call(Some(..))") {
-    assert(niche_opt_scrutinee() == 3)?;
+    assert!(niche_opt_scrutinee() == 3);
 }
 
 test("match niche call(Err(..))") {
-    assert(niche_result_scrutinee() == 13)?;
+    assert!(niche_result_scrutinee() == 13);
 }
 
 test("call(Some(..)) ?? default") {
-    assert((name_of(Option::Some(3)) ?? "none") == "pos")?;
+    assert!((name_of(Option::Some(3)) ?? "none") == "pos");
 }
 
 test("call(Err(..)) ?? default") {
-    assert((describe(Result::Err("boom")) ?? "fallback") == "fallback")?;
+    assert!((describe(Result::Err("boom")) ?? "fallback") == "fallback");
 }
 
 test("niche match arms rebuild Some") {
-    assert((niche_arms(Option::Some("hi")) ?? "none") == "hi!")?;
+    assert!((niche_arms(Option::Some("hi")) ?? "none") == "hi!");
 }
 
 test("return Err(UserEnum::V(..))") {
@@ -367,7 +368,7 @@ test("return Err(UserEnum::V(..))") {
             Pick::Name(s) => s.len(),
         },
     };
-    assert(n == 3)?;
+    assert!(n == 3);
 }
 
 test("return Some(Some(..))") {
@@ -375,7 +376,7 @@ test("return Some(Some(..))") {
         Option::Some(inner) => oget(inner),
         Option::None => -2,
     };
-    assert(n == 8)?;
+    assert!(n == 8);
 }
 
 test("return Ok(new C(..))") {
@@ -383,5 +384,5 @@ test("return Ok(new C(..))") {
         Result::Ok(t) => t.bias,
         Result::Err(_) => -1,
     };
-    assert(n == 12)?;
+    assert!(n == 12);
 }

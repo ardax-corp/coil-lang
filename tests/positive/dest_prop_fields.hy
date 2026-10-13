@@ -1,4 +1,5 @@
 // DestProp (#318): slot alias of a class must still read the src fields.
+use tests::assert;
 
 class Cell {
     pub a: int,
@@ -20,9 +21,9 @@ fn mutate_src_after_alias(Cell n) -> int {
 }
 
 test("field alias sums src fields") {
-    assert(sum_alias(new Cell(1, 2, 3, 4)) == 13)?;
+    assert!(sum_alias(new Cell(1, 2, 3, 4)) == 13);
 }
 
 test("alias sees later field writes on the same object") {
-    assert(mutate_src_after_alias(new Cell(1, 2, 3, 4)) == 100)?;
+    assert!(mutate_src_after_alias(new Cell(1, 2, 3, 4)) == 100);
 }

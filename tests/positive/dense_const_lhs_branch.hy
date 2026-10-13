@@ -1,5 +1,7 @@
 // A loop bound folded into a constant can end up as the left operand of the
 // loop test; dense emit must rebuild it rather than load an unset register.
+use tests::assert;
+
 fn range_sum() -> int {
     let s = 0;
     for x in 0..3 {
@@ -10,5 +12,5 @@ fn range_sum() -> int {
 }
 
 test("constant on the left of a dense loop test") {
-    assert(range_sum() == 3)?;
+    assert!(range_sum() == 3);
 }

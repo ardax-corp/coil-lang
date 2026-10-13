@@ -1,6 +1,7 @@
 // Trait methods with more than one parameter called through a generic
 // bound: the monomorphized direct CALL boxes only the parameters the trait
 // types as `T` (what the concrete entry unboxes), not `int k` / `Val v` (#521).
+use tests::assert;
 
 class Val {
     pub i: int,
@@ -43,19 +44,19 @@ fn g_mk<T: Probe>(T p, int k) -> T {
 }
 
 test("int arg") {
-    assert(g_two(new Point(4), 9) == 9)?;
+    assert!(g_two(new Point(4), 9) == 9);
 }
 
 test("object arg") {
-    assert(g_two_obj(new Point(4), new Val(7)) == 7)?;
+    assert!(g_two_obj(new Point(4), new Val(7)) == 7);
 }
 
 test("returns T") {
-    assert(g_mk(new Point(4), 3).x == 7)?;
+    assert!(g_mk(new Point(4), 3).x == 7);
 }
 
 test("direct") {
-    assert(new Point(4).two(9) == 9)?;
+    assert!(new Point(4).two(9) == 9);
 }
 
 trait Combine<T> {
@@ -107,19 +108,19 @@ fn g_sum<T: Combine>(T a, Vec<T> xs) -> int {
 }
 
 test("T in first and third position") {
-    assert(g_combine(new Point(1), 2, new Point(3)) == 6)?;
+    assert!(g_combine(new Point(1), 2, new Point(3)) == 6);
 }
 
 test("primitive instance") {
-    assert(g_combine(1, 2, 3) == 123)?;
+    assert!(g_combine(1, 2, 3) == 123);
 }
 
 test("default method through the bound") {
-    assert(g_twice(new Point(1), 5) == 14)?;
-    assert(g_twice(4, 5) == 908)?;
+    assert!(g_twice(new Point(1), 5) == 14);
+    assert!(g_twice(4, 5) == 908);
 }
 
 test("array of T parameter") {
-    assert(g_sum(new Point(1), [new Point(2), new Point(3)]) == 6)?;
-    assert(g_sum(1, [2, 3]) == 6)?;
+    assert!(g_sum(new Point(1), [new Point(2), new Point(3)]) == 6);
+    assert!(g_sum(1, [2, 3]) == 6);
 }

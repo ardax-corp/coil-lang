@@ -1,5 +1,7 @@
 // A `match` in statement position ends at its `}` like `if`: the `;` after
 // it is optional.
+use tests::assert;
+
 enum Dir {
     Left,
     Right,
@@ -28,10 +30,10 @@ fn with_semicolon(Dir d) -> int {
 }
 
 test("statement match without semicolon") {
-    assert(step(Dir::Left) == -1)?;
-    assert(step(Dir::Right) == 1)?;
+    assert!(step(Dir::Left) == -1);
+    assert!(step(Dir::Right) == 1);
 }
 
 test("semicolon after statement match is still accepted") {
-    assert(with_semicolon(Dir::Right) == 20)?;
+    assert!(with_semicolon(Dir::Right) == 20);
 }

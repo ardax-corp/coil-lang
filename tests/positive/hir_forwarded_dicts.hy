@@ -1,5 +1,6 @@
 // A generic body passes its own trait dictionaries on to a generic callee's
 // shared body, ahead of any the call site resolves itself.
+use tests::assert;
 use string::format;
 
 trait Weigh<T> {
@@ -69,18 +70,18 @@ fn via_scale<T: Weigh>(Scale s, T x) -> int {
 }
 
 test("a generic fn forwards to a generic fn") {
-    assert(twice(3) == 14)?;
-    assert(twice(new Crate(2)) == 42)?;
+    assert!(twice(3) == 14);
+    assert!(twice(new Crate(2)) == 42);
 }
 
 test("two dictionaries forwarded together") {
-    assert(relay(4, new Crate(1)) == "crate:9")?;
-    assert(relay(new Crate(1), 4) == "int:11")?;
+    assert!(relay(4, new Crate(1)) == "crate:9");
+    assert!(relay(new Crate(1), 4) == "int:11");
 }
 
 test("a generic fn forwards to a generic method") {
-    assert(via_scale(new Scale(5), 3) == 11)?;
-    assert(via_scale(new Scale(5), new Crate(3)) == 35)?;
+    assert!(via_scale(new Scale(5), 3) == 11);
+    assert!(via_scale(new Scale(5), new Crate(3)) == 35);
 }
 
 class Pack<T> {
@@ -99,6 +100,6 @@ fn packed<T: Weigh>(T x) -> int {
 }
 
 test("an open instance goal takes its context from scope") {
-    assert(packed(3) == 106)?;
-    assert(packed(new Crate(2)) == 120)?;
+    assert!(packed(3) == 106);
+    assert!(packed(new Crate(2)) == 120);
 }

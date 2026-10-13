@@ -1,5 +1,6 @@
 // COI-404: cross-module Result<Path, IoError> match must take Ok.
 // Caller does not import IoError — that was enough to lose niche layout.
+use tests::assert;
 use coi404_path::Path;
 
 test("cross-module Path IoError instance clone is Ok") {
@@ -8,7 +9,7 @@ test("cross-module Path IoError instance clone is Ok") {
         Result::Ok(p) => p,
         Result::Err(_) => panic "clone",
     };
-    assert(j.as_str() == "a")?;
+    assert!(j.as_str() == "a");
 }
 
 test("cross-module Path IoError join empty is Ok") {
@@ -18,5 +19,5 @@ test("cross-module Path IoError join empty is Ok") {
         Result::Ok(p) => p,
         Result::Err(_) => panic "join empty",
     };
-    assert(j.as_str() == "a")?;
+    assert!(j.as_str() == "a");
 }

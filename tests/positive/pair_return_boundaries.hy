@@ -1,6 +1,8 @@
 // A two-slot `[payload, tag]` return only carries the *returned* enum's tag. An
 // `Ok`/`Some` payload that is itself an enum has to stay boxed, or its tag is
 // mistaken for the function's.
+use tests::assert;
+
 fn parse(int n, int fail) {
     if fail == 1 {
         raise "bad";
@@ -23,7 +25,7 @@ fn nested_result(int fail) -> Result<Result<int, string>, string> {
 }
 
 test("Option payload keeps its own tag") {
-    assert(
+    assert!(
         match maybe(0, 0) {
             Result::Ok(inner) => match inner {
                 Option::Some(value) => value == 7,
@@ -31,8 +33,8 @@ test("Option payload keeps its own tag") {
             },
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match maybe(0, 1) {
             Result::Ok(inner) => match inner {
                 Option::Some(_) => false,
@@ -40,17 +42,17 @@ test("Option payload keeps its own tag") {
             },
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match maybe(1, 0) {
             Result::Ok(_) => false,
             Result::Err(_) => true,
         },
-    )?;
+    );
 }
 
 test("nested Result payload keeps its own tag") {
-    assert(
+    assert!(
         match nested_result(0) {
             Result::Ok(inner) => match inner {
                 Result::Ok(value) => value == 7,
@@ -58,11 +60,11 @@ test("nested Result payload keeps its own tag") {
             },
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match nested_result(1) {
             Result::Ok(_) => false,
             Result::Err(_) => true,
         },
-    )?;
+    );
 }

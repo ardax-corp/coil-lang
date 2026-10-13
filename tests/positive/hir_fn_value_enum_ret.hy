@@ -1,6 +1,7 @@
 // A named function whose result is a one-word enum is one function word as
 // a value, so a body that only passes it on lowers from HIR (a call through
 // it still takes the AST path).
+use tests::assert;
 use thread::{join, spawn};
 
 fn name_of(int x) -> Option<string> {
@@ -31,9 +32,9 @@ fn passes(int x) -> string {
 }
 
 test("function value with a niche Option result") {
-    assert(passes(8) == "even")?;
-    assert(passes(7) == "odd")?;
-    assert(apply(name_of, 10) == "even")?;
+    assert!(passes(8) == "even");
+    assert!(passes(7) == "odd");
+    assert!(apply(name_of, 10) == "even");
 }
 
 test("spawn a function returning a unit Result") {

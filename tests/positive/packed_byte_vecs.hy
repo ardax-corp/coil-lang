@@ -1,6 +1,7 @@
 // `Vec<byte>` / `Vec<bool>` are stored one byte per element (#927). Reads,
 // writes, growth, generic bodies and collections must see the same values
 // as word storage, and a byte vector must cost about a byte per element.
+use tests::assert;
 use gc::{collect, heap_bytes};
 use string::to_bytes;
 
@@ -30,32 +31,32 @@ test("byte vectors round-trip every value") {
         sum = sum + v[i] as int;
         i = i + 1;
     }
-    assert(sum == 32640)?;
+    assert!(sum == 32640);
     v[3] = 250 as byte;
-    assert(v[3] as int == 250)?;
+    assert!(v[3] as int == 250);
     v.insert(0, 7 as byte);
-    assert(v[0] as int == 7 && v[4] as int == 250)?;
-    assert(len(v) == 257)?;
+    assert!(v[0] as int == 7 && v[4] as int == 250);
+    assert!(len(v) == 257);
 }
 
 test("literal, with_capacity and from") {
     let lit: Vec<byte> = [1 as byte, 2 as byte, 255 as byte];
-    assert(lit[2] as int == 255)?;
+    assert!(lit[2] as int == 255);
     let cap: Vec<byte> = Vec::with_capacity(4);
     cap.push(9 as byte);
-    assert(len(cap) == 1 && cap[0] as int == 9)?;
+    assert!(len(cap) == 1 && cap[0] as int == 9);
     let fixed = [1 as byte, 2 as byte, 255 as byte];
     let copy: Vec<byte> = Vec::from(fixed);
     copy[0] = 100 as byte;
-    assert(copy[0] as int == 100 && fixed[0] as int == 1)?;
+    assert!(copy[0] as int == 100 && fixed[0] as int == 1);
     let expect: Vec<byte> = [100 as byte, 2 as byte, 255 as byte];
-    assert(copy == expect)?;
-    assert(copy != lit)?;
+    assert!(copy == expect);
+    assert!(copy != lit);
     let words = to_bytes("hi");
     let packed: Vec<byte> = Vec::new();
     packed.push(104 as byte);
     packed.push(105 as byte);
-    assert(words == packed && packed == words)?;
+    assert!(words == packed && packed == words);
 }
 
 test("bool vectors") {
@@ -73,19 +74,19 @@ test("bool vectors") {
         }
         i = i + 1;
     }
-    assert(count == 4)?;
+    assert!(count == 4);
     flags[1] = true;
-    assert(flags[1] && !flags[2])?;
+    assert!(flags[1] && !flags[2]);
 }
 
 test("generic bodies read and write packed vectors") {
     let v: Vec<byte> = Vec::new();
     push_all(v, 42 as byte, 5);
-    assert(len(v) == 5 && v[4] as int == 42)?;
-    assert(first(v) as int == 42)?;
+    assert!(len(v) == 5 && v[4] as int == 42);
+    assert!(first(v) as int == 42);
     let b: Vec<bool> = [false, true];
     push_all(b, true, 2);
-    assert(len(b) == 4 && b[3] && !first(b))?;
+    assert!(len(b) == 4 && b[3] && !first(b));
 }
 
 test("a byte vector costs about a byte per element") {
@@ -98,12 +99,12 @@ test("a byte vector costs about a byte per element") {
         i = i + 1;
     }
     let grown = heap_bytes() - before;
-    assert(grown < 200000)?;
-    assert(v[99999] as int == 99999 % 256)?;
+    assert!(grown < 200000);
+    assert!(v[99999] as int == 99999 % 256);
 }
 
 test("element-wise matrix ops read packed rows") {
     let q = matrix([[34 as byte, 0 as byte]]);
     let flipped = ~q;
-    assert(flipped[0][0] as int == 221 && flipped[0][1] as int == 255)?;
+    assert!(flipped[0][0] as int == 221 && flipped[0][1] as int == 255);
 }

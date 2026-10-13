@@ -1,3 +1,4 @@
+use tests::assert;
 use string::format;
 
 class Pt {
@@ -632,63 +633,143 @@ impl String for Mode {
 
 test("class Show / String / Eq") {
     let p = new Pt(1, 2);
-    assert(p.show() == "Pt { x: 1, y: 2 }", p.show())?;
-    assert(p.to_string() == "Pt { x: 1, y: 2 }", p.to_string())?;
-    assert(format("%v", p) == "Pt { x: 1, y: 2 }", format("%v", p))?;
-    assert(p == new Pt(1, 2), "eq")?;
-    assert(p != new Pt(1, 3), "ne")?;
+    if !(p.show() == "Pt { x: 1, y: 2 }") {
+        raise p.show();
+    }
+    if !(p.to_string() == "Pt { x: 1, y: 2 }") {
+        raise p.to_string();
+    }
+    if !(format("%v", p) == "Pt { x: 1, y: 2 }") {
+        raise format("%v", p);
+    }
+    if !(p == new Pt(1, 2)) {
+        raise "eq";
+    }
+    if !(p != new Pt(1, 3)) {
+        raise "ne";
+    }
 }
 
 test("class Ord / Hash") {
-    assert(new Pt(1, 2) < new Pt(1, 3))?;
-    assert(new Pt(1, 2) <= new Pt(1, 2))?;
-    assert(new Pt(2, 0) > new Pt(1, 9))?;
-    assert(new Pt(2, 0) >= new Pt(2, 0))?;
-    assert(new Pt(1, 2).hash() == new Pt(1, 2).hash())?;
-    assert(new Pt(1, 2).hash() != new Pt(2, 1).hash())?;
+    if !(new Pt(1, 2) < new Pt(1, 3)) {
+        raise "Assertion: 'new Pt(1, 2) < new Pt(1, 3)' failed";
+    }
+    if !(new Pt(1, 2) <= new Pt(1, 2)) {
+        raise "Assertion: 'new Pt(1, 2) <= new Pt(1, 2)' failed";
+    }
+    if !(new Pt(2, 0) > new Pt(1, 9)) {
+        raise "Assertion: 'new Pt(2, 0) > new Pt(1, 9)' failed";
+    }
+    if !(new Pt(2, 0) >= new Pt(2, 0)) {
+        raise "Assertion: 'new Pt(2, 0) >= new Pt(2, 0)' failed";
+    }
+    if !(new Pt(1, 2).hash() == new Pt(1, 2).hash()) {
+        raise "Assertion: 'new Pt(1, 2).hash() == new Pt(1, 2).hash()' failed";
+    }
+    if !(new Pt(1, 2).hash() != new Pt(2, 1).hash()) {
+        raise "Assertion: 'new Pt(1, 2).hash() != new Pt(2, 1).hash()' failed";
+    }
     let big = 9223372036854775807;
-    assert(new Pt(big, big).hash() == new Pt(big, big).hash())?;
-    assert(new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash())?;
+    if !(new Pt(big, big).hash() == new Pt(big, big).hash()) {
+        raise "Assertion: 'new Pt(big, big).hash() == new Pt(big, big).hash()' failed";
+    }
+    if !(new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash()) {
+        raise "Assertion: 'new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash()' failed";
+    }
 }
 
 test("enum Show / String") {
-    assert(Sh::Dot.show() == "Sh::Dot")?;
-    assert(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show())?;
-    assert(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)", Sh::Pair(1, 2).show())?;
-    assert(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }")?;
+    if !(Sh::Dot.show() == "Sh::Dot") {
+        raise "Assertion: 'Sh::Dot.show() == \"Sh::Dot\"' failed";
+    }
+    if !(Sh::Circle(3).show() == "Sh::Circle(3)") {
+        raise Sh::Circle(3).show();
+    }
+    if !(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)") {
+        raise Sh::Pair(1, 2).show();
+    }
+    if !(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }") {
+        raise "Assertion: 'Sh::Rect { w: 1, h: 2 }.to_string() == \"Sh::Rect { w: 1, h: 2 }\"' failed";
+    }
 }
 
 test("enum Eq / Ord") {
-    assert(Sh::Circle(3) == Sh::Circle(3))?;
-    assert(Sh::Circle(3) != Sh::Circle(4))?;
-    assert(Sh::Pair(1, 2) != Sh::Pair(1, 3))?;
-    assert(Sh::Dot != Sh::Circle(0))?;
-    assert(Sh::Dot < Sh::Circle(0))?;
-    assert(Sh::Circle(1) < Sh::Circle(2))?;
-    assert(Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 })?;
-    assert(Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 })?;
-    assert(Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, 9))?;
+    if !(Sh::Circle(3) == Sh::Circle(3)) {
+        raise "Assertion: 'Sh::Circle(3) == Sh::Circle(3)' failed";
+    }
+    if !(Sh::Circle(3) != Sh::Circle(4)) {
+        raise "Assertion: 'Sh::Circle(3) != Sh::Circle(4)' failed";
+    }
+    if !(Sh::Pair(1, 2) != Sh::Pair(1, 3)) {
+        raise "Assertion: 'Sh::Pair(1, 2) != Sh::Pair(1, 3)' failed";
+    }
+    if !(Sh::Dot != Sh::Circle(0)) {
+        raise "Assertion: 'Sh::Dot != Sh::Circle(0)' failed";
+    }
+    if !(Sh::Dot < Sh::Circle(0)) {
+        raise "Assertion: 'Sh::Dot < Sh::Circle(0)' failed";
+    }
+    if !(Sh::Circle(1) < Sh::Circle(2)) {
+        raise "Assertion: 'Sh::Circle(1) < Sh::Circle(2)' failed";
+    }
+    if !(Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 }) {
+        raise "Assertion: 'Sh::Rect { w: 1, h: 2 } < Sh::Rect { w: 1, h: 3 }' failed";
+    }
+    if !(Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 }) {
+        raise "Assertion: 'Sh::Rect { w: 1, h: 2 } >= Sh::Rect { w: 1, h: 2 }' failed";
+    }
+    if !(Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, 9)) {
+        raise "Assertion: 'Sh::Rect { w: 0, h: 0 } > Sh::Pair(9, 9)' failed";
+    }
 }
 
 test("enum Hash") {
-    assert(Sh::Circle(3).hash() == Sh::Circle(3).hash())?;
-    assert(Sh::Circle(3).hash() != Sh::Circle(4).hash())?;
-    assert(Sh::Dot.hash() != Sh::Circle(0).hash())?;
+    if !(Sh::Circle(3).hash() == Sh::Circle(3).hash()) {
+        raise "Assertion: 'Sh::Circle(3).hash() == Sh::Circle(3).hash()' failed";
+    }
+    if !(Sh::Circle(3).hash() != Sh::Circle(4).hash()) {
+        raise "Assertion: 'Sh::Circle(3).hash() != Sh::Circle(4).hash()' failed";
+    }
+    if !(Sh::Dot.hash() != Sh::Circle(0).hash()) {
+        raise "Assertion: 'Sh::Dot.hash() != Sh::Circle(0).hash()' failed";
+    }
 }
 
 test("scalar enums use their backing") {
-    assert(Status::Ok.show() == "200")?;
-    assert(Status::NotFound.to_string() == "404")?;
-    assert(Status::Ok == Status::Ok)?;
-    assert(Status::Ok < Status::NotFound)?;
-    assert(Status::Ok.hash() == 200.hash())?;
-    assert(Mode::Write.show() == "w")?;
-    assert(Mode::Read < Mode::Write)?;
+    if !(Status::Ok.show() == "200") {
+        raise "Assertion: 'Status::Ok.show() == \"200\"' failed";
+    }
+    if !(Status::NotFound.to_string() == "404") {
+        raise "Assertion: 'Status::NotFound.to_string() == \"404\"' failed";
+    }
+    if !(Status::Ok == Status::Ok) {
+        raise "Assertion: 'Status::Ok == Status::Ok' failed";
+    }
+    if !(Status::Ok < Status::NotFound) {
+        raise "Assertion: 'Status::Ok < Status::NotFound' failed";
+    }
+    if !(Status::Ok.hash() == 200.hash()) {
+        raise "Assertion: 'Status::Ok.hash() == 200.hash()' failed";
+    }
+    if !(Mode::Write.show() == "w") {
+        raise "Assertion: 'Mode::Write.show() == \"w\"' failed";
+    }
+    if !(Mode::Read < Mode::Write) {
+        raise "Assertion: 'Mode::Read < Mode::Write' failed";
+    }
 }
 
 test("tuple variants with different payload types") {
-    assert(format("%v", Holder::S("x")) == "Holder::S(x)", format("%v", Holder::S("x")))?;
-    assert(Holder::B(true).show() == "Holder::B(true)")?;
-    assert(Holder::S("x") == Holder::S("x"))?;
-    assert(Holder::S("x") != Holder::B(false))?;
+    if !(format("%v", Holder::S("x")) == "Holder::S(x)") {
+        raise format("%v", Holder::S("x"));
+    }
+    if !(Holder::B(true).show() == "Holder::B(true)") {
+        raise "Assertion: 'Holder::B(true).show() == \"Holder::B(true)\"' failed";
+    }
+    if !(Holder::S("x") == Holder::S("x")) {
+        raise "Assertion: 'Holder::S(\"x\") == Holder::S(\"x\")' failed";
+    }
+    if !(Holder::S("x") != Holder::B(false)) {
+        raise "Assertion: 'Holder::S(\"x\") != Holder::B(false)' failed";
+    }
 }

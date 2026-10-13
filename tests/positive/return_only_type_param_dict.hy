@@ -2,6 +2,7 @@
 // its dictionary from the call's result type, also for a nullary fn.
 // (Several `Default` instances chosen by the annotation: see
 // `derive_default_static.hy`.)
+use tests::assert;
 
 #[derive(Default)]
 class Q {
@@ -24,15 +25,15 @@ fn forwarded<T: Default>() -> T {
 
 test("nullary generic with a return-only bound") {
     let q: Q = make();
-    assert(q.x == 0 && q.y == 0)?;
+    assert!(q.x == 0 && q.y == 0);
 }
 
 test("return-only bound with other params") {
     let q: Q = make_n(3);
-    assert(q.y == 0)?;
+    assert!(q.y == 0);
 }
 
 test("return-only bound forwarded from a generic caller") {
     let q: Q = forwarded();
-    assert(q.x == 0)?;
+    assert!(q.x == 0);
 }

@@ -1,5 +1,7 @@
 // Nested `match` on the same Option field copies the field; outer
 // pattern bindings stay in scope in the inner arm.
+use tests::assert;
+
 class BoxInt {
     pub opt: Option<int>,
 }
@@ -121,28 +123,28 @@ fn nested_user_enum_rematch(Choice c) -> int {
 
 test("nested match on boxed Option field") {
     let b = new BoxInt(Option::Some(21));
-    assert(nested_same_field(b) == 42)?;
+    assert!(nested_same_field(b) == 42);
 }
 
 test("matching a field does not consume it") {
     let b = new BoxInt(Option::Some(21));
-    assert(sequential_same_field(b) == 2121)?;
+    assert!(sequential_same_field(b) == 2121);
 }
 
 test("nested match on niche Option class field") {
     let leaf = new Node(3, Option::None, Option::None);
     let root = new Node(1, Option::Some(leaf), Option::None);
-    assert(nested_niche_child(root) == 6)?;
+    assert!(nested_niche_child(root) == 6);
 }
 
 test("inner binding shadows outer match name") {
     let b = new BoxInt(Option::Some(21));
-    assert(nested_shadows_inner_name(b) == 100)?;
+    assert!(nested_shadows_inner_name(b) == 100);
 }
 
 test("inner None arm still sees outer binding") {
     let b = new BoxInt(Option::Some(21));
-    assert(nested_none_arm_uses_outer(b) == 21)?;
+    assert!(nested_none_arm_uses_outer(b) == 21);
 }
 
 test("nested match on niche Option string field") {
@@ -154,23 +156,23 @@ test("nested match on niche Option string field") {
         },
         Option::None => "none",
     };
-    assert(n == "ok")?;
+    assert!(n == "ok");
 }
 
 test("outer binding still resolves after nested match") {
     let b = new BoxInt(Option::Some(21));
-    assert(outer_binding_after_nested_match(b) == 22)?;
+    assert!(outer_binding_after_nested_match(b) == 22);
 }
 
 test("triple nested match keeps outermost binding") {
     let b = new BoxInt(Option::Some(7));
-    assert(triple_nested_keeps_outermost(b) == 21)?;
+    assert!(triple_nested_keeps_outermost(b) == 21);
 }
 
 test("nested rematch on Result keeps outer Ok binding") {
-    assert(nested_result_rematch(Result::Ok(21)) == 42)?;
+    assert!(nested_result_rematch(Result::Ok(21)) == 42);
 }
 
 test("nested rematch on user enum keeps outer binding") {
-    assert(nested_user_enum_rematch(Choice::A(21)) == 42)?;
+    assert!(nested_user_enum_rematch(Choice::A(21)) == 42);
 }

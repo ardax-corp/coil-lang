@@ -1,5 +1,6 @@
 // Destructuring under HIR: `let` tuple and record patterns, and for-in
 // patterns over arrays and dicts.
+use tests::assert;
 
 fn swap_sum(int a, int b) -> int {
     let (x, y) = (b, a);
@@ -38,12 +39,12 @@ fn dict_entries() -> int {
 }
 
 test("let patterns") {
-    assert(swap_sum(1, 2) == 21)?;
-    assert(nested(3) == 705)?;
+    assert!(swap_sum(1, 2) == 21);
+    assert!(nested(3) == 705);
 }
 
 test("for-in patterns") {
-    assert(pairs_total() == 14)?;
-    assert(dict_values() == 7)?;
-    assert(dict_entries() == 11)?;
+    assert!(pairs_total() == 14);
+    assert!(dict_values() == 7);
+    assert!(dict_entries() == 11);
 }

@@ -1,6 +1,7 @@
 // COI-410: sequential TCP HTTP/1.1 GETs with Connection: close (no pool).
 // One pair per request: park the client on wait_readable, then discard.
 // The client parks in its own task while the server task writes.
+use tests::assert;
 use io::{wait_readable, close, read};
 use task::{scope, Scope};
 use io::write;
@@ -91,12 +92,12 @@ test("200 sequential Connection-close GETs park then discard") {
             Result::Ok(n) => n,
             Result::Err(_) => -1,
         };
-        assert(n >= 2)?;
+        assert!(n >= 2);
         total = total + 2;
         close(c)?;
         close(s)?;
         close(listener)?;
         i = i + 1;
     }
-    assert(total == 400)?;
+    assert!(total == 400);
 }

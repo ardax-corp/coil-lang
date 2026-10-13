@@ -1,3 +1,5 @@
+use tests::assert;
+
 class Cell {
     pub n: int,
     hidden: int,
@@ -20,7 +22,7 @@ impl Cell {
 
 test("pub field and method from outside") {
     let c = new Cell(3, 4);
-    assert(c.n == 3)?;
-    assert(c.get() == 7)?;
-    assert(c.tick() == 8)?;
+    assert!(c.n == 3);
+    assert!(c.get() == 7);
+    assert!(c.tick() == 8);
 }

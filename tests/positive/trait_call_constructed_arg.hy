@@ -1,5 +1,7 @@
 // A trait method called from a monomorphized generic finds the instance for
 // a constructed argument (`Option::Some(42)` is `Option<int>`).
+use tests::assert;
+
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}
@@ -20,5 +22,5 @@ fn take_head<C: Collect>(C xs) -> C::Elem {
 }
 
 test("trait call on a constructed arg") {
-    assert(take_head(Option::Some(42)) == 42)?;
+    assert!(take_head(Option::Some(42)) == 42);
 }

@@ -2,6 +2,7 @@
 // is `FORMAT "%s%s"` with the format string under both operands, and a
 // call or `?` operand is not staged through temps. The language harness
 // also runs under `--hir`, so each case pins both codegens.
+use tests::assert;
 use string::format;
 
 fn name() -> Result<string, string> {
@@ -22,9 +23,9 @@ fn show(int n, float x, string s) -> string {
 }
 
 test("equality and concatenation") {
-    assert(join("x", "y") == "x/y")?;
-    assert(join("x", "y") != "y/x")?;
-    assert("<" + join(join("a", "b"), "c") + ">" == "<a/b/c>")?;
+    assert!(join("x", "y") == "x/y");
+    assert!(join("x", "y") != "y/x");
+    assert!("<" + join(join("a", "b"), "c") + ">" == "<a/b/c>");
 }
 
 test("a ? operand keeps its value") {
@@ -32,10 +33,10 @@ test("a ? operand keeps its value") {
         Result::Ok(s) => s,
         Result::Err(e) => e,
     };
-    assert(got == "a/coil")?;
+    assert!(got == "a/coil");
 }
 
 test("literal format") {
-    assert(show(3, 1.5, "hi") == format("n=%i x=%f s=%s %%", 3, 1.5, "hi"))?;
-    assert(format("%s-%i", "k", 7) == "k-7")?;
+    assert!(show(3, 1.5, "hi") == format("n=%i x=%f s=%s %%", 3, 1.5, "hi"));
+    assert!(format("%s-%i", "k", 7) == "k-7");
 }

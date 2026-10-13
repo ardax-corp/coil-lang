@@ -1,5 +1,6 @@
 // T1 tasks and IO: an IO wait suspends the task (never a generator it is
 // resuming), so other tasks run while it waits.
+use tests::assert;
 use task::{scope, Scope, TaskError};
 use thread::{spawn, join};
 use clock::sleep_ms;
@@ -107,8 +108,8 @@ test("an IO wait in one task lets another task run") {
             ok_or(server.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 11)?;
-    assert(log.len() == 2 && log[0] == "connecting" && log[1] == "accepted")?;
+    assert!(ok_or(r, -1) == 11);
+    assert!(log.len() == 2 && log[0] == "connecting" && log[1] == "accepted");
 }
 
 test("IO inside a generator suspends the task, not the generator") {
@@ -129,7 +130,7 @@ test("IO inside a generator suspends the task, not the generator") {
             ok_or(reader.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 12)?;
+    assert!(ok_or(r, -1) == 12);
 }
 
 test("IO inside a generator without tasks parks the VM until data arrives") {
@@ -139,7 +140,7 @@ test("IO inside a generator without tasks parks the VM until data arrives") {
     let g = read_all(accept_one(listener));
     let n = resume g;
     join(peer)?;
-    assert(n == 9)?;
+    assert!(n == 9);
 }
 
 test("connects from many tasks finish while the server task accepts") {
@@ -167,5 +168,5 @@ test("connects from many tasks finish while the server task accepts") {
             ok_or(server.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 24)?;
+    assert!(ok_or(r, -1) == 24);
 }

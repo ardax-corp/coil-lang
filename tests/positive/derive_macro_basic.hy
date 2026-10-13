@@ -1,4 +1,5 @@
 // User derive / attribute macros from `examples/src/derive_macros.hy`.
+use tests::assert;
 use derive_macros::{FieldNames, VariantName, Tagged, Loud, add_after};
 
 #[derive(FieldNames, Tagged)]
@@ -33,27 +34,27 @@ fn triple(int x) -> int {
 
 test("derive generates a static method with helper attributes") {
     let names = Config::field_names();
-    assert(len(names) == 2)?;
-    assert(names[0] == "server-port")?;
-    assert(names[1] == "name")?;
+    assert!(len(names) == 2);
+    assert!(names[0] == "server-port");
+    assert!(names[1] == "name");
 }
 
 test("derive over enum variants") {
-    assert(Shape::Dot.variant_name() == "Dot")?;
-    assert(Shape::Circle(2).variant_name() == "Circle")?;
-    assert(Shape::Dot == Shape::Dot)?;
+    assert!(Shape::Dot.variant_name() == "Dot");
+    assert!(Shape::Circle(2).variant_name() == "Circle");
+    assert!(Shape::Dot == Shape::Dot);
     let n: Maybe<int> = Maybe::Nothing;
-    assert(n.variant_name() == "Nothing")?;
-    assert(Maybe::Just("s").variant_name() == "Just")?;
+    assert!(n.variant_name() == "Nothing");
+    assert!(Maybe::Just("s").variant_name() == "Just");
 }
 
 test("attribute macro replaces the function") {
-    assert(triple(2) == 16)?;
+    assert!(triple(2) == 16);
 }
 
 test("generated code names provider items by path") {
     let t = Config::tag();
-    assert(t.label == "tag:Config")?;
+    assert!(t.label == "tag:Config");
 }
 
 #[derive(Loud)]
@@ -63,5 +64,5 @@ class Quiet {
 
 test("user derive of a prelude trait replaces the default Show") {
     let q = new Quiet(1);
-    assert(q.show() == "LOUD Quiet")?;
+    assert!(q.show() == "LOUD Quiet");
 }
