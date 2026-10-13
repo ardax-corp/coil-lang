@@ -141,6 +141,10 @@ pub struct Pipeline {
     macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Files whose macros an enclosing pipeline is expanding (cycle check).
     macro_stack: Vec<PathBuf>,
+    /// Compiles a macro expansion program: provider modules keep their
+    /// lowered macro functions (other pipelines drop them, see
+    /// [`macros::strip_compile_time_items`]).
+    expansion_program: bool,
     /// Generated-code spans per file, for moving diagnostics to macro sites.
     generated_ranges: Vec<macros::GeneratedRange>,
     /// Items each derived type already received, to splice in derive order.
@@ -725,6 +729,7 @@ impl Pipeline {
             cursor_il: None,
             macro_host: crate::macros::default_host(),
             macro_stack: Vec::new(),
+            expansion_program: false,
             generated_ranges: Vec::new(),
             derived_items: HashMap::new(),
         };
@@ -1188,6 +1193,18 @@ impl Pipeline {
         let module = self.namespace_for(file);
         let mut cached = crate::ast_cache::CachedAst::parse(source);
         let _ = cached.expand_in(&module);
+        // A provider's macros run only in the expansion program. The entry
+        // file keeps them so its macro bodies are still checked.
+        if !self.expansion_program
+            && self.entry_file.as_deref() != Some(file)
+            && !cached.macro_decls().is_empty()
+        {
+            let decls = cached.macro_decls().to_vec();
+            let source = cached.source().to_string();
+            if let Some(ast) = cached.ast_mut() {
+                crate::macros::strip_compile_time_items(ast, &source, &decls);
+            }
+        }
         self.ast_cache.insert(file.to_path_buf(), cached);
         true
     }

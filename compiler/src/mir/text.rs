@@ -172,6 +172,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::CallIndirect { dest, callee, args } => {
+            write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
+            for a in args {
+                write!(f, ", {a}")?;
+            }
+            Ok(())
+        }
         MirInst::MatchPayload {
             dest,
             scrutinee,
@@ -261,6 +268,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Boxed { tag } => write!(f, " {tag}")?,
+                MirAllocKind::Fn { target, operand } => write!(f, " {}, {operand}", target.0)?,
+                MirAllocKind::PolyFn { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Array
                 | MirAllocKind::Tuple
                 | MirAllocKind::Dict
@@ -794,6 +803,16 @@ impl<'a> Parser<'a> {
                 args,
             });
         }
+        if let Some(ty_s) = op.strip_prefix("callind.") {
+            let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
+            let callee = self.value()?;
+            let mut args = Vec::new();
+            while self.eat(',') {
+                args.push(self.value()?);
+            }
+            ensure_ty(types, dest, ty);
+            return Ok(MirInst::CallIndirect { dest, callee, args });
+        }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
             let target = crate::il::Label(self.uint()? as u32);
@@ -836,11 +855,21 @@ impl<'a> Parser<'a> {
                 "boxed" => MirAllocKind::Boxed {
                     tag: self.uint()? as u32,
                 },
+                "fn" => {
+                    let target = crate::il::Label(self.uint()? as u32);
+                    self.expect(',')?;
+                    let operand = self.uint()? as u32;
+                    MirAllocKind::Fn { target, operand }
+                }
+                "polyfn" => MirAllocKind::PolyFn {
+                    target: crate::il::Label(self.uint()? as u32),
+                },
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
             };
             let mut elems = Vec::new();
             let _ = self.eat(',');
-            if self.peek('v') {
+            // A `PolyFn` has no elements: the next line's value is not one.
+            if !matches!(kind, MirAllocKind::PolyFn { .. }) && self.peek('v') {
                 elems.push(self.value()?);
                 while self.eat(',') {
                     elems.push(self.value()?);
@@ -1233,5 +1262,35 @@ bb3:
         let g = parse_func(&f.to_string()).unwrap();
         assert_eq!(f, g);
         let _ = LocalId(0);
+    }
+
+    #[test]
+    fn round_trip_function_values() {
+        use crate::mir::inst::{MirAllocKind, MirGcKind};
+        let mut b = MirBuilder::new("closures");
+        let k = b.add_param(MirTy::I64).unwrap();
+        let x = b.add_param(MirTy::I64).unwrap();
+        let kind = MirAllocKind::Fn {
+            target: crate::il::Label(7),
+            operand: 3,
+        };
+        let f = b.ins_alloc(kind, vec![k]).unwrap();
+        let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
+        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::il::Label(9) }, Vec::new()).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
+        let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
+        assert!(b.ins_call_indirect(x, vec![k], MirTy::I64).is_err(), "callee must be a heap word");
+        b.ret(Some(y)).unwrap();
+        let func = b.finish().unwrap();
+        func.verify().unwrap();
+        let text = func.to_string();
+        assert!(text.contains("alloc.fn 7, 3, v0"), "{text}");
+        assert!(text.contains("alloc.polyfn 9"), "{text}");
+        assert!(text.contains("callind.i64 v"), "{text}");
+        let again = parse_func(&text).expect(&text);
+        again.verify().unwrap();
+        assert_eq!(again.to_string(), text);
+        let call = again.blocks[0].insts.iter().find(|i| matches!(i, MirInst::CallIndirect { .. })).unwrap();
+        assert!(call.is_effect_barrier());
     }
 }

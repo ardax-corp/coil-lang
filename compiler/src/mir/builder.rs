@@ -470,6 +470,31 @@ impl MirBuilder {
         Ok((dest, dest_hi))
     }
 
+    /// `CallIndirect`: call the function value `callee` with `args`, its
+    /// one-word result typed `ret`.
+    pub fn ins_call_indirect(&mut self, callee: ValueId, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
+        if self.resolve_ty(callee) != MirTy::HeapRef {
+            return Err(MirError::msg(format!("CallIndirect callee is {}", self.resolve_ty(callee))));
+        }
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_word_lane() {
+                return Err(MirError::msg(format!("CallIndirect arg {i} is {}", self.resolve_ty(a))));
+            }
+        }
+        if !ret.is_word_lane() {
+            return Err(MirError::msg(format!("CallIndirect dest is {ret}")));
+        }
+        let dest = self.alloc(ret);
+        self.push(MirInst::CallIndirect {
+            dest,
+            callee: self.resolve(callee),
+            args,
+        })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
     pub fn ins_stack_phi(&mut self, args: Vec<(BlockId, ValueId)>) -> Result<ValueId, MirError> {
         if args.is_empty() {
