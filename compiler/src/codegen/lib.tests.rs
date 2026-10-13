@@ -326,8 +326,8 @@ fn test_case_emits_synthetic_fns_virtual_main_and_relocates_offsets() {
     let mut ast = Pratt::default()
         .parse(
             r#"
-test("one") { assert(true)?; }
-test("two") { assert(true)?; }
+test("one") { if !(true) { raise "assertion failed"; } }
+test("two") { if !(true) { raise "assertion failed"; } }
 "#,
         )
         .expect("parse failed");
@@ -4033,8 +4033,8 @@ fn sum3([int; 3] xs) -> int {
 test("fixed local escapes to callee") {
     let a = [4, 5, 6];
     a[1] = 50;
-    assert(sum3(a) == 60)?;
-    assert(a[1] == 50)?;
+    if !(sum3(a) == 60) { raise "assertion failed"; }
+    if !(a[1] == 50) { raise "assertion failed"; }
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
@@ -4059,7 +4059,7 @@ test("zip locals") {
     let xs = [x, x + 1];
     let ys = [3, 4];
     let z = xs + ys;
-    assert(z[0] + z[1] == 10)?;
+    if !(z[0] + z[1] == 10) { raise "assertion failed"; }
 }
 "#;
     let mut pipeline = crate::Pipeline::new();

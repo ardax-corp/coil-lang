@@ -73,8 +73,8 @@ fn skip(int a) -> int {
     return a + 1;
 }
 #[test]
-fn t() -> Result<(), string> { assert(keep(1) == 2)?; }
-test(\"x\") { assert(1 + 1 == 2)?; }
+fn t() -> Result<(), string> { if !(keep(1) == 2) { raise \"assertion failed\"; } }
+test(\"x\") { if !(1 + 1 == 2) { raise \"assertion failed\"; } }
 ";
     let sites = enumerate(src, &Operator::ALL).unwrap();
     assert!(sites.iter().all(|s| s.line == 1), "{sites:?}");

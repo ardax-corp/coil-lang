@@ -5766,78 +5766,7 @@ fn main() {
     );
     assert!(c.builtin_name_in_scope("Option"));
     assert!(c.builtin_name_in_scope("Eq"));
-    assert!(c.prelude_fn_in_scope("assert").is_some());
     assert!(!c.ffi_fn_in_scope("dload").is_some());
-}
-
-#[test]
-fn assert_infers_result_unit_string() {
-    let src = r#"
-fn main() {
-    let r = assert(true);
-    let _ = match r {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-}
-"#;
-    let (c, _) = check(src);
-    assert!(
-        c.messages().is_empty(),
-        "unexpected: {:?}",
-        c.messages().iter().map(|m| m.message()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn assert_with_message_ok() {
-    let src = r#"
-fn main() {
-    let r = assert(false, "nope");
-    let _ = match r {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-}
-"#;
-    let (c, _) = check(src);
-    assert!(
-        c.messages().is_empty(),
-        "unexpected: {:?}",
-        c.messages().iter().map(|m| m.message()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn assert_wrong_arity_errors() {
-    let msgs = assert_messages(r#"fn main() { let _ = assert(); }"#);
-    assert!(
-        msgs.iter().any(|m| m.message().contains("assert expects")),
-        "expected arity diagnostic, got: {:?}",
-        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn assert_rebind_as_check_works() {
-    let src = r#"
-use prelude::test::assert as check;
-fn main() {
-    let r = check(1 == 1);
-    let _ = match r {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-}
-"#;
-    let (c, _) = check(src);
-    assert!(
-        c.messages().is_empty(),
-        "unexpected: {:?}",
-        c.messages().iter().map(|m| m.message()).collect::<Vec<_>>()
-    );
-    assert!(c.prelude_fn_in_scope("check").is_some());
-    assert!(c.prelude_fn_in_scope("assert").is_none());
 }
 
 #[test]
@@ -6913,7 +6842,7 @@ fn test_case_accepts_assert_in_result_mode() {
     let (mut c, _) = check(
         r#"
 test("ok") {
-    assert(true)?;
+    if !(true) { raise "assertion failed"; }
 }
 "#,
     );
@@ -6933,7 +6862,7 @@ fn test_case_rejects_main_alongside_cases() {
         r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-test("a") { assert(true)?; }
+test("a") { if !(true) { raise "assertion failed"; } }
 fn main() { write(stdout(), to_bytes("x")); }
 "#,
     );
@@ -6950,7 +6879,7 @@ fn test_case_name_must_be_string_literal() {
     let msgs = assert_messages(
         r#"
 let name = "x";
-test(name) { assert(true)?; }
+test(name) { if !(true) { raise "assertion failed"; } }
 "#,
     );
     assert!(
@@ -6964,8 +6893,8 @@ test(name) { assert(true)?; }
 fn test_case_registers_multiple_names_in_source_order() {
     let (mut c, _) = check(
         r#"
-test("first") { assert(true)?; }
-test("second") { assert(1 == 1)?; }
+test("first") { if !(true) { raise "assertion failed"; } }
+test("second") { if !(1 == 1) { raise "assertion failed"; } }
 "#,
     );
     let msgs = c.take_messages();
@@ -7872,7 +7801,8 @@ fn imported_enum_variant_match_works_in_test_body() {
         .parse(
             r#"test("match imported enum") {
     let v = JsonValue::Null;
-    match v { JsonValue::Null => assert(true)?, default => assert(false)? };
+    let ok = match v { JsonValue::Null => true, default => false };
+    if !ok { raise "not null"; }
 }"#,
         )
         .expect("parse test file");
@@ -7908,10 +7838,11 @@ fn imported_enum_payload_match_via_use_in_test_body() {
 use json::value::{JsonValue};
 test("match imported payload") {
     let v = JsonValue::Str("hi");
-    match v {
-        JsonValue::Str(s) => assert(s == "hi")?,
-        default => assert(false)?,
+    let ok = match v {
+        JsonValue::Str(s) => s == "hi",
+        default => false,
     };
+    if !ok { raise "not hi"; }
 }
 "#,
         )

@@ -22,11 +22,11 @@ fn static_len_ignores_later_test_shadowing_same_name() {
     let src = r#"
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    assert(len(a) == 4)?;
+    if !(len(a) == 4) { raise "assertion failed"; }
 }
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
-    assert(a[0][1] == 2)?;
+    if !(a[0][1] == 2) { raise "assertion failed"; }
 }
 "#;
     let (c, bc) = compile_tests(src);

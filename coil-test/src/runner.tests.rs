@@ -105,7 +105,7 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     )
     .unwrap();
     // Normal positive case still runs.
-    std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  assert(true)?;\n}\n").unwrap();
+    std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  if !(true) { raise \"assertion failed\"; }\n}\n").unwrap();
 
     let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
@@ -156,13 +156,13 @@ fn harness_isolates_cases_and_continues_after_failures() {
         root.join("cases.hy"),
         r#"
 test("soft fail") {
-    assert(false)?;
+    if !(false) { raise "assertion failed"; }
 }
 test("panics") {
     panic "boom";
 }
 test("still runs") {
-    assert(true)?;
+    if !(true) { raise "assertion failed"; }
 }
 "#,
     )
@@ -194,7 +194,7 @@ fn every_case_gets_fresh_static_init() {
     let mut src = String::from("static let seen: Vec<int> = Vec::new();\n");
     for i in 0..8 {
         src.push_str(&format!(
-            "test(\"push {i}\") {{\n    assert(seen.len() == 0, \"saw a previous case's write\")?;\n    seen.push({i});\n}}\n"
+            "test(\"push {i}\") {{\n    if !(seen.len() == 0) { raise \"saw a previous case's write\"; }\n    seen.push({i});\n}}\n"
         ));
     }
     std::fs::write(root.join("statics.hy"), src).unwrap();
@@ -230,7 +230,7 @@ test("spawn and join") {
         Result::Ok(v) => v,
         Result::Err(_) => -1,
     };
-    assert(v == 42)?;
+    if !(v == 42) { raise "assertion failed"; }
 }
 "#,
     )
@@ -253,7 +253,7 @@ fn seeded_file_order_is_reproducible_and_complete() {
     for i in 0..12 {
         std::fs::write(
             root.join(format!("t{i:02}.hy")),
-            "test(\"ok\") {\n  assert(true)?;\n}\n",
+            "test(\"ok\") {\n  if !(true) { raise \"assertion failed\"; }\n}\n",
         )
         .unwrap();
     }
@@ -297,7 +297,7 @@ fn coverage_reports_project_lines() {
     .unwrap();
     std::fs::write(
         root.join("tests/clamp.hy"),
-        "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    assert(clamp(-5, 0, 10) == 0)?;\n}\n\ntest(\"passes through\") {\n    assert(clamp(5, 0, 10) == 5)?;\n}\n",
+        "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     for jobs in [1, 2] {
@@ -341,7 +341,7 @@ fn cmd_test_returns_one_when_the_summary_is_failed() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("fail.hy"),
-        "test(\"no\") {\n    assert(false)?;\n}\n",
+        "test(\"no\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let code = cmd_test(ReportConfig::default(), options(&root, false));
@@ -355,7 +355,7 @@ fn cmd_test_returns_zero_when_the_suite_is_green() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("ok.hy"),
-        "test(\"yes\") {\n    assert(true)?;\n}\n",
+        "test(\"yes\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let code = cmd_test(ReportConfig::default(), options(&root, false));
@@ -441,7 +441,7 @@ fn plain(int x) -> int {
 }
 
 test("hand-written") {
-    assert(clamp(5, 0, 3) == 3)?;
+    if !(clamp(5, 0, 3) == 3) { raise "assertion failed"; }
 }
 "#,
     )
@@ -479,7 +479,7 @@ fn a_source_outside_the_test_root_runs_only_its_contract_tests() {
         &file,
         "fn twice(int x) -> int\n    ensures result == x + x\n{\n    return x * 2;\n}\n\n\
          fn plain(int x) -> int {\n    return x;\n}\n\n\
-         test(\"own case\") {\n    assert(false)?;\n}\n",
+         test(\"own case\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let mut opts = options(&tests, false);
