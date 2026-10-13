@@ -2654,8 +2654,9 @@ impl Compiler {
 
     /// The planned clone of generic `key` for `call`: at the type arguments
     /// its signature binds against the ground argument and call types (a
-    /// type parameter only inside `Vec<T>` or only in the result included),
-    /// else, as `mono_call_offset`, by the ground argument types.
+    /// type parameter only inside `Vec<T>` or only in the result included;
+    /// none while one is open), else (a rest formal), as `mono_call_offset`,
+    /// by the ground argument types.
     fn hir_mono_spec(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str) -> Option<&crate::monomorphize::MonoSpecialization> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return None;
@@ -2677,13 +2678,12 @@ impl Compiler {
             if let (Some(ret), Some(ty)) = (self.checker.fn_return_ty(lookup), Self::hir_ty(hir, call)) {
                 Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), ty), &mut map);
             }
+            // A type argument still open (a generic caller): no clone.
             let subst: Option<Vec<Ty>> = vars
                 .iter()
                 .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).cloned())
                 .collect();
-            if let Some(subst) = subst {
-                return self.mono_plan.specialization_for_subst(key, &subst);
-            }
+            return self.mono_plan.specialization_for_subst(key, &subst?);
         }
         self.mono_plan.specialization_for_call(key, &self.hir_mono_key_tys(strip_overload_key(key), arg_tys))
     }
@@ -3207,6 +3207,21 @@ impl Compiler {
     /// A bound method call in a mono clone: `T` is concrete here, so the
     /// instance is looked up from the ground argument types and called
     /// directly, as `try_emit_ground_bound_method_nodes`.
+    /// The instance types of trait `class`'s method call `call` with no
+    /// arguments: its `n` trait parameters bound by the method's result type
+    /// against the call's (ground) type.
+    fn hir_bound_call_result_lookup(&self, hir: &HirBody, call: HirId, class: &str, method: &str, n: usize) -> Option<Vec<Ty>> {
+        let scheme = self.checker.typeclass_method_scheme(class, method)?;
+        let vars = scheme.bounds.get(..n)?;
+        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
+        let mut map = HashMap::new();
+        Self::bind_scheme_vars(&ret, &ty, &mut map);
+        vars.iter()
+            .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
+            .collect()
+    }
+
     fn hir_ground_bound_call(
         &self,
         hir: &HirBody,
@@ -3245,10 +3260,16 @@ impl Compiler {
             .ok_or("callee-signature")?;
         let class_def = self.checker.generics().typeclass(&hint.class).ok_or("callee-trait")?;
         let lookup_n = class_def.type_params.len().max(1).min(arg_tys.len());
-        if lookup_n == 0 {
-            return Err("callee-trait");
-        }
-        let lookup: Vec<Ty> = arg_tys[..lookup_n].iter().map(Self::show_lookup_ty_for_instance).collect();
+        let (lookup, heads): (Vec<Ty>, &[Ty]) = if lookup_n == 0 {
+            // No argument names the instance (`default()`): the method's
+            // signature against the call's result type does.
+            let lookup = self
+                .hir_bound_call_result_lookup(hir, call, &hint.class, method, class_def.type_params.len())
+                .ok_or("callee-trait")?;
+            (lookup, &[])
+        } else {
+            (arg_tys[..lookup_n].iter().map(Self::show_lookup_ty_for_instance).collect(), &arg_tys[..lookup_n])
+        };
         // Constructed values carry `Sum` types; retry with their `App` head.
         let instance = self
             .checker
@@ -3256,7 +3277,10 @@ impl Compiler {
             .find_instance_relaxed(&hint.class, &lookup)
             .cloned()
             .or_else(|| {
-                let heads: Option<Vec<Ty>> = arg_tys[..lookup_n]
+                if heads.is_empty() {
+                    return None;
+                }
+                let heads: Option<Vec<Ty>> = heads
                     .iter()
                     .map(|t| self.sum_instance_head(t).or_else(|| Some(t.clone())))
                     .collect();
