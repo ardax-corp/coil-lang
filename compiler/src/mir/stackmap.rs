@@ -135,6 +135,8 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             |             Instruction::DictEntries
             | Instruction::MakeDict
             | Instruction::MakeCoro
+            | Instruction::MakeFn
+            | Instruction::MakePolyFn
     )
 }
 
