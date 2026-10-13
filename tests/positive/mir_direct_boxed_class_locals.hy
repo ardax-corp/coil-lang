@@ -1,6 +1,7 @@
 // A class local kept in frame slots is boxed into its object where it
 // escapes; field reads and writes after that go through the object, in
 // direct MIR as in HIR emission.
+use tests::assert;
 class Cell {
     pub v: int,
     pub next: Option<Cell>,
@@ -46,6 +47,6 @@ fn after_escape(int a) -> int {
 }
 
 test("frame-slot class locals boxed at their escape") {
-    assert(chain(4) == 64)?;
-    assert(after_escape(3) == 16)?;
+    assert!(chain(4) == 64);
+    assert!(after_escape(3) == 16);
 }
