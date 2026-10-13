@@ -1239,13 +1239,16 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             )?;
         }
-        MirInst::Alloc { dest, kind, elems } => {
+        MirInst::Alloc { dest, kind, elems, kinds: recorded } => {
             if !across_alloc {
                 return Err(LowerError::Refused(
                     "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
                 ));
             }
-            if let Some(make_kind) = dense_make_kind(*kind)? {
+            // `DenseMake` has no array element kind: a stamped array is made
+            // on the stack as HIR emission makes it.
+            let stamped_array = matches!(kind, MirAllocKind::Array) && *recorded != 0;
+            if let Some(make_kind) = dense_make_kind(*kind)?.filter(|_| !stamped_array) {
                 let arity = u8::try_from(elems.len())
                     .map_err(|_| LowerError::Refused("DenseMake arity".into()))?;
                 let mut slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
@@ -1257,6 +1260,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 let base = gather_base(out, &slots, scratch, loc)?;
                 // Declaration-order word kinds from the element types.
                 let kinds = match kind {
+                    _ if *recorded != 0 => *recorded,
                     _ if func.opaque_words => 0,
                     MirAllocKind::Enum { .. } => common::pack_word_kinds(
                         elems.iter().rev().map(|e| mir_word_kind(func.ty(*e))),
@@ -1294,7 +1298,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                     }
                 } else {
                     emit_dense_push(out, elems, regs, scratch, loc)?;
-                    out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                    out.extend(il_for_alloc(*kind, elems.len() as u32, *recorded, loc)?);
                     out.push(IlOp::StorePop {
                         slot: u32::from(live),
                         loc,
@@ -1302,7 +1306,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 }
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
-                out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                out.extend(il_for_alloc(*kind, elems.len() as u32, *recorded, loc)?);
                 if dead_drop_alloc(func, *kind, *dest) {
                     out.push(IlOp::Pop { loc });
                 } else {
@@ -2787,8 +2791,6 @@ fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), Lower
     Ok((0, c))
 }
 
-/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
-/// the ops after the elements are pushed.
 /// A finalized enum made for its effect alone (`Conn::Open(fd);`): popped
 /// as HIR emission pops it, not kept in a slot where it would stay
 /// reachable, and its `drop` wait, until the slot is reused.
@@ -2809,9 +2811,13 @@ pub(super) fn dead_drop_alloc(func: &MirFunc, kind: MirAllocKind, dest: ValueId)
     !used
 }
 
+/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
+/// the ops after the elements are pushed. `kinds` is the `Alloc`'s recorded
+/// construction kinds.
 pub(super) fn il_for_alloc(
     kind: MirAllocKind,
     arity: u32,
+    kinds: u8,
     loc: DebugLoc,
 ) -> Result<Vec<IlOp>, LowerError> {
     match kind {
@@ -2830,7 +2836,7 @@ pub(super) fn il_for_alloc(
         ]),
         // `TagEnumType` keeps the value on the stack and stamps its type.
         MirAllocKind::DropEnum { tag, type_id } => Ok(vec![
-            il_for_alloc_op(MirAllocKind::Enum { tag }, arity, loc)?,
+            il_for_alloc_op(MirAllocKind::Enum { tag }, arity, kinds, loc)?,
             IlOp::from_plain_byte(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id), loc),
         ]),
         MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
@@ -2840,19 +2846,19 @@ pub(super) fn il_for_alloc(
             loc,
             ret_words: 1,
         }]),
-        _ => il_for_alloc_op(kind, arity, loc).map(|op| vec![op]),
+        _ => il_for_alloc_op(kind, arity, kinds, loc).map(|op| vec![op]),
     }
 }
 
-fn il_for_alloc_op(kind: MirAllocKind, arity: u32, loc: DebugLoc) -> Result<IlOp, LowerError> {
+fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> Result<IlOp, LowerError> {
     match kind {
-        MirAllocKind::Array => Ok(IlOp::MakeArray { elem_kind: 0, arity, loc }),
-        MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds: 0, arity, loc }),
+        MirAllocKind::Array => Ok(IlOp::MakeArray { elem_kind: kinds, arity, loc }),
+        MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds, arity, loc }),
         MirAllocKind::Enum { tag } => {
             let tag = u16::try_from(tag).map_err(|_| LowerError::Refused("enum tag".into()))?;
             let arity =
                 u16::try_from(arity).map_err(|_| LowerError::Refused("enum arity".into()))?;
-            Ok(IlOp::MakeEnum { kinds: 0, tag, arity, loc })
+            Ok(IlOp::MakeEnum { kinds, tag, arity, loc })
         }
         MirAllocKind::DropEnum { .. } => Err(LowerError::Refused("drop enum op".into())),
         MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(

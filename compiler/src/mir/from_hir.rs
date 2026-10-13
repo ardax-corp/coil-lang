@@ -277,6 +277,12 @@ pub struct HirMirInput<'a> {
     /// A user enum whose variants carry a drop hook (`TagEnumType` after
     /// `MakeEnum`), by name: its finalizer type id.
     pub enum_drop: EnumDropFn<'a>,
+    /// How a heap word of a type reads for the collector (`common::WORD_*`,
+    /// as `value_layout::word_kind`): tuple and enum construction kinds.
+    pub word_kind: Box<dyn Fn(&Ty) -> u8 + 'a>,
+    /// The element kind an array of a type is stamped with at construction
+    /// (`value_layout::array_elem_stamp`): packed bytes, pointer elements.
+    pub array_stamp: Box<dyn Fn(&Ty) -> u8 + 'a>,
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
@@ -1632,7 +1638,10 @@ impl Lower<'_> {
             };
             words.push(v);
         }
-        let obj = self.b.ins_alloc(MirAllocKind::Tuple, words).map_err(mir)?;
+        let kinds = common::pack_word_kinds(
+            args.iter().map(|&a| self.expr_ty(a).map_or(common::WORD_UNKNOWN, |t| (self.inp.word_kind)(t))),
+        );
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
@@ -3478,7 +3487,7 @@ impl Lower<'_> {
 
     /// `[a, b, ..]` on the heap: each item, then the array. The array word
     /// is the safepoint's, as the IL lift reads it. Heap elements are
-    /// boxed words of an array of unknown element kind, as the lift builds.
+    /// boxed words; the array carries HIR emission's element stamp.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let ty = self
             .expr_ty(id)
@@ -3495,7 +3504,10 @@ impl Lower<'_> {
             }
             items.push(v);
         }
-        let arr = self.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
+        // Stamped as HIR emission stamps it: packed bytes / bools, pointer
+        // elements.
+        let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| (self.inp.array_stamp)(e));
+        let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
     }
 
@@ -3559,11 +3571,20 @@ impl Lower<'_> {
             words.push(v);
         }
         words.reverse();
+        // Declaration-order payload kinds, as HIR emission's `MakeEnumK`; a
+        // `()` payload is the empty tuple object, a pointer.
+        let kinds = common::pack_word_kinds(args.iter().zip(tys).map(|(&a, t)| {
+            if lower::is_unit_make(self.hir, a) {
+                common::WORD_POINTER
+            } else {
+                (self.inp.word_kind)(t)
+            }
+        }));
         let kind = match drop_type {
             Some(type_id) => MirAllocKind::DropEnum { tag, type_id },
             None => MirAllocKind::Enum { tag },
         };
-        let obj = self.b.ins_alloc(kind, words).map_err(mir)?;
+        let obj = self.b.ins_alloc_kinds(kind, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 

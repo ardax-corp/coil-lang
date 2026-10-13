@@ -443,6 +443,12 @@ pub enum MirInst {
         dest: ValueId,
         kind: MirAllocKind,
         elems: Vec<ValueId>,
+        /// Construction word kinds from the source types, as HIR emission
+        /// stamps them: an array's element kind (`MakeArrayK`), or a tuple's
+        /// / enum's packed payload kinds (`MakeTupleK` / `MakeEnumK`).
+        /// `0` = none recorded; emission then reads tuple / enum kinds off
+        /// the element words' MIR types.
+        kinds: u8,
     },
     /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
     /// (not a second object). `roots` is the S2a live-heap SSA list
