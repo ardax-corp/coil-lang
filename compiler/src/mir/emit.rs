@@ -1069,6 +1069,20 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::LoadStatic { dest, slot } => {
+            out.push(byte(Byte::new(Instruction::LoadStatic).with_operand_u32(*slot)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::StoreStatic { slot, value, .. } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[value.index()]),
+                loc,
+            });
+            out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
+        }
         MirInst::ArrayPush {
             dest,
             array,

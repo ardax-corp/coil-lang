@@ -250,6 +250,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
             }
         }
         Instruction::DoneCoro => Some(0),
+        Instruction::LoadStatic => Some(1),
+        Instruction::StoreStatic => Some(-1),
         Instruction::MakeEnum | Instruction::MakeEnumK => Some(1 - byte.make_arity() as i32),
         Instruction::CALL => {
             let (arity, _) = byte.call_parts();

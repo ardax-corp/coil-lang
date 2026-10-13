@@ -716,6 +716,31 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `LoadStatic slot`: the static's word, typed `ty`.
+    pub fn ins_load_static(&mut self, slot: u32, ty: MirTy) -> Result<ValueId, MirError> {
+        if !ty.is_word_lane() {
+            return Err(MirError::msg(format!("LoadStatic dest is {ty}")));
+        }
+        let dest = self.alloc(ty);
+        self.push(MirInst::LoadStatic { dest, slot })?;
+        Ok(dest)
+    }
+
+    /// `StoreStatic slot`: write `value`. Dest is a `bool` unit token.
+    pub fn ins_store_static(&mut self, slot: u32, value: ValueId) -> Result<ValueId, MirError> {
+        let vt = self.resolve_ty(value);
+        if !vt.is_word_lane() {
+            return Err(MirError::msg(format!("StoreStatic value is {vt}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::StoreStatic {
+            dest,
+            slot,
+            value: self.resolve(value),
+        })?;
+        Ok(dest)
+    }
+
     /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].
     pub fn ins_array_push(
         &mut self,

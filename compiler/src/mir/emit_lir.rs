@@ -286,7 +286,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -392,6 +392,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::Call { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::ResumeCoro { .. }
+            | MirInst::StoreStatic { .. }
             | MirInst::Print { .. }
     )
 }
@@ -399,7 +400,7 @@ fn writes_memory(inst: &MirInst) -> bool {
 fn reads_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
-        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. }
+        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. }
     )
 }
 
@@ -902,6 +903,17 @@ fn emit_stored(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+        }
+        MirInst::LoadStatic { dest, slot } => {
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::LoadStatic).with_operand_u32(*slot), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::StoreStatic { slot, value, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
         MirInst::ArrayPush {
             dest,
@@ -1435,6 +1447,22 @@ fn emit_stack(
                     loc,
                 });
             }
+            Ok(())
+        }
+        MirInst::LoadStatic { dest, slot } => {
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::LoadStatic).with_operand_u32(*slot), loc));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::StoreStatic { slot, value, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
             Ok(())
         }
         MirInst::ArrayPush {

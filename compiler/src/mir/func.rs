@@ -495,6 +495,19 @@ impl MirFunc {
                     return Err(format!("{dest} DoneCoro dest type"));
                 }
             }
+            MirInst::LoadStatic { dest, .. } => {
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} LoadStatic dest type"));
+                }
+            }
+            MirInst::StoreStatic { dest, value, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} StoreStatic dest is not bool"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} StoreStatic value type"));
+                }
+            }
             MirInst::ArrayPush {
                 dest,
                 array,
