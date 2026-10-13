@@ -1065,10 +1065,11 @@ fn emit_stored(
                 loc,
             })?;
         }
-        MirInst::Alloc { dest, kind, elems } => {
+        MirInst::Alloc { dest, kind, elems, kinds } => {
             emit_alloc_stack(EmitAllocStackArgs {
                 out,
                 kind: *kind,
+                kinds: *kinds,
                 elems,
                 func,
                 plan,
@@ -1209,6 +1210,7 @@ fn emit_lir_call(args: EmitLirCallArgs<'_>) -> Result<(), LowerError> {
 struct EmitAllocStackArgs<'args> {
     out: &'args mut Vec<IlOp>,
     kind: MirAllocKind,
+    kinds: u8,
     elems: &'args [ValueId],
     func: &'args MirFunc,
     plan: &'args EmitPlan,
@@ -1221,6 +1223,7 @@ fn emit_alloc_stack(args: EmitAllocStackArgs<'_>) -> Result<(), LowerError> {
     let EmitAllocStackArgs {
         out,
         kind,
+        kinds,
         elems,
         func,
         plan,
@@ -1232,7 +1235,7 @@ fn emit_alloc_stack(args: EmitAllocStackArgs<'_>) -> Result<(), LowerError> {
     for e in elems {
         emit_stack(out, *e, func, plan, regs, pool, loc)?;
     }
-    out.extend(il_for_alloc(kind, elems.len() as u32, loc)?);
+    out.extend(il_for_alloc(kind, elems.len() as u32, kinds, loc)?);
     Ok(())
 }
 
@@ -1652,10 +1655,11 @@ fn emit_stack(
             loc,
         }),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
-        MirInst::Alloc { kind, elems, .. } => {
+        MirInst::Alloc { kind, elems, kinds, .. } => {
             emit_alloc_stack(EmitAllocStackArgs {
                 out,
                 kind: *kind,
+                kinds: *kinds,
                 elems,
                 func,
                 plan,

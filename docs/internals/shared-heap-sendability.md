@@ -61,7 +61,7 @@ C0 answers four questions:
 CPU jobs are [`reactor::Job`](../../machine/src/reactor.rs): isolated
 `call_function` on a worker `Machine`. Args and results cross via
 `value_to_portable` / `portable_to_value`. Cycles, streams, threads,
-coroutines, `Fn` / `PolyFn`, libraries, `Root`, and `Weak` return
+coroutines, `Fn` (closures and generic function values), libraries, `Root`, and `Weak` return
 `ThreadErrorTag::NotSendable`. Channel / lock objects share the host
 `Arc` and re-wrap a fresh heap object on the child.
 
@@ -122,7 +122,7 @@ object identity.
 
 **Not shareable** (same refuse set as `encode_value`, plus mutable alias):
 
-`Stream`, `Thread`, `Coroutine`, `Fn`, `PolyFn`, `Library`, `Root`, `Weak`,
+`Stream`, `Thread`, `Coroutine`, `Fn`, `Library`, `Root`, `Weak`,
 cyclic heap graphs, any object another mutator may grow or field-store
 without a disjoint-write proof.
 

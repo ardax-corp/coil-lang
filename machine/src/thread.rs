@@ -940,7 +940,6 @@ fn encode_value(
         | Object::Thread(_)
         | Object::Coroutine(_)
         | Object::Fn(_)
-        | Object::PolyFn(_)
         | Object::Library(_)
         | Object::Root(_)
         | Object::Weak(_) => Err(ThreadErrorTag::NotSendable),
@@ -1067,7 +1066,7 @@ fn spawn_fn_from_value(heap: &Heap, v: Value) -> Result<(u32, u32, Vec<SpawnArg>
         return Err(ThreadErrorTag::NotSendable);
     };
     let f = gc.as_ref();
-    if f.is_rest || !f.captured_args.is_empty() || f.filled_mask != 0 {
+    if f.is_rest || !f.captured_args.is_empty() || f.filled_mask != 0 || f.dicts.is_some() {
         return Err(ThreadErrorTag::NotSendable);
     }
     let captures = f
@@ -1143,6 +1142,7 @@ pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value
                 filled_mask: 0,
                 captured_args: Vec::new(),
                 captures,
+                dicts: None,
             };
             let (obj, _) = heap.alloc(f, Object::Fn);
             Ok(Value::from(obj.addr()))
@@ -1155,7 +1155,7 @@ fn fn_entry_from_value(heap: &Heap, v: Value) -> Result<(u32, u32), ThreadErrorT
         return Err(ThreadErrorTag::NotSendable);
     };
     let f = gc.as_ref();
-    if f.is_rest || !f.captures.is_empty() || !f.captured_args.is_empty() || f.filled_mask != 0 {
+    if f.is_rest || !f.captures.is_empty() || !f.captured_args.is_empty() || f.filled_mask != 0 || f.dicts.is_some() {
         return Err(ThreadErrorTag::NotSendable);
     }
     Ok((f.entry, f.arity))
@@ -1985,6 +1985,7 @@ mod tests {
             filled_mask: 0,
             captured_args: vec![],
             captures: vec![],
+            dicts: None,
         };
         let (obj, _) = heap.alloc(pfn, Object::Fn);
         let v = Value::from(obj.addr());
