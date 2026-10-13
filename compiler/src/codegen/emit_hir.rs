@@ -286,6 +286,17 @@ struct HirParSite {
     end: bool,
 }
 
+/// How a call to a function with an auto-par fork site forks
+/// ([`Compiler::hir_par_call`]).
+enum HirParCall {
+    /// All-literal arguments the site's guards accept: the worker with its
+    /// hop budget.
+    Spec { vals: Vec<i64>, worker: usize },
+    /// One non-literal argument: the worker above the site's cutoff, else
+    /// the sequential function.
+    Dynamic { cutoff: i64, orig: usize, worker: usize },
+}
+
 /// A body whose parallel loops still need their functions emitted, once
 /// its own function record is made.
 pub(in crate::codegen) struct HirParTail {
@@ -10683,15 +10694,50 @@ impl Compiler {
     /// `try_emit_par_dynamic_call` (one non-literal argument: the worker
     /// above the site's cutoff, else the sequential function).
     fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
+        let hops = crate::typechecking::PAR_SPEC_HOPS as i32;
+        match self.hir_par_call_plan(hir, key, args) {
+            None => false,
+            Some(HirParCall::Spec { vals, worker }) => {
+                let mut bc = CodeBuf::new();
+                for &v in &vals {
+                    self.push_int_const_into(v, &mut bc);
+                }
+                self.bytecode.append(&mut bc);
+                self.bytecode.push_const(hops);
+                self.bytecode
+                    .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
+                true
+            }
+            Some(HirParCall::Dynamic { cutoff, orig, worker }) => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                let use_worker = self.bytecode.fresh_label();
+                let done = self.bytecode.fresh_label();
+                self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                let mut bc = CodeBuf::new();
+                self.push_int_const_into(cutoff - 1, &mut bc);
+                self.bytecode.append(&mut bc);
+                self.bytecode.push(Byte::new(Instruction::LE));
+                self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
+                self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+                self.hir_jump(IlJumpKind::Unconditional, done);
+                self.bytecode.bind_label(use_worker);
+                self.bytecode.push_const(hops);
+                self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+                self.bytecode.bind_label(done);
+                true
+            }
+        }
+    }
+
+    /// Whether and how [`Self::hir_par_call`] forks the call of `key`.
+    fn hir_par_call_plan(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Option<HirParCall> {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks.
         if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
-            return false;
+            return None;
         }
         let spec = crate::typechecking::par_worker_name(short);
-        let Some(&worker) = self.functions.get(&spec) else {
-            return false;
-        };
+        let &worker = self.functions.get(&spec)?;
         let lits: Option<Vec<i64>> = args
             .iter()
             .map(|&a| match hir.expr(a).kind {
@@ -10699,47 +10745,19 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        let hops = crate::typechecking::PAR_SPEC_HOPS as i32;
         if let Some(vals) = lits {
             let site = &self.par_shapes[short];
             if !crate::typechecking::guards_hold(&site.guards, &vals)
                 || !crate::typechecking::args_worth_parallel(&self.par_shapes, short, &vals)
             {
-                return false;
+                return None;
             }
-            let mut bc = CodeBuf::new();
-            for &v in &vals {
-                self.push_int_const_into(v, &mut bc);
-            }
-            self.bytecode.append(&mut bc);
-            self.bytecode.push_const(hops);
-            self.bytecode
-                .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
-            return true;
+            return Some(HirParCall::Spec { vals, worker });
         }
-        let [arg] = args else { return false };
-        let Some(cutoff) = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short) else {
-            return false;
-        };
-        let Some(&orig) = self.functions.get(key).or_else(|| self.functions.get(short)) else {
-            return false;
-        };
-        self.hir_value(hir, emit, *arg, &BOXED, depth);
-        let use_worker = self.bytecode.fresh_label();
-        let done = self.bytecode.fresh_label();
-        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-        let mut bc = CodeBuf::new();
-        self.push_int_const_into(cutoff - 1, &mut bc);
-        self.bytecode.append(&mut bc);
-        self.bytecode.push(Byte::new(Instruction::LE));
-        self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
-        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
-        self.hir_jump(IlJumpKind::Unconditional, done);
-        self.bytecode.bind_label(use_worker);
-        self.bytecode.push_const(hops);
-        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
-        self.bytecode.bind_label(done);
-        true
+        let [_] = args else { return None };
+        let cutoff = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short)?;
+        let &orig = self.functions.get(key).or_else(|| self.functions.get(short))?;
+        Some(HirParCall::Dynamic { cutoff, orig, worker })
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
