@@ -327,6 +327,9 @@ struct HirEmit {
     /// Entry label of the user `into_iter` a counted `for` loop calls, by
     /// loop.
     into_iters: HashMap<u32, crate::il::Label>,
+    /// The `into_iter` and `next` entries a `for` loop over a user
+    /// iterator calls, by loop.
+    iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
     /// String table index of the format string of each `format` call
@@ -1223,6 +1226,7 @@ impl Compiler {
             fields,
             calls: &emit.call_targets,
             into_iters: &emit.into_iters,
+            iter_loops: &emit.iter_loops,
             strings: &emit.string_lits,
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
@@ -2207,6 +2211,7 @@ impl Compiler {
             par_tail: Vec::new(),
             call_targets: HashMap::new(),
             into_iters: HashMap::new(),
+            iter_loops: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
             format_shows: HashMap::new(),
@@ -10442,6 +10447,7 @@ impl Compiler {
             }
             let two_slot = self.two_word_return_kind(next_fqn).is_some();
             into_iter(self, emit, into_iter_fqn);
+            let into_iter_target = self.last_call_target();
             self.expr_depth = 0;
             let it = self.alloc_temp_slot();
             self.bytecode.push_store_pop(it);
@@ -10453,6 +10459,20 @@ impl Compiler {
             let called = self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call);
             self.repr.unbox_enum_context -= 1;
             debug_assert!(called, "planned next entry");
+            // Both calls plain `CALL`s: the direct MIR lowering calls them.
+            if let (Some(into_iter), Some(next), Some(iter_ty)) =
+                (into_iter_target, self.last_call_target(), self.fn_return_ty(into_iter_fqn))
+            {
+                let shape = if niche {
+                    crate::mir::HirIterNext::Niche
+                } else if two_slot {
+                    crate::mir::HirIterNext::Pair
+                } else {
+                    let some = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "Some").unwrap_or(1);
+                    crate::mir::HirIterNext::Boxed { some }
+                };
+                emit.iter_loops.insert(id.0, crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
+            }
             if niche {
                 Self::push_niche_eq_zero(&mut self.bytecode);
                 self.hir_jump(IlJumpKind::JumpIfTrue, exit);
@@ -10679,6 +10699,20 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
+    }
+
+    /// The entry of the one-argument `CALL` just emitted, when that is the
+    /// last op.
+    fn last_call_target(&mut self) -> Option<crate::il::Label> {
+        match self.bytecode.il_mut().ops_slice_mut().last() {
+            Some(&IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                target,
+                arity: 1,
+                ..
+            }) => Some(target),
+            _ => None,
+        }
     }
 
     /// The `into_iter` entry a counted `for` loop `id` just called.
