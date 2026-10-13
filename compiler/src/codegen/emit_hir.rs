@@ -987,10 +987,24 @@ impl Compiler {
                 && emit.plan.sroa.contains_key(&local.0)
                 && !outlined.contains(&local.0)
             {
-                let slot = self.hir_sroa_slot(hir, emit, *base, name).ok_or("scalar-replaced field")?;
-                fields.insert(i as u32, slot);
+                // The field's slot whether or not the local is boxed by
+                // the end: direct MIR goes through the box only after it.
+                let Some((FieldAt::Slot(idx), _)) = self.hir_field(hir, *base, name) else {
+                    return Err("scalar-replaced field".into());
+                };
+                fields.insert(i as u32, Self::hir_slot(emit, local) + idx);
             }
         }
+        // A frame-slot class local that escapes is boxed into an object of
+        // its class: the type id and field count.
+        let sroa_classes = sroa
+            .keys()
+            .filter_map(|l| {
+                let class = emit.plan.sroa.get(l)?;
+                let n = self.checker.class_fields(class).map_or(0, |f| f.len());
+                Some((*l, (self.checker.class_type_id(class), n as u32)))
+            })
+            .collect();
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
@@ -1151,6 +1165,7 @@ impl Compiler {
             ret_pair,
             stacks,
             sroa,
+            sroa_classes,
             fields,
             calls: &emit.call_targets,
             into_iters: &emit.into_iters,
