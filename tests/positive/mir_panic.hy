@@ -3,6 +3,7 @@
 // body. Each runs in a child task, whose panic fails only that task and
 // carries the message.
 use task::{scope, Scope, TaskError};
+use tests::assert;
 
 fn checked(int n) -> int {
     if n < 0 {
@@ -48,15 +49,15 @@ fn outcome(unit -> int body) -> string {
 }
 
 test("panics not taken") {
-    assert(checked(4) == 8)?;
-    assert(unwrap_or_panic(Option::Some(7)) == 7)?;
-    assert(named(5) == 5)?;
+    assert!(checked(4) == 8);
+    assert!(unwrap_or_panic(Option::Some(7)) == 7);
+    assert!(named(5) == 5);
 }
 
 test("panics fail the task with their message") {
-    assert(outcome(fn () => checked(-1)) == "negative")?;
-    assert(outcome(fn () => unwrap_or_panic(Option::None)) == "none")?;
-    assert(outcome(fn () => named(500)) == "named: too big")?;
-    assert(outcome(fn () => always(1)) == "always")?;
-    assert(outcome(fn () => checked(3)) == "ok")?;
+    assert!(outcome(fn () => checked(-1)) == "negative");
+    assert!(outcome(fn () => unwrap_or_panic(Option::None)) == "none");
+    assert!(outcome(fn () => named(500)) == "named: too big");
+    assert!(outcome(fn () => always(1)) == "always");
+    assert!(outcome(fn () => checked(3)) == "ok");
 }
