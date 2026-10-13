@@ -25,6 +25,7 @@ pub mod lower;
 pub mod match_tree;
 pub mod print;
 pub mod stage;
+pub mod synth;
 pub mod cse;
 pub mod fold;
 pub mod licm;
@@ -321,6 +322,9 @@ pub enum Builtin {
     Invoke,
     Readonly,
     Default,
+    /// `PRINT` of a string (compiler-made bodies only: the test-runner
+    /// `main`).
+    Print,
 }
 
 #[derive(Debug, Clone, PartialEq)]

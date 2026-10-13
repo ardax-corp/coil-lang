@@ -525,6 +525,20 @@ pub struct Compiler {
     /// the entry of a [`Self::raw_instance_methods`] method; any other call
     /// goes through the adapter.
     raw_instance_call: bool,
+    /// Generic-head instance methods a ground call site may call a clone
+    /// of instead (`Eq__Box<T>__eq` at `Box<int>`), by method fqn.
+    inst_clone_srcs: HashMap<String, InstCloneSrc>,
+    /// `(method fqn, ground instance types)` → its clone's name.
+    inst_clones: HashMap<(String, Vec<Ty>), String>,
+    /// Clones named but not emitted yet (emitted after their program).
+    inst_clone_queue: std::collections::VecDeque<InstClone>,
+    /// Programs compiled so far: a clone is compiled from its source's
+    /// AST only within the program that holds it.
+    program_seq: usize,
+    /// Set while a clone compiles: the thunk body it falls back to.
+    inst_clone_fallback: Option<(InstCloneSrc, InstClone)>,
+    /// Entry labels minted at program start for the clones' entries.
+    inst_clone_labels: Vec<IlLabel>,
     /// Checker type variable → concrete type, per mono clone being compiled
     /// (the source function's type parameters), for open dictionary goals.
     mono_var_tys: Vec<HashMap<crate::typechecking::ty::TyVarId, Ty>>,
@@ -592,6 +606,11 @@ pub struct Compiler {
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     /// Functions that emit one parameterized `__coil_par_*` fork worker.
     par_workers: HashSet<String>,
+    /// While a compiler-made body ([`crate::hir::synth`]) lowers: the
+    /// functions it calls that have no checker signature (test cases, the
+    /// worker itself), with their parameter and result layouts.
+    /// `None` for any other body.
+    hir_synth_calls: Option<HashMap<String, (Vec<crate::typechecking::value_layout::ValueLayout>, crate::typechecking::value_layout::ValueLayout)>>,
     /// Counted loops whose iterations are independent arms, by loop span.
     loop_par_sites: crate::typechecking::LoopParSites,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
@@ -752,6 +771,12 @@ impl Default for Compiler {
             pending_instance_ctx: None,
             raw_instance_methods: HashSet::new(),
             raw_instance_call: false,
+            inst_clone_srcs: HashMap::new(),
+            inst_clones: HashMap::new(),
+            inst_clone_queue: Default::default(),
+            program_seq: 0,
+            inst_clone_fallback: None,
+            inst_clone_labels: Vec::new(),
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),
@@ -780,6 +805,7 @@ impl Default for Compiler {
             program_effects: Default::default(),
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),
+            hir_synth_calls: None,
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             loop_par_forks: 0,
@@ -853,6 +879,30 @@ mod precise_frames;
 pub(crate) use precise_frames::jump_target as jump_target_of;
 
 /// One `defer` thunk of the function being compiled.
+/// A generic-head instance method that ground call sites clone.
+#[derive(Clone)]
+pub(crate) struct InstCloneSrc {
+    class: String,
+    method: String,
+    /// The method's declaration span (its HIR body's key).
+    span: (usize, usize),
+    /// The checker's instance head, over the instance's type variables.
+    head: Vec<Ty>,
+    /// The emit cursor at the shared method's compile, once compiled.
+    emit_idx: Option<usize>,
+    program: usize,
+    /// A default body's trait parameter names (its head is theirs).
+    trait_params: Option<Vec<String>>,
+}
+
+/// A clone of [`InstCloneSrc`] `src` at ground instance types `lookup`.
+#[derive(Clone)]
+pub(crate) struct InstClone {
+    src: String,
+    lookup: Vec<Ty>,
+    name: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DeferThunk {
     /// Thunk entry (bound inside the function body, jumped over).

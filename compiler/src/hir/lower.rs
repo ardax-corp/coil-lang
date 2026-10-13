@@ -2954,6 +2954,17 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
+            // `PRINT` of a string.
+            HirKind::Builtin {
+                op: Builtin::Print,
+                args,
+            } => {
+                let [msg] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(*msg)?;
+                self.value(*msg, depth)
+            }
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,

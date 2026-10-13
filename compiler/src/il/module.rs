@@ -443,6 +443,11 @@ impl IlModule {
             pending = next;
         }
         let pinned = self.funcs.iter().filter(|b| b.meta.pinned).count();
+        for body in self.funcs.iter().filter(|b| b.meta.pinned) {
+            if let Some(func) = body.meta.hir_mir.as_deref() {
+                crate::mir::capture_pinned_mir(&body.meta.name, func);
+            }
+        }
         let dense_kept = self.funcs.len() - pending.len() - pinned;
         let mut lir_kept = 0usize;
         for i in pending.iter().copied() {
@@ -462,7 +467,7 @@ impl IlModule {
                 // rematerializes a stored remainder (pair_int_churn +12%).
                 if drops_bound_label(&body.ops, &lir) {
                     lir_why[i] = Some("drops a called inner label".to_string());
-                } else if lir_keeps(&body.ops, &lir) {
+                } else if (crate::mir::mir_fuse_on() && crate::mir::mir_fuse_takes(&body.meta.name)) || lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -501,6 +506,9 @@ impl IlModule {
                     self.stack_map_drafts.push(draft);
                     map_from[i] = "mir";
                 } else if tier[i] == "fuse"
+                    // A pinned (`defer`) body's frame also runs its thunks
+                    // and cleanup pad, which its MIR does not describe.
+                    && !body.meta.pinned
                     && body.ops.iter().any(crate::mir::refuses_alloc)
                     && !has_inner_code(&body.ops)
                     && let Some(func) = body.meta.hir_mir.as_deref()
