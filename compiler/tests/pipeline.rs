@@ -3857,7 +3857,7 @@ fn harness_virtual_main_lowers_to_direct_mir() {
         .compile_src(
             r#"
 test("passes") {
-    assert(true)?;
+    if !(true) { raise "unreachable"; }
 }
 test("fails") {
     return Result::Err("nope");
