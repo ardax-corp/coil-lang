@@ -85,7 +85,9 @@ test("connects past the listen backlog suspend only their own task") {
             accepted(server.join())
         },
     );
-    assert(accepted(r) == 200)?;
+    if accepted(r) != 200 {
+        raise "not all accepted";
+    }
 }
 "#;
 

@@ -994,10 +994,6 @@ impl Cx<'_> {
             // The host table keeps `len` unknown for any receiver; a
             // length read has no effect.
             Callee::Named { name, .. } if name == "len" && args.len() == 1 => {}
-            // A failed `assert` panics, which is no user-visible effect.
-            Callee::Named { name, def, .. } if name == "assert" && self.local_body(name, *def).is_none() => {
-                self.note_hidden(w, at, EffectFlags::UNKNOWN | EffectFlags::HOST, || "may panic".into())
-            }
             Callee::Named { name, def, .. } => {
                 let mut s = self.named(w, name, *def);
                 let callee = self.local_body(name, *def);

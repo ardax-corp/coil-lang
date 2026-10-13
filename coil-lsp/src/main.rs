@@ -1802,7 +1802,7 @@ fn virtual_completion_candidates(
 ) -> HashMap<String, (CompletionItemKind, String)> {
     let mut candidates = HashMap::new();
     let modules = VirtualModules::new();
-    for module in ["prelude", "prelude::ops", "prelude::test", "prelude::math"] {
+    for module in ["prelude", "prelude::ops", "prelude::math"] {
         let path = module
             .split("::")
             .map(str::to_owned)
@@ -1955,7 +1955,6 @@ fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) ->
     let doc_path = match module.as_str() {
         "prelude" => "references/option-result.md",
         "prelude::ops" => "references/types.md",
-        "prelude::test" => "references/assert.md",
         "prelude::math" => "references/math.md",
         "io" => "references/io.md",
         "io::fs" => "references/io-fs.md",
@@ -2014,7 +2013,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("io::net::udp", "send_to") => "Sends a datagram to an explicit UDP peer.".into(),
         ("io::net::udp", "recv_from") => "Receives a UDP datagram without waiting.".into(),
         ("io::net::udp", "local_port") => "Returns the local UDP port.".into(),
-        ("prelude::test", "assert") => "Checks a condition and returns a result instead of aborting.".into(),
         ("prelude", "ord") => "Returns the first UTF-8 code unit of a string.".into(),
         ("prelude", "char") => "Builds a one-code-unit string from a byte.".into(),
         ("prelude::math", "dot") => "Computes the dot product of two numeric vectors.".into(),
@@ -3706,7 +3704,6 @@ fn virtual_signature_candidate(name: &str) -> Option<GoodAnalysis> {
     for module in [
         "prelude",
         "prelude::ops",
-        "prelude::test",
         "prelude::math",
         "io",
         "io::fs",

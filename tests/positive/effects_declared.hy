@@ -38,7 +38,6 @@ pure fn total(Area a, Area b) -> int {
 }
 
 pure fn nth([int; 3] v, int i) -> int {
-    assert(i >= 0);
     return v[i];
 }
 

@@ -2,6 +2,7 @@
 // as a match arm's value, one with a built message and one ending the
 // body. Each runs in a child task, whose panic fails only that task and
 // carries the message.
+use tests::assert;
 use task::{scope, Scope, TaskError};
 use tests::assert;
 

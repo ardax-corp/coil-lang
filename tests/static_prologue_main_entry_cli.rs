@@ -28,7 +28,9 @@ fn main() {
         i = i + 1;
     }
     fill(px, 4, ROWS);
-    assert(px[11] == 23);
+    if px[11] != 23 {
+        panic "assertion failed";
+    }
 }
 "#;
 

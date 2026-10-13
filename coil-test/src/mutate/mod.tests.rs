@@ -95,16 +95,16 @@ const TESTS: &str = "\
 use mathx::{clamp, spin, top};
 
 test(\"clamps low\") {
-    assert(clamp(-5, 0, 10) == 0)?;
+    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }
 }
 
 test(\"passes through\") {
-    assert(clamp(5, 0, 10) == 5)?;
+    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }
 }
 
 test(\"spins\") {
-    assert(spin(3) == 3)?;
-    assert(top(1) == 255)?;
+    if !(spin(3) == 3) { raise \"assertion failed\"; }
+    if !(top(1) == 255) { raise \"assertion failed\"; }
 }
 ";
 
@@ -197,7 +197,7 @@ fn weak_suite_end_to_end() {
     );
     std::fs::write(
         root.join("tests/red.hy"),
-        "test(\"red\") {\n    assert(false)?;\n}\n",
+        "test(\"red\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let err = run_mutate(ReportConfig::default(), &options(2)).unwrap_err();

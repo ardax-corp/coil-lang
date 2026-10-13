@@ -1,11 +1,16 @@
-// Test bodies, `assert` and host builtins lower from HIR. A test returns
-// its `Result<(), string>` boxed, `assert` yields the niche word, and a
+// Test bodies, `assert!` and host builtins lower from HIR. A test returns
+// its `Result<(), string>` boxed, `assert!` raises from its body, and a
 // host call pushes its native id under the arguments. The language
 // harness also runs under `--hir`, so each case pins both codegens.
 use tests::assert;
 
+fn positive(int x) -> Result<(), string> {
+    assert!(x > 0, "not positive");
+    return Result::Ok(());
+}
+
 fn check(int x) -> string {
-    return match assert(x > 0, "not positive") {
+    return match positive(x) {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };

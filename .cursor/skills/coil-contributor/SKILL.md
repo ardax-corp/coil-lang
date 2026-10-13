@@ -94,7 +94,7 @@ rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 2178309 (defa
 
 ## Virtual modules (compiler-provided)
 
-Auto: `prelude`, `prelude::ops`, `prelude::test`, `prelude::math`.
+Auto: `prelude`, `prelude::ops`, `prelude::math`.
 
 Explicit `use`: `ffi`, `io`, `thread`, `env`, `string`, `gc`, `clock`. Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 

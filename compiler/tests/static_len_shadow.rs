@@ -22,42 +22,34 @@ fn static_len_ignores_later_test_shadowing_same_name() {
     let src = r#"
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    assert(len(a) == 4)?;
+    if len(a) != 4 { raise "bad len"; }
 }
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
-    assert(a[0][1] == 2)?;
+    if !(a[0][1] == 2) { raise "assertion failed"; }
 }
 "#;
     let (c, bc) = compile_tests(src);
     let f0 = c.get_function("__zs_test_0").expect("__zs_test_0");
     let f1 = c.get_function("__zs_test_1").expect("__zs_test_1");
     let body = &bc[f0..f1];
-    // `a` lives in four stack slots and `len(a)` const-folds to CONST 4 without
-    // boxing `a`. A later test reuses name `a` with outer length 2 — that must
-    // not poison this fold.
+    // `a`'s stores are dead and `len(a)` const-folds to CONST 4 without
+    // boxing `a`. A later test reuses name `a` with outer length 2 — that
+    // must not poison this fold.
     assert!(
         !body
             .iter()
             .any(|b| matches!(*b.bytecode(), Instruction::MakeArray)),
         "len(a) of a stack array must not box it"
     );
-    let elems_end = body
+    let folded = body
         .iter()
-        .enumerate()
-        .filter(|(_, b)| matches!(*b.bytecode(), Instruction::STORE))
-        .nth(3)
-        .map(|(i, _)| i)
-        .expect("four element stores");
-    // The AST folds `len(a)` to `CONST 4`; HIR folds the whole `len(a) == 4`
-    // to its boolean. Either way no `ArrayLen` runs and the poisoned outer
-    // length 2 never appears.
-    let folded = &body[elems_end + 1];
-    assert!(
-        matches!(*folded.bytecode(), Instruction::CONST) && folded.operand_u32() != 2,
-        "len(a) must const-fold, not to the later nested outer len; got {:?} {:#x}",
-        folded.bytecode(),
-        folded.operand_u32()
+        .find(|b| matches!(*b.bytecode(), Instruction::CONST))
+        .expect("len(a) folds to a constant");
+    assert_eq!(
+        folded.operand_u32(),
+        4,
+        "len(a) must const-fold to 4, not to the later nested outer len"
     );
     assert!(
         !body.iter().any(|b| matches!(*b.bytecode(), Instruction::ArrayLen)),

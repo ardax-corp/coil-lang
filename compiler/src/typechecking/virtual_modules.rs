@@ -18,9 +18,6 @@ pub const FFI_MODULE: &str = "ffi";
 /// Canonical module path for FFI type-tag constructors (`Int`, `Ptr`, …).
 pub const FFI_TYPES_MODULE: &str = "ffi::types";
 
-/// Canonical module path for test helpers (`assert`).
-pub const PRELUDE_TEST_MODULE: &str = "prelude::test";
-
 /// Canonical module path for linear-algebra helpers (`dot` / `matmul` / `cross`).
 pub const PRELUDE_MATH_MODULE: &str = "prelude::math";
 
@@ -84,10 +81,9 @@ impl FfiBuiltin {
     }
 }
 
-/// Prelude/test callables exported from virtual modules (parallel to [`FfiBuiltin`]).
+/// Prelude callables exported from virtual modules (parallel to [`FfiBuiltin`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreludeFn {
-    Assert,
     Dot,
     MatMul,
     Cross,
@@ -129,7 +125,6 @@ pub enum PreludeFn {
 impl PreludeFn {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Assert => "assert",
             Self::Dot => "dot",
             Self::MatMul => "matmul",
             Self::Cross => "cross",
@@ -164,7 +159,6 @@ impl PreludeFn {
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "assert" => Some(Self::Assert),
             "dot" => Some(Self::Dot),
             "matmul" => Some(Self::MatMul),
             "cross" => Some(Self::Cross),
@@ -835,13 +829,6 @@ impl VirtualModules {
         modules.insert(FFI_TYPES_MODULE, ffi_tags);
 
         modules.insert(
-            PRELUDE_TEST_MODULE,
-            vec![BuiltinExport::Fn {
-                kind: PreludeFn::Assert,
-            }],
-        );
-
-        modules.insert(
             PRELUDE_MATH_MODULE,
             vec![
                 BuiltinExport::Fn {
@@ -1120,7 +1107,7 @@ impl VirtualModules {
     }
 
     /// Exports injected into every file (implicit
-    /// `use prelude::*; use prelude::ops::*; use prelude::test::*; use prelude::math::*;`).
+    /// `use prelude::*; use prelude::ops::*; use prelude::math::*;`).
     ///
     /// `pow` stays on virtual `prelude::math` for an explicit import, but is
     /// **not** auto-injected so userland `num::pow` overloads can own the bare name.
@@ -1130,9 +1117,6 @@ impl VirtualModules {
             out.extend(e.iter().cloned());
         }
         if let Some(e) = self.modules.get(PRELUDE_OPS_MODULE) {
-            out.extend(e.iter().cloned());
-        }
-        if let Some(e) = self.modules.get(PRELUDE_TEST_MODULE) {
             out.extend(e.iter().cloned());
         }
         if let Some(e) = self.modules.get(PRELUDE_MATH_MODULE) {
@@ -1211,12 +1195,6 @@ mod tests {
         assert!(exports.iter().any(|e| matches!(
             e,
             BuiltinExport::Fn {
-                kind: PreludeFn::Assert
-            }
-        )));
-        assert!(exports.iter().any(|e| matches!(
-            e,
-            BuiltinExport::Fn {
                 kind: PreludeFn::Dot
             }
         )));
@@ -1269,21 +1247,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, BuiltinExport::FfiFn { .. }))
         );
-    }
-
-    #[test]
-    fn resolve_concrete_prelude_test_assert() {
-        let vm = VirtualModules::new();
-        let e = vm
-            .resolve_item(&["prelude".into(), "test".into()], "assert")
-            .expect("prelude::test::assert");
-        assert_eq!(
-            e,
-            BuiltinExport::Fn {
-                kind: PreludeFn::Assert
-            }
-        );
-        assert!(vm.resolves_use(&["prelude".into(), "test".into()], "*"));
     }
 
     #[test]

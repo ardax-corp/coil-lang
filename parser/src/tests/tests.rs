@@ -2540,7 +2540,7 @@
 
     #[test]
     fn parse_test_case_declaration() {
-        let src = r#"test("addition works") { assert(1 + 1 == 2)?; }"#;
+        let src = r#"test("addition works") { assert!(1 + 1 == 2); }"#;
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
@@ -2569,7 +2569,7 @@
 
     #[test]
     fn test_case_display_round_trips_name() {
-        let src = r#"test("x") { assert(true)?; }"#;
+        let src = r#"test("x") { assert!(true); }"#;
         let ast = Pratt::default()
             .declaration()
             .parse(src)

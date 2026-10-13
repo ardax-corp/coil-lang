@@ -3750,7 +3750,7 @@ fn harness_virtual_main_passes_when_all_asserts_ok() {
     let output = run_harness_src(
         r#"
 test("ok") {
-    assert(true)?;
+    if !(true) { raise "assertion failed"; }
 }
 "#,
     );
@@ -3766,7 +3766,7 @@ fn harness_virtual_main_prints_failure_and_panics() {
         .compile_src(
             r#"
 test("broken") {
-    assert(false)?;
+    if !(false) { raise "assertion failed"; }
 }
 "#,
         )
@@ -3808,18 +3808,18 @@ static let runs: int = 0;
 
 test("first fails") {
     runs = runs + 1;
-    assert(false)?;
+    if !(false) { raise "assertion failed"; }
 }
 test("passes") {
     runs = runs + 1;
-    assert(true)?;
+    if !(true) { raise "assertion failed"; }
 }
 test("returns Err") {
     runs = runs + 1;
     return Result::Err("nope");
 }
 test("all ran") {
-    assert(runs == 3)?;
+    if !(runs == 3) { raise "assertion failed"; }
 }
 "#,
         )
@@ -3878,9 +3878,9 @@ fn harness_isolated_call_function_continues_after_soft_fail() {
     let (bytecode, constants) = pipeline
         .compile_src(
             r#"
-test("a") { assert(true)?; }
-test("b") { assert(false)?; }
-test("c") { assert(1 + 1 == 2)?; }
+test("a") { if !(true) { raise "assertion failed"; } }
+test("b") { if !(false) { raise "assertion failed"; } }
+test("c") { if !(1 + 1 == 2) { raise "assertion failed"; } }
 "#,
         )
         .expect("compile");
@@ -3913,7 +3913,7 @@ fn harness_isolated_call_function_continues_after_hard_panic() {
         .compile_src(
             r#"
 test("boom") { panic "x"; }
-test("after") { assert(true)?; }
+test("after") { if !(true) { raise "assertion failed"; } }
 "#,
         )
         .expect("compile");
@@ -4482,8 +4482,8 @@ fn production_compile_strips_harness_declarations() {
             r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-test("hidden") { assert(false)?; }
-test("also hidden") { assert(false)?; }
+test("hidden") { if !(false) { raise "assertion failed"; } }
+test("also hidden") { if !(false) { raise "assertion failed"; } }
 fn main() { write(stdout(), to_bytes("ok")); }
 "#,
         )
@@ -4500,8 +4500,8 @@ fn main() { write(stdout(), to_bytes("ok")); }
 fn include_tests_flag_embeds_harness_metadata() {
     let (pipeline, _bc, _constants) = compile_src_with_tests(
         r#"
-test("via attr") { assert(true)?; }
-test("via block") { assert(true)?; }
+test("via attr") { if !(true) { raise "assertion failed"; } }
+test("via block") { if !(true) { raise "assertion failed"; } }
 "#,
     );
     assert_eq!(pipeline.test_cases().len(), 2);
@@ -10628,7 +10628,7 @@ test("bind free fn") {
         },
         Result::Err(_) => -1,
     };
-    assert(v == 42)?;
+    if !(v == 42) { raise "assertion failed"; }
 }
 "#,
     );
@@ -10664,7 +10664,7 @@ test("bind method result Ok payload") {
         },
         Result::Err(_) => -1,
     };
-    assert(v == 42)?;
+    if !(v == 42) { raise "assertion failed"; }
 }
 test("bind method result Err") {
     let s = new Svc();
@@ -10673,7 +10673,7 @@ test("bind method result Err") {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
-    assert(msg == "boom")?;
+    if !(msg == "boom") { raise "assertion failed"; }
 }
 test("bind method option Some/None") {
     let s = new Svc();
@@ -10687,8 +10687,8 @@ test("bind method option Some/None") {
         Option::Some(_) => false,
         Option::None => true,
     };
-    assert(v == 7)?;
-    assert(is_none)?;
+    if !(v == 7) { raise "assertion failed"; }
+    if !(is_none) { raise "assertion failed"; }
 }
 "#,
     );
@@ -10749,12 +10749,12 @@ fn free_encode_into(int n) -> Result<int, string> {
 test("nested method try keeps vec len") {
     let e = new Enc();
     let n = e.encode_into(10)?;
-    assert(n == 2)?;
+    if !(n == 2) { raise "assertion failed"; }
 }
 test("nested method try keeps first byte") {
     let e = new Enc();
     let b = e.encode_first(10)?;
-    assert(b == (10 as byte))?;
+    if !(b == (10 as byte)) { raise "assertion failed"; }
 }
 test("nested method try propagates Err") {
     let e = new Enc();
@@ -10763,11 +10763,11 @@ test("nested method try propagates Err") {
         Result::Ok(_) => "ok",
         Result::Err(m) => m,
     };
-    assert(msg == "boom")?;
+    if !(msg == "boom") { raise "assertion failed"; }
 }
 test("nested free-fn try mismatched Result") {
     let n = free_encode_into(7)?;
-    assert(n == 1)?;
+    if !(n == 1) { raise "assertion failed"; }
 }
 class Client {
 }
@@ -10785,7 +10785,7 @@ impl Client {
 test("nested same-Result methods declared later") {
     let c = new Client();
     let n = c.get()?;
-    assert(n == 42)?;
+    if !(n == 42) { raise "assertion failed"; }
 }
 class ClientFail {
 }
@@ -10807,7 +10807,7 @@ test("forward same-Result methods propagate Err") {
         Result::Ok(_) => "ok",
         Result::Err(m) => m,
     };
-    assert(msg == "nope")?;
+    if !(msg == "nope") { raise "assertion failed"; }
 }
 class Counter {
 }
@@ -10821,7 +10821,7 @@ impl Counter {
 }
 test("forward non-Result instance method call") {
     let c = new Counter();
-    assert(c.early() == 7)?;
+    if !(c.early() == 7) { raise "assertion failed"; }
 }
 class EncFwd {
 }
@@ -10839,7 +10839,7 @@ impl EncFwd {
 test("forward mismatched-Result method try") {
     let e = new EncFwd();
     let n = e.encode_into(9)?;
-    assert(n == 1)?;
+    if !(n == 1) { raise "assertion failed"; }
 }
 class Factory {
 }
@@ -10853,7 +10853,7 @@ impl Factory {
 }
 test("forward static method call from instance") {
     let f = new Factory();
-    assert(f.make() == 9)?;
+    if !(f.make() == 9) { raise "assertion failed"; }
 }
 "#,
         )
@@ -11049,7 +11049,7 @@ fn broken_effect_declarations_are_errors() {
                 pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
             );
         }
-        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    assert(true);\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
+        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
         let mut pipeline = test_pipeline();
         compile_ok(&mut pipeline, kept);
     }
@@ -11122,7 +11122,7 @@ fn open_mode_and_static_initializers_decide_capabilities() {
 /// description in the chain.
 #[test]
 fn tests_are_entry_points_for_capabilities() {
-    let src = "use io::fs::{exists};\nfn probe() -> bool {\n    let _ = exists(\"x\");\n    return true;\n}\ntest(\"looks for x\") {\n    assert(probe())?;\n}\n";
+    let src = "use io::fs::{exists};\nfn probe() -> bool {\n    let _ = exists(\"x\");\n    return true;\n}\ntest(\"looks for x\") {\n    if !(probe()) { raise \"assertion failed\"; }\n}\n";
     let mut pipeline = deny_pipeline();
     pipeline.set_include_tests(true);
     assert!(pipeline.compile_src(src).is_err());
@@ -11319,7 +11319,9 @@ pure fn first(Vec<int> xs) -> int
 fn main() {
     let v: Vec<int> = Vec::new();
     v.push(7);
-    assert(first(v) == 7);
+    if !(first(v) == 7) {
+        panic "assertion failed";
+    }
 }
 "#,
         compiler::ContractLevel::All,
@@ -11360,7 +11362,9 @@ fn main() {
     let a = new Account(10);
     a.deposit(5);
     let v: Vec<int> = Vec::new();
-    assert(push_two(v) == 2);
+    if !(push_two(v) == 2) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -11412,11 +11416,15 @@ fn total(Vec<int> xs) -> int {
 }
 
 fn main() {
-    assert(sum_to(5) == 10);
+    if !(sum_to(5) == 10) {
+        panic "assertion failed";
+    }
     let v: Vec<int> = Vec::new();
     v.push(3);
     v.push(4);
-    assert(total(v) == 7);
+    if !(total(v) == 7) {
+        panic "assertion failed";
+    }
     let w: Vec<int> = Vec::new();
     w.push(3);
     w.push(-9);
@@ -11503,7 +11511,9 @@ impl Account {
 fn main() {
     let a = Account::open(10);
     a.deposit(5);
-    assert(a.withdraw(15) == 0);
+    if !(a.withdraw(15) == 0) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -11544,7 +11554,9 @@ fn show<T: Area>(T x) -> int {
 }
 
 fn main() {
-    assert(show(3) == 4);
+    if !(show(3) == 4) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -11591,7 +11603,9 @@ fn find(int k) -> int
 }
 
 fn main() {
-    assert(find(3) >= 0);
+    if !(find(3) >= 0) {
+        panic "assertion failed";
+    }
 }
 "#;
     use compiler::ContractLevel::All;

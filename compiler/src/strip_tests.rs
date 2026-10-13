@@ -29,8 +29,8 @@ mod tests {
             .parse(
                 r#"
 #[test]
-fn hidden() { assert(true)?; }
-test("block") { assert(true)?; }
+fn hidden() { if !(true) { raise "assertion failed"; } }
+test("block") { if !(true) { raise "assertion failed"; } }
 fn main() { }
 "#,
             )
@@ -58,7 +58,7 @@ attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
 #[log(message = "x")]
 fn keep_me() -> int { return 1; }
 #[test]
-fn drop_me() { assert(true)?; }
+fn drop_me() { if !(true) { raise "assertion failed"; } }
 fn main() { }
 "#,
             )
@@ -84,7 +84,7 @@ fn main() { }
             .parse(
                 r#"
 #[test]
-fn sig_only() { assert(true)?; }
+fn sig_only() { if !(true) { raise "assertion failed"; } }
 fn main() { }
 "#,
             )

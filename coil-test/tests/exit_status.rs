@@ -27,7 +27,7 @@ fn process_exits_one_when_summary_says_failed() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("fail.hy"),
-        "test(\"no\") {\n    assert(false)?;\n}\n",
+        "test(\"no\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let out = run_harness(&root);
@@ -51,7 +51,7 @@ fn process_exits_zero_when_summary_says_ok() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("ok.hy"),
-        "test(\"yes\") {\n    assert(true)?;\n}\n",
+        "test(\"yes\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let out = run_harness(&root);

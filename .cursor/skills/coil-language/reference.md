@@ -82,7 +82,7 @@ match opt {
 
 Constructor names are per-enum. Qualified form is canonical (`Status::Ok`, `Result::Ok(x)`, `Option::Some(x)`). Bare `Some`/`None`/`Ok`/`Err` is prelude sugar only when a single in-scope enum owns that case; otherwise it is a compile error and you must write `Enum::Case`.
 
-`assert(cond)?` in tests — returns `Result<(), string>`.
+`assert!(cond)` / `assert!(cond, msg)` in tests (`use tests::assert;`, coil-stdlib) — raises `Err` when `cond` is false.
 
 `raise` is catchable (`Err` + return). `panic` aborts; checksum / CLI boards
 use `panic` so a `try`/`?` cannot swallow the failure (Q5).

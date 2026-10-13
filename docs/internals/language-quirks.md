@@ -136,7 +136,7 @@ See [debug-info.md](debug-info.md) for panic line-table output.
 | Checksum / hit-bench / “if this fires the program is wrong” | `panic "… checksum"` |
 | CLI / packaged-app hard failure | `panic` |
 | Recoverable user error, `?` chains, `match Result` | `raise` / `return Result.Err(…)` |
-| `coil test` expected-fail path | `raise` or `assert(false)` (harness treats `Err` as a failed case) |
+| `coil test` expected-fail path | `raise` or `assert!(false)` (harness treats `Err` as a failed case) |
 | `coil test` “this must not continue” | `panic` (also a failed case, and aborts that VM) |
 
 Uncaught `raise` from `main` is a `Result.Err` **return**. Default `coil`
