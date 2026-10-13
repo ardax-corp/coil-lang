@@ -61,7 +61,7 @@ const CORPUS: &[&str] = &[
 /// `Holder`); `user_trait_dispatch.hy` also gains the `$dict` adapters its
 /// dictionaries name.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "863c7be5f1f2864d_1287"),
+    ("arithmetic.hy", "572a47d3db03d9d7_1246"),
     ("functions.hy", "9d79ba2750678788_278"),
     ("loops.hy", "78d97e79a4a64057_235"),
     ("option_pair.hy", "15713395cabac428_335"),
