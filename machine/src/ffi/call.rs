@@ -899,10 +899,15 @@ mod tests {
         assert!(matches!(err, Err(FfiError::Unsupported(_))));
     }
 
+    // Per thread: the ConstBytes tests run in parallel, and each reads
+    // back the pointer its own call was handed.
+    thread_local! {
+        static CONST_BYTES_SEEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     /// Sums `n` bytes at `buf` and records the pointer it was handed.
-    static CONST_BYTES_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     extern "C" fn sum_const_bytes(buf: *const u8, n: i64) -> i64 {
-        CONST_BYTES_SEEN.store(buf as usize, std::sync::atomic::Ordering::SeqCst);
+        CONST_BYTES_SEEN.set(buf as usize);
         let bytes = unsafe { std::slice::from_raw_parts(buf, n as usize) };
         bytes.iter().map(|&b| i64::from(b)).sum()
     }
@@ -929,7 +934,7 @@ mod tests {
         let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 4).unwrap().unwrap();
         assert_eq!(ret.as_int(), 65 + 66 + 0xc3 + 0xa9);
         let data = gc.as_ref().data.as_bytes().as_ptr() as usize;
-        assert_eq!(CONST_BYTES_SEEN.load(std::sync::atomic::Ordering::SeqCst), data);
+        assert_eq!(CONST_BYTES_SEEN.get(), data);
     }
 
     #[test]
@@ -953,7 +958,7 @@ mod tests {
         let (obj, _gc) = heap.alloc(ObjString::from(""), Object::String);
         let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 0).unwrap().unwrap();
         assert_eq!(ret.as_int(), 0);
-        assert_ne!(CONST_BYTES_SEEN.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_ne!(CONST_BYTES_SEEN.get(), 0);
     }
 
     #[test]
