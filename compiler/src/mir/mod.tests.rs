@@ -4630,3 +4630,29 @@ bb2:
         "the call's argument is the payload (a load of its slot, or the Unpack)"
     );
 }
+
+/// A last-arm payload its user pushes first stays on the stack after
+/// `Unpack` (`Err(e) => show(e)`): no slot store.
+#[test]
+fn lir_last_arm_payload_first_word_stays_inline() {
+    let text = "func @h(v0: heapref) -> heapref {
+bb0:
+    v1 = matchpayload v0, 0
+    jumpifmatch v0, 0, v1, bb2, bb1
+bb1:
+    v2 = matchpayload v0, 0
+    v3 = call.heapref 9 v2
+    return v3
+bb2:
+    return v1
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits");
+    let unpack = lir
+        .iter()
+        .position(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack))
+        .expect("Unpack");
+    assert!(!matches!(lir[unpack + 1], IlOp::StorePop { .. }), "the payload stays on the stack");
+}
