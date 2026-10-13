@@ -1,4 +1,5 @@
 // T1 tasks: `task::scope` / `spawn` / `join` / `sleep` / `yield_now`.
+use tests::assert;
 use task::{scope, Scope, Task, TaskError};
 use clock::sleep_ms;
 
@@ -25,9 +26,9 @@ test("children run at the parent's first suspension, in spawn order") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(log.len() == 3)?;
-    assert(log[0] == 0 && log[1] == 1 && log[2] == 2)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(log.len() == 3);
+    assert!(log[0] == 0 && log[1] == 1 && log[2] == 2);
 }
 
 test("join returns the child's value") {
@@ -38,7 +39,7 @@ test("join returns the child's value") {
             ok_or(a.join(), -100) + ok_or(b.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 42)?;
+    assert!(ok_or(r, -1) == 42);
 }
 
 test("sleep orders tasks by deadline") {
@@ -72,9 +73,9 @@ test("sleep orders tasks by deadline") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(log.len() == 3)?;
-    assert(log[0] == 5 && log[1] == 20 && log[2] == 40)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(log.len() == 3);
+    assert!(log[0] == 5 && log[1] == 20 && log[2] == 40);
 }
 
 test("yield_now interleaves ready tasks") {
@@ -102,8 +103,8 @@ test("yield_now interleaves ready tasks") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(log[0] == 1 && log[1] == 2 && log[2] == 3 && log[3] == 4)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(log[0] == 1 && log[1] == 2 && log[2] == 3 && log[3] == 4);
 }
 
 test("nested scopes inside a child") {
@@ -131,7 +132,7 @@ test("nested scopes inside a child") {
             ok_or(outer.join(), -10000)
         },
     );
-    assert(ok_or(r, -1) == 30)?;
+    assert!(ok_or(r, -1) == 30);
 }
 
 test("join after the scope ended") {
@@ -151,8 +152,8 @@ test("join after the scope ended") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(ok_or(kept[0].join(), -1) == 9)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(ok_or(kept[0].join(), -1) == 9);
 }
 
 test("a child panic fails the scope and drops its siblings") {
@@ -185,8 +186,8 @@ test("a child panic fails the scope and drops its siblings") {
             default => "other error",
         },
     };
-    assert(msg == "boom")?;
-    assert(log.len() == 0)?;
+    assert!(msg == "boom");
+    assert!(log.len() == 0);
 }
 
 test("joining a panicked child reports it") {
@@ -210,12 +211,12 @@ test("joining a panicked child reports it") {
             0
         },
     );
-    assert(seen.len() == 1 && seen[0] == "bad child")?;
+    assert!(seen.len() == 1 && seen[0] == "bad child");
     let failed = match r {
         Result::Ok(_) => false,
         Result::Err(_) => true,
     };
-    assert(failed)?;
+    assert!(failed);
 }
 
 test("clock::sleep_ms inside a scope suspends the task") {
@@ -237,8 +238,8 @@ test("clock::sleep_ms inside a scope suspends the task") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(log[0] == 1 && log[1] == 2)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(log[0] == 1 && log[1] == 2);
 }
 
 test("many tasks") {
@@ -261,6 +262,6 @@ test("many tasks") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(total.len() == 200)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(total.len() == 200);
 }

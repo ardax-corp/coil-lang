@@ -1,5 +1,6 @@
 // COI-16: inlined Vec::push must not leave the receiver under format / match /
 // `new Class` args (those STORE/Seek on the shared operand/local buffer).
+use tests::assert;
 use string::format;
 
 enum LockPackage {
@@ -71,7 +72,7 @@ test("push format keeps both strings") {
     let lines = Vec::new();
     lines.push(format("name = %s", "alpha"));
     lines.push(format("git = %s", "a.git"));
-    assert(len(lines) == 2)?;
+    assert!(len(lines) == 2);
 }
 
 test("push match binding keeps both strings") {
@@ -96,15 +97,15 @@ test("push match binding keeps both strings") {
             hash,
         ) => name,
     });
-    assert(len(lines) == 2)?;
+    assert!(len(lines) == 2);
 }
 
 test("push new Class keeps both instances") {
     let pkgs = Vec::new();
     pkgs.push(new LockRecord("alpha", "a.git", "v1", "r1", "h1"));
     pkgs.push(new LockRecord("zeta", "z.git", "v2", "r2", "h2"));
-    assert(len(pkgs) == 2)?;
-    assert(pkgs[0].name != pkgs[1].name)?;
+    assert!(len(pkgs) == 2);
+    assert!(pkgs[0].name != pkgs[1].name);
 }
 
 test("enum match plus format serialize round-trip") {
@@ -113,11 +114,11 @@ test("enum match plus format serialize round-trip") {
     pkgs.push(LockPackage::Git("zeta", "z.git", "v2", "r2", "h2"));
     let text = serialize_enum(pkgs);
     // hdr + 5 fields × 2 packages, each terminated by '\n'
-    assert(
+    assert!(
         len(text) == len(
             "# hdr\nname = 'alpha'\ngit = 'a.git'\ntag = 'v1'\nrev = 'r1'\nhash = 'h1'\nname = 'zeta'\ngit = 'z.git'\ntag = 'v2'\nrev = 'r2'\nhash = 'h2'\n",
         ),
-    )?;
+    );
 }
 
 test("class Vec plus format serialize keeps rows") {
@@ -125,5 +126,5 @@ test("class Vec plus format serialize keeps rows") {
     pkgs.push(new LockRecord("alpha", "a.git", "v1", "r1", "h1"));
     pkgs.push(new LockRecord("zeta", "z.git", "v2", "r2", "h2"));
     let text = serialize_class(pkgs);
-    assert(len(text) == len("alpha\ta.git\tv1\tr1\th1\nzeta\tz.git\tv2\tr2\th2\n"))?;
+    assert!(len(text) == len("alpha\ta.git\tv1\tr1\th1\nzeta\tz.git\tv2\tr2\th2\n"));
 }

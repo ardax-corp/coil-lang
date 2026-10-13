@@ -1,4 +1,6 @@
 // A file's own free function shadows the implicit prelude one (`diff`).
+use tests::assert;
+
 fn diff(int n) -> int {
     if n <= 1 {
         return n;
@@ -7,5 +9,5 @@ fn diff(int n) -> int {
 }
 
 test("user fn shadows prelude diff") {
-    assert(diff(10) == -1)?;
+    assert!(diff(10) == -1);
 }

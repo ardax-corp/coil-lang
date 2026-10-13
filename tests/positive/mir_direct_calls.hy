@@ -1,6 +1,7 @@
 // Plain scalar calls in a body lowered straight from HIR to MIR: int,
 // float and bool arguments and results, a call made for its effect, a
 // self call, and calls inside a loop.
+use tests::assert;
 
 fn sq(int x) -> int {
     return x * x;
@@ -52,7 +53,7 @@ fn scaled_sum(int n) -> float {
 }
 
 test("scalar calls from a direct MIR loop") {
-    assert(sum_squares(10) == 290)?;
-    assert(scaled_sum(4) == 14.0)?;
-    assert(fact(10) * 2 == 7257600)?;
+    assert!(sum_squares(10) == 290);
+    assert!(scaled_sum(4) == 14.0);
+    assert!(fact(10) * 2 == 7257600);
 }

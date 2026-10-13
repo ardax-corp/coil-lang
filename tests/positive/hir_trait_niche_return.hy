@@ -1,5 +1,7 @@
 // A ground trait call whose result is a niche `Result` / `Option` lowers
 // from HIR: the instance entry returns that word as the call site reads it.
+use tests::assert;
+
 class Cfg {
     pub port: int,
 }
@@ -48,24 +50,24 @@ fn twice(int raw) -> Result<int, ParseError> {
 }
 
 test("niche Result from a static trait call") {
-    assert(port_or(8080, 0) == 8080)?;
-    assert(port_or(0, 7) == 7)?;
+    assert!(port_or(8080, 0) == 8080);
+    assert!(port_or(0, 7) == 7);
     let ok = match twice(10) {
         Result::Ok(n) => n,
         Result::Err(_) => -1,
     };
-    assert(ok == 21)?;
+    assert!(ok == 21);
 }
 
 test("niche Option from a static trait call") {
     if let Option::Some(c) = Cfg::find(1) {
-        assert(c.port == 80)?;
+        assert!(c.port == 80);
     } else {
-        assert(false)?;
+        assert!(false);
     }
     let missing = match Cfg::find(2) {
         Option::Some(_) => 1,
         Option::None => 0,
     };
-    assert(missing == 0)?;
+    assert!(missing == 0);
 }

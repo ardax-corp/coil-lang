@@ -1,5 +1,7 @@
 // Loop length proofs across impure calls: a callee that only writes fields or
 // elements keeps `len(v)` invariant; one that pushes must not.
+use tests::assert;
+
 class Tally {
     pub hits: int,
 }
@@ -52,8 +54,8 @@ test("field-writing callee keeps the scan") {
         s = s + count(t, v[i]);
         i = i + 1;
     }
-    assert(s == 20)?;
-    assert(t.hits == 4)?;
+    assert!(s == 20);
+    assert!(t.hits == 4);
 }
 
 test("element-writing callee keeps the scan") {
@@ -63,8 +65,8 @@ test("element-writing callee keeps the scan") {
         poke(v, i);
         i = i + 1;
     }
-    assert(v[0] == 2)?;
-    assert(v[2] == 4)?;
+    assert!(v[0] == 2);
+    assert!(v[2] == 4);
 }
 
 test("pushing callee is seen by the loop bound") {
@@ -74,8 +76,8 @@ test("pushing callee is seen by the loop bound") {
         grow(v);
         i = i + 1;
     }
-    assert(i == 10)?;
-    assert(len(v) == 10)?;
+    assert!(i == 10);
+    assert!(len(v) == 10);
 }
 
 test("popping callee is seen by the loop bound") {
@@ -87,6 +89,6 @@ test("popping callee is seen by the loop bound") {
         shrink(v);
         i = i + 1;
     }
-    assert(i == 3)?;
-    assert(s == 18)?;
+    assert!(i == 3);
+    assert!(s == 18);
 }

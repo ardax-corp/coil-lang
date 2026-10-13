@@ -1,6 +1,8 @@
 // `e.f` on a record-shaped enum variant reads the payload field by its
 // declared position, including through a nested variant and a
 // single-field enum (which may travel as a two-word pair).
+use tests::assert;
+
 enum Inner {
     Inner { v: int },
 }
@@ -30,8 +32,8 @@ fn height(Shape s) -> int {
 }
 
 test("record variant field reads") {
-    assert(inner_v(Inner::Inner { v: 7 }) == 7)?;
-    assert(nested(Outer::Outer { x: Inner::Inner { v: 3 }, y: 4 }) == 304)?;
-    assert(height(Shape::Box { w: 2, h: 5 }) == 52)?;
-    assert(height(Shape::Dot) == 0)?;
+    assert!(inner_v(Inner::Inner { v: 7 }) == 7);
+    assert!(nested(Outer::Outer { x: Inner::Inner { v: 3 }, y: 4 }) == 304);
+    assert!(height(Shape::Box { w: 2, h: 5 }) == 52);
+    assert!(height(Shape::Dot) == 0);
 }

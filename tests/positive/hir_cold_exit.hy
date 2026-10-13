@@ -1,5 +1,7 @@
 // Early exits that lowering lays out after the function body: the jump to
 // the exit inverts and the code after it falls through.
+use tests::assert;
+
 fn fib(int n) -> int {
     if n <= 2 {
         return 1;
@@ -65,16 +67,16 @@ fn quarter(int n) -> Result<int, string> {
 }
 
 test("early exits after the body") {
-    assert(fib(20) == 6765)?;
-    assert(first_over([1, 5, 9, 2], 4) == 1)?;
-    assert(first_over([1, 2], 4) == -1)?;
+    assert!(fib(20) == 6765);
+    assert!(first_over([1, 5, 9, 2], 4) == 1);
+    assert!(first_over([1, 2], 4) == -1);
     count_small(3);
     count_small(30);
     count_small(4);
-    assert(hits == 2)?;
-    assert(check(3) == Result::Ok(3))?;
-    assert(check(9) == Result::Err("failed: big"))?;
-    assert(quarter(12) == Result::Ok(3))?;
-    assert(quarter(6) == Result::Err("odd"))?;
-    assert(quarter(5) == Result::Err("odd"))?;
+    assert!(hits == 2);
+    assert!(check(3) == Result::Ok(3));
+    assert!(check(9) == Result::Err("failed: big"));
+    assert!(quarter(12) == Result::Ok(3));
+    assert!(quarter(6) == Result::Err("odd"));
+    assert!(quarter(5) == Result::Err("odd"));
 }

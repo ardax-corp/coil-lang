@@ -1,4 +1,6 @@
 // A heap enum passes through a generic type parameter boxed as one word.
+use tests::assert;
+
 enum Shape {
     Circle(int),
     Rect(int, int),
@@ -25,14 +27,14 @@ fn area(Shape s) -> int {
 }
 
 test("a heap enum round-trips a generic identity") {
-    assert(area(same(Shape::Rect(2, 5))) == 10)?;
-    assert(area(same(Shape::Circle(2))) == 12)?;
-    assert(area(same(Shape::Dot)) == 0)?;
+    assert!(area(same(Shape::Rect(2, 5))) == 10);
+    assert!(area(same(Shape::Circle(2))) == 12);
+    assert!(area(same(Shape::Dot)) == 0);
 }
 
 test("a heap enum chosen by a generic fn") {
-    assert(area(pick(true, Shape::Rect(3, 3), Shape::Dot)) == 9)?;
-    assert(area(pick(false, Shape::Rect(3, 3), Shape::Circle(1))) == 3)?;
+    assert!(area(pick(true, Shape::Rect(3, 3), Shape::Dot)) == 9);
+    assert!(area(pick(false, Shape::Rect(3, 3), Shape::Circle(1))) == 3);
 }
 
 fn or_zero(Option<int> o) -> int {
@@ -43,7 +45,7 @@ fn or_zero(Option<int> o) -> int {
 }
 
 test("an option comes back through a bare type parameter") {
-    assert(or_zero(same(Option::Some(4))) == 4)?;
+    assert!(or_zero(same(Option::Some(4))) == 4);
     let n: Option<int> = Option::None;
-    assert(or_zero(same(n)) == 0)?;
+    assert!(or_zero(same(n)) == 0);
 }

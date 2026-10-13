@@ -1,4 +1,5 @@
 // Large ints cannot use inline CONST (i32); two-word Result Ok must pool them.
+use tests::assert;
 use io::IoError;
 
 fn big() -> Result<int, IoError> {
@@ -8,7 +9,7 @@ fn big() -> Result<int, IoError> {
 test("two-word Result Ok keeps ints above i32::MAX") {
     match big() {
         Result::Ok(n) => {
-            assert(n == 94805378185680)?;
+            assert!(n == 94805378185680);
         },
         Result::Err(_) => {
             panic "big";

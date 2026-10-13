@@ -1,5 +1,7 @@
 // Module-level consts fold, including ones built from other consts, and a
 // value computed at startup is a `static const`.
+use tests::assert;
+
 const BASE = 40;
 
 const NEXT = BASE + 2;
@@ -17,12 +19,12 @@ static const STARTUP = four() + 1;
 static const ITEMS = [1, 2, 3];
 
 test("module consts fold") {
-    assert(NEXT == 42)?;
-    assert(NEG == -43)?;
-    assert(NAME == "coil")?;
+    assert!(NEXT == 42);
+    assert!(NEG == -43);
+    assert!(NAME == "coil");
 }
 
 test("static const computes at startup") {
-    assert(STARTUP == 5)?;
-    assert(ITEMS[2] == 3)?;
+    assert!(STARTUP == 5);
+    assert!(ITEMS[2] == 3);
 }

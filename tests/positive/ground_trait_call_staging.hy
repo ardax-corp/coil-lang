@@ -1,6 +1,7 @@
 // A ground trait method call whose receiver / arguments are `new C(..)`
 // (built in temp slots) leaves its result where the enclosing expression
 // expects it: `if let`, match, operands and call arguments.
+use tests::assert;
 
 class Val {
     pub i: int,
@@ -57,17 +58,17 @@ fn in_match(int i) -> int {
 }
 
 test("if let on a ground trait call with new operands") {
-    assert(if_let(7) == 1007)?;
-    assert(if_let(-7) == -1)?;
+    assert!(if_let(7) == 1007);
+    assert!(if_let(-7) == -1);
 }
 
 test("match on a ground trait call with new operands") {
-    assert(in_match(7) == 7)?;
-    assert(in_match(-7) == -1)?;
+    assert!(in_match(7) == 7);
+    assert!(in_match(-7) == -1);
 }
 
 test("ground trait call as an operand and an argument") {
-    assert(new Point(2).size(new Val(3)) + 10 == 15)?;
-    assert(plus(1, new Point(2).size(new Val(3))) == 6)?;
-    assert(plus(new Point(2).size(new Val(3)), new Point(4).size(new Val(5))) == 14)?;
+    assert!(new Point(2).size(new Val(3)) + 10 == 15);
+    assert!(plus(1, new Point(2).size(new Val(3))) == 6);
+    assert!(plus(new Point(2).size(new Val(3)), new Point(4).size(new Val(5))) == 14);
 }

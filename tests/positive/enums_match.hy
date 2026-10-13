@@ -1,4 +1,6 @@
 // Sum types, constructors, match arms, record/tuple payloads.
+use tests::assert;
+
 enum Color {
     Red,
     Green,
@@ -40,25 +42,25 @@ fn area(Shape s) -> int {
 }
 
 test("unit variant match") {
-    assert(color_tag(Color::Red) == 0)?;
-    assert(color_tag(Color::Green) == 1)?;
-    assert(color_tag(Color::Blue) == 2)?;
+    assert!(color_tag(Color::Red) == 0);
+    assert!(color_tag(Color::Green) == 1);
+    assert!(color_tag(Color::Blue) == 2);
 }
 
 test("tuple variant payload") {
-    assert(unwrap_or_zero(Box::Empty) == 0)?;
-    assert(unwrap_or_zero(Box::Full(42)) == 42)?;
+    assert!(unwrap_or_zero(Box::Empty) == 0);
+    assert!(unwrap_or_zero(Box::Full(42)) == 42);
 }
 
 test("record variant payload") {
-    assert(area(Shape::Nil) == 0)?;
-    assert(area(Shape::Circle(5)) == 25)?;
-    assert(area(Shape::Rect { width: 3, height: 4 }) == 12)?;
+    assert!(area(Shape::Nil) == 0);
+    assert!(area(Shape::Circle(5)) == 25);
+    assert!(area(Shape::Rect { width: 3, height: 4 }) == 12);
 }
 
 test("shuffled record construct") {
     let s = Shape::Rect { height: 4, width: 3 };
-    assert(area(s) == 12)?;
+    assert!(area(s) == 12);
 }
 
 test("default arm") {
@@ -67,7 +69,7 @@ test("default arm") {
         Color::Blue => 9,
         default => 1,
     };
-    assert(n == 1)?;
+    assert!(n == 1);
 }
 
 test("match as let rhs") {
@@ -76,7 +78,7 @@ test("match as let rhs") {
         Box::Empty => -1,
         Box::Full(x) => x + 1,
     };
-    assert(v == 8)?;
+    assert!(v == 8);
 }
 
 enum Phase {
@@ -105,12 +107,12 @@ fn wrap_phase(int x) -> Phase {
 }
 
 test("boxed last-arm payload plus const") {
-    assert(score_phase(Phase::Low(3)) == 3)?;
-    assert(score_phase(Phase::Mid(4)) == 5)?;
-    assert(score_phase(Phase::High(2)) == 4)?;
-    assert(score_phase(Phase::High(5)) == 7)?;
-    assert(score_phase(Phase::High(8)) == 10)?;
-    assert(score_phase(wrap_phase(2)) == 4)?;
-    assert(score_phase(wrap_phase(5)) == 7)?;
-    assert(score_phase(wrap_phase(8)) == 10)?;
+    assert!(score_phase(Phase::Low(3)) == 3);
+    assert!(score_phase(Phase::Mid(4)) == 5);
+    assert!(score_phase(Phase::High(2)) == 4);
+    assert!(score_phase(Phase::High(5)) == 7);
+    assert!(score_phase(Phase::High(8)) == 10);
+    assert!(score_phase(wrap_phase(2)) == 4);
+    assert!(score_phase(wrap_phase(5)) == 7);
+    assert!(score_phase(wrap_phase(8)) == 10);
 }

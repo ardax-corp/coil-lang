@@ -3,6 +3,7 @@
 // and the chunk worker is a body of its own. A const `while` range leaves
 // its index at the last value; a dynamic range whose index is read after
 // the loop stays inline.
+use tests::assert;
 
 fn sq(int x) -> int {
     return x * x;
@@ -54,23 +55,23 @@ fn two_sites(int n) -> int {
 
 test("const while site leaves its index") {
     // Each 0..9 cycle squares to 285.
-    assert(const_while() == 10000 * 285 + 100000)?;
+    assert!(const_while() == 10000 * 285 + 100000);
 }
 
 test("dynamic for site with a live capture") {
     // 0..90000 is 30000 cycles of 0, 1, 2.
-    assert(dyn_for(90000, 2) == 30000 * 3 * 2)?;
-    assert(dyn_for(4, 5) == 15)?;
-    assert(dyn_for(0, 5) == 0)?;
+    assert!(dyn_for(90000, 2) == 30000 * 3 * 2);
+    assert!(dyn_for(4, 5) == 15);
+    assert!(dyn_for(0, 5) == 0);
 }
 
 test("dynamic while site with its index read after") {
-    assert(dyn_while_index(80000) == 20000 * 6 * 10 + 80000)?;
-    assert(dyn_while_index(3) == 33)?;
+    assert!(dyn_while_index(80000) == 20000 * 6 * 10 + 80000);
+    assert!(dyn_while_index(3) == 33);
 }
 
 test("two sites in one body") {
     // 0..60000: 20000 cycles of 0, 1, 2; xor of 0..59999 (a multiple of 4) is 0.
-    assert(two_sites(60000) == 60000)?;
-    assert(two_sites(5) == 4 + 4)?;
+    assert!(two_sites(60000) == 60000);
+    assert!(two_sites(5) == 4 + 4);
 }

@@ -1,6 +1,8 @@
 // Local tuples split into one local per element in HIR: swaps that read
 // the tuple they overwrite, destructuring lets, nested destructures, and
 // enum reassignments that read their own payload.
+use tests::assert;
+
 fn fib_pair(int n) -> int {
     let t = (0, 1);
     let i = 0;
@@ -46,15 +48,15 @@ fn grow(int n) -> int {
 }
 
 test("swap reads the tuple it overwrites") {
-    assert(fib_pair(10) == 55)?;
-    assert(swap_sum(1, 2) == 21)?;
+    assert!(fib_pair(10) == 55);
+    assert!(swap_sum(1, 2) == 21);
 }
 
 test("destructuring lets") {
-    assert(nested(1) == 8)?;
-    assert(discard(4) == 9)?;
+    assert!(nested(1) == 8);
+    assert!(discard(4) == 9);
 }
 
 test("enum reassignment reads its own payload") {
-    assert(grow(5) == 32)?;
+    assert!(grow(5) == 32);
 }

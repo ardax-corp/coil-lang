@@ -1,6 +1,8 @@
 // Trait calls on a bound type parameter in a shared generic body go
 // through the hidden dictionary: methods, function-style calls and a
 // static `T::m(..)` constructor, with int and string results.
+use tests::assert;
+
 trait Size<S> {
     fn size(S x) -> int {}
     fn label(S x, int n) -> string {}
@@ -45,10 +47,10 @@ fn total<T: Size>(T a, T b) -> int {
 }
 
 test("bound calls through the dictionary") {
-    assert(twice(4) == 8)?;
-    assert(twice(new Bag(3)) == 60)?;
-    assert(named(5, 2) == "i7!")?;
-    assert(named(new Bag(1), 9) == "bag9!")?;
-    assert(total(1, 2) == 5)?;
-    assert(total(new Bag(1), new Bag(2)) == 50)?;
+    assert!(twice(4) == 8);
+    assert!(twice(new Bag(3)) == 60);
+    assert!(named(5, 2) == "i7!");
+    assert!(named(new Bag(1), 9) == "bag9!");
+    assert!(total(1, 2) == 5);
+    assert!(total(new Bag(1), new Bag(2)) == 50);
 }

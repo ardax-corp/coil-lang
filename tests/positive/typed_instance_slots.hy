@@ -1,4 +1,6 @@
 // Typed class fields use slot LoadField/SetField; checksum matches gc_churn.
+use tests::assert;
+
 class Node {
     pub v: int,
     pub next: Option<Node>,
@@ -36,15 +38,15 @@ fn checksum_walk(Option<Node> cur) -> int {
 
 test("typed slots get/set declaration order") {
     let p = new Node(10, Option::None);
-    assert(p.v == 10)?;
+    assert!(p.v == 10);
     p.v = 21;
-    assert(p.v == 21)?;
+    assert!(p.v == 21);
     let nxt = new Node(3, Option::None);
     p.next = Option::Some(nxt);
-    assert(match p.next {
+    assert!(match p.next {
         Option::Some(n) => n.v,
         Option::None => -1,
-    } == 3)?;
+    } == 3);
 }
 
 test("gc_churn shape checksum") {
@@ -57,5 +59,5 @@ test("gc_churn shape checksum") {
         r = r + 1;
     }
     // 3 * 20 * 19 / 2
-    assert(acc == 570)?;
+    assert!(acc == 570);
 }

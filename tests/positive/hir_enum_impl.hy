@@ -1,5 +1,6 @@
 // A user enum with methods and a drop lowers like any other enum: built,
 // matched, passed and returned.
+use tests::assert;
 use gc::collect;
 
 static let drops: int = 0;
@@ -40,14 +41,14 @@ fn closed() -> int {
 }
 
 test("enum with methods") {
-    assert(consume(4) == 5)?;
-    assert(closed() == -1)?;
-    assert(connect(9).fd() == 9)?;
+    assert!(consume(4) == 5);
+    assert!(closed() == -1);
+    assert!(connect(9).fd() == 9);
 }
 
 test("payload variant still drops") {
     drops = 0;
     consume(7);
     collect();
-    assert(drops >= 1)?;
+    assert!(drops >= 1);
 }

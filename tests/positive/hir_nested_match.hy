@@ -1,6 +1,7 @@
 // A match whose arms test nested sub-patterns tests arm by arm: the
 // scrutinee sits in a slot, each arm opens the payloads it needs above it,
 // and a miss pops them and falls into the next arm.
+use tests::assert;
 
 enum Color {
     Red,
@@ -51,19 +52,19 @@ fn total(Vec<Shape> shapes) -> int {
 }
 
 test("nested literal and binding in a result payload") {
-    assert(pick(Result::Ok(Option::Some(7))) == 70)?;
-    assert(pick(Result::Ok(Option::Some(5))) == 5)?;
-    assert(pick(Result::Ok(Option::None)) == 0)?;
-    assert(pick(Result::Err("x")) == -1)?;
+    assert!(pick(Result::Ok(Option::Some(7))) == 70);
+    assert!(pick(Result::Ok(Option::Some(5))) == 5);
+    assert!(pick(Result::Ok(Option::None)) == 0);
+    assert!(pick(Result::Err("x")) == -1);
 }
 
 test("three levels deep") {
-    assert(deep(Option::Some(Option::Some(Shape::Line(Color::Blue, 4)))) == 4)?;
-    assert(deep(Option::Some(Option::Some(Shape::Line(Color::Red, 4)))) == 1)?;
-    assert(deep(Option::Some(Option::Some(Shape::Box { color: Color::Red, w: 3, h: 5 }))) == 15)?;
-    assert(deep(Option::Some(Option::Some(Shape::Dot(Color::Red)))) == 1)?;
-    assert(deep(Option::Some(Option::None)) == 2)?;
-    assert(deep(Option::None) == 3)?;
+    assert!(deep(Option::Some(Option::Some(Shape::Line(Color::Blue, 4)))) == 4);
+    assert!(deep(Option::Some(Option::Some(Shape::Line(Color::Red, 4)))) == 1);
+    assert!(deep(Option::Some(Option::Some(Shape::Box { color: Color::Red, w: 3, h: 5 }))) == 15);
+    assert!(deep(Option::Some(Option::Some(Shape::Dot(Color::Red)))) == 1);
+    assert!(deep(Option::Some(Option::None)) == 2);
+    assert!(deep(Option::None) == 3);
 }
 
 test("statement match in a loop") {
@@ -73,7 +74,7 @@ test("statement match in a loop") {
         Shape::Dot(Color::Blue),
         Shape::Line(Color::Blue, 9),
     ];
-    assert(total(shapes) == 2009)?;
+    assert!(total(shapes) == 2009);
 }
 
 fn apply<T>(int n, unit -> T f) -> Result<T, Color> {
@@ -89,5 +90,5 @@ test("a binding match right after a call that took a closure") {
         Result::Ok(v) => v,
         default => 0,
     };
-    assert(got == 5)?;
+    assert!(got == 5);
 }

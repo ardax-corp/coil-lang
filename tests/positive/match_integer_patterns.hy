@@ -1,5 +1,7 @@
 // Integer literal arms compare the `int` scrutinee; `default` or a binding
 // closes the match (an `int` match without one is E0209).
+use tests::assert;
+
 fn classify(int code) -> int {
     return match code {
         200 => 1,
@@ -30,18 +32,18 @@ fn big(int n) -> int {
 }
 
 test("value match on integer literals") {
-    assert(classify(200) == 1)?;
-    assert(classify(404) == 2)?;
-    assert(classify(500) == 0)?;
+    assert!(classify(200) == 1);
+    assert!(classify(404) == 2);
+    assert!(classify(500) == 0);
 }
 
 test("statement match with returns and a binding catch-all") {
-    assert(describe(1) == 10)?;
-    assert(describe(2) == 30)?;
-    assert(describe(7) == 700)?;
+    assert!(describe(1) == 10);
+    assert!(describe(2) == 30);
+    assert!(describe(7) == 700);
 }
 
 test("literal outside i32 uses the constant pool") {
-    assert(big(4000000000) == 1)?;
-    assert(big(4) == 0)?;
+    assert!(big(4000000000) == 1);
+    assert!(big(4) == 0);
 }

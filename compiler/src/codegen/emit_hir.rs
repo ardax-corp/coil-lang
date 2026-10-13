@@ -915,9 +915,14 @@ impl Compiler {
         let mut stacks = HashMap::new();
         for (&local, &n) in emit.plan.stacks.iter().filter(|(l, _)| !outlined.contains(*l)) {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-            let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            // An array literal bound to a `Vec` local is slots too.
+            let element = ty.as_ref().and_then(|t| match crate::typechecking::ty::strip_readonly(t) {
+                Ty::Array { element, .. } => Some(element.as_ref()),
+                t => crate::typechecking::ty::vec_element_ty(t),
+            });
+            let elem = match element {
                 // A heap element's slot holds its boxed word.
-                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
                     (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
                         .then_some(crate::mir::MirTy::HeapRef)
@@ -6802,9 +6807,10 @@ impl Compiler {
                 args,
             } => {
                 let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
-                let mut bc = CodeBuf::new();
-                self.emit_raw_string_literal(&mut bc, &name);
-                self.bytecode.append(&mut bc);
+                // Direct MIR reads the index.
+                let idx = self.intern_string(&name);
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is

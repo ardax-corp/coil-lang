@@ -1,4 +1,6 @@
 // COI-109: inherent methods may call module helpers defined later in the file.
+use tests::assert;
+
 class Counter {
     pub value: int,
 }
@@ -23,10 +25,10 @@ fn add_n(int n, int k) -> int {
 
 test("method calls later unary helper") {
     let c = new Counter(41);
-    assert(c.bump() == 42)?;
+    assert!(c.bump() == 42);
 }
 
 test("method calls later multi-arg helper") {
     let c = new Counter(10);
-    assert(c.bump_by(7) == 17)?;
+    assert!(c.bump_by(7) == 17);
 }

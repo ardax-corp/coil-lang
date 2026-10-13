@@ -1,5 +1,7 @@
 // A named function read as a value is `MakeFn` over its entry, as the
 // AST does; the callee is then called through `CallIndirect`.
+use tests::assert;
+
 fn double(int x) -> int {
     return x * 2;
 }
@@ -26,7 +28,7 @@ fn pick(bool d) -> int {
 }
 
 test("named functions as values") {
-    assert(twice(3) == 12)?;
-    assert(pick(true) == 14)?;
-    assert(pick(false) == 7)?;
+    assert!(twice(3) == 12);
+    assert!(pick(true) == 14);
+    assert!(pick(false) == 7);
 }

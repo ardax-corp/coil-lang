@@ -1,5 +1,6 @@
 // HIR lowering of `panic`: as a statement, as a match arm value and with
 // a built message. The panics never run; the bodies lower from HIR.
+use tests::assert;
 
 fn checked(int n) -> int {
     if n < 0 {
@@ -32,8 +33,8 @@ fn first_ok(Result<int, string> r) -> int {
 }
 
 test("panic paths not taken") {
-    assert(checked(4) == 8)?;
-    assert(unwrap_or_panic(Option::Some(7)) == 7)?;
-    assert(named(5) == 5)?;
-    assert(first_ok(Result::Ok(1)) == 2)?;
+    assert!(checked(4) == 8);
+    assert!(unwrap_or_panic(Option::Some(7)) == 7);
+    assert!(named(5) == 5);
+    assert!(first_ok(Result::Ok(1)) == 2);
 }
