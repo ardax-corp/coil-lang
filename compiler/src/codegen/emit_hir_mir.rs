@@ -32,6 +32,9 @@ pub(super) struct HirMirTables {
     pub(super) op_prims: HashSet<u32>,
     /// Calls through a function value emitted as a plain `CallIndirect`.
     pub(super) value_calls: HashSet<u32>,
+    /// Auto-par call sites sent to a fork-join worker, by call: the direct
+    /// MIR lowering's calls.
+    pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -293,7 +296,21 @@ impl Compiler {
             }
             return;
         }
-        if self.hir_par_call_plan(hir, &call.key, args).is_some() {
+        if let Some(plan) = self.hir_par_call_plan(hir, &call.key, args) {
+            // The worker (and a dynamic site's sequential function) as the
+            // `CALL`s `hir_par_call` emits resolve them.
+            let (worker, seq) = match plan {
+                HirParCall::Spec { worker, .. } => (worker, None),
+                HirParCall::Dynamic { cutoff, orig, worker } => (worker, Some((orig, cutoff))),
+            };
+            let label = |offset: usize| self.bytecode.entry_label_for_offset(offset);
+            let seq = match seq {
+                None => Some(None),
+                Some((orig, cutoff)) => label(orig).map(|l| Some((l, cutoff))),
+            };
+            if let (Some(worker), Some(seq)) = (label(worker), seq) {
+                self.hir_note_par_fork(hir, emit, id, worker, seq, &mut t.par_forks);
+            }
             return;
         }
         let tail = emit.plan.tail_calls.contains(&id.0);

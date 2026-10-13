@@ -1242,6 +1242,7 @@ impl Compiler {
             format_shows: &tables.format_shows,
             op_calls: &tables.op_calls,
             par_loops: &emit.par_calls,
+            par_forks: &tables.par_forks,
             op_prims: &tables.op_prims,
             fn_values: &emit.fn_values,
             value_calls: &tables.value_calls,
@@ -10633,6 +10634,25 @@ impl Compiler {
         let cutoff = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short)?;
         let &orig = self.functions.get(key).or_else(|| self.functions.get(short))?;
         Some(HirParCall::Dynamic { cutoff, orig, worker })
+    }
+
+    /// Record auto-par site `id` for direct MIR when its result comes back
+    /// in its own type's one-word layout.
+    fn hir_note_par_fork(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        id: HirId,
+        worker: crate::il::Label,
+        seq: Option<(crate::il::Label, i64)>,
+        par_forks: &mut HashMap<u32, crate::mir::HirParFork>,
+    ) {
+        let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
+        if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
+            return;
+        }
+        let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
+        par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
