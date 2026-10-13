@@ -4820,6 +4820,13 @@ impl Compiler {
         self.expr_depth = depth_on_entry;
     }
 
+    /// Mark compiler-provided instance thunk `fqn` raw: its entry takes the
+    /// receiver's own word and no dictionary, and its `$dict` adapter (which
+    /// the caller emits next) the boxed receiver and the dictionary.
+    fn note_raw_builtin_thunk(&mut self, fqn: &str) {
+        self.raw_instance_methods.insert(fqn.to_string());
+    }
+
     /// Emit bytecode thunks for compiler-provided primitive instances.
     ///
     /// Shared generic bodies receive boxed type-parameter values, so numeric
@@ -4956,7 +4963,19 @@ impl Compiler {
             if self.functions.contains_key(&fqn) {
                 continue;
             }
-            self.bind_function_entry(fqn);
+            // An immediate's thunk is raw: a ground call passes its word
+            // (so direct MIR calls it), dictionaries its `$dict` adapter.
+            if let Some(tag) = tag.filter(|_| ty != "unit") {
+                self.note_raw_builtin_thunk(&fqn);
+                self.bind_function_entry(fqn.clone());
+                self.bytecode.push_load(0);
+                self.bytecode.push_box_value(tag as u32);
+                self.bytecode.push(Byte::new(Instruction::STRINGIFY));
+                self.bytecode.push_return();
+                self.bind_function_entry(Self::dict_adapter_name(&fqn));
+            } else {
+                self.bind_function_entry(fqn);
+            }
             self.bytecode.push_load(0);
             if let Some(tag) = tag {
                 self.bytecode.push_unbox_value(tag as u32);
@@ -5002,7 +5021,12 @@ impl Compiler {
             if self.functions.contains_key(&fqn) {
                 continue;
             }
-            self.bind_function_entry(fqn);
+            // Raw, as the Show thunks: the raw word is its own hash.
+            self.note_raw_builtin_thunk(&fqn);
+            self.bind_function_entry(fqn.clone());
+            self.bytecode.push_load(0);
+            self.bytecode.push_return();
+            self.bind_function_entry(Self::dict_adapter_name(&fqn));
             self.bytecode.push_load(0);
             self.bytecode.push_unbox_value(tag as u32);
             self.bytecode.push_return();
