@@ -1958,6 +1958,7 @@ impl Lower<'_> {
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
             // A boxed tuple's field: the same `Index`.
             HirKind::Index { base, index, kind: IndexKind::Tuple } => self.heap_index(id, *base, *index),
+            HirKind::Index { base, index, kind: IndexKind::String } => self.string_index(id, *base, *index),
             HirKind::ForIn {
                 pat,
                 iterable,
@@ -3108,6 +3109,35 @@ impl Lower<'_> {
         // A boxed stack array's read is always checked, as HIR emission's.
         let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
         Ok(Val::V(self.b.ins_index(arr, idx, ty, proven).map_err(mir)?))
+    }
+
+    /// `s[i]` on a string, as HIR emission's: `string_byte_at`, which
+    /// answers `-1` out of range, and there the panic of an array index.
+    /// The panic is an `Index` of the string word itself: `Index` reads
+    /// only arrays and tuples and panics `index out of bounds` on any
+    /// other object, with no allocation the IL body would not have.
+    fn string_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
+        let native = super::host_allow::host_edge_spec_by_name("string_byte_at").ok_or("string index native")?.id;
+        let Some(s) = self.word(base)? else {
+            return Ok(Val::Never);
+        };
+        let Some(i) = self.index_word(index)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(s) != MirTy::HeapRef {
+            return Err("string index base".into());
+        }
+        let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+        let byte = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, vec![s, i], layout, Some(MirTy::I64)).map_err(mir))?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let out = self.b.ins_cmp(MirCmpOp::Lt, byte, zero).map_err(mir)?;
+        let (oob, ok) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(out, oob, ok).map_err(mir)?;
+        self.switch(oob);
+        self.b.ins_index(s, byte, MirTy::I64, false).map_err(mir)?;
+        self.jump(ok)?;
+        self.switch(ok);
+        Ok(Val::V(byte))
     }
 
     /// `xs[i] = v` on a heap array: the value first, then the array and
