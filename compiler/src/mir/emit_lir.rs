@@ -1415,9 +1415,10 @@ fn emit_stack(
     };
     let inst = &func.block(bid).insts[idx];
     // A forwarded op that can panic keeps its own line, not its
-    // consumer's (#885).
+    // consumer's (#885); so does an inline call, the frame a trace names.
     let own = func.op_loc(v);
-    let loc = if own.is_known() && inst.may_trap(func) { own } else { loc };
+    let keeps_own = inst.may_trap(func) || matches!(inst, MirInst::Call { .. });
+    let loc = if own.is_known() && keeps_own { own } else { loc };
     match inst {
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {
@@ -1601,6 +1602,27 @@ fn emit_stack(
             }
             Ok(())
         }
+        // A one-word call with a single use in its block: emitted where
+        // that use is (`keep_memory_order` keeps it in program order), its
+        // result left on the stack. A pair call keeps its slots.
+        MirInst::Call {
+            dest,
+            dest_hi: None,
+            target,
+            args,
+        } => emit_lir_call(EmitLirCallArgs {
+            out,
+            dest: *dest,
+            dest_hi: None,
+            target: *target,
+            args,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        }),
+        // Host calls and indirect calls always keep a slot (`EmitPlan`).
         MirInst::HostInvoke { .. } | MirInst::Call { .. } | MirInst::CallIndirect { .. } => Err(LowerError::Refused(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
