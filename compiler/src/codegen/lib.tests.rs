@@ -1150,8 +1150,11 @@ fn aliased_byte_mul_by_power_of_two_emits_shl() {
 #[test]
 fn generic_num_mul_uses_dictionary_not_shl() {
     use common::Instruction;
-    let (bc, _pool) =
-        compile_src("fn mul2<T: Num>(T a, T b) -> T { return a * b; } fn main() { mul2(1, 2); }");
+    // No inlining: a main folded to a constant leaves the callee dead,
+    // and the tree shake drops it.
+    let (bc, _pool) = compile_src_no_inline(
+        "fn mul2<T: Num>(T a, T b) -> T { return a * b; } fn main() { mul2(1, 2); }",
+    );
     assert!(
         !bytecode_has_any_shl(&bc),
         "generic Num mul must not lower to SHL; opcodes: {:?}",
@@ -1166,6 +1169,7 @@ fn generic_num_mul_uses_dictionary_not_shl() {
                     | Instruction::MUL
                     | Instruction::BinSlotSlot
                     | Instruction::BinReturn
+                    | Instruction::DenseBin
             )
         }),
         "expected CallIndirect or specialized mul; opcodes: {:?}",
@@ -3264,10 +3268,17 @@ fn main() { return bounce_a(Option::None); }",
 #[test]
 fn tiny_add_inlined_at_call_site() {
     use common::Instruction;
-    // Non-const args so algebraic fold cannot erase the inlined add.
-    let (bc, _pool) = compile_src(
+    // A recursive caller cannot fold to a constant, so the inlined add
+    // stays; `add` itself has no caller left and is shaken.
+    let (bc, compiler) = compile_src_compiler(
         "fn add(int a, int b) -> int { return a + b; } \
-fn main() { let x = 0; while x < 3 { x = x + 1; } return add(x, 4); }",
+fn f(int n) -> int { if n == 0 { return 0; } return add(n, f(n - 1)); } \
+fn main() { return f(3); }",
+        |_| {},
+    );
+    assert!(
+        !compiler.functions.contains_key("add"),
+        "add must be inlined at its only call site"
     );
     assert!(
         bc.iter().any(|b| {
@@ -3443,21 +3454,20 @@ fn if_else_ending_a_loop_body_jumps_to_the_back_edge() {
 #[test]
 fn early_return_callee_is_tiny_inlined() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // A recursive caller cannot fold to a constant; once `early` is inlined
+    // at its only call site it has no caller left and is shaken.
+    let (bc, compiler) = compile_src_compiler(
         "fn early(int n, int is_neg) -> int { \
                if is_neg == 1 { return 99; } \
                return n * 2; \
              } \
-             fn main() { return early(4, 0); }",
+             fn f(int n) -> int { if n == 0 { return 0; } return early(n, 0) + f(n - 1); } \
+             fn main() { return f(4); }",
+        |_| {},
     );
-    // Prologue may contain one CALL to main; the early() call site must not.
-    let calls = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::CALL | Instruction::TailCall))
-        .count();
     assert!(
-        calls <= 1,
-        "early-return diamond must be tiny-inlined (only prologue CALL); call_count={calls}; opcodes: {:?}",
+        !compiler.functions.contains_key("early"),
+        "early-return diamond must be tiny-inlined; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
     // Inlined body still has a conditional branch (inverted when the early
@@ -5394,8 +5404,11 @@ fn match_depth_3_nested_records_bind_correctly() {
 #[test]
 fn generic_add_emits_dictionary_indirect_call() {
     use common::Instruction;
-    let (bc, _pool) =
-        compile_src("fn add<T: Num>(T a, T b) -> T { return a + b; } fn main() { add(1, 2); }");
+    // No inlining: a main folded to a constant leaves the callee dead,
+    // and the tree shake drops it.
+    let (bc, _pool) = compile_src_no_inline(
+        "fn add<T: Num>(T a, T b) -> T { return a + b; } fn main() { add(1, 2); }",
+    );
     // Ground monomorphization may shake the shared CallIndirect body.
     assert!(
         bc.iter().any(|b| {
@@ -5405,6 +5418,7 @@ fn generic_add_emits_dictionary_indirect_call() {
                     | Instruction::ADD
                     | Instruction::BinSlotSlot
                     | Instruction::BinReturn
+                    | Instruction::DenseBin
             )
         }),
         "expected CallIndirect or specialized add; bytecode opcodes: {:?}",
@@ -5423,7 +5437,9 @@ fn generic_add_emits_dictionary_indirect_call() {
 #[test]
 fn concrete_add_still_emits_add() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // No inlining: a main folded to a constant leaves the callee dead,
+    // and the tree shake drops it.
+    let (bc, _pool) = compile_src_no_inline(
         "fn add(int a, int b) -> int { return a + b; } fn main() { let x = 0; while x < 1 { x = x + 1; } return add(x, 2); }",
     );
     assert!(
@@ -5437,6 +5453,7 @@ fn concrete_add_still_emits_add() {
             || matches!(b.bytecode(), Instruction::BinSlotSlot)
             || matches!(b.bytecode(), Instruction::BinSlotImm)
             || matches!(b.bytecode(), Instruction::BinReturn)
+            || matches!(b.bytecode(), Instruction::DenseBin)
     });
     assert!(
         has_int_add,
@@ -5665,7 +5682,9 @@ fn main() { let _ = (new Cell(7)).get(); }
 #[test]
 fn bounded_generic_add_ground_call_uses_specialized_clone() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    // No inlining: a main folded to a constant leaves the callee dead,
+    // and the tree shake drops it.
+    let (bc, _pool) = compile_src_no_inline(
         "fn add<T: Num>(T a, T b) -> T { return a + b; } \
              fn main() { return add(1, 2); }",
     );
