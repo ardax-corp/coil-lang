@@ -85,7 +85,7 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use error::LowerError;
 pub use specialize::{
-    take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
+    mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
     try_specialize_body_side, BodySidecar,
 };
 pub use sroa::sroa;
