@@ -4450,6 +4450,7 @@ impl Compiler {
                 op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
+            HirKind::Field { .. } if let Some(rep) = self.hir_field_rep(hir, id) => Some(rep),
             HirKind::Index { .. }
             | HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array | MakeKind::Record(_),
@@ -4472,6 +4473,27 @@ impl Compiler {
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
             _ => None,
         }
+    }
+
+    /// Field read `id` of a generic class's slot whose declared type is
+    /// open (`head: Option<Node<T>>`): the word comes in the open type's
+    /// layout (boxed), not the read's ground one (a niche `Option`). `None`
+    /// for any other field, which reads in its own type's layout.
+    fn hir_field_rep(&self, hir: &HirBody, id: HirId) -> Option<Rep> {
+        let HirKind::Field { base, name } = &hir.expr(id).kind else {
+            return None;
+        };
+        if self.hir_field_of_variant(hir, *base, name).is_some()
+            || self.hir_field_of_new(hir, *base, name).is_some()
+        {
+            return None;
+        }
+        let (FieldAt::Slot(_), fty) = self.hir_field(hir, *base, name)? else {
+            return None;
+        };
+        let own = self.value_layout(Self::hir_ty(hir, id)?);
+        let stored = self.value_layout(&fty);
+        (Self::ty_has_var(&fty) && stored != own).then_some(Rep::Word(stored))
     }
 
     /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
@@ -5583,7 +5605,13 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
                 let layout = Self::hir_ty(hir, id).map(|ty| self.value_layout(ty));
-                if layout != Some(self.value_layout(&fty)) {
+                // A slot of a generic class's field holds the open type's
+                // layout (an `Option<T>` boxed); read at a ground receiver
+                // it converts to the ground one ([`Self::hir_field_rep`]).
+                let stored = self.hir_field_rep(hir, id);
+                if layout != Some(self.value_layout(&fty))
+                    && !stored.as_ref().zip(layout).is_some_and(|(s, l)| Self::hir_convertible(s, &Rep::Word(l)))
+                {
                     return Err("field-layout");
                 }
                 let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
