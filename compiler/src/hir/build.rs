@@ -660,9 +660,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
             Some((params, ty.clone()))
         });
-        let ret = keys
-            .iter()
-            .find_map(|k| self.checker.fn_return_ty(k))
+        // Only the declared parameters peel off the curried scheme: a
+        // function returning a function keeps that type as its result.
+        let arity = Self::arg_items(args).len() + usize::from(owner.is_some() && !is_static);
+        let span = span_of(node);
+        let sig = keys.iter().find_map(|k| self.checker.fn_signature(k, span, arity));
+        let ret = sig
+            .as_ref()
+            .map(|(_, ret)| ret.clone())
             .or_else(|| default_sig.as_ref().map(|(_, ret)| ret.clone()));
         b.body.ret_layout = ret
             .as_ref()
@@ -687,10 +692,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 b.type_params.extend(params.iter().cloned());
             }
         }
-        let param_tys = keys
-            .iter()
-            .find_map(|k| self.checker.fn_param_tys(k))
-            .or_else(|| default_sig.map(|(params, _)| params));
+        let param_tys = sig.map(|(params, _)| params).or_else(|| default_sig.map(|(params, _)| params));
         self.params(&mut b, args, param_tys.as_deref());
         if Self::pinned(&b, returns.as_ref(), b.body.ret.as_ref()) {
             b.body.pinned_param = true;
@@ -1020,11 +1022,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    fn params(&mut self, b: &mut BodyBuilder, args: &Output<'_>, tys: Option<&[Ty]>) {
+    /// A signature's declared parameters.
+    fn arg_items<'n, 'a>(args: &'n Output<'a>) -> Vec<&'n Output<'a>> {
         let items: Vec<&Output<'_>> = match args.1.as_ref() {
             Expression::Fragment(items) => items.iter().collect(),
             _ => vec![args],
         };
+        items.into_iter().filter(|item| matches!(item.1.as_ref(), Expression::Argument { .. })).collect()
+    }
+
+    fn params(&mut self, b: &mut BodyBuilder, args: &Output<'_>, tys: Option<&[Ty]>) {
+        let items = Self::arg_items(args);
         let skip = b.body.params.len();
         for (i, item) in items.into_iter().enumerate() {
             if let Expression::Argument { name, ty: ty_ann, is_rest, .. } = item.1.as_ref() {

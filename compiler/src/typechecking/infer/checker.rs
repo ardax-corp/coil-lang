@@ -11436,6 +11436,29 @@ impl Checker {
             .collect()
     }
 
+    /// The resolved parameter and return types of the function declared at
+    /// `decl` (an overload takes its own candidate's scheme, not the last
+    /// one the name binds). Only its `arity` declared parameters (a receiver
+    /// counted) peel off the curried scheme, so a returned function type
+    /// stays the return type; a nullary function peels its `unit`.
+    pub fn fn_signature(&self, fn_name: &str, decl: (usize, usize), arity: usize) -> Option<(Vec<Ty>, Ty)> {
+        let scheme = match self.overload_decl_at(decl.0, decl.1) {
+            Some((id, ..)) if self.is_overloaded(fn_name) => {
+                self.overload_candidates(fn_name)?.iter().find(|c| c.id == id)?.scheme.clone()
+            }
+            _ => self.lookup_fn_scheme(fn_name)?,
+        };
+        let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
+        let mut params = Vec::new();
+        while params.len() < arity.max(1)
+            && let Ty::Fun(p, next) = ty
+        {
+            params.push(*p);
+            ty = *next;
+        }
+        Some((params, ty))
+    }
+
     /// Resolved parameter types in declaration order (curried `Fun` peel).
     pub fn fn_param_tys(&self, fn_name: &str) -> Option<Vec<Ty>> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
