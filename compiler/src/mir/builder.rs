@@ -196,8 +196,8 @@ impl MirBuilder {
             if op.requires_int() && !lt.is_int() {
                 return Err(MirError::msg(format!("bitwise op on {lt}")));
             }
-            if op.requires_float() && !lt.is_float() {
-                return Err(MirError::msg(format!("fpow on {lt}")));
+            if !op.takes(lt) {
+                return Err(MirError::msg(format!("pow on {lt}")));
             }
         }
         let dest_ty = if heap_bit {
