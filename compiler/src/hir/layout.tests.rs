@@ -138,10 +138,10 @@ enum Tagged {
 }
 impl Tagged {
     pub fn num() -> int {
-        match self {
+        return match self {
             Tagged::Num(n) => n,
             Tagged::Empty => 0,
-        }
+        };
     }
 }
 enum Dropped {
