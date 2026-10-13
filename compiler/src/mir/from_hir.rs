@@ -172,6 +172,9 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
+/// An enum's finalizer type id when it has `fn drop()`, by name.
+pub type EnumDropFn<'a> = Box<dyn Fn(&str) -> Option<u32> + 'a>;
+
 /// A variant's payload field names, by enum and variant name.
 pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
 
@@ -248,7 +251,7 @@ pub struct HirMirInput<'a> {
     pub boxed_enum: BoxedEnumFn<'a>,
     /// A user enum whose variants carry a drop hook (`TagEnumType` after
     /// `MakeEnum`), by name: its finalizer type id.
-    pub enum_drop: Box<dyn Fn(&str) -> Option<u32> + 'a>,
+    pub enum_drop: EnumDropFn<'a>,
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
