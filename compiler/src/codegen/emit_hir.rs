@@ -4412,6 +4412,23 @@ impl Compiler {
         self.value_layout(ty) == ValueLayout::Boxed
     }
 
+    /// Whether a call to the shared body of a generic `generic` with no
+    /// dictionaries is a plain `CALL`: no argument boxed or adapted (a
+    /// lambda literal unboxes its own parameters), no result unboxed, and
+    /// each argument already in its parameter's layout. Direct MIR calls
+    /// the same entry then.
+    fn hir_generic_plain(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
+        generic.forwarded.is_empty()
+            && generic.unbox.is_none()
+            && generic.boxed.iter().all(Option::is_none)
+            && args.len() == params.len()
+            && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
+                let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
+                (lambda || generic.adapt.get(i).is_none_or(Option::is_none))
+                    && self.hir_natural(hir, emit, arg) == Some(Rep::Word(param))
+            })
+    }
+
     /// Push `generic`'s dictionaries after the arguments; their count.
     fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
         // The enclosing body's own first, then the call site's, as the AST.
@@ -7727,7 +7744,7 @@ impl Compiler {
                 // A plain one-word ABI call, each argument in its own layout:
                 // direct MIR calls the same entry.
                 if dicts == 0
-                    && generic.is_none()
+                    && generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &params))
                     && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                     && (0..args.len()).all(|i| boxed(i).is_none())
                     && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
@@ -7880,7 +7897,7 @@ impl Compiler {
                 let ok = self.emit_named_entry_on_module_ret(&key, words + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
                 if dicts == 0
-                    && generic.is_none()
+                    && generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &emit.plan.calls[&id.0].params))
                     && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                     && let Some(&IlOp::Entry {
                         kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::TailCall | crate::il::EntryKind::MakeCoro),
