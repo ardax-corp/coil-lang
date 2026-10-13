@@ -4968,7 +4968,11 @@ impl Compiler {
         self.raw_instance_methods.insert(fqn.to_string());
     }
 
-    /// Emit bytecode thunks for compiler-provided primitive instances.
+    /// Emit the bodies of the compiler-provided primitive instances, each
+    /// built as HIR ([`crate::hir::synth::builtin_entry`]) and lowered like
+    /// any other body. The stream `Read` / `Write` entries stay stack IL:
+    /// their natives' registry names (`read`, `write`) can be shadowed by a
+    /// user function of the same name, which a named HIR call would reach.
     ///
     /// Shared generic bodies receive boxed type-parameter values, so numeric
     /// thunks unbox their two arguments and re-box a type-parameter result.
@@ -4976,122 +4980,115 @@ impl Compiler {
     /// thunk accepts the ordinary hidden trailing dictionary argument, even
     /// though primitive implementations do not need to inspect it.
     fn emit_builtin_dict_thunks(&mut self) {
+        use crate::hir::{BinOp, Builtin, HirKind, Lit, UnOp};
         use crate::typechecking::generics::Generics;
+        use crate::typechecking::ty as coil_ty;
 
-        let emit = |compiler: &mut Self,
-                    class: &str,
-                    ty: &str,
-                    method: &str,
-                    tag: ValueTag,
-                    op: Instruction,
-                    boxes_result: bool| {
-            let fqn = Generics::builtin_instance_fqn(class, ty, method);
-            if compiler.functions.contains_key(&fqn) {
-                return;
-            }
-            compiler.bind_function_entry(fqn);
-            for slot in 0..2 {
-                compiler.bytecode.push_load(slot);
-                compiler.bytecode.push_unbox_value(tag as u32);
-            }
-            compiler.bytecode.push(Byte::new(op));
-            if boxes_result {
-                compiler.bytecode.push_box_value(tag as u32);
-            }
-            compiler.bytecode.push_return();
-        };
+        let prim = |name: &str| Ty::Con(name.to_string());
+        let (int, float, boolean, string) = (coil_ty::int(), coil_ty::float(), coil_ty::boolean(), coil_ty::string());
+        let tag_of = |tag: ValueTag| Some(tag as u32);
 
+        // `a op b` on the unboxed arguments; arithmetic boxes its result,
+        // a comparison returns its `bool` as it is.
         for (ty, tag, arithmetic, comparisons) in [
             (
-                "int",
+                &int,
                 ValueTag::Int,
                 [
-                    ("Add", "add", Instruction::ADD),
-                    ("Sub", "sub", Instruction::SUB),
-                    ("Mul", "mul", Instruction::MUL),
-                    ("Div", "div", Instruction::DIV),
-                    ("Rem", "rem", Instruction::MOD),
-                    ("Pow", "pow", Instruction::Pow),
+                    ("Add", "add", BinOp::IntAdd),
+                    ("Sub", "sub", BinOp::IntSub),
+                    ("Mul", "mul", BinOp::IntMul),
+                    ("Div", "div", BinOp::IntDiv),
+                    ("Rem", "rem", BinOp::IntRem),
+                    ("Pow", "pow", BinOp::IntPow),
                 ],
                 [
-                    ("Lt", "lt", Instruction::LE),
-                    ("Le", "le", Instruction::LEQ),
-                    ("Gt", "gt", Instruction::GT),
-                    ("Ge", "ge", Instruction::GEQ),
-                    ("Eq", "eq", Instruction::EQ),
-                    ("Eq", "ne", Instruction::NEQ),
+                    ("Lt", "lt", BinOp::Lt),
+                    ("Le", "le", BinOp::Le),
+                    ("Gt", "gt", BinOp::Gt),
+                    ("Ge", "ge", BinOp::Ge),
+                    ("Eq", "eq", BinOp::Eq),
+                    ("Eq", "ne", BinOp::Ne),
                 ],
             ),
             (
-                "float",
+                &float,
                 ValueTag::Float,
                 [
-                    ("Add", "add", Instruction::ADDF),
-                    ("Sub", "sub", Instruction::SUBF),
-                    ("Mul", "mul", Instruction::MULF),
-                    ("Div", "div", Instruction::DIVF),
-                    ("Rem", "rem", Instruction::MODF),
-                    ("Pow", "pow", Instruction::PowF),
+                    ("Add", "add", BinOp::FloatAdd),
+                    ("Sub", "sub", BinOp::FloatSub),
+                    ("Mul", "mul", BinOp::FloatMul),
+                    ("Div", "div", BinOp::FloatDiv),
+                    ("Rem", "rem", BinOp::FloatRem),
+                    ("Pow", "pow", BinOp::FloatPow),
                 ],
                 [
-                    ("Lt", "lt", Instruction::LEF),
-                    ("Le", "le", Instruction::LEQF),
-                    ("Gt", "gt", Instruction::GTF),
-                    ("Ge", "ge", Instruction::GEQF),
-                    ("Eq", "eq", Instruction::EQ),
-                    ("Eq", "ne", Instruction::NEQ),
+                    ("Lt", "lt", BinOp::Lt),
+                    ("Le", "le", BinOp::Le),
+                    ("Gt", "gt", BinOp::Gt),
+                    ("Ge", "ge", BinOp::Ge),
+                    ("Eq", "eq", BinOp::Eq),
+                    ("Eq", "ne", BinOp::Ne),
                 ],
             ),
         ] {
+            let name = coil_ty::strip_readonly(ty).to_string();
+            let params = [(ty.clone(), tag_of(tag)), (ty.clone(), tag_of(tag))];
             for (class, method, op) in arithmetic {
-                emit(self, class, ty, method, tag, op, true);
+                let fqn = Generics::builtin_instance_fqn(class, &name, method);
+                self.emit_builtin_entry(&fqn, &params, ty.clone(), tag_of(tag), |b, a| b.bin(op, a[0], a[1], ty.clone()));
             }
             for (class, method, op) in comparisons {
-                emit(self, class, ty, method, tag, op, false);
+                let fqn = Generics::builtin_instance_fqn(class, &name, method);
+                self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
-        // Bitwise traits over the int lane (`byte` shares its tag).
+        // Bitwise traits over the int lane (`byte` shares its tag, and its
+        // words: no byte wrap, as `int`).
         for ty in ["int", "byte"] {
+            let params = [(int.clone(), tag_of(ValueTag::Int)), (int.clone(), tag_of(ValueTag::Int))];
             for (class, method, op) in [
-                ("Shl", "shl", Instruction::SHL),
-                ("Shr", "shr", Instruction::SHR),
-                ("BitAnd", "bitand", Instruction::BITAND),
-                ("BitOr", "bitor", Instruction::BITOR),
-                ("BitXor", "bitxor", Instruction::XOR),
+                ("Shl", "shl", BinOp::Shl),
+                ("Shr", "shr", BinOp::Shr),
+                ("BitAnd", "bitand", BinOp::BitAnd),
+                ("BitOr", "bitor", BinOp::BitOr),
+                ("BitXor", "bitxor", BinOp::BitXor),
             ] {
-                emit(self, class, ty, method, ValueTag::Int, op, true);
+                let fqn = Generics::builtin_instance_fqn(class, ty, method);
+                self.emit_builtin_entry(&fqn, &params, int.clone(), tag_of(ValueTag::Int), |b, a| b.bin(op, a[0], a[1], int.clone()));
             }
         }
         // `Neg` / `BitNot` take one operand (plus the ignored trailing dictionary).
         for (class, method, ty, tag, op) in [
-            ("Neg", "neg", "int", ValueTag::Int, Instruction::NEG),
-            ("Neg", "neg", "float", ValueTag::Float, Instruction::NEGF),
-            ("BitNot", "bitnot", "int", ValueTag::Int, Instruction::NOT),
+            ("Neg", "neg", &int, ValueTag::Int, UnOp::Neg),
+            ("Neg", "neg", &float, ValueTag::Float, UnOp::Neg),
+            ("BitNot", "bitnot", &int, ValueTag::Int, UnOp::BitNot),
         ] {
-            let fqn = Generics::builtin_instance_fqn(class, ty, method);
-            if self.functions.contains_key(&fqn) {
-                continue;
-            }
-            self.bind_function_entry(fqn);
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(tag as u32);
-            self.bytecode.push(Byte::new(op));
-            self.bytecode.push_box_value(tag as u32);
-            self.bytecode.push_return();
+            let fqn = Generics::builtin_instance_fqn(class, &ty.to_string(), method);
+            self.emit_builtin_entry(&fqn, &[(ty.clone(), tag_of(tag))], ty.clone(), tag_of(tag), |b, a| {
+                b.push(HirKind::Un { op, operand: a[0] }, ty.clone())
+            });
         }
-        for (ty, tag) in [
-            ("string", ValueTag::String),
-            ("bool", ValueTag::Bool),
-            ("byte", ValueTag::Int),
-        ] {
-            emit(self, "Eq", ty, "eq", tag, Instruction::EQ, false);
-            emit(self, "Eq", ty, "ne", tag, Instruction::NEQ, false);
+        // `byte` compares as its int word.
+        for (ty, word, tag) in [("string", &string, ValueTag::String), ("bool", &boolean, ValueTag::Bool), ("byte", &int, ValueTag::Int)] {
+            let params = [(word.clone(), tag_of(tag)), (word.clone(), tag_of(tag))];
+            for (method, op) in [("eq", BinOp::Eq), ("ne", BinOp::Ne)] {
+                let fqn = Generics::builtin_instance_fqn("Eq", ty, method);
+                self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+            }
         }
 
         // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
         // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
         // An immediate is re-boxed with its tag first: a shared generic body
         // passes raw words (#802), and STRINGIFY reads a float or bool by tag.
+        let show = |b: &mut crate::hir::synth::Synth, word, tag: Option<ValueTag>| {
+            let word = match tag {
+                Some(tag) => b.builtin(Builtin::Box { tag: tag as u32 }, vec![word], coil_ty::int()),
+                None => word,
+            };
+            b.builtin(Builtin::Stringify, vec![word], coil_ty::string())
+        };
         for (ty, tag) in [
             ("int", Some(ValueTag::Int)),
             ("float", Some(ValueTag::Float)),
@@ -5104,29 +5101,24 @@ impl Compiler {
             if self.functions.contains_key(&fqn) {
                 continue;
             }
+            // A unit or byte is its int word here.
+            let word = match ty {
+                "float" | "string" | "bool" => prim(ty),
+                _ => int.clone(),
+            };
             // An immediate's or a string's thunk is raw: a ground call
             // passes its word (so direct MIR calls it), dictionaries its
             // `$dict` adapter. STRINGIFY reads a heap string as it is.
-            if ty != "unit" {
+            let adapter = if ty != "unit" {
                 self.note_raw_builtin_thunk(&fqn);
-                self.bind_function_entry(fqn.clone());
-                self.bytecode.push_load(0);
-                if let Some(tag) = tag {
-                    self.bytecode.push_box_value(tag as u32);
-                }
-                self.bytecode.push(Byte::new(Instruction::STRINGIFY));
-                self.bytecode.push_return();
-                self.bind_function_entry(Self::dict_adapter_name(&fqn));
+                self.emit_builtin_entry(&fqn, &[(word.clone(), None)], string.clone(), None, |b, a| show(b, a[0], tag));
+                Self::dict_adapter_name(&fqn)
             } else {
-                self.bind_function_entry(fqn);
-            }
-            self.bytecode.push_load(0);
-            if let Some(tag) = tag {
-                self.bytecode.push_unbox_value(tag as u32);
-                self.bytecode.push_box_value(tag as u32);
-            }
-            self.bytecode.push(Byte::new(Instruction::STRINGIFY));
-            self.bytecode.push_return();
+                fqn
+            };
+            self.emit_builtin_entry(&adapter, &[(word.clone(), tag.map(|t| t as u32))], string.clone(), None, |b, a| {
+                show(b, a[0], tag)
+            });
         }
 
         // Show thunks for the builtin error enums: reserved here, emitted by
@@ -5142,24 +5134,21 @@ impl Compiler {
             }
         }
 
-        // Length__string__len: unbox (dict ABI) then ArrayLen (byte length).
-        {
-            let fqn = Generics::builtin_instance_fqn("Length", "string", "len");
-            if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
-                self.bytecode.push_load(0);
-                self.bytecode.push_unbox_value(ValueTag::String as u32);
-                self.bytecode.push(Byte::new(Instruction::ArrayLen));
-                self.bytecode.push_return();
-            }
-        }
+        // Length__string__len: unbox (dict ABI) then its byte length.
+        self.emit_builtin_entry(
+            &Generics::builtin_instance_fqn("Length", "string", "len"),
+            &[(string.clone(), tag_of(ValueTag::String))],
+            int.clone(),
+            None,
+            |b, a| b.call("len", vec![a[0]], int.clone()),
+        );
 
         // Hash thunks: int/byte/bool identity after unbox; float via Value bits; string HostInvoke hash_string.
-        for (ty, tag) in [
-            ("int", ValueTag::Int),
-            ("byte", ValueTag::Int),
-            ("bool", ValueTag::Bool),
-            ("float", ValueTag::Float),
+        for (ty, word, tag) in [
+            ("int", &int, ValueTag::Int),
+            ("byte", &int, ValueTag::Int),
+            ("bool", &boolean, ValueTag::Bool),
+            ("float", &float, ValueTag::Float),
         ] {
             let fqn = Generics::builtin_instance_fqn("Hash", ty, "hash");
             if self.functions.contains_key(&fqn) {
@@ -5167,61 +5156,33 @@ impl Compiler {
             }
             // Raw, as the Show thunks: the raw word is its own hash.
             self.note_raw_builtin_thunk(&fqn);
-            self.bind_function_entry(fqn.clone());
-            self.bytecode.push_load(0);
-            self.bytecode.push_return();
-            self.bind_function_entry(Self::dict_adapter_name(&fqn));
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(tag as u32);
-            self.bytecode.push_return();
+            self.emit_builtin_entry(&fqn, &[(word.clone(), None)], word.clone(), None, |_, a| a[0]);
+            let adapter = Self::dict_adapter_name(&fqn);
+            self.emit_builtin_entry(&adapter, &[(word.clone(), tag_of(tag))], word.clone(), None, |_, a| a[0]);
         }
         // Default thunks (`static fn default()`): the primitive's zero value,
         // raw like the Hash results; a dictionary call's trailing dictionary
         // is ignored.
-        for (ty, value) in [
-            ("int", ConstValue::Int(0)),
-            ("byte", ConstValue::Int(0)),
-            ("float", ConstValue::Float(0.0)),
-            ("bool", ConstValue::Bool(false)),
-            ("string", ConstValue::Str(String::new())),
+        for (ty, value, word) in [
+            ("int", Lit::Int(0), &int),
+            ("byte", Lit::Int(0), &int),
+            ("float", Lit::Float(0.0), &float),
+            ("bool", Lit::Bool(false), &boolean),
+            ("string", Lit::Str(String::new()), &string),
         ] {
             let fqn = Generics::builtin_instance_fqn("Default", ty, "default");
-            if self.functions.contains_key(&fqn) {
-                continue;
-            }
-            self.bind_function_entry(fqn);
-            let mut value_bc = CodeBuf::new();
-            self.emit_const_value(&value, &mut value_bc);
-            self.bytecode.append(&mut value_bc);
-            self.bytecode.push_return();
+            self.emit_builtin_entry(&fqn, &[], word.clone(), None, |b, _| b.push(HirKind::Lit(value), word.clone()));
         }
-        {
-            let fqn = Generics::builtin_instance_fqn("Hash", "unit", "hash");
-            if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
-                self.bytecode.push_const(0);
-                self.bytecode.push_return();
-            }
-        }
-        if let Some(native_id) = self.native_id("hash_string") {
-            let fqn = Generics::builtin_instance_fqn("Hash", "string", "hash");
-            if !self.functions.contains_key(&fqn) {
-                // Raw, as the Show thunks: the string's own word, then the
-                // `$dict` adapter for a boxed one.
-                self.note_raw_builtin_thunk(&fqn);
-                self.bind_function_entry(fqn.clone());
-                self.bytecode
-                    .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-                self.bytecode.push_load(0);
-                self.bytecode.push_host_invoke(1);
-                self.bytecode.push_return();
-                self.bind_function_entry(Self::dict_adapter_name(&fqn));
-                self.bytecode
-                    .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-                self.bytecode.push_load(0);
-                self.bytecode.push_unbox_value(ValueTag::String as u32);
-                self.bytecode.push_host_invoke(1);
-                self.bytecode.push_return();
+        self.emit_builtin_entry(&Generics::builtin_instance_fqn("Hash", "unit", "hash"), &[], int.clone(), None, |b, _| b.int(0));
+        let fqn = Generics::builtin_instance_fqn("Hash", "string", "hash");
+        if self.native_id("hash_string").is_some() && !self.functions.contains_key(&fqn) {
+            // Raw, as the Show thunks: the string's own word, then the
+            // `$dict` adapter for a boxed one.
+            self.note_raw_builtin_thunk(&fqn);
+            for (name, tag) in [(fqn.clone(), None), (Self::dict_adapter_name(&fqn), tag_of(ValueTag::String))] {
+                self.emit_builtin_entry(&name, &[(string.clone(), tag)], int.clone(), None, |b, a| {
+                    b.call("hash_string", vec![a[0]], int.clone())
+                });
             }
         }
 
@@ -5248,64 +5209,39 @@ impl Compiler {
             self.bytecode.push_return();
         }
 
-        let into_pairs = [
-            (
-                "int",
-                "float",
-                Instruction::CastIntToFloat,
-                ValueTag::Int,
-                ValueTag::Float,
-            ),
-            (
-                "float",
-                "int",
-                Instruction::CastFloatToInt,
-                ValueTag::Float,
-                ValueTag::Int,
-            ),
-            (
-                "int",
-                "byte",
-                Instruction::CastIntToByte,
-                ValueTag::Int,
-                ValueTag::Int,
-            ),
-            (
-                "byte",
-                "int",
-                Instruction::CastByteToInt,
-                ValueTag::Int,
-                ValueTag::Int,
-            ),
-            (
-                "int",
-                "bool",
-                Instruction::CastIntToBool,
-                ValueTag::Int,
-                ValueTag::Bool,
-            ),
-            (
-                "bool",
-                "int",
-                Instruction::CastBoolToInt,
-                ValueTag::Bool,
-                ValueTag::Int,
-            ),
-        ];
-        for (from, to, cast_op, from_tag, to_tag) in into_pairs {
+        // `into`: the unboxed word cast, boxed again when its tag changes.
+        for (from, to, from_tag, to_tag) in [
+            ("int", "float", ValueTag::Int, ValueTag::Float),
+            ("float", "int", ValueTag::Float, ValueTag::Int),
+            ("int", "byte", ValueTag::Int, ValueTag::Int),
+            ("byte", "int", ValueTag::Int, ValueTag::Int),
+            ("int", "bool", ValueTag::Int, ValueTag::Bool),
+            ("bool", "int", ValueTag::Bool, ValueTag::Int),
+        ] {
             let fqn = into_primitive_fqn(from, to);
-            if self.functions.contains_key(&fqn) {
-                continue;
-            }
-            self.bind_function_entry(fqn);
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(from_tag as u32);
-            self.bytecode.push(Byte::new(cast_op));
-            if from_tag != to_tag {
-                self.bytecode.push_box_value(to_tag as u32);
-            }
-            self.bytecode.push_return();
+            let to_ty = prim(to);
+            let box_tag = (from_tag != to_tag).then_some(to_tag as u32);
+            self.emit_builtin_entry(&fqn, &[(prim(from), tag_of(from_tag))], to_ty.clone(), box_tag, |b, a| {
+                b.push(HirKind::Cast { value: a[0] }, to_ty.clone())
+            });
         }
+    }
+
+    /// A builtin instance method's body ([`crate::hir::synth::builtin_entry`])
+    /// as function `fqn`, unless one is already defined.
+    fn emit_builtin_entry(
+        &mut self,
+        fqn: &str,
+        params: &[(Ty, Option<u32>)],
+        ret: Ty,
+        box_tag: Option<u32>,
+        op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
+    ) {
+        if self.functions.contains_key(fqn) {
+            return;
+        }
+        let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, box_tag, op);
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
     }
 
     /// Thunk for `Vec::{name}` stamped with element kind `stamp`
@@ -5509,7 +5445,7 @@ impl Compiler {
             let call = b.call(native, args, ret);
             let root = b.ret(call);
             let hir = b.finish(root);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new());
+            self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
         }
     }
 
@@ -5518,14 +5454,20 @@ impl Compiler {
             return;
         }
         let hir = crate::hir::synth::range_to_vec(&self.checker, &fqn, inclusive, float);
-        self.emit_synth_fn(&fqn, &hir, HashMap::new());
+        self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
     }
 
     /// Emit compiler-made body `hir` ([`crate::hir::synth`]) as function
     /// `name`, its own function record, lowered like any other body (HIR
     /// lowering, then direct MIR). `calls` are its callees the checker has
     /// no signature for. A body that does not plan is reported.
-    fn emit_synth_fn(&mut self, name: &str, hir: &crate::hir::HirBody, calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>) {
+    fn emit_synth_fn(
+        &mut self,
+        name: &str,
+        hir: &crate::hir::HirBody,
+        calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
+        dict_entry: bool,
+    ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
         let body_start = self.bytecode.len();
@@ -5540,8 +5482,13 @@ impl Compiler {
         let body_end = self.bytecode.len();
         self.record_fn_span(name.to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get(name).copied();
+        // A dictionary entry is called with its parameters and then the
+        // instance dictionary. No `CALL` names it, so its precise frame map
+        // takes the entry height from here; too low a height leaves the top
+        // words unrooted.
+        let entry_sp = if dict_entry { hir.params.len() as u32 + 1 } else { 0 };
         self.bytecode
-            .record_func_with_sp(name.to_string(), entry, body_start, body_end, 0);
+            .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
         self.current_function_table_key = prev_key;
@@ -9107,7 +9054,7 @@ impl Compiler {
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new());
+            self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
         skip.bind_label(after, self.bytecode.il_mut());
     }

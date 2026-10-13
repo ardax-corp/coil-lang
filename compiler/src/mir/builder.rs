@@ -973,6 +973,20 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `STRINGIFY` of `src` ([`MirInst::Stringify`]): a new string.
+    pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        if !self.resolve_ty(src).is_specialized() {
+            return Err(MirError::msg("Stringify type".to_string()));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Stringify {
+            dest,
+            src: self.resolve(src),
+        })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     /// `UnboxValue tag` of `src` ([`MirInst::Unbox`]), read as `ty`.
     pub fn ins_unbox(&mut self, src: ValueId, tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() || !ty.is_specialized() {
