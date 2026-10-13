@@ -6059,6 +6059,26 @@ impl Compiler {
         })
     }
 
+    /// How a call's result sits against its own (instance) type's layout,
+    /// as direct MIR reads it: `Some(false)` in that layout, `Some(true)` a
+    /// niche `Option` / `Result` the callee returns boxed (a shared generic
+    /// class's method returns a type parameter's enum in the open type's
+    /// layout, and emission unboxes it), `None` any other mismatch.
+    fn hir_ret_shape(&self, hir: &HirBody, id: HirId, natural: &Rep) -> Option<bool> {
+        if natural.words() == 2 {
+            return Some(false);
+        }
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if matches!(ty, Ty::Var(_)) {
+            return Some(false);
+        }
+        let own = self.value_layout(&ty);
+        if *natural == Rep::Word(own) {
+            return Some(false);
+        }
+        (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheResult)).then_some(true)
+    }
+
     /// Whether `ty` is a bare type variable.
     fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
         ty.is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), ty), Ty::Var(_)))
@@ -6334,6 +6354,7 @@ impl Compiler {
                                     pair_args: vec![false; 2],
                                     pair_ret: false,
                                     coro: false,
+                                    boxed_ret: false,
                                 },
                                 tag: tag as u32,
                                 shift,
@@ -7162,6 +7183,7 @@ impl Compiler {
                 // direct MIR calls the same entry.
                 if dicts == 0
                     && generic.is_none()
+                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                     && (0..args.len()).all(|i| boxed(i).is_none())
                     && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
                     && let Some(&IlOp::Entry {
@@ -7180,6 +7202,7 @@ impl Compiler {
                             pair_args: vec![false; args.len()],
                             pair_ret: ret_words == 2,
                             coro: entry_kind == crate::il::EntryKind::MakeCoro,
+                            boxed_ret,
                         },
                     );
                 }
@@ -7313,6 +7336,7 @@ impl Compiler {
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
                 if dicts == 0
                     && generic.is_none()
+                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                     && let Some(&IlOp::Entry {
                         kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::TailCall | crate::il::EntryKind::MakeCoro),
                         target,
@@ -7338,6 +7362,7 @@ impl Compiler {
                             pair_args,
                             pair_ret,
                             coro: entry_kind == crate::il::EntryKind::MakeCoro,
+                            boxed_ret,
                         },
                     );
                 }
