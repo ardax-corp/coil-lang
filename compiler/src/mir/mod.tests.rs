@@ -4591,3 +4591,42 @@ bb0:
         "the result stays on the stack for its use"
     );
 }
+
+/// A last-arm match payload left on the stack by `Unpack` is an inline
+/// operand only when it is the first word its user pushes. Here an inline
+/// call takes it after the format string is pushed: the payload keeps a
+/// slot, so the call gets the payload, not the string.
+#[test]
+fn lir_last_arm_payload_under_another_operand_keeps_a_slot() {
+    let text = "func @show(v0: heapref) -> heapref {
+bb0:
+    v1 = matchpayload v0, 0
+    jumpifmatch v0, 0, v1, bb2, bb1
+bb1:
+    v2 = matchpayload v0, 0
+    v3 = string 7
+    v4 = call.heapref 49 v2
+    v5 = format v3, v4
+    v6 = gcbarrier.safepoint v5
+    return v6
+bb2:
+    v7 = string 8
+    v8 = call.heapref 47 v1
+    v9 = format v7, v8
+    v10 = gcbarrier.safepoint v1, v9
+    return v10
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, true).expect("mapped LIR");
+    let call = lir
+        .iter()
+        .position(|op| matches!(op, IlOp::Entry { kind: crate::il::EntryKind::Call, target: Label(49), .. }))
+        .expect("CALL 49");
+    let unpack = |op: &IlOp| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack);
+    assert!(
+        matches!(lir[call - 1], IlOp::Load { .. }) || unpack(&lir[call - 1]),
+        "the call's argument is the payload (a load of its slot, or the Unpack)"
+    );
+}
