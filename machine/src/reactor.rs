@@ -834,6 +834,9 @@ pub struct TestCase {
 
 /// Static init, then the case; the report is stored before the join completes.
 fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
+    // A case's GC roots must not depend on which job this worker ran before
+    // (#1006): no stale word from it may pass for a root.
+    vm.clear_operand_stack();
     #[cfg(feature = "coverage")]
     if test.coverage {
         vm.begin_coverage();
