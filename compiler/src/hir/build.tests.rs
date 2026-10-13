@@ -141,3 +141,38 @@ fn methods_take_an_implicit_self() {
         &["P::get", "f"],
     );
 }
+
+#[test]
+fn a_returned_function_type_stays_the_return_type() {
+    // Signatures are curried: `adder`'s is `int -> int -> int`, and only
+    // its declared parameters peel off it.
+    let src = "fn adder(int k) -> fn(int x) -> int { return fn (int y) use (k) => y + k; }\n\
+               fn ident() -> int -> int { return fn (int y) => y; }\n\
+               class P { pub x: int, }\n\
+               impl P { pub fn by(int k) -> int -> int { let x = self.x; return fn (int y) use (x, k) => y + x + k; } }";
+    for body in ["adder", "ident", "P::by"] {
+        let hir = hir_of(src, body);
+        let head = hir.lines().next().unwrap_or("");
+        assert!(head.ends_with("-> int -> int"), "`{body}`: {hir}");
+    }
+}
+
+#[test]
+fn a_dropped_tail_try_falls_off_into_ok() {
+    // `g()?;` last: its `int` is dropped and the body returns `Ok(())`.
+    let src = "fn g() -> Result<int, string> { return Result::Ok(1); }\n\
+               fn f() -> Result<(), string> { g()?; }";
+    let hir = hir_of(src, "f");
+    assert!(!hir.contains("    =>"), "{hir}");
+    assert!(hir.contains("make Result::Ok"), "{hir}");
+}
+
+#[test]
+fn an_overload_takes_its_own_signature() {
+    // The first `p` is the `float` overload; the name alone finds the last.
+    let src = "fn p(float a, float b) -> float { return a + b; }\n\
+               fn p(int a, int b) -> int { return a - b; }";
+    let hir = hir_of(src, "p");
+    let head = hir.lines().next().unwrap_or("");
+    assert_eq!(head, "Function p(a%0: float, b%1: float) -> float", "{hir}");
+}

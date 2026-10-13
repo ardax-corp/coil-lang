@@ -196,8 +196,8 @@ impl MirBuilder {
             if op.requires_int() && !lt.is_int() {
                 return Err(MirError::msg(format!("bitwise op on {lt}")));
             }
-            if op.requires_float() && !lt.is_float() {
-                return Err(MirError::msg(format!("fpow on {lt}")));
+            if !op.takes(lt) {
+                return Err(MirError::msg(format!("pow on {lt}")));
             }
         }
         let dest_ty = if heap_bit {
@@ -407,7 +407,7 @@ impl MirBuilder {
             None => spec.ret,
             // A generic edge's boxed result may be a heap reference, as its
             // arguments may.
-            Some(t) if super::host_allow::host_arg_ok(native_id, spec.ret, t) => t,
+            Some(t) if super::host_allow::host_result_ok(native_id, spec.ret, t) => t,
             Some(t) => {
                 return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
             }

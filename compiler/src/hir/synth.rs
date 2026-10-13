@@ -1,5 +1,6 @@
 //! HIR bodies the compiler makes itself, with no source of their own: the
-//! auto-par fork-join workers and the test-runner `main`. They lower like
+//! auto-par fork-join workers, the test-runner `main` and the builtin
+//! methods' bodies (`Range::to_vec`, …). They lower like
 //! any other body (HIR lowering, then direct MIR), instead of being written
 //! out as stack IL by hand.
 //!
@@ -151,4 +152,32 @@ impl<'a> Synth<'a> {
         self.body.root = Some(root);
         self.body
     }
+}
+
+/// `Range::to_vec` / `RangeInclusive::to_vec` (`float`: the
+/// `__float_to_vec` sibling a float range calls): every value `for x in
+/// self` visits, pushed onto a new `Vec`. An `int` body serves `byte`
+/// ranges too, as the same words.
+pub fn range_to_vec(checker: &Checker, name: &str, inclusive: bool, float: bool) -> HirBody {
+    use super::MakeKind;
+    let elem = if float { coil_ty::float() } else { coil_ty::int() };
+    let range = if inclusive { coil_ty::range_inclusive_ty(elem.clone()) } else { coil_ty::range_ty(elem.clone()) };
+    let vec = coil_ty::vec_app_ty(elem.clone());
+    let mut b = Synth::new(checker, name, vec.clone());
+    let this = b.local("self", range, LocalKind::Param);
+    let out = b.local("out", vec.clone(), LocalKind::Let);
+    let x = b.local("x", elem, LocalKind::Pattern);
+    let empty = b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec.clone());
+    let init = b.let_(out, empty);
+    let iterable = b.read(this);
+    let (o, v) = (b.read(out), b.read(x));
+    let callee = Callee::Method { name: "push".to_string() };
+    let push = b.push(HirKind::Call { callee, args: vec![o, v] }, coil_ty::unit());
+    let body = b.block(vec![push], None, coil_ty::unit());
+    let kind = Some(crate::typechecking::infer::ForInKind::Range { inclusive, float });
+    let each = b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable, body, kind }, coil_ty::unit());
+    let o = b.read(out);
+    let ret = b.ret(o);
+    let root = b.block(vec![init, each, ret], None, coil_ty::never());
+    b.finish(root)
 }

@@ -226,13 +226,16 @@ impl Compiler {
             args.iter().zip(params).all(|(&a, &p)| this.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
         };
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
-            let method = &inst.ground.as_ref().expect("ground call").method;
+            let ground = inst.ground.as_ref().expect("ground call");
+            let method = &ground.method;
             let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
             let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
-            if raw
+            // Raw words (or nothing boxed: `T::default()`) and no
+            // dictionary: direct MIR calls the same entry.
+            if (raw || ground.boxed.iter().all(Option::is_none))
                 && !dict
                 && natural_args(self, &call.params)
                 && let Some(target) = target
