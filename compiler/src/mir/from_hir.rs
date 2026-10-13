@@ -111,7 +111,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_thread(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -153,7 +153,16 @@ impl HirMirInput<'_> {
 pub type ScalarEnumFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
 
 /// A scalar enum variant's backing constant, by enum and variant name.
-pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>;
+pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<ScalarLit> + 'a>;
+
+/// The backing word of a scalar enum variant, or an `int` match literal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScalarLit {
+    /// An `int`, `float` or `bool` constant.
+    Const(MirConst),
+    /// A `#[repr(string)]` variant's string, by its string table index.
+    Str(u32),
+}
 
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
@@ -422,6 +431,11 @@ fn is_coroutine(ty: &Ty) -> bool {
 
 fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
+}
+
+/// A `Thread` handle: a heap object (`ObjThread`).
+fn is_thread(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::THREAD)
 }
 
 /// The element type of an array or `Vec`.
@@ -1611,6 +1625,24 @@ impl Lower<'_> {
             && self.inp.pair_tys.contains_key(&id.0)
     }
 
+    /// A host call whose result is a boxed enum kept as its object: no
+    /// word or pair of its own.
+    fn host_boxed(&self, id: HirId) -> bool {
+        // Or an `if` choosing between such calls (a fork-join worker's spawn
+        // of itself or of the sequential arm).
+        if let HirKind::If { then, els: Some(els), .. } = self.hir.expr(id).kind {
+            let tail = |b: HirId| match &self.hir.expr(b).kind {
+                HirKind::Block { stmts, tail: Some(t) } if stmts.is_empty() => *t,
+                _ => b,
+            };
+            return self.host_boxed(tail(then)) && self.host_boxed(tail(els));
+        }
+        matches!(self.hir.expr(id).kind, HirKind::Call { .. })
+            && self.inp.hosts.contains_key(&id.0)
+            && !self.inp.pair_tys.contains_key(&id.0)
+            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+    }
+
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
     /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
@@ -1822,9 +1854,9 @@ impl Lower<'_> {
             {
                 self.fill_slots(local, *value)
             }
-            // `a[i]++` used for its value reads the old or new element.
-            HirKind::Assign { .. } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
-                Err("adjust value".into())
+            // `x++` used for its value reads the old or new `x`.
+            HirKind::Assign { place, value } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
+                self.adjust_value(id, *place, *value)
             }
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
                 self.stack_store(*place, base, index, *value)
@@ -1986,8 +2018,8 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
                 args,
-            } if args.is_empty() && let Some(c) = (self.inp.scalar_variant)(enum_name, variant) => {
-                Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
+            } if args.is_empty() && let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) => {
+                Ok(Val::V(self.scalar_lit(lit)?))
             }
             // `p[0]` / `p[1]` of a two-word tuple local.
             HirKind::Index { base, index, .. }
@@ -2049,10 +2081,6 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Assign { place, value } => {
-                // `x++` used for its value reads the old or new `x`.
-                if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) {
-                    return Err("adjust value".into());
-                }
                 if let HirKind::Global { .. } = self.hir.expr(*place).kind {
                     return self.store_static(*place, *value);
                 }
@@ -3082,6 +3110,41 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
     }
 
+    /// `x++` / `--x` on a local or static used for its value: the old
+    /// word, then `x ± 1` stored, the value the old (postfix) or new
+    /// (prefix) word, as HIR emission's `INC` / `DEC` on the slot.
+    fn adjust_value(&mut self, id: HirId, place: HirId, value: HirId) -> Result<Val, Refusal> {
+        let prefix = self.hir.expr(id).flags.contains(HirFlags::PREFIX);
+        let Some(old) = self.word(place)? else {
+            return Ok(Val::Never);
+        };
+        let Some(new) = self.word(value)? else {
+            return Ok(Val::Never);
+        };
+        let ty = self.b.value_ty(old);
+        if !matches!(ty, MirTy::I64 | MirTy::F64) || self.b.value_ty(new) != ty {
+            return Err("adjust type".into());
+        }
+        match self.hir.expr(place).kind {
+            HirKind::Global { .. } => {
+                let slot = *self.inp.statics.get(&place.0).ok_or("adjust place")?;
+                if self.static_ty(place)? != ty {
+                    return Err("adjust type".into());
+                }
+                self.b.ins_store_static(slot, new).map_err(mir)?;
+            }
+            HirKind::Local(local) if self.pair_local(local).is_none() => {
+                if self.local_ty(local)? != ty {
+                    return Err("adjust type".into());
+                }
+                let slot = self.slot(local)?;
+                self.b.def_local(slot, new).map_err(mir)?;
+            }
+            _ => return Err("adjust place".into()),
+        }
+        Ok(Val::V(if prefix { new } else { old }))
+    }
+
     /// `STATIC = v`: the value, then `StoreStatic`, as HIR emission. The
     /// value is stored as is (no fixed-array copy).
     fn store_static(&mut self, place: HirId, value: HirId) -> Result<Val, Refusal> {
@@ -3338,7 +3401,14 @@ impl Lower<'_> {
         let ret = match self.expr_ty(id) {
             _ if pair.is_some() || raw => Some(MirTy::HeapRef),
             _ if unit => None,
-            Some(ty) => Some(self.inp.word(ty).ok_or_else(|| format!("host result {}", ty_kind(ty)))?),
+            // A boxed enum (`thread_spawn`'s `Result<thread, ThreadError>`)
+            // stays the object it comes back as.
+            Some(ty) => Some(
+                self.inp
+                    .word(ty)
+                    .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                    .ok_or_else(|| format!("host result {}", ty_kind(ty)))?,
+            ),
             None => return Err("host result".into()),
         };
         let mut words = Vec::with_capacity(args.len());
@@ -3773,7 +3843,7 @@ impl Lower<'_> {
             }
             _ => false,
         };
-        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
+        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee) || self.host_boxed(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }
@@ -4061,11 +4131,14 @@ impl Lower<'_> {
                 Ok(())
             }
             HirPat::Variant { enum_name, variant, tag, fields } => {
-                if let Some(c) = (self.inp.scalar_variant)(enum_name, variant) {
+                if let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) {
                     let Some(miss) = miss else {
                         return Ok(());
                     };
-                    if !matches!(c, MirConst::I64(_)) || self.b.value_ty(v) != MirTy::I64 {
+                    let ScalarLit::Const(c @ MirConst::I64(_)) = lit else {
+                        return Err("nested scalar pattern".into());
+                    };
+                    if self.b.value_ty(v) != MirTy::I64 {
                         return Err("nested scalar pattern".into());
                     }
                     let k = self.b.ins_const(c).map_err(mir)?;
@@ -4290,7 +4363,7 @@ impl Lower<'_> {
     /// Each arm's constant when `match` tests an `int`, or a scalar enum
     /// backed by an `int` or `float`, against literals (`None` for a
     /// catch-all), as `lower::is_scalar_match`.
-    fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<MirConst>>> {
+    fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<ScalarLit>>> {
         let ty = self.expr_ty(scrutinee)?;
         let int = matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::INT);
         if !int && (self.inp.scalar_enum)(ty).is_none() {
@@ -4299,7 +4372,7 @@ impl Lower<'_> {
         arms.iter()
             .map(|arm| match &arm.pat {
                 HirPat::Wild | HirPat::Bind(_) => Some(None),
-                HirPat::Int(n) if int => Some(Some(MirConst::I64(*n))),
+                HirPat::Int(n) if int => Some(Some(ScalarLit::Const(MirConst::I64(*n)))),
                 HirPat::Variant {
                     enum_name, variant, fields, ..
                 } if !int && unit_fields(fields) => (self.inp.scalar_variant)(enum_name, variant).map(Some),
@@ -4311,14 +4384,14 @@ impl Lower<'_> {
     /// `match` of a scalar word on constants: one equality test per arm but
     /// the last, or a binary search over many `int` literals, as HIR
     /// emission's `hir_match_scalar` / `hir_match_search`.
-    fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<MirConst>], tail: bool) -> Result<Val, Refusal> {
+    fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<ScalarLit>], tail: bool) -> Result<Val, Refusal> {
         let Some(v) = self.word(scrutinee)? else {
             return Ok(Val::Never);
         };
         let literal = |pat: &HirPat| {
             let i = arms.iter().position(|a| std::ptr::eq(&a.pat, pat))?;
             match consts[i] {
-                Some(MirConst::I64(n)) => Some(n),
+                Some(ScalarLit::Const(MirConst::I64(n))) => Some(n),
                 _ => None,
             }
         };
@@ -4347,9 +4420,8 @@ impl Lower<'_> {
         let mut last_start = None;
         for (i, arm) in arms.iter().enumerate() {
             let miss = match consts[i] {
-                Some(c) if i < last => {
-                    let c = self.b.ins_const(c).map_err(mir)?;
-                    let hit = self.b.ins_cmp(MirCmpOp::Eq, v, c).map_err(mir)?;
+                Some(lit) if i < last => {
+                    let hit = self.scalar_eq(v, lit)?;
                     let arm_b = self.b.create_block();
                     let miss = self.b.create_block();
                     self.b.branch(hit, arm_b, miss).map_err(mir)?;
@@ -4376,6 +4448,31 @@ impl Lower<'_> {
             self.mark_cold(start);
         }
         self.join_arms(out)
+    }
+
+    /// A scalar literal's word: its constant, or its string.
+    fn scalar_lit(&mut self, lit: ScalarLit) -> Result<ValueId, Refusal> {
+        match lit {
+            ScalarLit::Const(c) => self.b.ins_const(c).map_err(mir),
+            ScalarLit::Str(idx) => self.b.ins_string(idx).map_err(mir),
+        }
+    }
+
+    /// Whether the word `v` is `lit`, as HIR emission's `EQ` against the
+    /// pushed backing: words compare as words (a `bool` as its `0` / `1`),
+    /// a string by content.
+    fn scalar_eq(&mut self, v: ValueId, lit: ScalarLit) -> Result<ValueId, Refusal> {
+        let k = self.scalar_lit(lit)?;
+        match (self.b.value_ty(v), self.b.value_ty(k)) {
+            (MirTy::HeapRef, MirTy::HeapRef) => self.b.ins_str_eq(v, k, false).map_err(mir),
+            (MirTy::Bool, MirTy::Bool) => {
+                let v = self.b.ins_cast(MirCastKind::Word, MirTy::I64, v).map_err(mir)?;
+                let k = self.b.ins_cast(MirCastKind::Word, MirTy::I64, k).map_err(mir)?;
+                self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir)
+            }
+            (a, b) if a == b && a.is_numeric() => self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir),
+            _ => Err("scalar match type".into()),
+        }
     }
 
     /// Search the sorted `cases` for `v`, as `hir_search_node`: split on the
