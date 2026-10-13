@@ -150,3 +150,15 @@ test("self-call and enum combines") {
     assert!(run_tak() == 7);
     assert!(count(run_grow()) == 32767);
 }
+
+// A computed argument picks the sequential function below the cutoff and
+// the worker above it; the result may be a heap enum.
+fn run_grow_n(int depth) -> Tree {
+    return grow(depth);
+}
+
+test("computed arguments on both sides of the cutoff") {
+    assert!(count(run_grow_n(2)) == 7);
+    assert!(count(run_grow_n(14)) == 32767);
+    assert!(run_fib(1) == 1 && run_fib(20) == fib_seq(20));
+}
