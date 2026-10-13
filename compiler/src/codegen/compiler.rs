@@ -5256,9 +5256,10 @@ impl Compiler {
         Some(format!("{}::{name}${suffix}", common::BUILTIN_VEC_TYPE))
     }
 
-    /// Emit intrinsic bodies for builtin `Vec<T>` methods and register
-    /// them in the function / method tables so `v.push(x)` / `Vec::new()`
-    /// lower to direct `CALL`s.
+    /// Emit the bodies of the builtin `Vec<T>` methods, each built as HIR
+    /// ([`crate::hir::synth::builtin_entry`]), and register them in the
+    /// function / method tables so `v.push(x)` / `Vec::new()` lower to
+    /// direct `CALL`s.
     fn emit_vec_method_thunks(&mut self) {
         let owner = common::BUILTIN_VEC_TYPE;
         let methods = self.context.methods.entry(owner.to_string()).or_default();
