@@ -4565,3 +4565,29 @@ bb0:
     let g = parse_func(unpaired).expect(unpaired);
     assert!(!super::stackmap::mir_maps_ok(&g));
 }
+
+/// A one-word call whose result has a single use in its block is an inline
+/// (tree) operand of that use; MIR→LIR emits it where the use is, instead of
+/// refusing the body (it then ran emit_hir's stack IL under the fuse tier).
+#[test]
+fn lir_emits_single_use_call_inline() {
+    let text = "func @caller(v0: i64) -> i64 {
+bb0:
+    v1 = iconst.i64 10
+    v2 = call.i64 7 v0, v1
+    v3 = iadd v2, v0
+    return v3
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits an inline call");
+    let call = lir
+        .iter()
+        .position(|op| matches!(op, IlOp::Entry { kind: crate::il::EntryKind::Call, target: Label(7), arity: 2, .. }))
+        .expect("CALL 7");
+    assert!(
+        !matches!(lir.get(call + 1), Some(IlOp::StorePop { .. })),
+        "the result stays on the stack for its use"
+    );
+}
