@@ -35,10 +35,12 @@ test("xor one twice is identity") {
 }
 
 test("identity result match keeps payload") {
-    assert!(match id_result(7) {
-        Result::Ok(v) => v,
-        Result::Err(e) => e,
-    } == 7);
+    assert!(
+        match id_result(7) {
+            Result::Ok(v) => v,
+            Result::Err(e) => e,
+        } == 7,
+    );
     assert!(
         match id_result(-3) {
             Result::Ok(v) => v,

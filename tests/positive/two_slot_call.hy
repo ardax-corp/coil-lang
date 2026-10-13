@@ -92,10 +92,12 @@ test("result int int direct match") {
 }
 
 test("option int direct match") {
-    assert!(match maybe(3) {
-        Option::Some(v) => v == 3,
-        Option::None => false,
-    });
+    assert!(
+        match maybe(3) {
+            Option::Some(v) => v == 3,
+            Option::None => false,
+        },
+    );
     assert!(match maybe(-1) {
         Option::Some(_) => false,
         Option::None => true,

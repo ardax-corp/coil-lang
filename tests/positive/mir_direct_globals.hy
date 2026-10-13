@@ -3,6 +3,7 @@
 // statics (a class object, a `Vec`) and folded `const` reads, inside
 // loops so the bodies reach the dense and LIR tiers.
 
+use tests::assert;
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
@@ -111,30 +112,30 @@ fn relabel(string s) -> string {
 
 test("static int reads, writes and += in a loop") {
     reset();
-    assert(bump(4) == 12)?;
-    assert(bump(2) == 18)?;
-    assert(counter == 18)?;
+    assert!(bump(4) == 12);
+    assert!(bump(2) == 18);
+    assert!(counter == 18);
     counter = 1;
-    assert(bump(1) == 4)?;
-    assert(read_twice(5) == 15)?;
+    assert!(bump(1) == 4);
+    assert!(read_twice(5) == 15);
 }
 
 test("static float and bool") {
     reset();
-    assert(add_total(4) == 6.0)?;
-    assert(total == 6.0)?;
-    assert(toggle(3))?;
-    assert(!toggle(1))?;
+    assert!(add_total(4) == 6.0);
+    assert!(total == 6.0);
+    assert!(toggle(3));
+    assert!(!toggle(1));
 }
 
 test("heap statics: a class object and a Vec") {
-    assert(acc_sum(5) == 10)?;
-    assert(acc_sum(3) == 13)?;
-    assert(swap_acc(7) == 7)?;
-    assert(acc_sum(2) == 8)?;
-    assert(fill(4) == 18)?;
-    assert(fill(1) == 18)?;
-    assert(len(items) == 5)?;
+    assert!(acc_sum(5) == 10);
+    assert!(acc_sum(3) == 13);
+    assert!(swap_acc(7) == 7);
+    assert!(acc_sum(2) == 8);
+    assert!(fill(4) == 18);
+    assert!(fill(1) == 18);
+    assert!(len(items) == 5);
 }
 
 fn remember(int n) -> int {
@@ -161,16 +162,16 @@ fn last_or(int d) -> int {
 }
 
 test("a two-word Option static") {
-    assert(last_or(-1) == -1)?;
-    assert(remember(4) == 3)?;
-    assert(last_or(-1) == 3)?;
+    assert!(last_or(-1) == -1);
+    assert!(remember(4) == 3);
+    assert!(last_or(-1) == 3);
     last = Option::None;
-    assert(last_or(9) == 9)?;
+    assert!(last_or(9) == 9);
 }
 
 test("const reads and a string static") {
-    assert(relabel("x") == "glob:x")?;
-    assert(label == "glob:x")?;
+    assert!(relabel("x") == "glob:x");
+    assert!(label == "glob:x");
     let line = format("%s %i\n", label, counter);
     write_all(stdout(), to_bytes(line))?;
 }
