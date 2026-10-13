@@ -262,13 +262,16 @@ impl Compiler {
             let boxed = (0..args.len()).any(|i| {
                 call.generic.as_ref().is_some_and(|g| g.boxed[i].is_some()) || (i == 0 && instance.is_some_and(|inst| inst.recv_box.is_some()))
             });
-            let dict = call.generic.is_some()
+            // A shared generic body's call is plain with no dictionary.
+            let generic_plain = call.generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &call.params));
+            let dict = call.generic.as_deref().is_some_and(|g| self.hir_mir_dicts(g) > 0)
                 || instance.is_some_and(|inst| self.hir_mir_quiet(|this| this.emit_instance_dict(&mut CodeBuf::new(), &inst.class, &inst.args)));
             let coro = self.coroutine_fns.contains(&key);
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
             if !dict
+                && generic_plain
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && !boxed
                 && natural_args(self, &call.params)
@@ -294,7 +297,7 @@ impl Compiler {
         let coro = !tail && self.coroutine_fns.contains(&call.key);
         self.raw_instance_call = false;
         let target = self.named_entry_target(&call.key, true);
-        if call.generic.is_none()
+        if call.generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &call.params) && self.hir_mir_dicts(g) == 0)
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
@@ -304,6 +307,13 @@ impl Compiler {
             let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
             t.calls.insert(id.0, crate::mir::HirCallSite { target, pair_args, pair_ret, coro, boxed_ret });
         }
+    }
+
+    /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.
+    fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
+        let forwarded = generic.forwarded.iter().filter(|&&i| self.lookup_slot(&format!("__dict{i}")).is_some()).count();
+        let site = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
+        (forwarded + site) as u32
     }
 
     /// `f(self)` with the diagnostics it reports dropped: the walk asks
