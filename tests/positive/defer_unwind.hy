@@ -2,6 +2,7 @@
 // A child task's panic unwinds only that task, so a test can watch the log.
 // The log is a static `int`: a class capture through a function value is
 // coil-lang#783.
+use tests::assert;
 use task::{scope, Scope, TaskError};
 
 static let LOG: int = 0;
@@ -94,35 +95,35 @@ fn run(unit -> int body) -> bool {
 
 test("a panic runs the defers of each frame it leaves") {
     LOG = 0;
-    assert(run(calls_fails))?;
-    assert(LOG == 12)?;
+    assert!(run(calls_fails));
+    assert!(LOG == 12);
 }
 
 test("a defer whose statement did not run stays out") {
     LOG = 0;
-    assert(run(fn () => skipped(false)))?;
-    assert(LOG == 3)?;
+    assert!(run(fn () => skipped(false)));
+    assert!(LOG == 3);
     LOG = 0;
-    assert(run(fn () => skipped(true)))?;
-    assert(LOG == 43)?;
+    assert!(run(fn () => skipped(true)));
+    assert!(LOG == 43);
 }
 
 test("methods and generic instances unwind") {
     LOG = 0;
     let c = new Counter(5);
-    assert(run(fn () use (c) => c.bump()))?;
-    assert(run(fn () => generic(4)))?;
-    assert(LOG == 56)?;
+    assert!(run(fn () use (c) => c.bump()));
+    assert!(run(fn () => generic(4)));
+    assert!(LOG == 56);
 }
 
 test("a generator's defers run when it panics") {
     LOG = 0;
-    assert(run(drain))?;
-    assert(LOG == 7)?;
+    assert!(run(drain));
+    assert!(LOG == 7);
 }
 
 test("without a panic, defers still run once at the return") {
     LOG = 0;
-    assert(fails(0) == 0)?;
-    assert(LOG == 1)?;
+    assert!(fails(0) == 0);
+    assert!(LOG == 1);
 }

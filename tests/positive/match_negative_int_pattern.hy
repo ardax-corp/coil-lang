@@ -1,4 +1,6 @@
 // #897: a negative int literal is a match pattern, like a positive one.
+use tests::assert;
+
 fn sign(int n) -> int {
     return match n {
         -1 => 1,
@@ -9,9 +11,9 @@ fn sign(int n) -> int {
 }
 
 test("negative int literals match as patterns") {
-    assert(sign(-1) == 1)?;
-    assert(sign(0) == 2)?;
-    assert(sign(1) == 3)?;
-    assert(sign(-2) == 3)?;
-    assert(sign(-9223372036854775807 - 1) == 4)?;
+    assert!(sign(-1) == 1);
+    assert!(sign(0) == 2);
+    assert!(sign(1) == 3);
+    assert!(sign(-2) == 3);
+    assert!(sign(-9223372036854775807 - 1) == 4);
 }

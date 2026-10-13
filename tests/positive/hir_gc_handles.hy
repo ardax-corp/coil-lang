@@ -1,5 +1,6 @@
 // `Root<T>` and `Weak<T>` handles are one host word each, moved between
 // locals and passed to the `gc` natives.
+use tests::assert;
 use gc::{get, root, unroot, upgrade, weak};
 
 fn pinned(string s) -> string {
@@ -22,10 +23,10 @@ fn alive(string s) -> bool {
 }
 
 test("root then get and unroot") {
-    assert(pinned("pin") == "pin")?;
+    assert!(pinned("pin") == "pin");
 }
 
 test("weak upgrade of a live string") {
     let s = "live";
-    assert(alive(s))?;
+    assert!(alive(s));
 }

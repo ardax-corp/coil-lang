@@ -1,5 +1,6 @@
 // HIR lowering of `static let` reads and writes: module statics, class
 // statics, an `Option` static, and a parameter that shadows a static.
+use tests::assert;
 
 static let hits: int = 0;
 
@@ -35,12 +36,12 @@ fn shadowed(int hits) -> int {
 }
 
 test("module statics") {
-    assert(last_or(-1) == -1)?;
-    assert(hit(2) == 2)?;
-    assert(hit(3) == 5)?;
-    assert(last_or(-1) == 3)?;
-    assert(shadowed(21) == 42)?;
-    assert(hits == 5)?;
+    assert!(last_or(-1) == -1);
+    assert!(hit(2) == 2);
+    assert!(hit(3) == 5);
+    assert!(last_or(-1) == 3);
+    assert!(shadowed(21) == 42);
+    assert!(hits == 5);
 }
 
 test("class statics") {
@@ -48,6 +49,6 @@ test("class statics") {
     let before = Counter::count;
     c.bump();
     c.bump();
-    assert(Counter::count == before + 2)?;
-    assert(c.value == 2)?;
+    assert!(Counter::count == before + 2);
+    assert!(c.value == 2);
 }

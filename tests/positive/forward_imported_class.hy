@@ -2,6 +2,7 @@
 // class or enum: its forward signature resolves `Rec` / `Shape` through the
 // `use` (#888).
 
+use tests::assert;
 use forward_rec::{Rec, make, Shape, square};
 
 fn twice(int n) -> int {
@@ -29,11 +30,11 @@ fn area(Shape s) -> int {
 }
 
 test("later fn takes an imported enum") {
-    assert(side(4) == 16)?;
-    assert(area(Shape::Dot) == 0)?;
+    assert!(side(4) == 16);
+    assert!(area(Shape::Dot) == 0);
 }
 
 test("later fn takes and returns an imported class") {
-    assert(twice(3) == 6)?;
-    assert(later(make(5)).n == 10)?;
+    assert!(twice(3) == 6);
+    assert!(later(make(5)).n == 10);
 }

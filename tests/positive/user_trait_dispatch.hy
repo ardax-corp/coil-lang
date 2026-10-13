@@ -1,6 +1,7 @@
 // Ground user-trait methods emit CALL. The same method under an open
 // generic bound uses dictionary CallIndirect. Ground calls to those
 // generics specialize to CALL; dictionaries stay on the shared body.
+use tests::assert;
 
 trait Measurable<T> {
     fn size(T x) -> int {}
@@ -44,18 +45,18 @@ fn len_of<T: Length>(T x) -> int {
 }
 
 test("user trait at a ground type") {
-    assert(41.size() == 42)?;
+    assert!(41.size() == 42);
 }
 
 test("user trait under a generic bound") {
-    assert(size_of(41) == 42)?;
-    assert(size_of_ufcs(41) == 42)?;
+    assert!(size_of(41) == 42);
+    assert!(size_of_ufcs(41) == 42);
 }
 
 test("multi-method user trait via dictionary") {
-    assert(pair_right_of(3) == 13)?;
+    assert!(pair_right_of(3) == 13);
 }
 
 test("Length bound specializes at a ground call") {
-    assert(len_of("ab") == 2)?;
+    assert!(len_of("ab") == 2);
 }

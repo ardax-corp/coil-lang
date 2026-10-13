@@ -1,5 +1,6 @@
 // A generic class's shared method stores its type parameter's value into a
 // new object; the value must survive the allocations before the store.
+use tests::assert;
 use string::format;
 
 class Node<T> {
@@ -46,14 +47,14 @@ fn fill(int n) -> Stack<string> {
 
 test("strings pushed through a shared method") {
     let s = fill(50);
-    assert(s.len == 50)?;
-    assert((s.top() ?? "none") == "item b")?;
+    assert!(s.len == 50);
+    assert!((s.top() ?? "none") == "item b");
 }
 
 test("ints pushed through a shared method") {
     let s = Stack::new();
     s.push(3);
     s.push(8);
-    assert(s.len == 2)?;
-    assert((s.top() ?? 0) == 8)?;
+    assert!(s.len == 2);
+    assert!((s.top() ?? 0) == 8);
 }

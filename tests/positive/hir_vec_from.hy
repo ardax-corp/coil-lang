@@ -1,5 +1,6 @@
 // `Vec::from(array)` lowered from HIR: scalar and heap elements, a literal
 // and a local array, and growth after the copy.
+use tests::assert;
 
 class Node {
     pub v: int,
@@ -16,16 +17,16 @@ fn sum(Vec<int> v) -> int {
 test("from a literal") {
     let v = Vec::from([1, 2, 3]);
     v.push(4);
-    assert(v.len() == 4)?;
-    assert(sum(v) == 10)?;
+    assert!(v.len() == 4);
+    assert!(sum(v) == 10);
 }
 
 test("from a local array") {
     let a = [5, 6];
     let v: Vec<int> = Vec::from(a);
     v.push(7);
-    assert(sum(v) == 18)?;
-    assert(a[0] == 5)?;
+    assert!(sum(v) == 18);
+    assert!(a[0] == 5);
 }
 
 test("heap elements") {
@@ -35,5 +36,5 @@ test("heap elements") {
     for n in v {
         total = total + n.v;
     }
-    assert(total == 6)?;
+    assert!(total == 6);
 }

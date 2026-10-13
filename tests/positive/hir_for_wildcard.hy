@@ -1,4 +1,5 @@
 // `for _ in xs` steps every item without binding it.
+use tests::assert;
 
 fn count_range(Range<int> r) -> int {
     let n = 0;
@@ -17,7 +18,7 @@ fn count_array(Vec<int> xs) -> int {
 }
 
 test("wildcard over a range value") {
-    assert(count_range(2..7) == 5)?;
+    assert!(count_range(2..7) == 5);
 }
 
 test("wildcard over a literal range") {
@@ -25,11 +26,11 @@ test("wildcard over a literal range") {
     for _ in 0..3 {
         n = n + 2;
     }
-    assert(n == 6)?;
+    assert!(n == 6);
 }
 
 test("wildcard over an array") {
-    assert(count_array([4, 5, 6]) == 3)?;
+    assert!(count_array([4, 5, 6]) == 3);
 }
 
 test("wildcard over a vec") {
@@ -38,5 +39,5 @@ test("wildcard over a vec") {
     for _ in v {
         n = n + 1;
     }
-    assert(n == 4)?;
+    assert!(n == 4);
 }

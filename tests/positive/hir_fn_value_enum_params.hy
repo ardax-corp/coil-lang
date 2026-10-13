@@ -1,6 +1,7 @@
 // A function value whose parameters are enums: each enum argument goes
 // through `CallIndirect` as its one word (a niche enum as its niche word,
 // any other boxed), as the AST's escaped-function ABI.
+use tests::assert;
 use string::format;
 
 enum Shape {
@@ -83,7 +84,7 @@ test("named functions as values") {
         tv,
         a(o),
     );
-    assert(s == "3,7,x,none,5,4,12,6,0,15,11", s)?;
+    assert!(s == "3,7,x,none,5,4,12,6,0,15,11", s);
 }
 
 test("lambdas and higher-order calls") {
@@ -108,5 +109,5 @@ test("lambdas and higher-order calls") {
         n,
         p,
     );
-    assert(s == "a!,-,b!,y,nn", s)?;
+    assert!(s == "a!,-,b!,y,nn", s);
 }

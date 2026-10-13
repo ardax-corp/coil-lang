@@ -1508,11 +1508,14 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
-        // Derives, attribute macros and trait contract copies run in the
-        // discovery stage, which works on cached files: compile such input
-        // as an in-memory file.
+        // Derives, attribute and function-style macros and trait contract
+        // copies run in the discovery stage, which works on cached files:
+        // compile such input as an in-memory file.
         let trait_contracts = src.contains("trait ") && (src.contains("requires") || src.contains("ensures"));
-        if src.contains("#[") || trait_contracts {
+        let macro_call = src
+            .match_indices("!(")
+            .any(|(at, _)| src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'));
+        if src.contains("#[") || trait_contracts || macro_call {
             let path = PathBuf::from("<input>.hy");
             self.overlays.insert(path.clone(), src.to_string());
             let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));

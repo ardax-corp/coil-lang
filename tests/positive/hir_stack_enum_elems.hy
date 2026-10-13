@@ -1,5 +1,7 @@
 // A stack array of boxed enum values, and a variant whose payload is a
 // two-word Option (stored boxed), lower straight to MIR.
+use tests::assert;
+
 enum Op {
     Add(int, int),
     Neg(Option<int>),
@@ -28,5 +30,5 @@ fn arr() -> int {
 }
 
 test("stack array of enums and a boxed Option payload") {
-    assert(ev(mk()) + arr() == 12)?;
+    assert!(ev(mk()) + arr() == 12);
 }

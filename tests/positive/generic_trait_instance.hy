@@ -2,6 +2,7 @@
 // to every `Box<_>`: the head's bare uppercase letters are its type
 // parameters, scoped over the head and the method bodies, and each use
 // instantiates them afresh (#550). Bounds on the parameters are #551.
+use tests::assert;
 
 class Box<T> {
     pub item: T,
@@ -54,23 +55,23 @@ fn first<T>(Box<T> b) -> T {
 }
 
 test("generic class instance at several instantiations") {
-    assert(new Box(3).describe() == "Box")?;
-    assert(new Box("x").describe() == "Box")?;
-    assert(describe(new Box(1.5)) == "Box")?;
-    assert(new Box(new Box(1)).describe() == "Box")?;
-    assert(new Box(1).tag() == 1)?;
+    assert!(new Box(3).describe() == "Box");
+    assert!(new Box("x").describe() == "Box");
+    assert!(describe(new Box(1.5)) == "Box");
+    assert!(new Box(new Box(1)).describe() == "Box");
+    assert!(new Box(1).tag() == 1);
 }
 
 test("generic enum instance") {
     let n: Opt<int> = Opt::Nothing;
-    assert(n.describe() == "Nothing")?;
+    assert!(n.describe() == "Nothing");
     let j: Opt<string> = Opt::Just("s");
-    assert(j.describe() == "Just")?;
-    assert(j.tag() == 2)?;
+    assert!(j.describe() == "Just");
+    assert!(j.tag() == 2);
 }
 
 test("generic instance through a bound and next to a concrete one") {
-    assert(show_it(new Box(7)) == "Box")?;
-    assert(show_it(4) == "int")?;
-    assert(first(new Box(9)) == 9)?;
+    assert!(show_it(new Box(7)) == "Box");
+    assert!(show_it(4) == "int");
+    assert!(first(new Box(9)) == 9);
 }

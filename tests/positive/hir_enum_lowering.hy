@@ -2,6 +2,8 @@
 // boxed and two-slot dispatch, in-place payload bindings, `?` / `??`,
 // Result-mode returns and payloads built above live operands. The language
 // harness also runs under `--hir`, so each case pins both codegens.
+use tests::assert;
+
 enum Shape {
     Dot,
     Circle(int),
@@ -95,51 +97,51 @@ fn step(Shape s) -> int {
 }
 
 test("boxed match binds multi-field payloads in place") {
-    assert(area(Shape::Rect(3, 4)) == 12)?;
-    assert(area(Shape::Circle(2)) == 12)?;
-    assert(area(Shape::Dot) == 0)?;
+    assert!(area(Shape::Rect(3, 4)) == 12);
+    assert!(area(Shape::Circle(2)) == 12);
+    assert!(area(Shape::Dot) == 0);
 }
 
 test("try and coalesce on two-slot Options") {
-    assert(orz(8) == 2)?;
-    assert(orz(6) == -1)?;
-    assert(orz(5) == -1)?;
+    assert!(orz(8) == 2);
+    assert!(orz(6) == -1);
+    assert!(orz(5) == -1);
 }
 
 test("Result-mode returns and raise") {
-    assert(
+    assert!(
         match calc(10, 2) {
             Result::Ok(n) => n == 6,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match calc(1, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == "div by zero",
         },
-    )?;
+    );
 }
 
 test("identity arms and bound locals of two-slot calls") {
-    assert(ok_or_zero(checked_div(8, 2)) == 4)?;
-    assert(ok_or_zero(checked_div(8, 0)) == 0)?;
-    assert(err_scaled(8, 2) == 4)?;
-    assert(err_scaled(8, 0) == -100)?;
-    assert(
+    assert!(ok_or_zero(checked_div(8, 2)) == 4);
+    assert!(ok_or_zero(checked_div(8, 0)) == 0);
+    assert!(err_scaled(8, 2) == 4);
+    assert!(err_scaled(8, 0) == -100);
+    assert!(
         match bind_then_try(8, 2) {
             Result::Ok(v) => v == 4,
             Result::Err(_) => false,
         },
-    )?;
+    );
 }
 
 test("payload built above a live operand") {
-    assert(sum_after(1) == 1007)?;
+    assert!(sum_after(1) == 1007);
 }
 
 test("statement match whose arms all return") {
-    assert(step(Shape::Dot) == -1)?;
-    assert(step(Shape::Circle(3)) == 1)?;
-    assert(step(Shape::Rect(1, 2)) == 2)?;
+    assert!(step(Shape::Dot) == -1);
+    assert!(step(Shape::Circle(3)) == 1);
+    assert!(step(Shape::Rect(1, 2)) == 2);
 }

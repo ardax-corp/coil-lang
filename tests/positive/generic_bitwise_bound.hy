@@ -3,6 +3,7 @@
 // `T: Integral` implies all of them and `Num` (#816, #819-#824). A user
 // class overloads them with `impl`, and `-v` lowers through `impl Neg`
 // (#812).
+use tests::assert;
 
 fn low_bits<T: Integral>(T x, T mask) -> T {
     return x & mask;
@@ -85,45 +86,45 @@ impl Neg for V {
 }
 
 test("int through Integral") {
-    assert(low_bits(255, 15) == 15)?;
-    assert(mix(6, 1) == (((6 << 1) | (6 >> 1)) ^ ~6))?;
-    assert(integral_arith(2, 3) == (5 * 3) % 8)?;
+    assert!(low_bits(255, 15) == 15);
+    assert!(mix(6, 1) == (((6 << 1) | (6 >> 1)) ^ ~6));
+    assert!(integral_arith(2, 3) == (5 * 3) % 8);
 }
 
 test("int through the single traits") {
-    assert(shl_only(1, 4) == 16)?;
-    assert(not_only(0) == -1)?;
-    assert(not_only(5) == -6)?;
-    assert(or_in_place(4, 1) == 5)?;
+    assert!(shl_only(1, 4) == 16);
+    assert!(not_only(0) == -1);
+    assert!(not_only(5) == -6);
+    assert!(or_in_place(4, 1) == 5);
 }
 
 test("byte through the single traits") {
     let b: byte = 12 as byte;
     let m: byte = 10 as byte;
-    assert(shl_only(b, 1) == (b << 1))?;
-    assert(or_in_place(b, m) == (b | m))?;
+    assert!(shl_only(b, 1) == (b << 1));
+    assert!(or_in_place(b, m) == (b | m));
 }
 
 test("user class bitwise operators") {
     let a = new Flags(12);
     let b = new Flags(10);
-    assert((a & b).bits == 8)?;
-    assert((a | b).bits == 14)?;
-    assert((a ^ b).bits == 6)?;
-    assert((a << 1).bits == 24)?;
-    assert((a >> 2).bits == 3)?;
-    assert((~a).bits == 3)?;
+    assert!((a & b).bits == 8);
+    assert!((a | b).bits == 14);
+    assert!((a ^ b).bits == 6);
+    assert!((a << 1).bits == 24);
+    assert!((a >> 2).bits == 3);
+    assert!((~a).bits == 3);
     let c = new Flags(1);
     c |= new Flags(2);
     c <<= 1;
-    assert(c.bits == 6)?;
-    assert(shl_only(a, 1).bits == 24)?;
-    assert(not_only(a).bits == 3)?;
-    assert(or_in_place(a, b).bits == 14)?;
+    assert!(c.bits == 6);
+    assert!(shl_only(a, 1).bits == 24);
+    assert!(not_only(a).bits == 3);
+    assert!(or_in_place(a, b).bits == 14);
 }
 
 test("user class negation") {
     let v = -new V(3);
-    assert(v.x == -3)?;
-    assert(neg_only(new V(4)).x == -4)?;
+    assert!(v.x == -3);
+    assert!(neg_only(new V(4)).x == -4);
 }

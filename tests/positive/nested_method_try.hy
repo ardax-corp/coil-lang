@@ -1,5 +1,6 @@
 // COI-108: nested method `?` with a different Ok payload must keep the
 // inner ReturnPair (not JumpIfMatch a prematurely boxed heap enum).
+use tests::assert;
 
 class Enc {}
 
@@ -46,13 +47,13 @@ fn free_encode_into(int n) -> Result<int, string> {
 test("nested method try preserves Ok payload length") {
     let e = new Enc();
     let n = e.encode_into(10)?;
-    assert(n == 2)?;
+    assert!(n == 2);
 }
 
 test("nested method try preserves Ok byte payload") {
     let e = new Enc();
     let b = e.encode_first(10)?;
-    assert(b == (10 as byte))?;
+    assert!(b == (10 as byte));
 }
 
 test("nested method try propagates Err") {
@@ -62,12 +63,12 @@ test("nested method try propagates Err") {
         Result::Ok(_) => "ok",
         Result::Err(m) => m,
     };
-    assert(msg == "boom")?;
+    assert!(msg == "boom");
 }
 
 test("nested free-fn try mismatched Result payload") {
     let n = free_encode_into(7)?;
-    assert(n == 1)?;
+    assert!(n == 1);
 }
 
 class Client {}
@@ -89,7 +90,7 @@ impl Client {
 test("nested same-Result methods declared later") {
     let c = new Client();
     let n = c.get()?;
-    assert(n == 42)?;
+    assert!(n == 42);
 }
 
 class ClientFail {}
@@ -115,7 +116,7 @@ test("forward same-Result methods propagate Err") {
         Result::Ok(_) => "ok",
         Result::Err(m) => m,
     };
-    assert(msg == "nope")?;
+    assert!(msg == "nope");
 }
 
 class Counter {}
@@ -132,7 +133,7 @@ impl Counter {
 
 test("forward non-Result instance method call") {
     let c = new Counter();
-    assert(c.early() == 7)?;
+    assert!(c.early() == 7);
 }
 
 class EncFwd {}
@@ -153,7 +154,7 @@ impl EncFwd {
 test("forward mismatched-Result method try") {
     let e = new EncFwd();
     let n = e.encode_into(9)?;
-    assert(n == 1)?;
+    assert!(n == 1);
 }
 
 class Factory {}
@@ -170,5 +171,5 @@ impl Factory {
 
 test("forward static method call from instance") {
     let f = new Factory();
-    assert(f.make() == 9)?;
+    assert!(f.make() == 9);
 }

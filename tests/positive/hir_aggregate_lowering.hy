@@ -3,6 +3,8 @@
 // `op=`, `len`, and the builtin Vec constructor and methods. The
 // language harness also runs under `--hir`, so each case pins both
 // codegens.
+use tests::assert;
+
 fn sum_arr(Vec<int> xs) -> int {
     let total = 0;
     let i = 0;
@@ -82,17 +84,17 @@ fn vec_ops(int n) -> int {
 }
 
 test("Vec constructors and methods") {
-    assert(total(build(5)) == 25)?;
-    assert(vec_ops(3) == 4000)?;
+    assert!(total(build(5)) == 25);
+    assert!(vec_ops(3) == 4000);
 }
 
 test("arrays and tuples") {
     let xs = heap_arr(1);
-    assert(sum_arr(xs) == 6)?;
+    assert!(sum_arr(xs) == 6);
     fill(xs, 10);
-    assert(sum_arr(xs) == 36)?;
-    assert(pair_sum((1, 2, 3)) == 7)?;
-    assert(ring(xs, -1) == 24)?;
-    assert(nested(2) == 12)?;
-    assert(staged(heap_arr(1), 5) == 6)?;
+    assert!(sum_arr(xs) == 36);
+    assert!(pair_sum((1, 2, 3)) == 7);
+    assert!(ring(xs, -1) == 24);
+    assert!(nested(2) == 12);
+    assert!(staged(heap_arr(1), 5) == 6);
 }

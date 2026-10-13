@@ -1,5 +1,7 @@
 // `defer` bodies run as thunks at each later `return`, last first, with
 // their captures read from the frame at that moment.
+use tests::assert;
+
 class Log {
     pub n: int,
 }
@@ -53,26 +55,26 @@ fn falls_through(Log log) {
 test("defers run last first") {
     let log = new Log(0);
     lifo(log);
-    assert(log.n == 321)?;
+    assert!(log.n == 321);
 }
 
 test("an early return runs only the defers before it") {
     let log = new Log(0);
-    assert(early(log, 0) == 0)?;
-    assert(log.n == 1)?;
+    assert!(early(log, 0) == 0);
+    assert!(log.n == 1);
     let log2 = new Log(0);
-    assert(early(log2, 6) == 12)?;
-    assert(log2.n == 961)?;
+    assert!(early(log2, 6) == 12);
+    assert!(log2.n == 961);
 }
 
 test("a capture reads its value at the return") {
     let log = new Log(0);
-    assert(late_value(log) == 7)?;
-    assert(log.n == 7)?;
+    assert!(late_value(log) == 7);
+    assert!(log.n == 7);
 }
 
 test("defers run on fall-through") {
     let log = new Log(0);
     falls_through(log);
-    assert(log.n == 54)?;
+    assert!(log.n == 54);
 }

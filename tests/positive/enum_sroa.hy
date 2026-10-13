@@ -1,5 +1,6 @@
 // Local enums that are only matched become a tag slot plus payload slots
 // (no allocation). Semantics must not change whether or not they do.
+use tests::assert;
 use string::format;
 
 enum Shape {
@@ -127,36 +128,36 @@ fn escapes(int i) -> Shape {
 }
 
 test("variants built on different paths") {
-    assert(area(0) == 4)?;
-    assert(area(1) == 1010)?;
-    assert(area(2) == -1)?;
-    assert(area(3) == 25)?;
-    assert(area(4) == 4040)?;
+    assert!(area(0) == 4);
+    assert!(area(1) == 1010);
+    assert!(area(2) == -1);
+    assert!(area(3) == 25);
+    assert!(area(4) == 4040);
 }
 
 test("four-word and string payloads") {
-    assert(wide(1) == 1234)?;
-    assert(label("hi") == "hi!")?;
+    assert!(wide(1) == 1234);
+    assert!(label("hi") == "hi!");
 }
 
 test("if let and default arms") {
-    assert(if_let(3) == 12)?;
-    assert(defaulted(6) == 7)?;
+    assert!(if_let(3) == 12);
+    assert!(defaulted(6) == 7);
 }
 
 test("rebuilt every iteration") {
     // Even i contribute i, odd i contribute 2i.
-    assert(rebuilt_in_loop(6) == (0 + 2 + 4) + (2 + 6 + 10))?;
+    assert!(rebuilt_in_loop(6) == (0 + 2 + 4) + (2 + 6 + 10));
 }
 
 test("matched twice") {
-    assert(matched_twice(3) == 712)?;
+    assert!(matched_twice(3) == 712);
 }
 
 test("unit-only enum") {
-    assert(color_code(0) == 10)?;
-    assert(color_code(1) == 20)?;
-    assert(color_code(2) == 30)?;
+    assert!(color_code(0) == 10);
+    assert!(color_code(1) == 20);
+    assert!(color_code(2) == 30);
 }
 
 test("escaping enum keeps its identity") {
@@ -165,5 +166,5 @@ test("escaping enum keeps its identity") {
         Shape::Circle(x) => x,
         default => 0,
     };
-    assert(r == 5)?;
+    assert!(r == 5);
 }

@@ -1,5 +1,7 @@
 // A coroutine handle is one word: `MakeCoro` for the call, then
 // `ResumeCoro` (with or without a sent value) and `DoneCoro`.
+use tests::assert;
+
 gen fn upto(int n) {
     let i = 0;
     while i < n {
@@ -43,14 +45,14 @@ fn fresh_not_done() -> bool {
 }
 
 test("resume until done") {
-    assert(sum_upto(5) == 10)?;
-    assert(sum_upto(0) == 0)?;
+    assert!(sum_upto(5) == 10);
+    assert!(sum_upto(0) == 0);
 }
 
 test("resume with a sent value") {
-    assert(doubled(3, 4) == 14)?;
+    assert!(doubled(3, 4) == 14);
 }
 
 test("a fresh handle is not done") {
-    assert(!fresh_not_done())?;
+    assert!(!fresh_not_done());
 }

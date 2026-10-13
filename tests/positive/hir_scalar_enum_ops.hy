@@ -1,5 +1,7 @@
 // An int-backed scalar enum with no operator instance is its backing word:
 // arithmetic is the raw int opcodes, as in the AST.
+use tests::assert;
+
 #[repr(int)]
 enum Code {
     Low = 10,
@@ -19,7 +21,7 @@ fn scaled(Code c) -> int {
 }
 
 test("scalar enum arithmetic") {
-    assert(offset(Code::Low, 5) == 15)?;
-    assert(spread() == 240)?;
-    assert(scaled(Code::High) == 100)?;
+    assert!(offset(Code::Low, 5) == 15);
+    assert!(spread() == 240);
+    assert!(scaled(Code::High) == 100);
 }

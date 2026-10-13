@@ -1,6 +1,7 @@
 // Lambdas, named functions read as values and calls through function
 // values lower straight to MIR: captures, then `MakeFn` of the code; the
 // arguments, the function word, then `CallIndirect`, as HIR emission.
+use tests::assert;
 use gc::collect;
 
 class Cell {
@@ -103,35 +104,35 @@ fn pick(bool hi) -> int -> int {
 }
 
 test("captures of a word and a string") {
-    assert(scaled(3, 4) == 18)?;
-    assert(greet("coil") == "hello, coil!")?;
+    assert!(scaled(3, 4) == 18);
+    assert!(greet("coil") == "hello, coil!");
 }
 
 test("a capture of a class object across a collection") {
-    assert(boxed(41) == 42)?;
+    assert!(boxed(41) == 42);
 }
 
 test("closures made in a loop") {
-    assert(many(200) == 200 * 2 + 199 * 200 / 2)?;
+    assert!(many(200) == 200 * 2 + 199 * 200 / 2);
 }
 
 test("named functions as values") {
-    assert(named(5) == 7)?;
-    assert(apply(inc, 9) == 10)?;
-    assert(sum_with(inc, 3) == 6)?;
-    assert(apply(pick(true), 4) == 5)?;
-    assert(apply(pick(false), 4) == 3)?;
+    assert!(named(5) == 7);
+    assert!(apply(inc, 9) == 10);
+    assert!(sum_with(inc, 3) == 6);
+    assert!(apply(pick(true), 4) == 5);
+    assert!(apply(pick(false), 4) == 3);
 }
 
 test("float and bool results") {
-    assert(applyf(fn (float x) => x * 0.5, 3.0) == 1.5)?;
-    assert(test_both(fn (int x) => x > 0, 1, 2))?;
-    assert(!test_both(fn (int x) => x > 0, 1, -2))?;
+    assert!(applyf(fn (float x) => x * 0.5, 3.0) == 1.5);
+    assert!(test_both(fn (int x) => x > 0, 1, 2));
+    assert!(!test_both(fn (int x) => x > 0, 1, -2));
 }
 
 test("enum results through a function value") {
-    assert(first_half(half, 8) == 4)?;
-    assert(first_half(half, 7) == -1)?;
-    assert(parsed(parse, 4) == 40)?;
-    assert(parsed(parse, -4) == -1)?;
+    assert!(first_half(half, 8) == 4);
+    assert!(first_half(half, 7) == -1);
+    assert!(parsed(parse, 4) == 40);
+    assert!(parsed(parse, -4) == -1);
 }

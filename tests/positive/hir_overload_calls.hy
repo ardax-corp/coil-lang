@@ -1,5 +1,7 @@
 // Calls to overloaded functions go to the selected overload's keyed entry,
 // by type and by arity.
+use tests::assert;
+
 fn mag(int x) -> int {
     if x < 0 {
         return 0 - x;
@@ -35,14 +37,14 @@ fn scaled(float x) -> float {
 }
 
 test("overloads chosen by argument type") {
-    assert(mag(-4) == 4)?;
-    assert(mag(3) == 3)?;
-    assert(spread(2, 7) == 55)?;
-    assert(scaled(-1.5) == 3.0)?;
+    assert!(mag(-4) == 4);
+    assert!(mag(3) == 3);
+    assert!(spread(2, 7) == 55);
+    assert!(scaled(-1.5) == 3.0);
 }
 
 test("overloads chosen by arity") {
-    assert(join("a") == "a")?;
-    assert(join("a", "b") == "ab")?;
-    assert(join("a", "b", join("c")) == "abc")?;
+    assert!(join("a") == "a");
+    assert!(join("a", "b") == "ab");
+    assert!(join("a", "b", join("c")) == "abc");
 }

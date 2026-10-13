@@ -1,5 +1,6 @@
 // T3 cross-boundary waits: `task::channel` between tasks, `task::blocking`,
 // and `thread` channels / join / locks that suspend only the waiting task.
+use tests::assert;
 use task::{scope, Scope, TaskError, Channel, ChannelError};
 use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, ThreadError, channel as thread_channel};
 use clock::sleep_ms;
@@ -75,8 +76,8 @@ test("a full channel suspends the sender until the receiver takes a value") {
             total
         },
     );
-    assert(ok_or(r, -1) == 3)?;
-    assert(log[0] == "sent 1" && log[1] == "receiving" && log[2] == "sent 2")?;
+    assert!(ok_or(r, -1) == 3);
+    assert!(log[0] == "sent 1" && log[1] == "receiving" && log[2] == "sent 2");
 }
 
 test("try_send and try_recv do not wait") {
@@ -87,20 +88,20 @@ test("try_send and try_recv do not wait") {
         Result::Err(ChannelError::Full) => true,
         default => false,
     };
-    assert(full)?;
-    assert(ch.len() == 2 && ch.capacity() == 2)?;
-    assert(take(ch) == 1 && take(ch) == 2)?;
+    assert!(full);
+    assert!(ch.len() == 2 && ch.capacity() == 2);
+    assert!(take(ch) == 1 && take(ch) == 2);
     let empty = match ch.try_recv() {
         Result::Err(ChannelError::Empty) => true,
         default => false,
     };
-    assert(empty)?;
+    assert!(empty);
     ch.close();
     let closed = match ch.try_recv() {
         Result::Err(ChannelError::Closed) => true,
         default => false,
     };
-    assert(closed && ch.is_closed())?;
+    assert!(closed && ch.is_closed());
 }
 
 test("values are shared, not copied") {
@@ -125,8 +126,8 @@ test("values are shared, not copied") {
             0
         },
     );
-    assert(ok_or(r, -1) == 0)?;
-    assert(v.len() == 1 && v[0] == 42)?;
+    assert!(ok_or(r, -1) == 0);
+    assert!(v.len() == 1 && v[0] == 42);
 }
 
 test("blocking runs on a worker while other tasks keep going") {
@@ -158,8 +159,8 @@ test("blocking runs on a worker while other tasks keep going") {
             ok_or(b.join(), -100) + seven
         },
     );
-    assert(ok_or(r, -1) == 43)?;
-    assert(log[0] == "other task ran" && log[1] == "blocking done")?;
+    assert!(ok_or(r, -1) == 43);
+    assert!(log[0] == "other task ran" && log[1] == "blocking done");
 }
 
 fn produce(Sender tx) -> int {
@@ -196,8 +197,8 @@ test("a thread channel recv suspends only the receiving task") {
         },
     );
     join(worker)?;
-    assert(ok_or(r, -1) == 11)?;
-    assert(log[0] == "ticker" && log[1] == "got first")?;
+    assert!(ok_or(r, -1) == 11);
+    assert!(log[0] == "ticker" && log[1] == "got first");
 }
 
 fn bump(int n) -> (int, int) {
@@ -229,8 +230,8 @@ test("a contended with_lock suspends only the waiting task") {
             ok_or(locker.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 10)?;
-    assert(log[0] == "unlocking" && log[1] == "locked")?;
+    assert!(ok_or(r, -1) == 10);
+    assert!(log[0] == "unlocking" && log[1] == "locked");
 }
 
 test("join on a running thread suspends only the joining task") {
@@ -258,6 +259,6 @@ test("join on a running thread suspends only the joining task") {
             ok_or(joiner.join(), -100)
         },
     );
-    assert(ok_or(r, -1) == 16)?;
-    assert(log[0] == "ticker" && log[1] == "joined")?;
+    assert!(ok_or(r, -1) == 16);
+    assert!(log[0] == "ticker" && log[1] == "joined");
 }

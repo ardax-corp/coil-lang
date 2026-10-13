@@ -1,11 +1,12 @@
 // Exercised by `coil test` — success-path assert / Result edges.
+use tests::assert;
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
 test("assert arithmetic") {
-    assert(true)?;
-    assert(1 + 1 == 2, "arithmetic")?;
+    assert!(true);
+    assert!(1 + 1 == 2, "arithmetic");
 }
 
 test("match on assert Ok") {

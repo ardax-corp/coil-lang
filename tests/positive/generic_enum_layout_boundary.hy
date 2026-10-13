@@ -4,6 +4,7 @@
 // generic fns, calls through a trait bound (mono and dictionary), and
 // default trait bodies convert at the boundary. Non-`T` args to a shared
 // generic body pass unboxed.
+use tests::assert;
 
 class Node {
     pub i: int,
@@ -79,33 +80,33 @@ fn maybe_through<T: FromNode>(T proto, int k) -> int {
 }
 
 test("Result<T, E> return through a bound") {
-    assert(ok_of(new Config(0), new Node(5)) == 1)?;
-    assert(ok_of(new Config(0), new Node(-5)) == 0)?;
+    assert!(ok_of(new Config(0), new Node(5)) == 1);
+    assert!(ok_of(new Config(0), new Node(-5)) == 0);
 }
 
 test("through two generic layers") {
-    assert(via_two_generics(new Config(0), new Node(5)) == 1)?;
-    assert(via_two_generics(new Config(0), new Node(-5)) == 0)?;
+    assert!(via_two_generics(new Config(0), new Node(5)) == 1);
+    assert!(via_two_generics(new Config(0), new Node(-5)) == 0);
 }
 
 test("default method calls a sibling through the dictionary") {
-    assert(new Config(0).port_or(new Node(7), 42) == 7)?;
-    assert(new Config(0).port_or(new Node(-1), 42) == 42)?;
+    assert!(new Config(0).port_or(new Node(7), 42) == 7);
+    assert!(new Config(0).port_or(new Node(-1), 42) == 42);
 }
 
 test("Option<T> param through a bound") {
-    assert(pick_through(new Config(1), Option::Some(new Config(9))).port == 9)?;
-    assert(pick_through(new Config(1), Option::None).port == 1)?;
+    assert!(pick_through(new Config(1), Option::Some(new Config(9))).port == 9);
+    assert!(pick_through(new Config(1), Option::None).port == 1);
 }
 
 test("Option<T> return through a bound") {
-    assert(maybe_through(new Config(0), 3) == 1)?;
-    assert(maybe_through(new Config(0), -3) == 0)?;
+    assert!(maybe_through(new Config(0), 3) == 1);
+    assert!(maybe_through(new Config(0), -3) == 0);
 }
 
 test("default method passes Option<T> between siblings") {
-    assert(new Config(1).pick_or_self(4).port == 4)?;
-    assert(new Config(1).pick_or_self(-4).port == 1)?;
+    assert!(new Config(1).pick_or_self(4).port == 4);
+    assert!(new Config(1).pick_or_self(-4).port == 1);
 }
 
 test("ground calls stay concrete") {
@@ -113,8 +114,8 @@ test("ground calls stay concrete") {
         Result::Ok(c) => c.port,
         Result::Err(_) => -1,
     };
-    assert(p == 8)?;
-    assert(new Config(1).pick(Option::Some(new Config(6))).port == 6)?;
+    assert!(p == 8);
+    assert!(new Config(1).pick(Option::Some(new Config(6))).port == 6);
 }
 
 fn wrap_res<T>(T x, bool bad) -> Result<T, string> {
@@ -133,8 +134,8 @@ fn res_port(bool bad) -> int {
 }
 
 test("generic fn returning Result<T, E> at a heap T") {
-    assert(res_port(false) == 8)?;
-    assert(res_port(true) == -1)?;
+    assert!(res_port(false) == 8);
+    assert!(res_port(true) == -1);
 }
 
 fn port_or<T>(Result<T, string> r, T d) -> T {
@@ -152,6 +153,6 @@ fn ok_cfg(int p) -> Result<Config, string> {
 }
 
 test("generic param Result<T, E> from a niche caller") {
-    assert(port_or(ok_cfg(5), new Config(9)).port == 5)?;
-    assert(port_or(ok_cfg(-1), new Config(9)).port == 9)?;
+    assert!(port_or(ok_cfg(5), new Config(9)).port == 5);
+    assert!(port_or(ok_cfg(-1), new Config(9)).port == 9);
 }

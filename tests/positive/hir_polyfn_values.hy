@@ -1,6 +1,7 @@
 // Generic functions as `PolyFn` values: a let-bound or `forall` local
 // boxes its arguments, passes call-site dictionaries for a constrained
 // source, and unboxes a type-parameter result.
+use tests::assert;
 
 trait Tagged<T> {
     fn tag_of(T x) -> int {}
@@ -34,25 +35,25 @@ fn capture<T: Tagged>(T _w) {
 
 test("let-bound generic at two types") {
     let f = id;
-    assert(f(7) == 7)?;
-    assert(f(2.5) == 2.5)?;
+    assert!(f(7) == 7);
+    assert!(f(2.5) == 2.5);
 }
 
 test("two-argument constrained generic") {
     let add = sum;
-    assert(add(20, 22) == 42)?;
+    assert!(add(20, 22) == 42);
 }
 
 test("constrained generic with call-site evidence") {
     let t = tagged;
-    assert(t(4) == 40)?;
+    assert!(t(4) == 40);
 }
 
 test("forall parameter") {
-    assert(twice(id, 5) == 5)?;
+    assert!(twice(id, 5) == 5);
 }
 
 test("returned PolyFn with captured evidence") {
     let c = capture(0);
-    assert(c(3) == 30)?;
+    assert!(c(3) == 30);
 }

@@ -1,4 +1,6 @@
 // A `gen fn` declared in an `impl` returns a coroutine, as a free one (#778).
+use tests::assert;
+
 class Counter {
     n: int,
 }
@@ -27,7 +29,7 @@ test("gen fn method yields through its receiver") {
     let a = resume g;
     let b = resume g;
     let d = resume g;
-    assert(a == 5 && b == 6 && d == 7)?;
+    assert!(a == 5 && b == 6 && d == 7);
 }
 
 impl Counter {
@@ -39,5 +41,5 @@ impl Counter {
 
 test("gen fn method declared after its caller") {
     let c = new Counter(3);
-    assert(c.sum_pair() == 7)?;
+    assert!(c.sum_pair() == 7);
 }

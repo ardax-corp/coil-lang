@@ -1,6 +1,7 @@
 // #593: a `?` inside a call argument used to leave its value on the stack
 // while the other args were stored into temps over it, so
 // `contains(name()?, "--root")` compared "--root" with itself.
+use tests::assert;
 use text::contains;
 
 fn name() -> Result<string, string> {
@@ -88,21 +89,21 @@ fn ok_int(Result<int, string> r) -> int {
 }
 
 test("? in an if condition's call argument") {
-    assert(ok_bool(in_if()) == "false", "contains(\"coil\", \"--root\") is false")?;
-    assert(ok_bool(in_nested_if()) == "false", "nested call argument")?;
+    assert!(ok_bool(in_if()) == "false", "contains(\"coil\", \"--root\") is false");
+    assert!(ok_bool(in_nested_if()) == "false", "nested call argument");
 }
 
 test("? in a while condition's call argument") {
-    assert(ok_int(in_while()) == 0, "loop body never runs")?;
+    assert!(ok_int(in_while()) == 0, "loop body never runs");
 }
 
 test("? keeps argument order") {
-    assert(ok_str(in_let()) == "a/coil", "second argument")?;
-    assert(ok_str(first_arg()) == "coil/b", "first argument")?;
+    assert!(ok_str(in_let()) == "a/coil", "second argument");
+    assert!(ok_str(first_arg()) == "coil/b", "first argument");
 }
 
 test("? still returns early on Err") {
-    assert(ok_bool(propagates()) == "err: no name", "Err propagates")?;
+    assert!(ok_bool(propagates()) == "err: no name", "Err propagates");
 }
 
 test("? on Option in an argument") {
@@ -110,5 +111,5 @@ test("? on Option in an argument") {
         Option::Some(n) => n,
         Option::None => -1,
     };
-    assert(got == 31, "Some(3 * 10 + 1)")?;
+    assert!(got == 31, "Some(3 * 10 + 1)");
 }

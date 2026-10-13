@@ -1,5 +1,7 @@
 // In a function returning `Result<T, E>`, `return v;` is the Ok payload,
 // but a `v` that is already a `Result<T, E>` is returned as is (#786).
+use tests::assert;
+
 class Box<R> {
     pub v: R,
 }
@@ -41,21 +43,25 @@ fn ok_or(Result<int, string> r, int fallback) -> int {
 }
 
 test("a generic class method's Result returned from a generic fn") {
-    assert(ok_or(get_it(new Box(5)), 0) == 5)?;
+    assert!(ok_or(get_it(new Box(5)), 0) == 5);
     let s = get_it(new Box("hi"));
     match s {
-        Result::Ok(v) => assert(v == "hi")?,
-        Result::Err(_) => assert(false)?,
+        Result::Ok(v) => {
+            assert!(v == "hi");
+        },
+        Result::Err(_) => {
+            assert!(false);
+        },
     }
 }
 
 test("a Result local returned as is") {
-    assert(ok_or(forward(4), 0) == 8)?;
-    assert(ok_or(forward(-1), 7) == 7)?;
+    assert!(ok_or(forward(4), 0) == 8);
+    assert!(ok_or(forward(-1), 7) == 7);
 }
 
 test("payload and whole Result returns in one function") {
-    assert(ok_or(forward_or_payload(0), 0) == 100)?;
-    assert(ok_or(forward_or_payload(3), 0) == 6)?;
-    assert(ok_or(forward_or_payload(-3), 9) == 9)?;
+    assert!(ok_or(forward_or_payload(0), 0) == 100);
+    assert!(ok_or(forward_or_payload(3), 0) == 6);
+    assert!(ok_or(forward_or_payload(-3), 9) == 9);
 }

@@ -1,6 +1,7 @@
 // A `match` that binds payload slots inside a host native's argument
 // (`to_bytes(format("%i", match ..))`) runs before the native's id is
 // pushed, so its slots do not land on the id.
+use tests::assert;
 use string::{format, to_bytes};
 
 enum Wrap {
@@ -32,13 +33,17 @@ fn try_shown(Result<int, string> r) -> Result<int, string> {
 }
 
 test("a binding match under a host call") {
-    assert(shown(Wrap::Full(42)) == 14)?;
-    assert(shown(Wrap::Empty) == 11)?;
+    assert!(shown(Wrap::Full(42)) == 14);
+    assert!(shown(Wrap::Empty) == 11);
 }
 
 test("a `?` under a host call") {
     match try_shown(Result::Ok(123)) {
-        Result::Ok(n) => assert(n == 4)?,
-        Result::Err(_) => assert(false)?,
+        Result::Ok(n) => {
+            assert!(n == 4);
+        },
+        Result::Err(_) => {
+            assert!(false);
+        },
     }
 }

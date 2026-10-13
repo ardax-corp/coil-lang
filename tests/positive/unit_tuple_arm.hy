@@ -1,4 +1,6 @@
 // `()` and a unit-returning call are the same type in match arms.
+use tests::assert;
+
 static let hits: int = 0;
 
 fn bump() {
@@ -16,5 +18,5 @@ test("unit call arm next to a () arm") {
         Option::None => (),
         Option::Some(_) => bump(),
     }
-    assert(hits == 1)?;
+    assert!(hits == 1);
 }

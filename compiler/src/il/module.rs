@@ -229,6 +229,15 @@ impl IlModule {
                 jump_entries.insert(old, new);
             }
         }
+        // Prologue and epilogue are copied verbatim, so their labels keep
+        // their ids; a body's opts may have minted the same id, and the
+        // first-wins body map must not claim it (the prologue `JMP` to the
+        // static-init setup would land in that body).
+        for op in self.prologue.iter().chain(module.epilogue.iter()) {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+                prior_labels.insert(*id, *id);
+            }
+        }
         let flat_label_ids: std::collections::HashSet<u32> =
             prior_labels.values().copied().collect();
         for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
@@ -1171,6 +1180,50 @@ mod tests {
             .unwrap();
         let (at, _) = labels.iter().find(|(_, id)| *id == target).unwrap();
         assert_eq!(*at, 3, "the body's branch left the body: {labels:?} -> {target}");
+    }
+
+    /// The prologue (static-init setup region) is copied verbatim, so its
+    /// labels keep their ids. A body's opts may mint the same id; the global
+    /// remap must still resolve the prologue's label to itself, or the
+    /// prologue `JMP` to the setup region lands in that body (#960).
+    #[test]
+    fn to_flat_keeps_prologue_labels_when_a_body_binds_the_same_id() {
+        let loc = loc();
+        let mut m = IlModule {
+            prologue: vec![
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: Label(5),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Halt { loc },
+                IlOp::Label(Label(5)),
+                IlOp::Halt { loc },
+            ],
+            ..Default::default()
+        };
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("f", Some(Label(1)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(1)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(5),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+                IlOp::Label(Label(5)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        let (flat, remap, _) = m.to_flat();
+        assert_eq!(remap.get(&5).copied().unwrap_or(5), 5, "prologue label 5 remapped into the body: {remap:?}");
+        assert!(
+            matches!(flat[0], IlOp::Jump { target: Label(5), .. }),
+            "prologue jump must keep its own label"
+        );
     }
 
     #[test]
