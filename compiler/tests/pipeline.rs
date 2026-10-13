@@ -3844,6 +3844,31 @@ test("all ran") {
     );
 }
 
+/// The virtual `main` lowers straight from HIR to MIR: each case's boxed
+/// `Result<(), string>` comes back as its niche word, the banner is a MIR
+/// `print` and the final failure a MIR `panic`.
+#[test]
+fn harness_virtual_main_lowers_to_direct_mir() {
+    let mut pipeline = test_pipeline();
+    pipeline.set_include_tests(true);
+    pipeline.set_collect_opt_stats(true);
+    pipeline
+        .compile_src(
+            r#"
+test("passes") {
+    assert(true)?;
+}
+test("fails") {
+    return Result::Err("nope");
+}
+"#,
+        )
+        .expect("compile");
+    let tiers = compiler::last_opt_stats().body_tiers;
+    let main = tiers.iter().find(|t| t.name == "main").expect("virtual main");
+    assert_eq!(main.hir_reason.as_deref(), Some("lowered"), "virtual main: {:?}", main.hir_reason);
+}
+
 /// CLI-style isolation: each case is `call_function`'d independently so a
 /// soft failure does not prevent later cases from running.
 #[test]
