@@ -106,6 +106,8 @@ pub enum MirBinOp {
     Xor,
     Shl,
     Shr,
+    /// Float `**` only: an int `**` traps on overflow and is not lowered.
+    Pow,
 }
 
 impl MirBinOp {
@@ -126,6 +128,7 @@ impl MirBinOp {
             (Self::Xor, _) => "ixor",
             (Self::Shl, _) => "ishl",
             (Self::Shr, _) => "ishr",
+            (Self::Pow, _) => "fpow",
         }
     }
 
@@ -146,8 +149,13 @@ impl MirBinOp {
             "ixor" => (Self::Xor, false),
             "ishl" => (Self::Shl, false),
             "ishr" => (Self::Shr, false),
+            "fpow" => (Self::Pow, true),
             _ => return None,
         })
+    }
+
+    pub fn requires_float(self) -> bool {
+        self == Self::Pow
     }
 
     pub fn requires_int(self) -> bool {
