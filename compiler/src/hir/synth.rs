@@ -1,5 +1,6 @@
 //! HIR bodies the compiler makes itself, with no source of their own: the
-//! auto-par fork-join workers and the test-runner `main`. They lower like
+//! auto-par fork-join workers, the test-runner `main` and the builtin
+//! methods' bodies (`Range::to_vec`, …). They lower like
 //! any other body (HIR lowering, then direct MIR), instead of being written
 //! out as stack IL by hand.
 //!
@@ -151,4 +152,60 @@ impl<'a> Synth<'a> {
         self.body.root = Some(root);
         self.body
     }
+}
+
+/// `Range::to_vec` / `RangeInclusive::to_vec` (`float`: the
+/// `__float_to_vec` sibling a float range calls): every value `for x in
+/// self` visits, pushed onto a new `Vec`. An `int` body serves `byte`
+/// ranges too, as the same words.
+pub fn range_to_vec(checker: &Checker, name: &str, inclusive: bool, float: bool) -> HirBody {
+    use super::MakeKind;
+    let elem = if float { coil_ty::float() } else { coil_ty::int() };
+    let range = if inclusive { coil_ty::range_inclusive_ty(elem.clone()) } else { coil_ty::range_ty(elem.clone()) };
+    let vec = coil_ty::vec_app_ty(elem.clone());
+    let mut b = Synth::new(checker, name, vec.clone());
+    let this = b.local("self", range, LocalKind::Param);
+    let out = b.local("out", vec.clone(), LocalKind::Let);
+    let x = b.local("x", elem, LocalKind::Pattern);
+    let empty = b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec.clone());
+    let init = b.let_(out, empty);
+    let iterable = b.read(this);
+    let (o, v) = (b.read(out), b.read(x));
+    let callee = Callee::Method { name: "push".to_string() };
+    let push = b.push(HirKind::Call { callee, args: vec![o, v] }, coil_ty::unit());
+    let body = b.block(vec![push], None, coil_ty::unit());
+    let kind = Some(crate::typechecking::infer::ForInKind::Range { inclusive, float });
+    let each = b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable, body, kind }, coil_ty::unit());
+    let o = b.read(out);
+    let ret = b.ret(o);
+    let root = b.block(vec![init, each, ret], None, coil_ty::never());
+    b.finish(root)
+}
+
+/// `Show::show` of a builtin error enum (`IoError`, …): the variant's name,
+/// or the enum's name for a word that is none of its variants. The argument
+/// comes as a dictionary passes it, so it is unboxed first.
+pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variants: &[&str]) -> HirBody {
+    use super::HirPatFields;
+    let ty = Ty::Con(enum_name.to_string());
+    let mut b = Synth::new(checker, name, coil_ty::string());
+    let this = b.local("self", ty.clone(), LocalKind::Param);
+    let word = b.read(this);
+    let tag = common::ValueTag::Instance as u32;
+    let scrutinee = b.builtin(Builtin::Unbox { tag }, vec![word], ty);
+    let mut arms = Vec::with_capacity(variants.len() + 1);
+    for (i, variant) in variants.iter().enumerate() {
+        let pat = HirPat::Variant {
+            enum_name: enum_name.to_string(),
+            variant: (*variant).to_string(),
+            tag: Some(i as u32),
+            fields: HirPatFields::Unit,
+        };
+        arms.push((pat, b.str(variant)));
+    }
+    arms.push((HirPat::Wild, b.str(enum_name)));
+    let shown = b.match_(scrutinee, arms, coil_ty::string());
+    let ret = b.ret(shown);
+    let root = b.block(vec![ret], None, coil_ty::never());
+    b.finish(root)
 }

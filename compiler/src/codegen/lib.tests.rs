@@ -1993,16 +1993,21 @@ fn logical_and_if_fuses_bin_slot_slot_jmpf() {
 }
 
 /// `i = i + 1` fuses to `BinSlotImmStore(ADD)`, or elides the store when
-/// the value stays on stack for `return i`.
+/// the value stays on stack for `return i`. Fuse-IL only: the dense tier
+/// would take this body.
 #[test]
 fn assign_add_imm_fuses_bin_slot_imm_store() {
     use common::Instruction;
-    let (bc, pool) = compile_src(
+    let (bc, compiler) = compile_src_compiler(
         "fn bump(int i) -> int { \
                i = i + 1; \
                return i; \
              }",
+        |c| c.opt_options.mir_specialize = false,
     );
+    let start = compiler.functions["bump"];
+    let end = compiler.functions.values().copied().filter(|&pc| pc > start).min().unwrap_or(bc.len()).min(bc.len());
+    let (bc, pool) = (&bc[start..end], &compiler.constants);
     let fused = bc.iter().any(|b| {
         if *b.bytecode() != Instruction::BinSlotImmStore {
             return false;

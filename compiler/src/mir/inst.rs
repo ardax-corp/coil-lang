@@ -106,7 +106,8 @@ pub enum MirBinOp {
     Xor,
     Shl,
     Shr,
-    /// Float `**` only: an int `**` traps on overflow and is not lowered.
+    /// `**`: an int `**` traps on overflow and on a negative exponent, as
+    /// the stack `Pow`.
     Pow,
 }
 
@@ -128,7 +129,8 @@ impl MirBinOp {
             (Self::Xor, _) => "ixor",
             (Self::Shl, _) => "ishl",
             (Self::Shr, _) => "ishr",
-            (Self::Pow, _) => "fpow",
+            (Self::Pow, false) => "ipow",
+            (Self::Pow, true) => "fpow",
         }
     }
 
@@ -149,13 +151,15 @@ impl MirBinOp {
             "ixor" => (Self::Xor, false),
             "ishl" => (Self::Shl, false),
             "ishr" => (Self::Shr, false),
+            "ipow" => (Self::Pow, false),
             "fpow" => (Self::Pow, true),
             _ => return None,
         })
     }
 
-    pub fn requires_float(self) -> bool {
-        self == Self::Pow
+    /// `**` is a float or an `i64` op (no narrow int `**`).
+    pub fn takes(self, ty: MirTy) -> bool {
+        self != Self::Pow || ty.is_float() || ty == MirTy::I64
     }
 
     pub fn requires_int(self) -> bool {
@@ -497,6 +501,15 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
+    /// `UnboxValue tag`: the payload of `src` when it is a box of `tag`
+    /// (the default word for another box); any other word as it is. A
+    /// dictionary entry's argument comes boxed. Reads only the immutable
+    /// box, never allocates.
+    Unbox {
+        dest: ValueId,
+        src: ValueId,
+        tag: u32,
+    },
     /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -659,6 +672,7 @@ impl MirInst {
             | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
+            | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. } => dest,
         }
     }
@@ -750,7 +764,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -846,7 +860,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } => {}
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

@@ -196,8 +196,8 @@ impl MirBuilder {
             if op.requires_int() && !lt.is_int() {
                 return Err(MirError::msg(format!("bitwise op on {lt}")));
             }
-            if op.requires_float() && !lt.is_float() {
-                return Err(MirError::msg(format!("fpow on {lt}")));
+            if !op.takes(lt) {
+                return Err(MirError::msg(format!("pow on {lt}")));
             }
         }
         let dest_ty = if heap_bit {
@@ -407,7 +407,7 @@ impl MirBuilder {
             None => spec.ret,
             // A generic edge's boxed result may be a heap reference, as its
             // arguments may.
-            Some(t) if super::host_allow::host_arg_ok(native_id, spec.ret, t) => t,
+            Some(t) if super::host_allow::host_result_ok(native_id, spec.ret, t) => t,
             Some(t) => {
                 return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
             }
@@ -958,6 +958,20 @@ impl MirBuilder {
             args,
         })?;
         self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
+    /// `UnboxValue tag` of `src` ([`MirInst::Unbox`]), read as `ty`.
+    pub fn ins_unbox(&mut self, src: ValueId, tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
+        if !self.resolve_ty(src).is_specialized() || !ty.is_specialized() {
+            return Err(MirError::msg("Unbox type".to_string()));
+        }
+        let dest = self.alloc(ty);
+        self.push(MirInst::Unbox {
+            dest,
+            src: self.resolve(src),
+            tag,
+        })?;
         Ok(dest)
     }
 

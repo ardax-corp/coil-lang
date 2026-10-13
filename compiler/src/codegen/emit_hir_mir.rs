@@ -32,6 +32,9 @@ pub(super) struct HirMirTables {
     pub(super) op_prims: HashSet<u32>,
     /// Calls through a function value emitted as a plain `CallIndirect`.
     pub(super) value_calls: HashSet<u32>,
+    /// Auto-par call sites sent to a fork-join worker, by call: the direct
+    /// MIR lowering's calls.
+    pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
     /// named functions read as values), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
@@ -312,13 +315,16 @@ impl Compiler {
             args.iter().zip(params).all(|(&a, &p)| this.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
         };
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
-            let method = &inst.ground.as_ref().expect("ground call").method;
+            let ground = inst.ground.as_ref().expect("ground call");
+            let method = &ground.method;
             let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
             let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
-            if raw
+            // Raw words (or nothing boxed: `T::default()`) and no
+            // dictionary: direct MIR calls the same entry.
+            if (raw || ground.boxed.iter().all(Option::is_none))
                 && !dict
                 && natural_args(self, &call.params)
                 && let Some(target) = target
@@ -376,7 +382,21 @@ impl Compiler {
             }
             return;
         }
-        if self.hir_par_call_plan(hir, &call.key, args).is_some() {
+        if let Some(plan) = self.hir_par_call_plan(hir, &call.key, args) {
+            // The worker (and a dynamic site's sequential function) as the
+            // `CALL`s `hir_par_call` emits resolve them.
+            let (worker, seq) = match plan {
+                HirParCall::Spec { worker, .. } => (worker, None),
+                HirParCall::Dynamic { cutoff, orig, worker } => (worker, Some((orig, cutoff))),
+            };
+            let label = |offset: usize| self.bytecode.entry_label_for_offset(offset);
+            let seq = match seq {
+                None => Some(None),
+                Some((orig, cutoff)) => label(orig).map(|l| Some((l, cutoff))),
+            };
+            if let (Some(worker), Some(seq)) = (label(worker), seq) {
+                self.hir_note_par_fork(hir, emit, id, worker, seq, &mut t.par_forks);
+            }
             return;
         }
         let tail = emit.plan.tail_calls.contains(&id.0);

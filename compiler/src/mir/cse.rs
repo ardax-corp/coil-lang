@@ -240,7 +240,7 @@ fn pre_safe(func: &MirFunc, key: &ExprKey) -> bool {
     match *key {
         ExprKey::Const(_) => false,
         ExprKey::Bin {
-            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul,
+            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Pow,
             ty,
             ..
         } if !ty.is_float() => false,
@@ -519,6 +519,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
+        | MirInst::Unbox { .. }
         | MirInst::StrEq { .. } => {
             return None
         }

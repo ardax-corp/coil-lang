@@ -113,6 +113,18 @@ pub struct HirOpCall {
     pub shift: bool,
 }
 
+/// An auto-par call site HIR emission sent to the callee's fork-join
+/// worker (`hir_par_call`): the worker called on the arguments and the
+/// `hops` budget; with `seq`, a one-argument site whose argument is below
+/// the cutoff calls the sequential function instead.
+#[derive(Clone, Debug)]
+pub struct HirParFork {
+    pub worker: Label,
+    pub hops: i64,
+    /// The sequential function and the cutoff below which it is called.
+    pub seq: Option<(Label, i64)>,
+}
+
 /// A parallel loop HIR emission moved into its own fork-join function
 /// (`hir_par_loop`): the loop is a plain `CALL` of it, which takes the
 /// accumulator, the live captures and the runtime bounds and returns the
@@ -253,6 +265,8 @@ pub struct HirMirInput<'a> {
     /// Parallel loops emitted as a call of their fork-join function, by
     /// loop.
     pub par_loops: &'a HashMap<u32, HirParLoop>,
+    /// Auto-par call sites sent to a fork-join worker, by call.
+    pub par_forks: &'a HashMap<u32, HirParFork>,
     /// User operators with no instance: the raw opcode on the operands'
     /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
     pub op_prims: &'a HashSet<u32>,
@@ -1361,7 +1375,7 @@ impl Lower<'_> {
             AggregateOp::Div => Some(MirBinOp::Div),
             AggregateOp::Mod => Some(MirBinOp::Rem),
             AggregateOp::Neg => None,
-            AggregateOp::Pow => return Err("aggregate pow".into()),
+            AggregateOp::Pow => Some(MirBinOp::Pow),
         };
         let float = match info.kind {
             K::ZipTuple { elem_is_float, .. }
@@ -1788,6 +1802,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
+            HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
@@ -1820,22 +1835,41 @@ impl Lower<'_> {
             // location, as HIR emission. A failed `requires` (a second
             // argument) blames the caller through `contract_fail`.
             HirKind::Builtin { op: Builtin::Panic, args } => {
-                let [msg] = args.as_slice() else {
-                    return Err("panic blame".into());
+                let (msg, blame) = match args.as_slice() {
+                    [msg] => (*msg, false),
+                    [msg, _] => (*msg, true),
+                    _ => return Err("panic arguments".into()),
                 };
                 self.at_expr(id, |l| {
-                    let Some(m) = l.word(*msg)? else {
+                    let Some(m) = l.word(msg)? else {
                         return Ok(Val::Never);
                     };
                     if l.b.value_ty(m) != MirTy::HeapRef {
                         return Err("panic message".into());
                     }
+                    // `contract_fail` reads the caller's frame, so it runs
+                    // here in this body's own frame, as HIR emission's.
+                    let m = if blame {
+                        let native = super::host_allow::host_edge_spec_by_name(common::CONTRACT_FAIL_NATIVE).ok_or("panic blame native")?.id;
+                        let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+                        l.b.ins_host_invoke_as(native, vec![m], layout, Some(MirTy::HeapRef)).map_err(mir)?
+                    } else {
+                        m
+                    };
                     l.b.panic(m).map_err(mir)?;
                     Ok(Val::Never)
                 })
             }
             // `readonly e`: `e`'s value.
             HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
+            // A dictionary entry's argument, unboxed (compiler-made bodies).
+            HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
+                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("unbox type")?;
+                let Some(src) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_unbox(src, *tag, ty).map_err(mir)?))
+            }
             // `typeof e`: the type name HIR emission interned; `e` is not
             // evaluated.
             HirKind::Builtin { op: Builtin::TypeOf, .. } => {
@@ -2551,7 +2585,7 @@ impl Lower<'_> {
             BinOp::BitAnd => Some(MirBinOp::BitAnd),
             BinOp::BitOr => Some(MirBinOp::BitOr),
             BinOp::BitXor => Some(MirBinOp::Xor),
-            BinOp::FloatPow => Some(MirBinOp::Pow),
+            BinOp::IntPow | BinOp::FloatPow => Some(MirBinOp::Pow),
             _ => None,
         };
         let cmp = match op {
@@ -2928,6 +2962,60 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// An auto-par call as HIR emission left it: the fork-join worker on
+    /// the `int` arguments and the `hops` budget, or, for a one-argument
+    /// site with a cutoff, `arg <= cutoff - 1 ? seq(arg) : worker(arg, hops)`.
+    fn par_fork(&mut self, id: HirId, args: &[HirId], fork: &HirParFork) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let ret = self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?;
+        let mut words = Vec::with_capacity(args.len() + 1);
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != MirTy::I64 {
+                return Err("parallel call word".into());
+            }
+            words.push(v);
+        }
+        let worker = |l: &mut Self, mut words: Vec<ValueId>| -> Result<ValueId, Refusal> {
+            words.push(l.b.ins_const(MirConst::I64(fork.hops)).map_err(mir)?);
+            let abi = DenseAbi {
+                params: vec![MirTy::I64; words.len()],
+                ret,
+                ret_hi: None,
+            };
+            Ok(l.at_expr(id, |l| l.b.ins_call(fork.worker, words, &abi).map_err(mir))?.0)
+        };
+        let Some((seq, cutoff)) = fork.seq else {
+            return Ok(Val::V(worker(self, words)?));
+        };
+        let [arg] = words[..] else {
+            return Err("parallel call arity".into());
+        };
+        let limit = self.b.ins_const(MirConst::I64(cutoff - 1)).map_err(mir)?;
+        let small = self.b.ins_cmp(MirCmpOp::Le, arg, limit).map_err(mir)?;
+        let seq_block = self.b.create_block();
+        let par_block = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.branch(small, seq_block, par_block).map_err(mir)?;
+        self.switch(seq_block);
+        let abi = DenseAbi {
+            params: vec![MirTy::I64],
+            ret,
+            ret_hi: None,
+        };
+        let (low, _) = self.at_expr(id, |l| l.b.ins_call(seq, vec![arg], &abi).map_err(mir))?;
+        let low_from = self.cur;
+        self.jump(join)?;
+        self.switch(par_block);
+        let high = worker(self, vec![arg])?;
+        let high_from = self.cur;
+        self.jump(join)?;
+        self.switch(join);
+        Ok(Val::V(self.b.ins_stack_phi(vec![(low_from, low), (high_from, high)]).map_err(mir)?))
     }
 
     /// A parallel loop as HIR emission left it: its fork-join function
