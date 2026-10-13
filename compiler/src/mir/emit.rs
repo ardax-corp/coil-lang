@@ -1303,10 +1303,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
                 out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
-                out.push(IlOp::StorePop {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
+                if dead_drop_alloc(func, *kind, *dest) {
+                    out.push(IlOp::Pop { loc });
+                } else {
+                    out.push(IlOp::StorePop {
+                        slot: u32::from(regs[dest.index()]),
+                        loc,
+                    });
+                }
             }
         }
         MirInst::GcBarrier { dest, .. } => {
@@ -2713,7 +2717,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             }
             Ok(Some(packed as u8))
         }
-        MirAllocKind::Object { .. } => Ok(None),
+        MirAllocKind::Object { .. } | MirAllocKind::DropEnum { .. } => Ok(None),
         MirAllocKind::Dict
         | MirAllocKind::DictEntries
         | MirAllocKind::Coro { .. }
@@ -2785,6 +2789,26 @@ fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), Lower
 
 /// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
 /// the ops after the elements are pushed.
+/// A finalized enum made for its effect alone (`Conn::Open(fd);`): popped
+/// as HIR emission pops it, not kept in a slot where it would stay
+/// reachable, and its `drop` wait, until the slot is reused.
+pub(super) fn dead_drop_alloc(func: &MirFunc, kind: MirAllocKind, dest: ValueId) -> bool {
+    if !matches!(kind, MirAllocKind::DropEnum { .. }) {
+        return false;
+    }
+    let mut used = false;
+    for block in &func.blocks {
+        used |= block.insts.iter().any(|i| i.operands().contains(&dest));
+        if let Some(term) = &block.term {
+            term.clone().rewrite_values(|v| {
+                used |= v == dest;
+                v
+            });
+        }
+    }
+    !used
+}
+
 pub(super) fn il_for_alloc(
     kind: MirAllocKind,
     arity: u32,
@@ -2803,6 +2827,11 @@ pub(super) fn il_for_alloc(
                 ret_words: 1,
             },
             IlOp::from_plain_byte(Byte::new(Instruction::MakeFn).with_operand_u32(operand), loc),
+        ]),
+        // `TagEnumType` keeps the value on the stack and stamps its type.
+        MirAllocKind::DropEnum { tag, type_id } => Ok(vec![
+            il_for_alloc_op(MirAllocKind::Enum { tag }, arity, loc)?,
+            IlOp::from_plain_byte(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id), loc),
         ]),
         MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
             kind: crate::il::EntryKind::MakePolyFn,
@@ -2825,6 +2854,7 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, loc: DebugLoc) -> Result<IlOp
                 u16::try_from(arity).map_err(|_| LowerError::Refused("enum arity".into()))?;
             Ok(IlOp::MakeEnum { kinds: 0, tag, arity, loc })
         }
+        MirAllocKind::DropEnum { .. } => Err(LowerError::Refused("drop enum op".into())),
         MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(
             Byte::new(Instruction::InitTyped)
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),
