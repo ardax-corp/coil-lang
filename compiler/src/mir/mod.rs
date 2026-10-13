@@ -47,6 +47,7 @@ mod effects;
 mod emit;
 mod error;
 mod gc;
+mod gates;
 mod host_allow;
 mod emit_lir;
 mod func;
