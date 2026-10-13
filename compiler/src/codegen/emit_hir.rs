@@ -6854,9 +6854,10 @@ impl Compiler {
                 self.bytecode.push_const(0);
                 self.bytecode.push(Byte::new(Instruction::GEQ));
                 bb.emit_jump_to(ok, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-                let mut msg = CodeBuf::new();
-                self.emit_raw_string_literal(&mut msg, "index out of bounds");
-                self.bytecode.append(&mut msg);
+                // Direct MIR reads the message's index.
+                let idx = self.intern_string("index out of bounds");
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
                 self.bytecode.push(Byte::new(Instruction::Panic));
                 bb.bind_label(ok, self.bytecode.il_mut());
             }

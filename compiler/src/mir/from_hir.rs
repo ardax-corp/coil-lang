@@ -3212,12 +3212,11 @@ impl Lower<'_> {
     }
 
     /// `s[i]` on a string, as HIR emission's: `string_byte_at`, which
-    /// answers `-1` out of range, and there the panic of an array index.
-    /// The panic is an `Index` of the string word itself: `Index` reads
-    /// only arrays and tuples and panics `index out of bounds` on any
-    /// other object, with no allocation the IL body would not have.
+    /// answers `-1` out of range, and there `panic "index out of bounds"`
+    /// at the statement's location, the message emission interned.
     fn string_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
         let native = super::host_allow::host_edge_spec_by_name("string_byte_at").ok_or("string index native")?.id;
+        let &idx = self.inp.strings.get(&id.0).ok_or("string index message")?;
         let Some(s) = self.word(base)? else {
             return Ok(Val::Never);
         };
@@ -3234,8 +3233,8 @@ impl Lower<'_> {
         let (oob, ok) = (self.b.create_block(), self.b.create_block());
         self.b.branch(out, oob, ok).map_err(mir)?;
         self.switch(oob);
-        self.b.ins_index(s, byte, MirTy::I64, false).map_err(mir)?;
-        self.jump(ok)?;
+        let msg = self.b.ins_string(idx).map_err(mir)?;
+        self.b.panic(msg).map_err(mir)?;
         self.switch(ok);
         Ok(Val::V(byte))
     }
