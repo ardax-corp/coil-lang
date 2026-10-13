@@ -6268,7 +6268,7 @@ impl Compiler {
         if *natural == Rep::Word(own) {
             return Some(false);
         }
-        (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheResult)).then_some(true)
+        (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheUnitResult | ValueLayout::NicheResult)).then_some(true)
     }
 
     /// Whether `ty` is a bare type variable.
