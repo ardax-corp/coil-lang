@@ -4698,6 +4698,19 @@ impl Compiler {
     /// What a non-adapting producer pushes, or `None` for one that builds
     /// whatever its consumer wants (constructors, `match`, `if`, blocks,
     /// jumps).
+    /// Whether direct MIR passes argument `id` in `param` as HIR emission
+    /// does: its own word in that layout, or a numeric range's two words
+    /// boxed to its typed object (MIR's `box_pair_val`, as
+    /// `emit_box_range_slots`).
+    fn hir_arg_word(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
+        self.hir_natural(hir, emit, id) == Some(Rep::Word(param))
+            || (param == ValueLayout::Boxed
+                && Self::hir_ty(hir, id).is_some_and(|ty| {
+                    let ty = apply_ty_prune(self.checker.subst(), ty);
+                    crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
+                }))
+    }
+
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
             HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => Some(Rep::Word(
@@ -7775,7 +7788,7 @@ impl Compiler {
                     && generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &params))
                     && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                     && (0..args.len()).all(|i| boxed(i).is_none())
-                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_arg_word(hir, emit, a, p))
                     && let Some(&IlOp::Entry {
                         kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::MakeCoro),
                         target,
