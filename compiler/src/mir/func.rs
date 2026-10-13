@@ -333,8 +333,8 @@ impl MirFunc {
                     if op.requires_int() && !ty.is_int() {
                         return Err(format!("{dest} bitwise on {ty}"));
                     }
-                    if op.requires_float() && !ty.is_float() {
-                        return Err(format!("{dest} fpow on {ty}"));
+                    if !op.takes(*ty) {
+                        return Err(format!("{dest} pow on {ty}"));
                     }
                     if lt != *ty || rt != *ty {
                         return Err(format!("{dest} binop operand type"));

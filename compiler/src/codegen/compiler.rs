@@ -5527,65 +5527,35 @@ impl Compiler {
         if self.functions.contains_key(&fqn) {
             return;
         }
-        self.bind_function_entry(fqn);
-        // slot 0 = self (range object); 1 = cur; 2 = end; 3 = out vec
-        let start_idx = self.intern_string("start");
-        self.bytecode.push_load(0);
-        self.bytecode.push_string(start_idx);
-        self.bytecode.push_get_field();
-        self.bytecode.push_store_pop(1);
+        let hir = crate::hir::synth::range_to_vec(&self.checker, &fqn, inclusive, float);
+        self.emit_synth_fn(&fqn, &hir, HashMap::new());
+    }
 
-        let end_idx = self.intern_string("end");
-        self.bytecode.push_load(0);
-        self.bytecode.push_string(end_idx);
-        self.bytecode.push_get_field();
-        self.bytecode.push_store_pop(2);
-
-        self.bytecode.push_make_array(0);
-        self.bytecode.push_store_pop(3);
-
-        let mut bb = BlockBuilder::new();
-        let top_label = bb.fresh_label(self.bytecode.il_mut());
-        let exit_label = bb.fresh_label(self.bytecode.il_mut());
-        bb.bind_label(top_label, self.bytecode.il_mut());
-
-        self.bytecode.push_load(1);
-        self.bytecode.push_load(2);
-        self.bytecode.push(Byte::new(if float {
-            if inclusive {
-                Instruction::LEQF
-            } else {
-                Instruction::LEF
-            }
-        } else if inclusive {
-            Instruction::LEQ
-        } else {
-            Instruction::LE
-        }));
-        bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-
-        self.bytecode.push_load(3);
-        self.bytecode.push_load(1);
-        self.bytecode.push(Byte::new(Instruction::ArrayPush));
-        self.bytecode.push_store_pop(3);
-
-        self.bytecode.push_load(1);
-        if float {
-            let bits = Value::from(1.0_f64).raw() as u64;
-            let idx = self.intern_constant(bits);
-            self.bytecode.push_const_pool(idx);
-            self.bytecode.push(Byte::new(Instruction::ADDF));
-        } else {
-            self.bytecode.push_const(1);
-            self.bytecode.push(Byte::new(Instruction::ADD));
+    /// Emit compiler-made body `hir` ([`crate::hir::synth`]) as function
+    /// `name`, its own function record, lowered like any other body (HIR
+    /// lowering, then direct MIR). `calls` are its callees the checker has
+    /// no signature for. A body that does not plan is reported.
+    fn emit_synth_fn(&mut self, name: &str, hir: &crate::hir::HirBody, calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>) {
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_key = self.current_function_table_key.replace(name.to_string());
+        let body_start = self.bytecode.len();
+        let bind = name.to_string();
+        if !self.lower_synth_hir(hir, calls, move |c: &mut Self| {
+            c.bind_function_entry(bind);
+        }) {
+            self.report_unlowered(&SimpleSpan::from(0..0), name);
+            self.bind_function_entry(name.to_string());
         }
-        self.bytecode.push_store_pop(1);
-
-        bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(exit_label, self.bytecode.il_mut());
-
-        self.bytecode.push_load(3);
-        self.bytecode.push_return();
+        self.flush_hir_cold();
+        let body_end = self.bytecode.len();
+        self.record_fn_span(name.to_string(), body_start, body_end);
+        let entry = self.fn_entry_labels.get(name).copied();
+        self.bytecode
+            .record_func_with_sp(name.to_string(), entry, body_start, body_end, 0);
+        self.attach_hir_mir();
+        self.record_unboxed_class_fields();
+        self.current_function_table_key = prev_key;
+        self.context.variables = prev_vars;
     }
 
     /// Map a fully-resolved `Ty` to a `ValueTag` for box/unbox
