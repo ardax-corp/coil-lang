@@ -486,6 +486,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::StoreIndex { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
+        | MirInst::Yield { .. }
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }

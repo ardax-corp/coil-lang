@@ -518,6 +518,13 @@ pub struct Compiler {
     /// the first context dictionary in `__dict0` and how many there are.
     /// The method prologue unpacks them into `__dict1..` (#551).
     pending_instance_ctx: Option<(usize, usize)>,
+    /// Ground instance methods that take their arguments raw (their
+    /// `$dict` adapter unboxes for dictionary callers).
+    raw_instance_methods: HashSet<String>,
+    /// Set by a call site that passes raw arguments, right before it emits
+    /// the entry of a [`Self::raw_instance_methods`] method; any other call
+    /// goes through the adapter.
+    raw_instance_call: bool,
     /// Checker type variable → concrete type, per mono clone being compiled
     /// (the source function's type parameters), for open dictionary goals.
     mono_var_tys: Vec<HashMap<crate::typechecking::ty::TyVarId, Ty>>,
@@ -743,6 +750,8 @@ impl Default for Compiler {
             mono_codegen_var_types: Vec::new(),
             mono_type_param_tys: Vec::new(),
             pending_instance_ctx: None,
+            raw_instance_methods: HashSet::new(),
+            raw_instance_call: false,
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),

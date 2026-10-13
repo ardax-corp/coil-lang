@@ -56,6 +56,7 @@ impl MirInst {
             Self::Call { .. }
             | Self::CallIndirect { .. }
             | Self::ResumeCoro { .. }
+            | Self::Yield { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }

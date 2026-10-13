@@ -380,6 +380,19 @@ pub enum MirInst {
         handle: ValueId,
         send: Option<ValueId>,
     },
+    /// `YieldCoro` (or `YieldFromCoro` when `from`): suspend the running
+    /// coroutine with `value` (a sub-coroutine handle for `from`). The VM
+    /// saves the frame as it stands and resumes at the next instruction,
+    /// so this is one instruction, and a GC safepoint as a call is: every
+    /// live heap word stays in the frame. With `receive`, dest is the word
+    /// the next `resume .. with` sends (stored right after the yield);
+    /// otherwise a `bool` unit token.
+    Yield {
+        dest: ValueId,
+        value: ValueId,
+        from: bool,
+        receive: bool,
+    },
     /// `DoneCoro` (C2b). Dest is [`MirTy::Bool`].
     DoneCoro {
         dest: ValueId,
@@ -596,6 +609,7 @@ impl MirInst {
             | Self::StoreIndex { dest, .. }
             | Self::ArrayLen { dest, .. }
             | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
             | Self::DoneCoro { dest, .. }
             | Self::LoadStatic { dest, .. }
             | Self::StoreStatic { dest, .. }
@@ -690,6 +704,7 @@ impl MirInst {
                 }
                 v
             }
+            Self::Yield { value, .. } => vec![*value],
             Self::DoneCoro { handle, .. } => vec![*handle],
             Self::LoadStatic { .. } => Vec::new(),
             Self::StoreStatic { value, .. } => vec![*value],
@@ -774,6 +789,7 @@ impl MirInst {
                     *s = map(*s);
                 }
             }
+            Self::Yield { value, .. } => *value = map(*value),
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
             Self::LoadStatic { .. } => {}
             Self::StoreStatic { value, .. } => *value = map(*value),

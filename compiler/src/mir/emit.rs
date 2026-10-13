@@ -1068,6 +1068,26 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[value.index()]),
+                loc,
+            });
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(byte(Byte::new(op)));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::DoneCoro { dest, handle } => {
             out.push(IlOp::Load {
                 slot: u32::from(regs[handle.index()]),

@@ -727,6 +727,35 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `YieldCoro` / `YieldFromCoro` of `value`. With `receive`, dest is
+    /// the sent word typed `recv_ty`; otherwise a `bool` token.
+    pub fn ins_yield(
+        &mut self,
+        value: ValueId,
+        from: bool,
+        receive: Option<MirTy>,
+    ) -> Result<ValueId, MirError> {
+        let vt = self.resolve_ty(value);
+        if !vt.is_word_lane() || (from && vt != MirTy::HeapRef) {
+            return Err(MirError::msg(format!("Yield value is {vt}")));
+        }
+        if from && receive.is_some() {
+            return Err(MirError::msg("YieldFrom receives nothing"));
+        }
+        let dest_ty = receive.unwrap_or(MirTy::Bool);
+        if !dest_ty.is_word_lane() {
+            return Err(MirError::msg(format!("Yield dest is {dest_ty}")));
+        }
+        let dest = self.alloc(dest_ty);
+        self.push(MirInst::Yield {
+            dest,
+            value: self.resolve(value),
+            from,
+            receive: receive.is_some(),
+        })?;
+        Ok(dest)
+    }
+
     /// `DoneCoro` (C2b). Dest is `bool`.
     pub fn ins_done_coro(&mut self, handle: ValueId) -> Result<ValueId, MirError> {
         let ht = self.resolve_ty(handle);
