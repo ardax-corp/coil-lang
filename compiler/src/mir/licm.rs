@@ -261,7 +261,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
     match inst {
         MirInst::Phi { .. } => false,
         MirInst::Bin {
-            op: MirBinOp::Div | MirBinOp::Rem,
+            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow,
             ty,
             ..
         } if !ty.is_float() => false,
@@ -567,6 +567,39 @@ mod tests {
 
     /// A two-slot call's tag word is defined in the loop; a test on it must
     /// not be hoisted (it read a stale tag and looped forever).
+    /// An invariant int `**` may trap (overflow, a negative exponent), so
+    /// it stays where the loop body reaches it, as `/` does.
+    #[test]
+    fn does_not_hoist_invariant_int_pow() {
+        let mut b = MirBuilder::new("ipow");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let n = b.add_param(MirTy::I64).unwrap();
+        const I: crate::mir::inst::LocalId = crate::mir::inst::LocalId(0);
+        let i0 = b.ins_const(MirConst::I64(0)).unwrap();
+        b.def_local(I, i0).unwrap();
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+        b.jump(header).unwrap();
+        b.switch_to_block(header);
+        let i = b.use_local(I, MirTy::I64).unwrap();
+        let cond = b.ins_cmp(MirCmpOp::Lt, i, n).unwrap();
+        b.branch(cond, body, exit).unwrap();
+        b.switch_to_block(body);
+        let p = b.ins_binop(MirBinOp::Pow, x, n).unwrap();
+        let i1 = b.ins_binop(MirBinOp::Add, i, p).unwrap();
+        b.def_local(I, i1).unwrap();
+        b.jump(header).unwrap();
+        b.switch_to_block(exit);
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(i)).unwrap();
+        let mut f = b.finish().unwrap();
+        licm(&mut f);
+        f.verify().unwrap();
+        let lp = loop_blocks(&f);
+        assert_eq!(count_bin_in(&f, &lp, MirBinOp::Pow), 1);
+    }
+
     #[test]
     fn does_not_hoist_use_of_two_slot_call_hi_word() {
         let mut b = MirBuilder::new("hi");
