@@ -20,6 +20,7 @@ impl MirInst {
         match self {
             Self::Deopt { kind, .. } => Some(*kind),
             Self::Call { .. }
+            | Self::CallIndirect { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Print { .. }
