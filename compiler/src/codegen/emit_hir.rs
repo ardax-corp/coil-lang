@@ -334,25 +334,15 @@ struct HirEmit {
     /// The fork-join functions those calls reach, emitted after this body
     /// ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
-    /// Entry label of each plain one-word `CALL` emitted (no dictionaries,
-    /// not a tail call or a coroutine), by call site: the direct MIR
-    /// lowering's call targets.
-    call_targets: HashMap<u32, crate::mir::HirCallSite>,
     /// Entry label of the user `into_iter` a counted `for` loop calls, by
     /// loop.
     into_iters: HashMap<u32, crate::il::Label>,
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// User operators emitted as their instance method's plain `CALL`.
-    op_calls: HashMap<u32, crate::mir::HirOpCall>,
-    /// User operators emitted as a raw opcode on the operands.
-    op_prims: HashSet<u32>,
     /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
     /// named functions read as values), by expression.
     fn_values: HashMap<u32, crate::mir::HirFnValue>,
-    /// Calls through a function value emitted as a plain `CallIndirect`.
-    value_calls: HashSet<u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1233,7 +1223,7 @@ impl Compiler {
             sroa,
             sroa_classes,
             fields,
-            calls: &emit.call_targets,
+            calls: &tables.calls,
             into_iters: &emit.into_iters,
             iter_loops: &emit.iter_loops,
             strings: &tables.strings,
@@ -1241,11 +1231,11 @@ impl Compiler {
             consts: &emit.plan.consts,
             formats: &tables.formats,
             format_shows: &tables.format_shows,
-            op_calls: &emit.op_calls,
+            op_calls: &tables.op_calls,
             par_loops: &emit.par_calls,
-            op_prims: &emit.op_prims,
+            op_prims: &tables.op_prims,
             fn_values: &emit.fn_values,
-            value_calls: &emit.value_calls,
+            value_calls: &tables.value_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -2220,13 +2210,9 @@ impl Compiler {
             par_loop: false,
             par_calls: HashMap::new(),
             par_tail: Vec::new(),
-            call_targets: HashMap::new(),
             into_iters: HashMap::new(),
             iter_loops: HashMap::new(),
-            op_calls: HashMap::new(),
-            op_prims: HashSet::new(),
             fn_values: HashMap::new(),
-            value_calls: HashSet::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6531,42 +6517,6 @@ impl Compiler {
         }
     }
 
-    /// Operator call `id` on a raw instance method, just emitted as one
-    /// `CALL` of `arity` boxed-layout operands: direct MIR makes it a plain
-    /// call of the same entry.
-    fn hir_note_op_call_target(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, arity: u32) {
-        let operands = match &hir.expr(id).kind {
-            HirKind::Bin { lhs, rhs, .. } => vec![*lhs, *rhs],
-            HirKind::Un { operand, .. } => vec![*operand],
-            _ => return,
-        };
-        // Each operand's MIR word is the boxed-layout word the stack passes.
-        let boxed = |o: HirId| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-        if operands.len() as u32 != arity || !operands.iter().all(|&o| boxed(o)) {
-            return;
-        }
-        if let Some(&IlOp::Entry {
-            kind: crate::il::EntryKind::Call,
-            target,
-            arity: called,
-            ret_words: 1,
-            ..
-        }) = self.bytecode.ops().last()
-            && called == arity
-        {
-            emit.call_targets.insert(
-                id.0,
-                crate::mir::HirCallSite {
-                    target,
-                    pair_args: vec![false; arity as usize],
-                    pair_ret: false,
-                    coro: false,
-                    boxed_ret: false,
-                },
-            );
-        }
-    }
-
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
@@ -6810,7 +6760,6 @@ impl Compiler {
                     let instr = *instr;
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
                     self.bytecode.push(Byte::new(instr));
-                    emit.op_prims.insert(id.0);
                 }
                 &HirOp::Bound { dict, method } => {
                     for (i, operand) in [*lhs, *rhs].into_iter().enumerate() {
@@ -6862,36 +6811,6 @@ impl Compiler {
                     self.raw_instance_call = raw;
                     self.emit_direct_fn_call(&mut call, &fqn, arity);
                     self.bytecode.append(&mut call);
-                    // Raw operands: direct MIR makes a plain call. Else, no
-                    // dictionary and a one-word result: direct MIR boxes the
-                    // operands and calls the same entry.
-                    if raw {
-                        self.hir_note_op_call_target(hir, emit, id, 2);
-                    } else if arity == 2
-                        && let Some(tag) = Self::ty_to_value_tag(&lookup)
-                        && let Some(&IlOp::Entry {
-                            kind: crate::il::EntryKind::Call,
-                            target,
-                            arity: 2,
-                            ret_words: 1,
-                            ..
-                        }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    {
-                        emit.op_calls.insert(
-                            id.0,
-                            crate::mir::HirOpCall {
-                                site: crate::mir::HirCallSite {
-                                    target,
-                                    pair_args: vec![false; 2],
-                                    pair_ret: false,
-                                    coro: false,
-                                    boxed_ret: false,
-                                },
-                                tag: tag as u32,
-                                shift,
-                            },
-                        );
-                    }
                 }
             },
             HirKind::Bin { op, lhs, rhs } => {
@@ -7013,9 +6932,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 self.emit_direct_fn_call(&mut call, &fqn, arity);
                 self.bytecode.append(&mut call);
-                if raw {
-                    self.hir_note_op_call_target(hir, emit, id, 1);
-                }
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
@@ -7054,7 +6970,6 @@ impl Compiler {
                 }
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
-                emit.value_calls.insert(id.0);
             }
             HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, depth),
             HirKind::Resume { handle, value } => {
@@ -7643,31 +7558,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
                 debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
-                // Raw words and no dictionary: direct MIR calls the same entry.
-                if raw
-                    && arity == args.len() as u32
-                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(&IlOp::Entry {
-                        kind: crate::il::EntryKind::Call,
-                        target,
-                        arity: called,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.ops().last()
-                    && called == arity
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                {
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args: vec![false; args.len()],
-                            pair_ret: ret_words == 2,
-                            coro: false,
-                            boxed_ret,
-                        },
-                    );
-                }
                 self.expr_depth = depth;
                 self.hir_convert(&natural, want, depth);
                 return;
@@ -7735,33 +7625,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
-                // A plain one-word ABI call, each argument in its own layout:
-                // direct MIR calls the same entry.
-                if dicts == 0
-                    && generic.is_none()
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                    && (0..args.len()).all(|i| boxed(i).is_none())
-                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(&IlOp::Entry {
-                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::MakeCoro),
-                        target,
-                        arity,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    && arity == args.len() as u32
-                {
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args: vec![false; args.len()],
-                            pair_ret: ret_words == 2,
-                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
-                            boxed_ret,
-                        },
-                    );
-                }
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
@@ -7890,38 +7753,6 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(&key, words + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
-                if dicts == 0
-                    && generic.is_none()
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                    && let Some(&IlOp::Entry {
-                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::TailCall | crate::il::EntryKind::MakeCoro),
-                        target,
-                        arity,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    && arity == words
-                {
-                    let call = &emit.plan.calls[&id.0];
-                    let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
-                    // A `TailCall`'s callee returns for this function, so in
-                    // this function's words, whatever the call's own rep.
-                    let pair_ret = if entry_kind == crate::il::EntryKind::TailCall {
-                        matches!(emit.plan.ret, Rep::Pair(_))
-                    } else {
-                        ret_words == 2
-                    };
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args,
-                            pair_ret,
-                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
-                            boxed_ret,
-                        },
-                    );
-                }
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.
                     return;

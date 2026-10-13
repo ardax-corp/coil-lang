@@ -23,6 +23,15 @@ pub(super) struct HirMirTables {
     /// Per argument of such a `format` call (after the format string): the
     /// raw `show` entry a `%v` argument goes through, `None` for a word.
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
+    /// site: calls, and user operators on a raw instance method.
+    pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
+    /// User operators that call their instance method with boxed operands.
+    pub(super) op_calls: HashMap<u32, crate::mir::HirOpCall>,
+    /// User operators emitted as a raw opcode on the operands.
+    pub(super) op_prims: HashSet<u32>,
+    /// Calls through a function value emitted as a plain `CallIndirect`.
+    pub(super) value_calls: HashSet<u32>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -101,7 +110,33 @@ impl Compiler {
             {
                 return Kids::None;
             }
-            HirKind::Call { callee: Callee::Value(_), .. } => {}
+            HirKind::Bin {
+                op: BinOp::Overloaded(_),
+                lhs,
+                rhs,
+            } => match emit.plan.ops.get(&id.0) {
+                Some(HirOp::Prim(_)) => {
+                    t.op_prims.insert(id.0);
+                }
+                Some(HirOp::Call { lookup, fqn, class, method }) => {
+                    let (lookup, fqn) = (lookup.clone(), fqn.clone());
+                    self.hir_mir_op_call(hir, id, &[*lhs, *rhs], (class, method, fqn), lookup, t);
+                }
+                _ => {}
+            },
+            // A negated literal is its constant.
+            HirKind::Un { op: UnOp::Neg, operand } if matches!(hir.expr(*operand).kind, HirKind::Lit(Lit::Int(_) | Lit::Float(_))) => {}
+            HirKind::Un { operand, .. }
+                if let Some(HirOp::Call { lookup, fqn, class, method }) = emit.plan.ops.get(&id.0) =>
+            {
+                let (lookup, fqn) = (lookup.clone(), fqn.clone());
+                self.hir_mir_op_call(hir, id, &[*operand], (class, method, fqn), lookup, t);
+            }
+            HirKind::Call { callee: Callee::Value(f), .. } => {
+                if !lower::polyfn_callee(hir, &self.checker, *f) {
+                    t.value_calls.insert(id.0);
+                }
+            }
             // A fixed `len` of a local, literal or literal array evaluates
             // nothing.
             HirKind::Call { args, .. } if let Some(Some(_)) = emit.plan.lens.get(&id.0) => {
@@ -116,6 +151,9 @@ impl Compiler {
                 self.hir_mir_format(hir, id, args, t);
                 return Kids::Rest;
             }
+            HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
+                self.hir_mir_call(hir, emit, id, args, t);
+            }
             HirKind::Index {
                 base,
                 index,
@@ -127,6 +165,154 @@ impl Compiler {
             _ => {}
         }
         Kids::All
+    }
+
+    /// User operator `id` on `operands` calling its instance method, as
+    /// `hir_value_unpacked`'s `HirOp::Call` arms: a raw method takes the
+    /// operands' own words (a plain call), any other a binary operator's
+    /// boxed operands (an operator call).
+    fn hir_mir_op_call(
+        &mut self,
+        hir: &HirBody,
+        id: HirId,
+        operands: &[HirId],
+        (class, method, fqn): (&str, &str, String),
+        lookup: Ty,
+        t: &mut HirMirTables,
+    ) {
+        let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
+        let raw = self.raw_instance_methods.contains(&fqn);
+        let span = hir.expr(id).span;
+        let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        // A two-word result comes back as two words (or boxed after the call).
+        let one_word = self.two_word_return_kind(&fqn).is_none();
+        self.raw_instance_call = raw;
+        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word && !dict) else {
+            return;
+        };
+        let arity = operands.len();
+        let site = crate::mir::HirCallSite {
+            target,
+            pair_args: vec![false; arity],
+            pair_ret: false,
+            coro: false,
+            boxed_ret: false,
+        };
+        if raw {
+            // Each operand's MIR word is the boxed-layout word the stack passes.
+            if operands.iter().all(|&o| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)) {
+                t.calls.insert(id.0, site);
+            }
+        } else if arity == 2
+            && let Some(tag) = Self::ty_to_value_tag(&lookup)
+        {
+            let shift = matches!(class, "Shl" | "Shr");
+            t.op_calls.insert(id.0, crate::mir::HirOpCall { site, tag: tag as u32, shift });
+        }
+    }
+
+    /// Call `id` of a function or method, as `hir_value_unpacked`'s
+    /// `HirKind::Call` arms past the builtins: its entry when it is one
+    /// plain `CALL` (or `TailCall` / `MakeCoro`) of the arguments' own
+    /// words with no dictionary.
+    fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut HirMirTables) {
+        let call = &emit.plan.calls[&id.0];
+        if call.builtin.is_some() || call.key == format!("{}::push", common::BUILTIN_VEC_TYPE) {
+            return;
+        }
+        let natural = Self::hir_call_rep(call);
+        let span = hir.expr(id).span;
+        let natural_args = |this: &Self, params: &[ValueLayout]| {
+            args.iter().zip(params).all(|(&a, &p)| this.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+        };
+        if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
+            let method = &inst.ground.as_ref().expect("ground call").method;
+            let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+            let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
+            let raw = self.raw_instance_methods.contains(&key);
+            self.raw_instance_call = raw;
+            let target = self.named_entry_target(&key, true);
+            if raw
+                && !dict
+                && natural_args(self, &call.params)
+                && let Some(target) = target
+                && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
+            {
+                t.calls.insert(
+                    id.0,
+                    crate::mir::HirCallSite {
+                        target,
+                        pair_args: vec![false; args.len()],
+                        pair_ret: natural.words() == 2,
+                        coro: false,
+                        boxed_ret,
+                    },
+                );
+            }
+            return;
+        }
+        if call.method {
+            let instance = call.instance.as_deref();
+            let key = match instance.and_then(|i| i.recv_box.clone()) {
+                Some(recv) if call.generic.is_none() => self.instance_clone(&call.key, &[recv]).unwrap_or_else(|| call.key.clone()),
+                _ => call.key.clone(),
+            };
+            let raw = self.raw_instance_methods.contains(&key);
+            let instance = instance.filter(|_| !raw);
+            let boxed = (0..args.len()).any(|i| {
+                call.generic.as_ref().is_some_and(|g| g.boxed[i].is_some()) || (i == 0 && instance.is_some_and(|inst| inst.recv_box.is_some()))
+            });
+            let dict = call.generic.is_some()
+                || instance.is_some_and(|inst| self.hir_mir_quiet(|this| this.emit_instance_dict(&mut CodeBuf::new(), &inst.class, &inst.args)));
+            let coro = self.coroutine_fns.contains(&key);
+            self.hir_request_method_clone(&key);
+            self.raw_instance_call = raw;
+            let target = self.named_entry_target(&key, true);
+            if !dict
+                && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
+                && !boxed
+                && natural_args(self, &call.params)
+                && let Some(target) = target
+            {
+                t.calls.insert(
+                    id.0,
+                    crate::mir::HirCallSite {
+                        target,
+                        pair_args: vec![false; args.len()],
+                        pair_ret: natural.words() == 2,
+                        coro,
+                        boxed_ret,
+                    },
+                );
+            }
+            return;
+        }
+        if self.hir_par_call_plan(hir, &call.key, args).is_some() {
+            return;
+        }
+        let tail = emit.plan.tail_calls.contains(&id.0);
+        let coro = !tail && self.coroutine_fns.contains(&call.key);
+        self.raw_instance_call = false;
+        let target = self.named_entry_target(&call.key, true);
+        if call.generic.is_none()
+            && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
+            && let Some(target) = target
+        {
+            let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
+            // A `TailCall`'s callee returns for this function, so in this
+            // function's words, whatever the call's own rep.
+            let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
+            t.calls.insert(id.0, crate::mir::HirCallSite { target, pair_args, pair_ret, coro, boxed_ret });
+        }
+    }
+
+    /// `f(self)` with the diagnostics it reports dropped: the walk asks
+    /// what emission decided, which reported them already.
+    fn hir_mir_quiet<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let messages = self.messages.len();
+        let r = f(self);
+        self.messages.truncate(messages);
+        r
     }
 
     /// A `format` call whose `%v` arguments each go through one plain
@@ -179,11 +365,8 @@ impl Compiler {
         if !raw && Self::ty_to_value_tag(&lookup_ty).is_some() {
             return None;
         }
-        // A dictionary argument: not a plain call. Its code goes nowhere;
-        // emission reported any diagnostic.
-        let messages = self.messages.len();
-        let dict = self.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0);
-        self.messages.truncate(messages);
+        // A dictionary argument: not a plain call. Its code goes nowhere.
+        let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
         if dict || self.two_word_return_kind(&fqn).is_some() {
             return None;
         }
