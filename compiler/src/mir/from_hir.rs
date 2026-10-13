@@ -1725,6 +1725,13 @@ impl Lower<'_> {
                     (Some(MirTy::F64), Some(MirTy::I64)) => {
                         self.b.ins_cast(MirCastKind::FloatToInt, MirTy::I64, v).map_err(mir)?
                     }
+                    // `CastIntToBool`: any non-zero int is `true`.
+                    (Some(MirTy::I64), Some(MirTy::Bool)) => {
+                        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                        self.b.ins_cmp(MirCmpOp::Ne, v, zero).map_err(mir)?
+                    }
+                    // `CastBoolToInt`: a `bool` is its `0` / `1` word.
+                    (Some(MirTy::Bool), Some(MirTy::I64)) => self.b.ins_cast(MirCastKind::Word, MirTy::I64, v).map_err(mir)?,
                     _ => return Err("cast".into()),
                 };
                 Ok(Val::V(out))
