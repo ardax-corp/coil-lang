@@ -478,6 +478,7 @@ impl IlModule {
                     map_from[i] = "mir";
                 } else if tier[i] == "fuse"
                     && body.ops.iter().any(crate::mir::refuses_alloc)
+                    && !has_inner_code(&body.ops)
                     && let Some(func) = body.meta.hir_mir.as_deref()
                 {
                     let mut draft = crate::mir::encode_draft_slots(func);
@@ -656,6 +657,22 @@ fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
 }
 
 /// `new` still jumps to or calls a label `old` bound, but no longer binds it.
+/// Whether `ops` hold the code of a function value they build (a lambda's
+/// body, bound inside the body). Its frame is not this body's, so a map of
+/// this body's slots over every PC would cover it too.
+fn has_inner_code(ops: &[IlOp]) -> bool {
+    let bound: std::collections::HashSet<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            _ => None,
+        })
+        .collect();
+    ops.iter().any(|op| {
+        matches!(op, IlOp::Entry { kind: crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn, target, .. } if bound.contains(&target.0))
+    })
+}
+
 fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
     let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
         ops.iter()

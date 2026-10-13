@@ -295,6 +295,11 @@ struct HirEmit {
     op_calls: HashMap<u32, crate::mir::HirOpCall>,
     /// User operators emitted as a raw opcode on the operands.
     op_prims: HashSet<u32>,
+    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
+    /// named functions read as values), by expression.
+    fn_values: HashMap<u32, crate::mir::HirFnValue>,
+    /// Calls through a function value emitted as a plain `CallIndirect`.
+    value_calls: HashSet<u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -777,9 +782,7 @@ impl Compiler {
             .filter(|loc| loc.is_known())
             .map(|loc| loc.file);
         let plan = &emit.plan;
-        let why = if !plan.lambdas.is_empty() {
-            Err("lambda".to_string())
-        } else if emit.par_loop {
+        let why = if emit.par_loop {
             Err("parallel loop".to_string())
         } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
             // The debugger reads split class / array locals from their
@@ -1060,6 +1063,8 @@ impl Compiler {
             asserts: &emit.asserts,
             op_calls: &emit.op_calls,
             op_prims: &emit.op_prims,
+            fn_values: &emit.fn_values,
+            value_calls: &emit.value_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -1938,6 +1943,19 @@ impl Compiler {
         Ok(())
     }
 
+    /// Record the function value `id` builds for direct MIR, once its
+    /// `CodePtr` (with `operand`, `MakeFn` follows it) or `MakePolyFn` is
+    /// the last op: an entry label, not an absolute offset.
+    fn hir_note_fn_value(&mut self, emit: &mut HirEmit, id: HirId, operand: Option<u32>, captures: Vec<LocalId>) {
+        use crate::il::EntryKind;
+        let kind = match (self.bytecode.il_mut().ops_slice_mut().last(), operand) {
+            (Some(&IlOp::Entry { kind: EntryKind::CodePtr, target, .. }), Some(operand)) => crate::mir::MirAllocKind::Fn { target, operand },
+            (Some(&IlOp::Entry { kind: EntryKind::MakePolyFn, target, .. }), None) => crate::mir::MirAllocKind::PolyFn { target },
+            _ => return,
+        };
+        emit.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures });
+    }
+
     /// A lambda's frame: each capture's name, then each parameter's.
     fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody) -> Vec<u32> {
         let names = lam.captures.iter().map(|&(_, inner)| inner).chain(lam.params.iter().copied());
@@ -2021,6 +2039,8 @@ impl Compiler {
             asserts: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
+            fn_values: HashMap::new(),
+            value_calls: HashSet::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6164,8 +6184,9 @@ impl Compiler {
                 self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
                 let arity = lam.body.params.len() as u32;
                 let captures = lam.body.captures.len() as u32;
-                self.bytecode
-                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(captures, 0, arity, false)));
+                let operand = make_fn_operand(captures, 0, arity, false);
+                self.hir_note_fn_value(emit, id, Some(operand), lam.body.captures.iter().map(|&(outer, _)| outer).collect());
+                self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
                 emit.plan.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
@@ -6180,13 +6201,17 @@ impl Compiler {
                     bc.push(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(dict_arity as u32));
                 }
                 self.bytecode = bc;
+                if dict_arity == 0 {
+                    self.hir_note_fn_value(emit, id, None, Vec::new());
+                }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry as u32));
-                self.bytecode
-                    .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, rest)));
+                let operand = make_fn_operand(0, 0, arity, rest);
+                self.hir_note_fn_value(emit, id, Some(operand), Vec::new());
+                self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
             }
             HirKind::Global { .. } => {
                 let value = emit.plan.consts[&id.0].clone();
@@ -6493,6 +6518,7 @@ impl Compiler {
                 }
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
+                emit.value_calls.insert(id.0);
             }
             HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, depth),
             HirKind::Resume { handle, value } => {

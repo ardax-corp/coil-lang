@@ -301,6 +301,15 @@ pub enum MirInst {
         target: crate::il::Label,
         args: Vec<ValueId>,
     },
+    /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
+    /// `PolyFn` heap word) with `args`, pushed in order under it. Dest is
+    /// the one word it returns. Opaque: any effect, a GC safepoint in the
+    /// callee; never CSE'd or hoisted.
+    CallIndirect {
+        dest: ValueId,
+        callee: ValueId,
+        args: Vec<ValueId>,
+    },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
     MatchPayload {
@@ -486,6 +495,17 @@ pub enum MirAllocKind {
     Boxed {
         tag: u32,
     },
+    /// `MakeFn`: a function value of the code at `target`, elems its
+    /// captures (`Const 0` fill mask and `CodePtr` pushed after them).
+    /// `operand` is the packed `MakeFn` operand.
+    Fn {
+        target: crate::il::Label,
+        operand: u32,
+    },
+    /// `MakePolyFn`: a generic function's value with no dictionaries.
+    PolyFn {
+        target: crate::il::Label,
+    },
 }
 
 impl MirAllocKind {
@@ -499,6 +519,8 @@ impl MirAllocKind {
             Self::DictEntries => "dictentries",
             Self::Coro { .. } => "coro",
             Self::Boxed { .. } => "boxed",
+            Self::Fn { .. } => "fn",
+            Self::PolyFn { .. } => "polyfn",
         }
     }
 }
@@ -564,6 +586,7 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
             | Self::FieldLoad { dest, .. }
             | Self::FieldStore { dest, .. }
@@ -627,6 +650,7 @@ impl MirInst {
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
             Self::FieldStore { src, .. } => vec![*src],
@@ -699,6 +723,12 @@ impl MirInst {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }
+            }
+            Self::CallIndirect { callee, args, .. } => {
+                for v in args.iter_mut() {
+                    *v = map(*v);
+                }
+                *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::FieldLoad { object, .. } => *object = map(*object),
