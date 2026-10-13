@@ -805,7 +805,6 @@ impl Compiler {
                 Expression::Function {
                     name,
                     type_params,
-                    args,
                     body,
                     ..
                 } => {
@@ -820,7 +819,7 @@ impl Compiler {
                     let key = self.overload_entry_key(name, &qualified, child);
                     self.reserve_function_entry(key);
                     if body.is_some() {
-                        self.reserve_mono_entries(&qualified, type_params, args, name);
+                        self.reserve_mono_entries(&qualified, type_params, name);
                     }
                 }
                 Expression::Implementation { owner, methods, .. } => {
@@ -3177,7 +3176,7 @@ impl Compiler {
     ///
     /// Used by [`emit_call_site_dicts`] so `F<A>` against `Option<int>` records
     /// both `F = Option` and `A = int` (Phase 5).
-    pub(super) fn bind_scheme_vars(
+    pub(crate) fn bind_scheme_vars(
         pattern: &Ty,
         concrete: &Ty,
         map: &mut HashMap<crate::typechecking::ty::TyVarId, Ty>,
@@ -6295,11 +6294,10 @@ impl Compiler {
         &mut self,
         qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
-        args: &Output<'compiler>,
         source_name: &str,
     ) {
         for spec in self.planned_mono_specializations(qualified, type_params, source_name) {
-            if self.mono_names.contains_key(&spec.key) || self.mono_overrides_for_args(type_params, args, &spec.key).is_empty() {
+            if self.mono_names.contains_key(&spec.key) || !self.mono_clone_emits(type_params, &spec.key) {
                 continue;
             }
             let name = Self::mono_clone_name(qualified, &spec.key);
@@ -6330,11 +6328,11 @@ impl Compiler {
                 continue;
             }
 
-            let overrides = self.mono_overrides_for_args(type_params, args, &specialization.key);
-            if overrides.is_empty() {
+            if !self.mono_clone_emits(type_params, &specialization.key) {
                 continue;
             }
             let type_param_tys = self.mono_type_param_tys_for(type_params, &specialization.key);
+            let overrides = self.mono_overrides_for_args(source_name, qualified, type_params, args, &specialization.key);
 
             let mono_name = Self::mono_clone_name(qualified, &specialization.key);
             let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
@@ -6446,16 +6444,42 @@ impl Compiler {
             .find_map(|frame| frame.get(name).cloned())
     }
 
+    /// Whether a planned clone at `key` is emitted: every type parameter
+    /// has its type (a parameter only inside `Vec<T>`, or only in the
+    /// result, included).
+    fn mono_clone_emits(&self, type_params: &[parser::ast::TypeParam<'_>], key: &MonoKey) -> bool {
+        !type_params.is_empty() && self.mono_type_param_tys_for(type_params, key).len() == type_params.len()
+    }
+
+    /// The clone's parameter types at `key`, by name: a bare type
+    /// parameter's concrete type (a rest formal's packed array), and a
+    /// formal that mentions one (`Vec<T>`, `Option<T>`) at the clone's types.
     fn mono_overrides_for_args<'compiler>(
         &self,
+        source_name: &str,
+        qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
         args: &Output<'compiler>,
         key: &MonoKey,
     ) -> HashMap<String, Ty> {
         let type_param_tys = self.mono_type_param_tys_for(type_params, key);
+        let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
+        let param_tys = self.checker.fn_param_tys(source_name).unwrap_or_default();
 
         let mut overrides = HashMap::new();
         if let Expression::Fragment(children) = args.1.as_ref() {
+            let formals = children.iter().filter(|c| matches!(c.1.as_ref(), Expression::Argument { .. }));
+            for (child, param) in formals.zip(param_tys.iter().map(Some).chain(std::iter::repeat(None))) {
+                if let Expression::Argument { name, is_rest: false, .. } = child.1.as_ref()
+                    && let Some(param) = param
+                    && Self::ty_has_var(param)
+                {
+                    let ty = Self::apply_ty_var_map(param, &var_tys);
+                    if !Self::ty_has_var(&ty) {
+                        overrides.insert(name.to_string(), ty);
+                    }
+                }
+            }
             for child in children {
                 if let Expression::Argument {
                     ty, name, is_rest, ..

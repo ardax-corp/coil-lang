@@ -222,7 +222,9 @@ impl<P: Fn(&str) -> bool> Cx<'_, P> {
                 if !(self.pure)(name) || !e.ty.as_ref().is_some_and(value_ty) {
                     return None;
                 }
-                write!(out, "(call {name}#{overload:?}").ok()?;
+                // A generic callee's result type is part of the value
+                // (`make<int>()` and `make<string>()`).
+                write!(out, "(call {name}#{overload:?}:{:?}", e.ty.as_ref().map(ty::strip_readonly)?).ok()?;
                 for &a in args {
                     if !self.body.expr(a).ty.as_ref().is_some_and(value_ty) {
                         *heap = true;
