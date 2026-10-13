@@ -55,6 +55,7 @@ pub fn emit_lir_with_aliases(
     let plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
     let max_reg = plan
         .need_slot
         .iter()
@@ -116,6 +117,12 @@ pub fn emit_lir_with_aliases(
                         pool,
                         loc,
                     })?;
+                }
+                continue;
+            }
+            if let MirInst::ClearWord { dest, value } = inst {
+                if cleared.contains(dest) {
+                    super::emit::push_clear_word(&mut out, regs[value.index()]);
                 }
                 continue;
             }
@@ -203,6 +210,11 @@ impl EmitPlan {
                         phi_in[v.index()] = true;
                     }
                 }
+                // A clear reads no word: a value it alone follows can
+                // still be an inline operand (then it has no register).
+                if matches!(inst, MirInst::ClearWord { .. }) {
+                    continue;
+                }
                 for v in inst.operands() {
                     uses[v.index()] += 1;
                 }
@@ -286,7 +298,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -396,6 +408,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::ResumeCoro { .. }
             | MirInst::Yield { .. }
             | MirInst::StoreStatic { .. }
+            | MirInst::ClearWord { .. }
             | MirInst::Print { .. }
     )
 }
@@ -442,6 +455,25 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 for v in term_values(term) {
                     visit(v, &at, insts, &is_inline, &mut order);
                 }
+            }
+            // A clear zeroes its value's slot where it stands, so an
+            // inline user from before the clear must not be emitted after
+            // it (`let j = join(s); clear s; return j` would read the
+            // zeroed slot): that user keeps its slot.
+            let stale = order.iter().enumerate().find_map(|(i, &c)| {
+                let MirInst::ClearWord { value, .. } = &insts[c] else {
+                    return None;
+                };
+                order[i + 1..]
+                    .iter()
+                    .find(|&&k| k < c && insts[k].operands().contains(value))
+                    .map(|&k| insts[k].dest())
+            });
+            if let Some(v) = stale
+                && tree[v.index()]
+            {
+                tree[v.index()] = false;
+                continue;
             }
             let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
             // A later-defined op emitted first means an earlier one was
@@ -958,6 +990,8 @@ fn emit_stored(
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
+        // Emitted where it stands (`cleared_words`).
+        MirInst::ClearWord { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -1537,6 +1571,7 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
             Ok(())
         }
+        MirInst::ClearWord { .. } => Ok(()),
         MirInst::ArrayPush {
             dest,
             array,

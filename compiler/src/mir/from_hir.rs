@@ -2036,17 +2036,10 @@ impl Lower<'_> {
                 self.jump(exit)?;
                 Ok(Val::Never)
             }
-            // A scalar's word roots nothing. A heap local's must be zeroed
-            // (its register is scanned until overwritten), which direct MIR
-            // cannot say: such a body keeps HIR emission's clearing stores.
-            HirKind::Clear(locals)
-                if locals.iter().all(|&l| {
-                    !self.inp.stacks.contains_key(&l.0)
-                        && !self.inp.sroa.contains_key(&l.0)
-                        && !self.inp.pair_locals.contains_key(&l.0)
-                        && self.local_ty(l).is_ok_and(|t| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool))
-                }) =>
-            {
+            HirKind::Clear(locals) => {
+                for &local in locals {
+                    self.clear(local)?;
+                }
                 Ok(Val::Unit)
             }
             HirKind::Continue => {
@@ -2840,6 +2833,40 @@ impl Lower<'_> {
             Some(&(lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
             None => Ok(Val::V(out)),
         }
+    }
+
+    /// HIR `Clear` of `local` past its last use, as HIR emission's zero
+    /// stores: each of its words that may hold a heap object is zeroed
+    /// (`ClearWord`), so the frame no longer roots it. A scalar's word
+    /// roots nothing. A local some path here never bound has nothing to
+    /// clear on that path, and is left as it is.
+    fn clear(&mut self, local: HirLocal) -> Result<(), Refusal> {
+        // Every word the local was bound to: a boxed stack array's object,
+        // else its element or field slots, a pair's payload word, or its
+        // own slot.
+        let words: Vec<(LocalId, MirTy)> = if let Some(&slot) = self.boxes.get(&local.0) {
+            vec![(slot, MirTy::HeapRef)]
+        } else if let Some(&(base, n, ty)) = self.inp.stacks.get(&local.0) {
+            (0..n as u32).map(|i| (LocalId(base + i), ty)).collect()
+        } else if let Some(tys) = self.inp.sroa.get(&local.0) {
+            let base = self.slot(local)?.0;
+            tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
+        } else if let Some((lo, _, lo_ty, _)) = self.pair_local(local) {
+            // A heap payload moves through a pair as an opaque word.
+            vec![(lo, if lo_ty == MirTy::I64 { MirTy::HeapRef } else { lo_ty })]
+        } else if self.inp.pair_locals.contains_key(&local.0) {
+            return Err("clear pair local".into());
+        } else {
+            vec![(self.slot(local)?, self.local_ty(local)?)]
+        };
+        for (slot, ty) in words {
+            if !ty.is_heap_word() || !self.b.local_defined(slot) {
+                continue;
+            }
+            let v = self.b.use_local(slot, ty).map_err(mir)?;
+            self.b.ins_clear_word(v).map_err(mir)?;
+        }
+        Ok(())
     }
 
     /// Fill the slots of stack array or class local `local` from `init`:
