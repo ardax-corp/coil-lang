@@ -271,7 +271,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
         MirInst::Index { .. } => allow_index,
         MirInst::ArrayLen { .. } => true,
-        MirInst::ResumeCoro { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::StoreStatic { .. } => false,
+        MirInst::ResumeCoro { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. } => false,
         MirInst::Alloc {
             kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
             ..

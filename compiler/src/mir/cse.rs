@@ -488,6 +488,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
+        | MirInst::ClearWord { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }

@@ -49,6 +49,7 @@ pub fn emit_dense(
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let cleared = cleared_words(func, &regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -106,6 +107,12 @@ pub fn emit_dense(
             }
             starts.push((out.len(), inst.dest()));
             let loc = func.loc_of(inst.dest());
+            if let MirInst::ClearWord { dest, value } = inst {
+                if cleared.contains(dest) {
+                    push_clear_word(&mut out, regs[value.index()]);
+                }
+                continue;
+            }
             if let MirInst::Call {
                 dest,
                 dest_hi,
@@ -295,6 +302,43 @@ pub(super) fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
 
 pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
     entry.map(|Label(id)| id.saturating_add(1)).unwrap_or(1)
+}
+
+/// The `ClearWord`s whose register may be zeroed: their word has one, and
+/// no value in that register is live after them (another local holding
+/// the same value, or a value coalesced into it).
+pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashSet<ValueId> {
+    let mut out = HashSet::new();
+    if !func.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, MirInst::ClearWord { .. }))) {
+        return out;
+    }
+    let live = super::gc::liveness_after(func);
+    for (b, block) in func.blocks.iter().enumerate() {
+        for (k, inst) in block.insts.iter().enumerate() {
+            let MirInst::ClearWord { dest, value } = inst else {
+                continue;
+            };
+            let slot = |v: &ValueId| need_slot.get(v.index()).copied().unwrap_or(false);
+            if slot(value)
+                && !func.params.contains(value)
+                && !live[b][k].iter().any(|v| slot(v) && regs[v.index()] == regs[value.index()])
+            {
+                out.insert(*dest);
+            }
+        }
+    }
+    out
+}
+
+/// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so
+/// dead-store elimination keeps it (the register is never read again,
+/// but the collector scans it).
+pub(super) fn push_clear_word(out: &mut Vec<IlOp>, reg: u8) {
+    out.push(IlOp::Const { imm: 0, loc: DebugLoc::unknown() });
+    out.push(IlOp::Byte {
+        byte: Byte::new(Instruction::STORE).with_load_store_slot(u32::from(reg)),
+        loc: DebugLoc::unknown(),
+    });
 }
 
 pub(super) fn assign_regs(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {
@@ -1083,6 +1127,8 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             });
             out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
         }
+        // Emitted where it stands (`cleared_words`).
+        MirInst::ClearWord { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,

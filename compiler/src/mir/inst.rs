@@ -390,6 +390,14 @@ pub enum MirInst {
         slot: u32,
         value: ValueId,
     },
+    /// Zero the frame word holding `value` (a spliced heap local past its
+    /// last use, HIR `Clear`), so the frame no longer roots its object.
+    /// Dest is a `bool` unit token. A side effect; emission writes the zero
+    /// only when no value sharing that word is live after it.
+    ClearWord {
+        dest: ValueId,
+        value: ValueId,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -576,6 +584,7 @@ impl MirInst {
             | Self::DoneCoro { dest, .. }
             | Self::LoadStatic { dest, .. }
             | Self::StoreStatic { dest, .. }
+            | Self::ClearWord { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -668,7 +677,7 @@ impl MirInst {
             }
             Self::DoneCoro { handle, .. } => vec![*handle],
             Self::LoadStatic { .. } => Vec::new(),
-            Self::StoreStatic { value, .. } => vec![*value],
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -746,7 +755,7 @@ impl MirInst {
             }
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
             Self::LoadStatic { .. } => {}
-            Self::StoreStatic { value, .. } => *value = map(*value),
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => *value = map(*value),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);

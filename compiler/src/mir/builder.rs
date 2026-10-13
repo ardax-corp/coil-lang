@@ -741,6 +741,36 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Zero the frame word holding `value`. Dest is a `bool` unit token.
+    pub fn ins_clear_word(&mut self, value: ValueId) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::ClearWord {
+            dest,
+            value: self.resolve(value),
+        })?;
+        Ok(dest)
+    }
+
+    /// Whether every path from the entry to the current block defines
+    /// `local` (a known predecessor that does not leads to one that does).
+    pub fn local_defined(&self, local: LocalId) -> bool {
+        let Ok(start) = self.cur() else {
+            return false;
+        };
+        let mut seen = vec![false; self.func.blocks.len()];
+        let mut todo = vec![start];
+        while let Some(b) = todo.pop() {
+            if std::mem::replace(&mut seen[b.index()], true) || self.current_def[b.index()].contains_key(&local) {
+                continue;
+            }
+            if self.preds[b.index()].is_empty() {
+                return false;
+            }
+            todo.extend(self.preds[b.index()].iter().copied());
+        }
+        true
+    }
+
     /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].
     pub fn ins_array_push(
         &mut self,

@@ -508,6 +508,14 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
+            MirInst::ClearWord { dest, value } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} ClearWord dest is not bool"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} ClearWord value type"));
+                }
+            }
             MirInst::ArrayPush {
                 dest,
                 array,
