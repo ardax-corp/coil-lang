@@ -520,6 +520,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
+        | MirInst::Unbox { .. }
         | MirInst::StrEq { .. } => {
             return None
         }

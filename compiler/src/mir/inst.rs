@@ -509,6 +509,15 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
+    /// `UnboxValue tag`: the payload of `src` when it is a box of `tag`
+    /// (the default word for another box); any other word as it is. A
+    /// dictionary entry's argument comes boxed. Reads only the immutable
+    /// box, never allocates.
+    Unbox {
+        dest: ValueId,
+        src: ValueId,
+        tag: u32,
+    },
     /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -672,6 +681,7 @@ impl MirInst {
             | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
+            | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. } => dest,
         }
     }
@@ -763,7 +773,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -859,7 +869,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } => {}
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

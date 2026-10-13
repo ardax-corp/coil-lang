@@ -73,8 +73,17 @@ pub fn prune_unused_functions(
         .min()
         .unwrap_or(0);
     let setup_start = input.preserve_emit_start.unwrap_or(0).min(setup_end);
-    if setup_end > setup_start {
-        let (raw_s, raw_e) = emitting_range_to_raw(ops, setup_start, setup_end);
+    // Bodies emitted after setup starts (recorded spans) are not setup code,
+    // even before the first live body: a dead shared generic body there
+    // neither keeps its callees live nor survives the shake.
+    let bodies: Vec<(usize, usize)> = buf
+        .funcs()
+        .iter()
+        .filter(|f| f.code_start >= setup_start && f.code_start < f.code_end && input.functions.contains_key(&f.name))
+        .map(|f| (f.code_start, f.code_end))
+        .collect();
+    for (piece_s, piece_e) in outside_bodies(setup_start, setup_end, &bodies) {
+        let (raw_s, raw_e) = emitting_range_to_raw(ops, piece_s, piece_e);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
                 if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
@@ -136,20 +145,23 @@ pub fn prune_unused_functions(
             .min()
             .unwrap_or(preserve);
         if live_start > preserve {
-            dead_spans = dead_spans
-                .into_iter()
-                .flat_map(|(s, e, n)| {
-                    // Subtract [preserve, live_start) from [s, e).
-                    let mut out = Vec::new();
-                    if s < preserve {
-                        out.push((s, e.min(preserve), n.clone()));
-                    }
-                    if e > live_start {
-                        out.push((s.max(live_start), e, n));
-                    }
-                    out.into_iter().filter(|(a, b, _)| a < b)
-                })
-                .collect();
+            // Subtract each setup piece of [preserve, live_start) (the gap
+            // outside the bodies emitted there) from every dead span.
+            for (gap_s, gap_e) in outside_bodies(preserve, live_start, &bodies) {
+                dead_spans = dead_spans
+                    .into_iter()
+                    .flat_map(|(s, e, n)| {
+                        let mut out = Vec::new();
+                        if s < gap_s {
+                            out.push((s, e.min(gap_s), n.clone()));
+                        }
+                        if e > gap_e {
+                            out.push((s.max(gap_e), e, n));
+                        }
+                        out.into_iter().filter(|(a, b, _)| a < b)
+                    })
+                    .collect();
+            }
         }
     }
     dead_spans.sort_by_key(|(s, _, _)| *s);
@@ -184,6 +196,27 @@ pub fn prune_unused_functions(
     let live_names: HashSet<&str> = input.functions.keys().map(|s| s.as_str()).collect();
     buf.retain_funcs(|f| live_names.contains(f.name.as_str()));
     (dropped, shrinks)
+}
+
+/// The parts of emitting range `[start, end)` outside every span in `bodies`.
+fn outside_bodies(start: usize, end: usize, bodies: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut inside: Vec<(usize, usize)> = bodies.iter().copied().filter(|&(s, e)| s < end && e > start).collect();
+    inside.sort_unstable();
+    let mut out = Vec::new();
+    let mut at = start;
+    for (s, e) in inside {
+        if s > at {
+            out.push((at, s.min(end)));
+        }
+        at = at.max(e);
+        if at >= end {
+            break;
+        }
+    }
+    if at < end {
+        out.push((at, end));
+    }
+    out
 }
 
 /// Function bodies in the flat [`CodeBuf`] and the calls between them, for
@@ -680,5 +713,78 @@ mod tests {
         assert_eq!(buf.funcs().len(), 1);
         assert_eq!(buf.funcs()[0].name, "main");
         assert_eq!(buf.funcs()[0].entry_sp, 4);
+    }
+
+    /// A shared generic body emitted after setup and before the first live
+    /// body (`neg`, called only by the shared `twice`, whose every call site
+    /// took a mono clone) is no setup code: neither it nor its callees stay
+    /// live for sitting in that gap.
+    #[test]
+    fn prunes_dead_bodies_between_setup_and_first_live_body() {
+        let mut buf = CodeBuf::new();
+        let mut functions = HashMap::new();
+        let mut labels = HashMap::new();
+
+        let preserve = buf.len();
+        buf.push_const(11); // setup payload that must survive
+        buf.push_store_pop(0);
+
+        let neg_pc = buf.len();
+        let neg_l = buf.bind_fresh_entry();
+        functions.insert("neg".into(), neg_pc);
+        labels.insert("neg".into(), neg_l);
+        buf.push_const(5);
+        buf.push_return();
+        buf.record_func_with_sp("neg", Some(neg_l), neg_pc, neg_pc + 2, 1);
+
+        let twice_pc = buf.len();
+        let twice_l = buf.bind_fresh_entry();
+        functions.insert("twice".into(), twice_pc);
+        labels.insert("twice".into(), twice_l);
+        buf.push_op(IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 0,
+            target: neg_l,
+            loc: DebugLoc::unknown(),
+            ret_words: 1,
+        });
+        buf.push_return();
+        buf.record_func_with_sp("twice", Some(twice_l), twice_pc, twice_pc + 2, 1);
+
+        let main_pc = buf.len();
+        let main_l = buf.bind_fresh_entry();
+        functions.insert("main".into(), main_pc);
+        labels.insert("main".into(), main_l);
+        buf.push_const(1);
+        buf.push_return();
+        buf.record_func_with_sp("main", Some(main_l), main_pc, main_pc + 2, 0);
+
+        let mut locals = HashMap::new();
+        let mut tests = Vec::new();
+        let roots = vec!["main".into()];
+        let (dropped, _) = prune_unused_functions(
+            &mut buf,
+            TreeshakeInput {
+                functions: &mut functions,
+                fn_entry_labels: &mut labels,
+                fn_debug_locals: &mut locals,
+                test_cases: &mut tests,
+                root_names: &roots,
+                include_tests: false,
+                preserve_emit_start: Some(preserve),
+            },
+        );
+        assert_eq!(dropped, 2);
+        assert!(!functions.contains_key("neg"));
+        assert!(!functions.contains_key("twice"));
+        assert!(
+            buf.ops().iter().any(|op| matches!(op, IlOp::Const { imm: 11, .. })),
+            "setup CONST must survive"
+        );
+        assert!(
+            !buf.ops().iter().any(|op| matches!(op, IlOp::Const { imm: 5, .. })),
+            "dead body in the setup gap must be removed"
+        );
+        assert_eq!(functions["main"], 2);
     }
 }
