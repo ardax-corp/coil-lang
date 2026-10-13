@@ -283,7 +283,7 @@ fn test_failure_reports_assert_message() {
     std::fs::create_dir_all(&tests).unwrap();
     std::fs::write(
         tests.join("a.hy"),
-        "test(\"custom\") {\n    assert(1 == 2, \"one is not two\")?;\n}\n",
+        "test(\"custom\") {\n    if 1 != 2 { raise \"one is not two\"; }\n}\n",
     )
     .unwrap();
     let out = Command::new(&bin)
@@ -350,7 +350,7 @@ fn coil_test_passes_macro_provider_file() {
     .unwrap();
     std::fs::write(
         cwd.join("uses.hy"),
-        "use macros::{twice};\n\ntest(\"twice\") {\n    assert(twice!(3) == 6)?;\n}\n",
+        "use macros::{twice};\n\ntest(\"twice\") {\n    if twice!(3) != 6 { raise \"twice\"; }\n}\n",
     )
     .unwrap();
     let out = Command::new(&bin)
