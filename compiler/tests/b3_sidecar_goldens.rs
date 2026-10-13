@@ -1,5 +1,5 @@
 //! B3 goldens: sidecar meaning must not change bytecode on a small
-//! `tests/positive` corpus (self-contained files, no stdlib).
+//! `tests/positive` corpus (small files; only the stdlib `assert!` macro).
 
 use common::Byte;
 use compiler::Pipeline;
@@ -56,12 +56,14 @@ const CORPUS: &[&str] = &[
 /// (`indirect_pair`'s `Err` arm returns in place; `Ok` keeps the old one).
 /// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
 /// fuse to dense (`option_pair.hy` grows by three).
+/// The corpus asserting with the stdlib `assert!` macro (`if !c { raise … }`)
+/// instead of the builtin `assert(c)?` shortens all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "08946876e664c67f_1289"),
-    ("functions.hy", "236cccdbe25aa2b5_280"),
-    ("loops.hy", "3db0f12002dc0891_237"),
-    ("option_pair.hy", "c490ff2e6a2fb35e_343"),
-    ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
+    ("arithmetic.hy", "6b2ada4bb2d1a472_978"),
+    ("functions.hy", "c6438231a0f10a79_175"),
+    ("loops.hy", "69835fb542e68f64_171"),
+    ("option_pair.hy", "dd1515d1ca9f7eb7_296"),
+    ("user_trait_dispatch.hy", "82163b05e1ec6078_103"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
@@ -87,7 +89,9 @@ fn compile_file(name: &str) -> (Vec<Byte>, Vec<u64>) {
     let src = std::fs::read_to_string(positive(name)).unwrap_or_else(|e| {
         panic!("read {name}: {e}");
     });
+    comptime::install();
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     pipeline.set_include_tests(true);
     pipeline
         .compile_src(&src)
