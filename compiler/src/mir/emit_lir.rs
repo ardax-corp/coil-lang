@@ -306,9 +306,10 @@ impl EmitPlan {
                     tree[dest.index()] = false;
                     tree[hi.index()] = false;
                 }
-                // Host calls have effects: emit them in program order and
-                // keep the result in a slot, never as an inline operand.
-                if let MirInst::HostInvoke { dest, .. } | MirInst::CallIndirect { dest, .. } = inst {
+                // Host calls and yields have effects: emit them in program
+                // order and keep the result in a slot, never as an inline
+                // operand (a yield's sent word arrives only for a store).
+                if let MirInst::HostInvoke { dest, .. } | MirInst::CallIndirect { dest, .. } | MirInst::Yield { dest, .. } = inst {
                     need_slot[dest.index()] = true;
                     tree[dest.index()] = false;
                 }
