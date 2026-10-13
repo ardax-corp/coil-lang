@@ -1,4 +1,6 @@
 // Match-arm blocks accept statements and an optional trailing value.
+use tests::assert;
+
 enum Choice {
     Value(int),
     Stop,
@@ -17,9 +19,9 @@ fn choose(Choice choice) -> int {
 }
 
 test("match arm let and trailing value") {
-    assert(choose(Choice::Value(41)) == 42)?;
+    assert!(choose(Choice::Value(41)) == 42);
 }
 
 test("match arm early return") {
-    assert(choose(Choice::Stop) == 40)?;
+    assert!(choose(Choice::Stop) == 40);
 }

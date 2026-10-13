@@ -1,5 +1,6 @@
 // A callee whose guard clauses return early inlines as one `if` value:
 // `if c { return a; } rest` becomes `if c { a } else { rest }`.
+use tests::assert;
 
 fn clamp(int x, int lo, int hi) -> int {
     if x < lo {
@@ -38,20 +39,20 @@ fn note(int x) {
 }
 
 test("guard returns pick the right exit") {
-    assert(clamp(-5, 0, 9) == 0, "below")?;
-    assert(clamp(5, 0, 9) == 5, "inside")?;
-    assert(clamp(50, 0, 9) == 9, "above")?;
+    assert!(clamp(-5, 0, 9) == 0, "below");
+    assert!(clamp(5, 0, 9) == 5, "inside");
+    assert!(clamp(50, 0, 9) == 9, "above");
 }
 
 test("an if chain whose branches all return") {
-    assert(sign(-3) == -1, "negative")?;
-    assert(sign(0) == 0, "zero")?;
-    assert(sign(8) == 1, "positive")?;
+    assert!(sign(-3) == -1, "negative");
+    assert!(sign(0) == 0, "zero");
+    assert!(sign(8) == 1, "positive");
 }
 
 test("a guard with statements before and inside it") {
-    assert(step(3) == 7, "small")?;
-    assert(step(8) == 18, "large")?;
+    assert!(step(3) == 7, "small");
+    assert!(step(8) == 18, "large");
 }
 
 fn mix(int n) -> int {
@@ -66,5 +67,5 @@ fn mix(int n) -> int {
 }
 
 test("guards in a loop and a unit callee") {
-    assert(mix(20) == 260, "sum")?;
+    assert!(mix(20) == 260, "sum");
 }

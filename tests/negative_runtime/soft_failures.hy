@@ -1,4 +1,6 @@
 // Runtime "negative" paths that must remain well-defined (soft Err, not abort).
+use tests::assert;
+
 fn boom() {
     raise "x";
 }
@@ -21,7 +23,9 @@ test("assert false is Err not panic") {
     let r = assert(false);
     match r {
         Result::Ok(_) => raise "expected Err from assert(false)",
-        Result::Err(_) => assert(true)?,
+        Result::Err(_) => {
+            assert!(true);
+        },
     }
 }
 
@@ -30,23 +34,25 @@ test("assert message preserved") {
         Result::Ok(_) => "",
         Result::Err(e) => e,
     };
-    assert(msg == "boom")?;
+    assert!(msg == "boom");
 }
 
 test("raise propagates through ?") {
     let r = wrap();
     match r {
         Result::Ok(_) => raise "expected Err",
-        Result::Err(e) => assert(e == "x")?,
+        Result::Err(e) => {
+            assert!(e == "x");
+        },
     }
 }
 
 test("option none coalesce") {
-    assert((Option::None ?? 0) == 0)?;
+    assert!((Option::None ?? 0) == 0);
 }
 
 test("result err coalesce swallows") {
-    assert((Result::Err("e") ?? 5) == 5)?;
+    assert!((Result::Err("e") ?? 5) == 5);
 }
 
 test("match err arm taken") {
@@ -55,17 +61,19 @@ test("match err arm taken") {
         Result::Ok(n) => n,
         Result::Err(_) => 0 - 1,
     };
-    assert(v == 0 - 1)?;
+    assert!(v == 0 - 1);
 }
 
 test("failed assert does not poison next assert") {
     let _ = assert(false);
-    assert(true)?;
+    assert!(true);
 }
 
 test("double question mark on nested result") {
     match outer() {
         Result::Ok(_) => raise "expected Err",
-        Result::Err(e) => assert(e == "inner")?,
+        Result::Err(e) => {
+            assert!(e == "inner");
+        },
     }
 }

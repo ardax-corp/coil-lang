@@ -1,5 +1,6 @@
 // A call through a function value whose result is a two-word enum
 // (`Result<int, string>`, `Option<int>`) gets the boxed enum back.
+use tests::assert;
 
 fn parse(int n, int fail) -> Result<int, string> {
     if fail == 1 {
@@ -28,19 +29,19 @@ fn apply(int -> Option<int> f, int x) -> int {
 
 test("named function value") {
     let f = parse;
-    assert(ok_or(f(7, 0), -1) == 7)?;
-    assert(ok_or(f(7, 1), -1) == -1)?;
+    assert!(ok_or(f(7, 0), -1) == 7);
+    assert!(ok_or(f(7, 1), -1) == -1);
 }
 
 test("lambda over a pair result") {
     let g = fn (int x) => parse(x * 2, 0);
-    assert(ok_or(g(4), 0) == 8)?;
+    assert!(ok_or(g(4), 0) == 8);
     let h = fn (int x) => parse(x, 1);
-    assert(ok_or(h(4), 3) == 3)?;
+    assert!(ok_or(h(4), 3) == 3);
 }
 
 test("option through a parameter") {
-    assert(apply(half, 10) == 5)?;
-    assert(apply(half, 3) == -1)?;
-    assert(apply(fn (int x) => half(x + 1), 5) == 3)?;
+    assert!(apply(half, 10) == 5);
+    assert!(apply(half, 3) == -1);
+    assert!(apply(fn (int x) => half(x + 1), 5) == 3);
 }

@@ -1,4 +1,6 @@
 // COI-114: tuple variant may wrap a class (including mutual recursion).
+use tests::assert;
+
 class JsonObject {
     pub keys: Vec<string>,
     pub vals: Vec<JsonValue>,
@@ -16,5 +18,5 @@ test("construct and match Obj(JsonObject)") {
         JsonValue::Obj(inner) => inner.keys.len(),
         JsonValue::Null => -1,
     };
-    assert(n == 1)?;
+    assert!(n == 1);
 }

@@ -1,6 +1,7 @@
 // A heap-free function (`depth`) gets a precise frame map, so collections
 // that run in its callees skip its frame. Heap values held by the callers
 // and callees around it must still survive.
+use tests::assert;
 use gc::collect;
 
 class Box {
@@ -34,7 +35,7 @@ test("heap values around a precise frame survive collections") {
         total = total + depth(5);
         round = round + 1;
     }
-    assert(total == 20 * 12)?;
-    assert(outer.v == 40)?;
-    assert(words[2] == "c")?;
+    assert!(total == 20 * 12);
+    assert!(outer.v == 40);
+    assert!(words[2] == "c");
 }

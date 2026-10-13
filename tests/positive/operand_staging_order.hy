@@ -1,5 +1,6 @@
 // Operands that branch (`match`, `??`) keep their order and their values
 // when they meet in a binary operator.
+use tests::assert;
 
 fn lookup(int i, int n) -> Option<int> {
     if i < 0 || i >= n {
@@ -27,24 +28,24 @@ fn diff_match(int a, int b) -> int {
 test("coalesce on locals as operands") {
     let x = Option::Some(2);
     let y: Option<int> = Option::None;
-    assert((x ?? -1) + (y ?? -1) == 1)?;
-    assert((x ?? 10) + (x ?? 20) == 4)?;
-    assert((y ?? 10) + (y ?? 20) == 30)?;
-    assert(pick(5) == 25)?;
+    assert!((x ?? -1) + (y ?? -1) == 1);
+    assert!((x ?? 10) + (x ?? 20) == 4);
+    assert!((y ?? 10) + (y ?? 20) == 30);
+    assert!(pick(5) == 25);
 }
 
 test("coalesce on calls as operands") {
     let b = 3;
-    assert((lookup(1, 7) ?? -1) + (lookup(-1, 7) ?? -1) == 1)?;
-    assert((lookup(1, 7) ?? -1) - (lookup(3, 7) ?? -1) == -4)?;
-    assert(b - (lookup(1, 7) ?? -1) == 1)?;
-    assert((lookup(1, 7) ?? -1) - b == -1)?;
+    assert!((lookup(1, 7) ?? -1) + (lookup(-1, 7) ?? -1) == 1);
+    assert!((lookup(1, 7) ?? -1) - (lookup(3, 7) ?? -1) == -4);
+    assert!(b - (lookup(1, 7) ?? -1) == 1);
+    assert!((lookup(1, 7) ?? -1) - b == -1);
 }
 
 test("match operands keep their order") {
-    assert(diff_match(1, 3) == -4)?;
-    assert(diff_match(3, 1) == 4)?;
-    assert(diff_match(9, 1) == -3)?;
+    assert!(diff_match(1, 3) == -4);
+    assert!(diff_match(3, 1) == 4);
+    assert!(diff_match(9, 1) == -3);
 }
 
 test("match arms still bind from slots") {
@@ -53,5 +54,5 @@ test("match arms still bind from slots") {
         Option::Some(v) => v + 1,
         Option::None => 0,
     };
-    assert(r + (x ?? 0) == 9)?;
+    assert!(r + (x ?? 0) == 9);
 }

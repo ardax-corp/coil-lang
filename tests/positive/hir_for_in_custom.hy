@@ -1,5 +1,7 @@
 // A user `into_iter` returning a numeric range, an array or a Vec runs
 // that result's counted loop: the call, then the latch.
+use tests::assert;
+
 class Span {
     pub lo: int,
     pub hi: int,
@@ -55,9 +57,9 @@ fn span_early(Span s, int stop) -> int {
 }
 
 test("range-returning into_iter") {
-    assert(span_sum(new Span(1, 4)) == 10)?;
-    assert(span_sum(new Span(5, 4)) == 0)?;
-    assert(span_early(new Span(0, 9), 3) == 3)?;
+    assert!(span_sum(new Span(1, 4)) == 10);
+    assert!(span_sum(new Span(5, 4)) == 0);
+    assert!(span_early(new Span(0, 9), 3) == 3);
 }
 
 test("vec-returning into_iter") {
@@ -65,5 +67,5 @@ test("vec-returning into_iter") {
     v.push(3);
     v.push(9);
     v.push(4);
-    assert(bag_max(new Bag(v)) == 9)?;
+    assert!(bag_max(new Bag(v)) == 9);
 }

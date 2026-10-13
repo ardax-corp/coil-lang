@@ -1,5 +1,7 @@
 // Two self-call results added inside a match arm: the sum flows to a join,
 // so it is stored while its operands are still on the stack.
+use tests::assert;
+
 #[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 {
@@ -11,5 +13,5 @@ fn fibm(int n) -> int {
 }
 
 test("self-call results summed into a match join") {
-    assert(fibm(15) == 610)?;
+    assert!(fibm(15) == 610);
 }

@@ -1,5 +1,6 @@
 // A range value read by a call nested in another call's arguments stages
 // into a temp, with the calls before it, so it runs with nothing below it.
+use tests::assert;
 use string::format;
 
 test("range to_vec inside format") {
@@ -15,5 +16,5 @@ test("range to_vec inside format") {
         (lo..=hi).to_vec().len(),
         (1.0..4.0).to_vec().len(),
     );
-    assert(s == "5,4,0,2,3", s)?;
+    assert!(s == "5,4,0,2,3", s);
 }

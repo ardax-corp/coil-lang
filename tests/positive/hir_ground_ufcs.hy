@@ -1,5 +1,7 @@
 // A trait method called function-style on ground arguments goes straight
 // to the instance's method, boxing the positions it unboxes.
+use tests::assert;
+
 trait Weigh<S> {
     fn weigh(S x, int k) -> int {}
 }
@@ -25,9 +27,9 @@ fn heavy(Crate c) -> int {
 }
 
 test("ground function-style trait calls") {
-    assert(weigh(4, 5) == 20)?;
-    assert(heavy(new Crate(10)) == 17)?;
-    assert(weigh(new Crate(2), weigh(1, 3)) == 5)?;
+    assert!(weigh(4, 5) == 20);
+    assert!(heavy(new Crate(10)) == 17);
+    assert!(weigh(new Crate(2), weigh(1, 3)) == 5);
     let n = 7;
-    assert(1 + weigh(n, n) == 50)?;
+    assert!(1 + weigh(n, n) == 50);
 }

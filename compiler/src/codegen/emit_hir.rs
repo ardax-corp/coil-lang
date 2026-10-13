@@ -915,9 +915,14 @@ impl Compiler {
         let mut stacks = HashMap::new();
         for (&local, &n) in emit.plan.stacks.iter().filter(|(l, _)| !outlined.contains(*l)) {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-            let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            // An array literal bound to a `Vec` local is slots too.
+            let element = ty.as_ref().and_then(|t| match crate::typechecking::ty::strip_readonly(t) {
+                Ty::Array { element, .. } => Some(element.as_ref()),
+                t => crate::typechecking::ty::vec_element_ty(t),
+            });
+            let elem = match element {
                 // A heap element's slot holds its boxed word.
-                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
                     (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
                         .then_some(crate::mir::MirTy::HeapRef)
@@ -931,6 +936,7 @@ impl Compiler {
         // A finalizer class stays out: its object's lifetime follows the
         // frame slots emission clears, not MIR values.
         let checker = &self.checker;
+        let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
             checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
@@ -971,7 +977,12 @@ impl Compiler {
                 && !outlined.contains(&local.0)
             {
                 let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
-                let tys: Option<Vec<_>> = tys.iter().map(word).collect();
+                // A generic class's field at the made type's arguments.
+                let made = Self::hir_ty(hir, init);
+                let tys: Option<Vec<_>> = tys
+                    .iter()
+                    .map(|t| word(t).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
+                    .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
         }
@@ -1012,7 +1023,13 @@ impl Compiler {
                     }
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = field_word(&fty)
+                && let Some(w) = field_word(&fty).or_else(|| {
+                    // A generic class's field (`item: T`) at a ground
+                    // receiver (`Box<int>`): its slot holds the boxed-layout
+                    // word of the field's type there.
+                    let at = self.hir_class_ty_args_at(Self::hir_ty(hir, *base)?, &fty)?;
+                    field_word(&at)
+                })
                 && e.ty.as_ref().and_then(field_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
@@ -1067,11 +1084,16 @@ impl Compiler {
                     .iter()
                     .map(|t| {
                         // A two-word field value is stored boxed.
-                        word(t).or_else(|| {
-                            (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
-                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
-                                .then_some(crate::mir::MirTy::HeapRef)
-                        })
+                        let stored = |t: &Ty| {
+                            word(t).or_else(|| {
+                                (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
+                                    && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
+                        };
+                        // A generic class's field at the made type's
+                        // arguments (`new Box(1)`: `T` is `int`).
+                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?))
                     })
                     .collect::<Option<Vec<_>>>()
             {
@@ -1164,7 +1186,12 @@ impl Compiler {
                     Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
                     _ => return None,
                 };
-                checker.scalar_value_ty(&name).as_ref().and_then(crate::mir::word_mir_ty).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64))
+                // A `#[repr(string)]` value is its backing string's heap word.
+                let backing = checker.scalar_value_ty(&name)?;
+                if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+                    return Some(crate::mir::MirTy::HeapRef);
+                }
+                crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
             }),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
@@ -1210,10 +1237,17 @@ impl Compiler {
                 }
                 Self::boxed_payloads(checker, &t, variant)
             }),
-            scalar_variant: Box::new(move |enum_name: &str, variant: &str| match checker.scalar_for(enum_name, variant)? {
-                crate::typechecking::ty::ScalarBacking::Int(n) => Some(crate::mir::MirConst::I64(*n)),
-                crate::typechecking::ty::ScalarBacking::Float(bits) => Some(crate::mir::MirConst::F64(*bits)),
-                _ => None,
+            scalar_variant: Box::new(move |enum_name: &str, variant: &str| {
+                use crate::mir::{MirConst, ScalarLit};
+                use crate::typechecking::ty::ScalarBacking;
+                match checker.scalar_for(enum_name, variant)? {
+                    ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(*n))),
+                    ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(*bits))),
+                    ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(*b))),
+                    // Emission interned the string where it pushed it; a
+                    // string this body never pushed is not one to read.
+                    ScalarBacking::String(s) => string_indices.get(unescape_coil_string(s).as_str()).copied().map(ScalarLit::Str),
+                }
             }),
             heap_fields,
             record_fields,
@@ -5228,6 +5262,22 @@ impl Compiler {
         )
     }
 
+    /// Declared field type `fty` of a generic class (its parameters opened
+    /// by [`Self::hir_class_fields`]) at the class's type arguments in
+    /// `ty`, when that is ground and its value is stored as it is (a boxed
+    /// layout: a niche `Option` in a `T` slot is a boxed enum object).
+    fn hir_class_ty_args_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
+        if !Self::ty_has_var(fty) {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&ty) else {
+            return None;
+        };
+        let at = close_params(fty, args)?;
+        (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
+    }
+
     /// `new C(..)`'s class, instance field count and declared field types,
     /// when the codegen's layout of `C` matches the checker's.
     fn hir_new_layout(&self, hir: &HirBody, id: HirId) -> Option<(String, Vec<Ty>)> {
@@ -6755,9 +6805,10 @@ impl Compiler {
                 args,
             } => {
                 let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
-                let mut bc = CodeBuf::new();
-                self.emit_raw_string_literal(&mut bc, &name);
-                self.bytecode.append(&mut bc);
+                // Direct MIR reads the index.
+                let idx = self.intern_string(&name);
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
@@ -10686,6 +10737,28 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         },
         _ => ty.clone(),
     }
+}
+
+/// [`open_params`] undone at type arguments `args`: parameter `i`'s
+/// variable becomes `args[i]`. `None` when a parameter has no argument.
+fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
+    let close = |t: &Ty| close_params(t, args);
+    Some(match ty {
+        Ty::Var(crate::typechecking::ty::TyVarId(v)) if *v > u32::MAX - 64 => args.get((u32::MAX - v) as usize)?.clone(),
+        Ty::App(head, items) => Ty::App(Box::new(close(head)?), items.iter().map(close).collect::<Option<_>>()?),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(close(a)?), Box::new(close(b)?)),
+        Ty::List(inner) => Ty::List(Box::new(close(inner)?)),
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(close(inner)?)),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(close).collect::<Option<_>>()?),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(close(element)?),
+            length: *length,
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, f)| Some((n.clone(), close(f)?))).collect::<Option<_>>()?,
+        },
+        _ => ty.clone(),
+    })
 }
 
 /// A two-word `Option`, `Result` or user enum: a payload word and a tag,

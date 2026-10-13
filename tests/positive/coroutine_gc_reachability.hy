@@ -1,6 +1,7 @@
 // Coroutines are traced, not all rooted: a suspended `yield from` parent
 // and its delegate survive collections while reachable, and the delegate's
 // heap locals survive across yields.
+use tests::assert;
 use gc::collect;
 
 gen fn counter() {
@@ -23,9 +24,9 @@ test("yield from survives collections") {
     let b = resume h;
     collect();
     let c = resume h;
-    assert(a == 10)?;
-    assert(b == 20)?;
-    assert(c == 30)?;
+    assert!(a == 10);
+    assert!(b == 20);
+    assert!(c == 30);
 }
 
 test("dropped coroutines do not break later ones") {
@@ -37,5 +38,5 @@ test("dropped coroutines do not break later ones") {
     collect();
     let h = counter();
     let v = resume h;
-    assert(v == 10)?;
+    assert!(v == 10);
 }

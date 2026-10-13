@@ -1,3 +1,5 @@
+use tests::assert;
+
 fn parse(int value) {
     if value < 0 {
         raise "bad";
@@ -11,8 +13,8 @@ fn inc(int value) {
 }
 
 test("negative pair propagation") {
-    assert(match inc(-1) {
+    assert!(match inc(-1) {
         Result::Ok(_) => false,
         Result::Err(_) => true,
-    })?;
+    });
 }

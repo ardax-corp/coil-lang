@@ -1,5 +1,6 @@
 // String `==` and `!=` compare content, whether the result feeds a branch,
 // a local or the return value, on fields, parameters and fresh strings.
+use tests::assert;
 use string::format;
 
 class Slot {
@@ -41,17 +42,17 @@ fn count_eq(Vec<string> xs, string key) -> int {
 
 test("string == compares content") {
     let a = format("%s%s", "o", "k");
-    assert(same(a, "ok"))?;
-    assert(!same(a, "no"))?;
-    assert(!differ(a, "ok"))?;
-    assert(differ(a, "ko"))?;
+    assert!(same(a, "ok"));
+    assert!(!same(a, "no"));
+    assert!(!differ(a, "ok"));
+    assert!(differ(a, "ko"));
 }
 
 test("string != on a field") {
     let s = new Slot(1, format("%s", "key"));
-    assert(match_key(s, "key") == 1)?;
-    assert(match_key(s, "other") == 2)?;
-    assert(match_key(new Slot(0, "key"), "key") == 0)?;
+    assert!(match_key(s, "key") == 1);
+    assert!(match_key(s, "other") == 2);
+    assert!(match_key(new Slot(0, "key"), "key") == 0);
 }
 
 test("string == stored in a loop") {
@@ -59,6 +60,6 @@ test("string == stored in a loop") {
     xs.push(format("%s", "a"));
     xs.push("b");
     xs.push(format("%s%s", "", "a"));
-    assert(count_eq(xs, "a") == 2)?;
-    assert(count_eq(xs, "c") == 0)?;
+    assert!(count_eq(xs, "a") == 2);
+    assert!(count_eq(xs, "c") == 0);
 }

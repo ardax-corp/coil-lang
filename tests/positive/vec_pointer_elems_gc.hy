@@ -2,6 +2,7 @@
 // element type carries a pointer element kind (`TagArrayKind`): marking
 // treats the elements as precise references. Collections in between must
 // keep every element (and `None` / `0` holes) intact.
+use tests::assert;
 use gc::collect;
 
 class Node {
@@ -37,13 +38,13 @@ test("pointer vec survives collections") {
     collect();
     let more = chain(300);
     collect();
-    assert(sum(nodes) == 124750)?;
-    assert(sum(more) == 44850)?;
+    assert!(sum(nodes) == 124750);
+    assert!(sum(more) == 44850);
     let tail = match nodes[499].next {
         Option::Some(n) => n.v,
         Option::None => -1,
     };
-    assert(tail == 498)?;
+    assert!(tail == 498);
 }
 
 test("vec of options keeps holes and payloads") {
@@ -67,7 +68,7 @@ test("vec of options keeps holes and payloads") {
         };
         j = j + 1;
     }
-    assert(total == 3267)?;
+    assert!(total == 3267);
 }
 
 test("nested and literal-backed vecs") {
@@ -85,6 +86,6 @@ test("nested and literal-backed vecs") {
         total = total + len(rows[k]);
         k = k + 1;
     }
-    assert(total == 55)?;
-    assert(len(words[2]) == 3)?;
+    assert!(total == 55);
+    assert!(len(words[2]) == 3);
 }

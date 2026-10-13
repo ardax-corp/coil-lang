@@ -1,6 +1,7 @@
 // An auto-parallel loop's body runs in the chunk worker's own frame: its
 // `let`s bind there, and the index, accumulator and live captures arrive as
 // the worker's slots. `sum_halves` (an `Option` callee) stays sequential.
+use tests::assert;
 
 fn half(int x) -> Option<int> {
     if x % 2 == 0 {
@@ -46,19 +47,19 @@ fn weighted(int n, int w) -> int {
 }
 
 test("while site with body locals") {
-    assert(sum_halves(200000) == 5000050000)?;
-    assert(sum_halves(10) == 15)?;
-    assert(sum_halves(0) == 0)?;
+    assert!(sum_halves(200000) == 5000050000);
+    assert!(sum_halves(10) == 15);
+    assert!(sum_halves(0) == 0);
 }
 
 test("while site with body locals in the worker") {
     // Each cycle of 0..4 squares to 30.
-    assert(sum_mod(100000) == 20000 * 30)?;
-    assert(sum_mod(3) == 5)?;
+    assert!(sum_mod(100000) == 20000 * 30);
+    assert!(sum_mod(3) == 5);
 }
 
 test("counted for site with a live capture") {
     // 0..140000 is 20000 full cycles of 0..6 (sum 21).
-    assert(weighted(140000, 3) == 20000 * 21 * 3)?;
-    assert(weighted(7, 2) == 42)?;
+    assert!(weighted(140000, 3) == 20000 * 21 * 3);
+    assert!(weighted(7, 2) == 42);
 }

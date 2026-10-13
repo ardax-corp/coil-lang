@@ -2,6 +2,8 @@
 // (`Result<T, E>` holding an `Err`, `Option<T>` holding `None`) used to
 // drop `T` from its scheme: every call shared one `T`, so a call at `int`
 // read a two-slot `Result` the body never returned (#789).
+use tests::assert;
+
 fn gerr<T>(T x) -> Result<T, string> {
     let e: Result<T, string> = Result::Err("failed");
     return e;
@@ -44,19 +46,19 @@ fn show_str(Result<string, string> r) -> string {
 }
 
 test("an Err local returned at int and at string") {
-    assert(show(gerr(3)) == -1)?;
-    assert(show_str(gerr("x")) == "failed")?;
+    assert!(show(gerr(3)) == -1);
+    assert!(show_str(gerr("x")) == "failed");
 }
 
 test("Ok and Err locals on two paths") {
-    assert(show(gpick(3, false)) == 3)?;
-    assert(show(gpick(3, true)) == -1)?;
-    assert(show_str(gpick("y", false)) == "y")?;
+    assert!(show(gpick(3, false)) == 3);
+    assert!(show(gpick(3, true)) == -1);
+    assert!(show_str(gpick("y", false)) == "y");
 }
 
 test("a Result local reassigned in an if") {
-    assert(show(greassign(4, false)) == 4)?;
-    assert(show(greassign(4, true)) == -1)?;
+    assert!(show(greassign(4, false)) == 4);
+    assert!(show(greassign(4, true)) == -1);
 }
 
 test("a None local returned at two types") {
@@ -69,5 +71,5 @@ test("a None local returned at two types") {
         },
         Option::Some(_) => false,
     };
-    assert(both_none)?;
+    assert!(both_none);
 }

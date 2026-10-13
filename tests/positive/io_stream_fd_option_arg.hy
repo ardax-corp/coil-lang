@@ -1,6 +1,7 @@
 // `Option::None` in a two-slot Result CALL's arguments must stay a niche 0.
 // Pair-emitting it under `unbox_enum_context` shifts the frame so `Stream.fd`
 // sees a string (InvalidInput). Same shape as tls::client::enable → create_client.
+use tests::assert;
 use io::Stream;
 use io::IoError;
 use io::net::tcp::listen;
@@ -27,7 +28,7 @@ fn enable_like(Stream s, Option<string> ca) -> Result<Stream, IoError> {
 test("Stream.fd ? with Option arg in two-word Result") {
     let l = listen("127.0.0.1", 0)?;
     let n = fd_with_opt(l, "localhost", false, Option::None)?;
-    assert(n >= 0)?;
+    assert!(n >= 0);
 }
 
 test("two-word Result int ? into heap Result Stream") {

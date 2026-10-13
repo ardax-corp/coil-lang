@@ -1,5 +1,7 @@
 // Generic bodies and test bodies return a niche `Option` / `Result` boxed:
 // each return builds the enum object, on every path.
+use tests::assert;
+
 fn gfind<T>(Vec<T> xs, int at) -> Option<T> {
     if at < len(xs) {
         let s: Option<T> = Option::Some(xs[at]);
@@ -57,18 +59,18 @@ fn check(int x) -> Result<(), string> {
 test("a boxed Option on both paths") {
     let xs: Vec<string> = Vec::new();
     xs.push("a");
-    assert(name(gfind(xs, 0)) == "a")?;
-    assert(name(gfind(xs, 1)) == "-")?;
+    assert!(name(gfind(xs, 0)) == "a");
+    assert!(name(gfind(xs, 1)) == "-");
 }
 
 test("a boxed unit Result on both paths") {
-    assert(passed(gpass("s", false)) == "ok")?;
-    assert(passed(gpass("s", true)) == "no")?;
+    assert!(passed(gpass("s", false)) == "ok");
+    assert!(passed(gpass("s", true)) == "no");
 }
 
 test("a boxed Result on both paths") {
-    assert(picked(gpick("y", false)) == "y")?;
-    assert(picked(gpick("y", true)) == "bad")?;
+    assert!(picked(gpick("y", false)) == "y");
+    assert!(picked(gpick("y", true)) == "bad");
 }
 
 test("? and a fall-off Ok in a test body") {
@@ -80,5 +82,5 @@ test("an early return of a Result in a test body") {
     if passed(check(-1)) == "neg" {
         return check(1);
     }
-    assert(false)?;
+    assert!(false);
 }

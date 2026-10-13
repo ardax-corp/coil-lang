@@ -1,6 +1,7 @@
 // Ground trait method calls `recv.method(args)`, lowered from HIR: scalar,
 // class and enum receivers, an `Option` result, extra arguments and a
 // default method.
+use tests::assert;
 
 class Point {
     pub x: int,
@@ -81,37 +82,37 @@ fn total(Point p, Shape s) -> int {
 
 test("scalar receiver") {
     let n = 5;
-    assert(n.size() == 5)?;
-    assert(n.scaled(3) == 15)?;
-    assert(n.twice() == 10)?;
+    assert!(n.size() == 5);
+    assert!(n.scaled(3) == 15);
+    assert!(n.twice() == 10);
 }
 
 test("class receiver") {
     let p = new Point(2, 3);
-    assert(p.size() == 5)?;
-    assert(p.scaled(2) == 10)?;
-    assert(p.twice() == 10)?;
+    assert!(p.size() == 5);
+    assert!(p.scaled(2) == 10);
+    assert!(p.twice() == 10);
 }
 
 test("enum receiver") {
     let s = Shape::Square(4);
-    assert(s.size() == 16)?;
-    assert(Shape::Dot.size() == 0)?;
-    assert(s.scaled(2) == 32)?;
+    assert!(s.size() == 16);
+    assert!(Shape::Dot.size() == 0);
+    assert!(s.scaled(2) == 32);
 }
 
 test("option results") {
     let n = 5;
-    assert(n.pick(3) == Some(3))?;
-    assert(n.pick(9) == None)?;
+    assert!(n.pick(3) == Some(3));
+    assert!(n.pick(9) == None);
     let p = new Point(4, 1);
     let got = p.pick(0) ?? -1;
-    assert(got == 4)?;
-    assert(p.pick(1) == None)?;
+    assert!(got == 4);
+    assert!(p.pick(1) == None);
 }
 
 test("nested in an expression") {
     let p = new Point(1, 1);
-    assert(total(p, Shape::Square(3)) == 2 + 9 + 7)?;
-    assert(p.size() + new Point(5, 5).size() == 12)?;
+    assert!(total(p, Shape::Square(3)) == 2 + 9 + 7);
+    assert!(p.size() + new Point(5, 5).size() == 12);
 }

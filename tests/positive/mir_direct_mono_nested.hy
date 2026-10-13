@@ -3,6 +3,7 @@
 // ground call like one with a bare `T`: the clone's types come from the
 // signature against the argument and call types. Its `Option<T>` formals
 // arrive in the clone's own layout, with nothing converted on entry.
+use tests::assert;
 
 trait Weigh<T> {
     fn weight(T x) -> int {}
@@ -65,29 +66,29 @@ fn sum_firsts(int n) -> int {
 }
 
 test("a type parameter only inside Vec<T>") {
-    assert(total(Vec::from([1, 2, 3])) == 12)?;
-    assert(total(Vec::from(["ab", "c"])) == 3)?;
-    assert(first(Vec::from([7, 8])) == 7)?;
-    assert(first(Vec::from(["x", "y"])) == "x")?;
-    assert(sum_firsts(3) == 0 + 2 + 1 + 6 + 2 + 10)?;
+    assert!(total(Vec::from([1, 2, 3])) == 12);
+    assert!(total(Vec::from(["ab", "c"])) == 3);
+    assert!(first(Vec::from([7, 8])) == 7);
+    assert!(first(Vec::from(["x", "y"])) == "x");
+    assert!(sum_firsts(3) == 0 + 2 + 1 + 6 + 2 + 10);
 }
 
 test("a type parameter only in the result") {
     let n: int = make();
     let s: string = make();
     let c: Cell = make();
-    assert(n == 0)?;
-    assert(s == "")?;
-    assert(c.n == 0)?;
+    assert!(n == 0);
+    assert!(s == "");
+    assert!(c.n == 0);
 }
 
 test("Option<T> formals pass in the clone's layout") {
-    assert(get_or(Option::Some(4), 0) == 4)?;
-    assert(get_or(Option::None, 9) == 9)?;
-    assert(get_or(Option::Some("a"), "b") == "a")?;
-    assert(get_or(Option::None, 1.5) == 1.5)?;
+    assert!(get_or(Option::Some(4), 0) == 4);
+    assert!(get_or(Option::None, 9) == 9);
+    assert!(get_or(Option::Some("a"), "b") == "a");
+    assert!(get_or(Option::None, 1.5) == 1.5);
     let c = get_or(Option::Some(new Cell(3)), new Cell(0));
-    assert(c.n == 3)?;
-    assert(get_or(pick(Option::None, Option::Some(5)), 0) == 5)?;
-    assert(get_or(pick(Option::Some(true), Option::None), false))?;
+    assert!(c.n == 3);
+    assert!(get_or(pick(Option::None, Option::Some(5)), 0) == 5);
+    assert!(get_or(pick(Option::Some(true), Option::None), false));
 }

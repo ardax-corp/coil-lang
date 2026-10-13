@@ -2,6 +2,7 @@
 // one-byte string literals, casts between scalars, and the `()` binding
 // of `?` on a unit `Result`. The language harness also runs under
 // `--hir`, so each case pins both codegens.
+use tests::assert;
 use string::to_bytes;
 
 fn hex_val(byte c) -> int {
@@ -51,28 +52,32 @@ fn twice(int n) -> Result<int, string> {
 }
 
 test("byte literals and casts") {
-    assert(hex_val("7") == 7)?;
-    assert(hex_val("c") == 12)?;
-    assert(hex_val("z") == -1)?;
+    assert!(hex_val("7") == 7);
+    assert!(hex_val("c") == 12);
+    assert!(hex_val("z") == -1);
 }
 
 test("byte buffers") {
     let up = shout(to_bytes("hi there"));
-    assert(len(up) == 8)?;
-    assert(up[0] as int == 72)?;
-    assert(up[2] as int == 32)?;
+    assert!(len(up) == 8);
+    assert!(up[0] as int == 72);
+    assert!(up[2] as int == 32);
 }
 
 test("scalar casts") {
-    assert(mix(2) == 3.0)?;
-    assert(mix(0) == 0.0)?;
+    assert!(mix(2) == 3.0);
+    assert!(mix(0) == 0.0);
 }
 
 test("unit try") {
-    assert(twice(3) == Result::Ok(6))?;
-    assert(twice(1) == Result::Ok(2))?;
+    assert!(twice(3) == Result::Ok(6));
+    assert!(twice(1) == Result::Ok(2));
     match twice(0) {
-        Result::Ok(_) => assert(false)?,
-        Result::Err(e) => assert(e == "negative")?,
+        Result::Ok(_) => {
+            assert!(false);
+        },
+        Result::Err(e) => {
+            assert!(e == "negative");
+        },
     }
 }

@@ -2,12 +2,13 @@
 //
 // Output: ok,assertion failed,custom
 
+use tests::assert;
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn check_ok(int n) {
-    assert(n == 42)?;
+    assert!(n == 42);
     return "ok";
 }
 

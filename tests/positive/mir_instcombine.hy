@@ -1,4 +1,6 @@
 // COI-281: `t * 2.0` → add on dense SSA (plus leftover identities).
+use tests::assert;
+
 fn hot(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -12,5 +14,5 @@ fn hot(float scale, int n) -> float {
 }
 
 test("instcombine mul2 sum") {
-    assert(hot(2.0, 4) == 112.0)?;
+    assert!(hot(2.0, 4) == 112.0);
 }

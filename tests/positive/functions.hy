@@ -1,4 +1,6 @@
 // Function calls, recursion, early return, multiple params.
+use tests::assert;
+
 fn add(int a, int b) -> int {
     return a + b;
 }
@@ -32,42 +34,42 @@ fn multi(int a, int b, int c) -> int {
 }
 
 test("basic call") {
-    assert(add(2, 3) == 5)?;
+    assert!(add(2, 3) == 5);
 }
 
 test("recursion fib") {
-    assert(fib(1) == 1)?;
-    assert(fib(2) == 1)?;
-    assert(fib(6) == 8)?;
-    assert(fib(10) == 55)?;
+    assert!(fib(1) == 1);
+    assert!(fib(2) == 1);
+    assert!(fib(6) == 8);
+    assert!(fib(10) == 55);
 }
 
 test("early return") {
-    assert(early(4, 1) == 0 - 1)?;
-    assert(early(4, 0) == 8)?;
+    assert!(early(4, 1) == 0 - 1);
+    assert!(early(4, 0) == 8);
 }
 
 test("multi arg precedence in callee") {
-    assert(multi(1, 2, 3) == 7)?;
+    assert!(multi(1, 2, 3) == 7);
 }
 
 test("nested calls") {
-    assert(add(add(1, 2), add(3, 4)) == 10)?;
+    assert!(add(add(1, 2), add(3, 4)) == 10);
 }
 
 // A refused inline attempt must leave no bytecode behind: leaked arg prep or a
 // partially copied body used to run *and* be followed by the real CALL, storing
 // into caller slots and clobbering an already-computed operand.
 test("call whose body wraps a call") {
-    assert(wraps_call(5) == 6)?;
-    assert(wraps_call_sub(3) == 7)?;
+    assert!(wraps_call(5) == 6);
+    assert!(wraps_call_sub(3) == 7);
 }
 
 test("two such calls in one expression keep both operands") {
-    assert(wraps_call(5) + wraps_call_sub(3) == 13)?;
-    assert(wraps_call(5) + wraps_call(3) == 10)?;
+    assert!(wraps_call(5) + wraps_call_sub(3) == 13);
+    assert!(wraps_call(5) + wraps_call(3) == 10);
     let x = wraps_call(5);
     let y = wraps_call_sub(3);
-    assert(x == 6)?;
-    assert(y == 7)?;
+    assert!(x == 6);
+    assert!(y == 7);
 }

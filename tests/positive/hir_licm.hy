@@ -1,6 +1,8 @@
 // Loop-invariant code moves in front of its loop, and only where moving
 // it cannot change what the program does: a loop that runs no iteration
 // computes nothing, and code an iteration may skip stays put.
+use tests::assert;
+
 fn checked(int k) -> int {
     let a = [1, 2, 3];
     return a[k];
@@ -76,28 +78,28 @@ fn over(Vec<int> xs, int k) -> float {
 }
 
 test("invariant arithmetic in nested loops") {
-    assert(nested(3) == 3 * 3 * 10 + 3 * (0 + 2 + 4))?;
+    assert!(nested(3) == 3 * 3 * 10 + 3 * (0 + 2 + 4));
 }
 
 test("a loop that runs no iteration calls nothing") {
-    assert(zero_trip(0, 7) == 0)?;
-    assert(zero_trip(2, 1) == 4)?;
+    assert!(zero_trip(0, 7) == 0);
+    assert!(zero_trip(2, 1) == 4);
 }
 
 test("code an iteration skips is not computed early") {
-    assert(skipped(4, 9) == 0)?;
-    assert(skipped(2, 1) == 2 * (2 + 50))?;
+    assert!(skipped(4, 9) == 0);
+    assert!(skipped(2, 1) == 2 * (2 + 50));
 }
 
 test("code after an exit is not computed early") {
-    assert(after_exit(0, 7) == 0)?;
-    assert(after_exit(3, 2) == 9)?;
+    assert!(after_exit(0, 7) == 0);
+    assert!(after_exit(3, 2) == 9);
 }
 
 test("a local the loop writes is not invariant") {
-    assert(changes(3) == 60)?;
+    assert!(changes(3) == 60);
 }
 
 test("for loops") {
-    assert(over([1, 2], 4) == 7.0)?;
+    assert!(over([1, 2], 4) == 7.0);
 }

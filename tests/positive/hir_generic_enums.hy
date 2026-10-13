@@ -1,5 +1,7 @@
 // Ground instances of generic user enums: built, returned in two words,
 // matched with their parameters bound, and nested.
+use tests::assert;
+
 enum Box<T> {
     Empty,
     Full(T),
@@ -36,16 +38,16 @@ fn sum(Tree<int> t) -> int {
 }
 
 test("box of int") {
-    assert(unwrap(make(7)) == 7)?;
-    assert(unwrap(Box::Empty) == 0)?;
+    assert!(unwrap(make(7)) == 7);
+    assert!(unwrap(Box::Empty) == 0);
 }
 
 test("box of string") {
-    assert(name(Box::Full("x")) == "x")?;
-    assert(name(Box::Empty) == "none")?;
+    assert!(name(Box::Full("x")) == "x");
+    assert!(name(Box::Empty) == "none");
 }
 
 test("recursive tree") {
     let t: Tree<int> = Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)));
-    assert(sum(t) == 6)?;
+    assert!(sum(t) == 6);
 }

@@ -1,5 +1,6 @@
 // A `defer use (p)` of a class parameter, with its function reached
 // through a closure or a spawned task (#783).
+use tests::assert;
 use task::{scope, Scope};
 
 class Log {
@@ -20,7 +21,7 @@ fn call(unit -> int body) -> int {
 test("through a closure") {
     let log = new Log(0);
     let _ = call(fn () use (log) => fails(log));
-    assert(log.n == 1)?;
+    assert!(log.n == 1);
 }
 
 test("through a spawned task") {
@@ -31,5 +32,5 @@ test("through a spawned task") {
             0
         },
     );
-    assert(log.n == 1)?;
+    assert!(log.n == 1);
 }

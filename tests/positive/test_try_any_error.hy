@@ -1,5 +1,6 @@
 // `?` in a test body accepts any error type with `Show` and `Option`
 // operands; a failure fails the case with the shown error (#628).
+use tests::assert;
 use io::open;
 use io::close;
 use io::write;
@@ -35,21 +36,21 @@ test("io errors propagate with ?") {
     let f = open(path, "w")?;
     write(f, to_bytes("hi"))?;
     close(f)?;
-    assert(read_text(path)? == "hi")?;
+    assert!(read_text(path)? == "hi");
     remove_file(path)?;
 }
 
 test("user error types with Show propagate with ?") {
     let d = parse_digit("7")?;
-    assert(d == 7)?;
+    assert!(d == 7);
 }
 
 test("Option ? unwraps Some") {
     let v = first(Vec::from([3, 4]))?;
-    assert(v == 3, "first element")?;
+    assert!(v == 3, "first element");
 }
 
 test("string errors still work") {
     let r: Result<int, string> = Ok(2);
-    assert(r? == 2)?;
+    assert!(r? == 2);
 }

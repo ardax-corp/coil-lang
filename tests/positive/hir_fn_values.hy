@@ -1,5 +1,7 @@
 // Function-value parameters and curried results: the args, the function
 // word, then `CallIndirect`, as the AST does.
+use tests::assert;
+
 fn apply(int -> int f, int x) -> int {
     return f(x);
 }
@@ -41,18 +43,18 @@ fn inc(int x) -> int {
 }
 
 test("function-value params called directly and forwarded") {
-    assert(apply(inc, 4) == 5)?;
-    assert(twice(inc, 4) == 6)?;
-    assert(twice(fn (int x) => x * 3, 2) == 18)?;
-    assert(total(inc, [1, 2, 3]) == 18)?;
+    assert!(apply(inc, 4) == 5);
+    assert!(twice(inc, 4) == 6);
+    assert!(twice(fn (int x) => x * 3, 2) == 18);
+    assert!(total(inc, [1, 2, 3]) == 18);
 }
 
 test("curried function values") {
-    assert(fold_pairs([1, 2, 3, 4], fn (int a) => fn (int b) use (a) => a + b) == 10)?;
-    assert(fold_pairs([5, 6], fn (int a) => fn (int b) use (a) => a * 10 + b) == 56)?;
+    assert!(fold_pairs([1, 2, 3, 4], fn (int a) => fn (int b) use (a) => a + b) == 10);
+    assert!(fold_pairs([5, 6], fn (int a) => fn (int b) use (a) => a * 10 + b) == 56);
 }
 
 test("string results") {
-    assert(label(size, 7) == "big!")?;
-    assert(label(size, 1) == "small!")?;
+    assert!(label(size, 7) == "big!");
+    assert!(label(size, 1) == "small!");
 }

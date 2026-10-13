@@ -1,6 +1,7 @@
 // Inherent methods may be called before their `impl` appears in the file
 // (no later free fn forces the phased emit order): instance and static
 // calls, in operands that stage their siblings.
+use tests::assert;
 
 class Point {
     pub x: int,
@@ -25,9 +26,9 @@ impl Point {
 }
 
 test("instance method declared after its caller") {
-    assert(instance_only() == 6)?;
+    assert!(instance_only() == 6);
 }
 
 test("instance and static calls in one operand pair") {
-    assert(combined() == 16)?;
+    assert!(combined() == 16);
 }

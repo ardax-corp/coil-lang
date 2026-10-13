@@ -1,4 +1,6 @@
 // COI-269: repeated DIVF in a dense kernel is CSE'd; checksum matches.
+use tests::assert;
+
 fn hot(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -14,5 +16,5 @@ fn hot(float scale, int n) -> float {
 
 test("cse divf matches naive sum of squares") {
     // sum_{i=0..7} (i/3)^2 = (0+1+4+9+16+25+36+49)/9 = 140/9 → 15 as int
-    assert((hot(3.0, 8) as int) == 15)?;
+    assert!((hot(3.0, 8) as int) == 15);
 }

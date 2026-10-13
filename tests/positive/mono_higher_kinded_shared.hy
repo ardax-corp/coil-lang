@@ -4,6 +4,7 @@
 // resolve the trait callee through the projection. It keeps the shared
 // body, at an int and a string type argument alike. So does one under a
 // multi-parameter constraint whose second parameter is only in the result.
+use tests::assert;
 
 trait Pointer<P: * -> *> {
     type Ref<T>;
@@ -39,13 +40,13 @@ fn apply_cast<A, B>(A x) -> B where Convert<A, B> {
 }
 
 test("a higher-kinded P and a P::Ref<A> result") {
-    assert(get(Option::Some(42), 0) == 42)?;
-    assert(get(Option::None, 7) == 7)?;
-    assert(get(Option::Some("hk"), "none") == "hk")?;
-    assert(get(Option::None, 2.5) == 2.5)?;
+    assert!(get(Option::Some(42), 0) == 42);
+    assert!(get(Option::None, 7) == 7);
+    assert!(get(Option::Some("hk"), "none") == "hk");
+    assert!(get(Option::None, 2.5) == 2.5);
 }
 
 test("a multi-parameter constraint, B only in the result") {
     let n: int = apply_cast(41);
-    assert(n == 42)?;
+    assert!(n == 42);
 }

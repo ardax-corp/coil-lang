@@ -1,6 +1,7 @@
 // #597: `==` between an `Option` / `Result` value and a constructor literal
 // unifies the literal with the other operand, so payloads compare by type
 // (strings by content) and a typed operand type-checks.
+use tests::assert;
 
 fn join(string a, string b) -> string {
     return a + "/" + b;
@@ -23,23 +24,23 @@ fn count() -> Result<int, string> {
 }
 
 test("result compares with a constructor literal") {
-    assert(computed() == Result::Ok("a/coil"))?;
-    assert(literal() == Result::Ok("a/coil"))?;
-    assert(Result::Ok("a/coil") == computed())?;
-    assert(computed() != Result::Ok("other"))?;
-    assert(count() == Result::Ok(3))?;
-    assert(failed() == Result::Err("e/x"))?;
-    assert(failed() != Result::Ok("e/x"))?;
+    assert!(computed() == Result::Ok("a/coil"));
+    assert!(literal() == Result::Ok("a/coil"));
+    assert!(Result::Ok("a/coil") == computed());
+    assert!(computed() != Result::Ok("other"));
+    assert!(count() == Result::Ok(3));
+    assert!(failed() == Result::Err("e/x"));
+    assert!(failed() != Result::Ok("e/x"));
 }
 
 test("typed operands") {
     let a: Result<string, string> = Result::Ok("x");
-    assert(a == Result::Ok("x"))?;
-    assert(a != Result::Err("x"))?;
+    assert!(a == Result::Ok("x"));
+    assert!(a != Result::Err("x"));
     let o: Option<string> = Option::Some("a/coil");
-    assert(o == Option::Some(join("a", "coil")))?;
-    assert(o != Option::None)?;
+    assert!(o == Option::Some(join("a", "coil")));
+    assert!(o != Option::None);
     let n: Option<int> = Option::None;
-    assert(n == Option::None)?;
-    assert(n != Option::Some(0))?;
+    assert!(n == Option::None);
+    assert!(n != Option::Some(0));
 }

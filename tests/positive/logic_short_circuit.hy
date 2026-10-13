@@ -1,5 +1,7 @@
 // `&&` / `||` evaluate the right operand only when the left does not decide
 // the result (#718). Pure, trap-free operands may still lower eagerly.
+use tests::assert;
+
 class Log {
     pub n: int,
 }
@@ -58,34 +60,34 @@ fn count_in_loop(Log log, int n) -> int {
 
 test("&& skips the right operand when the left is false") {
     let log = new Log(0);
-    assert(!and_in_if(log, 3))?;
-    assert(!and_in_let(log, 3))?;
-    assert(log.n == 0)?;
-    assert(and_in_if(log, -1))?;
-    assert(and_in_let(log, -1))?;
-    assert(log.n == 2)?;
+    assert!(!and_in_if(log, 3));
+    assert!(!and_in_let(log, 3));
+    assert!(log.n == 0);
+    assert!(and_in_if(log, -1));
+    assert!(and_in_let(log, -1));
+    assert!(log.n == 2);
 }
 
 test("|| skips the right operand when the left is true") {
     let log = new Log(0);
-    assert(or_in_if(log, 3))?;
-    assert(or_in_let(log, 3))?;
-    assert(log.n == 0)?;
-    assert(!or_in_let(log, -1))?;
-    assert(log.n == 1)?;
+    assert!(or_in_if(log, 3));
+    assert!(or_in_let(log, 3));
+    assert!(log.n == 0);
+    assert!(!or_in_let(log, -1));
+    assert!(log.n == 1);
 }
 
 test("a guard protects an index and a division") {
     let v: Vec<int> = Vec::new();
-    assert(!guarded_index(v))?;
+    assert!(!guarded_index(v));
     v.push(5);
-    assert(guarded_index(v))?;
-    assert(!guarded_div(0))?;
-    assert(guarded_div(2))?;
+    assert!(guarded_index(v));
+    assert!(!guarded_div(0));
+    assert!(guarded_div(2));
 }
 
 test("short-circuit inside a loop") {
     let log = new Log(0);
-    assert(count_in_loop(log, 6) == 33)?;
-    assert(log.n == 6)?;
+    assert!(count_in_loop(log, 6) == 33);
+    assert!(log.n == 6);
 }

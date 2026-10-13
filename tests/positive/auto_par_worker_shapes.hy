@@ -2,6 +2,8 @@
 // body: each combine shape (binary op, n-ary sum, xor, a call of the
 // function itself, a helper call, an enum payload) forks and joins with
 // the sequential result, guards and hop budgets included.
+use tests::assert;
+
 enum Tree {
     Leaf,
     Node(Tree, Tree),
@@ -134,17 +136,17 @@ fn mix_seq(int n) -> int {
 }
 
 test("binary and n-ary combines") {
-    assert(run_fib(25) == fib_seq(25))?;
-    assert(run_fib(4) == 3)?;
-    assert(run_trib() == 289329)?;
+    assert!(run_fib(25) == fib_seq(25));
+    assert!(run_fib(4) == 3);
+    assert!(run_trib() == 289329);
 }
 
 test("xor and helper-call combines") {
-    assert(run_mix() == mix_seq(24))?;
-    assert(run_spread() == spread_seq(24))?;
+    assert!(run_mix() == mix_seq(24));
+    assert!(run_spread() == spread_seq(24));
 }
 
 test("self-call and enum combines") {
-    assert(run_tak() == 7)?;
-    assert(count(run_grow()) == 32767)?;
+    assert!(run_tak() == 7);
+    assert!(count(run_grow()) == 32767);
 }

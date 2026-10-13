@@ -1,4 +1,6 @@
 // COI-291: typed dense→dense CALL (leaf kernel + looping caller).
+use tests::assert;
+
 fn kernel(float x, int k) -> float {
     let i = 0;
     let t = x;
@@ -22,9 +24,9 @@ fn hot(float a, float dx, int n) -> float {
 }
 
 test("dense call n1") {
-    assert(hot(1.0, 0.0, 1) == kernel(0.125, 8))?;
+    assert!(hot(1.0, 0.0, 1) == kernel(0.125, 8));
 }
 
 test("dense call n2") {
-    assert(hot(2.0, 0.0, 2) == kernel(0.125, 8) * 4.0)?;
+    assert!(hot(2.0, 0.0, 2) == kernel(0.125, 8) * 4.0);
 }

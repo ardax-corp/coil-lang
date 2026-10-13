@@ -1,3 +1,5 @@
+use tests::assert;
+
 class Holder {
     pub text: string,
 }
@@ -42,23 +44,23 @@ fn indirect_pair() -> int {
 }
 
 test("direct pair match") {
-    assert(match_pair(0) == 7)?;
-    assert(match_pair(1) == -1)?;
+    assert!(match_pair(0) == 7);
+    assert!(match_pair(1) == -1);
 }
 
 test("pair try propagation") {
-    assert(
+    assert!(
         match chain_pair(0) {
             Result::Ok(value) => value == 8,
             Result::Err(_) => false,
         },
-    )?;
-    assert(
+    );
+    assert!(
         match chain_pair(1) {
             Result::Ok(_) => false,
             Result::Err(_) => true,
         },
-    )?;
+    );
 }
 
 test("pointer niche option from Vec pop") {
@@ -67,22 +69,22 @@ test("pointer niche option from Vec pop") {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(last == "b")?;
+    assert!(last == "b");
     let _ = values.pop();
     let empty = match values.pop() {
         Option::Some(_) => false,
         Option::None => true,
     };
-    assert(empty)?;
+    assert!(empty);
 }
 
 test("generic Option boundary") {
-    assert(generic_option(Option::Some("ok")) == "ok")?;
-    assert(generic_option(Option::None) == "none")?;
+    assert!(generic_option(Option::Some("ok")) == "ok");
+    assert!(generic_option(Option::None) == "none");
 }
 
 test("indirect Result boundary") {
-    assert(indirect_pair() == 7)?;
+    assert!(indirect_pair() == 7);
 }
 
 test("pointer niche optional access") {
@@ -94,6 +96,6 @@ test("pointer niche optional access") {
         Option::Some(_) => "bad",
         Option::None => "none",
     };
-    assert(some == "value")?;
-    assert(none == "none")?;
+    assert!(some == "value");
+    assert!(none == "none");
 }

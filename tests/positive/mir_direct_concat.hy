@@ -1,5 +1,7 @@
 // String `+` in bodies lowered straight from HIR to MIR: a two-argument
 // format over both sides.
+use tests::assert;
+
 fn greet(string name) -> string {
     return "hello, " + name + "!";
 }
@@ -15,7 +17,7 @@ fn repeat(string s, int n) -> string {
 }
 
 test("string concat in direct MIR") {
-    assert(greet("coil") == "hello, coil!")?;
-    assert(repeat("ab", 3) == "ababab")?;
-    assert(len(repeat("x", 0)) == 0)?;
+    assert!(greet("coil") == "hello, coil!");
+    assert!(repeat("ab", 3) == "ababab");
+    assert!(len(repeat("x", 0)) == 0);
 }
