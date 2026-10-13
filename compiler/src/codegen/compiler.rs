@@ -22,7 +22,7 @@ mod capabilities;
 #[path = "emit_call.rs"]
 mod emit_call;
 #[path = "emit_hir.rs"]
-mod emit_hir;
+pub(super) mod emit_hir;
 #[path = "emit_match.rs"]
 mod emit_match;
 
@@ -3905,6 +3905,7 @@ impl Compiler {
                 .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
             self.attach_hir_mir();
             self.record_unboxed_class_fields();
+            self.flush_hir_par_tail();
         } else {
             self.functions.remove(&worker_name);
             self.fn_arities.remove(&worker_name);
@@ -4654,14 +4655,7 @@ impl Compiler {
         let arity = 3 + site.live_captures.len() as u32;
         self.fn_arities.insert(name, (arity, false));
 
-        // A fresh frame, with the module's class, method and symbol tables
-        // (inlined code in the body may build an object).
-        let mut prev_ctx = std::mem::take(&mut self.context);
-        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
-        self.context.classes = std::mem::take(&mut prev_ctx.classes);
-        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
-        self.context.methods = std::mem::take(&mut prev_ctx.methods);
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
+        let (prev_ctx, prev_depth) = self.par_frame_enter();
         self.context.variables.intern(site.index.clone());
         self.context.variables.intern("__coil_par_hi".to_string());
         self.context.variables.intern(site.acc.clone());
@@ -4707,13 +4701,32 @@ impl Compiler {
         self.bytecode.push_load(ACC_SLOT);
         self.bytecode.push_return();
 
-        let worker_ctx = std::mem::replace(&mut self.context, prev_ctx);
-        self.context.symbols = worker_ctx.symbols;
-        self.context.classes = worker_ctx.classes;
-        self.context.impementations = worker_ctx.impementations;
-        self.context.methods = worker_ctx.methods;
-        self.expr_depth = prev_depth;
+        self.par_frame_exit((prev_ctx, prev_depth));
         entry
+    }
+
+    /// A fresh frame for a function emitted inside another, with the
+    /// module's class, method and symbol tables (inlined code in it may
+    /// build an object). The enclosing frame and expression depth, for
+    /// [`Self::par_frame_exit`].
+    pub(super) fn par_frame_enter(&mut self) -> (Context, u32) {
+        let mut prev_ctx = std::mem::take(&mut self.context);
+        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
+        self.context.classes = std::mem::take(&mut prev_ctx.classes);
+        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
+        self.context.methods = std::mem::take(&mut prev_ctx.methods);
+        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
+        (prev_ctx, prev_depth)
+    }
+
+    /// Back to the frame [`Self::par_frame_enter`] set aside.
+    pub(super) fn par_frame_exit(&mut self, (prev_ctx, prev_depth): (Context, u32)) {
+        let inner = std::mem::replace(&mut self.context, prev_ctx);
+        self.context.symbols = inner.symbols;
+        self.context.classes = inner.classes;
+        self.context.impementations = inner.impementations;
+        self.context.methods = inner.methods;
+        self.expr_depth = prev_depth;
     }
 
     /// Push an `int` constant onto [`Self::bytecode`]; inline `CONST` cannot
@@ -6034,6 +6047,7 @@ impl Compiler {
             self.bytecode.set_last_func_pinned();
         }
         self.record_unboxed_class_fields();
+        self.flush_hir_par_tail();
 
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
@@ -6388,6 +6402,7 @@ impl Compiler {
             if pinned {
                 self.bytecode.set_last_func_pinned();
             }
+            self.flush_hir_par_tail();
 
             self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
@@ -6947,6 +6962,7 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp(name, entry, body_start, body_end, 0);
         self.attach_hir_mir();
+        self.flush_hir_par_tail();
 
         self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;
@@ -7760,6 +7776,7 @@ impl Compiler {
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
+        self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
@@ -8096,6 +8113,7 @@ impl Compiler {
                 self.bytecode.set_last_func_pinned();
             }
             self.record_unboxed_class_fields();
+            self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
             self.context.stack_array_box = prev_stack_boxes;
@@ -8704,6 +8722,7 @@ impl Compiler {
                     self.bytecode.set_last_func_pinned();
                 }
                 self.record_unboxed_class_fields();
+                self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;

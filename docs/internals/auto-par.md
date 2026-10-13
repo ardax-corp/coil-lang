@@ -254,7 +254,14 @@ a worker and starts from the operator identity; the joiner folds them onto
 Codegen emits one private **chunk worker** per site,
 `__coil_par_loop_{n}(lo, hi, acc)`, holding the original body over `[lo, hi)` and
 returning the partial. For `for`, the worker emits the unit step after the body.
-At the loop site:
+The fork-join below is a second private function, `__coil_par_loop_fork_{n}(acc,
+…live captures, begin, end)`, returning the new `acc`; the loop site is a
+plain `CALL` of it. Both are emitted after the enclosing function, so neither
+sits inside its code: the enclosing body and the worker (planned as its own
+HIR body, `while lo < hi { body }; return acc`) each lower to MIR. A `while`
+site over a dynamic range whose index is read after the loop keeps the
+fork-join inline (only the fork-join knows the final index) and has no MIR.
+In the fork-join:
 
 1. `MakeFn` the worker, then `thread_spawn_shared(worker, lo, hi, identity)` for
    each chunk (HostInvoke **137**; falls back to isolate `thread_spawn` when maps

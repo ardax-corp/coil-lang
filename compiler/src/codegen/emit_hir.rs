@@ -252,6 +252,29 @@ struct HirPlan {
     cold_ok: bool,
 }
 
+/// A parallel loop moved out of its body: the chunk worker running `body`
+/// and the fork-join function `driver` that splits the range over it.
+struct HirParSite {
+    site: crate::typechecking::LoopParSite,
+    driver: String,
+    /// The enclosing body's locals the loop reads, by the site's names.
+    outer: HashMap<String, LocalId>,
+    bind: Option<LocalId>,
+    body: HirId,
+    natives: (usize, usize),
+    /// Whether the driver takes the range's begin and end as arguments
+    /// (after the accumulator and the live captures).
+    begin: bool,
+    end: bool,
+}
+
+/// A body whose parallel loops still need their functions emitted, once
+/// its own function record is made.
+pub(in crate::codegen) struct HirParTail {
+    hir: HirBody,
+    emit: HirEmit,
+}
+
 /// Per-body emission state, around the body's [`HirPlan`].
 struct HirEmit {
     plan: HirPlan,
@@ -276,6 +299,12 @@ struct HirEmit {
     /// A loop was emitted as a chunked fork-join (`hir_par_loop`), which the
     /// direct MIR lowering does not model.
     par_loop: bool,
+    /// Parallel loops emitted as a call of their fork-join function, by
+    /// loop: the direct MIR lowering's calls.
+    par_calls: HashMap<u32, crate::mir::HirParLoop>,
+    /// The fork-join functions those calls reach, emitted after this body
+    /// ([`Compiler::flush_hir_par_tail`]).
+    par_tail: Vec<HirParSite>,
     /// Entry label of each plain one-word `CALL` emitted (no dictionaries,
     /// not a tail call or a coroutine), by call site: the direct MIR
     /// lowering's call targets.
@@ -733,6 +762,9 @@ impl Compiler {
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
                 };
+                if !emit.par_tail.is_empty() {
+                    self.hir_par_tail = Some(Box::new(HirParTail { hir: hir.clone(), emit }));
+                }
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::il::opt::note_hir_lowered();
@@ -880,10 +912,21 @@ impl Compiler {
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
             .collect();
+        // The locals of outlined parallel loop bodies live in their chunk
+        // worker's frame, not this body's.
+        let mut outlined = HashSet::new();
+        for par in &emit.par_tail {
+            lower::visit(hir, par.body, &mut |x| match x.kind {
+                HirKind::Local(l) | HirKind::Let { local: l, .. } if emit.slots[l.0 as usize].is_none() => {
+                    outlined.insert(l.0);
+                }
+                _ => {}
+            });
+        }
         // Stack arrays and scalar-replaced class locals: one frame slot per
         // element or field, each one word.
         let mut stacks = HashMap::new();
-        for (&local, &n) in &emit.plan.stacks {
+        for (&local, &n) in emit.plan.stacks.iter().filter(|(l, _)| !outlined.contains(*l)) {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
             let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
                 // A heap element's slot holds its boxed word.
@@ -938,6 +981,7 @@ impl Compiler {
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
                 && emit.plan.sroa.contains_key(&local.0)
+                && !outlined.contains(&local.0)
             {
                 let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
                 let tys: Option<Vec<_>> = tys.iter().map(word).collect();
@@ -949,6 +993,7 @@ impl Compiler {
             if let HirKind::Field { base, name } = &e.kind
                 && let HirKind::Local(local) = hir.expr(*base).kind
                 && emit.plan.sroa.contains_key(&local.0)
+                && !outlined.contains(&local.0)
             {
                 let slot = self.hir_sroa_slot(hir, emit, *base, name).ok_or("scalar-replaced field")?;
                 fields.insert(i as u32, slot);
@@ -1112,6 +1157,7 @@ impl Compiler {
             formats: &emit.format_strs,
             asserts: &emit.asserts,
             op_calls: &emit.op_calls,
+            par_loops: &emit.par_calls,
             op_prims: &emit.op_prims,
             fn_values: &emit.fn_values,
             value_calls: &emit.value_calls,
@@ -2082,6 +2128,8 @@ impl Compiler {
             cold: Vec::new(),
             next_jump: None,
             par_loop: false,
+            par_calls: HashMap::new(),
+            par_tail: Vec::new(),
             call_targets: HashMap::new(),
             into_iters: HashMap::new(),
             string_lits: HashMap::new(),
@@ -9413,6 +9461,9 @@ impl Compiler {
         let Some(natives) = self.par_loop_natives(&slots) else {
             return false;
         };
+        if self.hir_par_outline(hir, emit, id, &site, &outer, &heads, bind, body, natives) {
+            return true;
+        }
         if let Some(local) = bind {
             let index = self.hir_bind_local(hir, local);
             emit.slots[local.0 as usize] = Some(index);
@@ -9439,6 +9490,297 @@ impl Compiler {
         self.emit_par_loop_chunks(&site, &slots, natives, worker, bb);
         emit.par_loop = true;
         true
+    }
+
+    /// The parallel loop `id` as a `CALL` of its own fork-join function,
+    /// emitted with its chunk worker after this body
+    /// ([`Self::flush_hir_par_tail`]), so this body's code holds neither
+    /// and it lowers to MIR. The function takes the accumulator, the live
+    /// captures and the runtime bounds, and returns the new accumulator;
+    /// a const range's index is left at its last value here, as the
+    /// fork-join leaves it. `false`, with nothing emitted, when a word is
+    /// not an `int` local or the loop's index is read after a dynamic
+    /// range (the fork-join computes it): the loop stays inline.
+    #[allow(clippy::too_many_arguments)]
+    fn hir_par_outline(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        id: HirId,
+        site: &crate::typechecking::LoopParSite,
+        outer: &HashMap<String, LocalId>,
+        heads: &HashMap<String, LocalId>,
+        bind: Option<LocalId>,
+        body: HirId,
+        natives: (usize, usize),
+    ) -> bool {
+        let Some(&acc) = outer.get(&site.acc) else { return false };
+        let mut args = vec![acc];
+        for name in &site.live_captures {
+            let Some(&l) = outer.get(name) else { return false };
+            args.push(l);
+        }
+        let begin = site.begin_local.as_ref().map(|n| heads.get(n).copied());
+        let end = site.end_local.as_ref().map(|n| heads.get(n).copied());
+        for bound in [begin, end].into_iter().flatten() {
+            let Some(l) = bound else { return false };
+            args.push(l);
+        }
+        let index = match bind {
+            Some(_) => None,
+            None => match outer.get(&site.index) {
+                Some(&l) => Some(l),
+                None => return false,
+            },
+        };
+        let int = |l: LocalId| hir.local(l).ty.as_ref().and_then(lower::primitive) == Some("int");
+        if !args.iter().chain(&index).all(|&l| int(l)) {
+            return false;
+        }
+        // The index after the loop: a const range's last value; a dynamic
+        // range's only the fork-join knows, so it must be dead.
+        let index = match index {
+            Some(l) if site.is_dynamic() => {
+                let mut uses = 0usize;
+                if let Some(root) = hir.root {
+                    lower::visit(hir, root, &mut |x| uses += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
+                }
+                let mut inside = 0usize;
+                lower::visit(hir, id, &mut |x| inside += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
+                if uses != inside {
+                    return false;
+                }
+                None
+            }
+            Some(l) => Some((l, site.final_index())),
+            None => None,
+        };
+        let driver = format!("__coil_par_loop_fork_{}", self.loop_par_forks);
+        self.loop_par_forks += 1;
+        self.reserve_function_entry(driver.clone());
+        let target = self.fn_entry_labels[&driver];
+        for &l in &args {
+            self.bytecode.push_load(Self::hir_slot(emit, l));
+        }
+        self.bytecode.emit_entry(crate::il::EntryKind::Call, args.len() as u32, target);
+        self.bytecode.push_store_pop(Self::hir_slot(emit, acc));
+        if let Some((l, after)) = index {
+            self.hir_push_int(after);
+            self.bytecode.push_store_pop(Self::hir_slot(emit, l));
+        }
+        emit.par_calls.insert(id.0, crate::mir::HirParLoop { target, args, acc, index });
+        emit.par_tail.push(HirParSite {
+            site: site.clone(),
+            driver,
+            outer: outer.clone(),
+            bind,
+            body,
+            natives,
+            begin: matches!(begin, Some(Some(_))),
+            end: matches!(end, Some(Some(_))),
+        });
+        true
+    }
+
+    /// Emit the functions of the parallel loops [`Self::hir_par_outline`]
+    /// moved out of the body just recorded: each chunk worker, then the
+    /// fork-join function over it, each its own function record.
+    pub(super) fn flush_hir_par_tail(&mut self) {
+        let Some(tail) = self.hir_par_tail.take() else { return };
+        let HirParTail { hir, mut emit } = *tail;
+        // A worker emitted from this body's plan may move out parallel
+        // loops of its own: they join the list.
+        while !emit.par_tail.is_empty() {
+            for par in std::mem::take(&mut emit.par_tail) {
+                let entry = match Self::hir_par_worker_body(&hir, &par)
+                    .and_then(|w| self.hir_par_worker_fn(&w))
+                {
+                    Some(entry) => entry,
+                    None => self.hir_par_worker_inline(&hir, &mut emit, &par),
+                };
+                let HirParSite { site, driver, natives, begin, end, .. } = par;
+
+                // The fork-join: slot 0 the accumulator, then the live
+                // captures and the bounds, as the call passes them.
+                let start = self.bytecode.len();
+                let frame = self.par_frame_enter();
+                self.bind_function_entry(driver.clone());
+                let mut words = 1 + site.live_captures.len() as u32;
+                let mut arg = |used: bool| {
+                    used.then(|| {
+                        words += 1;
+                        words - 1
+                    })
+                };
+                let live = (1..=site.live_captures.len() as u32).collect();
+                let (begin, end) = (arg(begin), arg(end));
+                for i in 0..words {
+                    self.context.variables.intern(format!("__coil_par_arg{i}"));
+                }
+                self.fn_arities.insert(driver.clone(), (words, false));
+                let index = self.alloc_temp_slot();
+                let slots = ParLoopSlots { index, acc: 0, live, begin, end };
+                self.emit_par_loop_chunks(&site, &slots, natives, entry, BlockBuilder::new());
+                self.bytecode.push_load(0);
+                self.bytecode.push_return();
+                self.par_frame_exit(frame);
+                let label = self.fn_entry_labels.get(&driver).copied();
+                self.bytecode.record_func_with_sp(driver, label, start, self.bytecode.len(), words);
+            }
+        }
+    }
+
+    /// The chunk worker of `par` as its own HIR body, `(index, hi, acc,
+    /// …live captures) -> acc`: the const captures bound on entry, then
+    /// `while index < hi { body }` (the step after the body when the loop
+    /// steps implicitly), then `return acc`. Every node of `hir` outside
+    /// it is cleared to `()`. `None` when a name the worker takes has no
+    /// local.
+    fn hir_par_worker_body(hir: &HirBody, par: &HirParSite) -> Option<HirBody> {
+        use crate::hir::{HirExpr, HirLocal, LocalKind};
+        let site = &par.site;
+        let index = match par.bind {
+            Some(l) => l,
+            None => *par.outer.get(&site.index)?,
+        };
+        let acc = *par.outer.get(&site.acc)?;
+        let int = hir.local(acc).ty.clone()?;
+        let mut w = hir.clone();
+        let param = |w: &mut HirBody, name: &str| {
+            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Param, captured: false });
+            LocalId(w.locals.len() as u32 - 1)
+        };
+        let hi = param(&mut w, "__coil_par_hi");
+        let mut params = vec![index, hi, acc];
+        for name in &site.live_captures {
+            let l = match par.outer.get(name) {
+                Some(&l) => l,
+                None => param(&mut w, name),
+            };
+            params.push(l);
+        }
+        for &l in &params {
+            w.locals[l.0 as usize].kind = LocalKind::Param;
+        }
+        let unit = Some(Ty::Con(crate::typechecking::ty::UNIT.into()));
+        let node = |w: &mut HirBody, kind: HirKind, ty: Option<Ty>| {
+            w.exprs.push(HirExpr { kind, ty, layout: crate::hir::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default() });
+            HirId(w.exprs.len() as u32 - 1)
+        };
+        let mut stmts = Vec::new();
+        for (name, val) in &site.captures {
+            if let Some(&l) = par.outer.get(name)
+                && !params.contains(&l)
+            {
+                let lit = node(&mut w, HirKind::Lit(Lit::Int(*val)), Some(int.clone()));
+                stmts.push(node(&mut w, HirKind::Let { local: l, init: Some(lit) }, unit.clone()));
+            }
+        }
+        let (i, h) = (node(&mut w, HirKind::Local(index), Some(int.clone())), node(&mut w, HirKind::Local(hi), Some(int.clone())));
+        let cond = node(&mut w, HirKind::Bin { op: BinOp::Lt, lhs: i, rhs: h }, Some(Ty::Con(crate::typechecking::ty::BOOL.into())));
+        let mut each = vec![par.body];
+        if site.implicit_step {
+            let place = node(&mut w, HirKind::Local(index), Some(int.clone()));
+            let old = node(&mut w, HirKind::Local(index), Some(int.clone()));
+            let stride = node(&mut w, HirKind::Lit(Lit::Int(site.stride)), Some(int.clone()));
+            let value = node(&mut w, HirKind::Bin { op: BinOp::IntAdd, lhs: old, rhs: stride }, Some(int.clone()));
+            each.push(node(&mut w, HirKind::Assign { place, value }, unit.clone()));
+        }
+        let then = node(&mut w, HirKind::Block { stmts: each, tail: None }, unit.clone());
+        let brk = node(&mut w, HirKind::Break, unit.clone());
+        let test = node(&mut w, HirKind::If { cond, then, els: Some(brk) }, unit.clone());
+        let body = node(&mut w, HirKind::Block { stmts: vec![test], tail: None }, unit.clone());
+        stmts.push(node(&mut w, HirKind::Loop { body }, unit.clone()));
+        let a = node(&mut w, HirKind::Local(acc), Some(int.clone()));
+        stmts.push(node(&mut w, HirKind::Return(Some(a)), unit.clone()));
+        let root = node(&mut w, HirKind::Block { stmts, tail: None }, unit);
+        let mut live = vec![false; w.exprs.len()];
+        let mut todo = vec![root];
+        while let Some(id) = todo.pop() {
+            if !std::mem::replace(&mut live[id.0 as usize], true) {
+                todo.extend(lower::children(&w, id));
+            }
+        }
+        for (e, live) in w.exprs.iter_mut().zip(live) {
+            if !live {
+                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::hir::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default() };
+            }
+        }
+        w.name = format!("{}$par", hir.name);
+        w.kind = crate::hir::BodyKind::Function;
+        w.params = params;
+        w.ret = Some(int);
+        w.ret_layout = crate::hir::layout::Layout::Word;
+        w.result_mode = false;
+        w.is_coro = false;
+        w.captures.clear();
+        w.contract_spans.clear();
+        w.root = Some(root);
+        Some(w)
+    }
+
+    /// Emit the chunk worker body `w` as its own function, the way a
+    /// declared function is: planned, emitted and lowered to MIR. Its
+    /// entry, or `None` with nothing emitted when it does not plan.
+    fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<u32> {
+        if lower::refusal(w, &self.checker).is_some() {
+            return None;
+        }
+        let frame = self.par_frame_enter();
+        for &p in &w.params {
+            self.context.variables.intern(w.local(p).name.clone());
+        }
+        let Ok(mut emit) = self.plan_hir_body(w) else {
+            self.par_frame_exit(frame);
+            return None;
+        };
+        self.loop_par_helpers += 1;
+        let name = format!("__coil_par_loop_{}", self.loop_par_helpers);
+        let (entry, label) = self.bind_function_entry(name.clone());
+        let arity = w.params.len() as u32;
+        self.fn_arities.insert(name.clone(), (arity, false));
+        emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
+        self.hir_effect(w, &mut emit, w.root.expect("worker root"));
+        self.hir_cold = std::mem::take(&mut emit.cold);
+        self.flush_hir_cold();
+        self.hir_mir = self.hir_lower_mir(w, &emit, None);
+        self.bytecode.record_func_with_sp(name, Some(label), entry, self.bytecode.len(), arity);
+        self.attach_hir_mir();
+        self.record_unboxed_class_fields();
+        self.par_frame_exit(frame);
+        // A parallel loop inside the worker moved out of it too.
+        if !emit.par_tail.is_empty() {
+            self.hir_par_tail = Some(Box::new(HirParTail { hir: w.clone(), emit }));
+            self.flush_hir_par_tail();
+        }
+        Some(entry as u32)
+    }
+
+    /// The chunk worker of `par` emitted from the enclosing body's plan in
+    /// a fresh frame, when it does not plan as its own body. Its entry.
+    fn hir_par_worker_inline(&mut self, hir: &HirBody, emit: &mut HirEmit, par: &HirParSite) -> u32 {
+        // The worker's frame holds the site's names; the body's own
+        // locals bind in it as they are reached.
+        let saved = emit.slots.clone();
+        let start = self.bytecode.len();
+        let worker = self.par_worker_begin(&par.site);
+        let name = format!("__coil_par_loop_{}", self.loop_par_helpers);
+        for (name, &l) in &par.outer {
+            emit.slots[l.0 as usize] = self.lookup_slot(name);
+        }
+        if let Some(local) = par.bind {
+            emit.slots[local.0 as usize] = Some(0);
+        }
+        self.hir_effect(hir, emit, par.body);
+        let entry = self.par_worker_end(&par.site, worker);
+        let cold = std::mem::take(&mut emit.cold);
+        let moved = self.bytecode.move_exits_to_end(&cold);
+        crate::il::opt::note_branches_optimized(moved);
+        emit.slots = saved;
+        let label = self.fn_entry_labels.get(&name).copied();
+        let arity = 3 + par.site.live_captures.len() as u32;
+        self.bytecode.record_func_with_sp(name, label, start, self.bytecode.len(), arity);
+        entry
     }
 
     /// `for x in a..b` / `for x in arr`, in the AST's counted-loop shapes
