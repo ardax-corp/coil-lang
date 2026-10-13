@@ -126,7 +126,23 @@ pub struct HirParLoop {
     pub acc: HirLocal,
     /// The loop's index local and its value after the loop, when the loop
     /// leaves it set.
-    pub index: Option<(HirLocal, i64)>,
+    pub index: Option<(HirLocal, HirParIndex)>,
+}
+
+/// A parallel loop's index after it: a const range's last value, or the
+/// larger of a dynamic stride-one range's start and end.
+#[derive(Clone, Copy, Debug)]
+pub enum HirParIndex {
+    Const(i64),
+    Max(HirParBound, HirParBound),
+}
+
+/// A dynamic parallel loop's bound: a constant, or an `int` local plus a
+/// bias (`1` for an inclusive end).
+#[derive(Clone, Copy, Debug)]
+pub enum HirParBound {
+    Const(i64),
+    Local(HirLocal, i64),
 }
 
 impl HirMirInput<'_> {
@@ -2953,15 +2969,52 @@ impl Lower<'_> {
         }
         let acc = self.slot(par.acc)?;
         self.b.def_local(acc, dest).map_err(mir)?;
-        if let Some((index, after)) = par.index {
-            if self.local_ty(index)? != MirTy::I64 {
-                return Err("parallel loop word".into());
+        let Some((index, after)) = par.index else {
+            return Ok(Val::Unit);
+        };
+        if self.local_ty(index)? != MirTy::I64 {
+            return Err("parallel loop word".into());
+        }
+        let slot = self.slot(index)?;
+        match after {
+            HirParIndex::Const(n) => {
+                let v = self.b.ins_const(MirConst::I64(n)).map_err(mir)?;
+                self.b.def_local(slot, v).map_err(mir)?;
             }
-            let slot = self.slot(index)?;
-            let v = self.b.ins_const(MirConst::I64(after)).map_err(mir)?;
-            self.b.def_local(slot, v).map_err(mir)?;
+            // `i = begin; if i < end { i = end }`, as HIR emission.
+            HirParIndex::Max(begin, end) => {
+                let b = self.par_bound(begin)?;
+                let e = self.par_bound(end)?;
+                self.b.def_local(slot, b).map_err(mir)?;
+                let less = self.b.ins_cmp(MirCmpOp::Lt, b, e).map_err(mir)?;
+                let raise = self.b.create_block();
+                let join = self.b.create_block();
+                self.b.branch(less, raise, join).map_err(mir)?;
+                self.switch(raise);
+                self.b.def_local(slot, e).map_err(mir)?;
+                self.jump(join)?;
+                self.switch(join);
+            }
         }
         Ok(Val::Unit)
+    }
+
+    /// A dynamic parallel loop's bound, as an `int` word.
+    fn par_bound(&mut self, bound: HirParBound) -> Result<ValueId, Refusal> {
+        let (local, bias) = match bound {
+            HirParBound::Const(n) => return self.b.ins_const(MirConst::I64(n)).map_err(mir),
+            HirParBound::Local(local, bias) => (local, bias),
+        };
+        if self.local_ty(local)? != MirTy::I64 {
+            return Err("parallel loop word".into());
+        }
+        let slot = self.slot(local)?;
+        let v = self.b.use_local(slot, MirTy::I64).map_err(mir)?;
+        if bias == 0 {
+            return Ok(v);
+        }
+        let bias = self.b.ins_const(MirConst::I64(bias)).map_err(mir)?;
+        self.b.ins_binop(MirBinOp::Add, v, bias).map_err(mir)
     }
 
     /// A function value, as HIR emission builds it: each capture's word,
