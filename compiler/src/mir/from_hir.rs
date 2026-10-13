@@ -68,6 +68,15 @@ pub struct HirCallSite {
     pub coro: bool,
 }
 
+/// A function value HIR emission built: `MakeFn` of a lambda's or a named
+/// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
+/// local), or `MakePolyFn` of a generic function's.
+#[derive(Clone, Debug)]
+pub struct HirFnValue {
+    pub kind: MirAllocKind,
+    pub captures: Vec<HirLocal>,
+}
+
 /// A user operator HIR emission lowered to its trait instance method's
 /// plain `CALL`, each operand boxed as the instance takes it.
 #[derive(Clone, Debug)]
@@ -84,7 +93,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -186,6 +195,11 @@ pub struct HirMirInput<'a> {
     /// User operators with no instance: the raw opcode on the operands'
     /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
     pub op_prims: &'a HashSet<u32>,
+    /// Lambdas and functions read as values, as HIR emission built them.
+    pub fn_values: &'a HashMap<u32, HirFnValue>,
+    /// Calls through a function value HIR emission made a plain
+    /// `CallIndirect` (not a `PolyFn` call with dictionaries).
+    pub value_calls: &'a HashSet<u32>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -403,6 +417,15 @@ fn ty_kind(ty: &Ty) -> &'static str {
         Ty::Fun(..) => "function",
         Ty::Sum { .. } | Ty::Constructor { .. } => "enum",
         _ => "other",
+    }
+}
+
+/// A function type: its values are `ObjFn` / `PolyFn` heap words.
+fn is_fn(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Fun(..) => true,
+        Ty::Forall { body, .. } => matches!(strip_readonly(body), Ty::Fun(..)),
+        _ => false,
     }
 }
 
@@ -1471,9 +1494,10 @@ impl Lower<'_> {
             && self.inp.pair_tys.contains_key(&id.0)
     }
 
-    /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk).
+    /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
+    /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
-        self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) && self.inp.pair_tys.contains_key(&id.0)
+        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
     }
 
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
@@ -1519,6 +1543,7 @@ impl Lower<'_> {
                 let slot = self.slot(*local)?;
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
+            HirKind::Global { .. } | HirKind::Lambda { .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.fn_value(id, &f.clone()),
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
@@ -1532,6 +1557,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if let Some(&default) = self.inp.asserts.get(&id.0) => self.assert(id, args, default),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
+            HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
@@ -2476,6 +2502,71 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// A function value, as HIR emission builds it: each capture's word,
+    /// then `MakeFn` of the code (or `MakePolyFn`).
+    fn fn_value(&mut self, id: HirId, f: &HirFnValue) -> Result<Val, Refusal> {
+        if self.expr_ty(id).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Err("function value type".into());
+        }
+        let mut words = Vec::with_capacity(f.captures.len());
+        for &local in &f.captures {
+            words.push(self.local_word(local)?);
+        }
+        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+    }
+
+    /// The word a plain one-word local holds, as a `Local` read.
+    fn local_word(&mut self, local: HirLocal) -> Result<ValueId, Refusal> {
+        if self.pair_local(local).is_some() {
+            return Err("capture pair".into());
+        }
+        if let Some(&v) = self.aliases.get(&local.0) {
+            return Ok(v);
+        }
+        if let Some(&slot) = self.boxes.get(&local.0) {
+            return self.b.use_local(slot, MirTy::HeapRef).map_err(mir);
+        }
+        if self.unit_local(local) {
+            return Err("capture unit".into());
+        }
+        let ty = self.local_ty(local)?;
+        let slot = self.slot(local)?;
+        self.b.use_local(slot, ty).map_err(mir)
+    }
+
+    /// `f(args)` through a function value: each argument's one word (a
+    /// two-word value boxed), then `f`, then `CallIndirect`, as HIR
+    /// emission. A two-word result comes back boxed.
+    fn call_value(&mut self, id: HirId, f: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        // The result is one word either way.
+        self.raw_host = false;
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if self.inp.pair_tys.contains_key(&id.0) {
+            MirTy::HeapRef
+        } else if unit {
+            MirTy::I64
+        } else {
+            self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
+        };
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let Some(callee) = self.word(f)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(callee) != MirTy::HeapRef {
+            return Err("call value callee".into());
+        }
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
     /// `lhs op rhs` through the operand type's instance method: each

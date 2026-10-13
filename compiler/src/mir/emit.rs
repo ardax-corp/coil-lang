@@ -276,7 +276,7 @@ pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> Has
         .filter_map(|inst| match inst {
             MirInst::Call { target, .. }
             | MirInst::Alloc {
-                kind: MirAllocKind::Coro { target },
+                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target },
                 ..
             } if Some(*target) != entry_label => Some(target.0),
             _ => None,
@@ -963,6 +963,16 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::CallIndirect { dest, callee, args } => {
+            // The arguments, then the function value on top.
+            let words: Vec<ValueId> = args.iter().copied().chain([*callee]).collect();
+            emit_dense_push(out, &words, regs, scratch, loc)?;
+            out.push(byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::Call {
             dest,
             dest_hi,
@@ -1231,7 +1241,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                     }
                 } else {
                     emit_dense_push(out, elems, regs, scratch, loc)?;
-                    out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                    out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
                     out.push(IlOp::StorePop {
                         slot: u32::from(live),
                         loc,
@@ -1239,7 +1249,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 }
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
-                out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                out.extend(il_for_alloc(*kind, elems.len() as u32, loc)?);
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
                     loc,
@@ -2093,6 +2103,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
             let w = match inst {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
+                MirInst::CallIndirect { args, .. } => args.len() + 1,
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
@@ -2644,7 +2655,12 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } => Ok(None),
-        MirAllocKind::Dict | MirAllocKind::DictEntries | MirAllocKind::Coro { .. } | MirAllocKind::Boxed { .. } => Ok(None),
+        MirAllocKind::Dict
+        | MirAllocKind::DictEntries
+        | MirAllocKind::Coro { .. }
+        | MirAllocKind::Boxed { .. }
+        | MirAllocKind::Fn { .. }
+        | MirAllocKind::PolyFn { .. } => Ok(None),
     }
 }
 
@@ -2708,12 +2724,39 @@ fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), Lower
     Ok((0, c))
 }
 
-/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`).
+/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`):
+/// the ops after the elements are pushed.
 pub(super) fn il_for_alloc(
     kind: MirAllocKind,
     arity: u32,
     loc: DebugLoc,
-) -> Result<IlOp, LowerError> {
+) -> Result<Vec<IlOp>, LowerError> {
+    match kind {
+        // The captures, then `Const 0` (no filled parameters), `CodePtr`
+        // and `MakeFn`, as HIR emission builds a function value.
+        MirAllocKind::Fn { target, operand } => Ok(vec![
+            IlOp::Const { imm: 0, loc },
+            IlOp::Entry {
+                kind: crate::il::EntryKind::CodePtr,
+                arity: 0,
+                target,
+                loc,
+                ret_words: 1,
+            },
+            IlOp::from_plain_byte(Byte::new(Instruction::MakeFn).with_operand_u32(operand), loc),
+        ]),
+        MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
+            kind: crate::il::EntryKind::MakePolyFn,
+            arity: 0,
+            target,
+            loc,
+            ret_words: 1,
+        }]),
+        _ => il_for_alloc_op(kind, arity, loc).map(|op| vec![op]),
+    }
+}
+
+fn il_for_alloc_op(kind: MirAllocKind, arity: u32, loc: DebugLoc) -> Result<IlOp, LowerError> {
     match kind {
         MirAllocKind::Array => Ok(IlOp::MakeArray { elem_kind: 0, arity, loc }),
         MirAllocKind::Tuple => Ok(IlOp::MakeTuple { kinds: 0, arity, loc }),
@@ -2742,6 +2785,7 @@ pub(super) fn il_for_alloc(
             ret_words: 1,
         }),
         MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
+        MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } => Err(LowerError::Refused("function value alloc".into())),
     }
 }
 
