@@ -2,6 +2,8 @@
 // pair: the call reads the two-word return kind from the signature.
 // `checked` also guards the MIR->LIR rebuild: its block labels must skip
 // the entry id of `halve`, which is the next one after its own.
+use tests::assert;
+
 fn bounce_a(Option<int> o) -> Option<int> {
     return bounce_b(o);
 }
@@ -26,11 +28,11 @@ fn halve(int n) -> Result<int, string> {
 }
 
 test("forward call returning Option") {
-    assert(bounce_a(Option::Some(41)) == Option::Some(42))?;
-    assert(bounce_a(Option::None) == Option::None)?;
+    assert!(bounce_a(Option::Some(41)) == Option::Some(42));
+    assert!(bounce_a(Option::None) == Option::None);
 }
 
 test("forward call returning Result") {
-    assert(checked(10) == Result::Ok(6))?;
-    assert(checked(3) == Result::Err("odd"))?;
+    assert!(checked(10) == Result::Ok(6));
+    assert!(checked(3) == Result::Err("odd"));
 }

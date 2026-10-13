@@ -2,6 +2,7 @@
 // `defer`s. Used by `t.cancel()`, a failing sibling, `task::timeout`; a
 // `task::shield` section finishes first. The log is a static `int`: a class
 // capture through a function value is coil-lang#783.
+use tests::assert;
 use task::{scope, Scope, Task, TaskError, timeout, shield};
 
 static let LOG: int = 0;
@@ -40,8 +41,8 @@ test("cancel unwinds a suspended task") {
             cancelled(t.join())
         },
     );
-    assert(r == Result::Ok(true))?;
-    assert(LOG == 1)?;
+    assert!(r == Result::Ok(true));
+    assert!(LOG == 1);
 }
 
 test("a task cancelled before it ran never runs") {
@@ -53,8 +54,8 @@ test("a task cancelled before it ran never runs") {
             cancelled(t.join())
         },
     );
-    assert(r == Result::Ok(true))?;
-    assert(LOG == 0)?;
+    assert!(r == Result::Ok(true));
+    assert!(LOG == 0);
 }
 
 test("a sibling panic cancels the others, running their defers") {
@@ -71,8 +72,8 @@ test("a sibling panic cancels the others, running their defers") {
         Result::Err(TaskError::Panicked(m)) => m == "boom",
         default => false,
     };
-    assert(failed)?;
-    assert(LOG == 23)?;
+    assert!(failed);
+    assert!(LOG == 23);
 }
 
 fn slow_close() {
@@ -100,8 +101,8 @@ test("a defer may suspend while its task unwinds") {
             cancelled(t.join())
         },
     );
-    assert(r == Result::Ok(true))?;
-    assert(LOG == 4)?;
+    assert!(r == Result::Ok(true));
+    assert!(LOG == 4);
 }
 
 fn owns_a_scope() -> int {
@@ -125,8 +126,8 @@ test("cancelling a task cancels the tasks of its scopes") {
             cancelled(t.join())
         },
     );
-    assert(r == Result::Ok(true))?;
-    assert(LOG == 56)?;
+    assert!(r == Result::Ok(true));
+    assert!(LOG == 56);
 }
 
 test("timeout cancels a slow body") {
@@ -136,15 +137,15 @@ test("timeout cancels a slow body") {
         Result::Err(TaskError::TimedOut) => true,
         default => false,
     };
-    assert(timed_out)?;
-    assert(LOG == 7)?;
+    assert!(timed_out);
+    assert!(LOG == 7);
 }
 
 test("timeout returns a body that finishes in time") {
     LOG = 0;
     let r = timeout(10000, fn () => sleeper(7, 0) + 42);
-    assert(r == Result::Ok(42))?;
-    assert(LOG == 97)?;
+    assert!(r == Result::Ok(42));
+    assert!(LOG == 97);
 }
 
 fn guarded() -> int {
@@ -170,6 +171,6 @@ test("a shield finishes before the cancel unwinds") {
             cancelled(t.join())
         },
     );
-    assert(r == Result::Ok(true))?;
-    assert(LOG == 18)?;
+    assert!(r == Result::Ok(true));
+    assert!(LOG == 18);
 }

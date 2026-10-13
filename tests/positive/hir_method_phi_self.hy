@@ -1,5 +1,6 @@
 // A result-mode method whose `?` assigns join in a φ read once by the
 // final call: the φ keeps its own slot instead of reusing `self`'s.
+use tests::assert;
 
 class Reader {
     pub base: int,
@@ -49,7 +50,7 @@ fn got(Result<int, string> r) -> int {
 
 test("a joined local beside self keeps its own slot") {
     let r = new Reader(1);
-    assert(got(r.pick(1, 3)) == 1 + 400 + 3)?;
-    assert(got(r.pick(2, 3)) == 1 + 500 + 3)?;
-    assert(got(r.pick(3, 3)) == 1 + 700 + 3)?;
+    assert!(got(r.pick(1, 3)) == 1 + 400 + 3);
+    assert!(got(r.pick(2, 3)) == 1 + 500 + 3);
+    assert!(got(r.pick(3, 3)) == 1 + 700 + 3);
 }

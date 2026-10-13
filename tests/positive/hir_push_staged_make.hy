@@ -1,5 +1,7 @@
 // A `Vec` push of a multi-field variant whose fields compute, and a variant
 // nested in another's fields, lower from HIR: the fields stage through temps.
+use tests::assert;
+
 enum Shape {
     Tri(int, int, int),
     Quad(int, int, int, int),
@@ -49,13 +51,13 @@ fn tree(int k) -> Tree {
 
 test("push of computed variants") {
     let shapes = build(4);
-    assert(len(shapes) == 4)?;
-    assert(perimeter(shapes[0]) == 3)?;
-    assert(perimeter(shapes[1]) == 1 + 2 + 3 + 1)?;
-    assert(perimeter(shapes[2]) == 2 + 3 + 4)?;
-    assert(perimeter(shapes[3]) == 3 + 2 + 3 + 3)?;
+    assert!(len(shapes) == 4);
+    assert!(perimeter(shapes[0]) == 3);
+    assert!(perimeter(shapes[1]) == 1 + 2 + 3 + 1);
+    assert!(perimeter(shapes[2]) == 2 + 3 + 4);
+    assert!(perimeter(shapes[3]) == 3 + 2 + 3 + 3);
 }
 
 test("variant nested in variant fields") {
-    assert(sum_tree(tree(5)) == 5 + 6 + 10)?;
+    assert!(sum_tree(tree(5)) == 5 + 6 + 10);
 }

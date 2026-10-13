@@ -1,6 +1,7 @@
 // An inlined callee's stack array is cleared after the statement. The IL
 // value numbering must see that clear as a write: before it did, `i + 1`
 // was read back from the cleared element slot and the loop never ended.
+use tests::assert;
 
 fn take(int i) -> int {
     let xs = [i, i + 1];
@@ -18,6 +19,6 @@ fn pack(int n) -> int {
 }
 
 test("a cleared inline slot is not reused for a later value") {
-    assert(pack(3) == 9)?;
-    assert(pack(10) == 100)?;
+    assert!(pack(3) == 9);
+    assert!(pack(10) == 100);
 }

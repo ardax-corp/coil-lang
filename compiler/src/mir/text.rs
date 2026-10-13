@@ -312,6 +312,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
+        MirInst::Panic { dest, msg } => write!(f, "{dest} = panic {msg}"),
         MirInst::Format { dest, fmt, args } => {
             write!(f, "{dest} = format {fmt}")?;
             for a in args {
@@ -936,6 +937,11 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::Print { dest, src });
+        }
+        if op == "panic" {
+            let msg = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Panic { dest, msg });
         }
         if op == "format" {
             let fmt = self.value()?;

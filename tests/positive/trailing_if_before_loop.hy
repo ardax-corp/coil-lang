@@ -1,5 +1,7 @@
 // COI-407: trailing `if` end-label must stay with this function when the
 // next body is MIR-dense (HTTP Client::get neighbored numeric helpers).
+use tests::assert;
+
 fn pred(int x) -> int {
     if x == 0 {
         return 1;
@@ -18,7 +20,7 @@ fn hot(int n) -> int {
 }
 
 test("trailing if then counted loop") {
-    assert(pred(0) == 1)?;
-    assert(pred(3) == 2)?;
-    assert(hot(5) == 10)?;
+    assert!(pred(0) == 1);
+    assert!(pred(3) == 2);
+    assert!(hot(5) == 10);
 }

@@ -1,6 +1,8 @@
 // A match on eight or more integer literals binary-searches its sorted
 // cases: `<` tests halve them down to small leaves of equality tests, and
 // a value that matches no case runs the catch-all.
+use tests::assert;
+
 #[repr(int)]
 enum Status {
     Cont = 100,
@@ -84,37 +86,37 @@ fn tally(int limit) -> int {
 }
 
 test("every literal finds its arm, and big literals work") {
-    assert(word(42) == 1, "42")?;
-    assert(word(7) == 2, "7")?;
-    assert(word(0) == 3, "0")?;
-    assert(word(9000000000) == 4, "big")?;
-    assert(word(13) == 5, "13")?;
-    assert(word(1) == 6, "1")?;
-    assert(word(100) == 7, "100")?;
-    assert(word(3000000000) == 8, "3e9")?;
-    assert(word(64) == 9, "64")?;
+    assert!(word(42) == 1, "42");
+    assert!(word(7) == 2, "7");
+    assert!(word(0) == 3, "0");
+    assert!(word(9000000000) == 4, "big");
+    assert!(word(13) == 5, "13");
+    assert!(word(1) == 6, "1");
+    assert!(word(100) == 7, "100");
+    assert!(word(3000000000) == 8, "3e9");
+    assert!(word(64) == 9, "64");
 }
 
 test("a value between or beyond the cases binds the catch-all") {
-    assert(word(2) == 2000, "between")?;
-    assert(word(-8) == -8000, "below")?;
-    assert(word(101) == 101000, "above")?;
-    assert(word(9000000001) == 9000000001000, "past the top")?;
+    assert!(word(2) == 2000, "between");
+    assert!(word(-8) == -8000, "below");
+    assert!(word(101) == 101000, "above");
+    assert!(word(9000000001) == 9000000001000, "past the top");
 }
 
 test("an exhaustive scalar enum match needs no catch-all") {
-    assert(class(Status::Cont) == 1, "cont")?;
-    assert(class(Status::Ok) == 2, "ok")?;
-    assert(class(Status::Created) == 3, "created")?;
-    assert(class(Status::Moved) == 4, "moved")?;
-    assert(class(Status::Bad) == 5, "bad")?;
-    assert(class(Status::Denied) == 6, "denied")?;
-    assert(class(Status::Missing) == 7, "missing")?;
-    assert(class(Status::Teapot) == 9, "teapot")?;
-    assert(class(Status::Broken) == 10, "broken")?;
-    assert(class(Status::Huge) == 11, "huge")?;
+    assert!(class(Status::Cont) == 1, "cont");
+    assert!(class(Status::Ok) == 2, "ok");
+    assert!(class(Status::Created) == 3, "created");
+    assert!(class(Status::Moved) == 4, "moved");
+    assert!(class(Status::Bad) == 5, "bad");
+    assert!(class(Status::Denied) == 6, "denied");
+    assert!(class(Status::Missing) == 7, "missing");
+    assert!(class(Status::Teapot) == 9, "teapot");
+    assert!(class(Status::Broken) == 10, "broken");
+    assert!(class(Status::Huge) == 11, "huge");
 }
 
 test("a statement match in a loop") {
-    assert(tally(24) == 894, "two rounds")?;
+    assert!(tally(24) == 894, "two rounds");
 }

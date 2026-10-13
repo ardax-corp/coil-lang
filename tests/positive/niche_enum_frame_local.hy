@@ -2,6 +2,8 @@
 // `Result<(), heap>`, `Result<heap, heap>`) is one word, whichever way the
 // constructor is spelled. Binding it as `[payload, tag]` underflowed the
 // stack on the following `match`.
+use tests::assert;
+
 class C {
     pub v: int,
 }
@@ -27,7 +29,7 @@ test("Option::Some of a call result") {
         Option::Some(c) => c.v,
         Option::None => 0,
     };
-    assert(r == 7)?;
+    assert!(r == 7);
 }
 
 test("Option::Some of a local") {
@@ -37,8 +39,8 @@ test("Option::Some of a local") {
         Option::Some(x) => x.v,
         Option::None => 0,
     };
-    assert(r == 3)?;
-    assert(opt_v(o) == 3)?;
+    assert!(r == 3);
+    assert!(opt_v(o) == 3);
 }
 
 test("Option::None stays a niche") {
@@ -47,7 +49,7 @@ test("Option::None stays a niche") {
         Option::Some(x) => x.v,
         Option::None => 11,
     };
-    assert(r == 11)?;
+    assert!(r == 11);
 }
 
 test("unit Result niche") {
@@ -61,8 +63,8 @@ test("unit Result niche") {
         Result::Ok(_) => 1,
         Result::Err(e) => e.code,
     };
-    assert(a == 1)?;
-    assert(b == 5)?;
+    assert!(a == 1);
+    assert!(b == 5);
 }
 
 test("heap Result niche") {
@@ -76,8 +78,8 @@ test("heap Result niche") {
         Result::Ok(c) => c.v,
         Result::Err(e) => e.code,
     };
-    assert(a == 9)?;
-    assert(b == 4)?;
+    assert!(a == 9);
+    assert!(b == 4);
 }
 
 test("immediate Option stays two-slot") {
@@ -86,5 +88,5 @@ test("immediate Option stays two-slot") {
         Option::Some(n) => n,
         Option::None => 0,
     };
-    assert(r == 6)?;
+    assert!(r == 6);
 }

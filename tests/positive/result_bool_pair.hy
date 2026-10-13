@@ -1,5 +1,7 @@
 // A `Result<bool, string>` keeps its `bool` payload in the pair's word
 // beside the string's: built, matched, passed and returned.
+use tests::assert;
+
 fn parse_flag(string s) -> Result<bool, string> {
     if s == "yes" {
         return Result::Ok(true);
@@ -52,11 +54,11 @@ fn count_true(int n) -> int {
 }
 
 test("bool payloads round trip") {
-    assert(show(parse_flag("yes")) == "true")?;
-    assert(show(parse_flag("no")) == "false")?;
-    assert(show(parse_flag("x")) == "err bad: x")?;
-    assert(show(flip(parse_flag("yes"))) == "false")?;
-    assert(show(flip(parse_flag("no"))) == "true")?;
-    assert(show(flip(parse_flag("q"))) == "err bad: q")?;
-    assert(count_true(10) == 4)?;
+    assert!(show(parse_flag("yes")) == "true");
+    assert!(show(parse_flag("no")) == "false");
+    assert!(show(parse_flag("x")) == "err bad: x");
+    assert!(show(flip(parse_flag("yes"))) == "false");
+    assert!(show(flip(parse_flag("no"))) == "true");
+    assert!(show(flip(parse_flag("q"))) == "err bad: q");
+    assert!(count_true(10) == 4);
 }

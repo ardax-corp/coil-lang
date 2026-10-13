@@ -1,6 +1,8 @@
 // Counted loops whose index sites are proven in bounds still compute the
 // same sums, and sites the proof must leave checked still read the right
 // element.
+use tests::assert;
+
 fn sum_while(Vec<int> a) -> int {
     let s = 0;
     let i = 0;
@@ -61,23 +63,23 @@ fn bound_let(Vec<int> a) -> int {
 
 test("a counted while sums and clears") {
     let a: Vec<int> = [1, 2, 3, 4];
-    assert(sum_while(a) == 10)?;
-    assert(a[0] + a[3] == 0)?;
+    assert!(sum_while(a) == 10);
+    assert!(a[0] + a[3] == 0);
 }
 
 test("a range loop over the length") {
-    assert(sum_range([1, 2, 3]) == 12)?;
+    assert!(sum_range([1, 2, 3]) == 12);
 }
 
 test("a read after the bump") {
-    assert(after_bump([5, 6, 7]) == 13)?;
+    assert!(after_bump([5, 6, 7]) == 13);
 }
 
 test("a filled vec") {
-    assert(filled(5) == 10)?;
-    assert(filled(0) == 0)?;
+    assert!(filled(5) == 10);
+    assert!(filled(0) == 0);
 }
 
 test("a bound from a len let") {
-    assert(bound_let([1, 2, 3, 4, 5]) == 9)?;
+    assert!(bound_let([1, 2, 3, 4, 5]) == 9);
 }

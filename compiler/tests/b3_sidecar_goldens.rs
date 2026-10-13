@@ -1,5 +1,5 @@
 //! B3 goldens: sidecar meaning must not change bytecode on a small
-//! `tests/positive` corpus (self-contained files, no stdlib).
+//! `tests/positive` corpus (small files; only the stdlib `assert!` macro).
 
 use common::Byte;
 use compiler::Pipeline;
@@ -60,12 +60,14 @@ const CORPUS: &[&str] = &[
 /// `UnboxValue` prologues (`option_pair.hy`'s derived `Show` / `String` of
 /// `Holder`); `user_trait_dispatch.hy` also gains the `$dict` adapters its
 /// dictionaries name.
+/// The corpus asserting with the stdlib `assert!` macro (`if !c { raise … }`)
+/// instead of the builtin `assert(c)?` shortens all five.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "572a47d3db03d9d7_1246"),
-    ("functions.hy", "9d79ba2750678788_278"),
-    ("loops.hy", "78d97e79a4a64057_235"),
-    ("option_pair.hy", "15713395cabac428_335"),
-    ("user_trait_dispatch.hy", "a964036816e40f05_113"),
+    ("arithmetic.hy", "cc932e3a25941f21_863"),
+    ("functions.hy", "b608853f86069095_173"),
+    ("loops.hy", "e35f127fe0897f4c_169"),
+    ("option_pair.hy", "1ad98429475c9600_288"),
+    ("user_trait_dispatch.hy", "02faa5a3f53813e3_93"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
@@ -91,7 +93,9 @@ fn compile_file(name: &str) -> (Vec<Byte>, Vec<u64>) {
     let src = std::fs::read_to_string(positive(name)).unwrap_or_else(|e| {
         panic!("read {name}: {e}");
     });
+    comptime::install();
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     pipeline.set_include_tests(true);
     pipeline
         .compile_src(&src)

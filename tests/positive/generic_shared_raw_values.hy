@@ -1,6 +1,7 @@
 // A shared generic body (a generic class method, or a generic fn reached
 // through a forwarded dictionary) keeps a bounded type parameter's values
 // as raw words, so what it stores or builds reads back as the value (#802).
+use tests::assert;
 use string::format;
 
 class Node<K> {
@@ -39,13 +40,13 @@ impl Box2<K: Ord + Eq> {
 test("push") {
     let a = new Box2(Vec::new(), Vec::new());
     a.put(3);
-    assert(a.items[0] == 3)?;
+    assert!(a.items[0] == 3);
 }
 
 test("return") {
     let a = new Box2(Vec::new(), Vec::new());
     a.items.push(4);
-    assert(a.at(0) == 4)?;
+    assert!(a.at(0) == 4);
 }
 
 test("some") {
@@ -54,37 +55,37 @@ test("some") {
         Option::Some(x) => x,
         Option::None => 0,
     };
-    assert(r == 5)?;
+    assert!(r == 5);
 }
 
 test("node") {
     let a = new Box2(Vec::new(), Vec::new());
-    assert(a.node(6).key == 6)?;
+    assert!(a.node(6).key == 6);
 }
 
 test("pair") {
     let a = new Box2(Vec::new(), Vec::new());
     let (x, y) = a.pair(7);
-    assert(x == 7 && y == 7)?;
+    assert!(x == 7 && y == 7);
 }
 
 test("arr") {
     let a = new Box2(Vec::new(), Vec::new());
-    assert(a.arr(8)[1] == 8)?;
+    assert!(a.arr(8)[1] == 8);
 }
 
 test("set") {
     let a = new Box2(Vec::new(), Vec::new());
     a.items.push(1);
     a.set0(9);
-    assert(a.items[0] == 9)?;
+    assert!(a.items[0] == 9);
 }
 
 test("float push") {
     let a = new Box2(Vec::new(), Vec::new());
     a.put(1.5);
-    assert(a.items[0] == 1.5)?;
-    assert(a.at(0) == 1.5)?;
+    assert!(a.items[0] == 1.5);
+    assert!(a.at(0) == 1.5);
 }
 
 fn put<K: Ord>(Vec<K> v, K k) {
@@ -106,10 +107,10 @@ fn fwd_first<K: Ord>(Vec<K> v) -> K {
 test("a generic fn through a forwarded dictionary") {
     let v: Vec<int> = Vec::new();
     fwd(v, 3);
-    assert(v[0] == 3)?;
+    assert!(v[0] == 3);
     let w: Vec<int> = Vec::new();
     w.push(7);
-    assert(fwd_first(w) == 7)?;
+    assert!(fwd_first(w) == 7);
 }
 
 fn shown<T: Show>(Vec<T> v) -> string {
@@ -123,8 +124,8 @@ fn fwd_shown<T: Show>(Vec<T> v) -> string {
 test("Show of a raw word in a shared body") {
     let v: Vec<float> = Vec::new();
     v.push(1.5);
-    assert(fwd_shown(v) == "1.5")?;
+    assert!(fwd_shown(v) == "1.5");
     let b: Vec<bool> = Vec::new();
     b.push(true);
-    assert(fwd_shown(b) == "true")?;
+    assert!(fwd_shown(b) == "true");
 }

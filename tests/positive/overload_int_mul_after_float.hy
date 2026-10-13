@@ -1,6 +1,7 @@
 // Regression: coil-stdlib num.hy (verbatim, minus coil-time). The float
 // overloads ahead of lcm once made its `a * b` compile to MULF, so
 // lcm(4, 6) returned 0.
+use tests::assert;
 use prelude::math::pow as float_pow;
 
 // Circle constant π (IEEE f64). `///` would bind to a following `fn`.
@@ -191,6 +192,6 @@ fn hypot(float a, float b) -> float {
 }
 
 test("lcm multiplies ints after float overloads") {
-    assert(lcm(4, 6) == 12)?;
-    assert(lcm(0 - 4, 6) == 12)?;
+    assert!(lcm(4, 6) == 12);
+    assert!(lcm(0 - 4, 6) == 12);
 }

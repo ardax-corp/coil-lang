@@ -1,4 +1,6 @@
 // Lowering reads a local where it lives instead of copying it first.
+use tests::assert;
+
 enum Shape {
     Circle(int),
     Rect(int, int),
@@ -80,13 +82,13 @@ fn unread_counter() -> int {
 }
 
 test("locals read in place") {
-    assert(range_end_local(5) == 10)?;
-    assert(range_end_moves(4) == 4)?;
-    assert(stack_store(5) == 18)?;
-    assert(staged(3) == 7)?;
-    assert(scalar_match(2) == 20)?;
-    assert(scalar_match(7) == 700)?;
-    assert(arm_writes(2) == 15)?;
-    assert(arm_writes(9) == 9)?;
-    assert(unread_counter() == 9)?;
+    assert!(range_end_local(5) == 10);
+    assert!(range_end_moves(4) == 4);
+    assert!(stack_store(5) == 18);
+    assert!(staged(3) == 7);
+    assert!(scalar_match(2) == 20);
+    assert!(scalar_match(7) == 700);
+    assert!(arm_writes(2) == 15);
+    assert!(arm_writes(9) == 9);
+    assert!(unread_counter() == 9);
 }

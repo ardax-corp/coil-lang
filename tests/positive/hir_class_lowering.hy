@@ -2,6 +2,8 @@
 // writes, inherent method and static calls, and `let p = new C(..)` kept in
 // frame slots while only its fields are used. The language harness also
 // runs under `--hir`, so each case pins both codegens.
+use tests::assert;
+
 class Point {
     pub x: int,
     pub y: int,
@@ -112,21 +114,21 @@ fn nested_args(int k) -> int {
 }
 
 test("fields of a frame-slot local") {
-    assert(local_fields(2, 3) == 48)?;
+    assert!(local_fields(2, 3) == 48);
 }
 
 test("static and method calls") {
-    assert(chain(3) == 30)?;
-    assert(count_to(5) == 10)?;
-    assert(nested_args(2) == 14)?;
+    assert!(chain(3) == 30);
+    assert!(count_to(5) == 10);
+    assert!(nested_args(2) == 14);
 }
 
 test("objects in fields and nested field writes") {
-    assert(segment(0) == 30)?;
-    assert(segment(2) == 34)?;
+    assert!(segment(0) == 30);
+    assert!(segment(2) == 34);
 }
 
 test("method results in a niche layout") {
-    assert(quadrant(3, 4) == 12)?;
-    assert(quadrant(-1, 4) == -1)?;
+    assert!(quadrant(3, 4) == 12);
+    assert!(quadrant(-1, 4) == -1);
 }

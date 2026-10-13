@@ -1,4 +1,6 @@
 // COI-280: invariant DIVF in a dense float-mul loop.
+use tests::assert;
+
 fn hot(float a, float b, int n) -> float {
     let i = 0;
     let s = 0.0;
@@ -12,5 +14,5 @@ fn hot(float a, float b, int n) -> float {
 }
 
 test("licm invariant divf sum") {
-    assert(hot(3.0, 2.0, 8) == 42.0)?;
+    assert!(hot(3.0, 2.0, 8) == 42.0);
 }

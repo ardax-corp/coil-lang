@@ -1,5 +1,7 @@
 // `if !c { A } else { B }` runs as `if c { B } else { A }`, in return and
 // statement position, and an `else if` chain keeps its order.
+use tests::assert;
+
 fn parity(int i) -> int {
     if !(i & 1) {
         return 10;
@@ -29,11 +31,11 @@ fn chain(bool a, bool b) -> int {
 }
 
 test("negated if conditions swap their branches") {
-    assert(parity(4) == 10)?;
-    assert(parity(5) == 20)?;
-    assert(pick(false) == 1)?;
-    assert(pick(true) == 2)?;
-    assert(chain(false, true) == 1)?;
-    assert(chain(true, true) == 2)?;
-    assert(chain(true, false) == 3)?;
+    assert!(parity(4) == 10);
+    assert!(parity(5) == 20);
+    assert!(pick(false) == 1);
+    assert!(pick(true) == 2);
+    assert!(chain(false, true) == 1);
+    assert!(chain(true, true) == 2);
+    assert!(chain(true, false) == 3);
 }

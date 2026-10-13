@@ -1,5 +1,7 @@
 // A `?` or `??` in a call argument after the first lowers from HIR: every
 // argument runs into a temp at depth zero, then they reload in order.
+use tests::assert;
+
 fn mul(int a, int b) -> Result<int, string> {
     if a > 1000 || b > 1000 {
         return Result::Err("overflow");
@@ -34,12 +36,12 @@ fn ordered(int n) -> int {
 }
 
 test("try in a later call argument") {
-    assert((total(2, 3) ?? -1) == 4 + 9 + 7)?;
-    assert((total(2, 2000) ?? -1) == -1)?;
-    assert((total(1001, 1) ?? -1) == -1)?;
+    assert!((total(2, 3) ?? -1) == 4 + 9 + 7);
+    assert!((total(2, 2000) ?? -1) == -1);
+    assert!((total(1001, 1) ?? -1) == -1);
 }
 
 test("coalesce in a later call argument keeps argument order") {
-    assert(ordered(5) == 90)?;
-    assert(ordered(0) == 93)?;
+    assert!(ordered(5) == 90);
+    assert!(ordered(0) == 93);
 }

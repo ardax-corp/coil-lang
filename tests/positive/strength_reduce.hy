@@ -1,4 +1,5 @@
 // Lite IV strength reduction: i*c and stride loops stay numerically exact.
+use tests::assert;
 
 test("iv times const sums") {
     let n = 10;
@@ -8,7 +9,7 @@ test("iv times const sums") {
         s = s + i * 3;
         i = i + 1;
     }
-    assert(s == 135)?;
+    assert!(s == 135);
 }
 
 test("iv times invariant slot") {
@@ -20,7 +21,7 @@ test("iv times invariant slot") {
         s = s + i * c;
         i = i + 1;
     }
-    assert(s == 196)?;
+    assert!(s == 196);
 }
 
 test("stride iv times const") {
@@ -32,7 +33,7 @@ test("stride iv times const") {
         s = s + k * 2;
         k = k + p;
     }
-    assert(s == 114)?;
+    assert!(s == 114);
 }
 
 test("cast iv is not rewritten") {
@@ -43,5 +44,5 @@ test("cast iv is not rewritten") {
         s = s + (i as float);
         i = i + 1;
     }
-    assert(s == 10.0)?;
+    assert!(s == 10.0);
 }

@@ -1,4 +1,5 @@
 // Host-edge Option pack: Vec pop/remove and gc get/unroot/upgrade.
+use tests::assert;
 use gc::{get, root, unroot, upgrade, weak};
 
 test("vec pop and remove string niche") {
@@ -7,17 +8,17 @@ test("vec pop and remove string niche") {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(last == "c")?;
+    assert!(last == "c");
     let mid = match v.remove(0) {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(mid == "a")?;
+    assert!(mid == "a");
     let miss = match v.remove(9) {
         Option::Some(_) => false,
         Option::None => true,
     };
-    assert(miss)?;
+    assert!(miss);
 }
 
 test("gc get unroot upgrade string") {
@@ -26,17 +27,17 @@ test("gc get unroot upgrade string") {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(got == "pin")?;
+    assert!(got == "pin");
     let taken = match unroot(r) {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(taken == "pin")?;
+    assert!(taken == "pin");
     let empty = match get(r) {
         Option::Some(_) => false,
         Option::None => true,
     };
-    assert(empty)?;
+    assert!(empty);
 
     // A strong local keeps the target alive across the upgrade (a weak
     // ref to a temporary may be collected first, as gc-stress shows).
@@ -46,5 +47,5 @@ test("gc get unroot upgrade string") {
         Option::Some(value) => value,
         Option::None => "none",
     };
-    assert(up == target)?;
+    assert!(up == target);
 }

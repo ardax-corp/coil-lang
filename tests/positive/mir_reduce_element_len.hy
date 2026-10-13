@@ -1,6 +1,7 @@
 // A sum of each element's length (`sum += x.len()` over a `Vec<string>`)
 // is not a lane-wise reduction: the length is not loop-invariant, since it
 // reads the element the loop indexes (#973).
+use tests::assert;
 
 fn total(Vec<string> xs) -> int {
     let sum = 0;
@@ -20,7 +21,7 @@ fn nested(Vec<Vec<int>> rows) -> int {
 
 test("element lengths over many elements") {
     let xs = Vec::from(["ab", "c", "def", "g", "hh", "i", "j", "k", "l", "mmmm", "n"]);
-    assert(total(xs) == 18)?;
+    assert!(total(xs) == 18);
     let rows = Vec::new();
     for i in 0..12 {
         let r = Vec::new();
@@ -29,5 +30,5 @@ test("element lengths over many elements") {
         }
         rows.push(r);
     }
-    assert(nested(rows) == 66)?;
+    assert!(nested(rows) == 66);
 }

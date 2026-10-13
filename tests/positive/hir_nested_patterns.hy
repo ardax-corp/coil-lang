@@ -3,6 +3,8 @@
 // that is not exhaustive on its own (a later catch-all covers it) keeps
 // the AST codegen. The language harness also runs under `--hir`, so each
 // case pins both codegens.
+use tests::assert;
+
 enum Shape {
     Dot,
     Line(int),
@@ -52,26 +54,26 @@ fn with_default(Option<Option<int>> o) -> int {
 }
 
 test("result of option") {
-    assert(describe(0) == 0)?;
-    assert(describe(4) == 40)?;
-    assert(describe(0 - 3) == 0 - 1)?;
+    assert!(describe(0) == 0);
+    assert!(describe(4) == 40);
+    assert!(describe(0 - 3) == 0 - 1);
 }
 
 test("option of option") {
-    assert(depth(Option::Some(Option::Some(9))) == 9)?;
-    assert(depth(Option::Some(Option::None)) == 1)?;
-    assert(depth(Option::None) == 0)?;
+    assert!(depth(Option::Some(Option::Some(9))) == 9);
+    assert!(depth(Option::Some(Option::None)) == 1);
+    assert!(depth(Option::None) == 0);
 }
 
 test("interleaved user enum arms") {
-    assert(size(Shape::Pair(Option::Some(5))) == 10)?;
-    assert(size(Shape::Pair(Option::None)) == 0 - 2)?;
-    assert(size(Shape::Line(3)) == 3)?;
-    assert(size(Shape::Dot) == 0)?;
+    assert!(size(Shape::Pair(Option::Some(5))) == 10);
+    assert!(size(Shape::Pair(Option::None)) == 0 - 2);
+    assert!(size(Shape::Line(3)) == 3);
+    assert!(size(Shape::Dot) == 0);
 }
 
 test("catch-all after a nested arm") {
-    assert(with_default(Option::Some(Option::Some(2))) == 2)?;
-    assert(with_default(Option::Some(Option::None)) == 0 - 7)?;
-    assert(with_default(Option::None) == 0 - 7)?;
+    assert!(with_default(Option::Some(Option::Some(2))) == 2);
+    assert!(with_default(Option::Some(Option::None)) == 0 - 7);
+    assert!(with_default(Option::None) == 0 - 7);
 }

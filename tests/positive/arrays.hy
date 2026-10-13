@@ -1,16 +1,18 @@
 // Array literals, index, mutation, Vec push, len, for-in.
+use tests::assert;
+
 test("literal index") {
     let a = [10, 20, 30];
-    assert(a[0] == 10)?;
-    assert(a[1] == 20)?;
-    assert(a[2] == 30)?;
+    assert!(a[0] == 10);
+    assert!(a[1] == 20);
+    assert!(a[2] == 30);
 }
 
 test("store index") {
     let a = [1, 2, 3];
     a[1] = 99;
-    assert(a[1] == 99)?;
-    assert(a[0] == 1)?;
+    assert!(a[1] == 99);
+    assert!(a[0] == 1);
 }
 
 // Heap `a[i] = v` spills only the RHS before compiling array/index. Eval order
@@ -24,39 +26,39 @@ test("indexed assign evaluates RHS before index") {
     let log: Vec<int> = Vec::new();
     let a = Vec::from([0, 0, 0]);
     a[record_step(log, 2, 1)] = record_step(log, 1, 42);
-    assert(a[1] == 42)?;
-    assert(log[0] == 1)?;
-    assert(log[1] == 2)?;
+    assert!(a[1] == 42);
+    assert!(log[0] == 1);
+    assert!(log[1] == 2);
 }
 
 test("compound index assign") {
     let a = [10, 20, 30];
     a[1] += 5;
-    assert(a[1] == 25)?;
+    assert!(a[1] == 25);
 }
 
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    assert(len(a) == 4)?;
+    assert!(len(a) == 4);
 }
 
 test("push grows vec") {
     let a = Vec::from([1]);
     a.push(2);
     a.push(3);
-    assert(len(a) == 3)?;
-    assert(a[0] == 1)?;
-    assert(a[1] == 2)?;
-    assert(a[2] == 3)?;
+    assert!(len(a) == 3);
+    assert!(a[0] == 1);
+    assert!(a[1] == 2);
+    assert!(a[2] == 3);
 }
 
 test("empty then push") {
     let a: Vec<int> = Vec::new();
     a.push(7);
     a.push(8);
-    assert(len(a) == 2)?;
-    assert(a[0] == 7)?;
-    assert(a[1] == 8)?;
+    assert!(len(a) == 2);
+    assert!(a[0] == 7);
+    assert!(a[1] == 8);
 }
 
 test("for in array") {
@@ -64,13 +66,13 @@ test("for in array") {
     for x in [1, 2, 3, 4] {
         sum = sum + x;
     }
-    assert(sum == 10)?;
+    assert!(sum == 10);
 }
 
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
-    assert(a[0][1] == 2)?;
-    assert(a[1][0] == 3)?;
+    assert!(a[0][1] == 2);
+    assert!(a[1][0] == 3);
 }
 
 // Runtime Index / StoreIndex panic on OOB (constant-index OOB is a compile error).

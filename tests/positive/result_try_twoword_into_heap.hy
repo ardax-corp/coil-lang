@@ -1,5 +1,7 @@
 // `?` from two-word `Result<int, E>` into heap-heap `Result<string, E>`
 // must return Err, not an aligned boxed Result that looks like Ok.
+use tests::assert;
+
 enum E {
     Bad,
 }
@@ -14,11 +16,11 @@ fn heap_ok_via_q() -> Result<string, E> {
 }
 
 test("two-word Err ? into heap Result is Err") {
-    assert(
+    assert!(
         match heap_ok_via_q() {
             Result::Ok(_) => false,
             Result::Err(_) => true,
         },
         "q",
-    )?;
+    );
 }

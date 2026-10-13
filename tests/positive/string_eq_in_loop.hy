@@ -1,5 +1,6 @@
 // `==` on strings returned by a call inside a loop compares content, not the
 // heap word. The dense loop path used to compare the two pointers.
+use tests::assert;
 use string::format;
 
 fn word(int idx) -> string {
@@ -36,12 +37,12 @@ fn pick(Vec<string> rows, string key) -> string {
 }
 
 test("string == on call results in a loop") {
-    assert(count_hits(4) == 2)?;
+    assert!(count_hits(4) == 2);
 }
 
 test("string == in a loop condition") {
     let rows: Vec<string> = Vec::new();
     rows.push("a");
     rows.push("k");
-    assert(pick(rows, "k") == "k")?;
+    assert!(pick(rows, "k") == "k");
 }

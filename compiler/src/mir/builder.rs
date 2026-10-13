@@ -808,6 +808,17 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `Panic` of the string `msg`, then [`Terminator::Unreachable`]: the
+    /// current block ends here.
+    pub fn panic(&mut self, msg: ValueId) -> Result<(), MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Panic {
+            dest,
+            msg: self.resolve(msg),
+        })?;
+        self.set_term(Terminator::Unreachable)
+    }
+
     /// Whether every path from the entry to the current block defines
     /// `local` (a known predecessor that does not leads to one that does).
     pub fn local_defined(&self, local: LocalId) -> bool {

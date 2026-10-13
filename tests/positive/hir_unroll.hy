@@ -1,5 +1,7 @@
 // Short counted loops unroll into copies of their body; the copies compute
 // what the loop did, and the counter ends where the loop left it.
+use tests::assert;
+
 fn counted(int x) -> int {
     let s = x;
     let i = 0;
@@ -46,19 +48,19 @@ fn stores(Vec<int> a) -> Vec<int> {
 }
 
 test("a counted loop runs every trip") {
-    assert(counted(2) == 203)?;
-    assert(counted(-1) == 23)?;
+    assert!(counted(2) == 203);
+    assert!(counted(-1) == 23);
 }
 
 test("a literal bound local and a body let") {
-    assert(bound_local([1, 2, 3, 4]) == 305)?;
+    assert!(bound_local([1, 2, 3, 4]) == 305);
 }
 
 test("an inner loop unrolls inside its outer loop") {
-    assert(nested(3) == 9)?;
+    assert!(nested(3) == 9);
 }
 
 test("stores land in every slot") {
     let a = stores([5, 5, 5, 5]);
-    assert(a[0] == 5 && a[1] == 6 && a[2] == 7 && a[3] == 5)?;
+    assert!(a[0] == 5 && a[1] == 6 && a[2] == 7 && a[3] == 5);
 }

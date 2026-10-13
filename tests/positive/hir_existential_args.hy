@@ -1,3 +1,5 @@
+use tests::assert;
+
 class Req {
     pub path: string,
     pub weight: int,
@@ -32,18 +34,18 @@ fn make(int base) -> Handler {
 }
 
 test("a trait object method takes further arguments") {
-    assert(serve(new Hello(200), 1) == 209)?;
+    assert!(serve(new Hello(200), 1) == 209);
 }
 
 test("a trait object from a call stages through a temp") {
     // A `new` argument here trips the AST (coil-lang#749).
     let q = new Req("/x", 3);
     let resp = handle(make(100), q, 0);
-    assert(resp.code == 106)?;
+    assert!(resp.code == 106);
 }
 
 test("a nested trait object call keeps the operands below it") {
     let q = new Req("ab", 1);
     let total = 1 + handle(make(10), q, 5).code;
-    assert(total == 18)?;
+    assert!(total == 18);
 }

@@ -516,6 +516,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Deopt { .. }
         | MirInst::String { .. }
         | MirInst::Print { .. }
+        | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::StrEq { .. } => {

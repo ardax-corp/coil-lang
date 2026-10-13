@@ -2,6 +2,7 @@
 // operands: a `return` / `==` context must not reach a match scrutinee or a
 // comparison's operands. Value-forwarding nodes (groups, match arms, `??`,
 // arithmetic) still carry it.
+use tests::assert;
 
 class Val {
     pub i: int,
@@ -64,23 +65,23 @@ fn byte_arith() -> byte {
 }
 
 test("return match on a trait call") {
-    assert(scrutinee() == 9)?;
+    assert!(scrutinee() == 9);
 }
 
 test("trait call inside a comparison operand") {
-    assert(comparison_operand())?;
+    assert!(comparison_operand());
 }
 
 test("expected byte still reaches arithmetic literals") {
-    assert(byte_arith() == 2 as byte)?;
+    assert!(byte_arith() == 2 as byte);
 }
 
 test("expected byte reaches match arms and groups") {
-    assert(byte_match(0) == 1 as byte)?;
-    assert(byte_match(4) == 5 as byte)?;
+    assert!(byte_match(0) == 1 as byte);
+    assert!(byte_match(4) == 5 as byte);
 }
 
 test("expected byte reaches the ?? fallback") {
-    assert(byte_coalesce(Option::None) == 7 as byte)?;
-    assert(byte_coalesce(Option::Some(3 as byte)) == 3 as byte)?;
+    assert!(byte_coalesce(Option::None) == 7 as byte);
+    assert!(byte_coalesce(Option::Some(3 as byte)) == 3 as byte);
 }

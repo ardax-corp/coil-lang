@@ -1,7 +1,9 @@
 // `Err(e) => return Err(e)` out of a one-word (niche) match into a
 // two-word return pushes only the tag back: the matched word is the payload.
+use tests::assert;
+
 fn check(int x) -> Result<int, string> {
-    assert(x > 0)?;
+    assert!(x > 0);
     return Result::Ok(x * 2);
 }
 
@@ -35,22 +37,30 @@ fn score(Result<int, string> r) -> int {
 }
 
 test("assert ? forwards its error") {
-    assert(score(check(3)) == 6)?;
-    assert(score(check(0)) < 0)?;
+    assert!(score(check(3)) == 6);
+    assert!(score(check(0)) < 0);
 }
 
 test("a niche Err rewraps into a pair") {
-    assert(score(name_len(Result::Ok("abc"))) == 3)?;
-    assert(score(name_len(Result::Err("no"))) == -2)?;
+    assert!(score(name_len(Result::Ok("abc"))) == 3);
+    assert!(score(name_len(Result::Err("no"))) == -2);
 }
 
 test("a niche Err returns its own word") {
     match first_word(Result::Err("bad")) {
-        Result::Ok(_) => assert(false)?,
-        Result::Err(e) => assert(e == "bad")?,
+        Result::Ok(_) => {
+            assert!(false);
+        },
+        Result::Err(e) => {
+            assert!(e == "bad");
+        },
     }
     match first_word(Result::Ok("hi")) {
-        Result::Ok(s) => assert(s == "hi!")?,
-        Result::Err(_) => assert(false)?,
+        Result::Ok(s) => {
+            assert!(s == "hi!");
+        },
+        Result::Err(_) => {
+            assert!(false);
+        },
     }
 }

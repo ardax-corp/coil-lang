@@ -1,4 +1,6 @@
 // Inherent methods that return Option<T> are monomorphized; int payloads stay native.
+use tests::assert;
+
 class Cell<T> {
     item: T,
 }
@@ -15,5 +17,5 @@ test("method Option<int> payload") {
         Option::Some(v) => v,
         Option::None => -1,
     };
-    assert(n == 7)?;
+    assert!(n == 7);
 }

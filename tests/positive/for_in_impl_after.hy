@@ -1,4 +1,5 @@
 // CALL into_iter/next must use reserved labels when impls follow the user.
+use tests::assert;
 
 class Counter {
     pub cur: int,
@@ -34,7 +35,7 @@ impl Iterator for Counter {
 }
 
 test("for-in over a user iterator whose impls follow its use") {
-    assert(consume(new Counter(0, 3)) == 3)?;
-    assert(consume(new Counter(2, 5)) == 9)?;
-    assert(consume(new Counter(4, 4)) == 0)?;
+    assert!(consume(new Counter(0, 3)) == 3);
+    assert!(consume(new Counter(2, 5)) == 9);
+    assert!(consume(new Counter(4, 4)) == 0);
 }

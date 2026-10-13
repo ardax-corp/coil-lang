@@ -1,5 +1,6 @@
 // A lambda or named function passed to a generic function: the generic
 // body calls it through its closure word.
+use tests::assert;
 use collections::vec::{filter, map};
 
 fn keep<T>(Vec<T> xs, T -> bool pred) -> int {
@@ -29,8 +30,8 @@ test("predicate lambda and named fn") {
     xs.push(1);
     xs.push(2);
     xs.push(4);
-    assert(evens(xs) == 2)?;
-    assert(named(xs) == 2)?;
+    assert!(evens(xs) == 2);
+    assert!(named(xs) == 2);
 }
 
 test("stdlib map and filter") {
@@ -39,6 +40,6 @@ test("stdlib map and filter") {
     xs.push(2);
     xs.push(3);
     let ys = map(xs, fn (int x) => x * 10);
-    assert(ys[2] == 30)?;
-    assert(len(filter(xs, fn (int x) => x > 1)) == 2)?;
+    assert!(ys[2] == 30);
+    assert!(len(filter(xs, fn (int x) => x > 1)) == 2);
 }

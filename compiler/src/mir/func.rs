@@ -671,6 +671,14 @@ impl MirFunc {
                     return Err(format!("{dest} Print src type"));
                 }
             }
+            MirInst::Panic { dest, msg } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Panic dest is not bool"));
+                }
+                if self.ty(*msg) != MirTy::HeapRef {
+                    return Err(format!("{dest} Panic msg is not heapref"));
+                }
+            }
             MirInst::Format { dest, fmt, args } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Format dest is not heapref"));

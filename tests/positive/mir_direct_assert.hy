@@ -1,6 +1,7 @@
 // `assert` in bodies lowered straight from HIR to MIR: `Ok(())` when the
 // condition holds, else `Err` of the message, the default one when the
 // call passes none.
+use tests::assert;
 
 fn check(int n) -> string {
     return match assert(n > 2, "too small") {
@@ -17,13 +18,13 @@ fn check_default(int n) -> string {
 }
 
 test("assert passes and fails with its message") {
-    assert(check(5) == "ok")?;
-    assert(check(1) == "too small")?;
+    assert!(check(5) == "ok");
+    assert!(check(1) == "too small");
 }
 
 test("assert without a message fails with the default one") {
-    assert(check_default(4) == "ok")?;
-    assert(check_default(3) == "assertion failed")?;
+    assert!(check_default(4) == "ok");
+    assert!(check_default(3) == "assertion failed");
 }
 
 test("assert in a numeric loop") {
@@ -40,9 +41,9 @@ test("assert in a numeric loop") {
             },
         }
     }
-    assert(fails > 9 && fails < 11, "ten odd sums")?;
-    assert(acc > 569 && acc < 571)?;
-    assert(check_default(acc + 1) != "ok")?;
+    assert!(fails > 9 && fails < 11, "ten odd sums");
+    assert!(acc > 569 && acc < 571);
+    assert!(check_default(acc + 1) != "ok");
 }
 
 class Cell {
@@ -60,5 +61,5 @@ test("a failing assert in a heap body") {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
-    assert(r == "small" && d == "assertion failed")?;
+    assert!(r == "small" && d == "assertion failed");
 }

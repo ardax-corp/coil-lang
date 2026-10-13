@@ -1,4 +1,6 @@
 // `len(a)` of a frame-slot array folds to its length and does not box it.
+use tests::assert;
+
 fn total() -> int {
     let a = [3, 4, 5];
     let s = 0;
@@ -11,5 +13,5 @@ fn total() -> int {
 }
 
 test("len of a stack array") {
-    assert(total() == 36)?;
+    assert!(total() == 36);
 }

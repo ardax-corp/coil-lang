@@ -1,6 +1,7 @@
 // Static initializers lower from their HIR to direct MIR like any other
 // body: arithmetic, branches, matches, allocations and calls in an
 // initializer keep their values, and heap statics stay precise roots.
+use tests::assert;
 use gc::collect;
 
 class Pair {
@@ -55,17 +56,17 @@ test("static initializers lowered to direct MIR") {
         junk = junk + t.a - t.b + 1;
     }
     collect();
-    assert(scaled == 51)?;
-    assert(picked == 56)?;
-    assert(pair.a == 9)?;
-    assert(pair.b == 78)?;
-    assert(area == 3136)?;
-    assert(len(primes) == 5)?;
-    assert(primes[4] == 11)?;
-    assert(greeting == "static init")?;
+    assert!(scaled == 51);
+    assert!(picked == 56);
+    assert!(pair.a == 9);
+    assert!(pair.b == 78);
+    assert!(area == 3136);
+    assert!(len(primes) == 5);
+    assert!(primes[4] == 11);
+    assert!(greeting == "static init");
     let b = match maybe {
         Option::Some(p) => p.b,
         Option::None => -1,
     };
-    assert(b == 2)?;
+    assert!(b == 2);
 }

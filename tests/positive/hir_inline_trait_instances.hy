@@ -1,6 +1,7 @@
 // Typed inlining splices a ground trait instance's method body at the call:
 // scalar and class receivers, locals in the body, and a default method that
 // stays a call (its body is shared by every instance).
+use tests::assert;
 
 class Point {
     pub x: int,
@@ -49,9 +50,9 @@ fn shadow(int t) -> int {
 test("instance methods inline in a loop") {
     // i.size(3) = 3i+1, p.size(i) = 3i+4, i.twice(2) = 2(2i+1)
     // sum over i in 0..4 of 10i + 7 = 60 + 28
-    assert(hot(4) == 88)?;
+    assert!(hot(4) == 88);
 }
 
 test("spliced locals stay apart from the caller's") {
-    assert(shadow(5) == 16)?;
+    assert!(shadow(5) == 16);
 }

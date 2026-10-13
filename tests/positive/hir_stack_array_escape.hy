@@ -1,6 +1,7 @@
 // HIR lowering of `let a = [..]` locals that escape: the slots are boxed
 // into one array object before the first statement that escapes, and the
 // local is that object from there on.
+use tests::assert;
 
 class Holder {
     pub a: [int; 3],
@@ -89,17 +90,17 @@ fn two_escapes(int n) -> int {
 
 test("escape by return and by call") {
     let xs = fill_return(9);
-    assert(xs[0] + xs[1] + xs[2] == 21)?;
-    assert(pack_call(9) == 21)?;
-    assert(pack_field(4) == 8)?;
+    assert!(xs[0] + xs[1] + xs[2] == 21);
+    assert!(pack_call(9) == 21);
+    assert!(pack_field(4) == 8);
 }
 
 test("writes after an escape reach the shared array") {
-    assert(alias_writes() == 900 + 70 + 7 - 7 + 0)?;
+    assert!(alias_writes() == 900 + 70 + 7 - 7 + 0);
 }
 
 test("escapes in loops and several arrays") {
-    assert(escape_in_loop(4) == 0 + 1 + 2 + 3 + 3)?;
-    assert(let_in_loop(3) == (0 + 3 + 100) + (1 + 3 + 100) + (2 + 3 + 100))?;
-    assert(two_escapes(2) == 200 + 3 + 300 + 2)?;
+    assert!(escape_in_loop(4) == 0 + 1 + 2 + 3 + 3);
+    assert!(let_in_loop(3) == (0 + 3 + 100) + (1 + 3 + 100) + (2 + 3 + 100));
+    assert!(two_escapes(2) == 200 + 3 + 300 + 2);
 }

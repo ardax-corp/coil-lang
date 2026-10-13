@@ -3,6 +3,7 @@
 // that builds an object with a finalizer keeps its call, so `drop` still
 // runs at the next collection.
 
+use tests::assert;
 use gc::collect;
 use string::format;
 
@@ -73,11 +74,11 @@ fn leak_and_collect() -> int {
 }
 
 test("heap locals splice and the result is right") {
-    assert(sums() == 60)?;
-    assert(sums_to(1000) == 509500)?;
-    assert(labelled() == "n=7")?;
+    assert!(sums() == 60);
+    assert!(sums_to(1000) == 509500);
+    assert!(labelled() == "n=7");
 }
 
 test("a finalized object still drops at the next collection") {
-    assert(leak_and_collect() == 1)?;
+    assert!(leak_and_collect() == 1);
 }
