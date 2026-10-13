@@ -5241,7 +5241,7 @@ impl Compiler {
             return;
         }
         let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, box_tag, op);
-        self.emit_synth_fn(fqn, &hir, HashMap::new());
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
     }
 
     /// Thunk for `Vec::{name}` stamped with element kind `stamp`
@@ -5407,7 +5407,7 @@ impl Compiler {
             let call = b.call(native, args, ret);
             let root = b.ret(call);
             let hir = b.finish(root);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new());
+            self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
         }
     }
 
@@ -5416,14 +5416,20 @@ impl Compiler {
             return;
         }
         let hir = crate::hir::synth::range_to_vec(&self.checker, &fqn, inclusive, float);
-        self.emit_synth_fn(&fqn, &hir, HashMap::new());
+        self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
     }
 
     /// Emit compiler-made body `hir` ([`crate::hir::synth`]) as function
     /// `name`, its own function record, lowered like any other body (HIR
     /// lowering, then direct MIR). `calls` are its callees the checker has
     /// no signature for. A body that does not plan is reported.
-    fn emit_synth_fn(&mut self, name: &str, hir: &crate::hir::HirBody, calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>) {
+    fn emit_synth_fn(
+        &mut self,
+        name: &str,
+        hir: &crate::hir::HirBody,
+        calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
+        dict_entry: bool,
+    ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
         let body_start = self.bytecode.len();
@@ -5438,8 +5444,13 @@ impl Compiler {
         let body_end = self.bytecode.len();
         self.record_fn_span(name.to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get(name).copied();
+        // A dictionary entry is called with its parameters and then the
+        // instance dictionary. No `CALL` names it, so its precise frame map
+        // takes the entry height from here; too low a height leaves the top
+        // words unrooted.
+        let entry_sp = if dict_entry { hir.params.len() as u32 + 1 } else { 0 };
         self.bytecode
-            .record_func_with_sp(name.to_string(), entry, body_start, body_end, 0);
+            .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
         self.current_function_table_key = prev_key;
@@ -9005,7 +9016,7 @@ impl Compiler {
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new());
+            self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
         skip.bind_label(after, self.bytecode.il_mut());
     }
