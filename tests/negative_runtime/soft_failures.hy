@@ -19,10 +19,20 @@ fn outer() {
     return 0;
 }
 
+fn fails() -> Result<(), string> {
+    assert!(false);
+    return Result::Ok(());
+}
+
+fn fails_with(string message) -> Result<(), string> {
+    assert!(1 == 0, message);
+    return Result::Ok(());
+}
+
 test("assert false is Err not panic") {
-    let r = assert(false);
+    let r = fails();
     match r {
-        Result::Ok(_) => raise "expected Err from assert(false)",
+        Result::Ok(_) => raise "expected Err from assert!(false)",
         Result::Err(_) => {
             assert!(true);
         },
@@ -30,7 +40,7 @@ test("assert false is Err not panic") {
 }
 
 test("assert message preserved") {
-    let msg = match assert(false, "boom") {
+    let msg = match fails_with("boom") {
         Result::Ok(_) => "",
         Result::Err(e) => e,
     };
@@ -65,7 +75,7 @@ test("match err arm taken") {
 }
 
 test("failed assert does not poison next assert") {
-    let _ = assert(false);
+    let _ = fails();
     assert!(true);
 }
 

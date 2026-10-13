@@ -1,5 +1,7 @@
 // A tuple that does not travel as a two-word pair is a heap tuple: a call
 // returns it boxed and takes it boxed, in direct MIR as in HIR emission.
+use tests::assert;
+
 fn triple(int i) -> (int, int, int) {
     return (i, i * 2, i * 3);
 }
@@ -21,10 +23,10 @@ fn label((int, string) p) -> string {
 
 test("heap tuples through calls") {
     let t = triple(2);
-    assert(t[0] + t[1] + t[2] == 12)?;
-    assert(sum3(triple(1)) == 6)?;
-    assert(sum3(t) == 12)?;
+    assert!(t[0] + t[1] + t[2] == 12);
+    assert!(sum3(triple(1)) == 6);
+    assert!(sum3(t) == 12);
     let p = tagged(4);
-    assert(label(p) == "nn")?;
-    assert(label(tagged(7)) == "n")?;
+    assert!(label(p) == "nn");
+    assert!(label(tagged(7)) == "n");
 }

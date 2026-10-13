@@ -1,20 +1,35 @@
-// `assert` in bodies lowered straight from HIR to MIR: `Ok(())` when the
-// condition holds, else `Err` of the message, the default one when the
-// call passes none.
+// `assert!` in bodies lowered straight from HIR to MIR: the body goes on
+// when the condition holds, else returns `Err` of the message, the default
+// one (naming the condition) when the call passes none.
 use tests::assert;
 
+fn need(int n) -> Result<(), string> {
+    assert!(n > 2, "too small");
+    return Result::Ok(());
+}
+
+fn need_even(int n) -> Result<(), string> {
+    assert!(n % 2 == 0);
+    return Result::Ok(());
+}
+
 fn check(int n) -> string {
-    return match assert(n > 2, "too small") {
+    return match need(n) {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
 }
 
 fn check_default(int n) -> string {
-    return match assert(n % 2 == 0) {
+    return match need_even(n) {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
+}
+
+fn even_sum(int acc) -> Result<(), string> {
+    assert!(acc % 2 < 1, "odd");
+    return Result::Ok(());
 }
 
 test("assert passes and fails with its message") {
@@ -24,7 +39,7 @@ test("assert passes and fails with its message") {
 
 test("assert without a message fails with the default one") {
     assert!(check_default(4) == "ok");
-    assert!(check_default(3) == "assertion failed");
+    assert!(check_default(3) == "Assertion: 'n % 2 == 0' failed");
 }
 
 test("assert in a numeric loop") {
@@ -34,7 +49,7 @@ test("assert in a numeric loop") {
     while i < 20 {
         acc = acc + i * 3;
         i = i + 1;
-        match assert(acc % 2 < 1, "odd") {
+        match even_sum(acc) {
             Result::Ok(_) => {},
             Result::Err(_) => {
                 fails = fails + 1;
@@ -50,16 +65,17 @@ class Cell {
     pub v: int,
 }
 
-test("a failing assert in a heap body") {
-    let c = new Cell(3);
+fn big(Cell c) -> Result<int, string> {
     let n = c.v * 2 + 1;
-    let r = match assert(n > 9, "small") {
+    assert!(n > 9, "small");
+    return Result::Ok(n);
+}
+
+test("a failing assert in a heap body") {
+    let r = match big(new Cell(3)) {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
-    let d = match assert(n % 2 == 0) {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => e,
-    };
-    assert!(r == "small" && d == "assertion failed");
+    let d = check_default(new Cell(3).v * 2 + 1);
+    assert!(r == "small" && d == "Assertion: 'n % 2 == 0' failed");
 }

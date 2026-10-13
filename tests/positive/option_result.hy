@@ -70,8 +70,18 @@ test("optional chain on dict") {
     assert!(b == 0);
 }
 
+fn fails() -> Result<(), string> {
+    assert!(false);
+    return Result::Ok(());
+}
+
+fn fails_with(string message) -> Result<(), string> {
+    assert!(1 == 0, message);
+    return Result::Ok(());
+}
+
 test("assert soft-fail returns Err") {
-    let r = assert(false);
+    let r = fails();
     let ok = match r {
         Result::Ok(_) => false,
         Result::Err(_) => true,
@@ -80,7 +90,7 @@ test("assert soft-fail returns Err") {
 }
 
 test("assert custom message") {
-    let msg = match assert(1 == 0, "custom") {
+    let msg = match fails_with("custom") {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };

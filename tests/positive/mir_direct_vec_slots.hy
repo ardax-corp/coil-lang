@@ -1,5 +1,7 @@
 // A `Vec` local bound to an array literal keeps its items in frame slots
 // until it escapes; direct MIR reads and writes those slots.
+use tests::assert;
+
 fn total(int a, int b) -> int {
     let v: Vec<int> = [a, b, a + b];
     v[1] = v[1] * 10;
@@ -23,7 +25,7 @@ fn floats(float x) -> float {
 }
 
 test("Vec literal locals in frame slots") {
-    assert(total(1, 2) == 27)?;
-    assert(grown(2) == 18)?;
-    assert(floats(1.5) == 4.5)?;
+    assert!(total(1, 2) == 27);
+    assert!(grown(2) == 18);
+    assert!(floats(1.5) == 4.5);
 }

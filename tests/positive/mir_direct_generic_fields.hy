@@ -2,6 +2,7 @@
 // type (`Box<int>`) lowers to direct MIR: the slot holds the value's own
 // word, so a `Box<int>` field reads as an `int` and a `Box<string>` one as
 // a traced heap word. A two-word value (`Option<int>`) sits in the slot boxed.
+use tests::assert;
 use string::format;
 
 class Box<T> {
@@ -56,11 +57,11 @@ fn make_some(int x) -> Box<Option<int>> {
 
 test("int, float and bool fields") {
     let b = new Box(4);
-    assert(bump(b) == 10)?;
-    assert(b.item == 5)?;
-    assert(half(new Box(3.0)) == 1.5)?;
-    assert(flag(new Box(false)))?;
-    assert(make_int(1).item == 2)?;
+    assert!(bump(b) == 10);
+    assert!(b.item == 5);
+    assert!(half(new Box(3.0)) == 1.5);
+    assert!(flag(new Box(false)));
+    assert!(make_int(1).item == 2);
 }
 
 test("string fields survive allocation") {
@@ -70,20 +71,20 @@ test("string fields survive allocation") {
         boxes.push(make_str(i));
         i = i + 1;
     }
-    assert(label(boxes[7]) == "n=7!")?;
-    assert(boxes[199].item == "n=199")?;
+    assert!(label(boxes[7]) == "n=7!");
+    assert!(boxes[199].item == "n=199");
 }
 
 test("nested and two-word fields") {
-    assert(inner(new Box(new Box(9))) == 9)?;
-    assert(some(make_some(3)) == 3)?;
+    assert!(inner(new Box(new Box(9))) == 9);
+    assert!(some(make_some(3)) == 3);
     let none: Box<Option<int>> = new Box(Option::None);
-    assert(some(none) == -1)?;
+    assert!(some(none) == -1);
 }
 
 test("two parameters") {
-    assert(sum(new Pair(1, 0.5)) == 1.5)?;
+    assert!(sum(new Pair(1, 0.5)) == 1.5);
     let p = new Pair("k", 2);
     p.b = p.b + 1;
-    assert(p.a == "k" && p.b == 3)?;
+    assert!(p.a == "k" && p.b == 3);
 }

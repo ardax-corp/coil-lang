@@ -9,13 +9,18 @@ test("assert arithmetic") {
     assert!(1 + 1 == 2, "arithmetic");
 }
 
+fn passes() -> Result<(), string> {
+    assert!(true);
+    return Result::Ok(());
+}
+
 test("match on assert Ok") {
     write_all(
         stdout(),
         to_bytes(
             format(
                 "%s",
-                match assert(true) {
+                match passes() {
                     Result::Ok(_) => "ok",
                     Result::Err(_) => "bad",
                 },

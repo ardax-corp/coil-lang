@@ -1,52 +1,31 @@
-// prelude::test::assert — returns Result<(), string>.
+// tests::assert! — a failed condition returns `Err` from the enclosing
+// function: the given message, or one naming the condition.
 //
-// Output: ok,assertion failed,custom
+// Output: ok,Assertion: 'n == 42' failed,custom
 
 use tests::assert;
 use io::stdout;
 use io::sync::write_all;
-use string::{format, to_bytes};
+use string::to_bytes;
 
-fn check_ok(int n) {
+fn check(int n) -> Result<string, string> {
     assert!(n == 42);
-    return "ok";
+    return Result::Ok("ok");
+}
+
+fn check_with_message(int n) -> Result<string, string> {
+    assert!(n == 42, "custom");
+    return Result::Ok("ok");
+}
+
+fn show(Result<string, string> r) -> string {
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(e) => e,
+    };
 }
 
 fn main() {
-    write_all(
-        stdout(),
-        to_bytes(
-            format(
-                "%s,",
-                match check_ok(42) {
-                    Result::Ok(v) => v,
-                    Result::Err(e) => e,
-                },
-            ),
-        ),
-    );
-    write_all(
-        stdout(),
-        to_bytes(
-            format(
-                "%s,",
-                match assert(false) {
-                    Result::Ok(_) => "ok",
-                    Result::Err(e) => e,
-                },
-            ),
-        ),
-    );
-    write_all(
-        stdout(),
-        to_bytes(
-            format(
-                "%s",
-                match assert(1 == 0, "custom") {
-                    Result::Ok(_) => "ok",
-                    Result::Err(e) => e,
-                },
-            ),
-        ),
-    );
+    let line = show(check(42)) + "," + show(check(1)) + "," + show(check_with_message(1));
+    write_all(stdout(), to_bytes(line));
 }
