@@ -1274,6 +1274,8 @@ impl Compiler {
             enum_drop: Box::new(move |name: &str| {
                 checker.enum_has_drop(name).then(|| checker.class_type_id(name))
             }),
+            word_kind: Box::new(move |t: &Ty| crate::typechecking::value_layout::word_kind(checker, t)),
+            array_stamp: Box::new(move |t: &Ty| crate::typechecking::value_layout::array_elem_stamp(checker, t)),
             match_tree: self.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
