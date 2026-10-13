@@ -47,6 +47,7 @@ mod effects;
 mod emit;
 mod error;
 mod gc;
+mod gates;
 mod host_allow;
 mod emit_lir;
 mod func;
@@ -85,8 +86,8 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use error::LowerError;
 pub use specialize::{
-    mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
-    try_specialize_body_side, BodySidecar,
+    fuse_fallback, mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
+    try_specialize_body_side, BodyLabels, BodySidecar, GateRef,
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;
