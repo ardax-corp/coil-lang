@@ -35,6 +35,14 @@ pub(super) struct HirMirTables {
     /// Auto-par call sites sent to a fork-join worker, by call: the direct
     /// MIR lowering's calls.
     pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
+    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
+    /// named functions read as values), by expression.
+    pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
+    /// Entry of the user `into_iter` a counted `for` loop calls, by loop.
+    pub(super) into_iters: HashMap<u32, crate::il::Label>,
+    /// The `into_iter` and `next` entries a `for` loop over a user
+    /// iterator calls, by loop.
+    pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -85,11 +93,33 @@ impl Compiler {
                 let idx = self.intern_string(unescape_coil_string(raw));
                 t.strings.insert(id.0, idx);
             }
-            HirKind::Global { .. }
-                if !emit.plan.statics.contains_key(&id.0)
-                    && !emit.plan.polyfns.contains_key(&id.0)
-                    && !emit.plan.fn_refs.contains_key(&id.0) =>
-            {
+            HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => {}
+            HirKind::Lambda { .. } => {
+                // Its body was emitted in its own frame, at its entry.
+                if let Some(lam) = emit.plan.lambdas.get(&id.0)
+                    && let Some(target) = lam.entry.and_then(|entry| self.bytecode.entry_label_for_offset(entry as usize))
+                {
+                    let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
+                    let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures });
+                }
+            }
+            // A generic function's `MakePolyFn`, when it takes no
+            // dictionaries.
+            HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
+                if self.checker.dict_arity_for(name) == 0
+                    && let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry))
+                {
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new() });
+                }
+            }
+            HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
+                if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
+                    let operand = make_fn_operand(0, 0, arity, rest);
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures: Vec::new() });
+                }
+            }
+            HirKind::Global { .. } => {
                 if let Some(crate::const_fold::ConstValue::Str(text)) = emit.plan.consts.get(&id.0) {
                     let idx = self.intern_string(text);
                     t.strings.insert(id.0, idx);
@@ -157,6 +187,12 @@ impl Compiler {
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
                 self.hir_mir_call(hir, emit, id, args, t);
             }
+            HirKind::ForIn {
+                pat,
+                iterable,
+                kind: Some(kind),
+                ..
+            } => self.hir_mir_for_in(hir, id, pat, *iterable, kind, t),
             HirKind::Index {
                 base,
                 index,
@@ -168,6 +204,56 @@ impl Compiler {
             _ => {}
         }
         Kids::All
+    }
+
+    /// The user `into_iter` / `next` entries `for` loop `id` calls, as
+    /// [`Self::hir_for_in`] emits them.
+    fn hir_mir_for_in(&mut self, hir: &HirBody, id: HirId, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut HirMirTables) {
+        let ForInKind::Custom { into_iter_fqn, next_fqn, counted } = kind else {
+            return;
+        };
+        // A counted result runs that result's loop; a range bound read
+        // from the iterable needs no call.
+        if let Some(counted) = counted {
+            use crate::typechecking::infer::ForInCounted as C;
+            if matches!(counted, C::Range { .. }) && lower::range_bounds(hir, iterable).is_some() {
+                return;
+            }
+            self.raw_instance_call = false;
+            if let Some(target) = self.named_entry_target(into_iter_fqn, true) {
+                t.into_iters.insert(id.0, target);
+            }
+            return;
+        }
+        let (Some(next_fqn), &HirPat::Bind(local)) = (next_fqn, pat) else {
+            return;
+        };
+        let item = hir.local(local).ty.clone();
+        let niche = item
+            .as_ref()
+            .is_some_and(|ty| crate::typechecking::value_layout::niche_heap_only(&self.checker, ty));
+        // Pinned as emission pins it, so `next`'s `CALL` agrees.
+        if let Some(item) = &item {
+            let opt = crate::typechecking::ty::option_ty(item.clone());
+            let pair = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
+            self.pin_two_word_return_kind(next_fqn, pair);
+        }
+        let two_slot = self.two_word_return_kind(next_fqn).is_some();
+        self.raw_instance_call = false;
+        let into_iter = self.named_entry_target(into_iter_fqn, true);
+        self.raw_instance_call = false;
+        let next = self.named_entry_target(next_fqn, true);
+        if let (Some(into_iter), Some(next), Some(iter_ty)) = (into_iter, next, self.fn_return_ty(into_iter_fqn)) {
+            let shape = if niche {
+                crate::mir::HirIterNext::Niche
+            } else if two_slot {
+                crate::mir::HirIterNext::Pair
+            } else {
+                let some = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "Some").unwrap_or(1);
+                crate::mir::HirIterNext::Boxed { some }
+            };
+            t.iter_loops.insert(id.0, crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
+        }
     }
 
     /// User operator `id` on `operands` calling its instance method, as
