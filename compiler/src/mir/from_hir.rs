@@ -111,7 +111,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_thread(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -434,6 +434,11 @@ fn is_coroutine(ty: &Ty) -> bool {
 
 fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
+}
+
+/// A `Thread` handle: a heap object (`ObjThread`).
+fn is_thread(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::THREAD)
 }
 
 /// The element type of an array or `Vec`.
@@ -1621,6 +1626,24 @@ impl Lower<'_> {
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
             && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
             && self.inp.pair_tys.contains_key(&id.0)
+    }
+
+    /// A host call whose result is a boxed enum kept as its object: no
+    /// word or pair of its own.
+    fn host_boxed(&self, id: HirId) -> bool {
+        // Or an `if` choosing between such calls (a fork-join worker's spawn
+        // of itself or of the sequential arm).
+        if let HirKind::If { then, els: Some(els), .. } = self.hir.expr(id).kind {
+            let tail = |b: HirId| match &self.hir.expr(b).kind {
+                HirKind::Block { stmts, tail: Some(t) } if stmts.is_empty() => *t,
+                _ => b,
+            };
+            return self.host_boxed(tail(then)) && self.host_boxed(tail(els));
+        }
+        matches!(self.hir.expr(id).kind, HirKind::Call { .. })
+            && self.inp.hosts.contains_key(&id.0)
+            && !self.inp.pair_tys.contains_key(&id.0)
+            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
     }
 
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
@@ -3419,7 +3442,14 @@ impl Lower<'_> {
         let ret = match self.expr_ty(id) {
             _ if pair.is_some() || raw => Some(MirTy::HeapRef),
             _ if unit => None,
-            Some(ty) => Some(self.inp.word(ty).ok_or_else(|| format!("host result {}", ty_kind(ty)))?),
+            // A boxed enum (`thread_spawn`'s `Result<thread, ThreadError>`)
+            // stays the object it comes back as.
+            Some(ty) => Some(
+                self.inp
+                    .word(ty)
+                    .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                    .ok_or_else(|| format!("host result {}", ty_kind(ty)))?,
+            ),
             None => return Err("host result".into()),
         };
         let mut words = Vec::with_capacity(args.len());
@@ -3854,7 +3884,7 @@ impl Lower<'_> {
             }
             _ => false,
         };
-        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee);
+        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee) || self.host_boxed(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }
