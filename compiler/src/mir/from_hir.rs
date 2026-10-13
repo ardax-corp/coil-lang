@@ -1061,6 +1061,18 @@ impl Lower<'_> {
         }
     }
 
+    /// The niche layout of `id`'s word of type `ty`: a `NicheRes` word is
+    /// a niche `Result`, a `NicheOpt` one an `Option` or a `Result<(), E>`.
+    fn niche_layout(&self, id: HirId, ty: MirTy) -> Result<ValueLayout, Refusal> {
+        let result = self.expr_ty(id).is_some_and(|t| crate::typechecking::ty::is_result_ty(strip_readonly(t)));
+        match ty {
+            MirTy::NicheRes => Ok(ValueLayout::NicheResult),
+            MirTy::NicheOpt if result => Ok(ValueLayout::NicheUnitResult),
+            MirTy::NicheOpt => Ok(ValueLayout::NicheOption),
+            _ => Err("niche layout".into()),
+        }
+    }
+
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
     /// emission's `emit_niche_option_to_boxed` and siblings.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
@@ -1722,6 +1734,32 @@ impl Lower<'_> {
                 };
                 Ok(Val::V(self.b.ins_done_coro(h).map_err(mir)?))
             }
+            // `panic msg`: the message and `Panic`, all at the panic's own
+            // location, as HIR emission. A failed `requires` (a second
+            // argument) blames the caller through `contract_fail`.
+            HirKind::Builtin { op: Builtin::Panic, args } => {
+                let [msg] = args.as_slice() else {
+                    return Err("panic blame".into());
+                };
+                self.at_expr(id, |l| {
+                    let Some(m) = l.word(*msg)? else {
+                        return Ok(Val::Never);
+                    };
+                    if l.b.value_ty(m) != MirTy::HeapRef {
+                        return Err("panic message".into());
+                    }
+                    l.b.panic(m).map_err(mir)?;
+                    Ok(Val::Never)
+                })
+            }
+            // `readonly e`: `e`'s value.
+            HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
+            // `typeof e`: the type name HIR emission interned; `e` is not
+            // evaluated.
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => {
+                let &idx = self.inp.strings.get(&id.0).ok_or("typeof")?;
+                Ok(Val::V(self.b.ins_string(idx).map_err(mir)?))
+            }
             HirKind::Logic { and, lhs, rhs } => self.logic(*and, *lhs, *rhs),
             HirKind::Un { op, operand } => {
                 let Some(v) = self.word(*operand)? else {
@@ -1764,6 +1802,13 @@ impl Lower<'_> {
                     (Some(MirTy::F64), Some(MirTy::I64)) => {
                         self.b.ins_cast(MirCastKind::FloatToInt, MirTy::I64, v).map_err(mir)?
                     }
+                    // `CastIntToBool`: any non-zero int is `true`.
+                    (Some(MirTy::I64), Some(MirTy::Bool)) => {
+                        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                        self.b.ins_cmp(MirCmpOp::Ne, v, zero).map_err(mir)?
+                    }
+                    // `CastBoolToInt`: a `bool` is its `0` / `1` word.
+                    (Some(MirTy::Bool), Some(MirTy::I64)) => self.b.ins_cast(MirCastKind::Word, MirTy::I64, v).map_err(mir)?,
                     _ => return Err("cast".into()),
                 };
                 Ok(Val::V(out))
@@ -2821,6 +2866,13 @@ impl Lower<'_> {
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+        }
+        // Niche `Option` / `Result` words compare as HIR emission pushes
+        // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
+        if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
+            let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
+            let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
         if lt != rt || !matches!(lt, MirTy::I64 | MirTy::F64) {

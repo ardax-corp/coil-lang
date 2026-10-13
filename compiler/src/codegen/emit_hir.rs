@@ -7046,9 +7046,10 @@ impl Compiler {
                 args,
             } => {
                 let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
-                let mut bc = CodeBuf::new();
-                self.emit_raw_string_literal(&mut bc, &name);
-                self.bytecode.append(&mut bc);
+                // Direct MIR reads the index.
+                let idx = self.intern_string(&name);
+                emit.string_lits.insert(id.0, idx);
+                self.bytecode.push_string(idx);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
