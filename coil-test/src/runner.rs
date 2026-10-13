@@ -334,7 +334,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                 if !ok {
                     match (timed_out, &reason) {
                         (true, _) => eprintln!("> Test \"{}\" failed (timed out)", case.name),
-                        // `assert(cond, "message")?` returns `Err("message")`.
+                        // `assert!(cond, "message")` raises `Err("message")`.
                         (false, Some(reason)) => {
                             eprintln!("> Test \"{}\" failed: {reason}", case.name)
                         }

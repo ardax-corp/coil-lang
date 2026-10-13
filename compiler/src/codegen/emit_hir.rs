@@ -141,8 +141,6 @@ struct HirGeneric {
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
 #[derive(Clone, Copy)]
 enum HirBuiltin {
-    /// `assert(cond)` / `assert(cond, msg)`: the `Result<(), string>` niche word.
-    Assert,
     /// `HostInvoke` of a registered native.
     Host(usize),
     /// `format("..", args)` with a literal format and no `%v`: the format
@@ -317,9 +315,6 @@ struct HirEmit {
     /// String table index of the format string of each `format` call
     /// whose arguments all print as words (no `%v`), by call.
     format_strs: HashMap<u32, u32>,
-    /// Each `assert` call: the string table index of its default message,
-    /// or `None` when it passes its own.
-    asserts: HashMap<u32, Option<u32>>,
     /// User operators emitted as their instance method's plain `CALL`.
     op_calls: HashMap<u32, crate::mir::HirOpCall>,
     /// User operators emitted as a raw opcode on the operands.
@@ -1163,7 +1158,6 @@ impl Compiler {
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
             formats: &emit.format_strs,
-            asserts: &emit.asserts,
             op_calls: &emit.op_calls,
             par_loops: &emit.par_calls,
             op_prims: &emit.op_prims,
@@ -2120,7 +2114,6 @@ impl Compiler {
             into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
-            asserts: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
             fn_values: HashMap::new(),
@@ -3187,7 +3180,6 @@ impl Compiler {
         }
         if let Some(kind) = self.checker.prelude_fn_in_scope(name) {
             return Some(match kind {
-                PreludeFn::Assert => Ok(HirBuiltin::Assert),
                 PreludeFn::Matrix => Ok(HirBuiltin::Matrix),
                 PreludeFn::BlockOn => Ok(HirBuiltin::BlockOn),
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
@@ -3699,9 +3691,6 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if matches!(builtin, HirBuiltin::Assert) && !(1..=2).contains(&args.len()) {
-            return Err("callee-arity");
-        }
         if matches!(builtin, HirBuiltin::Matrix | HirBuiltin::BlockOn) && args.len() != 1 {
             return Err("callee-arity");
         }
@@ -7053,29 +7042,6 @@ impl Compiler {
                 let params = call.params.clone();
                 let natural = Self::hir_call_rep(call);
                 match call.builtin.expect("builtin call") {
-                    HirBuiltin::Assert => {
-                        let fail = self.bytecode.fresh_label();
-                        let end = self.bytecode.fresh_label();
-                        self.hir_value(hir, emit, args[0], &Rep::Word(params[0]), depth);
-                        self.hir_jump(IlJumpKind::JumpIfFalse, fail);
-                        // `Ok(())` is the zero word.
-                        self.bytecode.push_const(0);
-                        self.hir_jump(IlJumpKind::Unconditional, end);
-                        self.bytecode.bind_label(fail);
-                        let default = match args.get(1) {
-                            Some(&msg) => {
-                                self.hir_value(hir, emit, msg, &Rep::Word(params[1]), depth);
-                                None
-                            }
-                            None => {
-                                let idx = self.intern_string("assertion failed");
-                                self.bytecode.push_string(idx);
-                                Some(idx)
-                            }
-                        };
-                        emit.asserts.insert(id.0, default);
-                        self.bytecode.bind_label(end);
-                    }
                     HirBuiltin::BlockOn => self.hir_block_on(hir, emit, args[0]),
                     HirBuiltin::Format => {
                         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
@@ -8729,7 +8695,7 @@ impl Compiler {
                 HirPat::Bind(_) => this.hir_arm(hir, emit, arm, 0, None, want, depth),
                 _ if matches!(emit.plan.ret, Rep::Pair(_)) && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
                     // `Err(e) => return Err(e)` from a niche word into a pair
-                    // return (`assert(..)?`): the word is the payload.
+                    // return (`r?` of a niche `Result`): the word is the payload.
                     if decode {
                         Self::push_result_untag(&mut this.bytecode);
                     }
@@ -8738,7 +8704,7 @@ impl Compiler {
                     this.push_return_two_word();
                 }
                 _ if emit.plan.ret == BOXED && let Some(tag) = this.hir_rewrap_tag(hir, ty, arm) => {
-                    // Into a boxed return (a test body's `assert(..)?`): make
+                    // Into a boxed return (a test body's `r?`): make
                     // the variant straight from the payload word.
                     if decode {
                         Self::push_result_untag(&mut this.bytecode);

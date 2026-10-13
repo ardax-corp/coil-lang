@@ -194,7 +194,7 @@ fn every_case_gets_fresh_static_init() {
     let mut src = String::from("static let seen: Vec<int> = Vec::new();\n");
     for i in 0..8 {
         src.push_str(&format!(
-            "test(\"push {i}\") {{\n    if !(seen.len() == 0) { raise \"saw a previous case's write\"; }\n    seen.push({i});\n}}\n"
+            "test(\"push {i}\") {{\n    if !(seen.len() == 0) {{ raise \"saw a previous case's write\"; }}\n    seen.push({i});\n}}\n"
         ));
     }
     std::fs::write(root.join("statics.hy"), src).unwrap();

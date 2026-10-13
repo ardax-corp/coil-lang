@@ -193,10 +193,9 @@ fn violations(src: &str) -> Vec<String> {
 }
 
 #[test]
-fn panics_and_asserts_are_not_user_visible() {
+fn panics_are_not_user_visible() {
     let src = "
 fn pick(Vec<int> v, int i) -> int {
-    assert(i >= 0);
     if i > 9 {
         panic(\"too far\");
     }

@@ -534,8 +534,6 @@ impl Checker {
         self.fn_param_names
             .insert("string::to_bytes".into(), vec!["s".into()]);
         self.fn_param_names
-            .insert("assert".into(), vec!["cond".into(), "msg".into()]);
-        self.fn_param_names
             .insert("block_on".into(), vec!["handle".into()]);
         self.fn_param_names
             .insert("dload".into(), vec!["path".into()]);
@@ -5005,12 +5003,11 @@ impl Checker {
                 }
             };
         }
-        // `assert` from `prelude::test` (auto-imported or via `use`).
+        // Prelude callables (auto-imported or via `use`).
         if let Some(kind) = self.prelude_fn_in_scope(&ident) {
             if has_named {
                 let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
-                    PreludeFn::Assert => self.infer_assert(&reordered, range),
                     PreludeFn::BlockOn => self.infer_block_on(&reordered, range),
                     PreludeFn::Dot => self.infer_dot(&reordered, id, range),
                     PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
@@ -5046,7 +5043,6 @@ impl Checker {
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
-                PreludeFn::Assert => self.infer_assert(arg_slice, range),
                 PreludeFn::BlockOn => self.infer_block_on(arg_slice, range),
                 PreludeFn::Dot => self.infer_dot(arg_slice, id, range),
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
@@ -7467,37 +7463,6 @@ impl Checker {
         }
         // If discharge failed (no instance), a diagnostic is already recorded.
         apply_ty_prune(&self.subst, &result)
-    }
-
-    /// `assert(bool)` / `assert(bool, string)` → `Result<(), string>`.
-    ///
-    /// Does not enter result-mode; callers use `?` / `match` / `raise`.
-    fn infer_assert(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        if !(1..=2).contains(&args.len()) {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("assert expects 1 or 2 arguments, got {}", args.len()),
-                range,
-                Some("use `assert(cond)` or `assert(cond, message)`".to_string()),
-            );
-        }
-
-        let cond_ty = self.infer(&args[0]);
-        self.coerce_or_unify(
-            &boolean(),
-            &cond_ty,
-            Some(&args[0]),
-            &args[0].0.into_range(),
-            "assert condition",
-        );
-        if let Some(msg) = args.get(1) {
-            let msg_ty = self.infer(msg);
-            self.unify(&msg_ty, &string(), &msg.0.into_range(), "assert message");
-        }
-        result_app_ty(unit_ty(), string())
     }
 
     /// `block_on(coro)`, drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.

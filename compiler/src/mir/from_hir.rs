@@ -205,9 +205,6 @@ pub struct HirMirInput<'a> {
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
-    /// `assert` calls: the default message's string table index, `None`
-    /// when the call passes its own.
-    pub asserts: &'a HashMap<u32, Option<u32>>,
     /// User operators that call their trait instance method.
     pub op_calls: &'a HashMap<u32, HirOpCall>,
     /// Parallel loops emitted as a call of their fork-join function, by
@@ -1669,7 +1666,6 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
-            HirKind::Call { args, .. } if let Some(&default) = self.inp.asserts.get(&id.0) => self.assert(id, args, default),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { args, .. } => self.call(id, args),
@@ -2803,43 +2799,6 @@ impl Lower<'_> {
             }
         };
         Ok(Val::V(self.b.ins_cmp(cmp, l, r).map_err(mir)?))
-    }
-
-    /// `assert(c)` / `assert(c, msg)`: `Ok(())` (the zero word) when `c`
-    /// holds, else `Err` of the message, as HIR emission's `JMPF` diamond.
-    fn assert(&mut self, id: HirId, args: &[HirId], default: Option<u32>) -> Result<Val, Refusal> {
-        if self.expr_ty(id).and_then(|t| self.inp.word(t)) != Some(MirTy::NicheOpt) {
-            return Err("assert type".into());
-        }
-        let Some(c) = self.word(args[0])? else {
-            return Ok(Val::Never);
-        };
-        if self.b.value_ty(c) != MirTy::Bool {
-            return Err("assert condition".into());
-        }
-        let (ok_b, fail_b) = (self.b.create_block(), self.b.create_block());
-        self.b.branch(c, ok_b, fail_b).map_err(mir)?;
-        let mut arms = Vec::with_capacity(2);
-        self.switch(ok_b);
-        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        let ok = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).map_err(mir)?;
-        self.known_niche.insert(ok, (false, None));
-        arms.push((self.cur, Val::V(ok)));
-        self.switch(fail_b);
-        let msg = match (args.get(1), default) {
-            (Some(&msg), _) => self.word(msg)?,
-            (None, Some(idx)) => Some(self.b.ins_string(idx).map_err(mir)?),
-            (None, None) => return Err("assert message".into()),
-        };
-        if let Some(msg) = msg {
-            if self.b.value_ty(msg) != MirTy::HeapRef {
-                return Err("assert message".into());
-            }
-            let err = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, msg).map_err(mir)?;
-            self.known_niche.insert(err, (true, Some(msg)));
-            arms.push((self.cur, Val::V(err)));
-        }
-        self.join_arms(arms)
     }
 
     /// `resume h` / `resume h with v`: the coroutine runs to its next

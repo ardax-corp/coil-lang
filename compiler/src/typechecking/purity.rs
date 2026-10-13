@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, Pattern, PatternPayload};
 
 use super::id::walk_children;
-use super::virtual_modules::{BuiltinExport, PreludeFn, VirtualModules};
+use super::virtual_modules::{BuiltinExport, VirtualModules};
 
 /// Names of user functions that are pure and self-recursive.
 pub type RecursivePureSet = HashSet<String>;
@@ -546,9 +546,6 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
         }
         BuiltinExport::Fn { kind } => match kind.math_native_name() {
             Some(registry) => row(registry),
-            None if *kind == PreludeFn::Assert => {
-                EffectFlags::from_bits(EffectFlags::HOST | EffectFlags::UNKNOWN)
-            }
             // `ord`, `char`, `block_on`, matrix helpers: compiled inline or
             // in userland, not a host row.
             None => UNKNOWN_CALLEE,
