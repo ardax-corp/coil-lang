@@ -1397,6 +1397,12 @@ struct EmitTermArgs<'args> {
     loc: DebugLoc,
 }
 
+/// Whether the ops so far end in a `Panic` (a block ending in
+/// [`MirInst::Panic`]).
+pub(super) fn ends_in_panic(out: &[IlOp]) -> bool {
+    out.last().and_then(IlOp::as_encode_byte).is_some_and(|b| *b.bytecode() == Instruction::Panic)
+}
+
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     let EmitTermArgs {
         out,
@@ -1549,6 +1555,8 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 ret_words: super::abi::ret_words_from_hi(*hi),
             });
         }
+        // A `Panic` never returns: nothing follows it.
+        Terminator::Unreachable if ends_in_panic(out) => {}
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
         }

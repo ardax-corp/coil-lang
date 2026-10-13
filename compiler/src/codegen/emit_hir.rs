@@ -847,8 +847,10 @@ impl Compiler {
         if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
+        // A compiler-made body has no source: its ops carry no location,
+        // as its stack lowering clears them.
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
-            .filter(|loc| loc.is_known())
+            .filter(|loc| loc.is_known() && self.hir_synth_calls.is_none())
             .map(|loc| loc.file);
         let plan = &emit.plan;
         let why = if emit.par_loop {

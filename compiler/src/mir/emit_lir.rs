@@ -1891,6 +1891,8 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
             }
             out.push(IlOp::Return { loc, ret_words });
         }
+        // A `Panic` never returns: nothing follows it.
+        Terminator::Unreachable if super::emit::ends_in_panic(out) => {}
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
         }
