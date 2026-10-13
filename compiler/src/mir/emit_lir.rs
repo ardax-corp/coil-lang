@@ -508,8 +508,11 @@ fn keep_payload_first(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
         fn pushes(v: ValueId, at: &HashMap<ValueId, usize>, insts: &[MirInst], inline: &dyn Fn(ValueId) -> bool, seq: &mut Vec<Option<usize>>) {
             match at.get(&v) {
                 Some(&k) if inline(v) => {
-                    for op in insts[k].operands() {
-                        pushes(op, at, insts, inline, seq);
+                    // A payload's scrutinee is not loaded for it.
+                    if !matches!(insts[k], MirInst::MatchPayload { .. }) {
+                        for op in insts[k].operands() {
+                            pushes(op, at, insts, inline, seq);
+                        }
                     }
                     seq.push(Some(k));
                 }
