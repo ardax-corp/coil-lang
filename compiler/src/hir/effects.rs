@@ -961,7 +961,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Readonly | Builtin::Default => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Readonly | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
             },
             // Workers of a parallel region have no statics, and another

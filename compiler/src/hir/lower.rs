@@ -696,7 +696,13 @@ impl Walk<'_> {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
                 ..
             } => Ok(()),
-            HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if structural => {
+            HirKind::Call { .. }
+            | HirKind::Field { .. }
+            | HirKind::Index { .. }
+            | HirKind::Global { .. }
+            | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
+                if structural =>
+            {
                 self.word(arg)?;
                 self.value(arg, depth)
             }
@@ -743,9 +749,12 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
                 | HirKind::Match { .. }
                 | HirKind::Make { kind: MakeKind::Class(_), .. }
                 | HirKind::Index { kind: IndexKind::String, .. }
-                | HirKind::Builtin { .. }
                 | HirKind::Resume { .. }
                 | HirKind::Yield { .. }
+        ) || matches!(
+            // Boxing ops of compiler-made bodies keep the stack as it is.
+            &e.kind,
+            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify)
         );
     });
     found
@@ -2586,6 +2595,18 @@ impl Walk<'_> {
                 };
                 self.value(*inner, depth)
             }
+            // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
+            // word: the word, then the op.
+            HirKind::Builtin {
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify,
+                args,
+            } => {
+                let [inner] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(id)?;
+                self.value(*inner, depth)
+            }
             // `typeof e`: a string constant; `e` is not evaluated.
             HirKind::Builtin {
                 op: Builtin::TypeOf,
@@ -3065,7 +3086,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf,
+                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify,
                 ..
             } => self.value(id, depth),
             other => Err(kind_name(other)),

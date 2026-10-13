@@ -287,6 +287,7 @@ impl EmitPlan {
         }
 
         keep_memory_order(func, &mut tree, &fused);
+        keep_payload_first(func, &mut tree, &fused);
 
         let mut need_slot = vec![false; n];
         for p in &func.params {
@@ -488,6 +489,60 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
             match late {
                 Some(v) if tree[v.index()] => tree[v.index()] = false,
                 _ => break,
+            }
+        }
+    }
+}
+
+/// A last-arm payload `Unpack` leaves on the stack is an inline operand
+/// that emits nothing: its user finds it on top only when it is the first
+/// word that user pushes (`format(s, show(p))` pushes `s` first, so the
+/// call would take `s`). Otherwise the payload keeps its slot.
+fn keep_payload_first(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
+    for block in &func.blocks {
+        let insts = &block.insts;
+        let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
+        // The words each top-level item pushes, in order: an inline
+        // operand's own (`Some`), or a load of a slot (`None`).
+        fn pushes(v: ValueId, at: &HashMap<ValueId, usize>, insts: &[MirInst], inline: &dyn Fn(ValueId) -> bool, seq: &mut Vec<Option<usize>>) {
+            match at.get(&v) {
+                Some(&k) if inline(v) => {
+                    // A payload's scrutinee is not loaded for it.
+                    if !matches!(insts[k], MirInst::MatchPayload { .. }) {
+                        for op in insts[k].operands() {
+                            pushes(op, at, insts, inline, seq);
+                        }
+                    }
+                    seq.push(Some(k));
+                }
+                _ => seq.push(None),
+            }
+        }
+        for (k, inst) in insts.iter().enumerate() {
+            let MirInst::MatchPayload { dest, .. } = inst else { continue };
+            if !tree[dest.index()] || is_jim_term_payload(func, *dest) {
+                continue;
+            }
+            let is_inline = |v: ValueId| inline(v, tree);
+            let mut first = None;
+            let tops = insts
+                .iter()
+                .filter(|i| !i.is_phi() && !matches!(i, MirInst::MatchPayload { .. }) && !is_inline(i.dest()))
+                .map(|i| i.operands())
+                .chain(block.term.as_ref().map(term_values));
+            for operands in tops {
+                let mut seq = Vec::new();
+                for op in operands {
+                    pushes(op, &at, insts, &is_inline, &mut seq);
+                }
+                if seq.contains(&Some(k)) {
+                    first = seq.first().copied().flatten();
+                    break;
+                }
+            }
+            if first != Some(k) {
+                tree[dest.index()] = false;
             }
         }
     }
@@ -1134,6 +1189,16 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::Unbox { dest, src, tag } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::UnboxValue { tag: *tag, loc });
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
             emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
@@ -1415,9 +1480,10 @@ fn emit_stack(
     };
     let inst = &func.block(bid).insts[idx];
     // A forwarded op that can panic keeps its own line, not its
-    // consumer's (#885).
+    // consumer's (#885); so does an inline call, the frame a trace names.
     let own = func.op_loc(v);
-    let loc = if own.is_known() && inst.may_trap(func) { own } else { loc };
+    let keeps_own = inst.may_trap(func) || matches!(inst, MirInst::Call { .. });
+    let loc = if own.is_known() && keeps_own { own } else { loc };
     match inst {
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {
@@ -1601,6 +1667,27 @@ fn emit_stack(
             }
             Ok(())
         }
+        // A one-word call with a single use in its block: emitted where
+        // that use is (`keep_memory_order` keeps it in program order), its
+        // result left on the stack. A pair call keeps its slots.
+        MirInst::Call {
+            dest,
+            dest_hi: None,
+            target,
+            args,
+        } => emit_lir_call(EmitLirCallArgs {
+            out,
+            dest: *dest,
+            dest_hi: None,
+            target: *target,
+            args,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        }),
+        // Host calls and indirect calls always keep a slot (`EmitPlan`).
         MirInst::HostInvoke { .. } | MirInst::Call { .. } | MirInst::CallIndirect { .. } => Err(LowerError::Refused(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
@@ -1705,6 +1792,11 @@ fn emit_stack(
         MirInst::Stringify { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            Ok(())
+        }
+        MirInst::Unbox { src, tag, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::UnboxValue { tag: *tag, loc });
             Ok(())
         }
         MirInst::StrEq { lhs, rhs, ne, .. } => {
