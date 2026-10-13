@@ -822,7 +822,12 @@ impl Compiler {
                         self.reserve_mono_entries(&qualified, type_params, name);
                     }
                 }
-                Expression::Implementation { owner, methods, .. } => {
+                Expression::Implementation {
+                    owner,
+                    methods,
+                    type_params: impl_params,
+                    ..
+                } => {
                     let owner_key = self.resolve_class_ident(owner);
                     for method in methods {
                         if let Some(name) = Self::impl_method_name(method) {
@@ -830,6 +835,7 @@ impl Compiler {
                             if Self::is_coro_with_body(method) {
                                 self.coroutine_fns.insert(fqn.clone());
                             }
+                            self.note_method_clone_src(&owner_key, &fqn, method, impl_params);
                             // Method-call lowering resolves `recv.m()` through
                             // `context.methods`: register it now so code before
                             // the `impl` can call it (the typechecker already
@@ -2020,6 +2026,7 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: None,
+                method_of: None,
             },
         );
     }
@@ -2048,6 +2055,57 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: Some(params),
+                method_of: None,
+            },
+        );
+    }
+
+    /// Record inherent method `fqn` as a clone source when it is generic
+    /// over one set of type parameters: its class's (`impl Stack<T>`) or
+    /// its own (`fn decode<T: FromVal>`). Its head is those parameters'
+    /// variables in the method's scheme.
+    fn note_method_clone_src(&mut self, owner: &str, fqn: &str, method: &Output, impl_params: &[parser::ast::TypeParam<'_>]) {
+        // A method as its `impl` compiles it (`Method`-wrapped).
+        let Expression::Method(_, f) = method.1.as_ref() else {
+            return;
+        };
+        let Expression::Function {
+            name,
+            type_params,
+            is_coro: false,
+            is_static,
+            body: Some(_),
+            args,
+            ..
+        } = f.1.as_ref()
+        else {
+            return;
+        };
+        let names: Vec<String> = match (impl_params.is_empty(), type_params.is_empty()) {
+            (false, true) => impl_params.iter().map(|p| p.name.to_string()).collect(),
+            (true, false) => type_params.iter().map(|p| p.name.to_string()).collect(),
+            _ => return,
+        };
+        if self.checker.is_overloaded(fqn) || fn_arity_from_args(args).1 {
+            return;
+        }
+        let Some(vars) = self.checker.fn_type_param_vars(fqn, names.len()) else {
+            return;
+        };
+        self.inst_clone_srcs.insert(
+            fqn.to_string(),
+            InstCloneSrc {
+                class: owner.to_string(),
+                method: name.to_string(),
+                span: (f.0.start, f.0.end),
+                head: vars.into_iter().map(Ty::Var).collect(),
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: None,
+                method_of: Some(super::MethodCloneSrc {
+                    is_static: *is_static,
+                    names,
+                }),
             },
         );
     }
@@ -2083,27 +2141,45 @@ impl Compiler {
             return None;
         }
         let (class, method) = (src.class.clone(), src.method.clone());
+        let inherent = src.method_of.is_some();
         let vars = self.inst_clone_vars(&src.head, lookup)?;
         let _ = vars;
         // `Option` / `Result` over a class parameter: the clone's ground
         // layout and the shared entry's boxed one differ; keep the shared
-        // entry there.
-        if self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
-            || self.checker.typeclass_method_scheme(&class, &method).is_none()
+        // entry there. (An inherent method's call site planned the clone's
+        // own layouts.)
+        if !inherent
+            && (self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
+                || self.checker.typeclass_method_scheme(&class, &method).is_none())
         {
             return None;
         }
-        let tys = lookup.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("_");
-        let name = format!("{fqn}$inst${tys}");
+        let name = Self::inst_clone_name(fqn, lookup);
         // Entry labels from the program-start pool: a label minted while a
         // body is being emitted shares that body's label range, and the
         // module layout's per-body relabeling takes it for a local one.
-        if self.inst_clone_labels.len() < 2 {
+        // An inherent method's clone has no dictionary adapter.
+        let entries = if inherent {
+            vec![name.clone()]
+        } else {
+            vec![name.clone(), Self::dict_adapter_name(&name)]
+        };
+        if self.inst_clone_labels.len() < entries.len() {
             return None;
         }
-        for entry in [name.clone(), Self::dict_adapter_name(&name)] {
+        for entry in entries {
             let label = self.inst_clone_labels.pop()?;
             self.fn_entry_labels.entry(entry).or_insert(label);
+        }
+        self.planned_method_clones.borrow_mut().remove(&key);
+        if inherent {
+            self.inst_clones.insert(key, name.clone());
+            self.inst_clone_queue.push_back(InstClone {
+                src: fqn.to_string(),
+                lookup: lookup.to_vec(),
+                name: name.clone(),
+            });
+            return Some(name);
         }
         self.raw_instance_methods.insert(name.clone());
         self.inst_clones.insert(key, name.clone());
@@ -2113,6 +2189,36 @@ impl Compiler {
             name: name.clone(),
         });
         Some(name)
+    }
+
+    /// The name of the clone of `fqn` at ground types `lookup`.
+    pub(super) fn inst_clone_name(fqn: &str, lookup: &[Ty]) -> String {
+        let tys = lookup.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("_");
+        format!("{fqn}$inst${tys}")
+    }
+
+    /// Whether a call site being planned may call the clone of inherent
+    /// method `fqn` at `lookup`: it exists, or the caps and the label pool
+    /// still have room for it next to the ones already planned (which it
+    /// then joins), so [`Self::instance_clone`] makes it at emission.
+    pub(super) fn method_clone_room(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        const MAX_PER_METHOD: usize = 8;
+        let key = (fqn.to_string(), lookup.to_vec());
+        if self.inst_clones.contains_key(&key) {
+            return true;
+        }
+        let mut planned = self.planned_method_clones.borrow_mut();
+        if planned.contains(&key) {
+            return true;
+        }
+        let per_method = self.inst_clones.keys().chain(planned.iter()).filter(|(f, _)| f == fqn).count();
+        let room = self.inst_clones.len() + planned.len() < INST_CLONE_MAX_TOTAL
+            && per_method < MAX_PER_METHOD
+            && planned.len() < self.inst_clone_labels.len();
+        if room {
+            planned.insert(key);
+        }
+        room
     }
 
     /// Mint, before this program's bodies, the entry labels the clones it
@@ -2171,6 +2277,20 @@ impl Compiler {
                     for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
                         names.insert(name.clone(), want.clone());
                     }
+                    // An inherent method compiles as in its `impl`: `self`
+                    // in slot 0 (an instance method), the class as namespace.
+                    let inherent = src.method_of.as_ref().map(|m| {
+                        for (name, want) in m.names.iter().zip(&req.lookup) {
+                            names.insert(name.clone(), want.clone());
+                        }
+                        (
+                            std::mem::replace(&mut self.compiling_method, !m.is_static),
+                            std::mem::replace(&mut self.namespace, src.class.clone()),
+                            // Its signature, as a mono clone's: a generic
+                            // `Option` / `Result` result in the open layout.
+                            std::mem::replace(&mut self.current_function_qualified, Some(req.src.clone())),
+                        )
+                    });
                     let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
                     let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
                     let prev_ctx = self.pending_instance_ctx.take();
@@ -2186,10 +2306,17 @@ impl Compiler {
                     self.pending_instance_ctx = prev_ctx;
                     self.compiling_mono_clone = prev_mono;
                     self.emit_idx = prev_idx;
+                    if let Some((method, namespace, qualified)) = inherent {
+                        self.compiling_method = method;
+                        self.namespace = namespace;
+                        self.current_function_qualified = qualified;
+                    }
                 }
                 None => self.emit_instance_clone_thunk(&src, &req),
             }
-            self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
+            if src.method_of.is_none() {
+                self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
+            }
         }
     }
 
@@ -2216,6 +2343,16 @@ impl Compiler {
                         Some((m, &[][..]))
                     }
                     _ => None,
+                });
+            }
+            if let Expression::Implementation { owner, methods, .. } = child.1.as_ref() {
+                let owner = self.resolve_class_ident(owner);
+                return methods.iter().find_map(|m| {
+                    let name = Self::impl_method_name(m)?;
+                    (format!("{owner}::{name}") == fqn)
+                        .then(|| Self::impl_method_fn(m))
+                        .flatten()
+                        .map(|f| (f, &[][..]))
                 });
             }
             let Expression::TypeClassImpl { class, args, methods, .. } = child.1.as_ref() else {
@@ -2268,6 +2405,10 @@ impl Compiler {
 
     /// The body of [`Self::emit_instance_clone_thunk`] after its entry.
     fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        if src.method_of.is_some() {
+            self.emit_method_clone_call_shared(&req.name);
+            return;
+        }
         let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len() as u32;
         for slot in 0..n {
             self.bytecode.push_load(slot);
@@ -8340,6 +8481,7 @@ impl Compiler {
                                 // Instance methods reserve slot 0 for `self`;
                                 // static methods start params at slot 0.
                                 self.compiling_method = !*is_static;
+                                self.note_inst_clone_compiled(&fqn);
                                 self.do_compile(body);
                                 self.compiling_method = false;
                                 self.context
