@@ -214,6 +214,18 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 checks projects through `typecheck_project`, which runs the same stage, and
 offers "Expand macros in this file" on attribute lines and `name!(…)` lines.
 
+## Providers in the program
+
+A module that declares macros is compiled into a program like any other
+module, minus what only the expansion program needs
+(`macros::strip_compile_time_items`): its lowered macro functions, and its
+`use macro::…` items once nothing left in the module names what they
+import. So the `macro` module's classes (`Code`, `Reader`, …) never meet a
+user's classes of the same name, and coverage and `coil mutate` do not count
+macro bodies, which only run at compile time. The entry file keeps its
+macros, so checking a provider still checks their bodies; expansion
+programs (`Pipeline::expansion_program`) keep everything.
+
 ## Function-style macros
 
 `macro name(Expr a, Expr b) -> Code { … }` is lowered to
