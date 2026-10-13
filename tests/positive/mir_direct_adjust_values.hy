@@ -1,5 +1,7 @@
 // `x++` / `--x` used as values in direct MIR: postfix gives the old word,
 // prefix the new one, on int and float locals and statics alike.
+use tests::assert;
+
 static let ticks: int = 10;
 
 static let level: float = 0.5;
@@ -37,12 +39,12 @@ fn in_loop(int n) -> int {
 }
 
 test("adjust values on locals and statics") {
-    assert(locals(1) == 1331)?;
-    assert(floats(1.5) == 166.5)?;
-    assert(statics() == 1101)?;
-    assert(ticks == 9)?;
+    assert!(locals(1) == 1331);
+    assert!(floats(1.5) == 166.5);
+    assert!(statics() == 1101);
+    assert!(ticks == 9);
     let l = level++;
-    assert(l == 0.5)?;
-    assert(++level == 2.5)?;
-    assert(in_loop(4) == 64)?;
+    assert!(l == 0.5);
+    assert!(++level == 2.5);
+    assert!(in_loop(4) == 64);
 }

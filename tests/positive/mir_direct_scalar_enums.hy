@@ -1,6 +1,8 @@
 // `#[repr(string)]` and `#[repr(bool)]` enums are their backing word in
 // direct MIR: a variant is its string or bool, and a match tests it with
 // `==` (a string by content).
+use tests::assert;
+
 #[repr(string)]
 #[derive(Eq, Ord)]
 enum Mode {
@@ -45,10 +47,10 @@ fn flipped(bool on) -> bool {
 }
 
 test("string and bool scalar enums") {
-    assert(weight(pick(0)) + weight(pick(1)) + weight(pick(2)) == 111)?;
-    assert(pick(1) == Mode::Write)?;
-    assert(pick(2) != Mode::Read)?;
-    assert(pick(0) < pick(1))?;
-    assert(flipped(false))?;
-    assert(!flipped(true))?;
+    assert!(weight(pick(0)) + weight(pick(1)) + weight(pick(2)) == 111);
+    assert!(pick(1) == Mode::Write);
+    assert!(pick(2) != Mode::Read);
+    assert!(pick(0) < pick(1));
+    assert!(flipped(false));
+    assert!(!flipped(true));
 }
