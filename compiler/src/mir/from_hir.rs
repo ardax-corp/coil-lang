@@ -153,7 +153,16 @@ impl HirMirInput<'_> {
 pub type ScalarEnumFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
 
 /// A scalar enum variant's backing constant, by enum and variant name.
-pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<MirConst> + 'a>;
+pub type ScalarVariantFn<'a> = Box<dyn Fn(&str, &str) -> Option<ScalarLit> + 'a>;
+
+/// The backing word of a scalar enum variant, or an `int` match literal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScalarLit {
+    /// An `int`, `float` or `bool` constant.
+    Const(MirConst),
+    /// A `#[repr(string)]` variant's string, by its string table index.
+    Str(u32),
+}
 
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
@@ -1990,8 +1999,8 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
                 args,
-            } if args.is_empty() && let Some(c) = (self.inp.scalar_variant)(enum_name, variant) => {
-                Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
+            } if args.is_empty() && let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) => {
+                Ok(Val::V(self.scalar_lit(lit)?))
             }
             // `p[0]` / `p[1]` of a two-word tuple local.
             HirKind::Index { base, index, .. }
@@ -4133,11 +4142,14 @@ impl Lower<'_> {
                 Ok(())
             }
             HirPat::Variant { enum_name, variant, tag, fields } => {
-                if let Some(c) = (self.inp.scalar_variant)(enum_name, variant) {
+                if let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) {
                     let Some(miss) = miss else {
                         return Ok(());
                     };
-                    if !matches!(c, MirConst::I64(_)) || self.b.value_ty(v) != MirTy::I64 {
+                    let ScalarLit::Const(c @ MirConst::I64(_)) = lit else {
+                        return Err("nested scalar pattern".into());
+                    };
+                    if self.b.value_ty(v) != MirTy::I64 {
                         return Err("nested scalar pattern".into());
                     }
                     let k = self.b.ins_const(c).map_err(mir)?;
@@ -4362,7 +4374,7 @@ impl Lower<'_> {
     /// Each arm's constant when `match` tests an `int`, or a scalar enum
     /// backed by an `int` or `float`, against literals (`None` for a
     /// catch-all), as `lower::is_scalar_match`.
-    fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<MirConst>>> {
+    fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<ScalarLit>>> {
         let ty = self.expr_ty(scrutinee)?;
         let int = matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::INT);
         if !int && (self.inp.scalar_enum)(ty).is_none() {
@@ -4371,7 +4383,7 @@ impl Lower<'_> {
         arms.iter()
             .map(|arm| match &arm.pat {
                 HirPat::Wild | HirPat::Bind(_) => Some(None),
-                HirPat::Int(n) if int => Some(Some(MirConst::I64(*n))),
+                HirPat::Int(n) if int => Some(Some(ScalarLit::Const(MirConst::I64(*n)))),
                 HirPat::Variant {
                     enum_name, variant, fields, ..
                 } if !int && unit_fields(fields) => (self.inp.scalar_variant)(enum_name, variant).map(Some),
@@ -4383,14 +4395,14 @@ impl Lower<'_> {
     /// `match` of a scalar word on constants: one equality test per arm but
     /// the last, or a binary search over many `int` literals, as HIR
     /// emission's `hir_match_scalar` / `hir_match_search`.
-    fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<MirConst>], tail: bool) -> Result<Val, Refusal> {
+    fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<ScalarLit>], tail: bool) -> Result<Val, Refusal> {
         let Some(v) = self.word(scrutinee)? else {
             return Ok(Val::Never);
         };
         let literal = |pat: &HirPat| {
             let i = arms.iter().position(|a| std::ptr::eq(&a.pat, pat))?;
             match consts[i] {
-                Some(MirConst::I64(n)) => Some(n),
+                Some(ScalarLit::Const(MirConst::I64(n))) => Some(n),
                 _ => None,
             }
         };
@@ -4419,9 +4431,8 @@ impl Lower<'_> {
         let mut last_start = None;
         for (i, arm) in arms.iter().enumerate() {
             let miss = match consts[i] {
-                Some(c) if i < last => {
-                    let c = self.b.ins_const(c).map_err(mir)?;
-                    let hit = self.b.ins_cmp(MirCmpOp::Eq, v, c).map_err(mir)?;
+                Some(lit) if i < last => {
+                    let hit = self.scalar_eq(v, lit)?;
                     let arm_b = self.b.create_block();
                     let miss = self.b.create_block();
                     self.b.branch(hit, arm_b, miss).map_err(mir)?;
@@ -4448,6 +4459,31 @@ impl Lower<'_> {
             self.mark_cold(start);
         }
         self.join_arms(out)
+    }
+
+    /// A scalar literal's word: its constant, or its string.
+    fn scalar_lit(&mut self, lit: ScalarLit) -> Result<ValueId, Refusal> {
+        match lit {
+            ScalarLit::Const(c) => self.b.ins_const(c).map_err(mir),
+            ScalarLit::Str(idx) => self.b.ins_string(idx).map_err(mir),
+        }
+    }
+
+    /// Whether the word `v` is `lit`, as HIR emission's `EQ` against the
+    /// pushed backing: words compare as words (a `bool` as its `0` / `1`),
+    /// a string by content.
+    fn scalar_eq(&mut self, v: ValueId, lit: ScalarLit) -> Result<ValueId, Refusal> {
+        let k = self.scalar_lit(lit)?;
+        match (self.b.value_ty(v), self.b.value_ty(k)) {
+            (MirTy::HeapRef, MirTy::HeapRef) => self.b.ins_str_eq(v, k, false).map_err(mir),
+            (MirTy::Bool, MirTy::Bool) => {
+                let v = self.b.ins_cast(MirCastKind::Word, MirTy::I64, v).map_err(mir)?;
+                let k = self.b.ins_cast(MirCastKind::Word, MirTy::I64, k).map_err(mir)?;
+                self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir)
+            }
+            (a, b) if a == b && a.is_numeric() => self.b.ins_cmp(MirCmpOp::Eq, v, k).map_err(mir),
+            _ => Err("scalar match type".into()),
+        }
     }
 
     /// Search the sorted `cases` for `v`, as `hir_search_node`: split on the
