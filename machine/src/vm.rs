@@ -2215,6 +2215,20 @@ impl<const S: usize> Machine<S> {
         self.gc_safepoint_from_alloc(ip);
     }
 
+    /// As [`Self::maybe_gc_after_alloc`], for an object the VM made at a
+    /// `CallIndirect` and pushed as its result. The call's precise map row
+    /// lists the slots live across the call, not the result word above them,
+    /// so the top frame is scanned conservatively instead.
+    fn maybe_gc_after_call_alloc(&mut self, ip: usize) {
+        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+            return;
+        }
+        if unlikely(!self.stack_maps.is_empty()) {
+            self.gc_ip = ip;
+        }
+        self.gc_safepoint();
+    }
+
     #[inline(never)]
     fn gc_safepoint_from_alloc(&mut self, ip: usize) {
         if unlikely(!self.stack_maps.is_empty()) {
