@@ -196,6 +196,9 @@ impl MirBuilder {
             if op.requires_int() && !lt.is_int() {
                 return Err(MirError::msg(format!("bitwise op on {lt}")));
             }
+            if op.requires_float() && !lt.is_float() {
+                return Err(MirError::msg(format!("fpow on {lt}")));
+            }
         }
         let dest_ty = if heap_bit {
             match op {
@@ -911,6 +914,14 @@ impl MirBuilder {
     pub fn ins_string(&mut self, idx: u32) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::String { dest, idx })?;
+        Ok(dest)
+    }
+
+    /// `PRINT` of the string `src` (I4 / Q9 R1). Returns the `bool` unit token.
+    pub fn ins_print(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Print { dest, src })?;
         Ok(dest)
     }
 
