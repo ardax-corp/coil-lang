@@ -1206,6 +1206,7 @@ impl SubProgram {
         sub.roots = self.roots;
         sub.macro_host = Some(self.host.clone());
         sub.macro_stack = self.macro_stack;
+        sub.expansion_program = true;
         sub.auto_par = false;
         // Macros run briefly; the full optimizer costs far more than it saves.
         // (`None` changed some macros' results; see limitations.md.)

@@ -145,6 +145,8 @@ fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
                 inst,
                 MirInst::StoreIndex { .. }
                     | MirInst::Call { .. }
+                    | MirInst::Yield { .. }
+                    | MirInst::CallIndirect { .. }
                     | MirInst::FieldStore { .. }
                     | MirInst::HeapFieldStore { .. }
             ) {
@@ -271,13 +273,19 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
         MirInst::Index { .. } => allow_index,
         MirInst::ArrayLen { .. } => true,
-        MirInst::ResumeCoro { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. } => false,
+        MirInst::ResumeCoro { .. }
+        | MirInst::Yield { .. }
+        | MirInst::DoneCoro { .. }
+        | MirInst::LoadStatic { .. }
+        | MirInst::StoreStatic { .. }
+        | MirInst::ClearWord { .. } => false,
         MirInst::Alloc {
             kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
             ..
         }
         | MirInst::GcBarrier { .. } => allow_alloc,
         MirInst::Call { .. }
+        | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }

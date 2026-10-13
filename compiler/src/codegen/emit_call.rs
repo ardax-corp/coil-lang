@@ -93,6 +93,8 @@ impl Compiler {
         kind: crate::il::EntryKind,
         ret_words: u32,
     ) -> bool {
+        let adapter = self.raw_instance_redirect(name);
+        let name = adapter.as_deref().unwrap_or(name);
         if let Some(&offset) = self.functions.get(name) {
             dest.push(Self::packed_entry_byte_ret(
                 kind,
@@ -152,6 +154,8 @@ impl Compiler {
         kind: crate::il::EntryKind,
         ret_words: u32,
     ) -> bool {
+        let adapter = self.raw_instance_redirect(name);
+        let name = adapter.as_deref().unwrap_or(name);
         if let Some(&offset) = self.functions.get(name) {
             self.bytecode.push(Self::packed_entry_byte_ret(
                 kind,
@@ -175,6 +179,14 @@ impl Compiler {
         } else {
             false
         }
+    }
+
+    /// The adapter an entry of raw instance method `name` goes through
+    /// unless the call site said it passes raw arguments
+    /// ([`Self::raw_instance_call`], taken here).
+    fn raw_instance_redirect(&mut self, name: &str) -> Option<String> {
+        let raw_call = std::mem::take(&mut self.raw_instance_call);
+        (!raw_call && self.raw_instance_methods.contains(name)).then(|| Self::dict_adapter_name(name))
     }
 
     pub(super) fn packed_entry_byte_ret(

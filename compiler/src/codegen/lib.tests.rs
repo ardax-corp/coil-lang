@@ -2946,8 +2946,9 @@ fn access_field_emits_correct_field_index_for_each_field() {
     use common::Instruction;
     // Two functions, each accessing a different field. The
     // x_coord access emits LoadField(0); the y_coord access
-    // emits LoadField(1).
-    let (bc, _pool) = compile_src(
+    // emits LoadField(1). Not inlined: an inlined accessor is unreferenced
+    // and the tree shake drops its body.
+    let (bc, _pool) = compile_src_no_inline(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn x_coord(Point p) -> int { return p.x; } \
  fn y_coord(Point p) -> int { return p.y; } \

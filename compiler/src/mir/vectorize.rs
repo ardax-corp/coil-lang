@@ -1882,6 +1882,7 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                 || matches!(
                     inst,
                     MirInst::Call { .. }
+                        | MirInst::CallIndirect { .. }
                         | MirInst::HostInvoke { .. }
                         | MirInst::MatchPayload { .. }
                         | MirInst::FieldLoad { .. }
