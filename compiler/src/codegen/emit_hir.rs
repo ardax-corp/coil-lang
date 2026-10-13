@@ -1333,6 +1333,7 @@ impl Compiler {
             }),
             heap_fields,
             boxed_niches,
+            existential_packs: tables.existential_packs,
             record_fields,
             records,
             aggregates: emit
@@ -6646,7 +6647,7 @@ impl Compiler {
 
     /// The checker's existential pack recipe for `id`, when `id` is the
     /// packed value itself (a wrapper sharing its span has another type).
-    fn hir_existential_pack(&self, hir: &HirBody, id: HirId) -> Option<crate::typechecking::infer::ExistentialPack> {
+    pub(super) fn hir_existential_pack(&self, hir: &HirBody, id: HirId) -> Option<crate::typechecking::infer::ExistentialPack> {
         let e = hir.expr(id);
         let pack = e
             .node

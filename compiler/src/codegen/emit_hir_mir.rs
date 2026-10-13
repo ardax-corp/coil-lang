@@ -23,6 +23,8 @@ pub(super) struct HirMirTables {
     /// Per argument of such a `format` call (after the format string): the
     /// raw `show` entry a `%v` argument goes through, `None` for a word.
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// Some value emission evaluates packs as a bare-class existential.
+    pub(super) existential_packs: bool,
 }
 
 /// Which children of an expression emission evaluates.
@@ -64,6 +66,8 @@ impl Compiler {
     /// Plan `id`'s own entries, as [`Self::hir_value_unpacked`]'s arm for
     /// it records them.
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
+        // As `hir_value` packs a value after emitting it.
+        t.existential_packs |= self.hir_existential_pack(hir, id).is_some();
         let e = hir.expr(id);
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
