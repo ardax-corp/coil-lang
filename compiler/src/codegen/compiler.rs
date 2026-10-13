@@ -5102,11 +5102,12 @@ impl Compiler {
                 "float" | "string" | "bool" => prim(ty),
                 _ => int.clone(),
             };
-            // An immediate's thunk is raw: a ground call passes its word
-            // (so direct MIR calls it), dictionaries its `$dict` adapter.
-            let adapter = if let Some(tag) = tag.filter(|_| ty != "unit") {
+            // An immediate's or a string's thunk is raw: a ground call
+            // passes its word (so direct MIR calls it), dictionaries its
+            // `$dict` adapter. STRINGIFY reads a heap string as it is.
+            let adapter = if ty != "unit" {
                 self.note_raw_builtin_thunk(&fqn);
-                self.emit_builtin_entry(&fqn, &[(word.clone(), None)], string.clone(), None, |b, a| show(b, a[0], Some(tag)));
+                self.emit_builtin_entry(&fqn, &[(word.clone(), None)], string.clone(), None, |b, a| show(b, a[0], tag));
                 Self::dict_adapter_name(&fqn)
             } else {
                 fqn
@@ -5175,14 +5176,16 @@ impl Compiler {
             self.emit_builtin_entry(&fqn, &[], word.clone(), None, |b, _| b.push(HirKind::Lit(value), word.clone()));
         }
         self.emit_builtin_entry(&Generics::builtin_instance_fqn("Hash", "unit", "hash"), &[], int.clone(), None, |b, _| b.int(0));
-        if self.native_id("hash_string").is_some() {
-            self.emit_builtin_entry(
-                &Generics::builtin_instance_fqn("Hash", "string", "hash"),
-                &[(string.clone(), tag_of(ValueTag::String))],
-                int.clone(),
-                None,
-                |b, a| b.call("hash_string", vec![a[0]], int.clone()),
-            );
+        let fqn = Generics::builtin_instance_fqn("Hash", "string", "hash");
+        if self.native_id("hash_string").is_some() && !self.functions.contains_key(&fqn) {
+            // Raw, as the Show thunks: the string's own word, then the
+            // `$dict` adapter for a boxed one.
+            self.note_raw_builtin_thunk(&fqn);
+            for (name, tag) in [(fqn.clone(), None), (Self::dict_adapter_name(&fqn), tag_of(ValueTag::String))] {
+                self.emit_builtin_entry(&name, &[(string.clone(), tag)], int.clone(), None, |b, a| {
+                    b.call("hash_string", vec![a[0]], int.clone())
+                });
+            }
         }
 
         // Stream Read/Write → same HostInvoke as free `read`/`write`; unbox dict-ABI args first.

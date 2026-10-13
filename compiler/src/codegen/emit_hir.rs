@@ -7762,8 +7762,9 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
                 debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
-                // Raw words and no dictionary: direct MIR calls the same entry.
-                if raw
+                // Raw words (or nothing boxed: `T::default()`) and no
+                // dictionary: direct MIR calls the same entry.
+                if (raw || boxed.iter().all(Option::is_none))
                     && arity == args.len() as u32
                     && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
                     && let Some(&IlOp::Entry {
