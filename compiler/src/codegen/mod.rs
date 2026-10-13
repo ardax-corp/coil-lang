@@ -495,7 +495,7 @@ pub struct Compiler {
     /// compiled from (tracked only while `keep_fns_in` is set).
     fn_source_files: HashMap<String, u32>,
 
-    /// Local variable names that hold an `ObjPolyFn` heap pointer
+    /// Local variable names that hold an generic `ObjFn` heap pointer
     /// (i.e. `let f = some_generic_fn;`). When these are invoked via
     /// `Expression::Call`, the codegen emits `CallIndirect` instead
     /// of a direct `CALL` opcode.

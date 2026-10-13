@@ -5447,7 +5447,7 @@ fn concrete_add_still_emits_add() {
 
 /// Codegen test B3-1: when a generic function is referenced in a non-call position
 /// (e.g. `let f = id;`), the codegen must emit `MakePolyFn` so that `f` holds an
-/// `ObjPolyFn` heap pointer that `CallIndirect` can dispatch through.
+/// generic `ObjFn` heap pointer that `CallIndirect` can dispatch through.
 ///
 /// The function `id<T>(T x) -> T` is a canonical unconstrained identity and has
 /// no trait bound, so no DynAdd / DynCmp / etc. opcode is emitted ,  this
