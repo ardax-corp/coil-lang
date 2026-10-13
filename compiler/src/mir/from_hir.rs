@@ -199,6 +199,9 @@ pub struct HirMirInput<'a> {
     /// Class locals kept in frame slots: the type of each field's slot,
     /// from the local's own.
     pub sroa: HashMap<u32, Vec<MirTy>>,
+    /// The class of each `sroa` local, for its box where it escapes: the
+    /// type id and field count.
+    pub sroa_classes: HashMap<u32, (u32, u32)>,
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
@@ -1873,7 +1876,12 @@ impl Lower<'_> {
                 if self.b.value_ty(v) != ty {
                     return Err("field type".into());
                 }
-                self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                match self.boxed_field(*place, slot)? {
+                    Some((obj, index)) => {
+                        self.b.ins_heap_field_store(obj, v, None, Some(index)).map_err(mir)?;
+                    }
+                    None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
+                }
                 Ok(Val::Unit)
             }
             HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
@@ -1946,6 +1954,9 @@ impl Lower<'_> {
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
                 let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
+                if let Some((obj, index)) = self.boxed_field(id, slot)? {
+                    return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
+                }
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
             }
             HirKind::Index { base, index, .. }
@@ -2566,6 +2577,32 @@ impl Lower<'_> {
             return Ok(());
         };
         for &local in locals {
+            // A frame-slot class local: an object of its class, each slot
+            // stored to its field, as HIR emission's `hir_box_sroa_class`.
+            if let (Some(tys), Some(&(type_id, nfields))) = (self.inp.sroa.get(&local), self.inp.sroa_classes.get(&local)) {
+                if tys.len() != nfields as usize {
+                    return Err("boxed class local".into());
+                }
+                let tys = tys.clone();
+                let base = self.slot(HirLocal(local))?.0;
+                let mut words = Vec::with_capacity(tys.len());
+                for (i, &ty) in tys.iter().enumerate() {
+                    let slot = LocalId(base + i as u32);
+                    if !self.b.local_defined(slot) {
+                        return Err("boxed class local field".into());
+                    }
+                    words.push(self.b.use_local(slot, ty).map_err(mir)?);
+                }
+                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+                for (i, v) in words.into_iter().enumerate() {
+                    self.b.ins_heap_field_store(obj, v, None, Some(i as u32)).map_err(mir)?;
+                }
+                let slot = self.temp();
+                self.b.def_local(slot, obj).map_err(mir)?;
+                self.boxes.insert(local, slot);
+                continue;
+            }
             let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
                 return Err("boxed class local".into());
             };
@@ -2583,6 +2620,22 @@ impl Lower<'_> {
             self.boxes.insert(local, slot);
         }
         Ok(())
+    }
+
+    /// For field `field` (slot `slot`) of a frame-slot class local boxed
+    /// before here: the object and the field's index in it.
+    fn boxed_field(&mut self, field: HirId, slot: u32) -> Result<Option<(ValueId, u32)>, Refusal> {
+        let HirKind::Field { base, .. } = self.hir.expr(field).kind else {
+            return Ok(None);
+        };
+        let HirKind::Local(local) = self.hir.expr(base).kind else {
+            return Ok(None);
+        };
+        let Some(&boxed) = self.boxes.get(&local.0) else {
+            return Ok(None);
+        };
+        let index = slot.checked_sub(self.slot(local)?.0).ok_or("boxed class field")?;
+        Ok(Some((self.b.use_local(boxed, MirTy::HeapRef).map_err(mir)?, index)))
     }
 
     /// The heap array a boxed stack array local `id` names.
