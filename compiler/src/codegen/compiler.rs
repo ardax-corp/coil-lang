@@ -14,6 +14,8 @@ fn literal_string<'a>(node: &'a Output<'a>) -> Option<&'a str> {
 
 /// Synthetic function name prefix for a static initializer body.
 const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
+/// Most generic-head instance / default-body clones in one compilation.
+const INST_CLONE_MAX_TOTAL: usize = 256;
 
 #[path = "capabilities.rs"]
 mod capabilities;
@@ -775,6 +777,15 @@ impl Compiler {
         }
     }
 
+    /// The `Function` node of an `impl` method, bare or wrapped.
+    fn impl_method_fn<'a, 'b>(method: &'b Output<'a>) -> Option<&'b Output<'a>> {
+        match method.1.as_ref() {
+            Expression::Function { .. } => Some(method),
+            Expression::Method(_, body) => matches!(body.1.as_ref(), Expression::Function { .. }).then_some(body),
+            _ => None,
+        }
+    }
+
     /// A `gen fn` with a body, bare or wrapped in an `impl` method.
     fn is_coro_with_body(method: &Output) -> bool {
         match method.1.as_ref() {
@@ -832,6 +843,16 @@ impl Compiler {
                         }
                     }
                 }
+                // A default body is cloned per instance, as a generic head.
+                Expression::TypeClass { name, methods, .. } => {
+                    for method in methods {
+                        if let Expression::Function { name: method_name, body: Some(body), is_coro: false, .. } = method.1.as_ref()
+                            && !matches!(body.1.as_ref(), Expression::Block(items) if items.is_empty())
+                        {
+                            self.note_default_clone_src(name, method_name, (method.0.start, method.0.end));
+                        }
+                    }
+                }
                 Expression::TypeClassImpl {
                     class,
                     args,
@@ -853,6 +874,9 @@ impl Compiler {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                             let is_coro = Self::is_coro_with_body(method);
                             self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            if !is_coro && let Some(f) = Self::impl_method_fn(method) {
+                                self.note_inst_clone_src(class, method_name, &fqn, (f.0.start, f.0.end));
+                            }
                             self.reserve_function_entry(fqn);
                         }
                     }
@@ -1971,6 +1995,297 @@ impl Compiler {
         true
     }
 
+    /// Record generic-head instance method `fqn` as a clone source.
+    fn note_inst_clone_src(&mut self, class: &str, method: &str, fqn: &str, span: (usize, usize)) {
+        let Some(instance) = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+        else {
+            return;
+        };
+        if !instance.args.iter().any(Self::ty_has_var) {
+            return;
+        }
+        let head = instance.args.clone();
+        self.inst_clone_srcs.insert(
+            fqn.to_string(),
+            InstCloneSrc {
+                class: class.to_string(),
+                method: method.to_string(),
+                span,
+                head,
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: None,
+            },
+        );
+    }
+
+    /// Record default body `class::method` as a clone source: generic over
+    /// the trait's parameters.
+    fn note_default_clone_src(&mut self, class: &str, method: &str, span: (usize, usize)) {
+        let Some(params) = self.checker.generics().typeclass(class).map(|c| c.type_params.clone()) else {
+            return;
+        };
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            return;
+        };
+        if scheme.bounds.len() < params.len() {
+            return;
+        }
+        let head = scheme.bounds[..params.len()].iter().map(|&v| Ty::Var(v)).collect();
+        let fqn = crate::typechecking::generics::Generics::default_method_fqn(class, method);
+        self.inst_clone_srcs.insert(
+            fqn,
+            InstCloneSrc {
+                class: class.to_string(),
+                method: method.to_string(),
+                span,
+                head,
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: Some(params),
+            },
+        );
+    }
+
+    /// The emit cursor a clone of `fqn` replays, taken as its shared body
+    /// is compiled.
+    fn note_inst_clone_compiled(&mut self, fqn: &str) {
+        let (idx, seq) = (self.emit_idx, self.program_seq);
+        if let Some(src) = self.inst_clone_srcs.get_mut(fqn)
+            && src.program == seq
+        {
+            src.emit_idx = Some(idx);
+        }
+    }
+
+    /// The clone of generic-head instance method `fqn` at ground instance
+    /// types `lookup`, named (and queued) on first use: it takes the
+    /// instance's own words and no dictionary, as a raw instance method.
+    /// `None` when `fqn` has no clone there.
+    pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
+        const MAX_PER_METHOD: usize = 8;
+        let src = self.inst_clone_srcs.get(fqn)?;
+        if lookup.len() != src.head.len() || lookup.iter().any(Self::ty_has_var) {
+            return None;
+        }
+        let key = (fqn.to_string(), lookup.to_vec());
+        if let Some(name) = self.inst_clones.get(&key) {
+            return Some(name.clone());
+        }
+        // Instance types may grow without end (`Show<Tree<Box<T>>>` from
+        // `Show<Tree<T>>`): a bounded number of clones, then the shared body.
+        if self.inst_clones.len() >= INST_CLONE_MAX_TOTAL || self.inst_clones.keys().filter(|(f, _)| f == fqn).count() >= MAX_PER_METHOD {
+            return None;
+        }
+        let (class, method) = (src.class.clone(), src.method.clone());
+        let vars = self.inst_clone_vars(&src.head, lookup)?;
+        let _ = vars;
+        // `Option` / `Result` over a class parameter: the clone's ground
+        // layout and the shared entry's boxed one differ; keep the shared
+        // entry there.
+        if self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
+            || self.checker.typeclass_method_scheme(&class, &method).is_none()
+        {
+            return None;
+        }
+        let tys = lookup.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("_");
+        let name = format!("{fqn}$inst${tys}");
+        // Entry labels from the program-start pool: a label minted while a
+        // body is being emitted shares that body's label range, and the
+        // module layout's per-body relabeling takes it for a local one.
+        if self.inst_clone_labels.len() < 2 {
+            return None;
+        }
+        for entry in [name.clone(), Self::dict_adapter_name(&name)] {
+            let label = self.inst_clone_labels.pop()?;
+            self.fn_entry_labels.entry(entry).or_insert(label);
+        }
+        self.raw_instance_methods.insert(name.clone());
+        self.inst_clones.insert(key, name.clone());
+        self.inst_clone_queue.push_back(InstClone {
+            src: fqn.to_string(),
+            lookup: lookup.to_vec(),
+            name: name.clone(),
+        });
+        Some(name)
+    }
+
+    /// Mint, before this program's bodies, the entry labels the clones it
+    /// requests take (two per clone: the clone and its `$dict` adapter), as
+    /// [`Self::reserve_program_callable_entries`] does for its callables.
+    fn reserve_inst_clone_labels(&mut self) {
+        if self.inst_clone_srcs.is_empty() {
+            return;
+        }
+        let want = 2 * INST_CLONE_MAX_TOTAL.saturating_sub(self.inst_clones.len());
+        while self.inst_clone_labels.len() < want {
+            let label = self.bytecode.fresh_label();
+            self.inst_clone_labels.push(label);
+        }
+    }
+
+    /// The instance head's type variables bound to `lookup` (with their
+    /// representatives), when it binds every one.
+    fn inst_clone_vars(&self, head: &[Ty], lookup: &[Ty]) -> Option<HashMap<crate::typechecking::ty::TyVarId, Ty>> {
+        let mut vars = HashMap::new();
+        for (have, want) in head.iter().zip(lookup) {
+            Self::bind_scheme_vars(have, want, &mut vars);
+        }
+        let free: HashSet<_> = head.iter().flat_map(crate::typechecking::subst::ftv).collect();
+        if free.iter().any(|v| !vars.contains_key(v)) {
+            return None;
+        }
+        let subst = self.checker.subst();
+        for (var, ty) in vars.clone() {
+            if let Ty::Var(rep) = crate::typechecking::subst::apply_ty_prune(subst, &Ty::Var(var)) {
+                vars.entry(rep).or_insert(ty);
+            }
+        }
+        Some(vars)
+    }
+
+    /// Emit the queued instance clones of this program: each from its
+    /// method's HIR at the instance's types, or, where that is not ground
+    /// or the method is in another program, a thunk calling the shared
+    /// entry; then its `$dict` adapter.
+    fn emit_instance_clones(&mut self, children: &[Output<'_>]) {
+        while let Some(req) = self.inst_clone_queue.pop_front() {
+            let src = self.inst_clone_srcs[&req.src].clone();
+            let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
+            let method = (src.program == self.program_seq)
+                .then(|| src.emit_idx.zip(self.find_impl_method_fn(children, &req.src)))
+                .flatten()
+                .filter(|_| self.inst_clone_ground(src.span, &vars));
+            match method {
+                Some((idx, (method, head_args))) => {
+                    // The instance's type parameter names (`T::m(..)`).
+                    let mut names = HashMap::new();
+                    for ((arg, have), want) in head_args.iter().zip(&src.head).zip(&req.lookup) {
+                        Self::bind_head_names(&self.codegen_instance_head_ty(arg), have, want, &mut names);
+                    }
+                    for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
+                        names.insert(name.clone(), want.clone());
+                    }
+                    let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
+                    let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
+                    let prev_ctx = self.pending_instance_ctx.take();
+                    self.mono_codegen_var_types.push(HashMap::new());
+                    self.mono_type_param_tys.push(names);
+                    self.mono_var_tys.push(vars);
+                    self.inst_clone_fallback = Some((src.clone(), req.clone()));
+                    self.compile_function_output_with_name(method, req.name.clone(), &[], 0, Some(&req.src));
+                    self.inst_clone_fallback = None;
+                    self.mono_var_tys.pop();
+                    self.mono_type_param_tys.pop();
+                    self.mono_codegen_var_types.pop();
+                    self.pending_instance_ctx = prev_ctx;
+                    self.compiling_mono_clone = prev_mono;
+                    self.emit_idx = prev_idx;
+                }
+                None => self.emit_instance_clone_thunk(&src, &req),
+            }
+            self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
+        }
+    }
+
+    /// Whether the HIR of the method declared at `span`, at `vars`, has
+    /// ground parameter, local and return types.
+    fn inst_clone_ground(&self, span: (usize, usize), vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+        let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
+            return false;
+        };
+        let body = self.hir_instance(&module.bodies[index], vars);
+        body.ret.as_ref().is_some_and(|t| !Self::ty_has_var(t))
+            && body.locals.iter().all(|l| l.ty.as_ref().is_some_and(|t| !Self::ty_has_var(t)))
+    }
+
+    /// The `Function` node of the `impl` method of this program whose
+    /// fqn is `fqn`.
+    fn find_impl_method_fn<'a, 'b>(&self, children: &'b [Output<'a>], fqn: &str) -> Option<(&'b Output<'a>, &'b [Output<'a>])> {
+        children.iter().find_map(|child| {
+            if let Expression::TypeClass { name, methods, .. } = child.1.as_ref() {
+                return methods.iter().find_map(|m| match m.1.as_ref() {
+                    Expression::Function { name: method, .. }
+                        if crate::typechecking::generics::Generics::default_method_fqn(name, method) == fqn =>
+                    {
+                        Some((m, &[][..]))
+                    }
+                    _ => None,
+                });
+            }
+            let Expression::TypeClassImpl { class, args, methods, .. } = child.1.as_ref() else {
+                return None;
+            };
+            let class = self.checker.impl_trait_key(class);
+            let ty_part = args
+                .iter()
+                .map(|arg| self.codegen_instance_head_ty(arg).to_string())
+                .collect::<Vec<_>>()
+                .join("_");
+            methods.iter().find_map(|m| {
+                let name = Self::impl_method_name(m)?;
+                (format!("{class}__{ty_part}__{name}") == fqn)
+                    .then(|| Self::impl_method_fn(m))
+                    .flatten()
+                    .map(|f| (f, args.as_slice()))
+            })
+        })
+    }
+
+    /// `name ↦ type` for each type parameter the AST head spells (`T` in
+    /// `Box<T>`) where the checker's head has a variable.
+    fn bind_head_names(ast: &Ty, have: &Ty, want: &Ty, out: &mut HashMap<String, Ty>) {
+        match (ast, have, want) {
+            (Ty::Con(name), Ty::Var(_), want) => {
+                out.entry(name.clone()).or_insert_with(|| want.clone());
+            }
+            (Ty::App(ah, aa), Ty::App(hh, ha), Ty::App(wh, wa)) if aa.len() == ha.len() && ha.len() == wa.len() => {
+                Self::bind_head_names(ah, hh, wh, out);
+                for ((a, h), w) in aa.iter().zip(ha).zip(wa) {
+                    Self::bind_head_names(a, h, w, out);
+                }
+            }
+            (Ty::Tuple(aa), Ty::Tuple(ha), Ty::Tuple(wa)) if aa.len() == ha.len() && ha.len() == wa.len() => {
+                for ((a, h), w) in aa.iter().zip(ha).zip(wa) {
+                    Self::bind_head_names(a, h, w, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A clone that is not compiled from its method: the arguments as they
+    /// came, the instance's dictionary, then the shared entry.
+    fn emit_instance_clone_thunk(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        self.bind_function_entry(req.name.clone());
+        self.emit_instance_clone_call_shared(src, req);
+    }
+
+    /// The body of [`Self::emit_instance_clone_thunk`] after its entry.
+    fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len() as u32;
+        for slot in 0..n {
+            self.bytecode.push_load(slot);
+        }
+        let mut arity = n;
+        if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
+            let mut dict = CodeBuf::new();
+            if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
+                arity += 1;
+            }
+            self.bytecode.append(&mut dict);
+        }
+        if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
+            self.missing_call_target(&req.src, 0..0);
+        }
+        self.bytecode.push_return();
+    }
+
     /// Dictionary entry for a concrete instance method whose trait signature
     /// has `Option` / `Result` params or return over a class type parameter:
     /// callers through a dictionary (shared generic bodies, existentials)
@@ -2764,7 +3079,9 @@ impl Compiler {
                     && (self.functions.contains_key(&fqn)
                         || self.fn_entry_labels.contains_key(&fqn))
                 {
-                    // A raw `show` takes the value unboxed.
+                    // A raw `show` takes the value unboxed; a generic-head
+                    // instance's clone is raw.
+                    let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
                     let raw = self.raw_instance_methods.contains(&fqn);
                     if !raw {
                         Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
@@ -3069,6 +3386,17 @@ impl Compiler {
             (fqns, (instance.range.clone(), context))
         };
         let (diag_range, context) = diag_range;
+        // A ground goal of a generic-head instance: its clones' adapters.
+        let fqns: Vec<String> = if open {
+            fqns
+        } else {
+            fqns.into_iter()
+                .map(|name| match self.instance_clone(&name, lookup) {
+                    Some(clone) => Self::dict_adapter_name(&clone),
+                    None => name,
+                })
+                .collect()
+        };
         for name in &fqns {
             if !self.emit_named_entry(bytecode, name, 0, crate::il::EntryKind::CodePtr) {
                 self.missing_call_target(name, diag_range.clone());
@@ -5577,6 +5905,7 @@ impl Compiler {
         qualified: String,
         argument_unbox_tys: &[Option<Ty>],
         dict_arity: usize,
+        source: Option<&str>,
     ) {
         let _method_id = self.next_emit_id();
         let Expression::Function {
@@ -5621,16 +5950,19 @@ impl Compiler {
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
         // Instance methods are recorded under their FQN; the bare name may
         // belong to a free fn (or another instance).
-        let mode_key = if self.checker.fn_return_ty(&qualified).is_some() {
-            qualified.as_str()
-        } else {
-            name
+        // A clone (`source`) is checked under the method it clones.
+        let mode_key = match source {
+            Some(source) => source,
+            None if self.checker.fn_return_ty(&qualified).is_some() => qualified.as_str(),
+            None => name,
         };
         self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
         self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
+            None
+        } else if source.is_some() {
             None
         } else {
             self.two_word_return_kind(&qualified)
@@ -5673,7 +6005,15 @@ impl Compiler {
         let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
-            self.report_unlowered(&method.0, &qualified);
+            // A clone its method's HIR does not lower at its types calls
+            // the shared entry instead.
+            match self.inst_clone_fallback.take() {
+                Some((src, req)) => {
+                    self.hir_refusal = None;
+                    self.emit_instance_clone_call_shared(&src, &req);
+                }
+                None => self.report_unlowered(&method.0, &qualified),
+            }
         }
 
         let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
@@ -7381,92 +7721,70 @@ impl Compiler {
         Some((native_id, meta))
     }
 
-    /// Emit a synthetic `main` that runs every harness test case in one VM
-    /// (standalone `cargo run -- tests/foo.hy`). Prints
-    /// `> Test "<name>" failed` on soft failures and panics with
-    /// `"tests failed"` if any case failed.
+    /// The `main` of a test file with none (standalone `coil tests/foo.hy`):
+    /// runs every test case in one VM, printing `> Test "<name>" failed` for
+    /// each case that returns `Err`, then panics with `"tests failed"` if
+    /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any
+    /// other body.
     fn emit_virtual_test_main(&mut self) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{BinOp, Builtin, HirPat, LocalKind};
+        use crate::typechecking::ty as coil_ty;
         let cases: Vec<(String, u32)> = self.test_cases.clone();
         if cases.is_empty() {
             return;
         }
-
-        self.bind_function_entry("main".to_string());
-        let body_start = self.bytecode.len();
-
-        let prev_vars = std::mem::take(&mut self.context.variables);
-        self.context.variables = Interner::default();
-        // slot 0 = failed count
-        let failed_slot = self.context.variables.intern("failed".to_string()) as u32;
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push_store_pop(failed_slot);
-
-        let mut bb = BlockBuilder::new();
-        for (desc, offset) in &cases {
-            if let Some(label) = self.bytecode.entry_label_for_offset(*offset as usize) {
-                self.bytecode.emit_entry(EntryKind::Call, 0, label);
-            } else {
-                // Fallback for cases without a bound entry label (should be rare
-                // after `bind_function_entry`); packed CALL(0, pc) keeps harness green.
-                self.bytecode
-                    .push(Byte::new(Instruction::CALL).with_call_packed(0, *offset));
-            }
-            // Jump if Result::Err (tag 1), on match, payload (message) is pushed.
-            let fail = bb.fresh_label(self.bytecode.il_mut());
-            let done = bb.fresh_label(self.bytecode.il_mut());
-            bb.emit_jump_to(
-                fail,
-                BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-                self.bytecode.il_mut(),
-            );
-            // Ok path: discard whole Result enum.
-            self.bytecode.push_pop();
-            bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
-            bb.bind_label(fail, self.bytecode.il_mut());
-            // Discard Err message payload.
-            self.bytecode.push_pop();
-            let msg = format!("> Test \"{desc}\" failed\n");
-            self.emit_string_literal(&msg);
-            self.bytecode.push_print();
-            // failed += 1
-            self.bytecode.push_load(failed_slot);
-            self.bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(1i64).raw() as _,
-            ));
-            self.bytecode.push(Byte::new(Instruction::ADD));
-            self.bytecode.push_store_pop(failed_slot);
-            bb.bind_label(done, self.bytecode.il_mut());
+        let names: Vec<String> = (0..cases.len()).map(crate::typechecking::Checker::test_case_fn_name).collect();
+        let result = coil_ty::result_ty(coil_ty::unit(), coil_ty::string());
+        let mut b = Synth::new(&self.checker, "main", coil_ty::unit());
+        let failed = b.local("failed", coil_ty::int(), LocalKind::Let);
+        let zero = b.int(0);
+        let mut stmts = vec![b.let_(failed, zero)];
+        for ((desc, _), name) in cases.iter().zip(&names) {
+            let call = b.call(name, Vec::new(), result.clone());
+            let msg = b.str(&format!("> Test \"{desc}\" failed\n"));
+            let print = b.builtin(Builtin::Print, vec![msg], coil_ty::unit());
+            let count = b.read(failed);
+            let one = b.int(1);
+            let more = b.bin(BinOp::IntAdd, count, one, coil_ty::int());
+            let bump = b.assign(failed, more);
+            let on_err = b.block(vec![print, bump], None, coil_ty::unit());
+            let on_ok = b.block(Vec::new(), None, coil_ty::unit());
+            let err = b.result_pat(false, HirPat::Wild);
+            stmts.push(b.match_(call, vec![(err, on_err), (HirPat::Wild, on_ok)], coil_ty::unit()));
         }
+        let count = b.read(failed);
+        let zero = b.int(0);
+        let any = b.bin(BinOp::Ne, count, zero, coil_ty::boolean());
+        let msg = b.str("tests failed");
+        let panic = b.builtin(Builtin::Panic, vec![msg], coil_ty::never());
+        let then = b.block(vec![panic], None, coil_ty::never());
+        stmts.push(b.if_(any, then, None, coil_ty::unit()));
+        let unit = b.unit();
+        stmts.push(b.ret(unit));
+        let root = b.block(stmts, None, coil_ty::never());
+        let hir = b.finish(root);
 
-        // if failed != 0 { panic "tests failed" }
-        let panic_lbl = bb.fresh_label(self.bytecode.il_mut());
-        let end_lbl = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode.push_load(failed_slot);
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(0i64).raw() as _,
-        ));
-        self.bytecode.push(Byte::new(Instruction::EQ));
-        // failed == 0 → EQ true → fall through JMPF; else JMPF → panic.
-        bb.emit_jump_to(panic_lbl, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-        bb.emit_jump_to(end_lbl, BbJumpKind::Unconditional, self.bytecode.il_mut());
-        bb.bind_label(panic_lbl, self.bytecode.il_mut());
-        self.emit_string_literal("tests failed");
-        self.bytecode.push(Byte::new(Instruction::Panic));
-        bb.bind_label(end_lbl, self.bytecode.il_mut());
-        self.bytecode.push_const(0);
-        self.bytecode.push_return();
-
+        let body_start = self.bytecode.len();
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
+        // A case returns its `Result<(), string>` boxed.
+        let calls = names.iter().map(|n| (n.clone(), (Vec::new(), ValueLayout::Boxed))).collect();
+        if !self.lower_synth_hir(&hir, calls, |c: &mut Self| {
+            c.bind_function_entry("main".to_string());
+        }) {
+            self.report_unlowered(&SimpleSpan::from(0..0), "main");
+            self.bind_function_entry("main".to_string());
+        }
+        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.attach_hir_mir();
         self.record_unboxed_class_fields();
+        self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
 
@@ -7851,7 +8169,9 @@ impl Compiler {
             // `mod foo;`, pipeline loads the file; no bytecode.
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
+                self.program_seq += 1;
                 self.reserve_program_callable_entries(children);
+                self.reserve_inst_clone_labels();
                 if Self::program_needs_phased_emit(children) {
                     // COI-109: free fns that call user impl methods follow those impls (source order); reserve entries.
                     self.reserve_phased_free_fn_entries(children);
@@ -7874,6 +8194,7 @@ impl Compiler {
                         bytecode.append(&mut self.do_compile(child));
                     }
                 }
+                self.emit_instance_clones(children);
                 if !self.test_cases.is_empty() && !self.user_main_defined {
                     self.emit_virtual_test_main();
                 }
@@ -8083,7 +8404,8 @@ impl Compiler {
                                         name,
                                         method_name,
                                     );
-                                self.compile_function_output_with_name(method, fqn, &[], 1);
+                                self.note_inst_clone_compiled(&fqn);
+                                self.compile_function_output_with_name(method, fqn, &[], 1, None);
                             } else {
                                 self.consume_function_signature_output(method);
                             }
@@ -8133,7 +8455,8 @@ impl Compiler {
                             };
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
-                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw));
+                            self.note_inst_clone_compiled(&fqn);
+                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw), None);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
@@ -8160,11 +8483,13 @@ impl Compiler {
                                     &fqn,
                                 );
                                 self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
+                                self.note_inst_clone_compiled(&fqn);
                                 self.compile_function_output_with_name(
                                     body,
                                     fqn.clone(),
                                     &unbox_tys,
                                     usize::from(!raw),
+                                    None,
                                 );
                                 self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                             } else {
