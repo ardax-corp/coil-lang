@@ -209,3 +209,43 @@ pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variant
     let root = b.block(vec![ret], None, coil_ty::never());
     b.finish(root)
 }
+
+/// A builtin instance method's body (`Add__int__add`, `Hash__string__hash`,
+/// …) over `params`: each parameter of its type, read unboxed with its tag
+/// when it has one (a dictionary passes it boxed), then `op` on them, then
+/// returned, boxed with `box_tag` when given. A boxed result is read as an
+/// `int` word. A trailing dictionary argument is never read.
+pub fn builtin_entry(
+    checker: &Checker,
+    name: &str,
+    params: &[(Ty, Option<u32>)],
+    ret: Ty,
+    box_tag: Option<u32>,
+    op: impl FnOnce(&mut Synth, Vec<HirId>) -> HirId,
+) -> HirBody {
+    let ret = if box_tag.is_some() { coil_ty::int() } else { ret };
+    let mut b = Synth::new(checker, name, ret);
+    let locals: Vec<_> = params
+        .iter()
+        .enumerate()
+        .map(|(i, (ty, _))| b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param))
+        .collect();
+    let args = locals
+        .into_iter()
+        .zip(params)
+        .map(|(local, (ty, tag))| {
+            let word = b.read(local);
+            match tag {
+                Some(tag) => b.builtin(Builtin::Unbox { tag: *tag }, vec![word], ty.clone()),
+                None => word,
+            }
+        })
+        .collect();
+    let mut value = op(&mut b, args);
+    if let Some(tag) = box_tag {
+        value = b.builtin(Builtin::Box { tag }, vec![value], coil_ty::int());
+    }
+    let ret = b.ret(value);
+    let root = b.block(vec![ret], None, coil_ty::never());
+    b.finish(root)
+}

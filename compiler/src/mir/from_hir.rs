@@ -1886,6 +1886,31 @@ impl Lower<'_> {
                 };
                 Ok(Val::V(self.b.ins_unbox(src, *tag, ty).map_err(mir)?))
             }
+            // A dictionary entry's result, boxed (compiler-made bodies): the
+            // box, read as the node's word.
+            HirKind::Builtin { op: Builtin::Box { tag }, args } if let [inner] = args.as_slice() => {
+                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("box type")?;
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                let boxed = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag: *tag }, vec![v]).map_err(mir))?;
+                let boxed = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?;
+                if ty == MirTy::HeapRef {
+                    return Ok(Val::V(boxed));
+                }
+                if !MirCastKind::Word.allows(MirTy::HeapRef, ty) {
+                    return Err("box type".into());
+                }
+                Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
+            }
+            // A primitive's text (compiler-made bodies).
+            HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir)?))
+            }
             // `typeof e`: the type name HIR emission interned; `e` is not
             // evaluated.
             HirKind::Builtin { op: Builtin::TypeOf, .. } => {

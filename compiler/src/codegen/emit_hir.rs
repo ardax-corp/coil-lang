@@ -4734,7 +4734,7 @@ impl Compiler {
                 args,
             } => self.hir_natural(hir, emit, args[0]),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -4813,6 +4813,7 @@ impl Compiler {
                     | HirKind::Index { .. }
                     | HirKind::Global { .. }
                     | HirKind::Lit(Lit::Str(_))
+                    | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
             )
         {
             return None;
@@ -5868,7 +5869,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. },
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             HirKind::Call { args, .. } => {
@@ -7035,6 +7036,20 @@ impl Compiler {
             } => {
                 self.hir_value(hir, emit, args[0], &BOXED, depth);
                 self.bytecode.push_unbox_value(*tag);
+            }
+            HirKind::Builtin {
+                op: Builtin::Box { tag },
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                self.bytecode.push_box_value(*tag);
+            }
+            HirKind::Builtin {
+                op: Builtin::Stringify,
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                self.bytecode.push(Byte::new(Instruction::STRINGIFY));
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
