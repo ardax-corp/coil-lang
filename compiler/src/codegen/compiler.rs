@@ -5104,13 +5104,16 @@ impl Compiler {
             if self.functions.contains_key(&fqn) {
                 continue;
             }
-            // An immediate's thunk is raw: a ground call passes its word
-            // (so direct MIR calls it), dictionaries its `$dict` adapter.
-            if let Some(tag) = tag.filter(|_| ty != "unit") {
+            // An immediate's or a string's thunk is raw: a ground call
+            // passes its word (so direct MIR calls it), dictionaries its
+            // `$dict` adapter. STRINGIFY reads a heap string as it is.
+            if ty != "unit" {
                 self.note_raw_builtin_thunk(&fqn);
                 self.bind_function_entry(fqn.clone());
                 self.bytecode.push_load(0);
-                self.bytecode.push_box_value(tag as u32);
+                if let Some(tag) = tag {
+                    self.bytecode.push_box_value(tag as u32);
+                }
                 self.bytecode.push(Byte::new(Instruction::STRINGIFY));
                 self.bytecode.push_return();
                 self.bind_function_entry(Self::dict_adapter_name(&fqn));
@@ -5203,7 +5206,16 @@ impl Compiler {
         if let Some(native_id) = self.native_id("hash_string") {
             let fqn = Generics::builtin_instance_fqn("Hash", "string", "hash");
             if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
+                // Raw, as the Show thunks: the string's own word, then the
+                // `$dict` adapter for a boxed one.
+                self.note_raw_builtin_thunk(&fqn);
+                self.bind_function_entry(fqn.clone());
+                self.bytecode
+                    .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+                self.bytecode.push_load(0);
+                self.bytecode.push_host_invoke(1);
+                self.bytecode.push_return();
+                self.bind_function_entry(Self::dict_adapter_name(&fqn));
                 self.bytecode
                     .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
                 self.bytecode.push_load(0);
