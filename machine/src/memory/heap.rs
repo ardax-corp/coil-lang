@@ -1284,7 +1284,6 @@ impl fmt::Display for Error {
 pub type RefBoxed = Gc<ObjBoxed>;
 pub type RefRoot = Gc<ObjRoot>;
 pub type RefWeak = Gc<ObjWeak>;
-pub type RefPolyFn = Gc<ObjPolyFn>;
 pub type RefFn = Gc<ObjFn>;
 pub type RefStream = Gc<ObjStream>;
 pub type RefThread = Gc<ObjThread>;
@@ -1322,7 +1321,6 @@ pub enum Object {
     Root(RefRoot),
     /// Non-rooting handle; cleared when the referent is unmarked.
     Weak(RefWeak),
-    PolyFn(RefPolyFn),
     Fn(RefFn),
     Stream(RefStream),
     Thread(RefThread),
@@ -1346,7 +1344,6 @@ impl Object {
             Self::Boxed(b) => b.mark(),
             Self::Root(r) => r.mark(),
             Self::Weak(w) => w.mark(),
-            Self::PolyFn(p) => p.mark(),
             Self::Fn(f) => f.mark(),
             Self::Stream(s) => s.mark(),
             Self::Thread(t) => t.mark(),
@@ -1373,7 +1370,6 @@ impl Object {
             Self::Boxed(b) => b.unmark(),
             Self::Root(r) => r.unmark(),
             Self::Weak(w) => w.unmark(),
-            Self::PolyFn(p) => p.unmark(),
             Self::Fn(f) => f.unmark(),
             Self::Stream(s) => s.unmark(),
             Self::Thread(t) => t.unmark(),
@@ -1397,7 +1393,6 @@ impl Object {
             Self::Boxed(b) => b.is_marked(),
             Self::Root(r) => r.is_marked(),
             Self::Weak(w) => w.is_marked(),
-            Self::PolyFn(p) => p.is_marked(),
             Self::Fn(f) => f.is_marked(),
             Self::Stream(s) => s.is_marked(),
             Self::Thread(t) => t.is_marked(),
@@ -1477,15 +1472,13 @@ impl Object {
                 }
             }
             Self::Weak(_) => {}
-            Self::PolyFn(p) => {
-                for captured in p.as_ref().captured_dicts.iter().flatten() {
-                    Self::mark_member(heap, captured, grey_objects);
-                }
-            }
             Self::Fn(f) => {
                 let f = f.as_ref();
                 for v in f.captures.iter().chain(f.captured_args.iter()) {
                     heap.mark_value(*v, grey_objects);
+                }
+                for captured in f.dicts.iter().flatten().flatten() {
+                    Self::mark_member(heap, captured, grey_objects);
                 }
             }
             Self::Stream(_) => {}
@@ -1578,12 +1571,12 @@ impl Object {
                     member(m, visit);
                 }
             }
-            Self::PolyFn(p) => p.as_ref().captured_dicts.iter().flatten().for_each(|m| member(m, visit)),
             Self::Fn(f) => {
                 let f = f.as_ref();
                 for v in f.captures.iter().chain(f.captured_args.iter()) {
                     word(*v, false, visit);
                 }
+                f.dicts.iter().flatten().flatten().for_each(|m| member(m, visit));
             }
             Self::String(_)
             | Self::Library(_)
@@ -1616,7 +1609,6 @@ impl Object {
             Self::Boxed(b) => b.as_ptr() as u64,
             Self::Root(r) => r.as_ptr() as u64,
             Self::Weak(w) => w.as_ptr() as u64,
-            Self::PolyFn(p) => p.as_ptr() as u64,
             Self::Fn(f) => f.as_ptr() as u64,
             Self::Stream(s) => s.as_ptr() as u64,
             Self::Thread(t) => t.as_ptr() as u64,
@@ -1639,7 +1631,6 @@ impl Object {
             Self::Boxed(_) => 8,
             Self::Root(_) => 9,
             Self::Weak(_) => 10,
-            Self::PolyFn(_) => 11,
             Self::Fn(_) => 12,
             Self::Stream(_) => 13,
             Self::Thread(_) => 14,
@@ -1663,7 +1654,6 @@ impl Object {
             Self::Boxed(b) => unsafe { b.recycle() },
             Self::Root(r) => unsafe { r.recycle() },
             Self::Weak(w) => unsafe { w.recycle() },
-            Self::PolyFn(p) => unsafe { p.recycle() },
             Self::Fn(f) => unsafe { f.recycle() },
             Self::Stream(s) => unsafe { s.recycle() },
             Self::Thread(t) => unsafe { t.recycle() },
@@ -1689,7 +1679,6 @@ impl Object {
             8 => Self::Boxed(unsafe { Gc::from_addr(addr) }),
             9 => Self::Root(unsafe { Gc::from_addr(addr) }),
             10 => Self::Weak(unsafe { Gc::from_addr(addr) }),
-            11 => Self::PolyFn(unsafe { Gc::from_addr(addr) }),
             12 => Self::Fn(unsafe { Gc::from_addr(addr) }),
             13 => Self::Stream(unsafe { Gc::from_addr(addr) }),
             14 => Self::Thread(unsafe { Gc::from_addr(addr) }),
@@ -1715,7 +1704,6 @@ impl GcSized for Object {
             Self::Boxed(b) => b.size(),
             Self::Root(r) => r.size(),
             Self::Weak(w) => w.size(),
-            Self::PolyFn(p) => p.size(),
             Self::Fn(f) => f.size(),
             Self::Stream(s) => s.size(),
             Self::Thread(t) => t.size(),
@@ -1740,7 +1728,6 @@ impl fmt::Display for Object {
             Self::Boxed(_) => write!(f, "<boxed 0x{:08x}>", self.addr()),
             Self::Root(_) => write!(f, "<root 0x{:08x}>", self.addr()),
             Self::Weak(_) => write!(f, "<weak 0x{:08x}>", self.addr()),
-            Self::PolyFn(_) => write!(f, "<polyfn 0x{:08x}>", self.addr()),
             Self::Fn(_) => write!(f, "<fn 0x{:08x}>", self.addr()),
             Self::Stream(_) => write!(f, "<stream 0x{:08x}>", self.addr()),
             Self::Thread(_) => write!(f, "<thread 0x{:08x}>", self.addr()),
@@ -1766,7 +1753,6 @@ impl Object {
             | Self::Boxed(_)
             | Self::Root(_)
             | Self::Weak(_)
-            | Self::PolyFn(_)
             | Self::Fn(_)
             | Self::Stream(_)
             | Self::Thread(_)
@@ -2906,18 +2892,9 @@ pub struct ObjWeak {
     pub cleared: Cell<bool>,
 }
 
-/// Heap-allocated polymorphic function descriptor.
-pub struct ObjPolyFn {
-    /// Bytecode entry offset of the monomorphised body.
-    pub entry: u32,
-    /// Number of type parameters expected (reserved for future use).
-    pub type_arity: u8,
-    /// Dictionary evidence captured when this value escaped a constrained
-    /// scope. `None` leaves the position for application-time evidence.
-    pub captured_dicts: Vec<Option<Member>>,
-}
-
-/// First-class monomorphic function / partial / explicit-capture lambda.
+/// First-class function value: a monomorphic function, partial application
+/// or explicit-capture lambda (`MakeFn`), or a generic function value
+/// (`MakePolyFn*`, which sets [`Self::dicts`]).
 pub struct ObjFn {
     /// Bytecode entry of the body.
     pub entry: u32,
@@ -2931,6 +2908,26 @@ pub struct ObjFn {
     pub captured_args: Vec<Value>,
     /// Explicit `use (x, y)` capture snapshot (leading frame locals).
     pub captures: Vec<Value>,
+    /// Generic function value: dictionary evidence captured when the value
+    /// escaped a constrained scope, merged with the call site's dictionaries
+    /// by `CallIndirect`. A `None` slot takes application-time evidence.
+    /// `None` for a monomorphic function.
+    pub dicts: Option<Vec<Option<Member>>>,
+}
+
+impl ObjFn {
+    /// Generic function value at `entry` with captured evidence `dicts`.
+    pub fn poly(entry: u32, dicts: Vec<Option<Member>>) -> Self {
+        Self {
+            entry,
+            arity: 0,
+            is_rest: false,
+            filled_mask: 0,
+            captured_args: Vec::new(),
+            captures: Vec::new(),
+            dicts: Some(dicts),
+        }
+    }
 }
 
 /// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / attached).
@@ -3084,12 +3081,6 @@ impl GcSized for ObjRoot {
 }
 
 impl GcSized for ObjWeak {
-    fn size(&self) -> usize {
-        mem::size_of::<Self>()
-    }
-}
-
-impl GcSized for ObjPolyFn {
     fn size(&self) -> usize {
         mem::size_of::<Self>()
     }

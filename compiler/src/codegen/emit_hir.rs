@@ -1283,6 +1283,8 @@ impl Compiler {
             enum_drop: Box::new(move |name: &str| {
                 checker.enum_has_drop(name).then(|| checker.class_type_id(name))
             }),
+            word_kind: Box::new(move |t: &Ty| crate::typechecking::value_layout::word_kind(checker, t)),
+            array_stamp: Box::new(move |t: &Ty| crate::typechecking::value_layout::array_elem_stamp(checker, t)),
             match_tree: self.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
@@ -2558,7 +2560,7 @@ impl Compiler {
         }
         let mut key = match name.rsplit_once("::") {
             // `C::f(..)`: the static method, keyed like `compile_construct_expr`.
-            Some((owner, member)) if self.checker.is_class(owner) => self.class_member_fqn(owner, member),
+            Some((owner, member)) if self.checker.has_impl(owner) => self.class_member_fqn(owner, member),
             _ => self.resolve_free_fn(name),
         };
         if !known(&key) && !self.namespace.is_empty() && !key.contains("::") {
@@ -2608,7 +2610,7 @@ impl Compiler {
         // `C::f(..)` on a generic class is its one shared body.
         let shared = name
             .rsplit_once("::")
-            .is_some_and(|(owner, _)| self.checker.is_class(owner) && lower::is_generic_class(&self.checker, owner));
+            .is_some_and(|(owner, _)| self.checker.has_impl(owner) && lower::is_generic_class(&self.checker, owner));
         let generic = self.checker.is_generic_fn(&lookup);
         let clone_key = key.clone();
         let mut abi = self.hir_call_abi(key, &lookup, argc, None, shared || generic)?;
@@ -3214,7 +3216,7 @@ impl Compiler {
         // A user enum's word is its heap object, passed as a class's is.
         let receiver = match lower::classify(&self.checker, &recv_ty) {
             Some(ValueClass::Object) => true,
-            Some(ValueClass::Enum) => self.hir_boxed_enum_word(&recv_ty) && self.checker.is_class(owner),
+            Some(ValueClass::Enum) => self.hir_boxed_enum_word(&recv_ty) && self.checker.has_impl(owner),
             _ => false,
         };
         if !shared && !receiver {

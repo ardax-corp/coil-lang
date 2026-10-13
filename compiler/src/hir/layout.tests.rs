@@ -125,3 +125,34 @@ fn pair_kinds_keep_their_names() {
     assert_eq!(name(range_ty(int())).as_deref(), Some(TWO_WORD_RANGE_KIND));
     assert_eq!(name(con("Cell")).as_deref(), Some("Cell"));
 }
+
+/// An `impl` block alone does not take an enum off the two-slot ABI; only a
+/// drop hook does (its payload variants are heap objects with a finalizer).
+#[test]
+fn impl_enums_keep_two_slots_unless_they_drop() {
+    let c = checked(
+        r#"
+enum Tagged {
+    Num(int),
+    Empty,
+}
+impl Tagged {
+    pub fn num() -> int {
+        return match self {
+            Tagged::Num(n) => n,
+            Tagged::Empty => 0,
+        };
+    }
+}
+enum Dropped {
+    Num(int),
+    Empty,
+}
+impl Dropped {
+    fn drop() {}
+}
+"#,
+    );
+    assert_eq!(of(&c, &con("Tagged")), Layout::Pair(PairKind::Enum("Tagged".into())));
+    assert_eq!(of(&c, &con("Dropped")), Layout::Word);
+}

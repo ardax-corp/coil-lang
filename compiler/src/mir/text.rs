@@ -265,8 +265,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             array,
             value,
         } => write!(f, "{dest} = arraypush {array}, {value}"),
-        MirInst::Alloc { dest, kind, elems } => {
+        MirInst::Alloc { dest, kind, elems, kinds } => {
             write!(f, "{dest} = alloc.{}", kind.as_str())?;
+            if *kinds != 0 {
+                write!(f, "[{kinds}]")?;
+            }
             match *kind {
                 MirAllocKind::Object { type_id, nfields } => {
                     write!(f, " {type_id}, {nfields}")?;
@@ -863,6 +866,13 @@ impl<'a> Parser<'a> {
             });
         }
         if let Some(kind_s) = op.strip_prefix("alloc.") {
+            let kinds = if self.eat('[') {
+                let k = u8::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
+                self.expect(']')?;
+                k
+            } else {
+                0
+            };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
                 "tuple" => MirAllocKind::Tuple,
@@ -910,7 +920,7 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, MirTy::HeapRef);
-            return Ok(MirInst::Alloc { dest, kind, elems });
+            return Ok(MirInst::Alloc { dest, kind, elems, kinds });
         }
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
             let kind = MirGcKind::parse(kind_s)

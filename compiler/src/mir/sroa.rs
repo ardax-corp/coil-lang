@@ -30,6 +30,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     dest,
                     kind: MirAllocKind::Array | MirAllocKind::Tuple,
                     elems,
+                    ..
                 } => {
                     alloc_of.insert(*dest, elems.clone());
                     if pending_reuse
