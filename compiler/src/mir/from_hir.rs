@@ -223,8 +223,11 @@ pub type NicheFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
-    /// Frame slot of each local (the first word of a pair local).
+    /// Planned local id of each local (the first word of a pair local).
     pub slots: &'a [Option<u32>],
+    /// The stack IL frame slot of each planned id, while the stack IL is
+    /// emitted beside MIR ([`MirBuilder::relocate`]).
+    pub relocate: HashMap<u32, u32>,
     /// Second-word slot and word types of each pair local.
     pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
     /// Word types of each expression of a two-word type.
@@ -655,6 +658,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let mut b = MirBuilder::new(hir.name.clone());
     // Host natives are word edges, as the dense lift types them.
     b.allow_host_edges = true;
+    b.relocate = inp.relocate.clone();
     b.set_ret_ty(ret_ty);
     let mut next = 0;
     for &param in &hir.params {
