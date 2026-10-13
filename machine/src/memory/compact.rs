@@ -194,8 +194,8 @@ impl Object {
                     fix_member(m);
                 }
             }
-            Self::PolyFn(p) => {
-                for m in p.payload_mut().captured_dicts.iter_mut().flatten() {
+            Self::Fn(f) => {
+                for m in f.payload_mut().dicts.iter_mut().flatten().flatten() {
                     fix_member(m);
                 }
             }

@@ -19,7 +19,7 @@ use common::{
 
 use crate::{
     AddrHashBuilder, CStructLayout, CoroState, EnumPayload, Frame, GcData, Heap, Member, ObjArray,
-    ObjBoxed, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object,
+    ObjBoxed, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjString, ObjTuple, Object,
     RefCoroutine, Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
@@ -986,7 +986,7 @@ impl<const S: usize> Machine<S> {
                 _ => DebugObject::Other("boxed"),
             },
             Object::Coroutine(_) => DebugObject::Other("coroutine"),
-            Object::Fn(_) | Object::PolyFn(_) => DebugObject::Other("fn"),
+            Object::Fn(_) => DebugObject::Other("fn"),
             _ => DebugObject::Other("object"),
         })
     }

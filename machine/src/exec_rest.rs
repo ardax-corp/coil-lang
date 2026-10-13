@@ -1443,225 +1443,61 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > value_arity + app_dict_arity);
                     let raw = self.stack.pop();
 
-                    // First-class ObjFn: merge new args into holes / captures.
-                    let fn_obj = {
-                        let addr = raw.raw() as u64;
-                        if raw.raw().is_null() {
-                            None
-                        } else {
-                            self.heap.find_object_by_addr(addr).and_then(|o| match o {
-                                Object::Fn(gc) => Some(gc),
-                                _ => None,
-                            })
-                        }
-                    };
-
-                    if let Some(gc) = fn_obj {
-                        for _ in 0..app_dict_arity {
-                            let _ = self.stack.pop();
-                        }
-                        let mut new_args = Vec::with_capacity(value_arity);
-                        for _ in 0..value_arity {
-                            new_args.push(self.stack.pop());
-                        }
-                        new_args.reverse();
-
-                        let base = gc.as_ref();
-                        let arity = base.arity as usize;
-                        let is_rest = base.is_rest;
-                        let mut filled_mask = base.filled_mask;
-                        let captures = base.captures.clone();
-                        let entry = base.entry;
-
-                        // Expand existing filled values into per-slot slots
-                        // (decl order), then fill the next unfilled holes
-                        // positionally from `new_args`.
-                        let mut slot_vals: Vec<Option<Value>> = vec![None; arity];
-                        {
-                            let mut old_i = 0usize;
-                            for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
-                                if filled_mask & (1u64 << slot) != 0
-                                    && old_i < base.captured_args.len() {
-                                        *slot_val = Some(base.captured_args[old_i]);
-                                        old_i += 1;
-                                    }
-                            }
-                        }
-                        let mut arg_i = 0usize;
-                        for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
-                            if filled_mask & (1u64 << slot) != 0 {
-                                continue;
-                            }
-                            if arg_i >= new_args.len() {
-                                break;
-                            }
-                            *slot_val = Some(new_args[arg_i]);
-                            filled_mask |= 1u64 << slot;
-                            arg_i += 1;
-                        }
-
-                        let mut captured_args: Vec<Value> = Vec::with_capacity(arity);
-                        for (slot, slot_val) in slot_vals.iter().enumerate() {
-                            if filled_mask & (1u64 << slot) != 0
-                                && let Some(v) = *slot_val {
-                                    captured_args.push(v);
-                                }
-                        }
-
-                        let fixed_filled = filled_mask.count_ones() as usize;
-                        let remaining_new = &new_args[arg_i..];
-
-                        if fixed_filled < arity {
-                            let partial = ObjFn {
-                                entry,
-                                arity: base.arity,
-                                is_rest,
-                                filled_mask,
-                                captured_args,
-                                captures,
-                            };
-                            let (object, _) = self.heap.alloc(partial, Object::Fn);
-                            self.stack.push(Value::from(object.addr()));
-                            self.maybe_gc_after_call_alloc(ip);
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Continue;
-                        }
-
-                        // Fixed slots complete. Rest extras → MakeArray
-                        // (including empty rest when `is_rest` and no extras).
-                        let mut call_args = captured_args;
-                        if is_rest {
-                            let rest_val = if remaining_new.len() == 1 {
-                                let v = remaining_new[0];
-                                let addr = v.raw() as u64;
-                                if !v.raw().is_null()
-                                    && matches!(
-                                        Self::find_object_by_addr(&self.heap, addr),
-                                        Some(Object::Array(_))
-                                    )
-                                {
-                                    v
-                                } else {
-                                    let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
-                                    let (object, _) = self.heap.alloc(arr, Object::Array);
-                                    Value::from(object.addr())
-                                }
-                            } else {
-                                let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
-                                let (object, _) = self.heap.alloc(arr, Object::Array);
-                                Value::from(object.addr())
-                            };
-                            call_args.push(rest_val);
-                        } else if !remaining_new.is_empty() {
-                            // Too many args for a fixed fn, drop extras defensively.
-                        }
-
-                        if self.frames.len() >= crate::MAX_CALL_FRAMES
-                            || !self.reserve_operand_words(captures.len() + call_args.len())
-                        {
-                            *ip_out = ip;
-                            *sp_out = sp;
-                            return dispatch::RestFlow::Done(
-                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
-                            );
-                        }
-                        // Frame: [captures..., params...]
-                        for c in &captures {
-                            self.stack.push(*c);
-                        }
-                        for a in &call_args {
-                            self.stack.push(*a);
-                        }
-                        let frame_arity = captures.len() + call_args.len();
-                        let return_ip = ip;
-                        let callee_sp = self.stack.tell() - frame_arity;
-                        self.frames.get_mut().seek(return_ip);
-                        self.frames
-                            .setup_current_and_advance(|frame| frame.set(callee_sp));
-                        self.keep_call_window(self.frames.len() - 1);
-                        sp = callee_sp;
-                        set_jump_target(&mut ip, entry as usize, code);
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Continue;
-                    }
-
-                    let (target, captured) = {
-                        let addr = raw.raw() as u64;
-                        if raw.raw().is_null() {
-                            (raw.as_int() as usize, Vec::new())
-                        } else if let Some(Object::PolyFn(gc)) = self.heap.find_object_by_addr(addr)
-                        {
-                            let pfn = gc.as_ref();
-                            (pfn.entry as usize, pfn.captured_dicts.clone())
-                        } else {
-                            (raw.as_int() as usize, Vec::new())
-                        }
-                    };
-
-                    // Pop application dictionaries (TOS = last in declaration order).
-                    let mut app_dicts = Vec::with_capacity(app_dict_arity);
-                    for _ in 0..app_dict_arity {
-                        app_dicts.push(self.stack.pop());
-                    }
-                    app_dicts.reverse();
-
-                    let member_value = |m: &crate::memory::Member| -> Value {
-                        match m {
-                            crate::memory::Member::Value(v) => *v,
-                            crate::memory::Member::Object(o) => Value::from(o.addr()),
-                        }
-                    };
-
-                    let merged_dicts: Vec<Value> = if captured.is_empty() {
-                        app_dicts
+                    // One probe: a function object, or a raw code pointer.
+                    let fn_obj = if raw.raw().is_null() {
+                        None
                     } else {
-                        let mut app_i = 0usize;
-                        let mut merged = Vec::with_capacity(captured.len());
-                        for slot in &captured {
-                            match slot {
-                                Some(m) => {
-                                    merged.push(member_value(m));
-                                    if app_i < app_dicts.len() {
-                                        app_i += 1;
-                                    }
-                                }
+                        match self.heap.find_object_by_addr(raw.raw() as u64) {
+                            Some(Object::Fn(gc)) => Some(gc),
+                            _ => None,
+                        }
+                    };
+                    let (target, captured) = match &fn_obj {
+                        Some(gc) => {
+                            let base = gc.as_ref();
+                            match &base.dicts {
+                                Some(dicts) => (base.entry as usize, dicts.as_slice()),
                                 None => {
-                                    if app_i < app_dicts.len() {
-                                        merged.push(app_dicts[app_i]);
-                                        app_i += 1;
-                                    } else {
-                                        merged.push(Value::default());
-                                    }
+                                    let (next, flow) =
+                                        self.call_fn_object(base, value_arity, app_dict_arity, ip, &mut sp, code);
+                                    *ip_out = next;
+                                    *sp_out = sp;
+                                    return flow;
                                 }
                             }
                         }
-                        merged
+                        None => (raw.as_int() as usize, &[][..]),
                     };
 
-                    let dict_arity = merged_dicts.len();
-                    if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(dict_arity) {
+                    // Merge captured evidence over the application dictionaries
+                    // in place: slot `k` is the captured dictionary, else the
+                    // `k`-th application dictionary.
+                    let dicts_base = self.stack.tell() - app_dict_arity;
+                    let dict_arity = if captured.is_empty() { app_dict_arity } else { captured.len() };
+                    if self.frames.len() >= crate::MAX_CALL_FRAMES
+                        || !self.reserve_operand_from(dicts_base + dict_arity)
+                    {
                         *ip_out = ip;
                         *sp_out = sp;
                         return dispatch::RestFlow::Done(
                             self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                         );
                     }
-                    for dict in merged_dicts {
-                        self.stack.push(dict);
+                    if !captured.is_empty() {
+                        self.stack.seek(dicts_base);
+                        for (k, slot) in captured.iter().enumerate() {
+                            let dict = match slot {
+                                Some(Member::Value(v)) => *v,
+                                Some(Member::Object(o)) => Value::from(o.addr()),
+                                None if k < app_dict_arity => self.stack.buffer()[dicts_base + k],
+                                None => Value::default(),
+                            };
+                            self.stack.push(dict);
+                        }
                     }
 
-                    let arity = value_arity + dict_arity;
-
-                    let return_ip = ip;
-                    let callee_sp = self.stack.tell() - arity;
-                    self.frames.get_mut().seek(return_ip);
-                    self.frames
-                        .setup_current_and_advance(|frame| frame.set(callee_sp));
-                    self.keep_call_window(self.frames.len() - 1);
-                    sp = callee_sp;
-                    set_jump_target(&mut ip, target, code);
+                    let callee_sp = self.stack.tell() - (value_arity + dict_arity);
+                    ip = self.enter_frame(callee_sp, target, ip, &mut sp, code);
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
@@ -1696,6 +1532,7 @@ impl<const S: usize> Machine<S> {
                         filled_mask,
                         captured_args: filled_vals,
                         captures,
+                        dicts: None,
                     };
                     let (object, _) = self.heap.alloc(pfn, Object::Fn);
                     self.stack.push(Value::from(object.addr()));
@@ -1772,12 +1609,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::MakePolyFn => {
                     let entry = opcode.operand_u32();
-                    let pfn = ObjPolyFn {
-                        entry,
-                        type_arity: 0,
-                        captured_dicts: Vec::new(),
-                    };
-                    let (object, _) = self.heap.alloc(pfn, Object::PolyFn);
+                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, Vec::new()), Object::Fn);
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
@@ -1797,12 +1629,7 @@ impl<const S: usize> Machine<S> {
                             Some(Member::Value(value))
                         };
                     }
-                    let pfn = ObjPolyFn {
-                        entry,
-                        type_arity: 0,
-                        captured_dicts,
-                    };
-                    let (object, _) = self.heap.alloc(pfn, Object::PolyFn);
+                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, captured_dicts), Object::Fn);
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
@@ -1954,5 +1781,156 @@ impl<const S: usize> Machine<S> {
         *ip_out = ip;
         *sp_out = sp;
         dispatch::RestFlow::Continue
+    }
+}
+
+impl<const S: usize> Machine<S> {
+    /// `CallIndirect` on a monomorphic [`ObjFn`]: the stack holds
+    /// `[value_args..., app_dicts...]` (the target already popped). An exact
+    /// call reuses the arguments in place under the captures; otherwise the
+    /// new arguments fill the next holes, giving a fresh partial or, once
+    /// every fixed slot is filled, a call (rest extras packed into an array).
+    /// Returns the next `ip` and how dispatch continues.
+    #[inline]
+    fn call_fn_object(
+        &mut self,
+        base: &ObjFn,
+        value_arity: usize,
+        app_dict_arity: usize,
+        ip: usize,
+        sp: &mut usize,
+        code: &[Byte],
+    ) -> (usize, dispatch::RestFlow) {
+        // A monomorphic function takes no dictionaries.
+        self.stack.seek(self.stack.tell() - app_dict_arity);
+        let arity = base.arity as usize;
+        let n_captures = base.captures.len();
+
+        if base.filled_mask == 0 && !base.is_rest && value_arity == arity {
+            // Frame: [captures..., params...], the params already pushed.
+            if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(n_captures) {
+                return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+            }
+            let callee_sp = self.stack.tell() - value_arity;
+            if n_captures > 0 {
+                self.stack.copy_slots(callee_sp + n_captures, callee_sp, value_arity);
+                self.stack.seek(callee_sp);
+                for c in &base.captures {
+                    self.stack.push(*c);
+                }
+                self.stack.seek(callee_sp + n_captures + value_arity);
+            }
+            return (self.enter_frame(callee_sp, base.entry as usize, ip, sp, code), dispatch::RestFlow::Continue);
+        }
+
+        let mut new_args = Vec::with_capacity(value_arity);
+        for _ in 0..value_arity {
+            new_args.push(self.stack.pop());
+        }
+        new_args.reverse();
+
+        let is_rest = base.is_rest;
+        let mut filled_mask = base.filled_mask;
+        let entry = base.entry;
+
+        // Expand existing filled values into per-slot slots (decl order),
+        // then fill the next unfilled holes positionally from `new_args`.
+        let mut slot_vals: Vec<Option<Value>> = vec![None; arity];
+        {
+            let mut old_i = 0usize;
+            for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
+                if filled_mask & (1u64 << slot) != 0 && old_i < base.captured_args.len() {
+                    *slot_val = Some(base.captured_args[old_i]);
+                    old_i += 1;
+                }
+            }
+        }
+        let mut arg_i = 0usize;
+        for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
+            if filled_mask & (1u64 << slot) != 0 {
+                continue;
+            }
+            if arg_i >= new_args.len() {
+                break;
+            }
+            *slot_val = Some(new_args[arg_i]);
+            filled_mask |= 1u64 << slot;
+            arg_i += 1;
+        }
+
+        let mut captured_args: Vec<Value> = Vec::with_capacity(arity);
+        for (slot, slot_val) in slot_vals.iter().enumerate() {
+            if filled_mask & (1u64 << slot) != 0
+                && let Some(v) = *slot_val
+            {
+                captured_args.push(v);
+            }
+        }
+
+        let fixed_filled = filled_mask.count_ones() as usize;
+        let remaining_new = &new_args[arg_i..];
+
+        if fixed_filled < arity {
+            let partial = ObjFn {
+                entry,
+                arity: base.arity,
+                is_rest,
+                filled_mask,
+                captured_args,
+                captures: base.captures.clone(),
+                dicts: None,
+            };
+            let (object, _) = self.heap.alloc(partial, Object::Fn);
+            self.stack.push(Value::from(object.addr()));
+            self.maybe_gc_after_call_alloc(ip);
+            return (ip, dispatch::RestFlow::Continue);
+        }
+
+        // Fixed slots complete. Rest extras → array (including an empty rest
+        // when `is_rest` and no extras); extras to a fixed fn are dropped.
+        let mut call_args = captured_args;
+        if is_rest {
+            let rest_val = if remaining_new.len() == 1
+                && !remaining_new[0].raw().is_null()
+                && matches!(
+                    Self::find_object_by_addr(&self.heap, remaining_new[0].raw() as u64),
+                    Some(Object::Array(_))
+                ) {
+                remaining_new[0]
+            } else {
+                let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
+                let (object, _) = self.heap.alloc(arr, Object::Array);
+                Value::from(object.addr())
+            };
+            call_args.push(rest_val);
+        }
+
+        if self.frames.len() >= crate::MAX_CALL_FRAMES
+            || !self.reserve_operand_words(n_captures + call_args.len())
+        {
+            return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+        }
+        // Frame: [captures..., params...]
+        for c in &base.captures {
+            self.stack.push(*c);
+        }
+        for a in &call_args {
+            self.stack.push(*a);
+        }
+        let callee_sp = self.stack.tell() - (n_captures + call_args.len());
+        (self.enter_frame(callee_sp, entry as usize, ip, sp, code), dispatch::RestFlow::Continue)
+    }
+
+    /// Push a call frame whose words start at `callee_sp`, returning to `ip`,
+    /// and jump to `target`. Returns the callee's first `ip`.
+    #[inline]
+    fn enter_frame(&mut self, callee_sp: usize, target: usize, ip: usize, sp: &mut usize, code: &[Byte]) -> usize {
+        self.frames.get_mut().seek(ip);
+        self.frames.setup_current_and_advance(|frame| frame.set(callee_sp));
+        self.keep_call_window(self.frames.len() - 1);
+        *sp = callee_sp;
+        let mut next = ip;
+        set_jump_target(&mut next, target, code);
+        next
     }
 }

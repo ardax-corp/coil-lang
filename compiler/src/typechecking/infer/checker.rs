@@ -17684,7 +17684,16 @@ impl Checker {
     }
 
     /// True if `name` is a registered class (source ident, alias, or FQN).
+    /// A class object type. An `impl` block on an enum leaves a field-less
+    /// entry in `classes` (it hosts the methods), but the enum keeps its own
+    /// representation, so it is not a class here.
     pub fn is_class(&self, name: &str) -> bool {
+        self.resolve_class_key(name).is_some_and(|key| !self.enums.contains_key(&key))
+    }
+
+    /// A class, or an enum with an `impl` block: a type that owns methods
+    /// and statics (`Owner::member`, `x.m()`).
+    pub fn has_impl(&self, name: &str) -> bool {
         self.resolve_class_key(name).is_some()
     }
 

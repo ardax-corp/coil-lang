@@ -160,7 +160,10 @@ fn unary_user_enum_name<'a>(checker: &Checker, ty: &'a Ty) -> Option<&'a str> {
     {
         return None;
     }
-    if checker.is_scalar_enum(name) || checker.is_class(name) {
+    // A drop enum's payload variants are heap objects carrying a
+    // finalizer (`TagEnumType`), so it stays boxed. Other `impl` blocks do
+    // not change the shape.
+    if checker.is_scalar_enum(name) || checker.enum_has_drop(name) {
         return None;
     }
     let vars = checker.enum_variants(name)?;

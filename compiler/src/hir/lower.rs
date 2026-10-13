@@ -241,7 +241,7 @@ fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, see
 
 /// A class declared with type parameters (`class HashMap<K, V>`).
 pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
-    if !checker.is_class(name) {
+    if !checker.has_impl(name) {
         return false;
     }
     let ctors = &checker.generics().generic_type_ctors;

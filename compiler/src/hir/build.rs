@@ -1477,7 +1477,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     fn static_ty(&self, name: &str) -> Option<Ty> {
         let slot = match name.rsplit_once("::") {
-            Some((owner, member)) if self.checker.is_class(owner) => {
+            Some((owner, member)) if self.checker.has_impl(owner) => {
                 let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
                 self.checker.static_slot_index(&format!("{key}::{member}"))
             }
@@ -1783,7 +1783,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     /// `Owner::member` in construct form calls a class's static method.
     /// `owner::member` names a static field of class `owner`.
     fn class_static(&self, owner: &str, member: &str) -> bool {
-        if self.checker.tag_for(owner, member).is_some() || !self.checker.is_class(owner) {
+        if self.checker.tag_for(owner, member).is_some() || !self.checker.has_impl(owner) {
             return false;
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
@@ -1797,7 +1797,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // `T::m(..)` / `int::m(..)` on a non-class owner (no static fields,
         // so even the bare form): a static trait method the typechecker
         // dispatched through a bound or a ground instance.
-        if !self.checker.is_class(owner) {
+        if !self.checker.has_impl(owner) {
             let (start, end) = (node.0.start, node.0.end);
             return self.node_id(node).is_some_and(|id| {
                 self.checker.bound_method_call_at(id).is_some() || self.checker.call_dicts_at(id).is_some()
