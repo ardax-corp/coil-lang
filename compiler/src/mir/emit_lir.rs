@@ -287,6 +287,7 @@ impl EmitPlan {
         }
 
         keep_memory_order(func, &mut tree, &fused);
+        keep_payload_first(func, &mut tree, &fused);
 
         let mut need_slot = vec![false; n];
         for p in &func.params {
@@ -488,6 +489,57 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
             match late {
                 Some(v) if tree[v.index()] => tree[v.index()] = false,
                 _ => break,
+            }
+        }
+    }
+}
+
+/// A last-arm payload `Unpack` leaves on the stack is an inline operand
+/// that emits nothing: its user finds it on top only when it is the first
+/// word that user pushes (`format(s, show(p))` pushes `s` first, so the
+/// call would take `s`). Otherwise the payload keeps its slot.
+fn keep_payload_first(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
+    for block in &func.blocks {
+        let insts = &block.insts;
+        let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
+        // The words each top-level item pushes, in order: an inline
+        // operand's own (`Some`), or a load of a slot (`None`).
+        fn pushes(v: ValueId, at: &HashMap<ValueId, usize>, insts: &[MirInst], inline: &dyn Fn(ValueId) -> bool, seq: &mut Vec<Option<usize>>) {
+            match at.get(&v) {
+                Some(&k) if inline(v) => {
+                    for op in insts[k].operands() {
+                        pushes(op, at, insts, inline, seq);
+                    }
+                    seq.push(Some(k));
+                }
+                _ => seq.push(None),
+            }
+        }
+        for (k, inst) in insts.iter().enumerate() {
+            let MirInst::MatchPayload { dest, .. } = inst else { continue };
+            if !tree[dest.index()] || is_jim_term_payload(func, *dest) {
+                continue;
+            }
+            let is_inline = |v: ValueId| inline(v, tree);
+            let mut first = None;
+            let tops = insts
+                .iter()
+                .filter(|i| !i.is_phi() && !matches!(i, MirInst::MatchPayload { .. }) && !is_inline(i.dest()))
+                .map(|i| i.operands())
+                .chain(block.term.as_ref().map(term_values));
+            for operands in tops {
+                let mut seq = Vec::new();
+                for op in operands {
+                    pushes(op, &at, insts, &is_inline, &mut seq);
+                }
+                if seq.contains(&Some(k)) {
+                    first = seq.first().copied().flatten();
+                    break;
+                }
+            }
+            if first != Some(k) {
+                tree[dest.index()] = false;
             }
         }
     }
