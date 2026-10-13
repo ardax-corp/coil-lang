@@ -23,6 +23,8 @@ pub(super) struct HirMirTables {
     /// Per argument of such a `format` call (after the format string): the
     /// raw `show` entry a `%v` argument goes through, `None` for a word.
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// `matrix(data)` calls, whose value is the data itself.
+    pub(super) matrix_wraps: HashSet<u32>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -108,6 +110,9 @@ impl Compiler {
                 if matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
                     return Kids::None;
                 }
+            }
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
+                t.matrix_wraps.insert(id.0);
             }
             HirKind::Call { args, .. }
                 if !emit.plan.lens.contains_key(&id.0)

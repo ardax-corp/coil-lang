@@ -331,7 +331,7 @@ pub struct HirMirInput<'a> {
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
-    pub matrix_wraps: HashSet<u32>,
+    pub matrix_wraps: &'a HashSet<u32>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:

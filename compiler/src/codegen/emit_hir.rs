@@ -1337,7 +1337,7 @@ impl Compiler {
             boxed_niches,
             record_fields,
             records,
-            matrix_wraps: emit.plan.calls.iter().filter(|(_, c)| matches!(c.builtin, Some(HirBuiltin::Matrix))).map(|(&i, _)| i).collect(),
+            matrix_wraps: &tables.matrix_wraps,
             aggregates: emit
                 .plan
                 .ops
