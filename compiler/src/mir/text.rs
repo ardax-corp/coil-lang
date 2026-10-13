@@ -251,6 +251,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::Yield { dest, value, from, receive } => {
+            let op = if *from { "yieldfrom" } else { "yield" };
+            let recv = if *receive { ".recv" } else { "" };
+            write!(f, "{dest} = {op}{recv} {value}")
+        }
         MirInst::DoneCoro { dest, handle } => write!(f, "{dest} = donecoro {handle}"),
         MirInst::LoadStatic { dest, slot } => write!(f, "{dest} = loadstatic {slot}"),
         MirInst::StoreStatic { dest, slot, value } => write!(f, "{dest} = storestatic {slot}, {value}"),
@@ -650,6 +655,17 @@ impl<'a> Parser<'a> {
                 dest,
                 handle,
                 send,
+            });
+        }
+        if op == "yield" || op == "yield.recv" || op == "yieldfrom" {
+            let value = self.value()?;
+            let receive = op == "yield.recv";
+            ensure_ty(types, dest, if receive { MirTy::I64 } else { MirTy::Bool });
+            return Ok(MirInst::Yield {
+                dest,
+                value,
+                from: op == "yieldfrom",
+                receive,
             });
         }
         if op == "donecoro" {

@@ -3098,10 +3098,21 @@ fn main() -> int {
                 .any(|b| *b.bytecode() == Instruction::YieldCoro),
             "scan_yield must contain YieldCoro"
         );
+        // A yielding body may take dense (a yield is one MIR instruction,
+        // a safepoint as a call is); its read stays bounds-checked: a dense
+        // index without the unchecked flag checks against the live length.
+        let checked_dense = |b: &common::Byte| {
+            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf)
+                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED == 0
+        };
+        let unchecked_dense = |b: &common::Byte| {
+            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf | Instruction::DenseStoreIndex)
+                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED != 0
+        };
         assert!(
             yield_body
                 .iter()
-                .any(|b| *b.bytecode() == Instruction::Index),
+                .any(|b| *b.bytecode() == Instruction::Index || checked_dense(b)),
             "scan_yield must keep checked Index; body={:?}",
             yield_body
                 .iter()
@@ -3110,6 +3121,7 @@ fn main() -> int {
         );
         assert!(
             yield_body.iter().all(|b| !is_pin(*b.bytecode())
+                && !unchecked_dense(b)
                 && *b.bytecode() != Instruction::IndexUnchecked
                 && *b.bytecode() != Instruction::StoreIndexUnchecked),
             "scan_yield must not pin or uncheck; body={:?}",

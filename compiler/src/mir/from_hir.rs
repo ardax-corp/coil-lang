@@ -290,6 +290,9 @@ struct Lower<'a> {
     loops: Vec<Loop>,
     /// The function returns `()`: a `return` gives the VM's unit word.
     unit_ret: bool,
+    /// The type a `return` gives: a `gen fn`'s yielded type (its final
+    /// resume's word), else the declared one.
+    ret_hir: Ty,
     /// Blocks in the order lowering started filling them: source order,
     /// which is how they are laid out.
     order: Vec<BlockId>,
@@ -511,10 +514,6 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> {
-    // A `gen fn` that never yields runs to its return like a function.
-    if hir.is_coro && hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Yield { .. })) {
-        return Err("body kind coroutine".into());
-    }
     if hir.is_generic && !inp.opaque_vars {
         return Err("body kind generic".into());
     }
@@ -528,9 +527,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
         _ => ret,
     };
-    if hir.is_coro && !is_unit(ret) && scalar(ret).is_none() {
-        return Err("body kind coroutine".into());
-    }
     let unit_ret = is_unit(ret);
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
@@ -588,6 +584,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cur,
         loops: Vec::new(),
         unit_ret,
+        ret_hir: ret.clone(),
         order: vec![cur],
         cold: Vec::new(),
         aliases: HashMap::new(),
@@ -600,9 +597,18 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         known_niche: HashMap::new(),
         raw_host: false,
     };
-    match lower.value(root)? {
-        Val::Never => {}
-        val => lower.ret(val)?,
+    if hir.is_coro {
+        // A `gen fn` runs its body for effect (a tail `yield` receives
+        // nothing) and falling off its end returns `0` as its last
+        // resume's word, as HIR emission's epilogue.
+        if lower.effect(root)? {
+            lower.ret_zero()?;
+        }
+    } else {
+        match lower.value(root)? {
+            Val::Never => {}
+            val => lower.ret(val)?,
+        }
     }
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
@@ -883,7 +889,7 @@ impl Lower<'_> {
         if let Some(layout) = self.inp.ret_boxed_niche {
             let boxed = match val {
                 // `Ok(())` boxed: `CONST 0; MakeEnum 0 1`, as HIR emission.
-                Val::Unit if self.hir.ret.as_ref().is_some_and(unit_result) => {
+                Val::Unit if unit_result(&self.ret_hir) => {
                     let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                     self.make_enum(0, Some(zero))?
                 }
@@ -896,7 +902,7 @@ impl Lower<'_> {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
             // Falling off a `Result<(), E>` body is `Ok(())`: `0`, as HIR
             // emission's `CONST 0; RETURN`.
-            (Val::Unit, None) if self.hir.ret.as_ref().is_some_and(unit_result) => {
+            (Val::Unit, None) if unit_result(&self.ret_hir) => {
                 // `Ok(())` is the zero word of a `NicheOpt` result.
                 if self.b.func().ret_ty != Some(MirTy::NicheOpt) {
                     return Err("return value".into());
@@ -910,7 +916,7 @@ impl Lower<'_> {
             (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
             // A two-word value the function returns boxed.
             (Val::Pair(lo, hi), None) if self.b.func().ret_ty == Some(MirTy::HeapRef) => {
-                let ty = self.hir.ret.clone().ok_or("return type")?;
+                let ty = self.ret_hir.clone();
                 match self.box_pair_val(&ty, lo, hi)? {
                     Val::V(v) => self.b.ret(Some(v)).map_err(mir),
                     _ => Err("return value".into()),
@@ -918,7 +924,7 @@ impl Lower<'_> {
             }
             // A boxed value the function returns as a pair.
             (Val::V(v), Some((lo_ty, hi_ty))) if self.b.value_ty(v) == MirTy::HeapRef => {
-                let ty = self.hir.ret.clone().ok_or("return type")?;
+                let ty = self.ret_hir.clone();
                 match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
                     Val::Pair(lo, hi) => self.b.ret_pair(lo, hi).map_err(mir),
                     _ => Err("return value".into()),
@@ -1470,6 +1476,11 @@ impl Lower<'_> {
 
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
+        // A statement `yield` leaves nothing: a send lands only where a
+        // receiving `yield` takes it.
+        if let HirKind::Yield { value, from } = self.hir.expr(id).kind {
+            return Ok(!matches!(self.yield_(id, value, from, false)?, Val::Never));
+        }
         // A host's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it.
         self.raw_host = self.host_pair(id) || self.boxed_call(id);
@@ -1554,6 +1565,7 @@ impl Lower<'_> {
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
+            HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);
@@ -2224,6 +2236,15 @@ impl Lower<'_> {
                     self.b.ins_binop(arith, l, r)
                 }
             }
+            // `bool`s compare as their `0` / `1` words.
+            (None, Some(cmp)) if lt == MirTy::Bool => {
+                if self.b.value_ty(r) != MirTy::Bool {
+                    return Err("operator operand type".into());
+                }
+                let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;
+                let r = self.b.ins_cast(MirCastKind::Word, MirTy::I64, r).map_err(mir)?;
+                self.b.ins_cmp(cmp, l, r)
+            }
             (None, Some(cmp)) => self.b.ins_cmp(cmp, l, r),
             (None, None) => unreachable!("refused above"),
         };
@@ -2678,11 +2699,17 @@ impl Lower<'_> {
     /// `resume h` / `resume h with v`: the coroutine runs to its next
     /// `yield`, whose word is the value.
     fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).ok_or("resume type")?;
-        let unit = is_unit(ty);
-        let dest_ty = if unit { MirTy::I64 } else { self.inp.word(ty).ok_or("resume type")? };
+        let ty = self.expr_ty(id).ok_or("resume type")?.clone();
+        let unit = is_unit(&ty);
+        // A two-word value moves through the coroutine boxed.
+        let pair = self.inp.pair_tys.get(&id.0).copied();
+        let dest_ty = match pair {
+            _ if unit => MirTy::I64,
+            Some(_) => MirTy::HeapRef,
+            None => self.inp.word(&ty).ok_or("resume type")?,
+        };
         let send = match value {
-            Some(v) => match self.word(v)? {
+            Some(v) => match self.word_or_boxed(v)? {
                 Some(w) => Some(w),
                 None => return Ok(Val::Never),
             },
@@ -2692,7 +2719,38 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
-        Ok(if unit { Val::Unit } else { Val::V(out) })
+        match pair {
+            _ if unit => Ok(Val::Unit),
+            Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
+            None => Ok(Val::V(out)),
+        }
+    }
+
+    /// `yield v` / `yield from h`: one instruction, as HIR emission's
+    /// `hir_yield` (the VM saves the frame and resumes after it). The word
+    /// moves boxed. A receiving yield's value is the word the next
+    /// `resume .. with` sends.
+    fn yield_(&mut self, id: HirId, value: HirId, from: bool, receive: bool) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("yield type")?.clone();
+        let receive = receive && !from && !is_unit(&ty);
+        let recv_ty = if !receive {
+            None
+        } else if self.inp.pair_tys.contains_key(&id.0) {
+            Some(MirTy::HeapRef)
+        } else {
+            Some(self.inp.word(&ty).ok_or("yield type")?)
+        };
+        let Some(v) = self.word_or_boxed(value)? else {
+            return Ok(Val::Never);
+        };
+        let out = self.b.ins_yield(v, from, recv_ty).map_err(mir)?;
+        if !receive {
+            return Ok(Val::Unit);
+        }
+        match self.inp.pair_tys.get(&id.0) {
+            Some(&(lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
+            None => Ok(Val::V(out)),
+        }
     }
 
     /// Fill the slots of stack array or class local `local` from `init`:
