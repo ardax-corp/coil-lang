@@ -2432,6 +2432,7 @@ impl Lower<'_> {
             BinOp::BitAnd => Some(MirBinOp::BitAnd),
             BinOp::BitOr => Some(MirBinOp::BitOr),
             BinOp::BitXor => Some(MirBinOp::Xor),
+            BinOp::FloatPow => Some(MirBinOp::Pow),
             _ => None,
         };
         let cmp = match op {
