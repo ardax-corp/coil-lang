@@ -1855,7 +1855,7 @@ impl Compiler {
         Some(inst)
     }
 
-    fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {
+    pub(super) fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {
         use crate::typechecking::subst::{Subst, apply_ty};
         let mut subst = Subst::empty();
         for (var, ty) in map {
@@ -5969,7 +5969,7 @@ impl Compiler {
             }
             HirKind::Break | HirKind::Continue => Ok(()),
             HirKind::Builtin {
-                op: Builtin::Panic,
+                op: Builtin::Panic | Builtin::Print,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED),
             HirKind::Return(value) => match lower::returned_value(hir, *value) {
@@ -6443,6 +6443,8 @@ impl Compiler {
                     // stashed in a temp, then the call.
                     debug_assert_eq!(depth, 0);
                     let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                    // A generic-head instance's clone at the operand type.
+                    let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
                     let raw = self.raw_instance_methods.contains(&fqn);
                     // A shift count is a plain `int` parameter, not the
                     // instance's type, so it is not boxed for it (#883).
@@ -6600,6 +6602,7 @@ impl Compiler {
                 // then the call.
                 debug_assert_eq!(depth, 0);
                 let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
                 let raw = self.raw_instance_methods.contains(&fqn);
                 self.hir_value(hir, emit, *operand, &BOXED, 0);
                 if !raw {
@@ -7239,6 +7242,8 @@ impl Compiler {
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
                 let HirGround { method, mut boxed, stage } = inst.ground.clone().expect("ground call");
+                // A generic-head instance's clone at these types.
+                let key = self.instance_clone(&key, &inst.args).unwrap_or(key);
                 // A raw instance method takes the instance's own words.
                 if self.raw_instance_methods.contains(&key) {
                     boxed.clear();
@@ -7312,8 +7317,14 @@ impl Compiler {
                 let generic = call.generic.clone();
                 // A raw instance method takes its receiver unboxed and no
                 // dictionary.
+                let instance = call.instance.clone();
+                // A generic-head instance's clone at the receiver's type.
+                let key = match instance.as_ref().and_then(|i| i.recv_box.clone()) {
+                    Some(recv) if generic.is_none() => self.instance_clone(&key, &[recv]).unwrap_or(key),
+                    _ => key,
+                };
                 let raw = self.raw_instance_methods.contains(&key);
-                let instance = call.instance.clone().filter(|_| !raw);
+                let instance = instance.filter(|_| !raw);
                 let boxed = |i: usize| {
                     generic.as_ref().and_then(|g| g.boxed[i].clone()).or_else(|| {
                         instance.as_ref().filter(|_| i == 0).and_then(|inst| inst.recv_box.clone())
@@ -9137,6 +9148,13 @@ impl Compiler {
             HirKind::Continue => {
                 let target = emit.loops.last().expect("continue inside a loop").cont;
                 self.hir_jump(IlJumpKind::Unconditional, target);
+            }
+            HirKind::Builtin {
+                op: Builtin::Print,
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, 0);
+                self.bytecode.push_print();
             }
             HirKind::Builtin {
                 op: Builtin::Panic,

@@ -322,6 +322,9 @@ pub enum Builtin {
     Invoke,
     Readonly,
     Default,
+    /// `PRINT` of a string (compiler-made bodies only: the test-runner
+    /// `main`).
+    Print,
 }
 
 #[derive(Debug, Clone, PartialEq)]

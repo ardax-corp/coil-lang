@@ -3794,6 +3794,56 @@ test("broken") {
     );
 }
 
+/// The virtual `main` (built as HIR) runs every case in order: a passing
+/// case prints nothing, each `Err` case its banner, and later cases still
+/// run after a failure.
+#[test]
+fn harness_virtual_main_reports_each_failed_case_in_order() {
+    let mut pipeline = test_pipeline();
+    pipeline.set_include_tests(true);
+    let (bytecode, constants) = pipeline
+        .compile_src(
+            r#"
+static let runs: int = 0;
+
+test("first fails") {
+    runs = runs + 1;
+    assert(false)?;
+}
+test("passes") {
+    runs = runs + 1;
+    assert(true)?;
+}
+test("returns Err") {
+    runs = runs + 1;
+    return Result::Err("nope");
+}
+test("all ran") {
+    assert(runs == 3)?;
+}
+"#,
+        )
+        .expect("compile");
+    let shared = SharedBuf::new();
+    let mut machine = Machine::<128>::default();
+    machine.with_output(shared.clone());
+    pipeline.wire_host_natives(&mut machine);
+    machine.set_program_debug(pipeline.program_debug());
+    machine.run_raw(
+        &bytecode,
+        &constants,
+        pipeline.strings(),
+        pipeline.static_slot_count(),
+    );
+    let _ = machine.restore_output();
+    assert!(machine.panicked(), "virtual main must panic when a case fails");
+    let output = shared.into_utf8();
+    assert_eq!(
+        output, "> Test \"first fails\" failed\n> Test \"returns Err\" failed\npanic: tests failed",
+        "got {output:?}"
+    );
+}
+
 /// CLI-style isolation: each case is `call_function`'d independently so a
 /// soft failure does not prevent later cases from running.
 #[test]

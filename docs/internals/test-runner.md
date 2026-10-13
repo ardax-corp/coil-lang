@@ -37,6 +37,14 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | a file without cases | `main` runs once as a single opaque case |
 | a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
 
+Outside `coil test` (`coil --include-tests tests/foo.hy`), a test file
+with no `main` gets one that runs every case in one VM, prints
+`> Test "<name>" failed` for each `Err`, and panics with `tests failed` if
+any did. The compiler builds that `main` as HIR
+([`hir::synth`](../../compiler/src/hir/synth.rs)) and lowers it like any
+other body; its `PRINT` is the HIR builtin `Print`, which keeps it off
+direct MIR.
+
 A case body is checked in `Result<(), string>` mode, but its `?` is
 looser than a function's (#628). The checker records each such site in
 `Checker::test_try_sites`. A `Result` whose error type has `Show` but is
