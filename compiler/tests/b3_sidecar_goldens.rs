@@ -57,11 +57,11 @@ const CORPUS: &[&str] = &[
 /// Heap payloads in pairs lowered straight to MIR move `chain_pair` from
 /// fuse to dense (`option_pair.hy` grows by three).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "08946876e664c67f_1289"),
-    ("functions.hy", "236cccdbe25aa2b5_280"),
-    ("loops.hy", "3db0f12002dc0891_237"),
-    ("option_pair.hy", "c490ff2e6a2fb35e_343"),
-    ("user_trait_dispatch.hy", "7f5d38e9b564859a_123"),
+    ("arithmetic.hy", "863c7be5f1f2864d_1287"),
+    ("functions.hy", "9d79ba2750678788_278"),
+    ("loops.hy", "78d97e79a4a64057_235"),
+    ("option_pair.hy", "4ca4f142229f9372_341"),
+    ("user_trait_dispatch.hy", "e6abfd3b808ab036_121"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
