@@ -1078,7 +1078,16 @@ impl Lower<'_> {
                     let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                     self.make_enum(0, Some(zero))?
                 }
-                Val::V(v) => self.box_niche(layout, v)?,
+                // Boxed from the word's own layout, as HIR emission
+                // converts from the value's: a niche `Result` word (its Err
+                // bit) may return as a `Result<(), E>`.
+                Val::V(v) => {
+                    let layout = match self.b.value_ty(v) {
+                        MirTy::NicheRes => ValueLayout::NicheResult,
+                        _ => layout,
+                    };
+                    self.box_niche(layout, v)?
+                }
                 _ => return Err("return value".into()),
             };
             return self.ret_word(boxed);
