@@ -11449,9 +11449,17 @@ impl Checker {
     /// The variables of generic `fn_name`'s first `n` type parameters, in
     /// declaration order (the scheme's leading bounds), as the resolved
     /// signature ([`Self::fn_param_tys`], [`Self::fn_return_ty`]) spells them.
+    /// None for a scheme over a higher-kinded parameter, an associated-type
+    /// projection or a multi-parameter constraint (`P<A>`, `P::Ref<A>`,
+    /// `where Convert<A, B>`): binding those through the signature would
+    /// clone a body whose trait callees the clone cannot resolve.
     pub fn fn_type_param_vars(&self, fn_name: &str, n: usize) -> Option<Vec<TyVarId>> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
-        if scheme.bounds.len() < n {
+        if scheme.bounds.len() < n
+            || !scheme.assoc_projections.is_empty()
+            || scheme.kinds.iter().any(|k| *k != Kind::Type)
+            || scheme.constraints.iter().any(|c| c.args.len() > 1)
+        {
             return None;
         }
         scheme.bounds[..n]
