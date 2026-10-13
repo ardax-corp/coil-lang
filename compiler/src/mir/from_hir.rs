@@ -1836,6 +1836,14 @@ impl Lower<'_> {
             }
             // `readonly e`: `e`'s value.
             HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
+            // A dictionary entry's argument, unboxed (compiler-made bodies).
+            HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
+                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("unbox type")?;
+                let Some(src) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_unbox(src, *tag, ty).map_err(mir)?))
+            }
             // `typeof e`: the type name HIR emission interned; `e` is not
             // evaluated.
             HirKind::Builtin { op: Builtin::TypeOf, .. } => {

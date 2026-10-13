@@ -1134,6 +1134,16 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::Unbox { dest, src, tag } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::UnboxValue { tag: *tag, loc });
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
             emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
@@ -1705,6 +1715,11 @@ fn emit_stack(
         MirInst::Stringify { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            Ok(())
+        }
+        MirInst::Unbox { src, tag, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::UnboxValue { tag: *tag, loc });
             Ok(())
         }
         MirInst::StrEq { lhs, rhs, ne, .. } => {

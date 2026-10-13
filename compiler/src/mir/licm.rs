@@ -299,6 +299,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
+        | MirInst::Unbox { .. }
         | MirInst::StrEq { .. } => false,
         MirInst::String { .. } => true,
     }

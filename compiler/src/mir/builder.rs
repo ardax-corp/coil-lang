@@ -961,6 +961,20 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `UnboxValue tag` of `src` ([`MirInst::Unbox`]), read as `ty`.
+    pub fn ins_unbox(&mut self, src: ValueId, tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
+        if !self.resolve_ty(src).is_specialized() || !ty.is_specialized() {
+            return Err(MirError::msg("Unbox type".to_string()));
+        }
+        let dest = self.alloc(ty);
+        self.push(MirInst::Unbox {
+            dest,
+            src: self.resolve(src),
+            tag,
+        })?;
+        Ok(dest)
+    }
+
     /// String `==` / `!=` by content ([`MirInst::StrEq`]).
     pub fn ins_str_eq(&mut self, lhs: ValueId, rhs: ValueId, ne: bool) -> Result<ValueId, MirError> {
         let (lt, rt) = (self.resolve_ty(lhs), self.resolve_ty(rhs));
