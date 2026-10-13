@@ -487,6 +487,14 @@ impl MirFunc {
                         return Err(format!("{dest} ResumeCoro send type"));
                     }
             }
+            MirInst::Yield { dest, value, from, receive } => {
+                if !self.ty(*value).is_word_lane() || (*from && self.ty(*value) != MirTy::HeapRef) {
+                    return Err(format!("{dest} Yield value type"));
+                }
+                if (*from && *receive) || (!*receive && self.ty(*dest) != MirTy::Bool) || !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} Yield dest type"));
+                }
+            }
             MirInst::DoneCoro { dest, handle } => {
                 if self.ty(*handle) != MirTy::HeapRef {
                     return Err(format!("{dest} DoneCoro handle is not heapref"));

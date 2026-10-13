@@ -392,6 +392,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::Call { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::ResumeCoro { .. }
+            | MirInst::Yield { .. }
             | MirInst::StoreStatic { .. }
             | MirInst::Print { .. }
     )
@@ -895,6 +896,23 @@ fn emit_stored(
                 loc,
                 always_store: true,
             })?;
+        }
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
@@ -1437,6 +1455,24 @@ fn emit_stack(
             loc,
             always_store: false,
         }),
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));

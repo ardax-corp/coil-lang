@@ -55,6 +55,7 @@ impl MirInst {
             Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
             Self::Call { .. }
             | Self::ResumeCoro { .. }
+            | Self::Yield { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
