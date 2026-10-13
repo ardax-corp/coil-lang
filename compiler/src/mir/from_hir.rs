@@ -70,6 +70,29 @@ pub struct HirCallSite {
     pub boxed_ret: bool,
 }
 
+/// How a user iterator's `next` returns `Option<Item>`, as HIR emission
+/// called it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HirIterNext {
+    /// One niche word: zero is `None`, else the item.
+    Niche,
+    /// `[payload, tag]`: tag zero is `None`.
+    Pair,
+    /// A boxed `Option`: `Some` (this tag) carries the item.
+    Boxed { some: u32 },
+}
+
+/// A `for x in it` over a user iterator, as HIR emission emitted it:
+/// `into_iter` once, then `next` until it returns `None`.
+#[derive(Clone, Debug)]
+pub struct HirIterLoop {
+    pub into_iter: Label,
+    pub next: Label,
+    /// The iterator `into_iter` returns.
+    pub iter_ty: Ty,
+    pub shape: HirIterNext,
+}
+
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
 /// local), or `MakePolyFn` of a generic function's.
@@ -172,6 +195,9 @@ pub type HostVariants = Vec<(u32, u32)>;
 /// declaration order. `None` for every other type.
 pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
 
+/// An enum's finalizer type id when it has `fn drop()`, by name.
+pub type EnumDropFn<'a> = Box<dyn Fn(&str) -> Option<u32> + 'a>;
+
 /// A variant's payload field names, by enum and variant name.
 pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
 
@@ -207,6 +233,8 @@ pub struct HirMirInput<'a> {
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
+    /// Each `for` loop over a user iterator's `into_iter` and `next`.
+    pub iter_loops: &'a HashMap<u32, HirIterLoop>,
     /// String table index of each `string` literal, and of each `const`
     /// global folded to a string.
     pub strings: &'a HashMap<u32, u32>,
@@ -247,8 +275,8 @@ pub struct HirMirInput<'a> {
     /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
     pub boxed_enum: BoxedEnumFn<'a>,
     /// A user enum whose variants carry a drop hook (`TagEnumType` after
-    /// `MakeEnum`), by name.
-    pub enum_drop: Box<dyn Fn(&str) -> bool + 'a>,
+    /// `MakeEnum`), by name: its finalizer type id.
+    pub enum_drop: EnumDropFn<'a>,
     /// How a heap word of a type reads for the collector (`common::WORD_*`,
     /// as `value_layout::word_kind`): tuple and enum construction kinds.
     pub word_kind: Box<dyn Fn(&Ty) -> u8 + 'a>,
@@ -2235,6 +2263,12 @@ impl Lower<'_> {
                 };
                 self.for_range(local, *iterable, *body, *inclusive, *float, None)
             }
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                kind: Some(ForInKind::Custom { counted: None, .. }),
+            } if let Some(plan) = self.inp.iter_loops.get(&id.0) => self.for_iter(*local, *iterable, *body, plan),
             // A user `into_iter` returning a range or array runs its loop.
             HirKind::ForIn {
                 pat: HirPat::Bind(local),
@@ -2378,6 +2412,86 @@ impl Lower<'_> {
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        self.loops.push(Loop {
+            cont: head,
+            cont_used: false,
+            exit: Some(exit),
+        });
+        let live = self.effect(body);
+        self.loops.pop();
+        if live? {
+            self.jump(head)?;
+        }
+        self.switch(exit);
+        Ok(Val::Unit)
+    }
+
+    /// `for x in it` over a user iterator, as HIR emission's: `into_iter`
+    /// on the iterable once, then each trip `next` on the iterator, the
+    /// loop left at `None` and `x` bound to the item.
+    fn for_iter(&mut self, local: HirLocal, iterable: HirId, body: HirId, plan: &HirIterLoop) -> Result<Val, Refusal> {
+        let ty = self.local_ty(local)?;
+        let it_ty = self.inp.word(&plan.iter_ty).ok_or("iterator type")?;
+        let Some(src) = self.word_or_boxed(iterable)? else {
+            return Ok(Val::Never);
+        };
+        let abi = DenseAbi {
+            params: vec![self.b.value_ty(src)],
+            ret: it_ty,
+            ret_hi: None,
+        };
+        let (it, _) = self.b.ins_call(plan.into_iter, vec![src], &abi).map_err(mir)?;
+        let item = self.hir.local(local).ty.clone().ok_or("local type")?;
+        let opt = crate::typechecking::ty::option_ty(item);
+        let (ret, ret_hi) = match plan.shape {
+            HirIterNext::Niche => {
+                if self.inp.word(&opt) != Some(MirTy::NicheOpt) {
+                    return Err("iterator next type".into());
+                }
+                (MirTy::NicheOpt, None)
+            }
+            HirIterNext::Pair => {
+                let (_, variants) = (self.inp.pair_variants)(&opt).ok_or("iterator next type")?;
+                let lo = variants.iter().find_map(|&(_, w)| w).ok_or("iterator next type")?;
+                (lo, Some(MirTy::I64))
+            }
+            HirIterNext::Boxed { .. } => (MirTy::HeapRef, None),
+        };
+        let head = self.b.create_block();
+        let body_b = self.b.create_block();
+        let exit = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let abi = DenseAbi {
+            params: vec![it_ty],
+            ret,
+            ret_hi,
+        };
+        let (w, hi) = self.b.ins_call(plan.next, vec![it], &abi).map_err(mir)?;
+        let x = match (plan.shape, hi) {
+            (HirIterNext::Niche, _) => {
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let none = self.b.ins_cmp(MirCmpOp::Eq, w, zero).map_err(mir)?;
+                self.b.branch(none, exit, body_b).map_err(mir)?;
+                self.switch(body_b);
+                self.fit(w, ty)?
+            }
+            (HirIterNext::Pair, Some(tag)) => {
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let none = self.b.ins_cmp(MirCmpOp::Eq, tag, zero).map_err(mir)?;
+                self.b.branch(none, exit, body_b).map_err(mir)?;
+                self.switch(body_b);
+                self.fit(w, ty)?
+            }
+            (HirIterNext::Boxed { some }, _) => {
+                let p = self.b.ins_match_payload(w, 0, ty).map_err(mir)?;
+                self.b.jump_if_match(w, some, vec![p], body_b, exit).map_err(mir)?;
+                self.switch(body_b);
+                p
+            }
+            _ => return Err("iterator next result".into()),
+        };
+        self.bind(local, x)?;
         self.loops.push(Loop {
             cont: head,
             cont_used: false,
@@ -3430,9 +3544,8 @@ impl Lower<'_> {
     /// last field first (it pops field 0 first), as HIR emission's
     /// `hir_make`.
     fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
-        if !args.is_empty() && (self.inp.enum_drop)(enum_name) {
-            return Err("make drop enum".into());
-        }
+        // A unit variant is a shared immortal: only payload variants drop.
+        let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, t) in args.iter().zip(tys) {
             // A `()` payload is the empty tuple object.
@@ -3467,7 +3580,11 @@ impl Lower<'_> {
                 (self.inp.word_kind)(t)
             }
         }));
-        let obj = self.b.ins_alloc_kinds(MirAllocKind::Enum { tag }, words, kinds).map_err(mir)?;
+        let kind = match drop_type {
+            Some(type_id) => MirAllocKind::DropEnum { tag, type_id },
+            None => MirAllocKind::Enum { tag },
+        };
+        let obj = self.b.ins_alloc_kinds(kind, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
@@ -3476,7 +3593,7 @@ impl Lower<'_> {
     /// the last, then that variant made from the payload word.
     fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
         let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;
-        if (self.inp.enum_drop)(&name) {
+        if (self.inp.enum_drop)(&name).is_some() {
             return Err("box drop enum".into());
         }
         let Some((&(last_tag, last_word), rest)) = variants.split_last() else {

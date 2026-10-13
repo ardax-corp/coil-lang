@@ -275,6 +275,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                     write!(f, " {type_id}, {nfields}")?;
                 }
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
+                MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Boxed { tag } => write!(f, " {tag}")?,
                 MirAllocKind::Fn { target, operand } => write!(f, " {}, {operand}", target.0)?,
@@ -884,6 +885,12 @@ impl<'a> Parser<'a> {
                 "enum" => MirAllocKind::Enum {
                     tag: self.uint()? as u32,
                 },
+                "dropenum" => {
+                    let tag = self.uint()? as u32;
+                    self.expect(',')?;
+                    let type_id = self.uint()? as u32;
+                    MirAllocKind::DropEnum { tag, type_id }
+                }
                 "dict" => MirAllocKind::Dict,
                 "dictentries" => MirAllocKind::DictEntries,
                 "coro" => MirAllocKind::Coro {

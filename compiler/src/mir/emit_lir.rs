@@ -1072,10 +1072,14 @@ fn emit_stored(
                 pool,
                 loc,
             })?;
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            if super::emit::dead_drop_alloc(func, *kind, *dest) {
+                out.push(IlOp::Pop { loc });
+            } else {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::GcBarrier { dest, .. } => {
             if let Some(obj) = paired_alloc_dest(func, *dest) {
