@@ -9389,7 +9389,18 @@ impl Compiler {
         apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
         for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
             if let Some(remap) = lowered.debug_slot_remaps.get(fn_name) {
-                vars.iter_mut().for_each(|v| v.loc.remap(remap));
+                for v in vars.iter_mut() {
+                    // A body emitted from MIR assigns its own registers: a
+                    // local the remap leaves out holds no value there, and
+                    // its old slot may now hold another value.
+                    if let crate::debug_vars::DebugVarLoc::Slot(home) = v.loc
+                        && !remap.contains_key(&home)
+                    {
+                        v.validated = true;
+                        v.ranges.clear();
+                    }
+                    v.loc.remap(remap);
+                }
             }
         }
         self.stack_maps = crate::mir::bind_drafts(

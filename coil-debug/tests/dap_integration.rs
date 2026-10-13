@@ -591,23 +591,21 @@ fn dap_panic_stops_for_inspection_case() {
     client.disconnect();
 }
 
-fn dap_let_locals_at_line_breakpoint_case() {
-    let dir = case_dir("coil-dap-locals");
+/// Stop at `line` of `src` and read the top frame's locals: each name with
+/// the value shown.
+fn locals_at_line(case: &str, src: &str, line: u32) -> Vec<(String, String)> {
+    let dir = case_dir(case);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("locals.hy");
-    std::fs::write(
-        &prog,
-        "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic \"label\";\n    }\n    return total;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
-    )
-    .unwrap();
+    std::fs::write(&prog, src).unwrap();
     let mut client = DapClient::spawn(&dir);
     initialize_and_launch(&mut client, prog.to_str().unwrap(), dir.to_str().unwrap(), false);
     let set_bp = client.request(
         "setBreakpoints",
         serde_json::json!({
             "source": { "path": prog.to_string_lossy() },
-            "breakpoints": [{ "line": 5 }]
+            "breakpoints": [{ "line": line }]
         }),
     );
     assert_eq!(
@@ -637,18 +635,17 @@ fn dap_let_locals_at_line_breakpoint_case() {
         "variables",
         serde_json::json!({ "variablesReference": variables_ref }),
     );
-    let value = |name: &str| {
-        vars.pointer("/body/variables")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(name))
-            .and_then(|v| v.get("value").and_then(|x| x.as_str()).map(str::to_string))
-    };
-    assert_eq!(value("n").as_deref(), Some("20"), "variables={vars}");
-    assert_eq!(value("doubled").as_deref(), Some("40"), "variables={vars}");
-    assert_eq!(value("total").as_deref(), Some("41"), "variables={vars}");
-    assert!(value("label").is_some_and(|v| v.contains('x')), "variables={vars}");
+    let locals = vars
+        .pointer("/body/variables")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            let name = v.get("name")?.as_str()?.to_string();
+            let value = v.get("value")?.as_str()?.to_string();
+            Some((name, value))
+        })
+        .collect();
     let clear = client.request(
         "setBreakpoints",
         serde_json::json!({ "source": { "path": prog.to_string_lossy() }, "breakpoints": [] }),
@@ -658,6 +655,42 @@ fn dap_let_locals_at_line_breakpoint_case() {
     let _ = client.wait_for_event("terminated");
     client.disconnect();
     let _ = std::fs::remove_dir_all(&dir);
+    locals
+}
+
+fn local<'a>(locals: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    locals.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+}
+
+fn dap_let_locals_at_line_breakpoint_case() {
+    // Each local is read again after the breakpoint, so it holds its value
+    // there whichever tier runs `work`.
+    let locals = locals_at_line(
+        "coil-dap-locals",
+        "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic label;\n    }\n    return total + doubled;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
+        5,
+    );
+    assert_eq!(local(&locals, "n"), Some("20"), "locals={locals:?}");
+    assert_eq!(local(&locals, "doubled"), Some("40"), "locals={locals:?}");
+    assert_eq!(local(&locals, "total"), Some("41"), "locals={locals:?}");
+    assert!(local(&locals, "label").is_some_and(|v| v.contains('x')), "locals={locals:?}");
+}
+
+/// A body emitted from MIR may reuse a dead local's frame word: the
+/// debugger shows that local as optimized out, never the value now there.
+fn dap_dead_local_is_optimized_out_case() {
+    let locals = locals_at_line(
+        "coil-dap-dead-local",
+        "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic \"label\";\n    }\n    return total;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
+        5,
+    );
+    assert_eq!(local(&locals, "n"), Some("20"), "locals={locals:?}");
+    assert_eq!(local(&locals, "total"), Some("41"), "locals={locals:?}");
+    // Optimized out, or (on a tier that keeps it) the local's own value.
+    let doubled = local(&locals, "doubled");
+    assert!(matches!(doubled, Some("<optimized out>" | "40")), "locals={locals:?}");
+    let label = local(&locals, "label");
+    assert!(label.is_some_and(|v| v == "<optimized out>" || v.contains('x')), "locals={locals:?}");
 }
 
 /// Tasks show as threads: the running task is thread 1, suspended tasks are
@@ -741,5 +774,6 @@ dap_tests! {
     dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
     dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
     dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
+    dap_dead_local_is_optimized_out_case => dap_dead_local_is_optimized_out;
     dap_tasks_are_threads_case => dap_tasks_are_threads;
 }
