@@ -35,6 +35,8 @@ pub(super) struct HirMirTables {
     /// Auto-par call sites sent to a fork-join worker, by call: the direct
     /// MIR lowering's calls.
     pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
+    /// Some value emission evaluates packs as a bare-class existential.
+    pub(super) existential_packs: bool,
     /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
     /// named functions read as values), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
@@ -84,6 +86,8 @@ impl Compiler {
     /// Plan `id`'s own entries, as [`Self::hir_value_unpacked`]'s arm for
     /// it records them.
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
+        // As `hir_value` packs a value after emitting it.
+        t.existential_packs |= self.hir_existential_pack(hir, id).is_some();
         let e = hir.expr(id);
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))

@@ -336,6 +336,9 @@ pub struct HirMirInput<'a> {
     /// whose own word is this niche layout: boxed on the way in, unboxed
     /// on the way out.
     pub boxed_niches: HashMap<u32, ValueLayout>,
+    /// HIR emission packs some value of the body as a bare-class
+    /// existential (`emit_existential_pack_recipe`).
+    pub existential_packs: bool,
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -786,6 +789,12 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         opaque_moves_only(hir, &func)?;
         func.opaque_words = true;
     }
+    // HIR emission packs a concrete value where a bare-class existential
+    // is expected (`[boxed value, dictionary]`); this lowering passes the
+    // value as is, so no tier emits from it.
+    if inp.existential_packs {
+        func.emit_refusal = Some("existential pack");
+    }
     Ok(func)
 }
 
@@ -1094,7 +1103,16 @@ impl Lower<'_> {
                     let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                     self.make_enum(0, Some(zero))?
                 }
-                Val::V(v) => self.box_niche(layout, v)?,
+                // Boxed from the word's own layout, as HIR emission
+                // converts from the value's: a niche `Result` word (its Err
+                // bit) may return as a `Result<(), E>`.
+                Val::V(v) => {
+                    let layout = match self.b.value_ty(v) {
+                        MirTy::NicheRes => ValueLayout::NicheResult,
+                        _ => layout,
+                    };
+                    self.box_niche(layout, v)?
+                }
                 _ => return Err("return value".into()),
             };
             return self.ret_word(boxed);
