@@ -113,6 +113,18 @@ pub struct HirOpCall {
     pub shift: bool,
 }
 
+/// An auto-par call site HIR emission sent to the callee's fork-join
+/// worker (`hir_par_call`): the worker called on the arguments and the
+/// `hops` budget; with `seq`, a one-argument site whose argument is below
+/// the cutoff calls the sequential function instead.
+#[derive(Clone, Debug)]
+pub struct HirParFork {
+    pub worker: Label,
+    pub hops: i64,
+    /// The sequential function and the cutoff below which it is called.
+    pub seq: Option<(Label, i64)>,
+}
+
 /// A parallel loop HIR emission moved into its own fork-join function
 /// (`hir_par_loop`): the loop is a plain `CALL` of it, which takes the
 /// accumulator, the live captures and the runtime bounds and returns the
@@ -269,6 +281,8 @@ pub struct HirMirInput<'a> {
     /// Parallel loops emitted as a call of their fork-join function, by
     /// loop.
     pub par_loops: &'a HashMap<u32, HirParLoop>,
+    /// Auto-par call sites sent to a fork-join worker, by call.
+    pub par_forks: &'a HashMap<u32, HirParFork>,
     /// User operators with no instance: the raw opcode on the operands'
     /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
     pub op_prims: &'a HashSet<u32>,
@@ -1804,6 +1818,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
+            HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
@@ -2955,6 +2970,60 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// An auto-par call as HIR emission left it: the fork-join worker on
+    /// the `int` arguments and the `hops` budget, or, for a one-argument
+    /// site with a cutoff, `arg <= cutoff - 1 ? seq(arg) : worker(arg, hops)`.
+    fn par_fork(&mut self, id: HirId, args: &[HirId], fork: &HirParFork) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let ret = self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?;
+        let mut words = Vec::with_capacity(args.len() + 1);
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(v) != MirTy::I64 {
+                return Err("parallel call word".into());
+            }
+            words.push(v);
+        }
+        let worker = |l: &mut Self, mut words: Vec<ValueId>| -> Result<ValueId, Refusal> {
+            words.push(l.b.ins_const(MirConst::I64(fork.hops)).map_err(mir)?);
+            let abi = DenseAbi {
+                params: vec![MirTy::I64; words.len()],
+                ret,
+                ret_hi: None,
+            };
+            Ok(l.at_expr(id, |l| l.b.ins_call(fork.worker, words, &abi).map_err(mir))?.0)
+        };
+        let Some((seq, cutoff)) = fork.seq else {
+            return Ok(Val::V(worker(self, words)?));
+        };
+        let [arg] = words[..] else {
+            return Err("parallel call arity".into());
+        };
+        let limit = self.b.ins_const(MirConst::I64(cutoff - 1)).map_err(mir)?;
+        let small = self.b.ins_cmp(MirCmpOp::Le, arg, limit).map_err(mir)?;
+        let seq_block = self.b.create_block();
+        let par_block = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.branch(small, seq_block, par_block).map_err(mir)?;
+        self.switch(seq_block);
+        let abi = DenseAbi {
+            params: vec![MirTy::I64],
+            ret,
+            ret_hi: None,
+        };
+        let (low, _) = self.at_expr(id, |l| l.b.ins_call(seq, vec![arg], &abi).map_err(mir))?;
+        let low_from = self.cur;
+        self.jump(join)?;
+        self.switch(par_block);
+        let high = worker(self, vec![arg])?;
+        let high_from = self.cur;
+        self.jump(join)?;
+        self.switch(join);
+        Ok(Val::V(self.b.ins_stack_phi(vec![(low_from, low), (high_from, high)]).map_err(mir)?))
     }
 
     /// A parallel loop as HIR emission left it: its fork-join function

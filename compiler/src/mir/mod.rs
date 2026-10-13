@@ -47,6 +47,7 @@ mod effects;
 mod emit;
 mod error;
 mod gc;
+mod gates;
 mod host_allow;
 mod emit_lir;
 mod func;
@@ -70,7 +71,7 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit_lir::emit_lir;
 pub use entry::LirRefuse;
-pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirFnValue, HirIterLoop, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParIndex, HirParLoop, ScalarLit};
+pub use from_hir::{lower_body as lower_from_hir, scalar as scalar_mir_ty, word as word_mir_ty, HirCallSite, HirFnValue, HirIterLoop, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, ScalarLit};
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
@@ -85,8 +86,8 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use error::LowerError;
 pub use specialize::{
-    mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
-    try_specialize_body_side, BodySidecar,
+    fuse_fallback, mir_fuse_on, mir_fuse_takes, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
+    try_specialize_body_side, BodyLabels, BodySidecar, GateRef,
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;
