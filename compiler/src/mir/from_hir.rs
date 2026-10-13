@@ -2592,6 +2592,21 @@ impl Lower<'_> {
         if arith.is_none() && cmp.is_none() {
             return Err(format!("operator {op:?}"));
         }
+        // `==` / `!=` on two-word values (an enum, tuple or range kept as
+        // a pair): both boxed, then the VM's structural `EQ`, as HIR
+        // emission compares them.
+        if matches!(op, BinOp::Eq | BinOp::Ne) && (self.inp.pair_tys.contains_key(&lhs.0) || self.inp.pair_tys.contains_key(&rhs.0)) {
+            let Some(l) = self.boxed_word(lhs)? else {
+                return Ok(Val::Never);
+            };
+            let Some(r) = self.boxed_word(rhs)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
+                return Err("operator operand type".into());
+            }
+            return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
+        }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
         }
@@ -3739,7 +3754,8 @@ impl Lower<'_> {
         let shows = self.inp.format_shows.get(&id.0);
         let mut words = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
-            let Some(v) = self.word(arg)? else {
+            // A two-word argument goes boxed, as emission passes it.
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             // `%v`: the value's `show`, a plain call of its raw entry.
@@ -4684,7 +4700,8 @@ impl Lower<'_> {
             [arg] => *arg,
             _ => return Err("variant payload".into()),
         };
-        let Some(v) = self.word(arg)? else {
+        // A two-word payload (a tuple) rides boxed.
+        let Some(v) = self.word_or_boxed(arg)? else {
             return Ok(Val::Never);
         };
         if !self.b.value_ty(v).is_heap_word() {
