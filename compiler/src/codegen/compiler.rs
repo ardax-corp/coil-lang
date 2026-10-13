@@ -8922,6 +8922,7 @@ impl Compiler {
             let flat_id = flat_label(idx, emit_id);
             lowered.label_pcs.get(&flat_id).copied()
         };
+        let first_body = funcs.iter().map(|f| f.code_start).min().unwrap_or(usize::MAX);
         let resolve_entry = |pre: usize| -> usize {
             if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
                 if let Some(idx) = func_idx_for_pre(pre) {
@@ -8929,6 +8930,14 @@ impl Compiler {
                     if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
                         return pc;
                     }
+                }
+                // The prologue (static / extern setup) keeps its emit-time
+                // ids when flattened; a body's private label space may reuse
+                // one, so `label_remap` would land inside that body.
+                if pre < first_body
+                    && let Some(&pc) = lowered.label_pcs.get(&label.0)
+                {
+                    return pc;
                 }
                 let global_flat = lowered
                     .label_remap
