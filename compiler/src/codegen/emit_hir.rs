@@ -2153,6 +2153,11 @@ impl Compiler {
             Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
             // A static's initializer returns the word its slot holds.
+            // A compiler-made body ([`crate::hir::synth`]) returns in its
+            // declared type's layout: it has no checker signature.
+            None if self.hir_synth_calls.is_some() => {
+                Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
+            }
             None if hir.kind == crate::hir::BodyKind::Static => {
                 Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
             }
