@@ -22,6 +22,9 @@ use crate::hir::{
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::value_layout::ValueLayout;
 
+#[path = "emit_hir_mir.rs"]
+mod emit_hir_mir;
+
 /// How a value sits on the operand stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Rep {
@@ -317,6 +320,9 @@ struct HirEmit {
     /// Parallel loops emitted as a call of their fork-join function, by
     /// loop: the direct MIR lowering's calls.
     par_calls: HashMap<u32, crate::mir::HirParLoop>,
+    /// Auto-par call sites sent to a fork-join worker, by call: the direct
+    /// MIR lowering's calls.
+    par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// The fork-join functions those calls reach, emitted after this body
     /// ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
@@ -330,14 +336,6 @@ struct HirEmit {
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// String table index of each `string` literal, by expression.
-    string_lits: HashMap<u32, u32>,
-    /// String table index of the format string of each `format` call
-    /// whose arguments all print as words, by call (`%v` as `%s`).
-    format_strs: HashMap<u32, u32>,
-    /// Per argument of such a `format` call (after the format string): the
-    /// raw `show` entry a `%v` argument goes through, `None` for a word.
-    format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
     /// User operators emitted as their instance method's plain `CALL`.
     op_calls: HashMap<u32, crate::mir::HirOpCall>,
     /// User operators emitted as a raw opcode on the operands.
@@ -880,7 +878,8 @@ impl Compiler {
             // frame slots; direct MIR keeps them in registers or folds them.
             Err("split local under a debugger".to_string())
         } else {
-            self.hir_mir_input(hir, emit, file, entry_words)
+            let tables = self.hir_mir_tables(hir, emit);
+            self.hir_mir_input(hir, emit, &tables, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
         };
         match why {
@@ -899,12 +898,14 @@ impl Compiler {
         }
     }
 
-    /// What direct MIR lowering needs from emission: slots, call sites, and
-    /// the word types of each two-word pair.
+    /// What direct MIR lowering needs from emission: slots, the side
+    /// tables planned over the HIR ([`Self::hir_mir_tables`]), call sites,
+    /// and the word types of each two-word pair.
     fn hir_mir_input<'a>(
         &'a self,
         hir: &HirBody,
         emit: &'a HirEmit,
+        tables: &'a emit_hir_mir::HirMirTables,
         file: Option<u32>,
         entry_words: Option<u32>,
     ) -> Result<crate::mir::HirMirInput<'a>, String> {
@@ -1257,13 +1258,14 @@ impl Compiler {
             calls: &emit.call_targets,
             into_iters: &emit.into_iters,
             iter_loops: &emit.iter_loops,
-            strings: &emit.string_lits,
+            strings: &tables.strings,
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
-            formats: &emit.format_strs,
-            format_shows: &emit.format_shows,
+            formats: &tables.formats,
+            format_shows: &tables.format_shows,
             op_calls: &emit.op_calls,
             par_loops: &emit.par_calls,
+            par_forks: &emit.par_forks,
             op_prims: &emit.op_prims,
             fn_values: &emit.fn_values,
             value_calls: &emit.value_calls,
@@ -2147,6 +2149,11 @@ impl Compiler {
             Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
             // A static's initializer returns the word its slot holds.
+            // A compiler-made body ([`crate::hir::synth`]) returns in its
+            // declared type's layout: it has no checker signature.
+            None if self.hir_synth_calls.is_some() => {
+                Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
+            }
             None if hir.kind == crate::hir::BodyKind::Static => {
                 Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
             }
@@ -2222,13 +2229,11 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             par_calls: HashMap::new(),
+            par_forks: HashMap::new(),
             par_tail: Vec::new(),
             call_targets: HashMap::new(),
             into_iters: HashMap::new(),
             iter_loops: HashMap::new(),
-            string_lits: HashMap::new(),
-            format_strs: HashMap::new(),
-            format_shows: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
             fn_values: HashMap::new(),
@@ -4412,28 +4417,6 @@ impl Compiler {
     }
 
     /// `Show` the value on top of the stack, leaving its string.
-    /// [`Self::hir_show`], and the entry it called when that is one plain
-    /// `CALL` of a raw `show` on the value's own word (a heap or immediate
-    /// word, no dictionary): direct MIR makes it the same call.
-    fn hir_show_target(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::il::Label> {
-        let start = self.bytecode.il_mut().raw_len();
-        self.hir_show(hir, arg);
-        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
-        if self.value_layout(&ty) != ValueLayout::Boxed {
-            return None;
-        }
-        match self.bytecode.il_mut().ops_slice_mut()[start..] {
-            [IlOp::Entry {
-                kind: crate::il::EntryKind::Call,
-                target,
-                arity: 1,
-                ret_words: 1,
-                ..
-            }] => Some(target),
-            _ => None,
-        }
-    }
-
     fn hir_show(&mut self, hir: &HirBody, arg: HirId) {
         if let Some((dict, method)) = self.hir_bound_show(hir, arg) {
             self.bytecode.push_load(dict);
@@ -6704,7 +6687,6 @@ impl Compiler {
             HirKind::Lit(Lit::Str(raw)) => {
                 let text = unescape_coil_string(raw);
                 let idx = self.intern_string(&text);
-                emit.string_lits.insert(id.0, idx);
                 self.bytecode.push_string(idx);
             }
             HirKind::Lit(Lit::Unit) => self.bytecode.push_const(0),
@@ -6801,9 +6783,8 @@ impl Compiler {
             HirKind::Global { .. } => {
                 let value = emit.plan.consts[&id.0].clone();
                 if let crate::const_fold::ConstValue::Str(text) = &value {
-                    // As `emit_const_value`; direct MIR reads the index.
+                    // As `emit_const_value`.
                     let idx = self.intern_string(text);
-                    emit.string_lits.insert(id.0, idx);
                     self.bytecode.push_string(idx);
                 } else {
                     let mut bc = CodeBuf::new();
@@ -6843,8 +6824,6 @@ impl Compiler {
                 let mut fmt = CodeBuf::new();
                 self.emit_raw_string_literal(&mut fmt, "%s%s");
                 self.bytecode.append(&mut fmt);
-                let idx = self.intern_string("%s%s");
-                emit.format_strs.insert(id.0, idx);
                 if staged {
                     self.bytecode.push_load(temps[0]);
                     self.bytecode.push_load(temps[1]);
@@ -7148,9 +7127,7 @@ impl Compiler {
                 args,
             } => {
                 let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
-                // Direct MIR reads the index.
                 let idx = self.intern_string(&name);
-                emit.string_lits.insert(id.0, idx);
                 self.bytecode.push_string(idx);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
@@ -7197,9 +7174,7 @@ impl Compiler {
                 self.bytecode.push_const(0);
                 self.bytecode.push(Byte::new(Instruction::GEQ));
                 bb.emit_jump_to(ok, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
-                // Direct MIR reads the message's index.
                 let idx = self.intern_string("index out of bounds");
-                emit.string_lits.insert(id.0, idx);
                 self.bytecode.push_string(idx);
                 self.bytecode.push(Byte::new(Instruction::Panic));
                 bb.bind_label(ok, self.bytecode.il_mut());
@@ -7424,19 +7399,12 @@ impl Compiler {
                         let staged = lower::shows_through_temps(hir, &self.checker, hir.expr(id))
                             || self.hir_stages_args(hir, emit, args, depth);
                         let mut temps = Vec::new();
-                        // Each `%v` argument's raw `show` entry, for direct MIR.
-                        let mut shows = Vec::with_capacity(args.len().saturating_sub(1));
-                        let mut shows_ok = true;
                         if staged {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
                                 self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                                 if specs.get(i - 1) == Some(&'v') {
                                     self.expr_depth = 0;
-                                    let show = self.hir_show_target(hir, arg);
-                                    shows_ok &= show.is_some();
-                                    shows.push(show);
-                                } else {
-                                    shows.push(None);
+                                    self.hir_show(hir, arg);
                                 }
                                 self.expr_depth = 0;
                                 let tmp = self.alloc_temp_slot();
@@ -7454,18 +7422,7 @@ impl Compiler {
                                 // `Show::show` on the value: a call, so it
                                 // keeps the operands below it.
                                 self.expr_depth = depth + i as u32;
-                                let show = self.hir_show_target(hir, arg);
-                                shows_ok &= show.is_some();
-                                shows.push(show);
-                            } else {
-                                shows.push(None);
-                            }
-                        }
-                        if shows_ok {
-                            let idx = self.intern_string(unescape_coil_string(&fmt));
-                            emit.format_strs.insert(id.0, idx);
-                            if specs.contains(&'v') {
-                                emit.format_shows.insert(id.0, shows);
+                                self.hir_show(hir, arg);
                             }
                         }
                         self.bytecode
@@ -7863,7 +7820,7 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let tail = emit.plan.tail_calls.contains(&id.0);
-                if self.hir_par_call(hir, emit, &key, args, depth) {
+                if self.hir_par_call(hir, emit, id, &key, args, depth) {
                     if tail {
                         // A tail site's `Return` emits nothing after it.
                         if natural.words() == 2 {
@@ -10783,7 +10740,7 @@ impl Compiler {
     /// guards accept: the worker with its hop budget) and
     /// `try_emit_par_dynamic_call` (one non-literal argument: the worker
     /// above the site's cutoff, else the sequential function).
-    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
+    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, key: &str, args: &[HirId], depth: u32) -> bool {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks.
         if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
@@ -10816,6 +10773,9 @@ impl Compiler {
             self.bytecode.push_const(hops);
             self.bytecode
                 .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
+            if let Some(worker) = self.hir_last_call_target() {
+                self.hir_note_par_fork(hir, emit, id, worker, None);
+            }
             return true;
         }
         let [arg] = args else { return false };
@@ -10835,12 +10795,40 @@ impl Compiler {
         self.bytecode.push(Byte::new(Instruction::LE));
         self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
         self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+        let seq = self.hir_last_call_target();
         self.hir_jump(IlJumpKind::Unconditional, done);
         self.bytecode.bind_label(use_worker);
         self.bytecode.push_const(hops);
         self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+        if let (Some(worker), Some(seq)) = (self.hir_last_call_target(), seq) {
+            self.hir_note_par_fork(hir, emit, id, worker, Some((seq, cutoff)));
+        }
         self.bytecode.bind_label(done);
         true
+    }
+
+    /// The target of the `CALL` just pushed, as its IL `Entry`.
+    fn hir_last_call_target(&mut self) -> Option<crate::il::Label> {
+        match self.bytecode.il_mut().ops_slice_mut().last() {
+            Some(&IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                target,
+                ret_words: 1,
+                ..
+            }) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Record auto-par site `id` for direct MIR when its result comes back
+    /// in its own type's one-word layout.
+    fn hir_note_par_fork(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, worker: crate::il::Label, seq: Option<(crate::il::Label, i64)>) {
+        let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
+        if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
+            return;
+        }
+        let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
+        emit.par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
