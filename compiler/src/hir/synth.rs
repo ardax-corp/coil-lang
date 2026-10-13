@@ -1,14 +1,14 @@
-//! HIR bodies the compiler makes itself, with no source of their own (the
-//! auto-par fork-join workers). They lower like any other body (HIR
-//! lowering, then direct MIR), instead of being written out as stack IL by
-//! hand.
+//! HIR bodies the compiler makes itself, with no source of their own: the
+//! auto-par fork-join workers and the test-runner `main`. They lower like
+//! any other body (HIR lowering, then direct MIR), instead of being written
+//! out as stack IL by hand.
 //!
 //! Every node takes [`SPAN`], which no source node has, so no span-keyed
 //! checker or sidecar fact is found for it; lowering clears the debug
 //! locations it would derive from it.
 
 use super::layout;
-use super::{BinOp, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind};
+use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
@@ -79,6 +79,14 @@ impl<'a> Synth<'a> {
         self.push(HirKind::Lit(Lit::Int(n)), coil_ty::int())
     }
 
+    pub fn str(&mut self, s: &str) -> HirId {
+        self.push(HirKind::Lit(Lit::Str(s.to_string())), coil_ty::string())
+    }
+
+    pub fn unit(&mut self) -> HirId {
+        self.push(HirKind::Lit(Lit::Unit), coil_ty::unit())
+    }
+
     pub fn read(&mut self, local: LocalId) -> HirId {
         let ty = self.body.local(local).ty.clone().unwrap_or_else(coil_ty::int);
         self.push(HirKind::Local(local), ty)
@@ -101,6 +109,12 @@ impl<'a> Synth<'a> {
         self.push(HirKind::Let { local, init: Some(init) }, coil_ty::unit())
     }
 
+    pub fn assign(&mut self, local: LocalId, value: HirId) -> HirId {
+        let place = self.read(local);
+        let ty = self.body.local(local).ty.clone().unwrap_or_else(coil_ty::int);
+        self.push(HirKind::Assign { place, value }, ty)
+    }
+
     pub fn block(&mut self, stmts: Vec<HirId>, tail: Option<HirId>, ty: Ty) -> HirId {
         self.push(HirKind::Block { stmts, tail }, ty)
     }
@@ -111,6 +125,10 @@ impl<'a> Synth<'a> {
 
     pub fn ret(&mut self, value: HirId) -> HirId {
         self.push(HirKind::Return(Some(value)), coil_ty::never())
+    }
+
+    pub fn builtin(&mut self, op: Builtin, args: Vec<HirId>, ty: Ty) -> HirId {
+        self.push(HirKind::Builtin { op, args }, ty)
     }
 
     pub fn match_(&mut self, scrutinee: HirId, arms: Vec<(HirPat, HirId)>, ty: Ty) -> HirId {

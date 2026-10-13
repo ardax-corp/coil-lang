@@ -962,6 +962,7 @@ impl Cx<'_> {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
                 Builtin::TypeOf | Builtin::Done | Builtin::Readonly | Builtin::Default => {}
+                Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
             },
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).
