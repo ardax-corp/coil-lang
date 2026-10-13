@@ -2288,7 +2288,7 @@ impl Compiler {
                             std::mem::replace(&mut self.namespace, src.class.clone()),
                             // Its signature, as a mono clone's: a generic
                             // `Option` / `Result` result in the open layout.
-                            std::mem::replace(&mut self.current_function_qualified, Some(req.src.clone())),
+                            self.current_function_qualified.replace(req.src.clone()),
                         )
                     });
                     let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
