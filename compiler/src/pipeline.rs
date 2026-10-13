@@ -141,6 +141,10 @@ pub struct Pipeline {
     macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Files whose macros an enclosing pipeline is expanding (cycle check).
     macro_stack: Vec<PathBuf>,
+    /// Compiles a macro expansion program: provider modules keep their
+    /// lowered macro functions (other pipelines drop them, see
+    /// [`macros::strip_compile_time_items`]).
+    expansion_program: bool,
     /// Generated-code spans per file, for moving diagnostics to macro sites.
     generated_ranges: Vec<macros::GeneratedRange>,
     /// Items each derived type already received, to splice in derive order.
@@ -725,6 +729,7 @@ impl Pipeline {
             cursor_il: None,
             macro_host: crate::macros::default_host(),
             macro_stack: Vec::new(),
+            expansion_program: false,
             generated_ranges: Vec::new(),
             derived_items: HashMap::new(),
         };
@@ -1188,6 +1193,18 @@ impl Pipeline {
         let module = self.namespace_for(file);
         let mut cached = crate::ast_cache::CachedAst::parse(source);
         let _ = cached.expand_in(&module);
+        // A provider's macros run only in the expansion program. The entry
+        // file keeps them so its macro bodies are still checked.
+        if !self.expansion_program
+            && self.entry_file.as_deref() != Some(file)
+            && !cached.macro_decls().is_empty()
+        {
+            let decls = cached.macro_decls().to_vec();
+            let source = cached.source().to_string();
+            if let Some(ast) = cached.ast_mut() {
+                crate::macros::strip_compile_time_items(ast, &source, &decls);
+            }
+        }
         self.ast_cache.insert(file.to_path_buf(), cached);
         true
     }
@@ -3081,10 +3098,21 @@ fn main() -> int {
                 .any(|b| *b.bytecode() == Instruction::YieldCoro),
             "scan_yield must contain YieldCoro"
         );
+        // A yielding body may take dense (a yield is one MIR instruction,
+        // a safepoint as a call is); its read stays bounds-checked: a dense
+        // index without the unchecked flag checks against the live length.
+        let checked_dense = |b: &common::Byte| {
+            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf)
+                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED == 0
+        };
+        let unchecked_dense = |b: &common::Byte| {
+            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf | Instruction::DenseStoreIndex)
+                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED != 0
+        };
         assert!(
             yield_body
                 .iter()
-                .any(|b| *b.bytecode() == Instruction::Index),
+                .any(|b| *b.bytecode() == Instruction::Index || checked_dense(b)),
             "scan_yield must keep checked Index; body={:?}",
             yield_body
                 .iter()
@@ -3093,6 +3121,7 @@ fn main() -> int {
         );
         assert!(
             yield_body.iter().all(|b| !is_pin(*b.bytecode())
+                && !unchecked_dense(b)
                 && *b.bytecode() != Instruction::IndexUnchecked
                 && *b.bytecode() != Instruction::StoreIndexUnchecked),
             "scan_yield must not pin or uncheck; body={:?}",

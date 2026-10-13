@@ -331,3 +331,64 @@ pub fn escape_string_lit(s: &str) -> String {
 pub fn string_lit(s: &str) -> String {
     format!("\"{}\"", escape_string_lit(s))
 }
+
+/// Drop what only the compile-time expansion program needs from a provider
+/// module compiled into a program: the lowered macro functions in `decls`,
+/// and its `use macro::…` items once nothing left in the module names what
+/// they import. The program never calls a macro, and compiling the `macro`
+/// module into it would clash with user types of the same names (`Code`,
+/// `Reader`).
+pub fn strip_compile_time_items(ast: &mut parser::ast::Output<'_>, source: &str, decls: &[MacroDecl]) {
+    use parser::ast::Expression;
+    let Expression::Program(children) = ast.1.as_mut() else {
+        return;
+    };
+    children.retain(|c| match c.1.as_ref() {
+        Expression::Function { name, .. } => !decls.iter().any(|d| d.fn_name == *name),
+        _ => true,
+    });
+    fn macro_use(node: &parser::ast::Output<'_>) -> bool {
+        matches!(node.1.as_ref(), Expression::Use { path, .. } if path.first().map(String::as_str) == Some(MACRO_MODULE))
+    }
+    fn imported(node: &parser::ast::Output<'_>, out: &mut Vec<String>) {
+        match node.1.as_ref() {
+            Expression::Use { name, alias, .. } if macro_use(node) => {
+                out.push(alias.clone().unwrap_or_else(|| name.clone()));
+            }
+            Expression::Fragment(items) => items.iter().for_each(|i| imported(i, out)),
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    children.iter().for_each(|c| imported(c, &mut names));
+    if names.is_empty() || names.iter().any(|n| n == "*") {
+        return;
+    }
+    let mentions = |text: &str, name: &str| {
+        text.match_indices(name).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + name.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
+    let still_used = children.iter().any(|c| {
+        let is_use = matches!(c.1.as_ref(), Expression::Use { .. } | Expression::Fragment(_));
+        !is_use
+            && source
+                .get(c.0.into_range())
+                .is_some_and(|text| names.iter().any(|n| mentions(text, n)))
+    });
+    if still_used {
+        return;
+    }
+    fn drop_macro_uses(items: &mut Vec<parser::ast::Output<'_>>) {
+        items.retain(|i| !macro_use(i));
+        for i in items.iter_mut() {
+            if let Expression::Fragment(inner) = i.1.as_mut() {
+                drop_macro_uses(inner);
+            }
+        }
+    }
+    drop_macro_uses(children);
+}

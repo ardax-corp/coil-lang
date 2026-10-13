@@ -537,6 +537,7 @@ pub struct Compiler {
     program_seq: usize,
     /// Set while a clone compiles: the thunk body it falls back to.
     inst_clone_fallback: Option<(InstCloneSrc, InstClone)>,
+    /// Entry labels minted at program start for the clones' entries.
     inst_clone_labels: Vec<IlLabel>,
     /// Checker type variable → concrete type, per mono clone being compiled
     /// (the source function's type parameters), for open dictionary goals.

@@ -7010,6 +7010,7 @@ impl Compiler {
         let entry = self.fn_entry_labels.get(&name).copied();
         self.bytecode
             .record_func_with_sp(name, entry, body_start, body_end, 0);
+        self.attach_hir_mir();
 
         self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;

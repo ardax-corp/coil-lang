@@ -308,7 +308,7 @@ impl EmitPlan {
                 }
                 // Host calls have effects: emit them in program order and
                 // keep the result in a slot, never as an inline operand.
-                if let MirInst::HostInvoke { dest, .. } = inst {
+                if let MirInst::HostInvoke { dest, .. } | MirInst::CallIndirect { dest, .. } = inst {
                     need_slot[dest.index()] = true;
                     tree[dest.index()] = false;
                 }
@@ -390,8 +390,10 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::StoreIndex { .. }
             | MirInst::ArrayPush { .. }
             | MirInst::Call { .. }
+            | MirInst::CallIndirect { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::ResumeCoro { .. }
+            | MirInst::Yield { .. }
             | MirInst::StoreStatic { .. }
             | MirInst::Print { .. }
     )
@@ -896,6 +898,23 @@ fn emit_stored(
                 always_store: true,
             })?;
         }
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
@@ -947,6 +966,17 @@ fn emit_stored(
                 layout: *layout,
                 loc,
             });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::CallIndirect { dest, callee, args } => {
+            // The arguments, then the function value on top.
+            for a in args.iter().chain([callee]) {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -1130,7 +1160,7 @@ fn emit_alloc_stack(args: EmitAllocStackArgs<'_>) -> Result<(), LowerError> {
     for e in elems {
         emit_stack(out, *e, func, plan, regs, pool, loc)?;
     }
-    out.push(il_for_alloc(kind, elems.len() as u32, loc)?);
+    out.extend(il_for_alloc(kind, elems.len() as u32, loc)?);
     Ok(())
 }
 
@@ -1437,6 +1467,24 @@ fn emit_stack(
             loc,
             always_store: false,
         }),
+        MirInst::Yield {
+            dest,
+            value,
+            from,
+            receive,
+        } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let op = if *from { Instruction::YieldFromCoro } else { Instruction::YieldCoro };
+            out.push(IlOp::from_plain_byte(Byte::new(op), loc));
+            // The VM pushes the sent word only for a store right after.
+            if *receive {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
@@ -1482,7 +1530,7 @@ fn emit_stack(
             }
             Ok(())
         }
-        MirInst::HostInvoke { .. } | MirInst::Call { .. } => Err(LowerError::Refused(
+        MirInst::HostInvoke { .. } | MirInst::Call { .. } | MirInst::CallIndirect { .. } => Err(LowerError::Refused(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
         MirInst::MatchPayload { dest, .. } => {
