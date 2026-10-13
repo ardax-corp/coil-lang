@@ -52,6 +52,9 @@ pub struct MirBuilder {
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
     pub pending_loc: DebugLoc,
+    /// The local each source local is kept in (`LocalId` to `LocalId`);
+    /// one not listed is itself.
+    pub relocate: HashMap<u32, u32>,
 }
 
 impl MirBuilder {
@@ -68,7 +71,13 @@ impl MirBuilder {
             allow_effects: false,
             allow_host_edges: false,
             pending_loc: DebugLoc::unknown(),
+            relocate: HashMap::new(),
         }
+    }
+
+    /// Where source local `local` is kept ([`Self::relocate`]).
+    fn at(&self, local: LocalId) -> LocalId {
+        self.relocate.get(&local.0).map_or(local, |&to| LocalId(to))
     }
 
     pub fn func(&self) -> &MirFunc {
@@ -94,6 +103,7 @@ impl MirBuilder {
 
     /// Bind a source local to an SSA value in the current block.
     pub fn def_local(&mut self, local: LocalId, val: ValueId) -> Result<(), MirError> {
+        let local = self.at(local);
         let b = self.cur()?;
         if self.func.ty(val).is_heap_word() {
             self.func.heap_slots.insert(local);
@@ -106,6 +116,7 @@ impl MirBuilder {
 
     /// Read a source local, inserting φs at sealed / incomplete joins.
     pub fn use_local(&mut self, local: LocalId, ty: MirTy) -> Result<ValueId, MirError> {
+        let local = self.at(local);
         let b = self.cur()?;
         Ok(self.read_variable(local, ty, b))
     }
@@ -825,6 +836,7 @@ impl MirBuilder {
     /// Whether every path from the entry to the current block defines
     /// `local` (a known predecessor that does not leads to one that does).
     pub fn local_defined(&self, local: LocalId) -> bool {
+        let local = self.at(local);
         let Ok(start) = self.cur() else {
             return false;
         };
