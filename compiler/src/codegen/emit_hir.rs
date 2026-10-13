@@ -4865,6 +4865,7 @@ impl Compiler {
                     | HirKind::Index { .. }
                     | HirKind::Global { .. }
                     | HirKind::Lit(Lit::Str(_))
+                    | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
             )
         {
             return None;

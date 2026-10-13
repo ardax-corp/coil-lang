@@ -4968,7 +4968,11 @@ impl Compiler {
         self.raw_instance_methods.insert(fqn.to_string());
     }
 
-    /// Emit bytecode thunks for compiler-provided primitive instances.
+    /// Emit the bodies of the compiler-provided primitive instances, each
+    /// built as HIR ([`crate::hir::synth::builtin_entry`]) and lowered like
+    /// any other body. The stream `Read` / `Write` entries stay stack IL:
+    /// their natives' registry names (`read`, `write`) can be shadowed by a
+    /// user function of the same name, which a named HIR call would reach.
     ///
     /// Shared generic bodies receive boxed type-parameter values, so numeric
     /// thunks unbox their two arguments and re-box a type-parameter result.
@@ -5136,13 +5140,7 @@ impl Compiler {
             &[(string.clone(), tag_of(ValueTag::String))],
             int.clone(),
             None,
-            |b, a| {
-                let s = b.local("s", string.clone(), crate::hir::LocalKind::Let);
-                let init = b.let_(s, a[0]);
-                let read = b.read(s);
-                let len = b.call("len", vec![read], int.clone());
-                b.block(vec![init], Some(len), int.clone())
-            },
+            |b, a| b.call("len", vec![a[0]], int.clone()),
         );
 
         // Hash thunks: int/byte/bool identity after unbox; float via Value bits; string HostInvoke hash_string.

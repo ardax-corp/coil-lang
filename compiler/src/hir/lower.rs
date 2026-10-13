@@ -696,7 +696,13 @@ impl Walk<'_> {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
                 ..
             } => Ok(()),
-            HirKind::Call { .. } | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if structural => {
+            HirKind::Call { .. }
+            | HirKind::Field { .. }
+            | HirKind::Index { .. }
+            | HirKind::Global { .. }
+            | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
+                if structural =>
+            {
                 self.word(arg)?;
                 self.value(arg, depth)
             }
