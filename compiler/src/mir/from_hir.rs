@@ -1994,8 +1994,15 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
-                let ty = self.expr_ty(*place).and_then(|t| self.inp.word(t)).ok_or("field type")?;
-                let Some(v) = self.word(*value)? else {
+                let boxed = self.boxed_slot_field(*place);
+                let ty = self
+                    .expr_ty(*place)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| boxed.then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
+                // A two-word value is stored boxed, as the slot's `new` did.
+                let v = if boxed { self.boxed_word(*value)? } else { self.word(*value)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2088,7 +2095,11 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
+                let ty = self
+                    .expr_ty(id)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| self.boxed_slot_field(id).then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
                     return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
                 }
@@ -2861,6 +2872,22 @@ impl Lower<'_> {
         Ok(Some((self.b.use_local(boxed, MirTy::HeapRef).map_err(mir)?, index)))
     }
 
+    /// Whether field `id` of a frame-slot class local is a two-word enum
+    /// its slot holds boxed (as HIR emission's `new` stored it).
+    fn boxed_slot_field(&self, id: HirId) -> bool {
+        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+            return false;
+        };
+        let HirKind::Local(local) = self.hir.expr(*base).kind else {
+            return false;
+        };
+        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+            return false;
+        };
+        slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
+            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+    }
+
     /// The heap array a boxed stack array local `id` names.
     fn boxed(&self, id: HirId) -> Option<LocalId> {
         match self.hir.expr(id).kind {
@@ -3327,7 +3354,10 @@ impl Lower<'_> {
                 // Every item before any slot changes (`a = [a[1], a[0]]`).
                 let mut words = Vec::with_capacity(args.len());
                 for (&arg, &ty) in args.iter().zip(&tys) {
-                    let Some(v) = self.word(arg)? else {
+                    // A two-word field value is stored boxed.
+                    let pair = ty == MirTy::HeapRef && self.expr_ty(arg).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some());
+                    let v = if pair { self.boxed_word(arg)? } else { self.word(arg)? };
+                    let Some(v) = v else {
                         return Ok(Val::Never);
                     };
                     if self.b.value_ty(v) != ty {
@@ -4229,8 +4259,9 @@ impl Lower<'_> {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
             HirKind::Field { .. } => {
-                self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
-                    && !self.inp.boxed_niches.contains_key(&scrutinee.0)
+                (self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
+                    && !self.inp.boxed_niches.contains_key(&scrutinee.0))
+                    || self.boxed_slot_field(scrutinee)
             }
             // So does an array element.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {
