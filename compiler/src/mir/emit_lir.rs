@@ -456,6 +456,25 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                     visit(v, &at, insts, &is_inline, &mut order);
                 }
             }
+            // A clear zeroes its value's slot where it stands, so an
+            // inline user from before the clear must not be emitted after
+            // it (`let j = join(s); clear s; return j` would read the
+            // zeroed slot): that user keeps its slot.
+            let stale = order.iter().enumerate().find_map(|(i, &c)| {
+                let MirInst::ClearWord { value, .. } = &insts[c] else {
+                    return None;
+                };
+                order[i + 1..]
+                    .iter()
+                    .find(|&&k| k < c && insts[k].operands().contains(value))
+                    .map(|&k| insts[k].dest())
+            });
+            if let Some(v) = stale
+                && tree[v.index()]
+            {
+                tree[v.index()] = false;
+                continue;
+            }
             let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
             // A later-defined op emitted first means an earlier one was
             // delayed past it.

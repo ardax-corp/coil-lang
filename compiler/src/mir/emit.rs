@@ -314,12 +314,19 @@ pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
     }
     let live = super::gc::liveness_after(func);
     for (b, block) in func.blocks.iter().enumerate() {
+        // A compare fused into the branch is emitted at the terminator,
+        // after any clear in the block: keep the words it reads.
+        let fused_reads: Vec<ValueId> = term_cmp_dest(func, block)
+            .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
+            .map(|i| i.operands())
+            .unwrap_or_default();
         for (k, inst) in block.insts.iter().enumerate() {
             let MirInst::ClearWord { dest, value } = inst else {
                 continue;
             };
             let slot = |v: &ValueId| need_slot.get(v.index()).copied().unwrap_or(false);
             if slot(value)
+                && !fused_reads.contains(value)
                 && !func.params.contains(value)
                 && !live[b][k].iter().any(|v| slot(v) && regs[v.index()] == regs[value.index()])
             {

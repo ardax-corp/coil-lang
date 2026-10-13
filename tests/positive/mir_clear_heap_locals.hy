@@ -74,3 +74,26 @@ test("a spliced heap local dies at its clear") {
 test("a cleared value another local holds stays live") {
     assert(kept_by_result() == 3)?;
 }
+
+fn pick() -> Result<string, string> {
+    return Result::Ok("coil");
+}
+
+fn sep(string a, string b) -> string {
+    return a + "/" + b;
+}
+
+// The `?` payload is cleared after the `let`; when the joined string is
+// built inline at the return, it must still read the payload first.
+fn joined_after_clear() -> Result<string, string> {
+    let j = sep("a", pick()?);
+    return Result::Ok(j);
+}
+
+test("an inline use is not moved past its value's clear") {
+    let got = match joined_after_clear() {
+        Result::Ok(s) => s,
+        Result::Err(e) => e,
+    };
+    assert(got == "a/coil")?;
+}
