@@ -93,6 +93,9 @@ pub fn emit_dense(
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         let loc = func.term_loc(block.id);
         seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, &plan, &regs, loc);
+        if missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc });
+        }
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
@@ -1942,6 +1945,23 @@ pub(super) fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: 
                     if *s == scrutinee && *not_taken == block
             )
         })
+}
+
+/// `block` is reached only by boxed `JumpIfMatch` misses, which leave the
+/// scrutinee on the stack, and takes no payload of it (a unit last arm,
+/// or a later arm's test, which pushes the scrutinee again): the leftover
+/// is popped, or every miss grows the stack.
+pub(super) fn missed_scrutinee_unused(func: &MirFunc, block: BlockId) -> bool {
+    let Some(&pred) = func.preds()[block.index()].first() else {
+        return false;
+    };
+    let Some(Terminator::JumpIfMatch { scrutinee, not_taken, .. }) = &func.block(pred).term else {
+        return false;
+    };
+    *not_taken == block
+        && !matches!(func.ty(*scrutinee), MirTy::NicheOpt | MirTy::NicheRes)
+        && scrutinee_left_by_miss(func, block, *scrutinee)
+        && last_arm_payloads(func, block, *scrutinee).is_empty()
 }
 
 fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {

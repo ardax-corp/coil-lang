@@ -95,6 +95,9 @@ pub fn emit_lir_with_aliases(
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
+        if super::emit::missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc: term_loc });
+        }
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
