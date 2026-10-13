@@ -1040,9 +1040,17 @@ impl Compiler {
                 let made = Self::hir_ty(hir, init);
                 let tys: Option<Vec<_>> = tys
                     .iter()
-                    // A string or two-word enum field's slot holds its boxed
-                    // word, as `new` stores it.
-                    .map(|t| field_word(t).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
+                    // A string or boxed enum field's slot holds its boxed
+                    // word, as `new` stores it; an enum with a niche layout
+                    // (`Option<int>`) holds its niche word, not a heap one.
+                    .map(|t| {
+                        word(t)
+                            .or_else(|| scalar_enum(t))
+                            .or_else(|| {
+                                field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                            })
+                            .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
+                    })
                     .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
