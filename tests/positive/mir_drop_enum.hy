@@ -55,6 +55,15 @@ fn name_len(string s) -> int {
     };
 }
 
+// The value is never read: it is unreachable before `collect` in the
+// same frame.
+fn discard_then_collect() -> int {
+    drops = 0;
+    Res::Pair(1, 2);
+    collect();
+    return drops;
+}
+
 fn unit_only() -> int {
     let r = Res::Gone;
     return match r {
@@ -88,6 +97,12 @@ test("heap payload drops") {
     collect();
     assert!(drops == 1);
     assert!(total == 5);
+}
+
+test("discarded value drops in its own frame") {
+    total = 0;
+    assert!(discard_then_collect() == 1);
+    assert!(total == 3);
 }
 
 test("unit variant never drops") {
