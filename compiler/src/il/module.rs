@@ -438,7 +438,7 @@ impl IlModule {
                 // rematerializes a stored remainder (pair_int_churn +12%).
                 if drops_bound_label(&body.ops, &lir) {
                     lir_why[i] = Some("drops a called inner label".to_string());
-                } else if lir_keeps(&body.ops, &lir) {
+                } else if (crate::mir::mir_fuse_on() && crate::mir::mir_fuse_takes(&body.meta.name)) || lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
