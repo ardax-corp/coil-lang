@@ -476,6 +476,7 @@ fn candidate_for_call(
 
     let bind = |subst: &mut [Option<Ty>], tp_idx: Option<usize>, arg_ty: &Ty| -> Option<()> {
         if let Some(tp_idx) = tp_idx {
+            type_arg(arg_ty)?;
             match &subst[tp_idx] {
                 Some(existing) if existing != arg_ty => return None,
                 Some(_) => {}
@@ -579,7 +580,7 @@ fn bind_from_signature(
     }
     for (slot, var) in subst.iter_mut().zip(vars) {
         if slot.is_none()
-            && let Some(ty) = map.get(&var).and_then(concrete_ty)
+            && let Some(ty) = map.get(&var).and_then(type_arg)
         {
             *slot = Some(ty);
         }
@@ -696,11 +697,19 @@ pub fn ground_ty(checker: &Checker, expr: &Output) -> Option<Ty> {
     }
 }
 
+/// A ground type: no type variable left. A ground function type is one
+/// (an argument `fn (int x) => ..` keys its call like any other).
 fn concrete_ty(ty: &Ty) -> Option<Ty> {
-    if contains_var(ty) || matches!(ty, Ty::Fun(_, _)) {
+    if contains_var(ty) {
         return None;
     }
     Some(ty.clone())
+}
+
+/// A type a type parameter is cloned at: ground, and not a function (a
+/// clone over a function-typed `T` is left to the shared body).
+fn type_arg(ty: &Ty) -> Option<Ty> {
+    concrete_ty(ty).filter(|ty| !matches!(ty, Ty::Fun(..)))
 }
 
 fn contains_var(ty: &Ty) -> bool {

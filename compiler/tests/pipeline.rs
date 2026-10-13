@@ -1829,9 +1829,13 @@ fn main() {
 }
 
 
-/// Int `to_vec` thunks fuse ADD/LE(Q); float sibling thunks keep ADDF and fuse LE(Q)F.
+/// The `to_vec` bodies, built as HIR, take the dense tier: int ones compare
+/// with LE(Q) and step with `IADD64`, float siblings compare with LE(Q)F
+/// and step with `FADD64`.
 #[test]
 fn range_to_vec_thunks_use_int_vs_float_opcodes() {
+    use common::Instruction;
+    use common::dense::{FADD64, IADD64};
     let src = r#"
 fn main() {
     let _a = (0..3).to_vec();
@@ -1860,70 +1864,27 @@ fn main() {
     let jmpf_ops = |slice: &[common::Byte]| -> Vec<u8> {
         slice
             .iter()
-            .filter(|b| *b.bytecode() == common::Instruction::BinSlotSlotJmpf)
+            .filter(|b| *b.bytecode() == Instruction::BinSlotSlotJmpf)
             .map(|b| b.bin_slot_slot_jmpf_parts().0)
             .collect()
     };
-    let imm_store_ops = |slice: &[common::Byte]| -> Vec<u8> {
+    let steps = |slice: &[common::Byte]| -> Vec<u8> {
         slice
             .iter()
-            .filter(|b| *b.bytecode() == common::Instruction::BinSlotImmStore)
-            .map(|b| b.bin_slot_imm_store_parts().0)
+            .filter(|b| matches!(*b.bytecode(), Instruction::DenseBin | Instruction::DenseBin2))
+            .map(|b| b.dense_abc_parts().0)
             .collect()
     };
-    let has =
-        |slice: &[common::Byte], op: common::Instruction| slice.iter().any(|b| *b.bytecode() == op);
-
-    let int_half = body("Range::to_vec");
-    assert_eq!(
-        jmpf_ops(int_half),
-        vec![common::Instruction::LE as u8],
-        "int half-open compare must be LE"
-    );
-    assert_eq!(
-        imm_store_ops(int_half),
-        vec![common::Instruction::ADD as u8],
-        "int half-open step must be ADD"
-    );
-    assert!(!has(int_half, common::Instruction::ADDF));
-
-    let int_inc = body("RangeInclusive::to_vec");
-    assert_eq!(
-        jmpf_ops(int_inc),
-        vec![common::Instruction::LEQ as u8],
-        "int inclusive compare must be LEQ"
-    );
-    assert_eq!(
-        imm_store_ops(int_inc),
-        vec![common::Instruction::ADD as u8],
-        "int inclusive step must be ADD"
-    );
-
-    let float_half = body("Range::__float_to_vec");
-    assert_eq!(
-        jmpf_ops(float_half),
-        vec![common::Instruction::LEF as u8],
-        "float half-open compare must be LEF"
-    );
-    assert!(
-        has(float_half, common::Instruction::ADDF),
-        "float half-open step must use ADDF"
-    );
-    assert!(
-        imm_store_ops(float_half).is_empty(),
-        "float half-open must not fuse int BinSlotImmStore"
-    );
-
-    let float_inc = body("RangeInclusive::__float_to_vec");
-    assert_eq!(
-        jmpf_ops(float_inc),
-        vec![common::Instruction::LEQF as u8],
-        "float inclusive compare must be LEQF"
-    );
-    assert!(
-        has(float_inc, common::Instruction::ADDF),
-        "float inclusive step must use ADDF"
-    );
+    for (name, cmp, step) in [
+        ("Range::to_vec", Instruction::LE, IADD64),
+        ("RangeInclusive::to_vec", Instruction::LEQ, IADD64),
+        ("Range::__float_to_vec", Instruction::LEF, FADD64),
+        ("RangeInclusive::__float_to_vec", Instruction::LEQF, FADD64),
+    ] {
+        let slice = body(name);
+        assert_eq!(jmpf_ops(slice), vec![cmp as u8], "`{name}` compare");
+        assert_eq!(steps(slice), vec![step], "`{name}` step");
+    }
 }
 
 

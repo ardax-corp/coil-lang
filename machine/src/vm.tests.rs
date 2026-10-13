@@ -1881,6 +1881,29 @@
         assert!(roots(&vm).contains(&obj.addr()), "the extent covers slot 5");
     }
 
+    /// A reused worker VM starts a test job with no word an earlier job left
+    /// on its operand stack, above or below the cursor (#1006).
+    #[test]
+    fn clear_operand_stack_zeroes_every_word() {
+        use crate::ObjString;
+
+        let mut vm = Machine::<8>::default();
+        let (obj, _) = vm.heap_mut().alloc(ObjString::from("stale"), Object::String);
+        vm.frames.clear();
+        vm.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(0);
+        });
+        vm.stack.push(Value::from(obj.addr()));
+        vm.stack[5] = Value::from(obj.addr());
+        vm.clear_operand_stack();
+        assert_eq!(vm.stack.tell(), 1, "the cursor stays");
+        assert!((0..vm.stack.capacity()).all(|i| vm.stack[i].heap_addr() == 0));
+        let mut roots = Vec::new();
+        vm.for_each_stack_root(&mut |addr, _| roots.push(addr));
+        assert!(!roots.contains(&obj.addr()));
+    }
+
     #[test]
     fn nested_enum_gc_traces_correctly() {
         use crate::{Heap, ObjString, Object};
