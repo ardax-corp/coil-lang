@@ -308,6 +308,15 @@ struct Lower<'a> {
     /// (`Some` / `Err`) and its payload word.
     known_niche: HashMap<ValueId, (bool, Option<ValueId>)>,
     raw_host: bool,
+    /// Each `defer`'s armed flag local, by its node; cleared at entry.
+    defer_flags: HashMap<u32, LocalId>,
+    /// The `defer`s lowered so far, in source order: flag and body. A
+    /// `return` runs these (HIR emission registers its thunks as it meets
+    /// them, so an earlier `return` runs none of the later ones).
+    defers: Vec<(LocalId, HirId)>,
+    /// `let`s in a `defer` body, which HIR emission slots in the thunk's
+    /// own frame: a temp each.
+    defer_locals: HashMap<u32, LocalId>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -571,7 +580,40 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         word_src: HashMap::new(),
         known_niche: HashMap::new(),
         raw_host: false,
+        defer_flags: HashMap::new(),
+        defers: Vec::new(),
+        defer_locals: HashMap::new(),
     };
+    for (i, e) in hir.exprs.iter().enumerate() {
+        if let HirKind::Defer { captures, body } = &e.kind {
+            // The thunk's frame holds copies of its captures: one that
+            // assigns a local would not write the function's.
+            let mut assigns = false;
+            lower::visit(hir, *body, &mut |x| {
+                assigns |= matches!(x.kind, HirKind::Assign { place, .. } if matches!(hir.expr(place).kind, HirKind::Local(l) if captures.contains(&Some(l))));
+            });
+            if assigns {
+                return Err("defer assigns a capture".into());
+            }
+            let mut lets = Vec::new();
+            lower::visit(hir, *body, &mut |x| {
+                if let HirKind::Let { local, .. } = x.kind
+                    && inp.slots.get(local.0 as usize).copied().flatten().is_none()
+                {
+                    lets.push(local.0);
+                }
+            });
+            for l in lets {
+                let t = lower.temp();
+                lower.defer_locals.insert(l, t);
+            }
+            let flag = lower.temp();
+            let off = lower.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+            lower.b.def_local(flag, off).map_err(mir)?;
+            lower.defer_flags.insert(i as u32, flag);
+        }
+    }
+    let params = lower.b.func().params.len();
     if hir.is_coro {
         // A `gen fn` runs its body for effect (a tail `yield` receives
         // nothing) and falling off its end returns `0` as its last
@@ -588,6 +630,11 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
     let mut func = lower.b.finish().map_err(mir)?;
+    // A capture read at a `return` some path reaches without passing its
+    // `let` would be a live-in word.
+    if func.params.len() != params {
+        return Err("defer capture unbound on a path".into());
+    }
     prune(&mut func, &spec);
     tidy(&mut func, &order);
     if inp.opaque_vars {
@@ -789,6 +836,7 @@ impl Lower<'_> {
             .copied()
             .flatten()
             .map(LocalId)
+            .or_else(|| self.defer_locals.get(&local.0).copied())
             .ok_or_else(|| "local slot".into())
     }
 
@@ -842,9 +890,42 @@ impl Lower<'_> {
         self.b.jump(to).map_err(mir)
     }
 
+    /// `RETURN` of `v`, after the `defer`s lowered so far, last first, as
+    /// HIR emission's `emit_run_defers` before each `return`.
+    fn ret_word(&mut self, v: ValueId) -> Result<(), Refusal> {
+        self.run_defers()?;
+        self.b.ret(Some(v)).map_err(mir)
+    }
+
+    /// Two-word `RETURN`, after the `defer`s as [`Self::ret_word`].
+    fn ret_two(&mut self, lo: ValueId, hi: ValueId) -> Result<(), Refusal> {
+        self.run_defers()?;
+        self.b.ret_pair(lo, hi).map_err(mir)
+    }
+
+    /// Each armed `defer` lowered so far, last first: disarm it and run
+    /// its body inline, its captures read as they are now (as the thunk's
+    /// frame copies them at the return).
+    fn run_defers(&mut self) -> Result<(), Refusal> {
+        for k in (0..self.defers.len()).rev() {
+            let (flag, body) = self.defers[k];
+            let armed = self.b.use_local(flag, MirTy::Bool).map_err(mir)?;
+            let (run, skip) = (self.b.create_block(), self.b.create_block());
+            self.b.branch(armed, run, skip).map_err(mir)?;
+            self.switch(run);
+            let off = self.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+            self.b.def_local(flag, off).map_err(mir)?;
+            if self.stmt(body)? {
+                self.jump(skip)?;
+            }
+            self.switch(skip);
+        }
+        Ok(())
+    }
+
     fn ret_unit(&mut self) -> Result<(), Refusal> {
         let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        self.b.ret(Some(zero)).map_err(mir)
+        self.ret_word(zero)
     }
 
     /// `v` as the function returns it: a two-word value the function
@@ -871,7 +952,7 @@ impl Lower<'_> {
                 Val::V(v) => self.box_niche(layout, v)?,
                 _ => return Err("return value".into()),
             };
-            return self.b.ret(Some(boxed)).map_err(mir);
+            return self.ret_word(boxed);
         }
         match (val, self.inp.ret_pair) {
             (Val::Unit, _) if self.unit_ret => self.ret_unit(),
@@ -884,16 +965,16 @@ impl Lower<'_> {
                 }
                 let ok = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
                 let ok = self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, ok).map_err(mir)?;
-                self.b.ret(Some(ok)).map_err(mir)
+                self.ret_word(ok)
             }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
-            (Val::V(v), None) if !self.unit_ret => self.b.ret(Some(v)).map_err(mir),
+            (Val::V(v), None) if !self.unit_ret => self.ret_word(v),
             // A two-word value the function returns boxed.
             (Val::Pair(lo, hi), None) if self.b.func().ret_ty == Some(MirTy::HeapRef) => {
                 let ty = self.ret_hir.clone();
                 match self.box_pair_val(&ty, lo, hi)? {
-                    Val::V(v) => self.b.ret(Some(v)).map_err(mir),
+                    Val::V(v) => self.ret_word(v),
                     _ => Err("return value".into()),
                 }
             }
@@ -901,7 +982,7 @@ impl Lower<'_> {
             (Val::V(v), Some((lo_ty, hi_ty))) if self.b.value_ty(v) == MirTy::HeapRef => {
                 let ty = self.ret_hir.clone();
                 match self.unbox_word(&ty, v, lo_ty, hi_ty)? {
-                    Val::Pair(lo, hi) => self.b.ret_pair(lo, hi).map_err(mir),
+                    Val::Pair(lo, hi) => self.ret_two(lo, hi),
                     _ => Err("return value".into()),
                 }
             }
@@ -909,7 +990,7 @@ impl Lower<'_> {
                 if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
                     return Err("return pair type".into());
                 }
-                self.b.ret_pair(lo, hi).map_err(mir)
+                self.ret_two(lo, hi)
             }
             // A unit body whose tail is a value, or a valued body ending in `()`.
             _ => Err("return value".into()),
@@ -987,7 +1068,7 @@ impl Lower<'_> {
         let ty = self.b.func().ret_ty.ok_or("return value")?;
         let z = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         let z = self.fit(z, ty)?;
-        self.b.ret(Some(z)).map_err(mir)
+        self.ret_word(z)
     }
 
     /// Word types of pair local `local`, with its second slot.
@@ -1535,6 +1616,14 @@ impl Lower<'_> {
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
+            // Arm the flag; each later `return` runs the body if armed.
+            HirKind::Defer { body, .. } => {
+                let flag = *self.defer_flags.get(&id.0).ok_or("defer")?;
+                let on = self.b.ins_const(MirConst::Bool(true)).map_err(mir)?;
+                self.b.def_local(flag, on).map_err(mir)?;
+                self.defers.push((flag, *body));
+                Ok(Val::Unit)
+            }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);

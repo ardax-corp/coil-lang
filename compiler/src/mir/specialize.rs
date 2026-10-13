@@ -49,6 +49,11 @@ pub fn take_mir_capture() -> CapturedMir {
     MIR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
 }
 
+/// A pinned (`defer`) body's MIR from HIR, which no tier emits yet.
+pub fn capture_pinned_mir(name: &str, func: &crate::mir::MirFunc) {
+    capture_mir(name, "pinned", func);
+}
+
 fn capture_mir(name: &str, form: &'static str, func: &crate::mir::MirFunc) {
     MIR_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
