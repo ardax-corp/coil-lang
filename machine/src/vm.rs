@@ -2963,6 +2963,16 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
     }
 
+    /// Zero every operand-stack word, below and above the cursor. A reused
+    /// worker VM keeps the words its earlier jobs stored, and a heap
+    /// collected in place hands out the same addresses again. A frame
+    /// scanned conservatively (no precise map at its PC) would then take
+    /// such a word for a root and keep a dead object, and its finalizer,
+    /// alive across `collect()`.
+    pub fn clear_operand_stack(&mut self) {
+        self.stack.clear_slots();
+    }
+
     /// Drop isolate GC identity after a reactor job. Operand-stack capacity
     /// is kept. More than one mapped slab chunk is unmapped so RSS cannot
     /// climb with successive jobs; a single 64KiB chunk is collected in place.
