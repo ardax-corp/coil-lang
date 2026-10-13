@@ -9075,8 +9075,9 @@ impl Compiler {
 
     /// Emit the reserved `Show` thunks of the builtin error enums that this
     /// module called (behind a jump, so control never falls into them):
-    /// unbox (dict ABI; enums box as `Instance`, an unboxed value passes
-    /// through), dispatch on the tag, return the variant's name.
+    /// each is HIR ([`crate::hir::synth::builtin_enum_show`]) that unboxes
+    /// its argument (dict ABI; enums box as `Instance`, an unboxed value
+    /// passes through) and returns the variant's name.
     fn emit_used_builtin_show_thunks(&mut self) {
         let due: Vec<_> = self
             .builtin_show_thunks
