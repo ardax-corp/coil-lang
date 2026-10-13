@@ -914,6 +914,14 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `PRINT` of the string `src` (I4 / Q9 R1). Returns the `bool` unit token.
+    pub fn ins_print(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Print { dest, src })?;
+        Ok(dest)
+    }
+
     /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
     pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
         let ft = self.resolve_ty(fmt);
