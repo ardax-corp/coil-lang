@@ -2896,7 +2896,8 @@ impl Compiler {
         for &arg in args {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-generic")?;
             let ty = apply_ty_prune(self.checker.subst(), ty);
-            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+            // A ground closure argument is one word the clone calls as is.
+            if !(crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty)) {
                 return Err("callee-generic");
             }
             arg_tys.push(ty);
