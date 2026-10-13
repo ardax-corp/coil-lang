@@ -267,6 +267,11 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// Heap fields and `new` arguments whose slot holds a boxed enum
+    /// object (a generic class's field open in a parameter) for a value
+    /// whose own word is this niche layout: boxed on the way in, unboxed
+    /// on the way out.
+    pub boxed_niches: HashMap<u32, ValueLayout>,
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -555,6 +560,15 @@ fn is_unit(ty: &Ty) -> bool {
         // A function declared with no return type.
         Ty::Tuple(items) => items.is_empty(),
         _ => false,
+    }
+}
+
+/// The word type of a niche layout.
+fn niche_word(layout: ValueLayout) -> Result<MirTy, Refusal> {
+    match layout {
+        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Ok(MirTy::NicheOpt),
+        ValueLayout::NicheResult => Ok(MirTy::NicheRes),
+        ValueLayout::Boxed => Err("boxed niche layout".into()),
     }
 }
 
@@ -1130,6 +1144,25 @@ impl Lower<'_> {
             Val::V(v) => Ok(v),
             _ => Err("boxed niche return".into()),
         }
+    }
+
+    /// Niche-layout value `id` as the boxed enum object a generic class's
+    /// open field holds: a read of another such field moves its object
+    /// as is, any other value boxes.
+    fn boxed_niche_word(&mut self, id: HirId, layout: ValueLayout) -> Result<Option<ValueId>, Refusal> {
+        if let HirKind::Field { base, .. } = self.hir.expr(id).kind
+            && self.inp.boxed_niches.get(&id.0) == Some(&layout)
+            && let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0)
+        {
+            let Some(obj) = self.boxed_word(base)? else {
+                return Ok(None);
+            };
+            return Ok(Some(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?));
+        }
+        let Some(v) = self.word(id)? else {
+            return Ok(None);
+        };
+        self.box_niche(layout, v).map(Some)
     }
 
     /// `MakeEnum tag` of at most one payload word.
@@ -1900,14 +1933,24 @@ impl Lower<'_> {
                 let Some(obj) = self.boxed_word(*base)? else {
                     return Ok(Val::Never);
                 };
-                Ok(Val::V(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?))
+                let w = self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?;
+                match self.inp.boxed_niches.get(&id.0) {
+                    Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
+                    None => Ok(Val::V(w)),
+                }
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
                     && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
             {
                 // The value, then the object, as HIR emission's `SetField`.
-                let Some(v) = self.word(*value)? else {
+                let v = match self.inp.boxed_niches.get(&place.0) {
+                    Some(&layout) => self.boxed_niche_word(*value, layout)?,
+                    // A two-word value is stored boxed, as `new`'s.
+                    None if ty == MirTy::HeapRef => self.boxed_word(*value)?,
+                    None => self.word(*value)?,
+                };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -3357,7 +3400,11 @@ impl Lower<'_> {
         let (type_id, tys) = (*type_id, tys.clone());
         let mut words = Vec::with_capacity(args.len());
         for (&arg, ty) in args.iter().zip(tys) {
-            let v = if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
+            let v = match self.inp.boxed_niches.get(&arg.0) {
+                Some(&layout) => self.boxed_niche_word(arg, layout)?,
+                None if ty == MirTy::HeapRef => self.boxed_word(arg)?,
+                None => self.word(arg)?,
+            };
             let Some(v) = v else {
                 return Ok(Val::Never);
             };
@@ -3939,7 +3986,10 @@ impl Lower<'_> {
         let boxed_local = match self.hir.expr(scrutinee).kind {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
-            HirKind::Field { .. } => self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef),
+            HirKind::Field { .. } => {
+                self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
+                    && !self.inp.boxed_niches.contains_key(&scrutinee.0)
+            }
             // So does an array element.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {
                 self.heap_array(base)

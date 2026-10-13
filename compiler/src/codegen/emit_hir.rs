@@ -91,6 +91,23 @@ struct HirCall {
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
 }
 
+/// A call of an inherent method's clone at ground type arguments
+/// ([`Compiler::hir_method_clone`]), with the shared call it replaces: the
+/// clone's thunk, when its body does not lower, makes that call.
+#[derive(Clone)]
+pub(crate) struct MethodClonePlan {
+    src: String,
+    lookup: Vec<Ty>,
+    /// The clone's parameter and result layouts.
+    params: Vec<ValueLayout>,
+    ret: ValueLayout,
+    /// The shared body's entry and ABI.
+    shared: String,
+    shared_params: Vec<ValueLayout>,
+    shared_ret: ValueLayout,
+    generic: Option<HirGeneric>,
+}
+
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
 /// over a discharged instance: the receiver boxed for the instance, then a
 /// trailing dictionary when the instance has one.
@@ -526,6 +543,8 @@ impl Compiler {
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
         self.hir_refusal = None;
+        // Clones an earlier body planned but never called give back their room.
+        self.planned_method_clones.borrow_mut().clear();
         let entry_sp = self.hir_entry_sp.take();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
@@ -1026,6 +1045,19 @@ impl Compiler {
                 boxed.then_some(crate::mir::MirTy::HeapRef)
             })
         };
+        // A generic class's field open in a parameter (`head:
+        // Option<Node<T>>`) holds its boxed word; read or written at a
+        // ground type with a niche layout of its own it converts there.
+        let open_niche = |fty: &Ty, at: &Ty| {
+            let at_layout = crate::typechecking::value_layout::value_layout(checker, at);
+            (Self::ty_has_var(fty)
+                && field_word(fty) == Some(crate::mir::MirTy::HeapRef)
+                && crate::typechecking::value_layout::value_layout(checker, fty) == ValueLayout::Boxed
+                && crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::hir::layout::Layout::Word
+                && at_layout != ValueLayout::Boxed)
+                .then_some(at_layout)
+        };
+        let mut boxed_niches = HashMap::new();
         let mut heap_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, name } = &e.kind
@@ -1049,6 +1081,14 @@ impl Compiler {
                 && e.ty.as_ref().and_then(field_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
+            } else if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(layout) = e.ty.as_ref().and_then(|t| open_niche(&fty, t))
+            {
+                heap_fields.insert(i as u32, (idx, crate::mir::MirTy::HeapRef));
+                boxed_niches.insert(i as u32, layout);
             }
         }
         // Record (dict) fields by key, and record literals, whose words are
@@ -1096,9 +1136,17 @@ impl Compiler {
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && !checker.class_has_drop(&class)
+                && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
                 && let Some(words) = tys
                     .iter()
-                    .map(|t| {
+                    .zip(args)
+                    .map(|(t, &arg)| {
+                        // A field open in a class parameter holds a niche
+                        // argument boxed.
+                        if let Some(layout) = Self::hir_ty(hir, arg).and_then(|at| open_niche(t, at)) {
+                            boxed_niches.insert(arg.0, layout);
+                            return Some(crate::mir::MirTy::HeapRef);
+                        }
                         // A two-word field value is stored boxed.
                         let stored = |t: &Ty| {
                             word(t).or_else(|| {
@@ -1267,6 +1315,7 @@ impl Compiler {
                 }
             }),
             heap_fields,
+            boxed_niches,
             record_fields,
             records,
             aggregates: emit
@@ -2108,6 +2157,16 @@ impl Compiler {
                 if let (true, Some(declared)) = (bare, declared) {
                     return Ok(Rep::Word(declared));
                 }
+                // An inherent method clone returns in the layout its
+                // callers planned ([`Self::hir_method_clone`]).
+                if let Some(declared) = declared
+                    && self.compiling_mono_clone
+                    && let Some((src, req)) = self.inst_clone_fallback.as_ref()
+                    && src.method_of.is_some()
+                    && self.method_clone_plans.borrow().get(&req.name).is_some_and(|p| p.ret == declared)
+                {
+                    return Ok(Rep::Word(declared));
+                }
                 if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
@@ -2537,12 +2596,20 @@ impl Compiler {
             .rsplit_once("::")
             .is_some_and(|(owner, _)| self.checker.is_class(owner) && lower::is_generic_class(&self.checker, owner));
         let generic = self.checker.is_generic_fn(&lookup);
+        let clone_key = key.clone();
         let mut abi = self.hir_call_abi(key, &lookup, argc, None, shared || generic)?;
         if generic {
             let HirKind::Call { args, .. } = &hir.expr(call).kind else {
                 return Err("callee");
             };
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
+        }
+        // `C::f(..)` at ground type arguments: the static method's clone.
+        if (shared || generic)
+            && !forwards
+            && let Some(clone) = self.hir_method_clone(hir, call, &clone_key, &lookup, &abi)
+        {
+            return Ok(clone);
         }
         Ok(abi)
     }
@@ -2902,6 +2969,158 @@ impl Compiler {
         })
     }
 
+    /// `call` of inherent method `key` sent to its clone at the call's
+    /// ground type arguments ([`Compiler::instance_clone`]) instead of the
+    /// shared body `shared` stands for: each argument in its own layout,
+    /// no boxing and no dictionaries. `None` when a type argument is open
+    /// or two words, a parameter or the result is two words, or the clone
+    /// caps are reached.
+    fn hir_method_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str, shared: &HirCall) -> Option<HirCall> {
+        let src = self.inst_clone_srcs.get(key).filter(|s| s.method_of.is_some())?;
+        if shared.pair.is_some()
+            || shared.instance.is_some()
+            || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty() || g.adapt.iter().any(Option::is_some))
+            || self.coroutine_fns.contains(key)
+        {
+            return None;
+        }
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return None;
+        };
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+                return None;
+            }
+            arg_tys.push(ty);
+        }
+        let param_tys = self.hir_mono_param_tys(lookup, args.len())?;
+        if param_tys.len() != args.len() || param_tys.len() != shared.params.len() {
+            return None;
+        }
+        let ret_ty = self.checker.fn_return_ty(lookup)?;
+        let mut map = HashMap::new();
+        for (param, arg) in param_tys.iter().zip(&arg_tys) {
+            Self::bind_scheme_vars(param, arg, &mut map);
+        }
+        let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
+        Self::bind_scheme_vars(&ret_ty, &call_ty, &mut map);
+        // Each type argument one word in its own layout (no pair).
+        let word = |ty: &Ty| {
+            crate::hir::layout::ty_is_closed(ty)
+                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && crate::hir::layout::of_resolved(&self.checker, ty) == crate::hir::layout::Layout::Word
+        };
+        let lookup_tys = src
+            .head
+            .iter()
+            .map(|v| match v {
+                Ty::Var(v) => map.get(v).filter(|t| word(t)).cloned(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
+        // A parameter or result one word, in a layout the thunk converts
+        // from the shared one's.
+        let one = |ty: &Ty| {
+            crate::hir::layout::ty_is_closed(ty)
+                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && !matches!(crate::hir::layout::of_resolved(&self.checker, ty), crate::hir::layout::Layout::Pair(_))
+        };
+        let mut params = Vec::with_capacity(param_tys.len());
+        for param in &param_tys {
+            let ty = at(param);
+            if !one(&ty) {
+                return None;
+            }
+            params.push(self.value_layout(&ty));
+        }
+        let ret = at(&ret_ty);
+        // A generic `Option` / `Result` result is returned in its own
+        // layout when it is one word (`Option<string>` a niche word: no
+        // box made for the caller to take apart); a two-word one stays in
+        // the open type's layout, as a mono clone's (`resolve_hir_mono`).
+        let boundary = !matches!(ret_ty, Ty::Var(_))
+            && !one(&ret)
+            && !crate::hir::layout::ty_is_closed(&ret_ty)
+            && crate::hir::layout::ty_is_closed(&ret)
+            && lower::classify(&self.checker, &ret) == Some(ValueClass::Enum);
+        let unit = matches!(&ret, Ty::Con(n) if n == crate::typechecking::ty::UNIT);
+        let ret_layout = if boundary {
+            self.generic_enum_layout(&ret_ty)?
+        } else if one(&ret) || unit {
+            self.value_layout(&ret)
+        } else {
+            return None;
+        };
+        if !self.method_clone_room(key, &lookup_tys) {
+            return None;
+        }
+        let name = Self::inst_clone_name(key, &lookup_tys);
+        self.method_clone_plans.borrow_mut().entry(name.clone()).or_insert_with(|| MethodClonePlan {
+            src: key.to_string(),
+            lookup: lookup_tys,
+            params: params.clone(),
+            ret: ret_layout,
+            shared: shared.key.clone(),
+            shared_params: shared.params.clone(),
+            shared_ret: shared.ret,
+            generic: shared.generic.as_deref().cloned(),
+        });
+        Some(HirCall {
+            key: name,
+            pair: None,
+            params,
+            ret: ret_layout,
+            method: true,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+            mono_of: None,
+        })
+    }
+
+    /// The call of an inherent method clone planned as `key`: the clone
+    /// made now ([`Compiler::instance_clone`]), its entry ready to call.
+    fn hir_request_method_clone(&mut self, key: &str) {
+        let Some(plan) = self.method_clone_plans.borrow().get(key).cloned() else {
+            return;
+        };
+        let made = self.instance_clone(&plan.src, &plan.lookup);
+        debug_assert_eq!(made.as_deref(), Some(key), "planned method clone `{key}`");
+    }
+
+    /// The body of an inherent method clone that does not lower: its
+    /// arguments in the shared body's layouts (a bare type parameter
+    /// boxed), the call site's dictionaries, the shared call, and its result
+    /// back in the clone's layout.
+    pub(super) fn emit_method_clone_call_shared(&mut self, name: &str) {
+        let plan = self.method_clone_plans.borrow().get(name).cloned().expect("a planned method clone");
+        for (slot, (&own, &shared)) in plan.params.iter().zip(&plan.shared_params).enumerate() {
+            self.bytecode.push_load(slot as u32);
+            if own != shared {
+                Self::emit_layout_convert(&mut self.bytecode, own, shared);
+            }
+            if let Some(Some(ty)) = plan.generic.as_ref().and_then(|g| g.boxed.get(slot)) {
+                Self::emit_box_if_needed(&mut self.bytecode, ty);
+            }
+        }
+        let dicts = plan.generic.as_ref().map_or(0, |g| self.hir_push_dicts(g));
+        if !self.emit_named_entry_on_module(&plan.shared, plan.params.len() as u32 + dicts, crate::il::EntryKind::Call) {
+            self.missing_call_target(&plan.shared, 0..0);
+        }
+        if let Some(ty) = plan.generic.as_ref().and_then(|g| g.unbox.as_ref()) {
+            Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+        }
+        if plan.shared_ret != plan.ret {
+            Self::emit_layout_convert(&mut self.bytecode, plan.shared_ret, plan.ret);
+        }
+        self.bytecode.push_return();
+    }
+
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
     /// receiver), when it is a plain `CALL` to an inherent method of a user
     /// class; checked in `compile_call_expr`'s order.
@@ -3024,6 +3243,13 @@ impl Compiler {
         let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
+        }
+        // At ground type arguments, the method's clone there.
+        if (shared || generic)
+            && !forwards
+            && let Some(clone) = self.hir_method_clone(hir, call, &lookup, &lookup, &abi)
+        {
+            return Ok(clone);
         }
         let mut call = abi;
         call.method = true;
@@ -4485,6 +4711,7 @@ impl Compiler {
                 op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
+            HirKind::Field { .. } if let Some(rep) = self.hir_field_rep(hir, id) => Some(rep),
             HirKind::Index { .. }
             | HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array | MakeKind::Record(_),
@@ -4507,6 +4734,27 @@ impl Compiler {
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
             _ => None,
         }
+    }
+
+    /// Field read `id` of a generic class's slot whose declared type is
+    /// open (`head: Option<Node<T>>`): the word comes in the open type's
+    /// layout (boxed), not the read's ground one (a niche `Option`). `None`
+    /// for any other field, which reads in its own type's layout.
+    fn hir_field_rep(&self, hir: &HirBody, id: HirId) -> Option<Rep> {
+        let HirKind::Field { base, name } = &hir.expr(id).kind else {
+            return None;
+        };
+        if self.hir_field_of_variant(hir, *base, name).is_some()
+            || self.hir_field_of_new(hir, *base, name).is_some()
+        {
+            return None;
+        }
+        let (FieldAt::Slot(_), fty) = self.hir_field(hir, *base, name)? else {
+            return None;
+        };
+        let own = self.value_layout(Self::hir_ty(hir, id)?);
+        let stored = self.value_layout(&fty);
+        (Self::ty_has_var(&fty) && stored != own).then_some(Rep::Word(stored))
     }
 
     /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
@@ -5618,7 +5866,13 @@ impl Compiler {
             HirKind::Field { base, name } => {
                 let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
                 let layout = Self::hir_ty(hir, id).map(|ty| self.value_layout(ty));
-                if layout != Some(self.value_layout(&fty)) {
+                // A slot of a generic class's field holds the open type's
+                // layout (an `Option<T>` boxed); read at a ground receiver
+                // it converts to the ground one ([`Self::hir_field_rep`]).
+                let stored = self.hir_field_rep(hir, id);
+                if layout != Some(self.value_layout(&fty))
+                    && !stored.as_ref().zip(layout).is_some_and(|(s, l)| Self::hir_convertible(s, &Rep::Word(l)))
+                {
                     return Err("field-layout");
                 }
                 let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
@@ -7502,6 +7756,7 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
+                self.hir_request_method_clone(&key);
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
