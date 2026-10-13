@@ -317,6 +317,9 @@ struct HirEmit {
     /// Parallel loops emitted as a call of their fork-join function, by
     /// loop: the direct MIR lowering's calls.
     par_calls: HashMap<u32, crate::mir::HirParLoop>,
+    /// Auto-par call sites sent to a fork-join worker, by call: the direct
+    /// MIR lowering's calls.
+    par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// The fork-join functions those calls reach, emitted after this body
     /// ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
@@ -1243,6 +1246,7 @@ impl Compiler {
             format_shows: &emit.format_shows,
             op_calls: &emit.op_calls,
             par_loops: &emit.par_calls,
+            par_forks: &emit.par_forks,
             op_prims: &emit.op_prims,
             fn_values: &emit.fn_values,
             value_calls: &emit.value_calls,
@@ -2219,6 +2223,7 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             par_calls: HashMap::new(),
+            par_forks: HashMap::new(),
             par_tail: Vec::new(),
             call_targets: HashMap::new(),
             into_iters: HashMap::new(),
@@ -7859,7 +7864,7 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let tail = emit.plan.tail_calls.contains(&id.0);
-                if self.hir_par_call(hir, emit, &key, args, depth) {
+                if self.hir_par_call(hir, emit, id, &key, args, depth) {
                     if tail {
                         // A tail site's `Return` emits nothing after it.
                         if natural.words() == 2 {
@@ -10779,7 +10784,7 @@ impl Compiler {
     /// guards accept: the worker with its hop budget) and
     /// `try_emit_par_dynamic_call` (one non-literal argument: the worker
     /// above the site's cutoff, else the sequential function).
-    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
+    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, key: &str, args: &[HirId], depth: u32) -> bool {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks.
         if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
@@ -10812,6 +10817,9 @@ impl Compiler {
             self.bytecode.push_const(hops);
             self.bytecode
                 .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
+            if let Some(worker) = self.hir_last_call_target() {
+                self.hir_note_par_fork(hir, emit, id, worker, None);
+            }
             return true;
         }
         let [arg] = args else { return false };
@@ -10831,12 +10839,40 @@ impl Compiler {
         self.bytecode.push(Byte::new(Instruction::LE));
         self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
         self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+        let seq = self.hir_last_call_target();
         self.hir_jump(IlJumpKind::Unconditional, done);
         self.bytecode.bind_label(use_worker);
         self.bytecode.push_const(hops);
         self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+        if let (Some(worker), Some(seq)) = (self.hir_last_call_target(), seq) {
+            self.hir_note_par_fork(hir, emit, id, worker, Some((seq, cutoff)));
+        }
         self.bytecode.bind_label(done);
         true
+    }
+
+    /// The target of the `CALL` just pushed, as its IL `Entry`.
+    fn hir_last_call_target(&mut self) -> Option<crate::il::Label> {
+        match self.bytecode.il_mut().ops_slice_mut().last() {
+            Some(&IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                target,
+                ret_words: 1,
+                ..
+            }) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Record auto-par site `id` for direct MIR when its result comes back
+    /// in its own type's one-word layout.
+    fn hir_note_par_fork(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, worker: crate::il::Label, seq: Option<(crate::il::Label, i64)>) {
+        let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
+        if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
+            return;
+        }
+        let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
+        emit.par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's
