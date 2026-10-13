@@ -113,6 +113,33 @@ pub fn declared_error_codes(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The stdout a `fn main()`-only file declares on the `// Output:` line of
+/// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
+/// `examples/` document theirs. `None` when there is no such line.
+pub fn declared_output(src: &str) -> Option<String> {
+    let line = src
+        .lines()
+        .take_while(|l| l.starts_with("//"))
+        .find_map(|l| l.strip_prefix("// Output:"))?;
+    let line = line.strip_prefix(' ').unwrap_or(line);
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('e') => out.push('\u{1b}'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    Some(out)
+}
+
 /// Every `E` + four digits in `text`, in order.
 fn error_codes_in(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
@@ -231,6 +258,8 @@ struct PendingFile {
     cases: Vec<PendingCase>,
     /// PC → source line map for recording this program's coverage.
     lines: Option<ProgramLines>,
+    /// What the file's single case must print (`// Output:` header).
+    expected_output: Option<String>,
 }
 
 impl PendingFile {
@@ -242,6 +271,7 @@ impl PendingFile {
             verdict: Some(verdict),
             cases: Vec::new(),
             lines: None,
+            expected_output: None,
         }
     }
 }
@@ -293,6 +323,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
         }
     }
     let mut case_events = Vec::new();
+    let single_case = file.cases.len() == 1;
     for case in file.cases {
         let TestReport {
             passed: report_ok,
@@ -304,7 +335,24 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
         };
-        let ok = report_ok && !timed_out;
+        let mut ok = report_ok && !timed_out;
+        let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
+        // A `// Output:` header checks a passing case's prints; it names
+        // one program, so a file with `test` blocks cannot use it.
+        let reason = match &file.expected_output {
+            Some(_) if ok && !single_case => {
+                ok = false;
+                Some("`// Output:` needs a file whose only case is `fn main()`".to_string())
+            }
+            Some(want) if ok && output != want.as_bytes() => {
+                ok = false;
+                Some(format!(
+                    "printed {:?}, `// Output:` expects {want:?}",
+                    String::from_utf8_lossy(&output)
+                ))
+            }
+            _ => reason,
+        };
         let covered = match (run.coverage, &file.lines, hits) {
             (Some(cov), Some(lines), Some(hits)) => cov
                 .lock()
@@ -319,7 +367,6 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             steps,
             covered,
         });
-        let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
         let show = !ok || run.options.show_output;
         if ok {
             passed += 1;
@@ -654,6 +701,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
                 verdict: None,
                 cases: Vec::new(),
                 lines: None,
+                expected_output: None,
             };
         }
         Compiled::Ready(prepared) => prepared,
@@ -685,7 +733,10 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
                 output,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let expected_output = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|src| declared_output(&src));
     PendingFile {
         path: path.to_path_buf(),
         display: path.display().to_string(),
@@ -693,6 +744,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
         verdict: None,
         cases,
         lines,
+        expected_output,
     }
 }
 

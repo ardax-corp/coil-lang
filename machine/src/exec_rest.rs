@@ -1522,7 +1522,7 @@ impl<const S: usize> Machine<S> {
                             };
                             let (object, _) = self.heap.alloc(partial, Object::Fn);
                             self.stack.push(Value::from(object.addr()));
-                            self.maybe_gc_after_alloc(ip);
+                            self.maybe_gc_after_call_alloc(ip);
                             *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Continue;

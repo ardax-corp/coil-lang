@@ -499,3 +499,33 @@ fn a_source_outside_the_test_root_runs_only_its_contract_tests() {
     reactor.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn output_header_checks_what_main_prints() {
+    let root = unique_tmp("output_header");
+    std::fs::create_dir_all(&root).unwrap();
+    let program = |out: &str| {
+        format!(
+            "// Output: {out}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"a\\nb\"));\n}}\n"
+        )
+    };
+    std::fs::write(root.join("right.hy"), program("a\\nb")).unwrap();
+    std::fs::write(root.join("wrong.hy"), program("a b")).unwrap();
+    std::fs::write(
+        root.join("cases.hy"),
+        "// Output: x\ntest(\"one\") {}\ntest(\"two\") {}\n",
+    )
+    .unwrap();
+    let result = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    let verdict = |file: &str| {
+        result
+            .cases
+            .iter()
+            .filter(|c| c.file.ends_with(file))
+            .all(|c| c.passed)
+    };
+    assert!(verdict("right.hy"), "{:?}", result.cases);
+    assert!(!verdict("wrong.hy"), "{:?}", result.cases);
+    assert!(!verdict("cases.hy"), "{:?}", result.cases);
+    let _ = std::fs::remove_dir_all(&root);
+}

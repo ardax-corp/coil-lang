@@ -717,44 +717,7 @@ fn main() {
     );
 }
 
-/// `static const` is readable via LoadStatic; only reassignment is rejected.
-#[test]
-fn static_const_reads_via_load_static() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-static const VERSION = 42;
 
-fn main() {
-    write(stdout(), to_bytes(format("%i", VERSION)));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
-
-/// Class `const` fields are readable after construction (mutation is blocked separately).
-#[test]
-fn const_class_field_reads_after_construction() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Point {
-    pub const x: int,
-    pub y: int,
-}
-
-fn main() {
-    let p = new Point(7, 9);
-    write(stdout(), to_bytes(format("%i", p.x)));
-    write(stdout(), to_bytes(format("%i", p.y)));
-}
-"#,
-    );
-    assert_eq!(output, "79");
-}
 
 #[test]
 fn example_modules_brace_prints_12_42() {
@@ -762,253 +725,15 @@ fn example_modules_brace_prints_12_42() {
     assert_eq!(output, "1242");
 }
 
-/// Regression: inherent `fn send` must not shadow `thread::send`, so
-/// `send(self.channel, msg)` typechecks and runs.
-#[test]
-fn method_named_send_can_call_thread_send_on_self_channel() {
-    let output = run_example_src(
-        r#"
-use thread::{channel, recv, send, spawn, Sender, Thread};
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-class ThreadWrapper {
-    pub thread: Thread,
-    pub channel: Sender,
-}
 
-impl ThreadWrapper {
-    pub fn send(string msg) {
-        send(self.channel, msg)?;
-    }
-}
 
-fn work() -> int { return 0; }
 
-fn main() {
-    let pair = channel()?;
-    let t = spawn(work)?;
-    let w = new ThreadWrapper(t, pair[0]);
-    w.send("hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
-}
-"#,
-    );
-    assert_eq!(output, "hi");
-}
 
-/// Regression: parenthesized `(self).field` must still emit GetField.
-/// Pre-fix, `receiver_type` ignored `Group`, so Access fell through to
-/// `LoadField(0)` and `send` received a bogus value (often looking like
-/// the class instance was passed instead of the field).
-#[test]
-fn grouped_self_field_passes_sender_to_send() {
-    let output = run_example_src(
-        r#"
-use thread::{channel, recv, send, Sender};
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-class Worker {
-    pub tx: Sender,
-}
 
-impl Worker {
-    pub fn push(string msg) {
-        send((self).tx, msg)?;
-    }
-}
 
-fn main() {
-    let pair = channel()?;
-    let w = new Worker(pair[0]);
-    w.push("hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
-}
-"#,
-    );
-    assert_eq!(output, "hi");
-}
 
-/// Regression: field access on `new Class(...)` must use GetField, and
-/// `new` must not leave a stash slot between a HostInvoke native-id and
-/// the field value (StorePop+final LOAD used to bury the id so `send`
-/// saw the instance address as the native id).
-#[test]
-fn inline_new_field_passes_sender_to_send() {
-    let output = run_example_src(
-        r#"
-use thread::{channel, recv, send, Sender};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-class Worker {
-    pub tx: Sender,
-}
-
-fn main() {
-    let pair = channel()?;
-    send((new Worker(pair[0])).tx, "hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
-}
-"#,
-    );
-    assert_eq!(output, "hi");
-}
-
-/// Regression: method call on `(new Class(...))` must resolve the owner.
-#[test]
-fn inline_new_method_call_works() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Point {
-    pub x: int,
-    pub y: int,
-}
-
-impl Point {
-    pub fn sum() -> int {
-        return self.x + self.y;
-    }
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", (new Point(1, 3)).sum())));
-}
-"#,
-    );
-    assert_eq!(output, "4");
-}
-
-/// Regression: `defer` inside a function must run on early `return`, not
-/// only on fall-through.
-#[test]
-fn defer_runs_on_early_return() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn f(int n) -> int {
-    defer { write(stdout(), to_bytes("d")); }
-    if n == 0 {
-        return 1;
-    }
-    return 2;
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i,", f(0))));
-    write(stdout(), to_bytes(format("%i", f(9))));
-}
-"#,
-    );
-    assert_eq!(output, "d1,d2");
-}
-
-/// Inline receiver `new Celsius(0).into()` must typecheck and run (Bugbot:
-/// codegen used to skip boxing when `receiver_type` only handled Identifier/Access).
-#[test]
-fn inline_into_receiver_prints_32() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Celsius { pub c: int }
-class Fahrenheit { pub f: int }
-impl Into<Fahrenheit> for Celsius {
-    fn into(Celsius x) -> Fahrenheit {
-        return new Fahrenheit(x.c * 2 + 32);
-    }
-}
-fn main() {
-    let f: Fahrenheit = new Celsius(0).into();
-    write(stdout(), to_bytes(format("%i", f.f)));
-}
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "32");
-}
-
-/// `return c.into();` under `-> Fahrenheit` pins the Into target at runtime.
-#[test]
-fn return_into_pins_target_prints_32() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Celsius { pub c: int }
-class Fahrenheit { pub f: int }
-class Kelvin { pub k: int }
-impl Into<Fahrenheit> for Celsius {
-    fn into(Celsius x) -> Fahrenheit {
-        return new Fahrenheit(x.c * 2 + 32);
-    }
-}
-impl Into<Kelvin> for Celsius {
-    fn into(Celsius x) -> Kelvin {
-        return new Kelvin(x.c);
-    }
-}
-fn to_f(Celsius c) -> Fahrenheit {
-    return c.into();
-}
-fn main() {
-    let f = to_f(new Celsius(0));
-    write(stdout(), to_bytes(format("%i", f.f)));
-}
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "32");
-}
-
-/// Shuffled record pattern `{ y: _, x: a }` must bind declaration-order `x`.
-#[test]
-fn shuffled_record_pattern_binds_declaration_order_field() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        enum E { Foo { x: int, y: int, z: int } }
-        fn main() {
-            let e = E::Foo { x: 1, y: 2, z: 3 };
-            let v = match e {
-                E::Foo { y: _, x: a, z: _ } => a,
-            };
-            write(stdout(), to_bytes(format("%i", v)));
-        }
-    "#;
-    assert_eq!(run_example_src(src), "1");
-}
-
-/// Phase 4: open `%v` inside a Show-bound generic body.
-#[test]
-fn generic_print_open_bound_uses_show_dictionary() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn show_it<T: Show>(T x) {
-            write(stdout(), to_bytes(format("%v,", x)));
-        }
-        fn main() {
-            show_it(10);
-            show_it(20);
-        }
-    "#;
-    assert_eq!(run_example_src(src), "10,20,");
-}
-
-/// Phase 4: `string::format("%v", ...)` produces a string for further use.
-#[test]
-fn format_percent_v_parity_with_print() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let s = format("%v-%v", 1, "x");
-            write(stdout(), to_bytes(format("%s", s)));
-        }
-    "#;
-    assert_eq!(run_example_src(src), "1-x");
-}
 
 /// Phase 4: captured dictionaries remain valid after the creating frame returns
 /// and the application site need not supply dictionaries (`app_dict_arity=0`).
@@ -1068,36 +793,6 @@ use string::{format, to_bytes};
     assert_eq!(run_example_src(src), "42");
 }
 
-/// Inner-block PolyFn let must not poison an outer same-named ObjFn local.
-#[test]
-fn polyfn_block_shadow_does_not_box_outer_mono_fn() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        trait Describable<T> {
-            fn describe_val(T x) -> int;
-        }
-        impl Describable for int {
-            pub fn describe_val(int x) -> int { return x + 1; }
-        }
-        fn show<T: Describable>(T x) -> int {
-            return describe_val(x);
-        }
-        fn capture_show<T: Describable>(T _w) {
-            return show;
-        }
-        fn add(int a, int b) -> int { return a + b; }
-        fn main() {
-            let f = add;
-            {
-                let f = capture_show(0);
-                write(stdout(), to_bytes(format("%i", f(41))));
-            }
-            write(stdout(), to_bytes(format("%i", f(1, 2))));
-        }
-    "#;
-    assert_eq!(run_example_src(src), "423");
-}
 
 /// Phase 4: multiparam `Convert<A,B>` capture works after return with no app dict.
 /// Both type args are witnessed at the capture call so the dict is concrete.
@@ -1178,35 +873,7 @@ use string::{format, to_bytes};
     assert_eq!(output, "8");
 }
 
-#[test]
-fn monomorphized_generic_add_prints_3() {
-    let output = run_example_src(
-        r#"use io::{stdout, write};
-use string::{format, to_bytes};
-fn add<T: Num>(T a, T b) -> T {
-            return a + b;
-        }
 
-        fn main() {
-            write(stdout(), to_bytes(format("%i", add(1, 2))));
-        }"#,
-    );
-    assert_eq!(output, "3");
-}
-
-#[test]
-fn string_plus_equal_updates_binding() {
-    let output = run_example_src(
-        r#"use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-            let s = "a";
-            s += "b";
-            write(stdout(), to_bytes(format("%s", s)));
-        }"#,
-    );
-    assert_eq!(output, "ab");
-}
 
 #[test]
 fn fizbuz_runs_to_completion() {
@@ -1232,198 +899,15 @@ fn main() {
     assert!(constants.is_empty());
 }
 
-/// A `let` and a re-assignment of the same binding both reach the output:
-/// the stack path stores each to the binding's slot, a body lowered
-/// straight from HIR keeps the binding in a register.
-#[test]
-fn let_binding_and_reassignment_both_print() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let x = 5;
-            write(stdout(), to_bytes(format("%i", x)));
-            x = 10;
-            write(stdout(), to_bytes(format("%i", x)));
-        }
-    "#;
-    assert_eq!(run_example_src(src), "510");
-}
 
-/// Critical regression: shuffled named args must reorder to declaration
-/// order at runtime. Happy-path goldens only exercise source-order and
-/// positional-prefix forms; a missing codegen reorder would still typecheck
-/// here (string then int) but print the wrong values.
-#[test]
-fn named_args_shuffled_order_prints_correct_values() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn greet(string name, int age) {
-    write(stdout(), to_bytes(format("%s", name)));
-    write(stdout(), to_bytes(format("%i", age)));
-}
 
-fn main() {
-    greet(age: 36, name: "Ada");
-    greet(age: 40, name: "Grace");
-}
-"#,
-    );
-    assert_eq!(output, "Ada36Grace40");
-}
 
-#[test]
-fn builtin_len_named_arg_prints_3() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    write(stdout(), to_bytes(format("%i", len(value: [1, 2, 3]))));
-}
-"#,
-    );
-    assert_eq!(output, "3");
-}
 
-#[test]
-fn format_operand_string_concat_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let n = 7;
-    write(stdout(), to_bytes("n=" + format("%i", n)));
-    write(stdout(), to_bytes(format("%i", n) + "!"));
-}
-"#,
-    );
-    assert_eq!(output, "n=77!");
-}
 
-#[test]
-fn pure_arg_reorder_preserves_identifier_args() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn effect() -> int {
-    write(stdout(), to_bytes(format("%i,", 7)));
-    return 2;
-}
-fn sink(int a, int b) -> int {
-    write(stdout(), to_bytes(format("%i,", a + b)));
-    return a + b;
-}
-fn main() {
-    let cached = 10;
-    write(stdout(), to_bytes(format("%i", sink(effect(), cached))));
-}
-"#,
-    );
-    assert_eq!(output, "7,12,12");
-}
 
-/// Rest packing with a named fixed prefix + trailing positionals (P4 + P2).
-#[test]
-fn rest_after_named_fixed_prefix_packs_trailing() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn f(int a, int... xs) -> int {
-    return a + len(xs);
-}
 
-fn main() {
-    write(stdout(), to_bytes(format("%i", f(a: 10, 1, 2, 3))));
-    write(stdout(), to_bytes(format("%i", f(a: 7))));
-}
-"#,
-    );
-    assert_eq!(output, "137");
-}
 
-/// Nested let destructure must bind inner tuple slots correctly (not swap).
-#[test]
-fn let_nested_tuple_destructure_binds_in_order() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let (a, (b, c)) = (1, (2, 3));
-    write(stdout(), to_bytes(format("%i", a)));
-    write(stdout(), to_bytes(format("%i", b)));
-    write(stdout(), to_bytes(format("%i", c)));
-}
-"#,
-    );
-    assert_eq!(output, "123");
-}
 
-/// Phase P0: `let x = match { … }` must bind the arm value via
-/// StorePop. Pre-fix Match emitted RETURN at end_label, so the
-/// StorePop was unreachable and prints never ran / saw 0.
-#[test]
-fn let_match_binds_arm_value() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let x = match Option::None {
-                Option::None => 7,
-                Option::Some(v) => v,
-            };
-            write(stdout(), to_bytes(format("%i", x)));
-            let y = match Option::Some(42) {
-                Option::None => 0,
-                Option::Some(v) => v,
-            };
-            write(stdout(), to_bytes(format("%i", y)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "742");
-}
-
-/// Phase P0: dict fields that hold heap objects (strings) must
-/// round-trip through GetField.
-#[test]
-fn dict_string_field_round_trips() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let d = { name: "hi", n: 9 };
-            write(stdout(), to_bytes(format("%s", d.name)));
-            write(stdout(), to_bytes(format("%i", d.n)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "hi9");
-}
-
-/// Phase P1: in-place dict mutation via `d.field = value` then re-read.
-#[test]
-fn dict_mutation_round_trips() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let d = { foo: 1, name: "a" };
-            d.foo = 99;
-            d.name = "z";
-            write(stdout(), to_bytes(format("%i", d.foo)));
-            write(stdout(), to_bytes(format("%s", d.name)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "99z");
-}
 
 #[test]
 fn example_let_chained_bindings_works() {
@@ -1467,148 +951,9 @@ use string::{format, to_bytes};
     assert_eq!(output, "6");
 }
 
-#[test]
-fn nested_if_in_loop_runs_correctly() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let i = 0;
-    let n = 0;
-    while (i < 4) {
-        if i < 2 { n = n + 1; }
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i,%i", i, n)));
-}
-"#;
-    assert_eq!(run_example_src(src), "4,2");
-}
 
-/// COI-16: inlined `Vec::push` must stage the receiver when the arg emits
-/// `STORE`/`Seek` (`format`, `match`, `new Class`). Pre-fix, those pushes
-/// silently dropped values (enum serialize via match+format yielded only the
-/// header; `v.push(new C(...))` left len=0).
-#[test]
-fn vec_push_clobbering_args_preserve_elements() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
 
-enum LockPackage {
-    Git(string, string, string),
-}
 
-class Point {
-    pub x: int,
-    pub y: int,
-}
-
-fn quote(string s) -> string {
-    return "'" + s + "'";
-}
-
-fn main() {
-    let lines = Vec::new();
-    lines.push(format("a=%s", "1"));
-    lines.push(format("b=%s", "2"));
-    let pkgs = Vec::new();
-    pkgs.push(new Point(1, 2));
-    pkgs.push(new Point(3, 4));
-    let enums = Vec::new();
-    enums.push(LockPackage::Git("n", "g", "t"));
-    let e0 = enums[0];
-    let names = Vec::new();
-    names.push(match e0 {
-        LockPackage::Git(name, git, tag) => format("name=%s", quote(name)),
-    });
-    let _ = write_all(
-        stdout(),
-        to_bytes(format(
-            "lines=%i pkgs=%i names=%i n0=%s",
-            len(lines),
-            len(pkgs),
-            len(names),
-            names[0],
-        )),
-    );
-}
-"#,
-    );
-    assert_eq!(
-        output, "lines=2 pkgs=2 names=1 n0=name='n'",
-        "format / new Class / match+format push args must not drop the vec"
-    );
-}
-
-/// Nested multi-field record patterns must not clobber sibling outer fields.
-/// Pre-fix, in-place `UnpackAt` at the outer field slot overwrote later
-/// siblings when the inner arity exceeded one.
-#[test]
-fn nested_multifield_record_pattern_preserves_sibling() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Wrap {
-    W { inner: Inner, name: int },
-}
-fn both(Wrap w) -> int {
-    return match w {
-        Wrap::W { inner: Inner::I { x, y }, name } => x + y + name,
-    };
-}
-fn main() {
-    let w = Wrap::W { inner: Inner::I { x: 10, y: 20 }, name: 3 };
-    write(stdout(), to_bytes(format("%i", both(w))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "33",
-        "inner fields and outer sibling `name` must all bind correctly"
-    );
-}
-
-/// Two nested multifield records in one outer arm — each must unpack into
-/// distinct scratch regions so the second nested payload cannot overwrite
-/// the first nested bindings.
-#[test]
-fn nested_two_multifield_records_preserve_both() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Pair {
-    P { a: Inner, b: Inner },
-}
-fn sum(Pair p) -> int {
-    return match p {
-        Pair::P {
-            a: Inner::I { x: ax, y: ay },
-            b: Inner::I { x: bx, y: by },
-        } => ax + ay + bx + by,
-    };
-}
-fn main() {
-    let p = Pair::P {
-        a: Inner::I { x: 1, y: 2 },
-        b: Inner::I { x: 10, y: 20 },
-    };
-    write(stdout(), to_bytes(format("%i", sum(p))));
-}
-"#,
-    );
-    assert_eq!(output, "33", "both nested multifield bindings must survive");
-}
 
 fn ensure_ffi_libsum_built() -> std::path::PathBuf {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2442,26 +1787,6 @@ fn example_perf_for_in_coro_prints_checksum() {
     assert_eq!(output, "193536");
 }
 
-#[test]
-fn for_in_continue_skips_body_and_still_increments() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    for x in [1, 2, 3, 4] {
-        if x == 2 {
-            continue;
-        }
-        s = s + x;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "8");
-}
 
 #[test]
 fn example_range_prints_01234012356() {
@@ -2471,97 +1796,10 @@ fn example_range_prints_01234012356() {
     assert_eq!(output, "012340123561.02.03.0");
 }
 
-/// Inner-block destructure must not clobber an outer binding's slot.
-#[test]
-fn let_destructure_block_shadow_preserves_outer_binding() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum A { A { z: int, x: int }, }
-enum B { B { y: int }, }
-fn main() {
-  let outer = { a: A::A { z: 10, x: 42 } };
-  let { a } = outer;
-  { let inner = { a: B::B { y: 7 } }; let { a } = inner; }
-  write(stdout(), to_bytes(format("%i", a.x)));
-}
-"#,
-    );
-    assert_eq!(output, "42", "outer `a` must survive inner-block shadow");
-}
 
-/// Rest-only generic with a typeclass constraint needs a call-site dict.
-#[test]
-fn generic_rest_only_show_call_emits_dict_and_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn show_all<T: Show>(T... xs) {
-    write(stdout(), to_bytes(format("%v", xs[0])));
-}
-fn main() {
-    show_all(1);
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
 
-/// Rest-only Num generic must monomorphize (not print a boxed heap pointer).
-#[test]
-fn generic_rest_only_num_call_monomorphizes_and_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn twice_first<T: Num>(T... xs) -> T { return xs[0] + xs[0]; }
-fn main() { write(stdout(), to_bytes(format("%i", twice_first(21)))); }
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Shadowing a function parameter inside a block must restore Access typing.
-#[test]
-fn block_shadow_of_param_restores_access_field_type() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum A { A { z: int, x: int }, }
-enum B { B { y: int }, }
-fn foo(A a) {
-  { let a = B::B { y: 7 }; }
-  write(stdout(), to_bytes(format("%i", a.x)));
-}
-fn main() { foo(A::A { z: 10, x: 42 }); }
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Half-open vs inclusive endpoints: `0..1` yields only 0; `0..=1` yields 0,1.
-#[test]
-fn range_half_open_excludes_end_inclusive_includes_end() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    for x in 0..1 {
-        write(stdout(), to_bytes(format("%i", x)));
-    }
-    write(stdout(), to_bytes(","));
-    for x in 0..=1 {
-        write(stdout(), to_bytes(format("%i", x)));
-    }
-}
-"#,
-    );
-    assert_eq!(output, "0,01");
-}
 
 #[test]
 fn range_to_vec_collects_int_byte_float() {
@@ -2590,44 +1828,6 @@ fn main() {
     assert_eq!(output, "5,4,0,2,3");
 }
 
-/// `.to_vec()` must yield the same sequence as `for` (shared LE/LEQ + step).
-#[test]
-fn range_to_vec_matches_for_in_elements() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    for x in 0..=3 {
-        write(stdout(), to_bytes(format("%i", x)));
-    }
-    write(stdout(), to_bytes("|"));
-    let v = (0..=3).to_vec();
-    let i = 0;
-    while i < v.len() {
-        write(stdout(), to_bytes(format("%i", v[i])));
-        i = i + 1;
-    }
-    write(stdout(), to_bytes("|"));
-    write(stdout(), to_bytes(format("%i", (7..=7).to_vec()[0])));
-    write(stdout(), to_bytes("|"));
-    for x in 1.0..=3.0 {
-        write(stdout(), to_bytes(format("%f", x)));
-    }
-    write(stdout(), to_bytes("|"));
-    let f = (1.0..=3.0).to_vec();
-    let j = 0;
-    while j < f.len() {
-        write(stdout(), to_bytes(format("%f", f[j])));
-        j = j + 1;
-    }
-    write(stdout(), to_bytes("|"));
-    write(stdout(), to_bytes(format("%i", (4.0..1.0).to_vec().len())));
-}
-"#,
-    );
-    assert_eq!(output, "0123|0123|7|1.02.03.0|1.02.03.0|0");
-}
 
 /// Int `to_vec` thunks fuse ADD/LE(Q); float sibling thunks keep ADDF and fuse LE(Q)F.
 #[test]
@@ -2726,94 +1926,8 @@ fn main() {
     );
 }
 
-/// Regression guard: `resume h` used INLINE as a `print` argument
-/// (no intermediate `let` binding) must not corrupt the operand
-/// stack. Pre-fix, the bare `yield expr;` statement's spurious
-/// trailing `POP` (see `bare_yield_statement_does_not_emit_trailing_pop`
-/// in `compiler/src/lib.rs`) would pop whatever the resumer had
-/// already pushed for the in-progress `print` call (e.g. the format
-/// string), leading to a misaligned pointer dereference.
-#[test]
-fn inline_resume_in_print_does_not_corrupt_stack() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn counter() {
-            yield 0;
-            yield 1;
-            yield 2;
-        }
 
-        fn main() {
-            let h = counter();
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%i", resume h)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "0,1,2");
-}
 
-/// Regression guard: two handles from the SAME parameterized
-/// `async fn`, interleaved, with `resume` used inline. Pre-fix, the
-/// same spurious trailing `POP` corrupted each coroutine's argument
-/// slot (`base`) on every resume after the first yield, producing
-/// wrong values once interleaving pushed other locals onto the
-/// shared stack.
-#[test]
-fn parameterized_interleaved_coroutines_inline_resume_stay_independent() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn counter(int base) {
-            yield base;
-            yield base + 1;
-            yield base + 2;
-        }
-
-        fn main() {
-            let a = counter(1);
-            let b = counter(100);
-
-            write(stdout(), to_bytes(format("%i,", resume a)));
-            write(stdout(), to_bytes(format("%i,", resume b)));
-            write(stdout(), to_bytes(format("%i,", resume a)));
-            write(stdout(), to_bytes(format("%i,", resume b)));
-            write(stdout(), to_bytes(format("%i,", resume a)));
-            write(stdout(), to_bytes(format("%i", resume b)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "1,100,2,101,3,102");
-}
-
-/// `return e;` inside an `async fn` now produces a real completion
-/// value (previously it was silently unified against `unit` and the
-/// typechecker rejected any non-unit `return`). The value returned by
-/// `return` propagates to the `resume` call that completes the
-/// coroutine, exactly like a yielded value.
-#[test]
-fn coroutine_return_value_propagates_to_resume() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn counter() {
-            yield 1;
-            yield 2;
-            return 42;
-        }
-
-        fn main() {
-            let h = counter();
-            write(stdout(), to_bytes(format("%i,", resume h))); // yield 1
-            write(stdout(), to_bytes(format("%i,", resume h))); // yield 2
-            write(stdout(), to_bytes(format("%i", resume h)));  // return 42
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "1,2,42");
-}
 
 /// WP-M6: resuming an already-Done coroutine panics instead of returning a
 /// stale sentinel value.
@@ -2844,51 +1958,7 @@ use string::{format, to_bytes};
     );
 }
 
-/// `done(h)` is false before the first resume and true after completion
-/// without needing another resume (M6: extra resume panics).
-#[test]
-fn done_before_and_after_coroutine_completion() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn counter() {
-            yield 1;
-            return 2;
-        }
 
-        fn main() {
-            let h = counter();
-            write(stdout(), to_bytes(format("%z,", done(h))));
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%z,", done(h))));
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%z", done(h))));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "false,1,false,2,true");
-}
-
-/// Immediate-return async fn completes on first resume; `done` flips after.
-#[test]
-fn immediate_return_async_done_after_first_resume() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn unit_ret() {
-            return;
-        }
-
-        fn main() {
-            let h = unit_ret();
-            write(stdout(), to_bytes(format("%z,", done(h))));
-            let _ = resume h;
-            write(stdout(), to_bytes(format("%z", done(h))));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "false,true");
-}
 
 /// `resume h with v` after completion panics (same M6 rule as bare resume).
 #[test]
@@ -2916,60 +1986,7 @@ use string::{format, to_bytes};
     );
 }
 
-/// Inline `yield from` must delegate every yielded value before completing.
-#[test]
-fn yield_from_inline_delegates_all_values() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        async fn inner() {
-            yield 1;
-            yield 2;
-        }
-        async fn outer() {
-            yield from inner();
-        }
 
-        fn main() {
-            let h = outer();
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%i,", resume h)));
-            write(stdout(), to_bytes(format("%i", resume h)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "1,2,0");
-}
-
-/// `write_all` between resumes must not mark the delegating coroutine done.
-#[test]
-fn yield_from_write_all_between_resumes() {
-    let src = r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-        async fn counter() {
-            yield 0;
-            yield 1;
-            yield 2;
-        }
-        async fn wrap() {
-            yield from counter();
-        }
-
-        fn main() {
-            let h = wrap();
-            let v0 = resume h;
-            write_all(stdout(), to_bytes(format("%i", v0)));
-            let v1 = resume h;
-            write_all(stdout(), to_bytes(format("%i", v1)));
-            let v2 = resume h;
-            write_all(stdout(), to_bytes(format("%i", v2)));
-        }
-    "#;
-    let output = run_example_src(src);
-    assert_eq!(output, "012");
-}
 
 fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
     ensure_ffi_libsum_built();
@@ -3061,48 +2078,7 @@ fn example_ffi_varargs_prints_60() {
     assert_eq!(output, "60");
 }
 
-#[test]
-fn example_while_loop_accumulates_correctly() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-        fn main() {
-            let acc = 0;
-            let i = 0;
-            while (i < 100) {
-                acc = acc + i;
-                i = i + 1;
-            }
-            write(stdout(), to_bytes(format("%i", acc)));
-        }
-        "#,
-    );
-    assert_eq!(output, "4950");
-}
 
-/// Structural `len` on non-literal values: string hits VM `ArrayLen`;
-/// tuple/dict use typed static length after binding (not literal fold).
-#[test]
-fn runtime_len_of_string_tuple_dict_params() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn id_str(string s) -> string { return s; }
-
-fn main() {
-    let t = (1, 2, 3);
-    let d = { a: 1, b: 2 };
-    write(stdout(), to_bytes(format("%i\n", len(id_str("ab")))));
-    write(stdout(), to_bytes(format("%i\n", len(t))));
-    write(stdout(), to_bytes(format("%i\n", len(d))));
-}
-"#,
-    );
-    assert_eq!(output, "2\n3\n2\n");
-}
 
 /// `typeof` of prelude Option/Result must print the module-qualified FQN.
 #[test]
@@ -3157,33 +2133,6 @@ fn main() {
     }
 }
 
-/// Regression: `derive Ord` must emit Lt/Le/Gt/Ge + empty Ord (PR #14 layout)
-/// and lexicographic field compare must use strict `<` so equal prefixes fall
-/// through (a Leq-primary fold would short-circuit on equal leading fields).
-#[test]
-fn derive_ord_record_payload_lexicographic_compare() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-#[derive(Ord)]
-enum Pair {
-    Pair { x: int, y: int },
-}
-
-fn main() {
-    let a = Pair::Pair { x: 1, y: 2 };
-    let b = Pair::Pair { x: 1, y: 3 };
-    let c = Pair::Pair { x: 2, y: 0 };
-    write(stdout(), to_bytes(format("%z,", a < b)));
-    write(stdout(), to_bytes(format("%z,", a < c)));
-    write(stdout(), to_bytes(format("%z,", b < a)));
-    write(stdout(), to_bytes(format("%z,", a <= a)));
-    write(stdout(), to_bytes(format("%z", a < a)));
-}
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "true,true,false,true,false");
-}
 
 #[test]
 fn attr_test_fn_discovered_by_harness() {
@@ -3395,48 +2344,6 @@ fn example_perf_coro_ping_prints_expected() {
     assert_eq!(output, "124750");
 }
 
-#[test]
-fn io_tcp_helper_hostinvokes_are_wired() {
-    let output = run_example_src(
-        r#"
-use io::{open, stdout, write};
-use io::net::tcp::{accept, connect_timeout, listen, local_addr, set_nodelay, shutdown};
-use string::{format, to_bytes};
-
-fn main() {
-    let path = "coil_io_timeout_tcp_helpers.bin";
-    let file = open(path, "w")?;
-
-    let local_on_file = match local_addr(file) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-    let nodelay_on_file = match set_nodelay(file, true) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-    let shutdown_on_file = match shutdown(file, 2) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-
-    let listener = listen("127.0.0.1", 0)?;
-    let addr = local_addr(listener)?;
-    let accept_code = match accept(listener) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-    let connect_code = match connect_timeout("127.0.0.1", 1, 1) {
-        Result::Ok(_) => 2,
-        Result::Err(_) => 2,
-    };
-
-    write(stdout(), to_bytes(format("%i%i%i%i%i", local_on_file, nodelay_on_file, shutdown_on_file, accept_code, connect_code)));
-}
-"#,
-    );
-    assert_eq!(output, "11112");
-}
 
 /// Nested `let server = match accept_wait(listener) { … }` inside a loop must handle
 /// multiple connections (binding matches omit the fusion barrier).
@@ -3636,54 +2543,7 @@ fn main() {{
     server.join().expect("server");
 }
 
-/// `let x = match …` inside `while` must not corrupt loop locals across iterations.
-#[test]
-fn while_let_result_ok_panic_match_preserves_locals() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let i = 0;
-    let acc = 0;
-    while i < 3 {
-        let v = match Result::Ok(i) {
-            Result::Ok(x) => x,
-            Result::Err(_) => panic "tick",
-        };
-        acc = acc + v;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i,%i", acc, i)));
-}
-"#,
-    );
-    assert_eq!(output, "3,3");
-}
 
-/// Same guard for `for-in` loop bodies (not only `while`).
-#[test]
-fn for_in_let_match_preserves_accumulator() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let items = [1, 2, 3];
-    let acc = 0;
-    for n in items {
-        let v = match Result::Ok(n) {
-            Result::Ok(x) => x + 1,
-            Result::Err(_) => panic "tick",
-        };
-        acc = acc + v;
-    }
-    write(stdout(), to_bytes(format("%i", acc)));
-}
-"#,
-    );
-    assert_eq!(output, "9");
-}
 
 /// Err arm in a binding match must still panic with the literal message.
 #[test]
@@ -3719,30 +2579,6 @@ fn main() {
     assert_eq!(s, "panic: accept");
 }
 
-/// `x = match …` reassignment inside a loop uses the same binding-context
-/// match lowering as `let x = match …`.
-#[test]
-fn while_assignment_match_preserves_locals() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let i = 0;
-    let v = 0;
-    while i < 3 {
-        v = match Result::Ok(i) {
-            Result::Ok(x) => x,
-            Result::Err(_) => panic "tick",
-        };
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", v)));
-}
-"#,
-    );
-    assert_eq!(output, "2");
-}
 
 /// Standalone virtual `main` for a green `test("…")` suite exits cleanly.
 #[test]
@@ -3941,44 +2777,6 @@ test("after") { if !(true) { raise "assertion failed"; } }
     assert_eq!(results, [("boom", false), ("after", true)]);
 }
 
-/// Match arms that reuse a binding name with different payload types
-/// must resolve field access against *that arm's* type. A flat
-/// `codegen_var_types` side-table last-wins would make `p.y` emit
-/// `LoadField(0)` (against Rect) and return `x` instead of `y`.
-#[test]
-fn match_arm_reused_binding_name_field_access_uses_arm_type() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Point {
-    Point { x: int, y: int },
-}
-
-enum Rect {
-    Rect { w: int, h: int },
-}
-
-enum Shape {
-    Pt(Point),
-    Rc(Rect),
-}
-
-fn get(Shape s) -> int {
-    return match s {
-        Shape::Pt(p) => p.y,
-        Shape::Rc(p) => p.h,
-    };
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", get(Shape::Pt(Point::Point { x: 1, y: 2 })))));
-    write(stdout(), to_bytes(format("%i", get(Shape::Rc(Rect::Rect { w: 3, h: 4 })))));
-}
-"#,
-    );
-    assert_eq!(output, "24");
-}
 
 /// Polymorphic payloads (`Option<Point>`, `Box<T>`) must not push
 /// registry schema placeholders (`Con("T")`) onto the per-arm override
@@ -4021,30 +2819,6 @@ fn main() {
     assert_eq!(output, "22");
 }
 
-/// P0: early-loop flag reassignment sticks while later locals stay live.
-#[test]
-fn store_pop_early_flag_sticks_with_later_locals() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let got = 0;
-    let a = 1;
-    let b = 2;
-    let c = 3;
-    let i = 0;
-    while i < 3 {
-        got = 1;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", got)));
-    write(stdout(), to_bytes(format("%i", a + b + c)));
-}
-"#,
-    );
-    assert_eq!(output, "16");
-}
 
 /// P1: empty Vec + push + index round-trip (and under GC pressure).
 #[test]
@@ -4074,104 +2848,9 @@ fn main() {
     assert_eq!(output, "3444");
 }
 
-/// P1: `arr[i] = x` then read-back.
-#[test]
-fn array_index_store_round_trip() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let arr = [0, 0, 0];
-    arr[1] = 42;
-    write(stdout(), to_bytes(format("%i", arr[0])));
-    write(stdout(), to_bytes(format("%i", arr[1])));
-    write(stdout(), to_bytes(format("%i", arr[2])));
-}
-"#,
-    );
-    assert_eq!(output, "0420");
-}
 
-/// P3: `return -1;` compiles and runs.
-#[test]
-fn return_negative_one_works() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn neg() -> int { return -1; }
-fn main() {
-    write(stdout(), to_bytes(format("%i", neg())));
-    write(stdout(), to_bytes(format("%i", 0 - 1)));
-}
-"#,
-    );
-    assert_eq!(output, "-1-1");
-}
 
-/// P4: natural Ok/Ok/Err arm order (Err last) must not panic at codegen.
-#[test]
-fn nested_match_ok_arms_before_err_dispatches() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn unwrap_result(Result r) -> int {
-    return match r {
-        Result::Ok(Option::Some(v)) => v,
-        Result::Ok(Option::None) => 0,
-        Result::Err(_) => -1,
-    };
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::Some(42))))));
-    write(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::None)))));
-    write(stdout(), to_bytes(format("%i", unwrap_result(Result::Err("oops")))));
-}
-"#,
-    );
-    assert_eq!(output, "420-1");
-}
 
-/// P6: class field holding an enum round-trips via GetField.
-#[test]
-fn class_enum_field_access_round_trip() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Status {
-    Ready,
-    Done(int),
-}
-
-class Box {
-    pub status: Status,
-}
-
-impl Box {
-    pub fn get() -> Status {
-        return self.status;
-    }
-}
-
-fn main() {
-    let b = new Box(Status::Done(9));
-    let s = b.get();
-    write(stdout(), to_bytes(format("%i", match s {
-        Status::Ready => 0,
-        Status::Done(v) => v,
-    })));
-    write(stdout(), to_bytes(format("%i", match b.status {
-        Status::Ready => 0,
-        Status::Done(v) => v,
-    })));
-}
-"#,
-    );
-    assert_eq!(output, "99");
-}
 
 /// P6: match-bound constructor payloads must land in `codegen_var_types`
 /// so field access uses the payload enum's LoadField index — not the
@@ -4213,138 +2892,12 @@ fn main() {
     assert_eq!(output, "421");
 }
 
-/// Disk-module imports (e.g. `io::sync::write_all`) are file-level globals.
-/// After `take_and_isolate` they must be rebound like virtual imports — not
-/// treated as missing captures inside lambdas.
-#[test]
-fn disk_import_usable_inside_lambda_without_capture() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
-fn main() {
-    let f = fn () => write_all(stdout(), to_bytes("ok"));
-    f()?;
-}
-"#,
-    );
-    assert_eq!(output, "ok");
-}
 
-/// Aliased disk imports must rebind under the local alias name.
-#[test]
-fn disk_import_alias_usable_inside_lambda() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all as wa};
-use string::{to_bytes};
-fn main() {
-    let f = fn () => wa(stdout(), to_bytes("ok"));
-    f()?;
-}
-"#,
-    );
-    assert_eq!(output, "ok");
-}
 
-/// Same rebind rule for `defer` bodies that call disk-module imports.
-#[test]
-fn disk_import_usable_inside_defer_without_capture() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
-fn main() {
-    defer { write_all(stdout(), to_bytes("d")); }
-    write_all(stdout(), to_bytes("a"));
-}
-"#,
-    );
-    assert_eq!(output, "ad");
-}
 
-/// Top-level named `fn`s are callable from a lambda without `use` (empty captures).
-#[test]
-fn named_fn_callable_inside_lambda_without_capture() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-fn rec(int n) -> int { return n + 1; }
-fn main() {
-    let f = fn (int x) => rec(x);
-    write_all(stdout(), to_bytes(format("%i", f(41))));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Capture-free `with_lock` callback may CALL a named `fn`.
-#[test]
-fn with_lock_lambda_calls_named_fn_without_capture() {
-    let output = run_example_src(
-        r#"
-use thread::{mutex, with_lock};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-fn bump(int x) -> int { return x + 1; }
-fn main() {
-    let m = mutex(41)?;
-    let n = with_lock(m, fn (int x) => (bump(x), bump(x)))?;
-    write_all(stdout(), to_bytes(format("%i", n)));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Capture-free `spawn` lambda may CALL a named `fn`.
-#[test]
-fn spawn_lambda_calls_named_fn_without_capture() {
-    let output = run_example_src(
-        r#"
-use thread::{spawn, join};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-fn work() -> int { return 42; }
-fn main() {
-    let t = spawn(fn () => work())?;
-    write_all(stdout(), to_bytes(format("%i", join(t)?)));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Capturing lambda is still refused by `with_lock` (runtime NotSendable).
-#[test]
-fn with_lock_still_rejects_capturing_lambda() {
-    let output = run_example_src(
-        r#"
-use thread::{mutex, with_lock};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-fn main() {
-    let extra = 1;
-    let m = mutex(0)?;
-    let code = match with_lock(m, fn (int x) use (extra) => (x, extra)) {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-    write_all(stdout(), to_bytes(format("%i", code)));
-}
-"#,
-    );
-    assert_eq!(output, "0");
-}
 
 /// Outer lambda still requires `use` to be called from another lambda.
 #[test]
@@ -4398,81 +2951,9 @@ fn main() {
     );
 }
 
-/// Nested typed lambdas must keep Fragment/Argument NodeIds lockstep with
-/// codegen (`assign_fn_arg_node_ids`); a desync surfaces as wrong results or
-/// compile failure rather than Identifier span prefer.
-#[test]
-fn nested_typed_lambdas_print_sum() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let add = fn (int x) => fn (int y) use (x) => x + y;
-    let add40 = add(40);
-    write(stdout(), to_bytes(format("%i", add40(2))));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Named under-apply must build a partial whose holes fill in declaration
-/// order at CallIndirect time (not print the named value as the only arg).
-#[test]
-fn named_partial_application_completes_and_prints_3() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add(int a, int b) -> int { return a + b; }
-fn main() {
-    let g = add(a: 1);
-    write(stdout(), to_bytes(format("%i", g(2))));
-}
-"#,
-    );
-    assert_eq!(output, "3");
-}
 
-/// Nested partials (`f(1)` → `p(2)` → `q(3)`) must merge filled masks without
-/// clobbering earlier holes — a common ObjFn regression.
-#[test]
-fn nested_partial_application_prints_6() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add3(int a, int b, int c) -> int { return a + b + c; }
-fn main() {
-    let p = add3(1);
-    let q = p(2);
-    write(stdout(), to_bytes(format("%i", q(3))));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-/// Fixed-N vs rest-K (N < K) must dispatch by argc: exact fixed wins at N;
-/// rest handles K and above. Typechecker unit tests alone miss wrong CALL targets.
-#[test]
-fn fixed_vs_rest_overload_dispatches_at_runtime() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn f(int x) -> int { return x * 10; }
-fn f(int x, int y, int... xs) -> int { return x + y + len(xs); }
-fn main() {
-    write(stdout(), to_bytes(format("%i", f(1))));
-    write(stdout(), to_bytes(format("%i", f(1, 2))));
-    write(stdout(), to_bytes(format("%i", f(1, 2, 3, 4))));
-}
-"#,
-    );
-    assert_eq!(output, "1035");
-}
 
 #[test]
 fn production_compile_strips_harness_declarations() {
@@ -4509,333 +2990,22 @@ test("via block") { if !(true) { raise "assertion failed"; } }
     assert_eq!(pipeline.test_cases()[1].0, "via block");
 }
 
-#[test]
-fn spread_with_partial_application_forwards_remaining_args() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add3(int a, int b, int c) -> int { return a + b + c; }
-fn main() {
-    let p = add3(1);
-    write(stdout(), to_bytes(format("%i", p(...(2, 3)))));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-#[test]
-fn named_call_args_on_overloaded_functions_dispatch_correctly() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn greet(string name) -> string { return name; }
-fn greet(string name, int age) -> string { return format("%s:%i", name, age); }
-fn main() {
-    write(stdout(), to_bytes(format("%s", greet(name: "Ada"))));
-    write(stdout(), to_bytes(format("%s", greet(name: "Grace", age: 40))));
-}
-"#,
-    );
-    assert_eq!(output, "AdaGrace:40");
-}
 
-/// Prefix args + spread pack must flatten in source order. A buggy flatten that
-/// drops the prefix or reverses pack elements would still typecheck for
-/// `add3(int,int,int)` but print the wrong sum.
-#[test]
-fn spread_mixed_prefix_and_pack_prints_6() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add3(int a, int b, int c) -> int { return a + b + c; }
-fn main() {
-    write(stdout(), to_bytes(format("%i", add3(1, ...(2, 3)))));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-/// Let-bound packs exercise the typed-lookup codegen path (not the literal
-/// Tuple/Array shortcuts). Wrong Index expansion would silently mis-bind.
-#[test]
-fn spread_let_bound_tuple_prints_6() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add3(int a, int b, int c) -> int { return a + b + c; }
-fn main() {
-    let pack = (1, 2, 3);
-    write(stdout(), to_bytes(format("%i", add3(...pack))));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-/// End-to-end TailCall: self-recursive accumulator must print the correct sum.
-#[test]
-fn tail_recursive_sum_to_prints_15() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn sum_to(int n, int acc) -> int {
-    if n <= 0 { return acc; }
-    return sum_to(n - 1, acc + n);
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", sum_to(5, 0))));
-}
-"#,
-    );
-    assert_eq!(output, "15");
-}
 
-/// Const-fold `if` with strict `<` equality boundary takes else (Le vs Leq).
-#[test]
-fn const_if_strict_lt_equality_prints_else() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    if 5 < 5 {
-        write(stdout(), to_bytes(format("%i", 1)));
-    } else {
-        write(stdout(), to_bytes(format("%i", 0)));
-    }
-}
-"#,
-    );
-    assert_eq!(output, "0");
-}
 
-/// `while false` must skip the body entirely.
-#[test]
-fn const_while_false_skips_body() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    while false {
-        write(stdout(), to_bytes(format("%i", 1)));
-    }
-    write(stdout(), to_bytes(format("%i", 2)));
-}
-"#,
-    );
-    assert_eq!(output, "2");
-}
 
-/// Constant-trip `for` unroll must advance `i` via `step` between bodies.
-/// If unroll engaged but skipped `step`, `s = s + i` would stay `0`.
-#[test]
-fn const_for_unroll_prints_sum() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    let i = 0;
-    while i < 4 {
-        s = s + i;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-/// IL unroll of counted `while` must still run the induction step each trip.
-#[test]
-fn const_while_unroll_prints_sum() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    let i = 0;
-    while i < 4 {
-        s = s + i;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "6");
-}
 
-/// Signed `/` is toward zero; arithmetic `>>` would differ for negatives.
-#[test]
-fn signed_div_toward_zero_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let x = 0 - 5;
-    write(stdout(), to_bytes(format("%i", x / 2)));
-}
-"#,
-    );
-    assert_eq!(output, "-2");
-}
 
-/// Bit identities: `x | 0` and `x ^ x` keep value / yield zero (COI-123).
-#[test]
-fn bitop_identities_print() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let x = 7;
-    write(stdout(), to_bytes(format("%i %i", x | 0, x ^ x)));
-}
-"#,
-    );
-    assert_eq!(output, "7 0");
-}
 
-/// Invariant `t = 42` in a counted `while` must still be visible after the loop
-/// (COI-120 sinks the store rather than dropping a live slot).
-#[test]
-fn loop_invariant_store_live_after_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let t = 0;
-    let i = 0;
-    while i < 10 {
-        t = 42;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", t)));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Loop-variant stores must keep the last iteration's value.
-#[test]
-fn loop_variant_store_live_after_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let t = 0;
-    let i = 0;
-    while i < 10 {
-        t = i;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", t)));
-}
-"#,
-    );
-    assert_eq!(output, "9");
-}
 
-/// Same induction check with `i <= 2` (3 trips: 0+1+2).
-#[test]
-fn const_for_unroll_leq_advances_induction() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    let i = 0;
-    while i <= 2 {
-        s = s + i;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "3");
-}
 
-/// Range for-in unroll (`0..3`) binds successive values correctly.
-#[test]
-fn const_range_for_in_unroll_prints() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    for x in 0..3 {
-        s = s + x;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "3");
-}
 
-/// `break` disables unroll — first iteration still runs, rest skipped.
-#[test]
-fn for_with_break_still_stops_early() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let s = 0;
-    let i = 0;
-    while i < 5 {
-        s = s + i;
-        break;
-    }
-    write(stdout(), to_bytes(format("%i", s)));
-}
-"#,
-    );
-    assert_eq!(output, "0");
-}
 
-/// Fused `if i == k { continue/break }` inverts to `*Jmpt` (COI-87). Sum is
-/// 0+1+2+4+5+6 = 18 (skip 3, stop before 7).
-#[test]
-fn for_continue_and_break_guards_invert_to_jmpt() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let sum = 0;
-    let i = 0;
-    while i < 10 {
-        if i == 3 { i = i + 1; continue; }
-        if i == 7 { break; }
-        sum = sum + i;
-        i = i + 1;
-    }
-    write(stdout(), to_bytes(format("%i", sum)));
-}
-"#,
-    );
-    assert_eq!(output, "18");
-}
 
 /// `if !done { break }` leaves no standalone `LogNot`: the stack path fuses
 /// `LogNot; JMPF`, and in registers the branch takes its targets swapped.
@@ -4901,165 +3071,12 @@ fn main() {
     assert_eq!(run_example_src(src), "0");
 }
 
-/// Tiny direct-call inlining must preserve call semantics end-to-end.
-#[test]
-fn tiny_add_inlined_prints_7() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add(int a, int b) -> int { return a + b; }
-fn main() {
-    write(stdout(), to_bytes(format("%i", add(3, 4))));
-}
-"#,
-    );
-    assert_eq!(output, "7");
-}
 
-/// `x * 2^n` / `2^n * x` / `x * const(2^n)` must lower to SHL but still
-/// compute the same values as MUL (wrong shift amount is silent otherwise).
-#[test]
-fn mul_strength_reduce_to_shl_prints_correct_values() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn scale_rhs(int x) -> int { return x * 8; }
-fn scale_lhs(int x) -> int { return 4 * x; }
-fn scale_const(int x) -> int {
-    const K = 16;
-    return x * K;
-}
-fn scale_one(int x) -> int { return x * 1; }
-fn scale_six(int x) -> int { return x * 6; }
-fn scale_negative_x(int x) -> int { return x * 8; }
-fn main() {
-    write(stdout(), to_bytes(format("%i,", scale_rhs(5))));
-    write(stdout(), to_bytes(format("%i,", scale_lhs(7))));
-    write(stdout(), to_bytes(format("%i,", scale_const(3))));
-    write(stdout(), to_bytes(format("%i,", scale_one(9))));
-    write(stdout(), to_bytes(format("%i,", scale_six(7))));
-    write(stdout(), to_bytes(format("%i", scale_negative_x(0 - 3))));
-}
-"#,
-    );
-    assert_eq!(output, "40,28,48,9,42,-24");
-}
 
-/// Early-return diamond callees are tiny-inlined; both arms must still evaluate
-/// correctly at the call site.
-#[test]
-fn early_return_callee_both_arms_correct() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn early(int n, int is_neg) -> int {
-    if is_neg == 1 {
-        return 0 - 1;
-    }
-    return n * 2;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i,", early(4, 1))));
-    write(stdout(), to_bytes(format("%i", early(4, 0))));
-}
-"#,
-    );
-    assert_eq!(output, "-1,8");
-}
 
-/// Pure-arg reorder must keep CALL arg order while evaluating pure temps before
-/// effectful args (print from effect runs first; sink still sees a=2, b=10).
-#[test]
-fn pure_arg_reorder_preserves_order_and_effects() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn effect() -> int {
-    write(stdout(), to_bytes(format("%i,", 7)));
-    return 2;
-}
-fn sink(int a, int b) -> int {
-    write(stdout(), to_bytes(format("%i,", a + b)));
-    return a + b;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", sink(effect(), 10))));
-}
-"#,
-    );
-    assert_eq!(output, "7,12,12");
-}
 
-/// Predicate peel base path and recursive path must both return correct values.
-#[test]
-fn predicate_peel_base_and_recursive_paths() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn other(int n) -> int {
-    return n;
-}
-fn base(int n) -> int {
-    if n <= 0 {
-        return 1;
-    }
-    return other(n) + 1;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i,", base(0))));
-    write(stdout(), to_bytes(format("%i", base(5))));
-}
-"#,
-    );
-    assert_eq!(output, "1,6");
-}
 
-/// One-level self-unroll must not change recursive fib results.
-#[test]
-fn self_unroll_fib_still_correct() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn fib(int n) -> int {
-    if n <= 1 {
-        return n;
-    }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", fib(10))));
-}
-"#,
-    );
-    assert_eq!(output, "55");
-}
 
-/// Auto-par fork-join of pure recursive `fib(n-1)+fib(n-2)` must stay correct.
-#[test]
-fn auto_par_fib_still_correct() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn fib(int n) -> int {
-    if n <= 1 {
-        return n;
-    }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", fib(12))));
-}
-"#,
-    );
-    assert_eq!(output, "144");
-}
 
 /// Constant sites above the expression grain floor must emit `__coil_par_*` and stay correct.
 #[test]
@@ -6606,333 +4623,17 @@ fn main() {
     assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
 }
 
-/// Nested CALL + `let x = f(); if x == k` must not hang: mem_fwd must not
-/// turn StorePop;Load into Dup;Store when the store extends tell past TOS
-/// (shared-stack CmpJmpf would eat the local — broke http `parse_url`).
-#[test]
-fn mem_fwd_post_call_store_compare_does_not_hang() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn find_bytes(Vec<byte> hay, Vec<byte> needle) -> int {
-    let hn = len(hay);
-    let nn = len(needle);
-    if nn == 0 { return 0; }
-    if nn > hn { return 999999; }
-    let i = 0;
-    while i + nn <= hn {
-        let ok = 1;
-        let j = 0;
-        while j < nn {
-            if hay[i + j] != needle[j] { ok = 0; }
-            j = j + 1;
-        }
-        if ok == 1 { return i; }
-        i = i + 1;
-    }
-    return 999999;
-}
-fn bytes_slice(Vec<byte> src, int start, int end) -> Vec<byte> {
-    let out: Vec<byte> = Vec::new();
-    let i = start;
-    while i < end {
-        if i < len(src) { out.push(src[i]); }
-        i = i + 1;
-    }
-    return out;
-}
-fn parse_url(string s) -> int {
-    let b = to_bytes(s);
-    let sep = Vec::from([58 as byte, 47 as byte, 47 as byte]);
-    let sep_at = find_bytes(b, sep);
-    if sep_at == 999999 { return -1; }
-    let scheme_b = bytes_slice(b, 0, sep_at);
-    let rest_start = sep_at + 3;
-    let host_end = len(b);
-    let host_b = bytes_slice(b, rest_start, host_end);
-    return len(scheme_b) + len(host_b);
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", parse_url("http://example.com/hi"))));
-}
-"#,
-    );
-    assert_eq!(output, "18");
-}
 
-/// Fused assign / two-local AND-if / packed three-arg call must evaluate correctly.
-#[test]
-fn fused_assign_and_packed_call_runtime() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add3(int a, int b, int c) -> int {
-    if a < 0 {
-        return 0;
-    }
-    if b < 0 {
-        return 0;
-    }
-    return a + b + c;
-}
-fn main() {
-    let i = 0;
-    i = i + 1;
-    i = i + 1;
-    let flags = 15;
-    let mask = 7;
-    flags = flags & mask;
-    let a = true;
-    let b = false;
-    let and_ok = 0;
-    if a && b {
-        and_ok = 1;
-    } else {
-        and_ok = 2;
-    }
-    let x = 1;
-    let y = 2;
-    let z = 3;
-    write(stdout(), to_bytes(format("%i,", i)));
-    write(stdout(), to_bytes(format("%i,", flags)));
-    write(stdout(), to_bytes(format("%i,", and_ok)));
-    write(stdout(), to_bytes(format("%i", add3(x, y, z))));
-}
-"#,
-    );
-    assert_eq!(output, "2,7,2,6");
-}
 
-/// A local copy must preserve the shared cursor when its temporary store is
-/// above the live operand height.
-#[test]
-fn cursor_safe_copy_propagation_preserves_local_result() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn read_back(int x) -> int {
-    let value = 41;
-    let copy = value;
-    return copy + x;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", read_back(1))));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-/// Copied locals feeding MakeArray must not be rewritten into shape-sensitive
-/// stack producers that break array construction.
-#[test]
-fn copy_prop_preserves_array_built_from_copied_locals() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn build() -> int {
-    let a = 10;
-    let b = a;
-    let xs = [b, 20];
-    return xs[0] + xs[1];
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", build())));
-}
-"#,
-    );
-    assert_eq!(output, "30");
-}
 
-#[test]
-fn copy_prop_preserves_spilled_call_result_alias() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn produce() -> int {
-    return 41;
-}
-fn use_copy() -> int {
-    let value = produce();
-    let copy = value;
-    return copy + 1;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", use_copy())));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-#[test]
-fn copy_prop_preserves_field_aliases() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Point {
-    pub x: int,
-    pub y: int,
-}
-fn sum(Point point) -> int {
-    let alias = point;
-    return alias.x + alias.y;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", sum(new Point(3, 4)))));
-}
-"#,
-    );
-    assert_eq!(output, "7");
-}
 
-#[test]
-fn copy_prop_preserves_match_aliases() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Choice {
-    Empty,
-    Value(int),
-}
-fn unwrap(Choice choice) -> int {
-    return match choice {
-        Choice::Empty => 0,
-        Choice::Value(value) => value,
-    };
-}
-fn main() {
-    let value = Choice::Value(42);
-    let alias = value;
-    write(stdout(), to_bytes(format("%i", unwrap(alias))));
-}
-"#,
-    );
-    assert_eq!(output, "42");
-}
 
-#[test]
-fn copy_prop_preserves_loop_carried_writes() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn sum_alias() -> int {
-    let seed = 3;
-    let alias = seed;
-    let i = 0;
-    let total = 0;
-    while i < 4 {
-        total = total + alias;
-        i = i + 1;
-    }
-    return total;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", sum_alias())));
-}
-"#,
-    );
-    assert_eq!(output, "12");
-}
 
-/// MakeEnum one-pass payload build must keep mixed Value/Object order for match.
-#[test]
-fn make_enum_mixed_payload_survives_match() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Pair {
-    Both(int, string),
-}
-fn describe(Pair p) -> int {
-    return match p {
-        Pair::Both(n, s) => n + len(s),
-    };
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", describe(Pair::Both(7, "abcd")))));
-}
-"#,
-    );
-    assert_eq!(output, "11");
-}
 
-#[test]
-fn direct_enum_consumers_avoid_heap_construction() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Choice {
-    Value(int),
-}
-enum Point {
-    Point { x: int },
-}
-fn main() {
-    let unwrapped = match Choice::Value(42) {
-        Choice::Value(value) => value,
-    };
-    let field = Point::Point { x: 9 }.x;
-    write(stdout(), to_bytes(format("%i,%i", unwrapped, field)));
-}
-"#,
-    );
-    assert_eq!(output, "42,9");
-}
 
-#[test]
-fn local_option_match_unbox_runs() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let x = Option::Some(41);
-    let y = match x {
-        Option::Some(v) => v + 1,
-        Option::None => 0,
-    };
-    let z = match Option::None {
-        Option::Some(_) => 9,
-        Option::None => 2,
-    };
-    write(stdout(), to_bytes(format("%i,%i", y, z)));
-}
-"#,
-    );
-    assert_eq!(output, "42,2");
-}
 
-#[test]
-fn local_option_escape_at_call_still_matches() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn take(Option<int> o) -> int {
-    return match o {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
-}
-fn main() {
-    let x = Option::Some(7);
-    write(stdout(), to_bytes(format("%i", take(x))));
-}
-"#,
-    );
-    assert_eq!(output, "7");
-}
 
 #[test]
 fn direct_class_field_access_avoids_temporary_object() {
@@ -7600,322 +5301,12 @@ fn host_result_unit_churn_example_checksum() {
     assert_eq!(output, "18000000");
 }
 
-#[test]
-fn pointer_niche_option_match_and_coalesce() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn show(Option<string> value) -> string {
-    return match value {
-        Option::Some(text) => text,
-        Option::None => "none",
-    };
-}
-fn main() {
-    write(stdout(), to_bytes(format("%s,%s", show(Option::Some("ok")), show(Option::None))));
-}
-"#,
-    );
-    assert_eq!(output, "ok,none");
-}
 
-#[test]
-fn nested_match_keeps_outer_option_field_bindings() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-class BoxInt {
-    pub opt: Option<int>,
-}
 
-class Node {
-    pub val: int,
-    pub left: Option<Node>,
-}
 
-fn nested_boxed(BoxInt b) -> int {
-    return match b.opt {
-        Option::Some(v) => match b.opt {
-            Option::Some(v2) => v + v2,
-            Option::None => -1,
-        },
-        Option::None => 0,
-    };
-}
 
-fn nested_shadow(BoxInt b) -> int {
-    return match b.opt {
-        Option::Some(v) => match Option::Some(100) {
-            Option::Some(v) => v,
-            Option::None => -1,
-        },
-        Option::None => 0,
-    };
-}
 
-fn nested_niche(Node n) -> int {
-    return match n.left {
-        Option::Some(child) => match n.left {
-            Option::Some(child2) => child.val + child2.val,
-            Option::None => -1,
-        },
-        Option::None => 0,
-    };
-}
-
-fn main() {
-    let b = new BoxInt(Option::Some(21));
-    let leaf = new Node(3, Option::None);
-    let root = new Node(1, Option::Some(leaf));
-    write(stdout(), to_bytes(format("%i,%i,%i", nested_boxed(b), nested_shadow(b), nested_niche(root))));
-}
-"#,
-    );
-    assert_eq!(output, "42,100,6");
-}
-
-#[test]
-fn nested_match_restores_and_chains_outer_bindings() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-class BoxInt {
-    pub opt: Option<int>,
-}
-
-enum Choice {
-    A(int),
-    B,
-}
-
-fn after_nested(BoxInt b) -> int {
-    return match b.opt {
-        Option::Some(v) => {
-            let inner = match Option::Some(1) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
-            v + inner
-        },
-        Option::None => 0,
-    };
-}
-
-fn triple(BoxInt box) -> int {
-    return match box.opt {
-        Option::Some(a) => match box.opt {
-            Option::Some(b) => match box.opt {
-                Option::Some(c) => a + b + c,
-                Option::None => -1,
-            },
-            Option::None => -2,
-        },
-        Option::None => 0,
-    };
-}
-
-fn nested_result(Result<int, string> r) -> int {
-    return match r {
-        Result::Ok(v) => match r {
-            Result::Ok(v2) => v + v2,
-            Result::Err(_) => -1,
-        },
-        Result::Err(_) => 0,
-    };
-}
-
-fn nested_choice(Choice c) -> int {
-    return match c {
-        Choice::A(x) => match c {
-            Choice::A(y) => x + y,
-            Choice::B => -1,
-        },
-        Choice::B => 0,
-    };
-}
-
-fn main() {
-    let b = new BoxInt(Option::Some(21));
-    let t = new BoxInt(Option::Some(7));
-    write(stdout(), to_bytes(format(
-        "%i,%i,%i,%i",
-        after_nested(b),
-        triple(t),
-        nested_result(Result::Ok(21)),
-        nested_choice(Choice::A(21)),
-    )));
-}
-"#,
-    );
-    assert_eq!(output, "22,21,42,42");
-}
-
-#[test]
-fn direct_result_pair_match_and_try() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn parse(int value) {
-    if value < 0 {
-        raise "bad";
-    }
-    return value;
-}
-fn inc(int value) {
-    let parsed = parse(value)?;
-    return parsed + 1;
-}
-fn main() {
-    let ok = match parse(4) {
-        Result::Ok(value) => value,
-        Result::Err(_) => -1,
-    };
-    let bad = match inc(-1) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-    let direct_bad = match parse(-1) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 1,
-    };
-    write(
-        stdout(),
-        to_bytes(format("%i,%i,%i", ok, bad, direct_bad)),
-    );
-}
-"#,
-    );
-    assert_eq!(output, "4,1,1");
-}
-
-#[test]
-fn custom_iterator_uses_pointer_niche_option() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class TextCounter {
-    pub cur: int,
-    pub end: int,
-    pub text: string,
-}
-impl IntoIterator for TextCounter {
-    type Item = string;
-    type IntoIter = TextCounter;
-    pub fn into_iter(TextCounter value) -> TextCounter {
-        return value;
-    }
-}
-impl Iterator for TextCounter {
-    type Item = string;
-    pub fn next(TextCounter value) -> Option<string> {
-        if value.cur < value.end {
-            value.cur = value.cur + 1;
-            return Option::Some(value.text);
-        }
-        return Option::None;
-    }
-}
-fn main() {
-    let value = new TextCounter(0, 2, "x");
-    for text in value {
-        write(stdout(), to_bytes(format("%s", text)));
-    }
-}
-"#,
-    );
-    assert_eq!(output, "xx");
-}
-
-/// COI-115: trait instance may call an inherent method on the same type.
-#[test]
-fn trait_impl_calls_inherent_method_declared_later() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class ItemBox { pub v: int }
-class ItemBoxIter { pub i: int }
-impl ItemBox {
-    pub fn iter() -> ItemBoxIter {
-        return new ItemBoxIter(self.v);
-    }
-}
-impl IntoIterator for ItemBox {
-    type Item = int;
-    type IntoIter = ItemBoxIter;
-    pub fn into_iter(ItemBox m) -> ItemBoxIter {
-        return m.iter();
-    }
-}
-impl Iterator for ItemBoxIter {
-    type Item = int;
-    pub fn next(ItemBoxIter it) -> Option<int> {
-        if it.i == 0 {
-            it.i = 1;
-            return Option::Some(1);
-        }
-        return Option::None;
-    }
-}
-fn main() {
-    let b = new ItemBox(0);
-    for x in b {
-        write(stdout(), to_bytes(format("%i", x)));
-    }
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
-
-/// COI-115: static inherent helper used from a trait instance.
-#[test]
-fn trait_impl_calls_static_inherent_method_declared_later() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class ItemBox { pub v: int }
-class ItemBoxIter { pub i: int }
-impl ItemBox {
-    pub static fn make_iter(ItemBox m) -> ItemBoxIter {
-        return new ItemBoxIter(m.v);
-    }
-}
-impl IntoIterator for ItemBox {
-    type Item = int;
-    type IntoIter = ItemBoxIter;
-    pub fn into_iter(ItemBox m) -> ItemBoxIter {
-        return ItemBox::make_iter(m);
-    }
-}
-impl Iterator for ItemBoxIter {
-    type Item = int;
-    pub fn next(ItemBoxIter it) -> Option<int> {
-        if it.i == 0 {
-            it.i = 1;
-            return Option::Some(7);
-        }
-        return Option::None;
-    }
-}
-fn main() {
-    let b = new ItemBox(0);
-    for x in b {
-        write(stdout(), to_bytes(format("%i", x)));
-    }
-}
-"#,
-    );
-    assert_eq!(output, "7");
-}
 
 #[test]
 fn thread_main_exits_without_join_still_runs_worker_recv() {
@@ -7972,137 +5363,10 @@ fn main() {
     assert_eq!(output, "leaf");
 }
 
-#[test]
-fn gc_upgrade_some_while_rooted() {
-    let output = run_example_src(
-        r#"
-use gc::{get, root, weak, upgrade};
-use io::{stdout, write};
-use string::{to_bytes};
 
-fn main() {
-    let r = root([7, 8]);
-    let inner = match get(r) {
-        Option::Some(v) => v,
-        Option::None => { return; }
-    };
-    let w = weak(inner);
-    let out = match upgrade(w) {
-        Option::Some(_) => "some",
-        Option::None => "none",
-    };
-    write(stdout(), to_bytes(out));
-}
-"#,
-    );
-    assert_eq!(output, "some");
-}
 
-#[test]
-fn gc_finalizer_runs_on_collect() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout, write};
-use string::{format, to_bytes};
-static let drops: int = 0;
-class Handle { pub fd: int }
-impl Handle {
-    fn drop() {
-        drops = drops + 1;
-    }
-}
-fn make() {
-    let h = new Handle(1);
-}
-fn main() {
-    make();
-    collect();
-    write(stdout(), to_bytes(format("%i", drops)));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
 
-#[test]
-fn gc_finalizer_once_bit_and_explicit_drop() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout, write};
-use string::{format, to_bytes};
-static let drops: int = 0;
-class Handle { pub fd: int }
-impl Handle {
-    fn drop() {
-        drops = drops + 1;
-    }
-}
-fn main() {
-    let h = new Handle(1);
-    h.drop();
-    h.drop();
-    collect();
-    write(stdout(), to_bytes(format("%i", drops)));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
 
-#[test]
-fn gc_finalizer_skips_live_root() {
-    let output = run_example_src(
-        r#"
-use gc::{collect, root};
-use io::{stdout, write};
-use string::{format, to_bytes};
-static let drops: int = 0;
-class Handle { pub fd: int }
-impl Handle {
-    fn drop() {
-        drops = drops + 1;
-    }
-}
-fn main() {
-    let h = new Handle(1);
-    let r = root(h);
-    collect();
-    write(stdout(), to_bytes(format("%i", drops)));
-}
-"#,
-    );
-    assert_eq!(output, "0");
-}
-
-#[test]
-fn gc_finalizer_nested_collect_is_deferred() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout, write};
-use string::{format, to_bytes};
-static let drops: int = 0;
-class Handle { pub fd: int }
-impl Handle {
-    fn drop() {
-        collect();
-        drops = drops + 1;
-    }
-}
-fn make() {
-    let h = new Handle(1);
-}
-fn main() {
-    make();
-    collect();
-    write(stdout(), to_bytes(format("%i", drops)));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
 
 #[test]
 fn gc_finalizer_panic_continues_queue() {
@@ -8141,73 +5405,7 @@ fn main() {
     );
 }
 
-#[test]
-fn gc_finalizer_runs_on_teardown() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{to_bytes};
-static let drops: int = 0;
-class Handle { pub fd: int }
-impl Handle {
-    fn drop() {
-        write(stdout(), to_bytes("closed"));
-        drops = drops + 1;
-    }
-}
-fn make() {
-    let h = new Handle(1);
-}
-fn main() {
-    make();
-}
-"#,
-    );
-    assert_eq!(output, "closed");
-}
 
-#[test]
-fn gc_finalizer_can_upgrade_weak_then_clears() {
-    let output = run_example_src(
-        r#"
-use gc::{collect, weak, upgrade, Weak};
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Handle { pub fd: int }
-static let during: int = 0;
-static let held: Option<Weak<Handle>> = Option::None;
-impl Handle {
-    fn drop() {
-        let live = match held {
-            Option::Some(w) => match upgrade(w) {
-                Option::Some(_) => 1,
-                Option::None => 2,
-            },
-            Option::None => 3,
-        };
-        during = live;
-    }
-}
-fn ephemeral() {
-    let h = new Handle(1);
-    held = Option::Some(weak(h));
-}
-fn main() {
-    ephemeral();
-    collect();
-    let after = match held {
-        Option::Some(w) => match upgrade(w) {
-            Option::Some(_) => 1,
-            Option::None => 0,
-        },
-        Option::None => -1,
-    };
-    write(stdout(), to_bytes(format("%i%i", during, after)));
-}
-"#,
-    );
-    assert_eq!(output, "10");
-}
 
 #[test]
 fn gc_finalizer_storing_self_resurrects_once() {
@@ -8252,41 +5450,6 @@ fn main() {
     assert_eq!(output, "1142");
 }
 
-#[test]
-fn gc_explicit_drop_store_self_stays_once() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Handle { pub fd: int }
-static let drops: int = 0;
-static let kept: Option<Handle> = Option::None;
-impl Handle {
-    fn drop() {
-        drops = drops + 1;
-        kept = Option::Some(self);
-    }
-}
-fn explicit() {
-    let h = new Handle(7);
-    h.drop();
-}
-fn clear_kept() {
-    kept = Option::None;
-}
-fn main() {
-    explicit();
-    collect();
-    let d1 = drops;
-    clear_kept();
-    collect();
-    write(stdout(), to_bytes(format("%i%i", d1, drops)));
-}
-"#,
-    );
-    assert_eq!(output, "11");
-}
 
 #[test]
 fn gc_finalizer_store_self_into_root_resurrects() {
@@ -8432,23 +5595,6 @@ fn main() {
     assert_eq!(output, "13");
 }
 
-#[test]
-fn gc_heap_bytes_is_nonnegative() {
-    let output = run_example_src(
-        r#"
-use gc::{heap_bytes, root};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn main() {
-    let _ = root([1, 2, 3, 4]);
-    let n = heap_bytes();
-    write(stdout(), to_bytes(format("%z", n >= 0)));
-}
-"#,
-    );
-    assert_eq!(output, "true");
-}
 
 #[test]
 fn gc_collect_preserves_stack_rooted_weak() {
@@ -8479,155 +5625,11 @@ fn main() {
     assert_eq!(output, "some");
 }
 
-#[test]
-fn gc_collect_returns_nonnegative_freed_bytes() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-fn main() {
-    let n = collect();
-    write(stdout(), to_bytes(format("%z", n >= 0)));
-}
-"#,
-    );
-    assert_eq!(output, "true");
-}
 
-#[test]
-fn gc_get_after_unroot_then_collect_clears_weak() {
-    let output = run_example_src(
-        r#"
-use gc::{collect, get, root, unroot, weak, upgrade};
-use io::{stdout, write};
-use string::{to_bytes};
 
-fn only_weak() {
-    let r = root("temp");
-    let v = match get(r) {
-        Option::Some(x) => x,
-        Option::None => { return weak(""); }
-    };
-    let w = weak(v);
-    let _ = unroot(r);
-    return w;
-}
 
-fn main() {
-    let w = only_weak();
-    let _ = collect();
-    let out = match upgrade(w) {
-        Option::Some(_) => "some",
-        Option::None => "none",
-    };
-    write(stdout(), to_bytes(out));
-}
-"#,
-    );
-    assert_eq!(output, "none");
-}
 
-#[test]
-fn thread_channel_close_try_recv_is_disconnected() {
-    let output = run_example_src(
-        r#"
-use thread::{channel, close, try_recv, ThreadError};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn main() {
-    let pair = channel()?;
-    let tx = pair[0];
-    let rx = pair[1];
-    close(tx)?;
-    let msg = match try_recv(rx) {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e {
-            ThreadError::Disconnected => "disc",
-            default => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
-}
-"#,
-    );
-    assert_eq!(output, "disc");
-}
-
-#[test]
-fn thread_try_recv_empty_open_channel_would_block() {
-    let output = run_example_src(
-        r#"
-use thread::{channel, try_recv, ThreadError};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn main() {
-    let pair = channel()?;
-    let rx = pair[1];
-    let msg = match try_recv(rx) {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e {
-            ThreadError::WouldBlock => "wb",
-            default => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
-}
-"#,
-    );
-    assert_eq!(output, "wb");
-}
-
-#[test]
-fn thread_rwlock_with_write_then_read() {
-    let output = run_example_src(
-        r#"
-use thread::{rwlock, with_read, with_write};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn main() {
-    let rw = rwlock(10)?;
-    with_write(rw, fn (int n) => (n + 1, 0))?;
-    let v = with_read(rw, fn (int n) => n)?;
-    write(stdout(), to_bytes(format("%i", v)));
-}
-"#,
-    );
-    assert_eq!(output, "11");
-}
-
-#[test]
-fn thread_detach_then_join_fails() {
-    let output = run_example_src(
-        r#"
-use thread::{detach, join, spawn, ThreadError};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn work() -> int {
-    return 1;
-}
-
-fn main() {
-    let t = spawn(work)?;
-    detach(t)?;
-    let msg = match join(t) {
-        Result::Ok(_) => "joined",
-        Result::Err(e) => match e {
-            ThreadError::JoinFailed => "jf",
-            default => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
-}
-"#,
-    );
-    assert_eq!(output, "jf");
-}
 
 #[test]
 fn packed_vec_arith_runtime_neg_div_and_scalar_left() {
@@ -8703,24 +5705,6 @@ fn main() {
     );
 }
 
-#[test]
-fn aggregate_dynamic_array_broadcast_adds_scalar() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add1(Vec<int> xs) -> Vec<int> {
-    return xs + 1;
-}
-
-fn main() {
-    let a = add1([1, 2, 3]);
-    write(stdout(), to_bytes(format("%i%i%i", a[0], a[1], a[2])));
-}
-"#,
-    );
-    assert_eq!(output, "234");
-}
 
 #[test]
 fn example_s2i_vec_array_checksums() {
@@ -8734,21 +5718,6 @@ fn example_s2j_class_sroa_checksums() {
     assert_eq!(output, "28");
 }
 
-#[test]
-fn matrix_compound_add_assign_updates_cells() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let m = matrix([[1, 2], [3, 4]]);
-    m += matrix([[10, 20], [30, 40]]);
-    write(stdout(), to_bytes(format("%i,%i,%i,%i", m[0][0], m[0][1], m[1][0], m[1][1])));
-}
-"#,
-    );
-    assert_eq!(output, "11,22,33,44");
-}
 
 #[test]
 fn matrix_sub_and_neg_packed_path_values() {
@@ -8770,19 +5739,6 @@ fn main() {
     assert_eq!(output, "4,5,6,7,-1,-2,-3,-4");
 }
 
-#[test]
-fn float_dot_packed_path_value() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    write(stdout(), to_bytes(format("%f", dot([1.5, 2.0], [2.5, 4.0]))));
-}
-"#,
-    );
-    assert_eq!(output, "11.75");
-}
 
 #[test]
 fn matmul_tuple_of_tuples_rebuilds_correct_product() {
@@ -8802,21 +5758,6 @@ fn main() {
     assert_eq!(output, "19,22,43,50");
 }
 
-#[test]
-fn aggregate_compound_assign_updates_tuple() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let v = (1, 2);
-    v += (3, 4);
-    write(stdout(), to_bytes(format("%i%i", v[0], v[1])));
-}
-"#,
-    );
-    assert_eq!(output, "46");
-}
 
 #[test]
 fn example_ansi_color_prints_red() {
@@ -8860,97 +5801,8 @@ fn virtual_crypto_module_does_not_resolve() {
     );
 }
 
-/// HostInvoke + virtual `clock`: wall/mono advance across a short sleep.
-#[test]
-fn clock_natives_move_forward_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use clock::{mono_nanos, sleep_ms, wall_nanos};
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-fn flag(int later, int earlier) -> int {
-    if later > earlier {
-        return 1;
-    }
-    return 0;
-}
 
-fn main() {
-    let w0 = wall_nanos();
-    let m0 = mono_nanos();
-    sleep_ms(15);
-    let w1 = wall_nanos();
-    let m1 = mono_nanos();
-    write(stdout(), to_bytes(format("%i%i", flag(w1, w0), flag(m1, m0))));
-}
-"#,
-    );
-    assert_eq!(output, "11", "wall and mono must advance, got {output:?}");
-}
-
-/// HostInvoke + virtual `io::fs` wiring: `exists(".")` returns Ok.
-#[test]
-fn fs_exists_dot_ok_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use io::fs::{exists};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn dot_ok() -> int {
-    return match exists(".") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", dot_ok())));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
-
-/// HostInvoke + virtual `env` wiring: set/get/remove round-trip.
-#[test]
-fn env_var_round_trip_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use env::{remove_var, set_var, var};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn round_trip() -> string {
-    let set_ok = match set_var("COIL_PIPELINE_ENV_KEY", "coil_ok") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-    if set_ok == 0 {
-        return "0";
-    }
-    let got = match var("COIL_PIPELINE_ENV_KEY") {
-        Result::Ok(s) => s,
-        Result::Err(_) => "0",
-    };
-    let rem_ok = match remove_var("COIL_PIPELINE_ENV_KEY") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-    if rem_ok == 0 {
-        return "0";
-    }
-    return got;
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%s", round_trip())));
-}
-"#,
-    );
-    assert_eq!(output, "coil_ok");
-}
 
 /// HostInvoke + virtual `env::args`: `?` yields argv; argv0 matches process.
 #[test]
@@ -9200,51 +6052,7 @@ fn language_default_features_are_empty() {
     );
 }
 
-/// `#[derive(String)]` end-to-end: synthesized `to_string` is callable.
-#[test]
-fn derive_string_to_string_prints_variant() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-#[derive(String)]
-enum Color {
-    Red,
-}
 
-fn main() {
-    write(stdout(), to_bytes(format("%s", Color::Red.to_string())));
-}
-"#,
-    );
-    assert_eq!(output, "Color::Red");
-}
-
-/// Primitive `Hash` covers non-int payloads used by derive.
-#[test]
-fn hash_primitives_and_nested_differ_when_payloads_differ() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-#[derive(Hash)]
-enum Box {
-    S { s: string },
-    B { b: bool },
-    F { f: float },
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%z,", "a".hash() != "b".hash())));
-    write(stdout(), to_bytes(format("%z,", true.hash() != false.hash())));
-    write(stdout(), to_bytes(format("%z,", (1.0).hash() != (2.0).hash())));
-    write(stdout(), to_bytes(format("%z,", Box::S { s: "x" }.hash() != Box::S { s: "y" }.hash())));
-    write(stdout(), to_bytes(format("%z", Box::B { b: true }.hash() != Box::B { b: false }.hash())));
-}
-"#,
-    );
-    assert_eq!(output, "true,true,true,true,true");
-}
 
 #[test]
 fn fallthrough_string_return_requires_explicit_return() {
@@ -9275,24 +6083,6 @@ fn main() {
     );
 }
 
-#[test]
-fn fallthrough_unit_allows_implicit_epilogue() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn unitish() {
-    let x = 1;
-}
-
-fn main() {
-    unitish();
-    write(stdout(), to_bytes("ok"));
-}
-"#,
-    );
-    assert_eq!(output, "ok");
-}
 
 #[test]
 fn fallthrough_int_requires_explicit_return() {
@@ -9391,24 +6181,6 @@ fn main() {
     );
 }
 
-#[test]
-fn fallthrough_result_unit_ok_allows_epilogue() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn ok_unit() -> Result<(), string> {}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", match ok_unit() {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    })));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
 
 #[test]
 fn fallthrough_result_int_requires_explicit_return() {
@@ -9459,28 +6231,6 @@ fn main() {
     );
 }
 
-#[test]
-fn bare_return_semi_exits_unit_fn() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn early(int n) {
-    if n == 0 {
-        return;
-    }
-    write(stdout(), to_bytes("go"));
-    return;
-}
-
-fn main() {
-    early(0);
-    early(1);
-}
-"#,
-    );
-    assert_eq!(output, "go");
-}
 
 #[test]
 fn while_true_satisfies_non_unit_return() {
@@ -9830,26 +6580,6 @@ fn main() {
     );
 }
 
-#[test]
-fn never_join_match_panic_arm_types_as_int() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn unwrap(Option<int> o) -> int {
-    return match o {
-        Option::Some(x) => x,
-        Option::None => panic "none",
-    };
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", unwrap(Option::Some(7)))));
-}
-"#,
-    );
-    assert_eq!(output, "7");
-}
 
 #[test]
 fn match_all_arms_exit_satisfies_non_unit_return() {
@@ -9879,78 +6609,8 @@ fn main() {
     );
 }
 
-#[test]
-fn unit_fallthrough_still_runs_defers() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn f() {
-    defer { write(stdout(), to_bytes("d")); }
-    write(stdout(), to_bytes("b"));
-}
 
-fn main() {
-    f();
-}
-"#,
-    );
-    assert_eq!(
-        output, "bd",
-        "unit epilogue must still emit defers before CONST 0; RETURN"
-    );
-}
 
-/// Nested multifield record that is not the first outer field must still
-/// relocate into scratch and preserve the preceding sibling binding.
-#[test]
-fn nested_multifield_record_after_sibling_preserves_bindings() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Wrap {
-    W { name: int, inner: Inner },
-}
-fn both(Wrap w) -> int {
-    return match w {
-        Wrap::W { name, inner: Inner::I { x, y } } => name + x + y,
-    };
-}
-fn main() {
-    let w = Wrap::W { name: 3, inner: Inner::I { x: 10, y: 20 } };
-    write(stdout(), to_bytes(format("%i", both(w))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "33",
-        "preceding sibling `name` and nested `x`/`y` must all bind"
-    );
-}
-
-/// `x ** 0/1/2` strength-reduce must still match `i32::pow` (incl. `0 ** 0` → 1).
-#[test]
-fn int_pow_strength_reduce_prints_correct_values() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let x = 5;
-    write(stdout(), to_bytes(format("%i,", x ** 0)));
-    write(stdout(), to_bytes(format("%i,", x ** 1)));
-    write(stdout(), to_bytes(format("%i,", x ** 2)));
-    write(stdout(), to_bytes(format("%i,", x ** 3)));
-    write(stdout(), to_bytes(format("%i", 0 ** 0)));
-}
-"#,
-    );
-    assert_eq!(output, "1,5,25,125,1");
-}
 
 /// `if (!c) { A } else { B }` inverts to `if (c) { B } else { A }` — arms must
 /// not swap incorrectly when LogNot is eliminated.
@@ -10020,26 +6680,6 @@ fn main() {
     assert_eq!(run_example_src(src), "7,30");
 }
 
-/// Repeated reads of the same field run correctly. (Reusing the loaded value
-/// via `Dup` was `cfg_gvn`, removed 2026-10.)
-#[test]
-fn repeated_field_read_runs() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-class Point {
-    pub x: int,
-    pub y: int,
-}
-fn twice(Point p) -> int {
-    return p.x + p.x;
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i", twice(new Point(3, 4)))));
-}
-"#;
-    assert_eq!(run_example_src(src), "6");
-}
 
 /// for-in over arrays hoists ArrayLen out of the loop header.
 #[test]
@@ -10092,26 +6732,6 @@ fn example_perf_field_hot_prints_expected() {
     assert_eq!(output, "4000000");
 }
 
-#[test]
-fn option_unwrap_both_arms_correct_after_return_clone() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn unwrap(Option o) -> int {
-    return match o {
-        Option::None => 0,
-        Option::Some(v) => v,
-    };
-}
-fn main() {
-    write(stdout(), to_bytes(format("%i,", unwrap(Option::Some(42)))));
-    write(stdout(), to_bytes(format("%i", unwrap(Option::None))));
-}
-"#,
-    );
-    assert_eq!(output, "42,0");
-}
 
 /// v35 string table: serialize → load → run must keep STRING indexes valid,
 /// and the compiler must not emit legacy trailing DATA payloads.
@@ -10195,98 +6815,9 @@ fn main() {
     assert_eq!(shared.into_utf8(), "archive-35");
 }
 
-/// Worker `write(stdout(), …)` in a multi-iteration loop must keep HostInvoke
-/// results on the stack and honor shared-print capture TLS.
-#[test]
-fn worker_write_all_loop_captures_via_shared_print() {
-    let output = run_example_src(
-        r#"
-use thread::{join, spawn};
-use io::{stdout, write};
-use string::{format, to_bytes};
 
-fn worker() -> int {
-    let i = 0;
-    while i < 3 {
-        write(stdout(), to_bytes(format("%i", i)));
-        i = i + 1;
-    }
-    return 0;
-}
 
-fn main() {
-    let t = spawn(worker)?;
-    join(t)?;
-}
-"#,
-    );
-    assert_eq!(output, "012");
-}
 
-/// Qualified `string::format` / `string::to_bytes` resolve without a glob import.
-#[test]
-fn qualified_string_helpers_without_glob_import() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-
-fn main() {
-    write(stdout(), string::to_bytes(string::format("%s", "ok")));
-}
-"#,
-    );
-    assert_eq!(output, "ok");
-}
-
-/// Nested HostInvoke call args must stage through temps — evaluating the second
-/// `to_bytes` inline must not clobber the first result on the operand stack.
-#[test]
-fn nested_host_invoke_call_args_stage_without_clobber() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn concat_bytes(Vec<byte> a, Vec<byte> b) -> Vec<byte> {
-    let out: Vec<byte> = Vec::new();
-    let i = 0;
-    while i < len(a) {
-        out.push(a[i]);
-        i = i + 1;
-    }
-    let j = 0;
-    while j < len(b) {
-        out.push(b[j]);
-        j = j + 1;
-    }
-    return out;
-}
-
-fn main() {
-    let msg = concat_bytes(to_bytes("GET "), to_bytes("/hi"));
-    write(stdout(), msg);
-}
-"#,
-    );
-    assert_eq!(output, "GET /hi");
-}
-
-#[test]
-fn variable_string_add_concatenates() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::to_bytes;
-
-fn main() {
-    let a = "GET";
-    let b = "/hi";
-    write(stdout(), to_bytes(a + b));
-}
-"#,
-    );
-    assert_eq!(output, "GET/hi");
-}
 
 #[test]
 fn variable_string_add_in_test_harness() {
@@ -10448,25 +6979,6 @@ fn main() {
     assert_eq!(output, "17");
 }
 
-/// Tiny-inline binop arms must stage (not bury) — `add(x,y)+add(y,x)` == 14.
-#[test]
-fn tiny_inline_binop_arms_stage_prints_sum() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn add(int a, int b) -> int {
-    return a + b;
-}
-fn main() {
-    let x = 3;
-    let y = 4;
-    write(stdout(), to_bytes(format("%i", add(x, y) + add(y, x))));
-}
-"#,
-    );
-    assert_eq!(output, "14");
-}
 
 /// Nested call-arg arm must stage so `leaf(leaf(2))+leaf(3)` stays correct.
 #[test]
@@ -10534,55 +7046,7 @@ fn main() {
     );
 }
 
-/// COI-16: enum `Construct` with nested `format` must stage the push receiver
-/// (len preserved). Nested format-inside-Construct payload correctness is a
-/// separate clobber (still open); this only guards the Vec::push drop.
-#[test]
-fn vec_push_enum_construct_with_format_args_keeps_len() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
 
-enum Row {
-    Pair(string, string),
-}
-
-fn main() {
-    let rows = Vec::new();
-    rows.push(Row::Pair(format("a=%s", "1"), format("b=%s", "2")));
-    rows.push(Row::Pair(format("c=%s", "3"), format("d=%s", "4")));
-    let _ = write_all(stdout(), to_bytes(format("%i", len(rows))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "2",
-        "push with Construct(format,…) must not drop the vec"
-    );
-}
-
-/// COI-19: heap value in a user static survives `gc::collect` (static roots).
-#[test]
-fn static_string_survives_gc_collect() {
-    let output = run_example_src(
-        r#"
-use gc::{collect};
-use io::{stdout};
-use io::sync::{write_all};
-use string::{to_bytes};
-
-static const HELD = "across-gc";
-
-fn main() {
-    let _freed = collect();
-    let _ = write_all(stdout(), to_bytes(HELD));
-}
-"#,
-    );
-    assert_eq!(output, "across-gc");
-}
 
 /// COI-19: extern of libc is a compile error even with host extra stems.
 #[test]
@@ -11739,4 +8203,29 @@ fn missing_module_reports_no_internal_lowering_error() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(errors.iter().any(|(_, m)| m.contains("Module not found")), "{errors:?}");
     assert!(!errors.iter().any(|(_, m)| m.contains("cannot lower")), "{errors:?}");
+}
+
+#[test]
+fn gc_finalizer_runs_on_teardown() {
+    let output = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{to_bytes};
+static let drops: int = 0;
+class Handle { pub fd: int }
+impl Handle {
+    fn drop() {
+        write(stdout(), to_bytes("closed"));
+        drops = drops + 1;
+    }
+}
+fn make() {
+    let h = new Handle(1);
+}
+fn main() {
+    make();
+}
+"#,
+    );
+    assert_eq!(output, "closed");
 }
