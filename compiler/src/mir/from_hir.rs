@@ -66,6 +66,8 @@ pub struct HirCallSite {
     pub pair_ret: bool,
     /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
+    /// The result is a niche `Option` / `Result` the callee returns boxed.
+    pub boxed_ret: bool,
 }
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
@@ -2440,7 +2442,9 @@ impl Lower<'_> {
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        let niche = if site.boxed_ret { Some(self.inp.word(ty).ok_or("call type")?) } else { None };
         let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
+            _ if site.boxed_ret => (MirTy::HeapRef, None),
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             // A callee returning the two-word value boxed (a depth-checked
             // body): the word, unboxed where a pair is read.
@@ -2493,6 +2497,9 @@ impl Lower<'_> {
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        if let Some(want) = niche {
+            return self.unbox_niche(dest, want);
+        }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
             None if unit => Val::Unit,
@@ -3216,6 +3223,42 @@ impl Lower<'_> {
         };
         let tag = self.b.ins_const(MirConst::I64(i64::from(last_tag))).map_err(mir)?;
         out.push((self.cur, Val::Pair(p, tag)));
+        self.join_arms(out)
+    }
+
+    /// A boxed `Option` / `Result` word to its niche word, as HIR
+    /// emission's boxed-to-niche conversion: `None` is 0 and `Some(p)` is
+    /// `p`; `Ok(p)` is `p` and `Err(p)` is `p | 1`.
+    fn unbox_niche(&mut self, obj: ValueId, want: MirTy) -> Result<Val, Refusal> {
+        let (hit, miss) = (self.b.create_block(), self.b.create_block());
+        let p = self.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
+        let mut out = Vec::with_capacity(2);
+        match want {
+            MirTy::NicheOpt => {
+                self.b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(mir)?;
+                self.switch(hit);
+                let w = self.b.ins_cast(MirCastKind::Word, want, p).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+                self.switch(miss);
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, zero).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+            }
+            MirTy::NicheRes => {
+                self.b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(mir)?;
+                self.switch(hit);
+                let word = self.b.ins_cast(MirCastKind::Word, MirTy::I64, p).map_err(mir)?;
+                let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                let tagged = self.b.ins_binop(MirBinOp::BitOr, word, one).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, tagged).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+                self.switch(miss);
+                let ok = self.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
+                let w = self.b.ins_cast(MirCastKind::Word, want, ok).map_err(mir)?;
+                out.push((self.cur, Val::V(w)));
+            }
+            _ => return Err("boxed call result".into()),
+        }
         self.join_arms(out)
     }
 
