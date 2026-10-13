@@ -7736,7 +7736,7 @@ fn broken_effect_declarations_are_errors() {
                 pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
             );
         }
-        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    assert(true);\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
+        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
         let mut pipeline = test_pipeline();
         compile_ok(&mut pipeline, kept);
     }
@@ -8006,7 +8006,9 @@ pure fn first(Vec<int> xs) -> int
 fn main() {
     let v: Vec<int> = Vec::new();
     v.push(7);
-    assert(first(v) == 7);
+    if !(first(v) == 7) {
+        panic "assertion failed";
+    }
 }
 "#,
         compiler::ContractLevel::All,
@@ -8047,7 +8049,9 @@ fn main() {
     let a = new Account(10);
     a.deposit(5);
     let v: Vec<int> = Vec::new();
-    assert(push_two(v) == 2);
+    if !(push_two(v) == 2) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -8099,11 +8103,15 @@ fn total(Vec<int> xs) -> int {
 }
 
 fn main() {
-    assert(sum_to(5) == 10);
+    if !(sum_to(5) == 10) {
+        panic "assertion failed";
+    }
     let v: Vec<int> = Vec::new();
     v.push(3);
     v.push(4);
-    assert(total(v) == 7);
+    if !(total(v) == 7) {
+        panic "assertion failed";
+    }
     let w: Vec<int> = Vec::new();
     w.push(3);
     w.push(-9);
@@ -8190,7 +8198,9 @@ impl Account {
 fn main() {
     let a = Account::open(10);
     a.deposit(5);
-    assert(a.withdraw(15) == 0);
+    if !(a.withdraw(15) == 0) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -8231,7 +8241,9 @@ fn show<T: Area>(T x) -> int {
 }
 
 fn main() {
-    assert(show(3) == 4);
+    if !(show(3) == 4) {
+        panic "assertion failed";
+    }
     CASE
 }
 "#;
@@ -8278,7 +8290,9 @@ fn find(int k) -> int
 }
 
 fn main() {
-    assert(find(3) >= 0);
+    if !(find(3) >= 0) {
+        panic "assertion failed";
+    }
 }
 "#;
     use compiler::ContractLevel::All;
