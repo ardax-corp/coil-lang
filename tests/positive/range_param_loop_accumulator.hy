@@ -1,5 +1,6 @@
 // A loop-carried accumulator stays one variable when a Range parameter's
 // copies are folded away (slot_promote peel-floor raise at -O2).
+use tests::assert;
 
 fn rsum(Range<int> r) -> int {
     let s = 0;
@@ -26,16 +27,16 @@ fn rcount_after(Range<int> r, int base) -> int {
 }
 
 test("sum over a Range parameter") {
-    assert(rsum(0..4) == 6)?;
-    assert(rsum(3..3) == 0)?;
-    assert(rsum(1..11) == 55)?;
+    assert!(rsum(0..4) == 6);
+    assert!(rsum(3..3) == 0);
+    assert!(rsum(1..11) == 55);
 }
 
 test("sum over a RangeInclusive parameter") {
-    assert(rsum_inclusive(0..=4) == 10)?;
+    assert!(rsum_inclusive(0..=4) == 10);
 }
 
 test("accumulator seeded from a parameter") {
-    assert(rcount_after(0..5, 10) == 15)?;
-    assert(rcount_after(2..2, 10) == 10)?;
+    assert!(rcount_after(0..5, 10) == 15);
+    assert!(rcount_after(2..2, 10) == 10);
 }

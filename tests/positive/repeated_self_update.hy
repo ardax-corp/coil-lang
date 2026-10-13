@@ -1,5 +1,6 @@
 // `n = n + 1` twice in one block: the second add reads the updated `n`
 // (local CSE must not reuse the first sum).
+use tests::assert;
 
 fn three() -> int {
     let n = 0;
@@ -20,9 +21,9 @@ fn interleaved() -> int {
 }
 
 test("repeated self increments") {
-    assert(three() == 3)?;
+    assert!(three() == 3);
 }
 
 test("increments with other stores between") {
-    assert(interleaved() == 6)?;
+    assert!(interleaved() == 6);
 }

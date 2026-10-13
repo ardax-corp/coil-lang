@@ -1,6 +1,8 @@
 // For-in over a tuple walks its elements; over a user iterator it calls
 // `into_iter` once, then `next` until `None`. Items come back as two words
 // (`Option<int>`), as a niche word (`Option<string>`) or boxed.
+use tests::assert;
+
 class Counter {
     pub cur: int,
     pub end: int,
@@ -83,16 +85,16 @@ fn tuple_sum() -> int {
 }
 
 test("int iterator with continue and break") {
-    assert(count_sum(4) == 4)?;
-    assert(count_sum(10) == 13)?;
-    assert(count_sum(0) == 0)?;
+    assert!(count_sum(4) == 4);
+    assert!(count_sum(10) == 13);
+    assert!(count_sum(0) == 0);
 }
 
 test("niche string iterator") {
-    assert(word_chars(3) == 6)?;
-    assert(word_chars(0) == 0)?;
+    assert!(word_chars(3) == 6);
+    assert!(word_chars(0) == 0);
 }
 
 test("tuple elements") {
-    assert(tuple_sum() == 7)?;
+    assert!(tuple_sum() == 7);
 }

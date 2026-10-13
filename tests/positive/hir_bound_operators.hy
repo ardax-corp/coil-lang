@@ -1,5 +1,7 @@
 // A bound type parameter's operators in a generic class's shared method
 // body dispatch through the hidden dictionary, for every key type.
+use tests::assert;
+
 class Sorted<K> {
     pub items: Vec<K>,
 }
@@ -46,23 +48,23 @@ impl Sorted<K: Ord + Eq> {
 
 test("bound operators in shared bodies") {
     let a = new Sorted(Vec::new());
-    assert(a.add(3))?;
-    assert(a.add(-7))?;
-    assert(a.add(5))?;
-    assert(a.add(3) == false)?;
-    assert(a.rank(-7) == 0)?;
-    assert(a.rank(4) == 2)?;
-    assert(a.rank(9) == 3)?;
-    assert(a.has(5))?;
-    assert(a.has(4) == false)?;
+    assert!(a.add(3));
+    assert!(a.add(-7));
+    assert!(a.add(5));
+    assert!(a.add(3) == false);
+    assert!(a.rank(-7) == 0);
+    assert!(a.rank(4) == 2);
+    assert!(a.rank(9) == 3);
+    assert!(a.has(5));
+    assert!(a.has(4) == false);
 
     let b = new Sorted(Vec::new());
-    assert(b.add(2.5))?;
-    assert(b.add(-1.25))?;
-    assert(b.add(-3.5))?;
-    assert(b.add(-1.25) == false)?;
-    assert(b.rank(-2.0) == 1)?;
-    assert(b.rank(0.0) == 2)?;
-    assert(b.has(2.5))?;
-    assert(b.has(0.5) == false)?;
+    assert!(b.add(2.5));
+    assert!(b.add(-1.25));
+    assert!(b.add(-3.5));
+    assert!(b.add(-1.25) == false);
+    assert!(b.rank(-2.0) == 1);
+    assert!(b.rank(0.0) == 2);
+    assert!(b.has(2.5));
+    assert!(b.has(0.5) == false);
 }

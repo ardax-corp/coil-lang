@@ -1,5 +1,6 @@
 // Frames with per-PC precise maps: match payload bindings, loop joins and
 // locals must stay rooted across calls that collect.
+use tests::assert;
 use gc::collect;
 
 class Cell {
@@ -44,5 +45,5 @@ fn sum_picks(int n) -> int {
 
 test("match bindings and locals survive collections in mapped frames") {
     // picks 1,2,4,5,7,8 of 0..9 sum to 27.
-    assert(sum_picks(9) == 27 + 300)?;
+    assert!(sum_picks(9) == 27 + 300);
 }

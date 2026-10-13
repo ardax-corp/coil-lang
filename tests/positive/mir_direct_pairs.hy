@@ -2,6 +2,7 @@
 // parameters, results and locals as `[payload, tag]`, matches on them
 // (bound, wildcard and identity arms, returned and joined), float
 // payloads, ranges as `[start, end]` and two-element tuples.
+use tests::assert;
 
 enum Phase {
     Low(int),
@@ -145,14 +146,14 @@ fn spread(int n) -> int {
 }
 
 test("enum pairs from direct MIR") {
-    assert(score(Phase::High(4)) == 6)?;
-    assert(phases(8) == 244)?;
-    assert(halves(10) == 10)?;
-    assert(ratios(3) == 0.5)?;
-    assert(divs(7) == 291)?;
+    assert!(score(Phase::High(4)) == 6);
+    assert!(phases(8) == 244);
+    assert!(halves(10) == 10);
+    assert!(ratios(3) == 0.5);
+    assert!(divs(7) == 291);
 }
 
 test("range and tuple pairs from direct MIR") {
-    assert(span_sum(5) == 10)?;
-    assert(spread(5) == 13)?;
+    assert!(span_sum(5) == 10);
+    assert!(spread(5) == 13);
 }

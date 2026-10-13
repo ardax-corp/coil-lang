@@ -1,6 +1,8 @@
 // A statement `match` whose arms leave different numbers of values (`{}` vs
 // an expression) must not disturb the locals after it. Each arm drops its
 // own value; nothing is popped after the match.
+use tests::assert;
+
 enum Dir {
     Left,
     Right,
@@ -77,26 +79,26 @@ fn tail_value_arm(Dir d) -> int {
 }
 
 test("empty block arms") {
-    assert(empty_arms(Dir::Left) == 13)?;
-    assert(empty_arms(Dir::Right) == 13)?;
+    assert!(empty_arms(Dir::Left) == 13);
+    assert!(empty_arms(Dir::Right) == 13);
 }
 
 test("expression arm next to an empty arm") {
-    assert(mixed_arms(Dir::Left) == 13)?;
-    assert(mixed_arms(Dir::Right) == 13)?;
+    assert!(mixed_arms(Dir::Left) == 13);
+    assert!(mixed_arms(Dir::Right) == 13);
 }
 
 test("option statement match") {
-    assert(option_arms(Option::Some(1)) == 13)?;
-    assert(option_arms(Option::None) == 13)?;
+    assert!(option_arms(Option::Some(1)) == 13);
+    assert!(option_arms(Option::None) == 13);
 }
 
 test("scalar enum statement match") {
-    assert(scalar_arms(Level::Low) == 13)?;
-    assert(scalar_arms(Level::High) == 13)?;
+    assert!(scalar_arms(Level::Low) == 13);
+    assert!(scalar_arms(Level::High) == 13);
 }
 
 test("arm with a tail value") {
-    assert(tail_value_arm(Dir::Left) == 13)?;
-    assert(tail_value_arm(Dir::Right) == 13)?;
+    assert!(tail_value_arm(Dir::Left) == 13);
+    assert!(tail_value_arm(Dir::Right) == 13);
 }

@@ -1,5 +1,7 @@
 // A `return match` whose every arm is a self call becomes tail calls, so
 // deep bouncing recursion runs in constant frames under both codegens.
+use tests::assert;
+
 fn bounce(Option<int> o, int n) -> int {
     if n == 0 {
         return 7;
@@ -11,5 +13,5 @@ fn bounce(Option<int> o, int n) -> int {
 }
 
 test("tail match self calls run deep") {
-    assert(bounce(Option::None, 200000) == 7)?;
+    assert!(bounce(Option::None, 200000) == 7);
 }

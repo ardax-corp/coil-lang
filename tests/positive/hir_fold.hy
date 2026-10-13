@@ -1,6 +1,8 @@
 // Operators on literals fold, identities keep their operand, and an `if`
 // on a literal keeps the branch it takes. Nothing that has an effect or
 // does not fit the inline constant range is folded away.
+use tests::assert;
+
 static let calls: int = 0;
 
 fn bump(int v) -> int {
@@ -66,38 +68,38 @@ fn picks(bool b) -> int {
 }
 
 test("operators on literals") {
-    assert(constants() == 107)?;
+    assert!(constants() == 107);
 }
 
 test("identities keep the operand") {
-    assert(identities(7) == 70)?;
-    assert(identities(-3) == -30)?;
+    assert!(identities(7) == 70);
+    assert!(identities(-3) == -30);
 }
 
 test("a call times zero still runs") {
     calls = 0;
-    assert(zero_with_effect() == 0)?;
-    assert(calls == 1)?;
+    assert!(zero_with_effect() == 0);
+    assert!(calls == 1);
 }
 
 test("results past 32 bits are computed at run time") {
-    assert(wide() == 2147483648)?;
-    assert(wide_product() == 16000000000000)?;
+    assert!(wide() == 2147483648);
+    assert!(wide_product() == 16000000000000);
 }
 
 test("constant steps add once") {
-    assert(steps(10) == 27)?;
-    assert(steps(-1) == -6)?;
-    assert(step_stmts(5) == 9)?;
+    assert!(steps(10) == 27);
+    assert!(steps(-1) == -6);
+    assert!(step_stmts(5) == 9);
 }
 
 test("float folds") {
-    assert(floats(2.0) == 7.0)?;
+    assert!(floats(2.0) == 7.0);
 }
 
 test("an if on a literal keeps the branch it takes") {
-    assert(picks(true) == 36)?;
-    assert(picks(false) == 26)?;
+    assert!(picks(true) == 36);
+    assert!(picks(false) == 26);
 }
 
 fn self_assign(int x) -> int {
@@ -108,7 +110,7 @@ fn self_assign(int x) -> int {
 }
 
 test("x = x does nothing") {
-    assert(self_assign(4) == 4)?;
+    assert!(self_assign(4) == 4);
 }
 
 fn known_some(int i) -> int {
@@ -137,7 +139,7 @@ fn known_then_write(int i) -> int {
 }
 
 test("a match on a constructor takes its arm") {
-    assert(known_some(5) == 10)?;
-    assert(known_default(3) == 4)?;
-    assert(known_then_write(1) == 12)?;
+    assert!(known_some(5) == 10);
+    assert!(known_default(3) == 4);
+    assert!(known_then_write(1) == 12);
 }

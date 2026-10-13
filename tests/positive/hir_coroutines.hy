@@ -1,5 +1,6 @@
 // Coroutine bodies lower through HIR: statement and receiving `yield`,
 // `yield from`, `?` inside a gen fn, and `block_on`.
+use tests::assert;
 
 gen fn count(int n) {
     let i = 0;
@@ -43,7 +44,7 @@ test("statement yield") {
     let a = resume h;
     let b = resume h;
     let c = resume h;
-    assert(a + b + c == 3)?;
+    assert!(a + b + c == 3);
 }
 
 test("receiving yield") {
@@ -51,17 +52,17 @@ test("receiving yield") {
     let x = resume e;
     let y = resume e with 10;
     let z = resume e with 7;
-    assert(x == 5)?;
-    assert(y == 11)?;
-    assert(z == 14)?;
+    assert!(x == 5);
+    assert!(y == 11);
+    assert!(z == 14);
 }
 
 test("yield from") {
     let h = twice();
     let a = resume h;
     let b = resume h;
-    assert(a == 0)?;
-    assert(b == 1)?;
+    assert!(a == 0);
+    assert!(b == 1);
 }
 
 test("question mark in a gen fn") {
@@ -70,15 +71,15 @@ test("question mark in a gen fn") {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,
     };
-    assert(first == "negative")?;
+    assert!(first == "negative");
     let good = checked(2);
     let v = match resume good {
         Result::Ok(n) => n,
         Result::Err(_) => -1,
     };
-    assert(v == 20)?;
+    assert!(v == 20);
 }
 
 test("block_on") {
-    assert(block_on(greet()) == 2)?;
+    assert!(block_on(greet()) == 2);
 }

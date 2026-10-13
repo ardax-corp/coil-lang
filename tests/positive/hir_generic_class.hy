@@ -1,3 +1,5 @@
+use tests::assert;
+
 class Stack<T> {
     items: Vec<T>,
     n: int,
@@ -55,12 +57,16 @@ test("generic class locals and methods lower") {
     let s = Stack::new();
     s.push(3);
     s.push(4);
-    assert(drain(s) == 43)?;
+    assert!(drain(s) == 43);
     let t = names();
-    assert(t.size() == 2)?;
+    assert!(t.size() == 2);
     match t.pop() {
-        Option::Some(top) => assert(top == "bc")?,
-        Option::None => assert(false)?,
+        Option::Some(top) => {
+            assert!(top == "bc");
+        },
+        Option::None => {
+            assert!(false);
+        },
     }
-    assert(t.size() == 1)?;
+    assert!(t.size() == 1);
 }

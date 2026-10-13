@@ -1,4 +1,6 @@
 // Scalar-backed enums: unboxed backing word, nominal type, coerce to backing.
+use tests::assert;
+
 #[repr(int)]
 #[derive(Show, Eq, Ord, Hash)]
 enum Status {
@@ -46,52 +48,52 @@ fn take_status(Status s) -> Status {
 
 test("int scalar match and coerce") {
     let s = Status::Ok;
-    assert(describe(s) == 1)?;
+    assert!(describe(s) == 1);
     let n: int = Status::Ok;
-    assert(n == 200)?;
-    assert(Status::NotFound + 0 == 404)?;
-    assert(describe(Status::NotFound) == 0)?;
-    assert(take_int(Status::Ok) == 200)?;
+    assert!(n == 200);
+    assert!(Status::NotFound + 0 == 404);
+    assert!(describe(Status::NotFound) == 0);
+    assert!(take_int(Status::Ok) == 200);
     let kept = take_status(Status::NotFound);
-    assert(describe(kept) == 0)?;
+    assert!(describe(kept) == 0);
 }
 
 test("inferred repr without attribute") {
-    assert(Status::Ok + Status::NotFound == 604)?;
+    assert!(Status::Ok + Status::NotFound == 604);
 }
 
 test("string float bool scalar") {
     let mode: string = Mode::Fast;
-    assert(mode == "fast")?;
-    assert(Ratio::Half + 0.0 == 0.5)?;
-    assert(Switch::On)?;
+    assert!(mode == "fast");
+    assert!(Ratio::Half + 0.0 == 0.5);
+    assert!(Switch::On == true);
     let m = match Mode::Slow {
         Mode::Fast => 1,
         Mode::Slow => 2,
     };
-    assert(m == 2)?;
+    assert!(m == 2);
 }
 
 test("Status.Ok next to Result.Ok") {
     let s = Status::Ok;
     let r = Result::Ok(1);
-    assert(s + 0 == 200)?;
-    assert(match r {
+    assert!(s + 0 == 200);
+    assert!(match r {
         Result::Ok(v) => v,
         Result::Err(_) => 0,
-    } == 1)?;
+    } == 1);
 }
 
 test("payload enum still constructs") {
     let c = Color::Red;
-    assert(match c {
+    assert!(match c {
         Color::Red => 1,
         Color::Green => 0,
-    } == 1)?;
+    } == 1);
 }
 
 test("Status.Ok plus one") {
-    assert(Status::Ok + 1 == 201)?;
+    assert!(Status::Ok + 1 == 201);
 }
 
 fn hash_key<T: Hash>(T k) -> int {
@@ -99,15 +101,15 @@ fn hash_key<T: Hash>(T k) -> int {
 }
 
 test("derived Eq Hash Show Ord") {
-    assert(Status::Ok == Status::Ok)?;
-    assert(Status::Ok != Status::NotFound)?;
-    assert(Status::Ok < Status::NotFound)?;
-    assert(Status::Ok.show() == (200).show())?;
-    assert(Mode::Fast.show() == "fast".show())?;
-    assert(Ratio::Half.show() == (0.5).show())?;
-    assert(Switch::On.show() == true.show())?;
-    assert(hash_key(Status::Ok) == Status::Ok.hash())?;
-    assert(Status::Ok.hash() != Status::NotFound.hash())?;
+    assert!(Status::Ok == Status::Ok);
+    assert!(Status::Ok != Status::NotFound);
+    assert!(Status::Ok < Status::NotFound);
+    assert!(Status::Ok.show() == (200).show());
+    assert!(Mode::Fast.show() == "fast".show());
+    assert!(Ratio::Half.show() == (0.5).show());
+    assert!(Switch::On.show() == true.show());
+    assert!(hash_key(Status::Ok) == Status::Ok.hash());
+    assert!(Status::Ok.hash() != Status::NotFound.hash());
 }
 
 #[repr(int)]
@@ -118,5 +120,5 @@ enum Rank {
 }
 
 test("Ord uses backing word not declaration order") {
-    assert(Rank::Low < Rank::High)?;
+    assert!(Rank::Low < Rank::High);
 }

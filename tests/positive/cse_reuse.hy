@@ -1,11 +1,12 @@
 // Local EarlyCSE (#317): stored Index / CastIntToFloat reuse must keep
 // values; a store through the same index must kill the expr.
+use tests::assert;
 
 test("index reuse matches first load") {
     let a = [10, 20, 30, 40];
     let i = 2;
     let x = a[i];
-    assert(x + a[i] + a[i] == 90)?;
+    assert!(x + a[i] + a[i] == 90);
 }
 
 test("index store kills reused slot") {
@@ -15,22 +16,22 @@ test("index store kills reused slot") {
     let i = 1;
     let x = a[i];
     a[i] = x + 5;
-    assert(a[i] == 7)?;
-    assert(x == 2)?;
+    assert!(a[i] == 7);
+    assert!(x == 2);
 }
 
 test("cast reuse stays IEEE-equal") {
     let i = 7;
     let xf = i as float;
     let s = xf + (i as float) + (i as float);
-    assert(s == 21.0)?;
+    assert!(s == 21.0);
 }
 
 test("commutative add reuse") {
     let a = 11;
     let b = 31;
     let x = a + b;
-    assert(x + (b + a) == 84)?;
+    assert!(x + (b + a) == 84);
 }
 
 fn sq(int n) -> int {
@@ -39,5 +40,5 @@ fn sq(int n) -> int {
 
 test("pure call reuse") {
     let a = 7;
-    assert(sq(a) + sq(a) == 98)?;
+    assert!(sq(a) + sq(a) == 98);
 }

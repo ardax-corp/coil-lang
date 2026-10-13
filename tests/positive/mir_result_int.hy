@@ -1,4 +1,6 @@
 // COI-270: two-slot Result<int,int> leaf must stay off MakeEnum / dense.
+use tests::assert;
+
 fn checked_div(int a, int b) -> Result<int, int> {
     if b == 0 {
         return Result::Err(-1);
@@ -7,19 +9,19 @@ fn checked_div(int a, int b) -> Result<int, int> {
 }
 
 test("ok divides") {
-    assert(
+    assert!(
         match checked_div(6, 3) {
             Result::Ok(q) => q == 2,
             Result::Err(_) => false,
         },
-    )?;
+    );
 }
 
 test("err on zero") {
-    assert(
+    assert!(
         match checked_div(1, 0) {
             Result::Ok(_) => false,
             Result::Err(e) => e == -1,
         },
-    )?;
+    );
 }

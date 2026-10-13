@@ -1,5 +1,6 @@
 // `Result<(), E>` returns cross direct calls as a `[(), tag]` pair instead
 // of a boxed enum. These cover the edges where the pair meets other layouts.
+use tests::assert;
 use io::result_unit_probe;
 
 fn check(int x) -> Result<(), string> {
@@ -79,13 +80,13 @@ fn err_of(Result<(), string> r) -> string {
 }
 
 test("ok and err round trip") {
-    assert(is_ok(check(1)))?;
-    assert(err_of(check(-1)) == "neg")?;
-    assert(is_ok(chain(1, 2)))?;
-    assert(err_of(chain(1, -2)) == "neg")?;
-    assert(err_of(pass_through(-3)) == "neg")?;
-    assert(err_of(store_then_return(-3)) == "neg")?;
-    assert(is_ok(store_then_return(3)))?;
+    assert!(is_ok(check(1)));
+    assert!(err_of(check(-1)) == "neg");
+    assert!(is_ok(chain(1, 2)));
+    assert!(err_of(chain(1, -2)) == "neg");
+    assert!(err_of(pass_through(-3)) == "neg");
+    assert!(err_of(store_then_return(-3)) == "neg");
+    assert!(is_ok(store_then_return(3)));
 }
 
 test("int error payload") {
@@ -93,12 +94,12 @@ test("int error payload") {
         Result::Ok(_) => -1,
         Result::Err(e) => e,
     };
-    assert(got == 12)?;
+    assert!(got == 12);
     let ok = match check_int(3) {
         Result::Ok(_) => 1,
         Result::Err(_) => 0,
     };
-    assert(ok == 1)?;
+    assert!(ok == 1);
 }
 
 test("host result passes through a user function") {
@@ -110,24 +111,24 @@ test("host result passes through a user function") {
         Result::Ok(_) => 0,
         Result::Err(e) => e,
     };
-    assert(a == 0)?;
-    assert(b == 7)?;
+    assert!(a == 0);
+    assert!(b == 7);
 }
 
 test("method results chain with ?") {
     let c = new Counter(0);
-    assert(
+    assert!(
         match bump_many(c, 5, 100) {
             Result::Ok(_) => true,
             Result::Err(_) => false,
         },
-    )?;
-    assert(c.n == 5)?;
+    );
+    assert!(c.n == 5);
     let stopped = match bump_many(c, 10, 8) {
         Result::Ok(_) => -1,
         Result::Err(n) => n,
     };
-    assert(stopped == 8)?;
+    assert!(stopped == 8);
 }
 
 test("results stored in collections and closures") {
@@ -138,10 +139,10 @@ test("results stored in collections and closures") {
             oks = oks + 1;
         }
     }
-    assert(oks == 2)?;
+    assert!(oks == 2);
     let f = fn (int x) => check(x);
-    assert(err_of(f(-5)) == "neg")?;
-    assert(is_ok(f(5)))?;
+    assert!(err_of(f(-5)) == "neg");
+    assert!(is_ok(f(5)));
 }
 
 test("? in a test body") {

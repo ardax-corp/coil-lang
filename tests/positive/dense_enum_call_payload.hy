@@ -1,6 +1,8 @@
 // An enum built from two recursive call results keeps both words as GC
 // roots: the dense lowering used to type the first call's result as a
 // scalar, so a collection during the second call freed that subtree.
+use tests::assert;
+
 enum Tree {
     Leaf,
     Node(Tree, Tree),
@@ -30,6 +32,6 @@ fn count(Tree t) -> int {
 }
 
 test("enum payloads from call results survive collection") {
-    assert(count(bottom_up(16)) == 65536)?;
-    assert(count(direct(16)) == 65536)?;
+    assert!(count(bottom_up(16)) == 65536);
+    assert!(count(direct(16)) == 65536);
 }

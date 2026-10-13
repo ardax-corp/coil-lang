@@ -2,6 +2,7 @@
 // (`MakeArrayK`): marking treats the elements as precise references and the
 // collector may move what they point at. Collections in between must keep
 // every element, including `None` holes and nested literals.
+use tests::assert;
 use gc::collect;
 
 class Node {
@@ -27,7 +28,7 @@ test("node literals survive collections") {
         total = total + nodes[i].v;
         i = i + 1;
     }
-    assert(total == 10)?;
+    assert!(total == 10);
 }
 
 test("option, nested and string literals") {
@@ -44,7 +45,7 @@ test("option, nested and string literals") {
         };
         i = i + 1;
     }
-    assert(total == 12)?;
-    assert(rows[0][1].v + rows[1][0].v == 5)?;
-    assert(len(words[2]) == 3)?;
+    assert!(total == 12);
+    assert!(rows[0][1].v + rows[1][0].v == 5);
+    assert!(len(words[2]) == 3);
 }

@@ -1,6 +1,7 @@
 // Coroutine bodies in direct MIR: each `yield` is one instruction the VM
 // resumes after, with every live word (ints, floats, heap objects) kept in
 // the frame across it, collections between resumes included.
+use tests::assert;
 use gc::collect;
 
 class Box {
@@ -98,21 +99,21 @@ test("live ints, floats and objects survive yields and collections") {
     let c = resume h;
     let d = resume h;
     let e = resume h;
-    assert(a == 12)?;
-    assert(b == 13)?;
-    assert(c == 15)?;
-    assert(d == 11)?;
-    assert(e == 4)?;
-    assert(done(h))?;
+    assert!(a == 12);
+    assert!(b == 13);
+    assert!(c == 15);
+    assert!(d == 11);
+    assert!(e == 4);
+    assert!(done(h));
 }
 
 test("receiving yields in a loop") {
     let h = running_total();
-    assert((resume h) == 0)?;
-    assert((resume h with 5) == 5)?;
-    assert((resume h with 7) == 12)?;
-    assert((resume h with -1) == 12)?;
-    assert(done(h))?;
+    assert!((resume h) == 0);
+    assert!((resume h with 5) == 5);
+    assert!((resume h with 7) == 12);
+    assert!((resume h with -1) == 12);
+    assert!(done(h));
 }
 
 test("yield from keeps the delegator's frame") {
@@ -123,22 +124,22 @@ test("yield from keeps the delegator's frame") {
         got = got * 100 + (resume h);
         i = i + 1;
     }
-    assert(got == 7141011)?;
+    assert!(got == 7141011);
 }
 
 test("two-word yields and a gen fn ?") {
     let h = halves(8);
-    assert(ok_or(resume h, -1) == 4)?;
-    assert(ok_or(resume h, -1) == 2)?;
-    assert(ok_or(resume h, -1) == 0)?;
+    assert!(ok_or(resume h, -1) == 4);
+    assert!(ok_or(resume h, -1) == 2);
+    assert!(ok_or(resume h, -1) == 0);
     let odd = halves(6);
-    assert(ok_or(resume odd, -1) == 3)?;
-    assert(ok_or(resume odd, -1) == -1)?;
+    assert!(ok_or(resume odd, -1) == 3);
+    assert!(ok_or(resume odd, -1) == -1);
 }
 
 test("bool compares in a gen fn") {
     let h = flags();
-    assert((resume h) == 1)?;
-    assert((resume h) == 2)?;
-    assert((resume h) == 3)?;
+    assert!((resume h) == 1);
+    assert!((resume h) == 2);
+    assert!((resume h) == 3);
 }

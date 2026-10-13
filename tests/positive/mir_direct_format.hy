@@ -1,5 +1,6 @@
 // `format` calls in bodies lowered straight from HIR to MIR: the format
 // string loads first, then the arguments, then one Format instruction.
+use tests::assert;
 use string::format;
 
 fn show(int n) -> string {
@@ -21,7 +22,7 @@ fn tally(int n) -> int {
 }
 
 test("format in direct MIR") {
-    assert(show(42) == "n=42")?;
-    assert(len(mixed(1, 2.5, "a")) > 0)?;
-    assert(tally(12) == 14)?;
+    assert!(show(42) == "n=42");
+    assert!(len(mixed(1, 2.5, "a")) > 0);
+    assert!(tally(12) == 14);
 }

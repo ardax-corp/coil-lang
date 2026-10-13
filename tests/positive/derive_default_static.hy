@@ -1,6 +1,7 @@
 // `#[derive(Default)]` generates `static fn default()`; every field takes
 // its type's default (`0`, `0.0`, `false`, `""`, `Ty::default()`), and the
 // instance is chosen by the annotation when several exist (#524).
+use tests::assert;
 
 #[derive(Default)]
 class Inner {
@@ -48,23 +49,23 @@ fn is_circle(Shape s) -> bool {
 
 test("Q::default() fills every field with its type's default") {
     let q = Q::default();
-    assert(q.x == 0)?;
-    assert(q.f == 0.0)?;
-    assert(!q.ok)?;
-    assert(q.name == "")?;
-    assert(q.inner.n == 0)?;
-    assert(q.inner.label == "")?;
+    assert!(q.x == 0);
+    assert!(q.f == 0.0);
+    assert!(!q.ok);
+    assert!(q.name == "");
+    assert!(q.inner.n == 0);
+    assert!(q.inner.label == "");
 }
 
 test("annotation chooses among several Default instances") {
     let q: Q = make();
-    assert(q.name == "")?;
+    assert!(q.name == "");
     let r: R = make();
-    assert(r.y == 0)?;
+    assert!(r.y == 0);
 }
 
 test("enum default: first variant with defaulted payload") {
-    assert(is_circle(Shape::default()))?;
+    assert!(is_circle(Shape::default()));
 }
 
 test("enum default: unit variant") {
@@ -73,5 +74,5 @@ test("enum default: unit variant") {
         Mode::Fast => true,
         Mode::Slow => false,
     };
-    assert(fast)?;
+    assert!(fast);
 }

@@ -1,6 +1,7 @@
 // Operators over user types lower from HIR as the AST codegen emits them:
 // a call of the type's trait instance (derived or written), or `EQ` / `NEQ`
 // when the type has no `Eq` instance.
+use tests::assert;
 
 class Vec2 {
     pub x: int,
@@ -73,31 +74,31 @@ fn shift(Vec2 a) -> Vec2 {
 }
 
 test("enum equality without an Eq instance") {
-    assert(same(Color::Red, Color::Red))?;
-    assert(!same(Color::Red, Color::Blue))?;
-    assert(differ(Color::Red, Color::Blue))?;
-    assert(!differ(Color::Blue, Color::Blue))?;
+    assert!(same(Color::Red, Color::Red));
+    assert!(!same(Color::Red, Color::Blue));
+    assert!(differ(Color::Red, Color::Blue));
+    assert!(!differ(Color::Blue, Color::Blue));
 }
 
 test("derived Eq and Ord") {
-    assert(below(Rank::Low, Rank::High))?;
-    assert(!below(Rank::High, Rank::Mid))?;
-    assert(at_most(Rank::Mid, Rank::Mid))?;
-    assert(above(Rank::High, Rank::Low))?;
-    assert(at_least(Rank::Low, Rank::Low))?;
-    assert(!at_least(Rank::Low, Rank::Mid))?;
-    assert(rank_eq(Rank::Mid, Rank::Mid))?;
-    assert(!rank_eq(Rank::Mid, Rank::High))?;
+    assert!(below(Rank::Low, Rank::High));
+    assert!(!below(Rank::High, Rank::Mid));
+    assert!(at_most(Rank::Mid, Rank::Mid));
+    assert!(above(Rank::High, Rank::Low));
+    assert!(at_least(Rank::Low, Rank::Low));
+    assert!(!at_least(Rank::Low, Rank::Mid));
+    assert!(rank_eq(Rank::Mid, Rank::Mid));
+    assert!(!rank_eq(Rank::Mid, Rank::High));
 }
 
 test("option equality") {
-    assert(opt_is(Option::Some(3)))?;
-    assert(!opt_is(Option::Some(4)))?;
-    assert(!opt_is(Option::None))?;
+    assert!(opt_is(Option::Some(3)));
+    assert!(!opt_is(Option::Some(4)));
+    assert!(!opt_is(Option::None));
 }
 
 test("class operators") {
-    assert(span(new Vec2(1, 2), new Vec2(4, 8)) == 9)?;
+    assert!(span(new Vec2(1, 2), new Vec2(4, 8)) == 9);
     let s = shift(new Vec2(2, 3));
-    assert(s.x == 3 && s.y == 4)?;
+    assert!(s.x == 3 && s.y == 4);
 }

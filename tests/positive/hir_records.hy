@@ -1,4 +1,5 @@
 // Records under HIR: built as dicts, fields read and written by name.
+use tests::assert;
 
 fn norm1(int x, int y) -> int {
     let p = { x: x, y: y };
@@ -30,12 +31,12 @@ fn nested(int v) -> int {
 }
 
 test("record fields of each kind") {
-    assert(norm1(3, 4) == 27)?;
-    assert(scaled(2.0) == 5.0)?;
-    assert(label(true) == "fine")?;
-    assert(label(false) == "bad")?;
+    assert!(norm1(3, 4) == 27);
+    assert!(scaled(2.0) == 5.0);
+    assert!(label(true) == "fine");
+    assert!(label(false) == "bad");
 }
 
 test("nested records share the inner dict") {
-    assert(nested(7) == 23)?;
+    assert!(nested(7) == 23);
 }

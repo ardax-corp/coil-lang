@@ -1,5 +1,6 @@
 // HIR lowering of `let a = [..]` locals kept in frame slots: literal and
 // computed indexes, stores, `%` indexes, and selects as binary operands.
+use tests::assert;
 
 fn pick(int i) -> int {
     let a = [10, 20, 30, 40];
@@ -59,25 +60,25 @@ fn nested(int i) -> int {
 }
 
 test("literal and computed reads") {
-    assert(pick(0) == 10)?;
-    assert(pick(3) == 40)?;
-    assert(sum_twice(2) == 90)?;
-    assert(both_sides(3, 1) == 802)?;
-    assert(nested(0) == 9)?;
-    assert(nested(1) == 7)?;
+    assert!(pick(0) == 10);
+    assert!(pick(3) == 40);
+    assert!(sum_twice(2) == 90);
+    assert!(both_sides(3, 1) == 802);
+    assert!(nested(0) == 9);
+    assert!(nested(1) == 7);
 }
 
 test("stores and compound stores") {
-    assert(bump(0) == 800)?;
-    assert(bump(1) == 170)?;
-    assert(bump(2) == 107)?;
-    assert(floats(1) == 6.5)?;
-    assert(flags(1))?;
-    assert(!flags(0))?;
+    assert!(bump(0) == 800);
+    assert!(bump(1) == 170);
+    assert!(bump(2) == 107);
+    assert!(floats(1) == 6.5);
+    assert!(flags(1));
+    assert!(!flags(0));
 }
 
 test("modulo indexes stay in range") {
-    assert(wrap(4) == 12)?;
-    assert(wrap(-1) == 13)?;
-    assert(count(8) == 10 * 1000 + 8 * 100 + 6 * 10 + 4)?;
+    assert!(wrap(4) == 12);
+    assert!(wrap(-1) == 13);
+    assert!(count(8) == 10 * 1000 + 8 * 100 + 6 * 10 + 4);
 }

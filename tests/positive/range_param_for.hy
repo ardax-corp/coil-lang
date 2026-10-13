@@ -1,4 +1,6 @@
 // C2: free-fn Range param and returned Range for-in.
+use tests::assert;
+
 fn sum_param(Range<int> r) -> int {
     let iter = r;
     let acc = 0;
@@ -30,13 +32,13 @@ fn sum_inc(RangeInclusive<int> r) -> int {
 }
 
 test("param range for-in") {
-    assert(sum_param(0..5) == 10)?;
+    assert!(sum_param(0..5) == 10);
 }
 
 test("returned range for-in") {
-    assert(sum_ret(5) == 10)?;
+    assert!(sum_ret(5) == 10);
 }
 
 test("inclusive range param") {
-    assert(sum_inc(0..=4) == 10)?;
+    assert!(sum_inc(0..=4) == 10);
 }

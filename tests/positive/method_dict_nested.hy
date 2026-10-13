@@ -1,6 +1,7 @@
 // Regression: inherent methods under `impl Foo<T: Eq>` need dictionary ABI,
 // and nested `self.inner.method(...)` must stage the receiver before arg temps
 // (locals share the operand stack).
+use tests::assert;
 
 class Store<T> {
     pub item: T,
@@ -55,19 +56,19 @@ impl Nest<T: Eq> {
 
 test("nested constrained method preserves receiver") {
     let n = Nest::empty(0);
-    assert(n.put(1))?;
-    assert(n.put(1) == false)?;
-    assert(n.has(1))?;
-    assert(n.has(2) == false)?;
+    assert!(n.put(1));
+    assert!(n.put(1) == false);
+    assert!(n.has(1));
+    assert!(n.has(2) == false);
 }
 
 test("nested constrained method with strings") {
     let n = Nest::empty("");
-    assert(n.put("a"))?;
-    assert(n.put("a") == false)?;
-    assert(n.has("a"))?;
-    assert(n.has("c") == false)?;
-    assert(n.put("b"))?;
-    assert(n.has("b"))?;
-    assert(n.has("a") == false)?;
+    assert!(n.put("a"));
+    assert!(n.put("a") == false);
+    assert!(n.has("a"));
+    assert!(n.has("c") == false);
+    assert!(n.put("b"));
+    assert!(n.has("b"));
+    assert!(n.has("a") == false);
 }

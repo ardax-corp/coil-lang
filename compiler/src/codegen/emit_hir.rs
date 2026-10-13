@@ -915,9 +915,14 @@ impl Compiler {
         let mut stacks = HashMap::new();
         for (&local, &n) in emit.plan.stacks.iter().filter(|(l, _)| !outlined.contains(*l)) {
             let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-            let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            // An array literal bound to a `Vec` local is slots too.
+            let element = ty.as_ref().and_then(|t| match crate::typechecking::ty::strip_readonly(t) {
+                Ty::Array { element, .. } => Some(element.as_ref()),
+                t => crate::typechecking::ty::vec_element_ty(t),
+            });
+            let elem = match element {
                 // A heap element's slot holds its boxed word.
-                Some(Ty::Array { element, .. }) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
                     (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
                         .then_some(crate::mir::MirTy::HeapRef)
@@ -971,7 +976,12 @@ impl Compiler {
                 && !outlined.contains(&local.0)
             {
                 let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
-                let tys: Option<Vec<_>> = tys.iter().map(word).collect();
+                // A generic class's field at the made type's arguments.
+                let made = Self::hir_ty(hir, init);
+                let tys: Option<Vec<_>> = tys
+                    .iter()
+                    .map(|t| word(t).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
+                    .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
         }
@@ -1012,7 +1022,13 @@ impl Compiler {
                     }
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = field_word(&fty)
+                && let Some(w) = field_word(&fty).or_else(|| {
+                    // A generic class's field (`item: T`) at a ground
+                    // receiver (`Box<int>`): its slot holds the boxed-layout
+                    // word of the field's type there.
+                    let at = self.hir_class_ty_args_at(Self::hir_ty(hir, *base)?, &fty)?;
+                    field_word(&at)
+                })
                 && e.ty.as_ref().and_then(field_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
@@ -1067,11 +1083,16 @@ impl Compiler {
                     .iter()
                     .map(|t| {
                         // A two-word field value is stored boxed.
-                        word(t).or_else(|| {
-                            (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
-                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
-                                .then_some(crate::mir::MirTy::HeapRef)
-                        })
+                        let stored = |t: &Ty| {
+                            word(t).or_else(|| {
+                                (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
+                                    && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
+                        };
+                        // A generic class's field at the made type's
+                        // arguments (`new Box(1)`: `T` is `int`).
+                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?))
                     })
                     .collect::<Option<Vec<_>>>()
             {
@@ -5226,6 +5247,22 @@ impl Compiler {
                 .map(|(name, ty)| (name, open_params(&ty, params)))
                 .collect(),
         )
+    }
+
+    /// Declared field type `fty` of a generic class (its parameters opened
+    /// by [`Self::hir_class_fields`]) at the class's type arguments in
+    /// `ty`, when that is ground and its value is stored as it is (a boxed
+    /// layout: a niche `Option` in a `T` slot is a boxed enum object).
+    fn hir_class_ty_args_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
+        if !Self::ty_has_var(fty) {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&ty) else {
+            return None;
+        };
+        let at = close_params(fty, args)?;
+        (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,
@@ -10687,6 +10724,28 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         },
         _ => ty.clone(),
     }
+}
+
+/// [`open_params`] undone at type arguments `args`: parameter `i`'s
+/// variable becomes `args[i]`. `None` when a parameter has no argument.
+fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
+    let close = |t: &Ty| close_params(t, args);
+    Some(match ty {
+        Ty::Var(crate::typechecking::ty::TyVarId(v)) if *v > u32::MAX - 64 => args.get((u32::MAX - v) as usize)?.clone(),
+        Ty::App(head, items) => Ty::App(Box::new(close(head)?), items.iter().map(close).collect::<Option<_>>()?),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(close(a)?), Box::new(close(b)?)),
+        Ty::List(inner) => Ty::List(Box::new(close(inner)?)),
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(close(inner)?)),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(close).collect::<Option<_>>()?),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(close(element)?),
+            length: *length,
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, f)| Some((n.clone(), close(f)?))).collect::<Option<_>>()?,
+        },
+        _ => ty.clone(),
+    })
 }
 
 /// A two-word `Option`, `Result` or user enum: a payload word and a tag,

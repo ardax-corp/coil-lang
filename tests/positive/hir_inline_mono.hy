@@ -1,5 +1,7 @@
 // Typed inlining of mono clone callees: the generic body is spliced in at
 // the call's types.
+use tests::assert;
+
 fn add<T: Num>(T a, T b) -> T {
     return a + b;
 }
@@ -37,7 +39,7 @@ fn sum_ints(int n) -> int {
 
 test("an int instance in a loop") {
     // i = 0..7 clamped to 2..5: 2+2+2+3+4+5+5+5.
-    assert(sum_ints(8) == 28, "sum")?;
+    assert!(sum_ints(8) == 28, "sum");
 }
 
 fn mixed(float x, int y) -> float {
@@ -52,7 +54,7 @@ fn mixed(float x, int y) -> float {
 }
 
 test("one generic at two types in one caller") {
-    assert(mixed(1.5, 3) == 10.75, "sum")?;
+    assert!(mixed(1.5, 3) == 10.75, "sum");
 }
 
 fn count_kept(int n) -> int {
@@ -70,5 +72,5 @@ fn count_kept(int n) -> int {
 
 test("a generic Option result at int") {
     // 0 + 3 + 6 + 9.
-    assert(count_kept(10) == 18, "sum")?;
+    assert!(count_kept(10) == 18, "sum");
 }

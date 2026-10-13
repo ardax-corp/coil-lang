@@ -1,6 +1,7 @@
 // E3: `pure fn` and `uses {…}` hold, a trait method's declaration gives
 // calls through the trait its effects, and a declaration says nothing
 // about the functions a higher-order function is passed.
+use tests::assert;
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;
@@ -59,11 +60,11 @@ fn say(string s) uses {write, suspend} {
 }
 
 test("declared functions run as written") {
-    assert(total(new Sq(2), new Rect(2, 3)) == 10)?;
-    assert(nth([4, 5, 6], 1) == 5)?;
-    assert(bytes_of("abc") == 3)?;
-    assert(apply(fn (int x) => x + 1, 1) == 2)?;
-    assert(apply(fn (int x) => bump(x), 2) == 2)?;
-    assert(bump(3) == 5)?;
+    assert!(total(new Sq(2), new Rect(2, 3)) == 10);
+    assert!(nth([4, 5, 6], 1) == 5);
+    assert!(bytes_of("abc") == 3);
+    assert!(apply(fn (int x) => x + 1, 1) == 2);
+    assert!(apply(fn (int x) => bump(x), 2) == 2);
+    assert!(bump(3) == 5);
     say("");
 }

@@ -1,5 +1,7 @@
 // Mirrors coil-http H2ClientSlot reuse predicate: free fn over class fields.
 // DenseFieldLoad of a string field in a callee must match LoadField in the caller.
+use tests::assert;
+
 class Slot {
     pub on: int,
     pub key: string,
@@ -94,41 +96,41 @@ test("reuse predicate after field stores") {
     if g == 0 {
         panic "on";
     }
-    assert(g == 1)?;
+    assert!(g == 1);
 }
 
 test("string field equals arg in caller") {
     let slot = new Slot(0, "", 1, Option::None);
     slot.key = "http://127.0.0.1:9";
     let key = "http://127.0.0.1:9";
-    assert(slot.key == key)?;
+    assert!(slot.key == key);
 }
 
 test("string field equals arg in callee") {
     let slot = new Slot(0, "", 1, Option::None);
     slot.key = "http://127.0.0.1:9";
     let key = "http://127.0.0.1:9";
-    assert(key_eq(slot, key) == 1)?;
+    assert!(key_eq(slot, key) == 1);
 }
 
 test("string field not-equal inverted in callee") {
     let slot = new Slot(0, "", 1, Option::None);
     slot.key = "http://127.0.0.1:9";
     let key = "http://127.0.0.1:9";
-    assert(key_neq_then_zero(slot, key) == 1)?;
+    assert!(key_neq_then_zero(slot, key) == 1);
 }
 
 test("string field equals arg on method") {
     let slot = new Slot(0, "", 1, Option::None);
     slot.key = "http://127.0.0.1:9";
     let key = "http://127.0.0.1:9";
-    assert(slot.key_eq_m(key) == 1)?;
+    assert!(slot.key_eq_m(key) == 1);
 }
 
 test("reuse predicate rejects empty slot") {
     let slot = new Slot(0, "", 1, Option::None);
     let key = "http://127.0.0.1:9";
-    assert(can_reuse(slot, key) == 0)?;
+    assert!(can_reuse(slot, key) == 0);
 }
 
 test("take then arity-2 key_eq sees stored string") {
@@ -136,17 +138,17 @@ test("take then arity-2 key_eq sees stored string") {
     slot.on = 1;
     slot.key = "http://127.0.0.1:9";
     let key = "http://127.0.0.1:9";
-    assert(take(slot) == key)?;
-    assert(key_eq(slot, key) == 1)?;
+    assert!(take(slot) == key);
+    assert!(key_eq(slot, key) == 1);
 }
 
 test("nested field stores reach second free-fn call") {
     let w = new Wrap(new Slot(0, "", 1, Option::None));
     let key = "http://127.0.0.1:9";
-    assert(exchange(w.h2, key) == 0)?;
-    assert(w.h2.key == key)?;
-    assert(exchange(w.h2, key) == 1)?;
-    assert(can_reuse(w.h2, key) == 1)?;
+    assert!(exchange(w.h2, key) == 0);
+    assert!(w.h2.key == key);
+    assert!(exchange(w.h2, key) == 1);
+    assert!(can_reuse(w.h2, key) == 1);
 }
 
 class Sess {
@@ -216,7 +218,7 @@ fn h2_exchange(H2Slot slot, string key) -> int {
 test("Option class sess set in callee is visible to can_reuse") {
     let c = new Clientish(new H2Slot(0, "", 1, Option::None, Option::None));
     let key = "http://127.0.0.1:9";
-    assert(h2_exchange(c.h2, key) == 0)?;
+    assert!(h2_exchange(c.h2, key) == 0);
     let g = h2_can_reuse(c.h2, key);
     if g == 2 {
         panic "key";
@@ -236,6 +238,6 @@ test("Option class sess set in callee is visible to can_reuse") {
     if g == 0 {
         panic "on";
     }
-    assert(g == 1)?;
-    assert(h2_exchange(c.h2, key) == 1)?;
+    assert!(g == 1);
+    assert!(h2_exchange(c.h2, key) == 1);
 }

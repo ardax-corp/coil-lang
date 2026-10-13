@@ -1,5 +1,7 @@
 // A `?` or `??` inside a string `+` lowers from HIR: both operands run into
 // temps at depth zero, then the format string goes under them.
+use tests::assert;
+
 fn piece(string s, int n) -> Result<string, string> {
     if n < 0 {
         return Result::Err("neg");
@@ -45,21 +47,21 @@ fn looped(int n) -> Result<string, string> {
 }
 
 test("try inside string concat") {
-    assert((chain("a", 1) ?? "err") == "<a!>")?;
-    assert((chain("a", -1) ?? "err") == "err")?;
-    assert((tail("b", 0) ?? "err") == "xb!")?;
-    assert((tail("b", -2) ?? "err") == "err")?;
-    assert((both(1, 1) ?? "err") == "a!b!")?;
-    assert((both(1, -1) ?? "err") == "err")?;
-    assert((both(-1, 1) ?? "err") == "err")?;
+    assert!((chain("a", 1) ?? "err") == "<a!>");
+    assert!((chain("a", -1) ?? "err") == "err");
+    assert!((tail("b", 0) ?? "err") == "xb!");
+    assert!((tail("b", -2) ?? "err") == "err");
+    assert!((both(1, 1) ?? "err") == "a!b!");
+    assert!((both(1, -1) ?? "err") == "err");
+    assert!((both(-1, 1) ?? "err") == "err");
 }
 
 test("coalesce inside string concat") {
-    assert(coalesce(1) == "pm.")?;
-    assert(coalesce(0) == "pnone.")?;
+    assert!(coalesce(1) == "pm.");
+    assert!(coalesce(0) == "pnone.");
 }
 
 test("try inside a looped concat") {
-    assert((looped(3) ?? "err") == "i!i!i!end!")?;
-    assert((looped(0) ?? "err") == "end!")?;
+    assert!((looped(3) ?? "err") == "i!i!i!end!");
+    assert!((looped(0) ?? "err") == "end!");
 }

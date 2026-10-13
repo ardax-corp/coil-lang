@@ -2,6 +2,7 @@
 // is a precise root the collector may rewrite when its target moves, a scalar
 // static is no root. Collections (and evacuation) in between must keep every
 // static's value intact.
+use tests::assert;
 use gc::collect;
 
 class Node {
@@ -42,9 +43,9 @@ test("static roots survive collections") {
         Option::Some(n) => n.v,
         Option::None => -1,
     };
-    assert(first == 9)?;
-    assert(len(nodes) == 510)?;
-    assert(nodes[499].v == 499)?;
-    assert(count == 510)?;
-    assert(len(label) == 6)?;
+    assert!(first == 9);
+    assert!(len(nodes) == 510);
+    assert!(nodes[499].v == 499);
+    assert!(count == 510);
+    assert!(len(label) == 6);
 }

@@ -1,5 +1,6 @@
 // A variant make with several non-trivial arguments stages them through
 // temps, so a call holding one stages its own arguments first.
+use tests::assert;
 use string::format;
 
 enum T {
@@ -20,10 +21,10 @@ fn pair(string s, int n) -> string {
 
 test("nested makes under calls") {
     let s = pair("n", sum(T::Node(1, T::Node(2, T::Leaf(), T::Leaf()), T::Leaf())));
-    assert(s == "n3")?;
+    assert!(s == "n3");
 }
 
 test("make after a live operand") {
     let base = 10;
-    assert(base + sum(T::Node(3, T::Leaf(), T::Node(4, T::Leaf(), T::Leaf()))) == 17)?;
+    assert!(base + sum(T::Node(3, T::Leaf(), T::Node(4, T::Leaf(), T::Leaf()))) == 17);
 }
