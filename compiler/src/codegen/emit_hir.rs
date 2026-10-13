@@ -208,6 +208,8 @@ enum HirBuiltin {
 struct HirLambda {
     body: HirBody,
     emit: HirEmit,
+    /// Its code's offset, once emitted.
+    entry: Option<u32>,
 }
 
 /// Per-body lowering state.
@@ -334,15 +336,6 @@ struct HirEmit {
     /// The fork-join functions those calls reach, emitted after this body
     /// ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
-    /// Entry label of the user `into_iter` a counted `for` loop calls, by
-    /// loop.
-    into_iters: HashMap<u32, crate::il::Label>,
-    /// The `into_iter` and `next` entries a `for` loop over a user
-    /// iterator calls, by loop.
-    iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
-    /// named functions read as values), by expression.
-    fn_values: HashMap<u32, crate::mir::HirFnValue>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1233,8 +1226,8 @@ impl Compiler {
             sroa_classes,
             fields,
             calls: &tables.calls,
-            into_iters: &emit.into_iters,
-            iter_loops: &emit.iter_loops,
+            into_iters: &tables.into_iters,
+            iter_loops: &tables.iter_loops,
             strings: &tables.strings,
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
@@ -1244,7 +1237,7 @@ impl Compiler {
             par_loops: &emit.par_calls,
             par_forks: &tables.par_forks,
             op_prims: &tables.op_prims,
-            fn_values: &emit.fn_values,
+            fn_values: &tables.fn_values,
             value_calls: &tables.value_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
@@ -2115,22 +2108,9 @@ impl Compiler {
             for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
                 plan.slots[inner.0 as usize] = Some(slot as u32);
             }
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan, entry: None }));
         }
         Ok(())
-    }
-
-    /// Record the function value `id` builds for direct MIR, once its
-    /// `CodePtr` (with `operand`, `MakeFn` follows it) or `MakePolyFn` is
-    /// the last op: an entry label, not an absolute offset.
-    fn hir_note_fn_value(&mut self, emit: &mut HirEmit, id: HirId, operand: Option<u32>, captures: Vec<LocalId>) {
-        use crate::il::EntryKind;
-        let kind = match (self.bytecode.il_mut().ops_slice_mut().last(), operand) {
-            (Some(&IlOp::Entry { kind: EntryKind::CodePtr, target, .. }), Some(operand)) => crate::mir::MirAllocKind::Fn { target, operand },
-            (Some(&IlOp::Entry { kind: EntryKind::MakePolyFn, target, .. }), None) => crate::mir::MirAllocKind::PolyFn { target },
-            _ => return,
-        };
-        emit.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures });
     }
 
     /// A lambda's frame: each capture's name, then each parameter's.
@@ -2226,9 +2206,6 @@ impl Compiler {
             par_loop: false,
             par_calls: HashMap::new(),
             par_tail: Vec::new(),
-            into_iters: HashMap::new(),
-            iter_loops: HashMap::new(),
-            fn_values: HashMap::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -6714,8 +6691,8 @@ impl Compiler {
                 let arity = lam.body.params.len() as u32;
                 let captures = lam.body.captures.len() as u32;
                 let operand = make_fn_operand(captures, 0, arity, false);
-                self.hir_note_fn_value(emit, id, Some(operand), lam.body.captures.iter().map(|&(outer, _)| outer).collect());
                 self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
+                lam.entry = Some(entry);
                 emit.plan.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
@@ -6730,16 +6707,12 @@ impl Compiler {
                     bc.push(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(dict_arity as u32));
                 }
                 self.bytecode = bc;
-                if dict_arity == 0 {
-                    self.hir_note_fn_value(emit, id, None, Vec::new());
-                }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 self.bytecode.push_const(0);
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry as u32));
                 let operand = make_fn_operand(0, 0, arity, rest);
-                self.hir_note_fn_value(emit, id, Some(operand), Vec::new());
                 self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
             }
             HirKind::Global { .. } => {
@@ -10303,7 +10276,6 @@ impl Compiler {
             }
             let two_slot = self.two_word_return_kind(next_fqn).is_some();
             into_iter(self, emit, into_iter_fqn);
-            let into_iter_target = self.last_call_target();
             self.expr_depth = 0;
             let it = self.alloc_temp_slot();
             self.bytecode.push_store_pop(it);
@@ -10315,20 +10287,6 @@ impl Compiler {
             let called = self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call);
             self.repr.unbox_enum_context -= 1;
             debug_assert!(called, "planned next entry");
-            // Both calls plain `CALL`s: the direct MIR lowering calls them.
-            if let (Some(into_iter), Some(next), Some(iter_ty)) =
-                (into_iter_target, self.last_call_target(), self.fn_return_ty(into_iter_fqn))
-            {
-                let shape = if niche {
-                    crate::mir::HirIterNext::Niche
-                } else if two_slot {
-                    crate::mir::HirIterNext::Pair
-                } else {
-                    let some = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "Some").unwrap_or(1);
-                    crate::mir::HirIterNext::Boxed { some }
-                };
-                emit.iter_loops.insert(id.0, crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
-            }
             if niche {
                 Self::push_niche_eq_zero(&mut self.bytecode);
                 self.hir_jump(IlJumpKind::JumpIfTrue, exit);
@@ -10424,7 +10382,6 @@ impl Compiler {
                         self.bytecode.push_store_pop(end);
                     } else if let Some(fqn) = &custom {
                         into_iter(self, emit, fqn);
-                        self.hir_note_into_iter(emit, id);
                         self.expr_depth = 0;
                         self.bytecode.push_store_pop(end);
                         self.bytecode.push_store_pop(cur);
@@ -10470,7 +10427,6 @@ impl Compiler {
                 match &custom {
                     Some(fqn) => {
                         into_iter(self, emit, fqn);
-                        self.hir_note_into_iter(emit, id);
                     }
                     None => self.hir_value(hir, emit, iterable, &BOXED, 0),
                 }
@@ -10555,33 +10511,6 @@ impl Compiler {
         self.bytecode.push_store_pop(step_slot);
         self.hir_jump(IlJumpKind::Unconditional, top);
         self.bytecode.bind_label(exit);
-    }
-
-    /// The entry of the one-argument `CALL` just emitted, when that is the
-    /// last op.
-    fn last_call_target(&mut self) -> Option<crate::il::Label> {
-        match self.bytecode.il_mut().ops_slice_mut().last() {
-            Some(&IlOp::Entry {
-                kind: crate::il::EntryKind::Call,
-                target,
-                arity: 1,
-                ..
-            }) => Some(target),
-            _ => None,
-        }
-    }
-
-    /// The `into_iter` entry a counted `for` loop `id` just called.
-    fn hir_note_into_iter(&mut self, emit: &mut HirEmit, id: HirId) {
-        if let Some(&IlOp::Entry {
-            kind: crate::il::EntryKind::Call,
-            target,
-            arity: 1,
-            ..
-        }) = self.bytecode.il_mut().ops_slice_mut().last()
-        {
-            emit.into_iters.insert(id.0, target);
-        }
     }
 
     /// A call to a function with an auto-par fork site, as the AST's
