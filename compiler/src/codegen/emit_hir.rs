@@ -9676,15 +9676,31 @@ impl Compiler {
         true
     }
 
+    /// A dynamic parallel loop's bound: its local plus its bias, or its
+    /// constant.
+    fn hir_push_par_bound(&mut self, emit: &HirEmit, bound: crate::mir::HirParBound) {
+        match bound {
+            crate::mir::HirParBound::Const(n) => self.hir_push_int(n),
+            crate::mir::HirParBound::Local(l, bias) => {
+                self.bytecode.push_load(Self::hir_slot(emit, l));
+                if bias != 0 {
+                    self.hir_push_int(bias);
+                    self.bytecode.push(Byte::new(Instruction::ADD));
+                }
+            }
+        }
+    }
+
     /// The parallel loop `id` as a `CALL` of its own fork-join function,
     /// emitted with its chunk worker after this body
     /// ([`Self::flush_hir_par_tail`]), so this body's code holds neither
     /// and it lowers to MIR. The function takes the accumulator, the live
     /// captures and the runtime bounds, and returns the new accumulator;
     /// a const range's index is left at its last value here, as the
-    /// fork-join leaves it. `false`, with nothing emitted, when a word is
-    /// not an `int` local or the loop's index is read after a dynamic
-    /// range (the fork-join computes it): the loop stays inline.
+    /// fork-join leaves it, and a dynamic stride-one range's at the larger
+    /// of its start and end. `false`, with nothing emitted, when a word is
+    /// not an `int` local or the loop's index is read after a dynamic range
+    /// of a longer stride: the loop stays inline.
     #[allow(clippy::too_many_arguments)]
     fn hir_par_outline(
         &mut self,
@@ -9722,7 +9738,9 @@ impl Compiler {
             return false;
         }
         // The index after the loop: a const range's last value; a dynamic
-        // range's only the fork-join knows, so it must be dead.
+        // stride-one range's larger of its start and end, read from the
+        // bounds' locals (the fork-join leaves this body's frame alone).
+        // A longer stride's only the fork-join knows, so it must be dead.
         let index = match index {
             Some(l) if site.is_dynamic() => {
                 let mut uses = 0usize;
@@ -9731,12 +9749,21 @@ impl Compiler {
                 }
                 let mut inside = 0usize;
                 lower::visit(hir, id, &mut |x| inside += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
-                if uses != inside {
+                if uses == inside {
+                    None
+                } else if site.stride == 1 {
+                    let bound = |local: Option<Option<LocalId>>, value: i64, bias: i64| match local {
+                        Some(l) => crate::mir::HirParBound::Local(l.expect("bound local checked above"), bias),
+                        None => crate::mir::HirParBound::Const(value),
+                    };
+                    let begin = bound(begin, site.begin, 0);
+                    let end = bound(end, site.end, site.end_bias);
+                    Some((l, crate::mir::HirParIndex::Max(begin, end)))
+                } else {
                     return false;
                 }
-                None
             }
-            Some(l) => Some((l, site.final_index())),
+            Some(l) => Some((l, crate::mir::HirParIndex::Const(site.final_index()))),
             None => None,
         };
         let driver = format!("__coil_par_loop_fork_{}", self.loop_par_forks);
@@ -9748,9 +9775,26 @@ impl Compiler {
         }
         self.bytecode.emit_entry(crate::il::EntryKind::Call, args.len() as u32, target);
         self.bytecode.push_store_pop(Self::hir_slot(emit, acc));
-        if let Some((l, after)) = index {
-            self.hir_push_int(after);
-            self.bytecode.push_store_pop(Self::hir_slot(emit, l));
+        match index {
+            Some((l, crate::mir::HirParIndex::Const(after))) => {
+                self.hir_push_int(after);
+                self.bytecode.push_store_pop(Self::hir_slot(emit, l));
+            }
+            // `i = begin; if i < end { i = end }`.
+            Some((l, crate::mir::HirParIndex::Max(begin, end))) => {
+                let slot = Self::hir_slot(emit, l);
+                let skip = self.bytecode.fresh_label();
+                self.hir_push_par_bound(emit, begin);
+                self.bytecode.push_store_pop(slot);
+                self.bytecode.push_load(slot);
+                self.hir_push_par_bound(emit, end);
+                self.bytecode.push(Byte::new(Instruction::LE));
+                self.hir_jump(IlJumpKind::JumpIfFalse, skip);
+                self.hir_push_par_bound(emit, end);
+                self.bytecode.push_store_pop(slot);
+                self.bytecode.bind_label(skip);
+            }
+            None => {}
         }
         emit.par_calls.insert(id.0, crate::mir::HirParLoop { target, args, acc, index });
         emit.par_tail.push(HirParSite {
