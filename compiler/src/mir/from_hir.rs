@@ -1379,7 +1379,7 @@ impl Lower<'_> {
             AggregateOp::Div => Some(MirBinOp::Div),
             AggregateOp::Mod => Some(MirBinOp::Rem),
             AggregateOp::Neg => None,
-            AggregateOp::Pow => return Err("aggregate pow".into()),
+            AggregateOp::Pow => Some(MirBinOp::Pow),
         };
         let float = match info.kind {
             K::ZipTuple { elem_is_float, .. }
@@ -2570,7 +2570,7 @@ impl Lower<'_> {
             BinOp::BitAnd => Some(MirBinOp::BitAnd),
             BinOp::BitOr => Some(MirBinOp::BitOr),
             BinOp::BitXor => Some(MirBinOp::Xor),
-            BinOp::FloatPow => Some(MirBinOp::Pow),
+            BinOp::IntPow | BinOp::FloatPow => Some(MirBinOp::Pow),
             _ => None,
         };
         let cmp = match op {
