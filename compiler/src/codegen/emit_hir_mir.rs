@@ -370,7 +370,7 @@ impl Compiler {
                 && generic_plain
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && !boxed
-                && natural_args(self, &call.params)
+                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_word(hir, emit, a, p))
                 && let Some(target) = target
             {
                 t.calls.insert(
@@ -420,6 +420,19 @@ impl Compiler {
     }
 
     /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.
+    /// Whether direct MIR passes argument `id` in `param` as HIR emission
+    /// does: its own word in that layout, or a numeric range's two words
+    /// boxed to its typed object (MIR's `box_pair_val`, as
+    /// `emit_box_range_slots`).
+    fn hir_arg_word(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
+        self.hir_natural(hir, emit, id) == Some(Rep::Word(param))
+            || (param == ValueLayout::Boxed
+                && Self::hir_ty(hir, id).is_some_and(|ty| {
+                    let ty = apply_ty_prune(self.checker.subst(), ty);
+                    crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
+                }))
+    }
+
     fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
         let forwarded = generic.forwarded.iter().filter(|&&i| self.lookup_slot(&format!("__dict{i}")).is_some()).count();
         let site = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
