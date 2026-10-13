@@ -9093,37 +9093,8 @@ impl Compiler {
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         for (fqn, enum_name, variants) in due {
-            self.bind_function_entry(fqn);
-            let mut bb = BlockBuilder::new();
-            let labels: Vec<_> = variants
-                .iter()
-                .map(|_| bb.fresh_label(self.bytecode.il_mut()))
-                .collect();
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(ValueTag::Instance as u32);
-            for (tag, label) in labels.iter().enumerate() {
-                bb.emit_jump_to(
-                    *label,
-                    BbJumpKind::JumpIfMatch {
-                        tag: tag as u32,
-                        arity: 0,
-                    },
-                    self.bytecode.il_mut(),
-                );
-            }
-            // Not one of the variants (unreachable for a well-typed value).
-            self.bytecode.push_pop();
-            let mut text = CodeBuf::new();
-            self.emit_raw_string_literal(&mut text, enum_name);
-            self.bytecode.append(&mut text);
-            self.bytecode.push_return();
-            for (variant, label) in variants.iter().zip(labels) {
-                bb.bind_label(label, self.bytecode.il_mut());
-                let mut text = CodeBuf::new();
-                self.emit_raw_string_literal(&mut text, variant);
-                self.bytecode.append(&mut text);
-                self.bytecode.push_return();
-            }
+            let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
         }
         skip.bind_label(after, self.bytecode.il_mut());
     }
