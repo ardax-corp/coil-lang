@@ -407,7 +407,7 @@ impl MirBuilder {
             None => spec.ret,
             // A generic edge's boxed result may be a heap reference, as its
             // arguments may.
-            Some(t) if super::host_allow::host_arg_ok(native_id, spec.ret, t) => t,
+            Some(t) if super::host_allow::host_result_ok(native_id, spec.ret, t) => t,
             Some(t) => {
                 return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
             }

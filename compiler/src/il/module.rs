@@ -397,14 +397,43 @@ impl IlModule {
         let mut side_deopts = Vec::new();
         // Maps of dense and LIR bodies, built from their MIR.
         let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
+        // A fused body (`COIL_MIR_FUSE=1`) takes its stack IL from its MIR,
+        // so its tier gates read that MIR and the fuse IL emitted from it
+        // (N1b): of emit_hir's stack IL only the labels it binds.
+        let fused: Vec<bool> = self
+            .funcs
+            .iter()
+            .map(|b| {
+                crate::mir::mir_fuse_on()
+                    && (b.meta.hir_mir.is_none() || crate::mir::mir_fuse_takes(&b.meta.name))
+            })
+            .collect();
+        let labels: Vec<crate::mir::BodyLabels> =
+            self.funcs.iter().map(|b| crate::mir::BodyLabels::of(&b.ops)).collect();
+        let bound: Vec<std::collections::HashSet<u32>> =
+            self.funcs.iter().map(|b| bound_labels(&b.ops)).collect();
+        // Per fused body, once: the fuse IL its MIR emits (what runs if
+        // dense refuses), `None` when the LIR tier refuses it.
+        let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
         while !pending.is_empty() && opts.mir_specialize {
             let mut next = Vec::new();
             let mut progressed = false;
             for i in pending.iter().copied() {
                 let body = &mut self.funcs[i];
                 let mut side = crate::mir::BodySidecar::default();
+                let gate = if fused[i] {
+                    let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
+                        let func = body.meta.hir_mir.as_deref()?;
+                        crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func)
+                            .filter(|lir| !drops_bound_label(&bound[i], lir))
+                    });
+                    crate::mir::GateRef::Mir(fallback.as_deref())
+                } else {
+                    crate::mir::GateRef::Stack(&body.ops)
+                };
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
-                    &body.ops,
+                    gate,
+                    &labels[i],
                     &body.meta.name,
                     pool,
                     &dense_calls,
@@ -412,7 +441,7 @@ impl IlModule {
                     body.meta.hir_mir.as_deref(),
                     &mut side,
                 ) {
-                    if drops_bound_label(&body.ops, &dense) {
+                    if drops_bound_label(&bound[i], &dense) {
                         // A `defer` thunk sits in its function's body and is
                         // reached only by `CALL`; the reconstruct keeps blocks
                         // reachable from the entry and loses it (#760).
@@ -464,8 +493,14 @@ impl IlModule {
             }
             let body = &mut self.funcs[i];
             let mut side = crate::mir::BodySidecar::default();
+            let gate = if fused[i] {
+                crate::mir::GateRef::Mir(None)
+            } else {
+                crate::mir::GateRef::Stack(&body.ops)
+            };
             if let Some(lir) = crate::mir::try_lower_abi_body_side(
-                &body.ops,
+                gate,
+                &labels[i],
                 &body.meta.name,
                 pool,
                 body.meta.hir_mir.as_deref(),
@@ -473,9 +508,9 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                if drops_bound_label(&body.ops, &lir) {
+                if drops_bound_label(&bound[i], &lir) {
                     lir_why[i] = Some("drops a called inner label".to_string());
-                } else if (crate::mir::mir_fuse_on() && crate::mir::mir_fuse_takes(&body.meta.name)) || lir_keeps(&body.ops, &lir) {
+                } else if fused[i] || lir_keeps(&body.ops, &lir) {
                     // Even empty: a local it leaves out has no register.
                     side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     if let Some(deopt) = side.deopt {
@@ -712,16 +747,19 @@ fn has_inner_code(ops: &[IlOp]) -> bool {
     })
 }
 
-fn drops_bound_label(old: &[IlOp], new: &[IlOp]) -> bool {
-    let bound = |ops: &[IlOp]| -> std::collections::HashSet<u32> {
-        ops.iter()
-            .filter_map(|op| match op {
-                IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
-                _ => None,
-            })
-            .collect()
-    };
-    let (was, now) = (bound(old), bound(new));
+/// Every label `ops` binds.
+fn bound_labels(ops: &[IlOp]) -> std::collections::HashSet<u32> {
+    ops.iter()
+        .filter_map(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `new` names a label the body bound (`was`) but `new` no longer binds.
+fn drops_bound_label(was: &std::collections::HashSet<u32>, new: &[IlOp]) -> bool {
+    let now = bound_labels(new);
     new.iter().any(|op| match op {
         IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => was.contains(&target.0) && !now.contains(&target.0),
         _ => false,

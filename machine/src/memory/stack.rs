@@ -35,6 +35,11 @@ impl<T: Default + Copy> Stack<T> {
         self.stack.len()
     }
 
+    /// Reset every slot to its default; the cursor and capacity stay.
+    pub fn clear_slots(&mut self) {
+        self.stack.fill(T::default());
+    }
+
     /// Extend the backing storage to `cap` slots; the cursor and every slot
     /// keep their values. Never shrinks.
     pub fn grow_to(&mut self, cap: usize) {
