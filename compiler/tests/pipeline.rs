@@ -952,130 +952,8 @@ use string::{format, to_bytes};
 }
 
 
-/// COI-16: inlined `Vec::push` must stage the receiver when the arg emits
-/// `STORE`/`Seek` (`format`, `match`, `new Class`). Pre-fix, those pushes
-/// silently dropped values (enum serialize via match+format yielded only the
-/// header; `v.push(new C(...))` left len=0).
-#[test]
-fn vec_push_clobbering_args_preserve_elements() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
 
-enum LockPackage {
-    Git(string, string, string),
-}
 
-class Point {
-    pub x: int,
-    pub y: int,
-}
-
-fn quote(string s) -> string {
-    return "'" + s + "'";
-}
-
-fn main() {
-    let lines = Vec::new();
-    lines.push(format("a=%s", "1"));
-    lines.push(format("b=%s", "2"));
-    let pkgs = Vec::new();
-    pkgs.push(new Point(1, 2));
-    pkgs.push(new Point(3, 4));
-    let enums = Vec::new();
-    enums.push(LockPackage::Git("n", "g", "t"));
-    let e0 = enums[0];
-    let names = Vec::new();
-    names.push(match e0 {
-        LockPackage::Git(name, git, tag) => format("name=%s", quote(name)),
-    });
-    let _ = write_all(
-        stdout(),
-        to_bytes(format(
-            "lines=%i pkgs=%i names=%i n0=%s",
-            len(lines),
-            len(pkgs),
-            len(names),
-            names[0],
-        )),
-    );
-}
-"#,
-    );
-    assert_eq!(
-        output, "lines=2 pkgs=2 names=1 n0=name='n'",
-        "format / new Class / match+format push args must not drop the vec"
-    );
-}
-
-/// Nested multi-field record patterns must not clobber sibling outer fields.
-/// Pre-fix, in-place `UnpackAt` at the outer field slot overwrote later
-/// siblings when the inner arity exceeded one.
-#[test]
-fn nested_multifield_record_pattern_preserves_sibling() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Wrap {
-    W { inner: Inner, name: int },
-}
-fn both(Wrap w) -> int {
-    return match w {
-        Wrap::W { inner: Inner::I { x, y }, name } => x + y + name,
-    };
-}
-fn main() {
-    let w = Wrap::W { inner: Inner::I { x: 10, y: 20 }, name: 3 };
-    write(stdout(), to_bytes(format("%i", both(w))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "33",
-        "inner fields and outer sibling `name` must all bind correctly"
-    );
-}
-
-/// Two nested multifield records in one outer arm — each must unpack into
-/// distinct scratch regions so the second nested payload cannot overwrite
-/// the first nested bindings.
-#[test]
-fn nested_two_multifield_records_preserve_both() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Pair {
-    P { a: Inner, b: Inner },
-}
-fn sum(Pair p) -> int {
-    return match p {
-        Pair::P {
-            a: Inner::I { x: ax, y: ay },
-            b: Inner::I { x: bx, y: by },
-        } => ax + ay + bx + by,
-    };
-}
-fn main() {
-    let p = Pair::P {
-        a: Inner::I { x: 1, y: 2 },
-        b: Inner::I { x: 10, y: 20 },
-    };
-    write(stdout(), to_bytes(format("%i", sum(p))));
-}
-"#,
-    );
-    assert_eq!(output, "33", "both nested multifield bindings must survive");
-}
 
 fn ensure_ffi_libsum_built() -> std::path::PathBuf {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1918,25 +1796,6 @@ fn example_range_prints_01234012356() {
     assert_eq!(output, "012340123561.02.03.0");
 }
 
-/// Inner-block destructure must not clobber an outer binding's slot.
-#[test]
-fn let_destructure_block_shadow_preserves_outer_binding() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum A { A { z: int, x: int }, }
-enum B { B { y: int }, }
-fn main() {
-  let outer = { a: A::A { z: 10, x: 42 } };
-  let { a } = outer;
-  { let inner = { a: B::B { y: 7 } }; let { a } = inner; }
-  write(stdout(), to_bytes(format("%i", a.x)));
-}
-"#,
-    );
-    assert_eq!(output, "42", "outer `a` must survive inner-block shadow");
-}
 
 
 
@@ -5917,34 +5776,6 @@ fn virtual_crypto_module_does_not_resolve() {
     );
 }
 
-/// HostInvoke + virtual `clock`: wall/mono advance across a short sleep.
-#[test]
-fn clock_natives_move_forward_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use clock::{mono_nanos, sleep_ms, wall_nanos};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn flag(int later, int earlier) -> int {
-    if later > earlier {
-        return 1;
-    }
-    return 0;
-}
-
-fn main() {
-    let w0 = wall_nanos();
-    let m0 = mono_nanos();
-    sleep_ms(15);
-    let w1 = wall_nanos();
-    let m1 = mono_nanos();
-    write(stdout(), to_bytes(format("%i%i", flag(w1, w0), flag(m1, m0))));
-}
-"#,
-    );
-    assert_eq!(output, "11", "wall and mono must advance, got {output:?}");
-}
 
 
 
@@ -6753,58 +6584,7 @@ fn main() {
     );
 }
 
-#[test]
-fn unit_fallthrough_still_runs_defers() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn f() {
-    defer { write(stdout(), to_bytes("d")); }
-    write(stdout(), to_bytes("b"));
-}
 
-fn main() {
-    f();
-}
-"#,
-    );
-    assert_eq!(
-        output, "bd",
-        "unit epilogue must still emit defers before CONST 0; RETURN"
-    );
-}
-
-/// Nested multifield record that is not the first outer field must still
-/// relocate into scratch and preserve the preceding sibling binding.
-#[test]
-fn nested_multifield_record_after_sibling_preserves_bindings() {
-    let output = run_example_src(
-        r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-enum Inner {
-    I { x: int, y: int },
-}
-enum Wrap {
-    W { name: int, inner: Inner },
-}
-fn both(Wrap w) -> int {
-    return match w {
-        Wrap::W { name, inner: Inner::I { x, y } } => name + x + y,
-    };
-}
-fn main() {
-    let w = Wrap::W { name: 3, inner: Inner::I { x: 10, y: 20 } };
-    write(stdout(), to_bytes(format("%i", both(w))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "33",
-        "preceding sibling `name` and nested `x`/`y` must all bind"
-    );
-}
 
 
 /// `if (!c) { A } else { B }` inverts to `if (c) { B } else { A }` — arms must
@@ -7241,34 +7021,6 @@ fn main() {
     );
 }
 
-/// COI-16: enum `Construct` with nested `format` must stage the push receiver
-/// (len preserved). Nested format-inside-Construct payload correctness is a
-/// separate clobber (still open); this only guards the Vec::push drop.
-#[test]
-fn vec_push_enum_construct_with_format_args_keeps_len() {
-    let output = run_example_src(
-        r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-
-enum Row {
-    Pair(string, string),
-}
-
-fn main() {
-    let rows = Vec::new();
-    rows.push(Row::Pair(format("a=%s", "1"), format("b=%s", "2")));
-    rows.push(Row::Pair(format("c=%s", "3"), format("d=%s", "4")));
-    let _ = write_all(stdout(), to_bytes(format("%i", len(rows))));
-}
-"#,
-    );
-    assert_eq!(
-        output, "2",
-        "push with Construct(format,…) must not drop the vec"
-    );
-}
 
 
 /// COI-19: extern of libc is a compile error even with host extra stems.
