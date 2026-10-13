@@ -286,6 +286,17 @@ struct HirParSite {
     end: bool,
 }
 
+/// How a call to a function with an auto-par fork site forks
+/// ([`Compiler::hir_par_call`]).
+enum HirParCall {
+    /// All-literal arguments the site's guards accept: the worker with its
+    /// hop budget.
+    Spec { vals: Vec<i64>, worker: usize },
+    /// One non-literal argument: the worker above the site's cutoff, else
+    /// the sequential function.
+    Dynamic { cutoff: i64, orig: usize, worker: usize },
+}
+
 /// A body whose parallel loops still need their functions emitted, once
 /// its own function record is made.
 pub(in crate::codegen) struct HirParTail {
@@ -320,31 +331,18 @@ struct HirEmit {
     /// Parallel loops emitted as a call of their fork-join function, by
     /// loop: the direct MIR lowering's calls.
     par_calls: HashMap<u32, crate::mir::HirParLoop>,
-    /// Auto-par call sites sent to a fork-join worker, by call: the direct
-    /// MIR lowering's calls.
-    par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// The fork-join functions those calls reach, emitted after this body
     /// ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
-    /// Entry label of each plain one-word `CALL` emitted (no dictionaries,
-    /// not a tail call or a coroutine), by call site: the direct MIR
-    /// lowering's call targets.
-    call_targets: HashMap<u32, crate::mir::HirCallSite>,
     /// Entry label of the user `into_iter` a counted `for` loop calls, by
     /// loop.
     into_iters: HashMap<u32, crate::il::Label>,
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// User operators emitted as their instance method's plain `CALL`.
-    op_calls: HashMap<u32, crate::mir::HirOpCall>,
-    /// User operators emitted as a raw opcode on the operands.
-    op_prims: HashSet<u32>,
     /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
     /// named functions read as values), by expression.
     fn_values: HashMap<u32, crate::mir::HirFnValue>,
-    /// Calls through a function value emitted as a plain `CallIndirect`.
-    value_calls: HashSet<u32>,
 }
 
 /// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
@@ -1234,7 +1232,7 @@ impl Compiler {
             sroa,
             sroa_classes,
             fields,
-            calls: &emit.call_targets,
+            calls: &tables.calls,
             into_iters: &emit.into_iters,
             iter_loops: &emit.iter_loops,
             strings: &tables.strings,
@@ -1242,12 +1240,12 @@ impl Compiler {
             consts: &emit.plan.consts,
             formats: &tables.formats,
             format_shows: &tables.format_shows,
-            op_calls: &emit.op_calls,
+            op_calls: &tables.op_calls,
             par_loops: &emit.par_calls,
-            par_forks: &emit.par_forks,
-            op_prims: &emit.op_prims,
+            par_forks: &tables.par_forks,
+            op_prims: &tables.op_prims,
             fn_values: &emit.fn_values,
-            value_calls: &emit.value_calls,
+            value_calls: &tables.value_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -2146,6 +2144,11 @@ impl Compiler {
             Some(kind) if self.hir_pair_kind(&kind) => Rep::Pair(kind),
             Some(_) => return Err("return-pair-kind"),
             // A static's initializer returns the word its slot holds.
+            // A compiler-made body ([`crate::hir::synth`]) returns in its
+            // declared type's layout: it has no checker signature.
+            None if self.hir_synth_calls.is_some() => {
+                Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
+            }
             None if hir.kind == crate::hir::BodyKind::Static => {
                 Rep::Word(hir.ret.as_ref().map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)))
             }
@@ -2221,15 +2224,10 @@ impl Compiler {
             next_jump: None,
             par_loop: false,
             par_calls: HashMap::new(),
-            par_forks: HashMap::new(),
             par_tail: Vec::new(),
-            call_targets: HashMap::new(),
             into_iters: HashMap::new(),
             iter_loops: HashMap::new(),
-            op_calls: HashMap::new(),
-            op_prims: HashSet::new(),
             fn_values: HashMap::new(),
-            value_calls: HashSet::new(),
         };
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
@@ -4703,19 +4701,6 @@ impl Compiler {
     /// What a non-adapting producer pushes, or `None` for one that builds
     /// whatever its consumer wants (constructors, `match`, `if`, blocks,
     /// jumps).
-    /// Whether direct MIR passes argument `id` in `param` as HIR emission
-    /// does: its own word in that layout, or a numeric range's two words
-    /// boxed to its typed object (MIR's `box_pair_val`, as
-    /// `emit_box_range_slots`).
-    fn hir_arg_word(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
-        self.hir_natural(hir, emit, id) == Some(Rep::Word(param))
-            || (param == ValueLayout::Boxed
-                && Self::hir_ty(hir, id).is_some_and(|ty| {
-                    let ty = apply_ty_prune(self.checker.subst(), ty);
-                    crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
-                }))
-    }
-
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
             HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => Some(Rep::Word(
@@ -4772,6 +4757,9 @@ impl Compiler {
                 args,
             } => self.hir_natural(hir, emit, args[0]),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
+            HirKind::Builtin { op: Builtin::Unbox { .. }, .. } => {
+                Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
+            }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
             // for; its own type's is the natural one.
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
@@ -5902,6 +5890,10 @@ impl Compiler {
             } => {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
+            HirKind::Builtin {
+                op: Builtin::Unbox { .. },
+                args,
+            } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             HirKind::Call { args, .. } => {
                 let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
@@ -6582,42 +6574,6 @@ impl Compiler {
         }
     }
 
-    /// Operator call `id` on a raw instance method, just emitted as one
-    /// `CALL` of `arity` boxed-layout operands: direct MIR makes it a plain
-    /// call of the same entry.
-    fn hir_note_op_call_target(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, arity: u32) {
-        let operands = match &hir.expr(id).kind {
-            HirKind::Bin { lhs, rhs, .. } => vec![*lhs, *rhs],
-            HirKind::Un { operand, .. } => vec![*operand],
-            _ => return,
-        };
-        // Each operand's MIR word is the boxed-layout word the stack passes.
-        let boxed = |o: HirId| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-        if operands.len() as u32 != arity || !operands.iter().all(|&o| boxed(o)) {
-            return;
-        }
-        if let Some(&IlOp::Entry {
-            kind: crate::il::EntryKind::Call,
-            target,
-            arity: called,
-            ret_words: 1,
-            ..
-        }) = self.bytecode.ops().last()
-            && called == arity
-        {
-            emit.call_targets.insert(
-                id.0,
-                crate::mir::HirCallSite {
-                    target,
-                    pair_args: vec![false; arity as usize],
-                    pair_ret: false,
-                    coro: false,
-                    boxed_ret: false,
-                },
-            );
-        }
-    }
-
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
@@ -6861,7 +6817,6 @@ impl Compiler {
                     let instr = *instr;
                     self.hir_operands(hir, emit, *lhs, *rhs, depth);
                     self.bytecode.push(Byte::new(instr));
-                    emit.op_prims.insert(id.0);
                 }
                 &HirOp::Bound { dict, method } => {
                     for (i, operand) in [*lhs, *rhs].into_iter().enumerate() {
@@ -6913,36 +6868,6 @@ impl Compiler {
                     self.raw_instance_call = raw;
                     self.emit_direct_fn_call(&mut call, &fqn, arity);
                     self.bytecode.append(&mut call);
-                    // Raw operands: direct MIR makes a plain call. Else, no
-                    // dictionary and a one-word result: direct MIR boxes the
-                    // operands and calls the same entry.
-                    if raw {
-                        self.hir_note_op_call_target(hir, emit, id, 2);
-                    } else if arity == 2
-                        && let Some(tag) = Self::ty_to_value_tag(&lookup)
-                        && let Some(&IlOp::Entry {
-                            kind: crate::il::EntryKind::Call,
-                            target,
-                            arity: 2,
-                            ret_words: 1,
-                            ..
-                        }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    {
-                        emit.op_calls.insert(
-                            id.0,
-                            crate::mir::HirOpCall {
-                                site: crate::mir::HirCallSite {
-                                    target,
-                                    pair_args: vec![false; 2],
-                                    pair_ret: false,
-                                    coro: false,
-                                    boxed_ret: false,
-                                },
-                                tag: tag as u32,
-                                shift,
-                            },
-                        );
-                    }
                 }
             },
             HirKind::Bin { op, lhs, rhs } => {
@@ -7064,9 +6989,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 self.emit_direct_fn_call(&mut call, &fqn, arity);
                 self.bytecode.append(&mut call);
-                if raw {
-                    self.hir_note_op_call_target(hir, emit, id, 1);
-                }
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
@@ -7105,7 +7027,6 @@ impl Compiler {
                 }
                 self.bytecode
                     .push(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32));
-                emit.value_calls.insert(id.0);
             }
             HirKind::Yield { value, from } => self.hir_yield(hir, emit, *value, *from, depth),
             HirKind::Resume { handle, value } => {
@@ -7134,6 +7055,13 @@ impl Compiler {
                 let name = self.hir_typeof(hir, args[0]).expect("planned typeof");
                 let idx = self.intern_string(&name);
                 self.bytecode.push_string(idx);
+            }
+            HirKind::Builtin {
+                op: Builtin::Unbox { tag },
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                self.bytecode.push_unbox_value(*tag);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
@@ -7694,32 +7622,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
                 debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
-                // Raw words (or nothing boxed: `T::default()`) and no
-                // dictionary: direct MIR calls the same entry.
-                if (raw || boxed.iter().all(Option::is_none))
-                    && arity == args.len() as u32
-                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(&IlOp::Entry {
-                        kind: crate::il::EntryKind::Call,
-                        target,
-                        arity: called,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.ops().last()
-                    && called == arity
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                {
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args: vec![false; args.len()],
-                            pair_ret: ret_words == 2,
-                            coro: false,
-                            boxed_ret,
-                        },
-                    );
-                }
                 self.expr_depth = depth;
                 self.hir_convert(&natural, want, depth);
                 return;
@@ -7787,33 +7689,6 @@ impl Compiler {
                 self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
-                // A plain one-word ABI call, each argument in its own layout:
-                // direct MIR calls the same entry.
-                if dicts == 0
-                    && generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &params))
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                    && (0..args.len()).all(|i| boxed(i).is_none())
-                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_arg_word(hir, emit, a, p))
-                    && let Some(&IlOp::Entry {
-                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::MakeCoro),
-                        target,
-                        arity,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    && arity == args.len() as u32
-                {
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args: vec![false; args.len()],
-                            pair_ret: ret_words == 2,
-                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
-                            boxed_ret,
-                        },
-                    );
-                }
                 if let Some(ty) = generic.as_ref().and_then(|g| g.unbox.as_ref()) {
                     Self::emit_unbox_if_needed(&mut self.bytecode, ty);
                 }
@@ -7825,7 +7700,7 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let tail = emit.plan.tail_calls.contains(&id.0);
-                if self.hir_par_call(hir, emit, id, &key, args, depth) {
+                if self.hir_par_call(hir, emit, &key, args, depth) {
                     if tail {
                         // A tail site's `Return` emits nothing after it.
                         if natural.words() == 2 {
@@ -7942,38 +7817,6 @@ impl Compiler {
                 };
                 let ok = self.emit_named_entry_on_module_ret(&key, words + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR call target `{key}` has an entry");
-                if dicts == 0
-                    && generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &emit.plan.calls[&id.0].params))
-                    && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                    && let Some(&IlOp::Entry {
-                        kind: entry_kind @ (crate::il::EntryKind::Call | crate::il::EntryKind::TailCall | crate::il::EntryKind::MakeCoro),
-                        target,
-                        arity,
-                        ret_words: ret_words @ (1 | 2),
-                        ..
-                    }) = self.bytecode.il_mut().ops_slice_mut().last()
-                    && arity == words
-                {
-                    let call = &emit.plan.calls[&id.0];
-                    let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
-                    // A `TailCall`'s callee returns for this function, so in
-                    // this function's words, whatever the call's own rep.
-                    let pair_ret = if entry_kind == crate::il::EntryKind::TailCall {
-                        matches!(emit.plan.ret, Rep::Pair(_))
-                    } else {
-                        ret_words == 2
-                    };
-                    emit.call_targets.insert(
-                        id.0,
-                        crate::mir::HirCallSite {
-                            target,
-                            pair_args,
-                            pair_ret,
-                            coro: entry_kind == crate::il::EntryKind::MakeCoro,
-                            boxed_ret,
-                        },
-                    );
-                }
                 if tail {
                     // `TailCall` is the terminator; the callee returns for us.
                     return;
@@ -10745,16 +10588,51 @@ impl Compiler {
     /// guards accept: the worker with its hop budget) and
     /// `try_emit_par_dynamic_call` (one non-literal argument: the worker
     /// above the site's cutoff, else the sequential function).
-    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, key: &str, args: &[HirId], depth: u32) -> bool {
+    fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
+        let hops = crate::typechecking::PAR_SPEC_HOPS as i32;
+        match self.hir_par_call_plan(hir, key, args) {
+            None => false,
+            Some(HirParCall::Spec { vals, worker }) => {
+                let mut bc = CodeBuf::new();
+                for &v in &vals {
+                    self.push_int_const_into(v, &mut bc);
+                }
+                self.bytecode.append(&mut bc);
+                self.bytecode.push_const(hops);
+                self.bytecode
+                    .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
+                true
+            }
+            Some(HirParCall::Dynamic { cutoff, orig, worker }) => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                let use_worker = self.bytecode.fresh_label();
+                let done = self.bytecode.fresh_label();
+                self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                let mut bc = CodeBuf::new();
+                self.push_int_const_into(cutoff - 1, &mut bc);
+                self.bytecode.append(&mut bc);
+                self.bytecode.push(Byte::new(Instruction::LE));
+                self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
+                self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+                self.hir_jump(IlJumpKind::Unconditional, done);
+                self.bytecode.bind_label(use_worker);
+                self.bytecode.push_const(hops);
+                self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+                self.bytecode.bind_label(done);
+                true
+            }
+        }
+    }
+
+    /// Whether and how [`Self::hir_par_call`] forks the call of `key`.
+    fn hir_par_call_plan(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Option<HirParCall> {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks.
         if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
-            return false;
+            return None;
         }
         let spec = crate::typechecking::par_worker_name(short);
-        let Some(&worker) = self.functions.get(&spec) else {
-            return false;
-        };
+        let &worker = self.functions.get(&spec)?;
         let lits: Option<Vec<i64>> = args
             .iter()
             .map(|&a| match hir.expr(a).kind {
@@ -10762,78 +10640,38 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        let hops = crate::typechecking::PAR_SPEC_HOPS as i32;
         if let Some(vals) = lits {
             let site = &self.par_shapes[short];
             if !crate::typechecking::guards_hold(&site.guards, &vals)
                 || !crate::typechecking::args_worth_parallel(&self.par_shapes, short, &vals)
             {
-                return false;
+                return None;
             }
-            let mut bc = CodeBuf::new();
-            for &v in &vals {
-                self.push_int_const_into(v, &mut bc);
-            }
-            self.bytecode.append(&mut bc);
-            self.bytecode.push_const(hops);
-            self.bytecode
-                .push(Byte::new(Instruction::CALL).with_call_packed(vals.len() as u32 + 1, worker as u32));
-            if let Some(worker) = self.hir_last_call_target() {
-                self.hir_note_par_fork(hir, emit, id, worker, None);
-            }
-            return true;
+            return Some(HirParCall::Spec { vals, worker });
         }
-        let [arg] = args else { return false };
-        let Some(cutoff) = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short) else {
-            return false;
-        };
-        let Some(&orig) = self.functions.get(key).or_else(|| self.functions.get(short)) else {
-            return false;
-        };
-        self.hir_value(hir, emit, *arg, &BOXED, depth);
-        let use_worker = self.bytecode.fresh_label();
-        let done = self.bytecode.fresh_label();
-        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-        let mut bc = CodeBuf::new();
-        self.push_int_const_into(cutoff - 1, &mut bc);
-        self.bytecode.append(&mut bc);
-        self.bytecode.push(Byte::new(Instruction::LE));
-        self.hir_jump(IlJumpKind::JumpIfFalse, use_worker);
-        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
-        let seq = self.hir_last_call_target();
-        self.hir_jump(IlJumpKind::Unconditional, done);
-        self.bytecode.bind_label(use_worker);
-        self.bytecode.push_const(hops);
-        self.bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
-        if let (Some(worker), Some(seq)) = (self.hir_last_call_target(), seq) {
-            self.hir_note_par_fork(hir, emit, id, worker, Some((seq, cutoff)));
-        }
-        self.bytecode.bind_label(done);
-        true
-    }
-
-    /// The target of the `CALL` just pushed, as its IL `Entry`.
-    fn hir_last_call_target(&mut self) -> Option<crate::il::Label> {
-        match self.bytecode.il_mut().ops_slice_mut().last() {
-            Some(&IlOp::Entry {
-                kind: crate::il::EntryKind::Call,
-                target,
-                ret_words: 1,
-                ..
-            }) => Some(target),
-            _ => None,
-        }
+        let [_] = args else { return None };
+        let cutoff = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short)?;
+        let &orig = self.functions.get(key).or_else(|| self.functions.get(short))?;
+        Some(HirParCall::Dynamic { cutoff, orig, worker })
     }
 
     /// Record auto-par site `id` for direct MIR when its result comes back
     /// in its own type's one-word layout.
-    fn hir_note_par_fork(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, worker: crate::il::Label, seq: Option<(crate::il::Label, i64)>) {
+    fn hir_note_par_fork(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        id: HirId,
+        worker: crate::il::Label,
+        seq: Option<(crate::il::Label, i64)>,
+        par_forks: &mut HashMap<u32, crate::mir::HirParFork>,
+    ) {
         let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
         if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
             return;
         }
         let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
-        emit.par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
+        par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
     }
 
     /// `if !c { A } else { B }` as `if c { B } else { A }`, as the AST's

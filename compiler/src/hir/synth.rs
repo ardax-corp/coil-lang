@@ -181,3 +181,31 @@ pub fn range_to_vec(checker: &Checker, name: &str, inclusive: bool, float: bool)
     let root = b.block(vec![init, each, ret], None, coil_ty::never());
     b.finish(root)
 }
+
+/// `Show::show` of a builtin error enum (`IoError`, …): the variant's name,
+/// or the enum's name for a word that is none of its variants. The argument
+/// comes as a dictionary passes it, so it is unboxed first.
+pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variants: &[&str]) -> HirBody {
+    use super::HirPatFields;
+    let ty = Ty::Con(enum_name.to_string());
+    let mut b = Synth::new(checker, name, coil_ty::string());
+    let this = b.local("self", ty.clone(), LocalKind::Param);
+    let word = b.read(this);
+    let tag = common::ValueTag::Instance as u32;
+    let scrutinee = b.builtin(Builtin::Unbox { tag }, vec![word], ty);
+    let mut arms = Vec::with_capacity(variants.len() + 1);
+    for (i, variant) in variants.iter().enumerate() {
+        let pat = HirPat::Variant {
+            enum_name: enum_name.to_string(),
+            variant: (*variant).to_string(),
+            tag: Some(i as u32),
+            fields: HirPatFields::Unit,
+        };
+        arms.push((pat, b.str(variant)));
+    }
+    arms.push((HirPat::Wild, b.str(enum_name)));
+    let shown = b.match_(scrutinee, arms, coil_ty::string());
+    let ret = b.ret(shown);
+    let root = b.block(vec![ret], None, coil_ty::never());
+    b.finish(root)
+}
