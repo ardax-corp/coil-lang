@@ -516,13 +516,6 @@ impl Compiler {
             self.hir_refusal = Some("mono-instance");
             return false;
         }
-        // An `Option` / `Result` parameter whose generic type mentions a type
-        // parameter arrives in that open type's (boxed) layout; the body
-        // converts it to the instance's own layout on entry.
-        let entry_convs = instance
-            .as_ref()
-            .map(|inst| self.hir_mono_enum_params(&module.bodies[index], inst))
-            .unwrap_or_default();
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         // A generic fn with a nested type parameter read as a value that the
         // HIR could not alias: if the body is refused, that read is why (#916).
@@ -692,12 +685,6 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
-                for &(param, from, to) in &entry_convs {
-                    let slot = Self::hir_slot(&emit, param);
-                    self.bytecode.push_load(slot);
-                    self.hir_convert(&Rep::Word(from), &Rep::Word(to), 0);
-                    self.bytecode.push_store_pop(slot);
-                }
                 // A shared generic body keeps a type parameter's values as
                 // raw words: the call boxed them (`hir_generic_abi`), and a
                 // boxed word stored into a field or container would reach a
@@ -723,9 +710,9 @@ impl Compiler {
                 // dictionaries as trailing parameters it never reads.
                 let shared = self.hir_shared_generic();
                 let open = hir.params.iter().any(|&p| self.hir_open_ty(hir.local(p).ty.as_ref()));
-                self.hir_mir = if entry_convs.is_empty() && !shared {
+                self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &emit, None)
-                } else if entry_convs.is_empty() && !open && let Some(entry) = entry_sp
+                } else if !open && let Some(entry) = entry_sp
                     && !self.hir_reads_dicts(body_ops)
                 {
                     self.hir_lower_mir(hir, &emit, Some(entry))
@@ -1583,28 +1570,6 @@ impl Compiler {
                 None
             }
         }
-    }
-
-    /// The parameters of a mono clone that cross a generic `Option` /
-    /// `Result` boundary: each with the boxed layout its caller passes
-    /// (`generic_enum_layout`) and the instance layout the body uses.
-    fn hir_mono_enum_params(&self, generic: &HirBody, inst: &HirBody) -> Vec<(LocalId, ValueLayout, ValueLayout)> {
-        generic
-            .params
-            .iter()
-            .filter_map(|&param| {
-                let open = generic.local(param).ty.as_ref()?;
-                let ty = inst.local(param).ty.as_ref()?;
-                if matches!(apply_ty_prune(self.checker.subst(), open), Ty::Var(_))
-                    || lower::classify(&self.checker, ty) != Some(ValueClass::Enum)
-                {
-                    return None;
-                }
-                let from = self.generic_enum_layout(open)?;
-                let to = self.value_layout(ty);
-                (from != to).then_some((param, from, to))
-            })
-            .collect()
     }
 
     /// `body` with named, spread and rest call arguments made positional,
@@ -2465,7 +2430,7 @@ impl Compiler {
         }
         // The AST sends a call to an emitted mono clone, else to the shared
         // body with boxed arguments and dictionaries.
-        if self.checker.is_generic_fn(&lookup) && self.hir_has_mono_clone(hir, call, &key) {
+        if self.checker.is_generic_fn(&lookup) && self.hir_has_mono_clone(hir, call, &key, &lookup) {
             return self.resolve_hir_mono(hir, call, key, &lookup);
         }
         // `C::f(..)` on a generic class is its one shared body.
@@ -2680,22 +2645,57 @@ impl Compiler {
         })
     }
 
-    /// Whether the AST's `mono_call_offset` finds an emitted clone of `key`
-    /// for `call`'s ground argument types.
-    fn hir_has_mono_clone(&self, hir: &HirBody, call: HirId, key: &str) -> bool {
+    /// Whether a planned clone of generic `key` that is emitted serves
+    /// `call` ([`Self::hir_mono_spec`]).
+    fn hir_has_mono_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str) -> bool {
+        self.hir_mono_spec(hir, call, key, lookup)
+            .is_some_and(|spec| self.mono_offsets.contains_key(&spec.key) || self.mono_names.contains_key(&spec.key))
+    }
+
+    /// The planned clone of generic `key` for `call`: at the type arguments
+    /// its signature binds against the ground argument and call types (a
+    /// type parameter only inside `Vec<T>` or only in the result included),
+    /// else, as `mono_call_offset`, by the ground argument types.
+    fn hir_mono_spec(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str) -> Option<&crate::monomorphize::MonoSpecialization> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
-            return false;
+            return None;
         };
         let mut arg_tys = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(ty) = Self::hir_ty(hir, arg) else {
-                return false;
-            };
-            arg_tys.push(apply_ty_prune(self.checker.subst(), ty));
+            arg_tys.push(apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?));
         }
-        self.mono_plan
-            .specialization_for_call(key, &self.hir_mono_key_tys(strip_overload_key(key), arg_tys))
-            .is_some_and(|spec| self.mono_offsets.contains_key(&spec.key) || self.mono_names.contains_key(&spec.key))
+        if !self.checker.fn_has_rest(lookup)
+            && let Some(n) = self.mono_plan.specializations_for_fn(key).next().map(|spec| spec.key.subst.len())
+            && let Some(vars) = self.checker.fn_type_param_vars(lookup, n)
+            && let Some(params) = self.hir_mono_param_tys(lookup, arg_tys.len())
+            && params.len() == arg_tys.len()
+        {
+            let mut map = HashMap::new();
+            for (param, arg) in params.iter().zip(&arg_tys) {
+                Self::bind_scheme_vars(param, arg, &mut map);
+            }
+            if let (Some(ret), Some(ty)) = (self.checker.fn_return_ty(lookup), Self::hir_ty(hir, call)) {
+                Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), ty), &mut map);
+            }
+            let subst: Option<Vec<Ty>> = vars
+                .iter()
+                .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).cloned())
+                .collect();
+            if let Some(subst) = subst {
+                return self.mono_plan.specialization_for_subst(key, &subst);
+            }
+        }
+        self.mono_plan.specialization_for_call(key, &self.hir_mono_key_tys(strip_overload_key(key), arg_tys))
+    }
+
+    /// Generic `lookup`'s parameter types for a call of `argc` arguments: a
+    /// function of no parameters is typed `unit -> T`, which is none.
+    fn hir_mono_param_tys(&self, lookup: &str, argc: usize) -> Option<Vec<Ty>> {
+        let params = self.checker.fn_param_tys(lookup)?;
+        let none = argc == 0
+            && self.checker.fn_param_names(lookup).is_some_and(<[String]>::is_empty)
+            && matches!(params.as_slice(), [Ty::Con(unit)] if unit == "unit");
+        Some(if none { Vec::new() } else { params })
     }
 
     /// The types a mono clone is keyed by (`Compiler::mono_call_offset`):
@@ -2728,15 +2728,12 @@ impl Compiler {
             }
             arg_tys.push(ty);
         }
-        let spec = self
-            .mono_plan
-            .specialization_for_call(&key, &self.hir_mono_key_tys(lookup, arg_tys.clone()))
-            .ok_or("callee-generic")?;
+        let spec = self.hir_mono_spec(hir, call, &key, lookup).ok_or("callee-generic")?;
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
         if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) || self.two_word_return_kind(lookup).is_some() {
             return Err("callee-generic");
         }
-        let mut param_tys = self.checker.fn_param_tys(lookup).ok_or("callee-signature")?.to_vec();
+        let mut param_tys = self.hir_mono_param_tys(lookup, arg_tys.len()).ok_or("callee-signature")?;
         let mut ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
         // A returned function's parameters are flattened onto the
         // callee's own (`fn f<T>(T x) { return show; }`): curry them back
@@ -2755,15 +2752,16 @@ impl Compiler {
             Self::bind_scheme_vars(param, arg, &mut map);
         }
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
-        // A generic `Option` / `Result` boundary is boxed even in a clone.
+        // A generic `Option` / `Result` result is boxed even in a clone: the
+        // open type's layout (`generic_enum_layout`), converted from after
+        // the call.
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
                 && !crate::hir::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
         };
-        // The boxed side of such a boundary is the open type's layout
-        // (`generic_enum_layout`); the argument and result convert to and
-        // from it.
+        // Arguments pass in the clone's own layout at its types: the clone
+        // converts nothing on entry.
         let mut params = Vec::with_capacity(args.len());
         for param in &param_tys {
             let ty = at(param);
@@ -2771,11 +2769,7 @@ impl Compiler {
                 Some(class) if lower::is_word(class) => {}
                 _ => return Err("callee-signature"),
             }
-            if enum_boundary(param, &ty) {
-                params.push(self.generic_enum_layout(param).ok_or("callee-signature")?);
-            } else {
-                params.push(self.value_layout(&ty));
-            }
+            params.push(self.value_layout(&ty));
         }
         // A result type the parameters do not bind is the call's own.
         let mut ret = at(&ret_ty);

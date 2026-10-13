@@ -112,6 +112,16 @@ impl MonoPlan {
         })
     }
 
+    /// The specialization of `fn_name` at type arguments `subst` (one per
+    /// type parameter, in declaration order).
+    pub fn specialization_for_subst(&self, fn_name: &str, subst: &[Ty]) -> Option<&MonoSpecialization> {
+        self.specializations.iter().find(|spec| {
+            spec.fn_name == fn_name
+                && spec.key.subst.len() == subst.len()
+                && spec.key.subst.iter().zip(subst).all(|(id, ty)| self.intern.get(*id) == Some(ty))
+        })
+    }
+
     pub fn specializations_for_fn<'a>(
         &'a self,
         fn_name: &'a str,
@@ -215,6 +225,17 @@ fn collect_transitive(
                 && let Some(ty) = spec.key.subst.get(*i).and_then(|id| intern.get(*id))
             {
                 map.insert(v, ty.clone());
+            }
+        }
+        // Type parameters no bare formal names, by declaration order.
+        for (var, id) in checker
+            .fn_type_param_vars(&spec.fn_name, spec.key.subst.len())
+            .unwrap_or_default()
+            .into_iter()
+            .zip(&spec.key.subst)
+        {
+            if let Some(ty) = intern.get(*id) {
+                map.entry(var).or_insert_with(|| ty.clone());
             }
         }
         if map.is_empty() {
@@ -366,7 +387,7 @@ fn collect_candidates(
         if let Expression::Identifier(fn_name) = name.1.as_ref()
             && let Some(sig) = sigs.get(*fn_name)
             && let Some(specialization) =
-                candidate_for_call(fn_name, sig, args.as_deref(), checker, ty_of, intern)
+                candidate_for_call(fn_name, sig, node, args.as_deref(), checker, ty_of, intern)
         {
             out.push(MonoCandidate {
                 span: node.0,
@@ -417,6 +438,7 @@ fn peel<'a, 'e>(node: &'a Output<'e>) -> &'a Output<'e> {
 fn candidate_for_call(
     fn_name: &str,
     sig: &GenericFnSig,
+    call: &Output,
     args: Option<&[Output]>,
     checker: &Checker,
     ty_of: &dyn Fn(&Output) -> Option<Ty>,
@@ -499,6 +521,12 @@ fn candidate_for_call(
         return None;
     }
 
+    // A type parameter no bare formal names (only inside `Vec<T>` or
+    // `Option<T>`, or only in the result): bound by matching the signature
+    // against the ground argument and call types.
+    if !has_rest && subst.iter().any(Option::is_none) {
+        bind_from_signature(fn_name, &mut subst, &fixed_args, call, checker, ty_of);
+    }
     let subst = subst.into_iter().collect::<Option<Vec<_>>>()?;
     let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
     let arg_ids: Vec<TyId> = arg_types.into_iter().map(|ty| intern.intern(ty)).collect();
@@ -514,6 +542,48 @@ fn candidate_for_call(
         },
         arg_types: arg_ids,
     })
+}
+
+/// Fill the unbound entries of `subst` (one per type parameter of
+/// `fn_name`) from its signature: each formal's type against its argument's
+/// ground type, the result type against the call's. A parameter bound two
+/// ways must agree; else it stays unbound.
+fn bind_from_signature(
+    fn_name: &str,
+    subst: &mut [Option<Ty>],
+    args: &[&Output],
+    call: &Output,
+    checker: &Checker,
+    ty_of: &dyn Fn(&Output) -> Option<Ty>,
+) {
+    let (Some(vars), Some(params), Some(ret)) = (
+        checker.fn_type_param_vars(fn_name, subst.len()),
+        checker.fn_param_tys(fn_name),
+        checker.fn_return_ty(fn_name),
+    ) else {
+        return;
+    };
+    // A function of no parameters is typed `unit -> T`.
+    let params = if args.is_empty() && params == [Ty::Con("unit".into())] { Vec::new() } else { params };
+    if params.len() != args.len() {
+        return;
+    }
+    let mut map = HashMap::new();
+    for (param, arg) in params.iter().zip(args) {
+        if let Some(ty) = ty_of(arg) {
+            crate::Compiler::bind_scheme_vars(param, &ty, &mut map);
+        }
+    }
+    if let Some(ty) = ty_of(call) {
+        crate::Compiler::bind_scheme_vars(&ret, &ty, &mut map);
+    }
+    for (slot, var) in subst.iter_mut().zip(vars) {
+        if slot.is_none()
+            && let Some(ty) = map.get(&var).and_then(concrete_ty)
+        {
+            *slot = Some(ty);
+        }
+    }
 }
 
 /// Mirror of codegen `split_call_args_for_rest` for mono planning.

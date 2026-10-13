@@ -11446,6 +11446,23 @@ impl Checker {
         Some(apply_ty_prune(&self.subst, &ty))
     }
 
+    /// The variables of generic `fn_name`'s first `n` type parameters, in
+    /// declaration order (the scheme's leading bounds), as the resolved
+    /// signature ([`Self::fn_param_tys`], [`Self::fn_return_ty`]) spells them.
+    pub fn fn_type_param_vars(&self, fn_name: &str, n: usize) -> Option<Vec<TyVarId>> {
+        let scheme = self.lookup_fn_scheme(fn_name)?;
+        if scheme.bounds.len() < n {
+            return None;
+        }
+        scheme.bounds[..n]
+            .iter()
+            .map(|&v| match apply_ty_prune(&self.subst, &Ty::Var(v)) {
+                Ty::Var(rep) => Some(rep),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Resolved parameter types in declaration order (curried `Fun` peel).
     pub fn fn_param_tys(&self, fn_name: &str) -> Option<Vec<Ty>> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
