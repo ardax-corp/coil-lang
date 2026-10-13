@@ -662,7 +662,7 @@ impl MirFunc {
                     return Err(format!("{dest} String dest is not heapref"));
                 }
             }
-            MirInst::Print { dest, src } => {
+            MirInst::Print { dest, src } | MirInst::Panic { dest, src } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Print dest is not bool"));
                 }

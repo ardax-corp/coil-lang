@@ -1677,6 +1677,30 @@ impl Lower<'_> {
                 self.defers.push((flag, *body));
                 Ok(Val::Unit)
             }
+            // `PRINT` of a string (the test-runner `main`'s failure line).
+            HirKind::Builtin { op: Builtin::Print, args } if let [msg] = args.as_slice() => {
+                let Some(s) = self.word(*msg)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(s) != MirTy::HeapRef {
+                    return Err("print operand".into());
+                }
+                self.at_expr(id, |l| l.b.ins_print(s).map_err(mir))?;
+                Ok(Val::Unit)
+            }
+            // `panic msg`: the message, then `Panic`, which never returns.
+            // A failed `requires` (a second argument) blames the caller
+            // through a host call and stays on the stack path.
+            HirKind::Builtin { op: Builtin::Panic, args } if let [msg] = args.as_slice() => {
+                let Some(s) = self.word(*msg)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(s) != MirTy::HeapRef {
+                    return Err("panic operand".into());
+                }
+                self.at_expr(id, |l| l.b.panic(s).map_err(mir))?;
+                Ok(Val::Never)
+            }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);

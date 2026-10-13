@@ -298,7 +298,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -410,6 +410,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::StoreStatic { .. }
             | MirInst::ClearWord { .. }
             | MirInst::Print { .. }
+            | MirInst::Panic { .. }
     )
 }
 
@@ -1098,6 +1099,10 @@ fn emit_stored(
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::Print { loc });
         }
+        MirInst::Panic { src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
+        }
         MirInst::Format { dest, fmt, args } => {
             emit_stack(out, *fmt, func, plan, regs, pool, loc)?;
             for a in args {
@@ -1671,6 +1676,11 @@ fn emit_stack(
         MirInst::Print { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::Print { loc });
+            Ok(())
+        }
+        MirInst::Panic { src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
             Ok(())
         }
         MirInst::Format { fmt, args, .. } => {
