@@ -3905,6 +3905,7 @@ impl Compiler {
                 .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
             self.attach_hir_mir();
             self.record_unboxed_class_fields();
+            self.flush_hir_par_tail();
         } else {
             self.functions.remove(&worker_name);
             self.fn_arities.remove(&worker_name);
@@ -6961,6 +6962,7 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp(name, entry, body_start, body_end, 0);
         self.attach_hir_mir();
+        self.flush_hir_par_tail();
 
         self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;
@@ -7774,6 +7776,7 @@ impl Compiler {
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
+        self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
