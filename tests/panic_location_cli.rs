@@ -56,6 +56,23 @@ fn main() {
     show(b);
 }
 ";
+    // A string index out of range panics at its statement (line 8), also
+    // where `at` is lowered straight to MIR.
+    let string_index = "fn at(string s, int i) -> int {
+    let n = 0;
+    let k = 0;
+    while k < 3 {
+        n = n + k;
+        k = k + 1;
+    }
+    let c = s[i] as int;
+    return c + n;
+}
+fn main() {
+    let a = at(\"abc\", 1);
+    let b = at(\"abc\", 7) + a;
+}
+";
     for mode in [&["-O", "0"][..], &["-O", "2"][..]] {
         let line = panic_line(&bin, &dir, "contract.hy", contract, mode);
         assert!(line.contains("contract violated") && line.contains("contract.hy:3:"), "{mode:?}: {line}");
@@ -63,6 +80,8 @@ fn main() {
         assert!(line.contains("integer overflow") && line.contains("forwarded.hy:5:"), "{mode:?}: {line}");
         let line = panic_line(&bin, &dir, "inlined.hy", inlined, mode);
         assert!(line.contains("integer overflow") && line.contains("inlined.hy:8:"), "{mode:?}: {line}");
+        let line = panic_line(&bin, &dir, "string_index.hy", string_index, mode);
+        assert!(line.contains("index out of bounds") && line.contains("string_index.hy:8:4"), "{mode:?}: {line}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
